@@ -1,4 +1,5 @@
 import json
+import shlex
 import subprocess
 import time
 from datetime import datetime
@@ -14,6 +15,7 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -24,6 +26,9 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaude
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaudeAgentConfig
+from imbue.mngr_claude.headless_claude_agent import extract_assistant_message_id
+from imbue.mngr_claude.headless_claude_agent import extract_assistant_text
+from imbue.mngr_claude.headless_claude_agent import extract_message_start_id
 from imbue.mngr_claude.headless_claude_agent import extract_text_delta
 from imbue.mngr_claude.plugin import ClaudeAgent
 
@@ -234,6 +239,107 @@ def test_assemble_command_raises_without_command(
         agent.assemble_command(host, agent_args=(), command_override=None)
 
 
+def test_stage_initial_message_writes_prompt_file_in_state_dir(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """stage_initial_message writes the prompt into the agent's state dir (not work dir).
+
+    Writing to the state dir means the file is blown away when the agent is
+    destroyed, so it never leaks into an in-place source directory.
+    """
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+    # The agent state dir is normally created by create_agent_state; mirror
+    # that here so stage_initial_message's write has a parent directory.
+    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    agent.stage_initial_message("please fix the tests")
+
+    assert (agent_dir / ".mngr-prompt").read_text() == "please fix the tests"
+    # Work dir remains clean.
+    assert not (agent.work_dir / ".mngr-prompt").exists()
+
+
+def test_assemble_command_appends_prompt_ref_when_initial_message_set(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """When initial_message is passed (via Host.create_agent_state from
+    CreateAgentOptions.initial_message) and agent_args do not already
+    reference the prompt file, assemble_command appends a cat of
+    $MNGR_AGENT_STATE_DIR/.mngr-prompt so claude actually receives the
+    user's message.
+    """
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    cmd = agent.assemble_command(host, agent_args=(), command_override=None, initial_message="hi there")
+
+    assert ".mngr-prompt" in cmd
+    # Cat-form against the state dir (not the work dir), so cleanup is automatic.
+    assert 'cat "$MNGR_AGENT_STATE_DIR/.mngr-prompt"' in cmd
+
+
+def test_assemble_command_does_not_duplicate_prompt_ref(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """If the caller already included a state-dir .mngr-prompt reference in agent_args,
+    assemble_command must not append a second one (would double-feed the prompt).
+    """
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    explicit_prompt_arg = '"$(cat "$MNGR_AGENT_STATE_DIR/.mngr-prompt")"'
+    cmd = agent.assemble_command(
+        host, agent_args=(explicit_prompt_arg,), command_override=None, initial_message="hi there"
+    )
+
+    assert cmd.count(".mngr-prompt") == 1
+
+
+def test_assemble_command_no_prompt_ref_when_no_initial_message(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """No initial_message supplied = no appended prompt reference."""
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    cmd = agent.assemble_command(host, agent_args=(), command_override=None)
+
+    assert ".mngr-prompt" not in cmd
+
+
+def test_create_agent_state_persists_prompt_cat_in_command_for_headless_claude(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """End-to-end check: Host.create_agent_state must thread
+    options.initial_message into HeadlessClaude.assemble_command so the
+    persisted command (in data.json) actually cats the staged prompt.
+
+    Unit tests on assemble_command alone cannot catch a case where
+    create_agent_state forgets to forward initial_message. Reading the
+    command back from data.json mirrors what start_agents does in
+    production via _get_agent_command.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    options = CreateAgentOptions(
+        name=AgentName("test-prompt-plumbing"),
+        agent_type=AgentTypeName("headless_claude"),
+        command=CommandString("claude"),
+        initial_message="hello from the regression test",
+    )
+    agent = host.create_agent_state(work_dir, options)
+
+    data_path = host.host_dir / "agents" / str(agent.id) / "data.json"
+    persisted = json.loads(data_path.read_text())
+    assert 'cat "$MNGR_AGENT_STATE_DIR/.mngr-prompt"' in persisted["command"]
+
+
 def test_assemble_command_is_posix_compatible(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
@@ -243,6 +349,51 @@ def test_assemble_command_is_posix_compatible(
     command = agent.assemble_command(host, agent_args=(), command_override=None)
 
     assert_posix_compatible(str(command))
+
+
+def test_assemble_command_quotes_agent_args_with_shell_metacharacters(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """Agent args containing shell metacharacters must survive shell parsing as single tokens."""
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+    prompt = "respond with only the word HELLO; echo pwned & rm -rf $HOME"
+    cmd = agent.assemble_command(
+        host,
+        agent_args=("--verbose", prompt),
+        command_override=None,
+    )
+
+    cmd_before_redirect = str(cmd).split(" >", 1)[0]
+    tokens = shlex.split(cmd_before_redirect)
+    assert prompt in tokens, f"prompt should be a single token after shell parsing, got tokens={tokens!r}"
+
+
+def test_assemble_command_does_not_double_quote_pre_quoted_cli_args(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """cli_args reach assemble_command already shell-safe (see split_cli_args_string).
+
+    Re-quoting them would break the documented round-trip contract: a string config like
+    --settings '{"key": "value"}' is shlex-split in non-POSIX mode so the JSON keeps its
+    outer single quotes in-token. A second round of shlex.quote would wrap those single
+    quotes in another layer, breaking the final shell command.
+    """
+    # Same tokens split_cli_args_string produces for --settings '{"key": "value"}'
+    pre_quoted_json = '\'{"key": "value"}\''
+    config = HeadlessClaudeAgentConfig(
+        cli_args=("--settings", pre_quoted_json),
+        check_installation=False,
+    )
+    agent, host = _make_headless_agent(local_provider, tmp_path, agent_config=config)
+    cmd = agent.assemble_command(host, agent_args=(), command_override=None)
+
+    cmd_before_redirect = str(cmd).split(" >", 1)[0]
+    tokens = shlex.split(cmd_before_redirect)
+    assert '{"key": "value"}' in tokens, (
+        f'pre-quoted cli_arg JSON should pass through shell as \'{{"key": "value"}}\', got tokens={tokens!r}'
+    )
 
 
 # =============================================================================
@@ -259,6 +410,39 @@ def _make_stream_json_line(text: str) -> str:
                 "type": "content_block_delta",
                 "index": 0,
                 "delta": {"type": "text_delta", "text": text},
+            },
+        }
+    )
+
+
+def _make_assistant_message_line(text: str, message_id: str | None = None) -> str:
+    """Build a stream-json line for a top-level `assistant` event with one text block.
+
+    This is the envelope `claude --output-format stream-json` emits by default
+    (without `--include-partial-messages`) on v2.1.114 and similar versions.
+    """
+    message: dict[str, object] = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": text}],
+    }
+    if message_id is not None:
+        message["id"] = message_id
+    return json.dumps({"type": "assistant", "message": message})
+
+
+def _make_message_start_line(message_id: str) -> str:
+    """Build a stream-json `message_start` line carrying a message id.
+
+    With `--include-partial-messages`, claude emits this before the per-token
+    text deltas. The id lets the parser correlate the deltas with a later
+    top-level `assistant` summary that carries the same id.
+    """
+    return json.dumps(
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "message_start",
+                "message": {"id": message_id, "role": "assistant"},
             },
         }
     )
@@ -341,6 +525,31 @@ def test_stream_output_raises_with_stream_json_error_result(
     )
 
     with pytest.raises(MngrError, match="err-7f3a9b2e"):
+        list(agent.stream_output())
+
+
+def test_stream_output_handles_non_string_result_error_payload(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stream_output should fall back to 'unknown error' when `result` is non-string.
+
+    Defensive: claude's API contract says `result` is a string for error
+    results, but if a future version emits null / a number / a structured
+    object, we honor the declared str | None return type rather than
+    leaking a non-string into the error path.
+    """
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    _write_fake_agent_output(
+        host,
+        agent,
+        stdout='{"type":"result","subtype":"success","is_error":true,"result":null}\n',
+    )
+
+    with pytest.raises(MngrError, match="unknown error"):
         list(agent.stream_output())
 
 
@@ -643,3 +852,335 @@ def test_extract_text_delta_text_not_string() -> None:
         }
     )
     assert extract_text_delta(event) is None
+
+
+# =============================================================================
+# Tests for extract_assistant_text and dual-envelope stream_output
+# =============================================================================
+
+
+def test_extract_assistant_text_single_text_block() -> None:
+    event = json.dumps(
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "hello"}]},
+        }
+    )
+    assert extract_assistant_text(event) == "hello"
+
+
+def test_extract_assistant_text_concatenates_multiple_text_blocks() -> None:
+    event = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Hello "},
+                    {"type": "text", "text": "world!"},
+                ],
+            },
+        }
+    )
+    assert extract_assistant_text(event) == "Hello world!"
+
+
+def test_extract_assistant_text_skips_non_text_blocks() -> None:
+    event = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "tu_1", "name": "bash", "input": {}},
+                    {"type": "text", "text": "after tool"},
+                ],
+            },
+        }
+    )
+    assert extract_assistant_text(event) == "after tool"
+
+
+def test_extract_assistant_text_returns_none_when_no_text_blocks() -> None:
+    event = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "tu_1", "name": "bash", "input": {}}],
+            },
+        }
+    )
+    assert extract_assistant_text(event) is None
+
+
+def test_extract_assistant_text_returns_none_for_non_assistant_event() -> None:
+    event = json.dumps({"type": "system", "subtype": "init"})
+    assert extract_assistant_text(event) is None
+
+
+def test_extract_assistant_text_returns_none_for_malformed_json() -> None:
+    assert extract_assistant_text("not valid json {{{") is None
+
+
+def test_extract_assistant_text_returns_none_when_message_not_dict() -> None:
+    event = json.dumps({"type": "assistant", "message": "not_a_dict"})
+    assert extract_assistant_text(event) is None
+
+
+def test_extract_assistant_text_returns_none_when_content_not_list() -> None:
+    event = json.dumps({"type": "assistant", "message": {"content": "not_a_list"}})
+    assert extract_assistant_text(event) is None
+
+
+# A tool_use-only assistant event for the "tool_use_only_assistant_event_ends_turn"
+# scenario. `is_definitely_different_message` is False (same id), so without a
+# state reset the next assistant text would be diffed against the stale buffer
+# "Hello" rather than treated as a fresh turn.
+_TOOL_USE_ONLY_ASSISTANT_EVENT = json.dumps(
+    {
+        "type": "assistant",
+        "message": {
+            "id": "msg_a",
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "tu_1", "name": "bash", "input": {}}],
+        },
+    }
+)
+
+# Each entry is a pytest.param wrapping (lines, expected_chunks) and tagged
+# with a behavioral id. The docstring above the parametrize decorator covers
+# the contract these scenarios collectively describe (the dual-envelope
+# stream_output parser).
+_DUAL_ENVELOPE_SCENARIOS = [
+    pytest.param(
+        # Without --include-partial-messages, claude emits only
+        # system/assistant/result events (no `stream_event` deltas, as on
+        # claude CLI v2.1.114+). The parser must still surface the response.
+        [
+            '{"type":"system","subtype":"init","session_id":"abc"}',
+            _make_assistant_message_line("Hello from claude"),
+            '{"type":"result","subtype":"success","is_error":false,"result":"Hello from claude"}',
+        ],
+        ["Hello from claude"],
+        id="yields_assistant_envelope_without_partial_messages",
+    ),
+    pytest.param(
+        # With --include-partial-messages, claude emits per-token stream_event
+        # deltas AND a final `assistant` summary containing the same text. The
+        # parser must yield each token once (from the deltas) and skip the
+        # summary so text is not double-emitted.
+        [
+            _make_stream_json_line("Hello "),
+            _make_stream_json_line("world!"),
+            _make_assistant_message_line("Hello world!"),
+            '{"type":"result","subtype":"success","is_error":false,"result":"Hello world!"}',
+        ],
+        ["Hello ", "world!"],
+        id="does_not_double_emit_when_partial_and_assistant_interleave",
+    ),
+    pytest.param(
+        # A subsequent assistant turn after a fully-streamed turn must still be
+        # yielded -- the dedup state resets at each `assistant` boundary. A
+        # tool-using session (partial deltas + assistant summary, then a second
+        # assistant-only turn) otherwise loses the second turn's text.
+        [
+            _make_stream_json_line("first "),
+            _make_stream_json_line("answer"),
+            _make_assistant_message_line("first answer"),
+            _make_assistant_message_line("second answer"),
+            '{"type":"result","subtype":"success","is_error":false,"result":"second answer"}',
+        ],
+        ["first ", "answer", "second answer"],
+        id="yields_assistant_envelopes_across_multiple_turns",
+    ),
+    pytest.param(
+        # When the assistant summary contains text beyond what the deltas
+        # yielded, that trailing text is emitted instead of silently dropped.
+        # Models the failure mode where partial deltas end early (dropped
+        # frame, truncated stream, etc.) and only the final summary carries
+        # the full message text.
+        [
+            _make_message_start_line("msg_a"),
+            _make_stream_json_line("Hello "),
+            _make_stream_json_line("world"),
+            _make_assistant_message_line("Hello world! And then some.", message_id="msg_a"),
+            '{"type":"result","subtype":"success","is_error":false,"result":"Hello world! And then some."}',
+        ],
+        ["Hello ", "world", "! And then some."],
+        id="emits_trailing_text_when_summary_extends_past_deltas",
+    ),
+    pytest.param(
+        # If the partial-stream message_start id does not match the assistant
+        # summary id, treat them as separate messages: the deltas are already
+        # yielded and the full summary is yielded too, with no dedup attempt.
+        # Models a streamed message whose summary was dropped before a new
+        # message's summary arrived.
+        [
+            _make_message_start_line("msg_a"),
+            _make_stream_json_line("first message body"),
+            _make_assistant_message_line("second message body", message_id="msg_b"),
+            '{"type":"result","subtype":"success","is_error":false,"result":"second message body"}',
+        ],
+        ["first message body", "second message body"],
+        id="yields_full_summary_when_assistant_id_does_not_match_streaming_id",
+    ),
+    pytest.param(
+        # A new `message_start` clears per-turn state so the second turn's
+        # summary diff is computed against the second turn's deltas only.
+        [
+            _make_message_start_line("msg_a"),
+            _make_stream_json_line("first"),
+            _make_assistant_message_line("first", message_id="msg_a"),
+            _make_message_start_line("msg_b"),
+            _make_stream_json_line("second"),
+            _make_assistant_message_line("second extra", message_id="msg_b"),
+            '{"type":"result","subtype":"success","is_error":false,"result":"second extra"}',
+        ],
+        ["first", "second", " extra"],
+        id="message_start_resets_buffer_across_turns",
+    ),
+    pytest.param(
+        # If deltas drift from the summary and no id info is available, fall
+        # back to yielding the full summary rather than silently dropping it.
+        # A possible partial double-emit is preferred over losing the
+        # assistant message entirely.
+        [
+            _make_stream_json_line("drifted prefix"),
+            _make_assistant_message_line("totally different summary text"),
+            '{"type":"result","subtype":"success","is_error":false,"result":"totally different summary text"}',
+        ],
+        ["drifted prefix", "totally different summary text"],
+        id="yields_full_summary_when_buffer_is_not_a_prefix",
+    ),
+    pytest.param(
+        # A tool_use-only assistant event must end the current turn's dedup
+        # state. Otherwise stale `yielded_text_chunks` from the streamed
+        # deltas would dedup the next assistant text event whose id we
+        # cannot disambiguate -- causing the second message's text to be
+        # partially suppressed when it shares a prefix with the first
+        # message's already-yielded text. Here the streamed "Hello" delta is
+        # yielded as-is; the tool_use-only event ends the turn with no text
+        # emit AND clears the per-turn buffer; the second assistant event's
+        # full text is then yielded.
+        [
+            _make_message_start_line("msg_a"),
+            _make_stream_json_line("Hello"),
+            _TOOL_USE_ONLY_ASSISTANT_EVENT,
+            _make_assistant_message_line("Hello there"),
+            '{"type":"result","subtype":"success","is_error":false,"result":"Hello there"}',
+        ],
+        ["Hello", "Hello there"],
+        id="tool_use_only_assistant_event_ends_turn",
+    ),
+]
+
+
+@pytest.mark.parametrize(("lines", "expected_chunks"), _DUAL_ENVELOPE_SCENARIOS)
+def test_stream_output_dual_envelope_dispatch(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lines: list[str],
+    expected_chunks: list[str],
+) -> None:
+    """stream_output correctly dispatches between the partial-stream `stream_event`
+    deltas and the top-level `assistant` summary envelope.
+
+    Each parametrized case covers one behavioral contract of the dual-envelope
+    parser. See _DUAL_ENVELOPE_SCENARIOS above for the per-case rationale.
+    """
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+    _write_fake_agent_output(host, agent, stdout="\n".join(lines) + "\n")
+
+    chunks = list(agent.stream_output())
+
+    assert chunks == expected_chunks
+
+
+def test_extract_assistant_message_id_returns_id_when_present() -> None:
+    line = json.dumps(
+        {
+            "type": "assistant",
+            "message": {"id": "msg_xyz", "role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+        }
+    )
+    assert extract_assistant_message_id(line) == "msg_xyz"
+
+
+def test_extract_assistant_message_id_returns_none_when_id_missing() -> None:
+    line = json.dumps(
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+        }
+    )
+    assert extract_assistant_message_id(line) is None
+
+
+def test_extract_assistant_message_id_returns_none_for_non_assistant_event() -> None:
+    line = json.dumps({"type": "system", "subtype": "init"})
+    assert extract_assistant_message_id(line) is None
+
+
+def test_extract_assistant_message_id_returns_none_for_malformed_json() -> None:
+    assert extract_assistant_message_id("not valid json {{{") is None
+
+
+def test_extract_assistant_message_id_returns_none_when_message_not_dict() -> None:
+    line = json.dumps({"type": "assistant", "message": "not_a_dict"})
+    assert extract_assistant_message_id(line) is None
+
+
+def test_extract_assistant_message_id_returns_none_when_id_not_string() -> None:
+    line = json.dumps(
+        {
+            "type": "assistant",
+            "message": {"id": 42, "role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+        }
+    )
+    assert extract_assistant_message_id(line) is None
+
+
+def test_extract_message_start_id_returns_id_for_message_start_event() -> None:
+    line = _make_message_start_line("msg_abc")
+    assert extract_message_start_id(line) == "msg_abc"
+
+
+def test_extract_message_start_id_returns_none_for_text_delta_event() -> None:
+    assert extract_message_start_id(_make_stream_json_line("hello")) is None
+
+
+def test_extract_message_start_id_returns_none_for_top_level_assistant_event() -> None:
+    line = _make_assistant_message_line("hi", message_id="msg_abc")
+    assert extract_message_start_id(line) is None
+
+
+def test_extract_message_start_id_returns_none_for_malformed_json() -> None:
+    assert extract_message_start_id("not valid json {{{") is None
+
+
+def test_extract_message_start_id_returns_none_when_event_not_dict() -> None:
+    line = json.dumps({"type": "stream_event", "event": "not_a_dict"})
+    assert extract_message_start_id(line) is None
+
+
+def test_extract_message_start_id_returns_none_when_message_not_dict() -> None:
+    line = json.dumps(
+        {
+            "type": "stream_event",
+            "event": {"type": "message_start", "message": "not_a_dict"},
+        }
+    )
+    assert extract_message_start_id(line) is None
+
+
+def test_extract_message_start_id_returns_none_when_id_not_string() -> None:
+    line = json.dumps(
+        {
+            "type": "stream_event",
+            "event": {"type": "message_start", "message": {"id": 42, "role": "assistant"}},
+        }
+    )
+    assert extract_message_start_id(line) is None

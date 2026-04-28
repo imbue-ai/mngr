@@ -2,11 +2,8 @@ import re
 import shutil
 import string
 import sys
-import threading
-from collections.abc import Callable
 from collections.abc import Sequence
 from enum import Enum
-from pathlib import Path
 from threading import Lock
 from typing import Any
 from typing import Final
@@ -21,12 +18,14 @@ from tabulate import tabulate
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
-from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import agent_details_to_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.filter_opts import AgentFilterCliOptions
+from imbue.mngr.cli.filter_opts import add_agent_filter_options
+from imbue.mngr.cli.filter_opts import build_agent_filter_cel
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
@@ -37,16 +36,12 @@ from imbue.mngr.config.completion_writer import write_cli_completions_cache
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
-from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import ErrorBehavior
-from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_sort_keys
 from imbue.mngr.utils.cel_utils import evaluate_cel_sort_key
-from imbue.mngr.utils.git_utils import build_project_filter_clause
 from imbue.mngr.utils.terminal import ANSI_DIM_GRAY
 from imbue.mngr.utils.terminal import ANSI_ERASE_LINE
 from imbue.mngr.utils.terminal import ANSI_RESET
@@ -74,129 +69,76 @@ _HEADER_LABELS: Final[dict[str, str]] = {
     "activity_sources": "ACTIVITY",
 }
 
+# Aliases that let users reference fields by the same name in --fields/--format
+# templates as they do in CEL filters and --sort. host.provider is the short form
+# documented for CEL; the underlying attribute is host.provider_name.
+_FIELD_ALIASES: Final[dict[str, str]] = {
+    "host.provider": "host.provider_name",
+}
+
+
+@pure
+def _resolve_field_alias(field: str) -> str:
+    """Map a user-supplied field name to its canonical form for attribute/dict lookups."""
+    return _FIELD_ALIASES.get(field, field)
+
 
 @pure
 def _is_streaming_eligible(
-    is_watch: bool,
     is_sort_explicit: bool,
 ) -> bool:
     """Whether the general conditions for streaming mode are met.
 
-    Streaming requires: no watch mode (needs repeated full fetches) and no explicit sort
-    (needs all results before sorting). A limit is compatible with streaming -- it simply
-    caps output at the first N agents to arrive, which is non-deterministic.
+    Streaming requires no explicit sort (needs all results before sorting). A limit is
+    compatible with streaming -- it simply caps output at the first N agents to arrive,
+    which is non-deterministic.
     """
-    return not is_watch and not is_sort_explicit
+    return not is_sort_explicit
 
 
 @pure
 def _should_use_streaming_mode(
     output_format: OutputFormat,
-    is_watch: bool,
     is_sort_explicit: bool,
 ) -> bool:
     """Determine whether to use streaming mode for human list output."""
-    return output_format == OutputFormat.HUMAN and _is_streaming_eligible(
-        is_watch=is_watch, is_sort_explicit=is_sort_explicit
-    )
+    return output_format == OutputFormat.HUMAN and _is_streaming_eligible(is_sort_explicit=is_sort_explicit)
 
 
-class ListCliOptions(CommonCliOptions):
+class ListCliOptions(AgentFilterCliOptions, CommonCliOptions):
     """Options passed from the CLI to the list command.
 
     This captures all the click parameters so we can pass them as a single object
     to helper functions instead of passing dozens of individual parameters.
 
-    Inherits common options (output_format, quiet, verbose, etc.) from CommonCliOptions.
+    Inherits filter options (include, exclude, running, ...) from AgentFilterCliOptions
+    and common options (output_format, quiet, verbose, ...) from CommonCliOptions.
 
     Note that this class VERY INTENTIONALLY DOES NOT use Field() decorators with descriptions, defaults, etc.
     For that information, see the click.option() and click.argument() decorators on the list() function itself.
     """
 
-    include: tuple[str, ...]
-    exclude: tuple[str, ...]
-    running: bool
-    stopped: bool
-    archived: bool
-    active: bool
-    local: bool
-    remote: bool
     provider: tuple[str, ...]
-    project: tuple[str, ...]
-    label: tuple[str, ...]
-    host_label: tuple[str, ...]
     stdin: bool
     fields: str | None
     header: tuple[str, ...]
     sort: str
     limit: int | None
-    watch: int | None
     ids: bool
     addrs: bool
     on_error: str
 
 
 @click.command(name="list")
-@optgroup.group("Filtering")
-@optgroup.option(
-    "--include",
-    multiple=True,
-    help="Include agents matching CEL expression (repeatable)",
-)
-@optgroup.option(
-    "--exclude",
-    multiple=True,
-    help="Exclude agents matching CEL expression (repeatable)",
-)
-@optgroup.option(
-    "--running",
-    is_flag=True,
-    help="Show only running agents (alias for --include 'state == \"RUNNING\"')",
-)
-@optgroup.option(
-    "--stopped",
-    is_flag=True,
-    help="Show only stopped agents (alias for --include 'state == \"STOPPED\"')",
-)
-@optgroup.option(
-    "--archived",
-    is_flag=True,
-    help="Show only stopped agents (alias for --include 'has(labels.archived_at)')",
-)
-@optgroup.option(
-    "--active",
-    is_flag=True,
-    help="Show only stopped agents (anything not archived/destroyed/crashed/failed)",
-)
-@optgroup.option(
-    "--local",
-    is_flag=True,
-    help="Show only local agents (alias for --include 'host.provider == \"local\"')",
-)
-@optgroup.option(
-    "--remote",
-    is_flag=True,
-    help="Show only remote agents (alias for --exclude 'host.provider == \"local\"')",
-)
+@add_agent_filter_options
+# --provider and --stdin are intentionally NOT in add_agent_filter_options:
+# --provider selects which providers to query (a fan-out control passed
+# through to api_list_agents as provider_names, not a CEL filter on results),
+# and --stdin reads refs from stdin which only makes sense for batch list.
 @optgroup.option(
     "--provider",
     multiple=True,
     help="Show only agents using specified provider (repeatable)",
-)
-@optgroup.option(
-    "--project",
-    multiple=True,
-    help="Show only agents with this project label (repeatable; '.' expands to the current project)",
-)
-@optgroup.option(
-    "--label",
-    multiple=True,
-    help="Show only agents with this label (format: KEY=VALUE, repeatable) [experimental]",
-)
-@optgroup.option(
-    "--host-label",
-    multiple=True,
-    help="Show only agents on hosts with this host label (format: KEY=VALUE, repeatable)",
 )
 @optgroup.option(
     "--stdin",
@@ -232,14 +174,6 @@ class ListCliOptions(CommonCliOptions):
     "--limit",
     type=int,
     help="Limit number of results (applied after fetching from all providers)",
-)
-@optgroup.group("Watch Mode")
-# FIXME: remove the watch option, it's pointless
-@optgroup.option(
-    "-w",
-    "--watch",
-    type=int,
-    help="Continuously watch and update status at specified interval (seconds)",
 )
 @optgroup.group("Error Handling")
 @optgroup.option(
@@ -324,77 +258,21 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
             field_name, label = header_spec.split("=", 1)
             custom_headers[field_name.strip()] = label.strip()
 
-    # Build list of include filters
-    include_filters = list(opts.include)
+    # Translate filter aliases (--running, --project, etc.) into CEL strings.
+    include_filters_tuple, exclude_filters_tuple = build_agent_filter_cel(
+        opts, mngr_ctx.concurrency_group, project_root=mngr_ctx.project_root
+    )
 
-    # Handle stdin input by converting to CEL filters
+    # --stdin: read agent/host refs from stdin and add as an OR'd include filter.
+    # List-specific because kanpan and other commands don't take stdin input.
     if opts.stdin:
         stdin_refs = [line.strip() for line in sys.stdin if line.strip()]
         if stdin_refs:
-            # Create a CEL filter that matches any of the provided refs against
-            # host.name, host.id, name, or id (using dot notation for nested fields)
-            ref_filters = []
-            for ref in stdin_refs:
-                ref_filter = f'(name == "{ref}" || id == "{ref}" || host.name == "{ref}" || host.id == "{ref}")'
-                ref_filters.append(ref_filter)
-            # Combine all ref filters with OR
-            combined_filter = " || ".join(ref_filters)
-            include_filters.append(combined_filter)
-
-    # --running: alias for --include 'state == "RUNNING"'
-    # --stopped: alias for --include 'state == "STOPPED"'
-    # --local: alias for --include 'host.provider == "local"'
-    # --remote: alias for --exclude 'host.provider == "local"'
-    if opts.running:
-        include_filters.append(f'state == "{AgentLifecycleState.RUNNING.value}"')
-    if opts.stopped:
-        include_filters.append(f'state == "{AgentLifecycleState.STOPPED.value}"')
-    if opts.local:
-        include_filters.append('host.provider == "local"')
-    if opts.archived:
-        include_filters.append("has(labels.archived_at)")
-
-    # --project X: alias for --include 'labels.project == "X"'
-    # Multiple values are OR'd together. The literal "." resolves to the current project name.
-    project_clause = build_project_filter_clause(
-        opts.project, mngr_ctx.concurrency_group, project_root=mngr_ctx.project_root
-    )
-    if project_clause is not None:
-        include_filters.append(project_clause)
-
-    # --label K=V: alias for --include 'labels.K == "V"'
-    # Multiple values are OR'd together
-    if opts.label:
-        label_parts = []
-        for label_spec in opts.label:
-            if "=" not in label_spec:
-                raise click.BadParameter(f"Label must be in KEY=VALUE format, got: {label_spec}", param_hint="--label")
-            key, value = label_spec.split("=", 1)
-            label_parts.append(f'labels.{key} == "{value}"')
-        include_filters.append(" || ".join(label_parts))
-
-    # --host-label K=V: alias for --include 'host.tags.K == "V"'
-    # Multiple values are OR'd together
-    if opts.host_label:
-        host_label_parts = []
-        for label_spec in opts.host_label:
-            if "=" not in label_spec:
-                raise click.BadParameter(
-                    f"Host label must be in KEY=VALUE format, got: {label_spec}", param_hint="--host-label"
-                )
-            key, value = label_spec.split("=", 1)
-            host_label_parts.append(f'host.tags.{key} == "{value}"')
-        include_filters.append(" || ".join(host_label_parts))
-
-    # Build list of exclude filters
-    exclude_filters = list(opts.exclude)
-    if opts.remote:
-        exclude_filters.append('host.provider == "local"')
-    if opts.active:
-        exclude_filters.append("has(labels.archived_at)")
-        include_filters.append(f'host.state != "{HostState.CRASHED.value}"')
-        include_filters.append(f'host.state != "{HostState.FAILED.value}"')
-        include_filters.append(f'host.state != "{HostState.DESTROYED.value}"')
+            ref_filters = [
+                f'(name == "{ref}" || id == "{ref}" || host.name == "{ref}" || host.id == "{ref}")'
+                for ref in stdin_refs
+            ]
+            include_filters_tuple = (*include_filters_tuple, " || ".join(ref_filters))
 
     # --sort EXPR: CEL expression(s) with optional direction, e.g. "name asc, create_time desc"
     compiled_sort_keys = compile_cel_sort_keys(opts.sort)
@@ -407,8 +285,6 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
-    include_filters_tuple = tuple(include_filters)
-    exclude_filters_tuple = tuple(exclude_filters)
     provider_names = opts.provider if opts.provider else None
 
     # Dispatch to the appropriate output path
@@ -421,7 +297,6 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
             provider_names,
             error_behavior,
             limit,
-            is_watch=bool(opts.watch),
         )
         return
 
@@ -431,7 +306,7 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
 
     # Template output path: if --format is a template string, use streaming when possible, batch otherwise
     if format_template is not None:
-        is_streaming_template = _is_streaming_eligible(is_watch=bool(opts.watch), is_sort_explicit=is_sort_explicit)
+        is_streaming_template = _is_streaming_eligible(is_sort_explicit=is_sort_explicit)
         if is_streaming_template:
             _list_streaming_template(
                 ctx,
@@ -451,7 +326,7 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     # output can pass --sort explicitly, which falls back to batch mode. When --limit is set,
     # streaming still works but produces non-deterministic results (whichever agents arrive first).
     if format_template is None and _should_use_streaming_mode(
-        output_opts.output_format, is_watch=bool(opts.watch), is_sort_explicit=is_sort_explicit
+        output_opts.output_format, is_sort_explicit=is_sort_explicit
     ):
         display_fields = fields if fields is not None else list(_DEFAULT_HUMAN_DISPLAY_FIELDS)
         _list_streaming_human(
@@ -467,7 +342,6 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         )
         return
 
-    # Batch/watch path
     iteration_params = _ListIterationParams(
         mngr_ctx=mngr_ctx,
         output_opts=output_opts,
@@ -482,19 +356,7 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         custom_headers=custom_headers,
     )
 
-    if opts.watch:
-        try:
-            _list_watch_with_stream(
-                iteration_params=iteration_params,
-                ctx=ctx,
-                mngr_ctx=mngr_ctx,
-                max_interval_seconds=opts.watch,
-            )
-        except KeyboardInterrupt:
-            logger.info("\nWatch mode stopped")
-            return
-    else:
-        _run_list_iteration(iteration_params, ctx)
+    _run_list_iteration(iteration_params, ctx)
 
 
 def _list_jsonl(
@@ -505,12 +367,8 @@ def _list_jsonl(
     provider_names: tuple[str, ...] | None,
     error_behavior: ErrorBehavior,
     limit: int | None,
-    is_watch: bool,
 ) -> None:
     """JSONL output path: stream agents as JSONL lines with optional limit."""
-    if is_watch:
-        logger.warning("Watch mode is not supported with JSONL format, running once")
-
     limited_callback = _LimitedJsonlEmitter(limit=limit)
 
     result = api_list_agents(
@@ -725,8 +583,9 @@ def _get_header_label(field: str, custom_headers: dict[str, str] | None = None) 
     """Get the display label for a column header."""
     if custom_headers and field in custom_headers:
         return custom_headers[field]
-    if field in _HEADER_LABELS:
-        return _HEADER_LABELS[field]
+    canonical_field = _resolve_field_alias(field)
+    if canonical_field in _HEADER_LABELS:
+        return _HEADER_LABELS[canonical_field]
     return field.upper().replace(".", " ")
 
 
@@ -737,10 +596,12 @@ def _compute_column_widths(
     """Compute column widths sized to the terminal, distributing extra space to expandable columns."""
     separator_total = len(_COLUMN_SEPARATOR) * max(len(fields) - 1, 0)
 
-    # Start with minimum widths, ensuring each column is at least as wide as its header
+    # Start with minimum widths, ensuring each column is at least as wide as its header.
+    # Column-width tables are keyed by canonical field names, so resolve aliases before lookup.
     width_by_field: dict[str, int] = {}
     for field in fields:
-        min_data_width = _MIN_COLUMN_WIDTHS.get(field, _DEFAULT_MIN_COLUMN_WIDTH)
+        canonical_field = _resolve_field_alias(field)
+        min_data_width = _MIN_COLUMN_WIDTHS.get(canonical_field, _DEFAULT_MIN_COLUMN_WIDTH)
         header_width = len(_get_header_label(field, custom_headers))
         width_by_field[field] = max(min_data_width, header_width)
 
@@ -751,14 +612,14 @@ def _compute_column_widths(
     # Process columns sorted by tightest max cap first so capped leftovers flow to less
     # constrained columns in a single pass.
     if fields and extra_space > 0:
-        sorted_fields = sorted(fields, key=lambda f: _MAX_COLUMN_WIDTHS.get(f, float("inf")))
+        sorted_fields = sorted(fields, key=lambda f: _MAX_COLUMN_WIDTHS.get(_resolve_field_alias(f), float("inf")))
         remaining = extra_space
         for idx, field in enumerate(sorted_fields):
             fields_left = len(sorted_fields) - idx
             per_column = remaining // fields_left
             extra = 1 if (remaining % fields_left) > 0 else 0
             bonus = per_column + extra
-            max_width = _MAX_COLUMN_WIDTHS.get(field)
+            max_width = _MAX_COLUMN_WIDTHS.get(_resolve_field_alias(field))
             if max_width is not None and width_by_field[field] + bonus > max_width:
                 bonus = max(max_width - width_by_field[field], 0)
             width_by_field[field] = width_by_field[field] + bonus
@@ -810,7 +671,7 @@ def _format_streaming_agent_row(
 
 
 class _ListIterationParams(BaseModel):
-    """Parameters for a single list iteration, used for watch mode."""
+    """Parameters for a single list iteration."""
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -1057,6 +918,9 @@ def _get_field_value(agent: AgentDetails, field: str) -> str:
     Supports nested fields like "host.name" and list slicing syntax like
     "host.snapshots[0]" or "host.snapshots[:3]".
     """
+    # Resolve aliases first so a user-supplied alias (e.g. host.provider) maps to the
+    # canonical attribute name (host.provider_name) before walking the agent object.
+    field = _resolve_field_alias(field)
     # Handle nested fields (e.g., "host.name") with optional bracket notation
     # Also supports dict key access for plugin fields (e.g., "host.plugin.aws.iam_user")
     parts = field.split(".")
@@ -1179,7 +1043,14 @@ All agent fields from the "Available Fields" section can be used in filter expre
         ),
         (
             "Available Fields",
-            """**Agent fields** (same syntax for `--fields` and CEL filters):
+            """The fields below use the same names across the three places they can appear:
+- CEL expressions for `--include`/`--exclude` (filtering)
+- CEL expressions for `--sort` (ordering)
+- `--fields` and `--format` template strings (selecting and formatting displayed data)
+
+Each subsection notes where its fields are available; agent and host fields work in all three contexts, while computed fields are only available in the CEL contexts.
+
+**Agent fields:**
 - `name` - Agent name
 - `id` - Agent ID
 - `type` - Agent type (claude, codex, etc.)
@@ -1202,10 +1073,15 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `labels.$KEY` - Specific label value (e.g., `labels.project`)
 - `plugin.$PLUGIN_NAME.*` - Plugin-defined fields (e.g., `plugin.chat_history.messages`)
 
-**Host fields** (dot notation for both `--fields` and CEL filters):
+**Computed fields** (derived from other fields, available in CEL filters and `--sort`):
+- `age` - Seconds since `create_time`
+- `runtime` - Alias for `runtime_seconds`
+- `idle` - Seconds since the most recent activity across `user_activity_time`, `agent_activity_time`, and `host.ssh_activity_time` (only present when at least one is set)
+
+**Host fields** (dot notation):
 - `host.name` - Host name
 - `host.id` - Host ID
-- `host.provider_name` - Host provider (local, docker, modal, etc.) (in CEL filters, use `host.provider`)
+- `host.provider` - Host provider (local, docker, modal, etc.); also accessible as `host.provider_name`
 - `host.state` - Current host state (RUNNING, STOPPED, BUILDING, etc.)
 - `host.image` - Host image (Docker image name, Modal image ID, etc.)
 - `host.tags` - Host labels (metadata key-value pairs)
@@ -1247,123 +1123,3 @@ All agent fields from the "Available Fields" section can be used in filter expre
 
 # Add pager-enabled help option to the list command
 add_pager_help_option(list_command)
-
-
-# === Watch Mode (stream-backed) ===
-
-
-def _list_watch_with_stream(
-    iteration_params: _ListIterationParams,
-    ctx: click.Context,
-    mngr_ctx: MngrContext,
-    max_interval_seconds: int,
-) -> None:
-    """Watch mode backed by the discovery event stream.
-
-    Does an initial full list and display, then monitors the discovery events
-    file for changes. When a change is detected (from create, destroy, etc.),
-    re-polls immediately. Also re-polls at max_interval_seconds as a safety net.
-    """
-    logger.info("Starting watch mode (stream-backed): refreshing on changes or every {} seconds", max_interval_seconds)
-    logger.info("Press Ctrl+C to stop")
-
-    events_path = get_discovery_events_path(mngr_ctx.config)
-
-    # Initial display
-    _run_list_iteration(iteration_params, ctx)
-
-    # Tail the events file and re-render when changes arrive.
-    # Use a stop_event to allow clean shutdown on KeyboardInterrupt.
-    stop_event = threading.Event()
-    try:
-        _run_watch_loop_with_event_tailing(
-            iteration_params=iteration_params,
-            ctx=ctx,
-            events_path=events_path,
-            max_interval_seconds=max_interval_seconds,
-            stop_event=stop_event,
-        )
-    finally:
-        stop_event.set()
-
-
-def _run_watch_loop_with_event_tailing(
-    iteration_params: _ListIterationParams,
-    ctx: click.Context,
-    events_path: Path,
-    max_interval_seconds: int,
-    stop_event: threading.Event,
-) -> None:
-    """Repeatedly refresh the list display, triggered by event file changes or a timeout."""
-    _run_event_driven_watch(
-        events_path=events_path,
-        max_interval_seconds=max_interval_seconds,
-        stop_event=stop_event,
-        on_refresh=lambda: _refresh_watch_display(iteration_params, ctx),
-    )
-
-
-def _refresh_watch_display(
-    iteration_params: _ListIterationParams,
-    ctx: click.Context,
-) -> None:
-    """Run a single refresh cycle for watch mode."""
-    logger.info("\nRefreshing...")
-    try:
-        _run_list_iteration(iteration_params, ctx)
-    except MngrError as e:
-        logger.error("Error in watch iteration (continuing): {}", e)
-
-
-def _poll_events_file_for_changes(
-    events_path: Path,
-    watched_size: int,
-    changed_flag: threading.Event,
-    stop_event: threading.Event,
-    max_polls: int,
-) -> None:
-    """Poll the events file until its size changes or stop_event is set."""
-    current_size = watched_size
-    for _ in range(max_polls):
-        if stop_event.is_set() or changed_flag.is_set():
-            return
-        try:
-            if events_path.exists():
-                new_size = events_path.stat().st_size
-                if new_size != current_size:
-                    changed_flag.set()
-                    return
-        except OSError as e:
-            logger.trace("OSError while polling events file: {}", e)
-        stop_event.wait(timeout=0.1)
-
-
-def _run_event_driven_watch(
-    events_path: Path,
-    max_interval_seconds: int,
-    stop_event: threading.Event,
-    on_refresh: Callable[[], None],
-) -> None:
-    """Run the watch loop, calling on_refresh each time the events file changes or the interval elapses."""
-    for _ in range(100_000):
-        if stop_event.is_set():
-            break
-
-        last_size = events_path.stat().st_size if events_path.exists() else 0
-        is_changed = threading.Event()
-
-        watcher = threading.Thread(
-            target=_poll_events_file_for_changes,
-            args=(events_path, last_size, is_changed, stop_event, max_interval_seconds * 10),
-            daemon=True,
-        )
-        watcher.start()
-
-        is_changed.wait(timeout=float(max_interval_seconds))
-        stop_event_was_set = stop_event.is_set()
-        watcher.join(timeout=2.0)
-
-        if stop_event_was_set:
-            break
-
-        on_refresh()

@@ -1,3 +1,6 @@
+import re
+import shutil
+import uuid
 from pathlib import Path
 from typing import Final
 from urllib.parse import urlparse
@@ -8,6 +11,13 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import UserInputError
+
+_GIT_URL_SCHEMES: Final[frozenset[str]] = frozenset({"http", "https", "ssh", "git", "file"})
+# SCP-like SSH URL: user@host:path. Host part allows [\w.-]; path must be nonempty
+# and must not start with / or : (to avoid matching "user@host:/abs/path" handled by ssh-style parse).
+_SCP_URL_RE: Final[re.Pattern[str]] = re.compile(r"^[\w.-]+@[\w.-]+:[^/:][^:]*$")
+_GIT_CLONE_TIMEOUT_SECONDS: Final[float] = 600.0
 
 # Refspecs that replicate `git push --mirror` behavior for branches and tags,
 # without pushing remote-tracking refs (refs/remotes/*). Pushing symbolic
@@ -50,16 +60,6 @@ def find_source_repo_of_worktree(worktree_path: Path) -> Path | None:
     except (FileNotFoundError, OSError):
         return None
     return parse_worktree_git_file(content)
-
-
-def remove_worktree(worktree_path: Path, source_repo_path: Path, cg: ConcurrencyGroup) -> None:
-    """Remove a git worktree, running git from the source repository.
-
-    Raises ProcessError if the removal fails.
-    """
-    cg.run_process_to_completion(
-        ["git", "-C", str(source_repo_path), "worktree", "remove", "--force", str(worktree_path)],
-    )
 
 
 def get_current_git_branch(path: Path | None, cg: ConcurrencyGroup) -> str | None:
@@ -238,6 +238,49 @@ def parse_project_name_from_url(url: str) -> str | None:
     except ValueError:
         pass
     return None
+
+
+@pure
+def is_git_url(source: str) -> bool:
+    """Return True if `source` looks like a git URL that can be cloned.
+
+    Recognizes explicit schemes (http/https/ssh/git) and the SCP-like SSH form
+    (user@host:path). Narrower than the bare-name grammar used for agents:
+    SCP-form requires a slash in the path or a `.git` suffix, so `name@host.modal`
+    is not mistaken for a git URL.
+    """
+    if not source:
+        return False
+
+    parsed = urlparse(source)
+    if parsed.scheme in _GIT_URL_SCHEMES:
+        return True
+
+    if _SCP_URL_RE.match(source):
+        path_part = source.split(":", 1)[1]
+        if source.endswith(".git") or "/" in path_part:
+            return True
+
+    return False
+
+
+def clone_git_url_to_managed_dir(url: str, base_dir: Path, name: str, cg: ConcurrencyGroup) -> Path:
+    """Clone a git URL into `base_dir/<name>-<uuid>/` and return the destination path.
+
+    Raises UserInputError on clone failure. Best-effort removes a half-populated
+    destination directory on failure so the caller sees a clean filesystem.
+    """
+    dest = base_dir / f"{name}-{uuid.uuid4().hex}"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        cg.run_process_to_completion(
+            ["git", "clone", url, str(dest)],
+            timeout=_GIT_CLONE_TIMEOUT_SECONDS,
+        )
+    except ProcessError as e:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise UserInputError(f"Failed to clone {url}: {e.stderr}") from e
+    return dest
 
 
 def _get_git_config_value(path: Path, key: str, cg: ConcurrencyGroup) -> str | None:

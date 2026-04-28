@@ -232,3 +232,41 @@ test target:
 # force-verify the file or after nuking the static/ dir.
 minds-tailwind:
   bash apps/minds/scripts/fetch_tailwind.sh
+
+# Sync vendor/mngr in forever-claude-template to this repo's HEAD and commit
+# in FCT. Default FCT path is $HOME/project/forever-claude-template; override
+# by passing a positional arg. Run from this repo on the branch you want to
+# vendor (typically main); the recipe archives HEAD, replaces vendor/mngr/
+# contents with that snapshot, and commits in FCT. Does not push. Aborts if
+# FCT has any uncommitted changes -- resolve them first. The full release
+# flow (release branches, push, merge to main) is the release-minds skill.
+sync-vendor-mngr fct="$HOME/project/forever-claude-template":
+    #!/bin/bash
+    set -ueo pipefail
+    fct="{{fct}}"
+    if [ ! -d "$fct/vendor/mngr" ]; then
+        echo "Error: $fct/vendor/mngr not found"
+        exit 1
+    fi
+    if [ -n "$(git -C "$fct" status --porcelain)" ]; then
+        echo "Error: $fct has uncommitted changes; resolve them first:"
+        git -C "$fct" status --short
+        exit 1
+    fi
+    branch=$(git rev-parse --abbrev-ref HEAD)
+    short=$(git rev-parse --short HEAD)
+    full=$(git rev-parse HEAD)
+    tarball=$(mktemp)
+    trap "rm -f $tarball" EXIT
+    git archive --format=tar HEAD > "$tarball"
+    cd "$fct/vendor/mngr"
+    rm -rf ./* ./.[!.]*
+    tar -xf "$tarball"
+    cd "$fct"
+    git add -A vendor/mngr/
+    if git diff --cached --quiet -- vendor/mngr/; then
+        echo "vendor/mngr already in sync with mngr ${short}; nothing to commit"
+        exit 0
+    fi
+    git commit -m "Sync vendor/mngr to ${branch} (${short})" -m "Tracks ${full} in mngr."
+    echo "Synced vendor/mngr to ${branch} (${short}). To publish: (cd $fct && git push origin ${branch})"

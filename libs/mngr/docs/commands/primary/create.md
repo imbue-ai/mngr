@@ -33,9 +33,8 @@ command, use the built-in 'command' agent type:
 
 Headless agent types (those implementing StreamingHeadlessAgentMixin,
 like headless_command and headless_claude) require the --foreground flag.
-This runs the headless flow: creates a temporary directory, streams the
-agent's output to stdout, and destroys the agent when done. Source,
-provisioning, environment, and connection flags do not apply.
+The agent streams its output to stdout and is destroyed when done instead
+of being connected to.
 
 For local agents in git repos, mngr creates a git worktree that shares objects
 with your original repository. For remote agents, the repo is transferred
@@ -102,7 +101,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--from`, `--source` | text | Source data for the agent [AGENT[@HOST[.PROVIDER]][:PATH] &#x7C; @HOST:PATH &#x7C; :PATH]. A bare name refers to an agent; use :PATH for a directory. Defaults to git root if omitted | None |
+| `--from`, `--source` | text | Source data for the agent [AGENT[@HOST[.PROVIDER]][:PATH] &#x7C; @HOST:PATH &#x7C; :PATH &#x7C; GIT_URL]. A bare name refers to an agent; use :PATH for a directory. GIT_URL (e.g. https://github.com/owner/repo or git@gitlab.com:owner/repo.git) is cloned to ~/.mngr/clones/<name>-<id>/ using local git auth. Defaults to git root if omitted | None |
 | `--rsync`, `--no-rsync` | boolean | Use rsync for file transfer [default: yes if rsync-args are present or if git is disabled] | None |
 | `--rsync-args` | text | Additional arguments to pass to rsync | None |
 

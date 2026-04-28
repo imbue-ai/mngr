@@ -37,7 +37,7 @@ def forward(ctx: click.Context, host: str, port: int, no_browser: bool) -> None:
 
     The desktop client handles authentication and proxies web traffic
     to individual workspace web servers. It discovers backends by calling
-    mngr CLI commands (mngr list, mngr events).
+    mngr CLI commands (mngr list, mngr event).
 
     Data directory, mngr host directory, and mngr prefix are all derived
     from the MINDS_ROOT_NAME environment variable (default: "minds").

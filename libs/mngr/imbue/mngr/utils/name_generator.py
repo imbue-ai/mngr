@@ -1,5 +1,6 @@
 from functools import cache
 from pathlib import Path
+from typing import Final
 
 import coolname
 from coolname import RandomGenerator
@@ -12,6 +13,24 @@ from imbue.mngr.primitives import HostNameStyle
 
 # Number of words to use when generating coolname-style names
 _COOLNAME_WORD_COUNT = 3
+
+# Fallback used when callers that build <name>-<uuid> directories don't have a user-supplied name.
+GENERIC_AGENT_NAME_HINT: Final[str] = "agent"
+
+
+@pure
+def pick_agent_name_hint(*candidates: str | None) -> str:
+    """Return the first non-empty candidate, falling back to `GENERIC_AGENT_NAME_HINT`.
+
+    For building `<name>-<uuid>` directory paths where the exact name only matters
+    as a human-readable prefix (not for addressing), so the return type is a plain
+    `str` and values are not validated as `AgentName`.
+    """
+    for candidate in candidates:
+        if candidate:
+            return candidate
+    return GENERIC_AGENT_NAME_HINT
+
 
 # Styles that use first_name + last_name format
 _STYLES_WITH_LAST_NAMES: frozenset[AgentNameStyle] = frozenset(
