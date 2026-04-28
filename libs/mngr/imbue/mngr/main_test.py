@@ -39,16 +39,21 @@ def test_create_plugin_manager_skips_blocking_when_load_all_plugins_set(
 def test_builtin_specs_match_command_help_metadata() -> None:
     """Each ``BuiltinCommandSpec`` must mirror the command's ``CommandHelpMetadata``.
 
-    The lazy-load registry duplicates ``one_line_description`` and ``aliases``
-    so the root ``mngr --help`` can render rows without importing the command
-    module. This test forces every builtin to load and asserts the duplicated
-    text and aliases stay in sync, so updates to the metadata don't silently
-    drift from the registry text.
+    The lazy-load registry duplicates ``one_line_description``, ``aliases``, and
+    ``hidden`` so the root ``mngr --help`` can render rows without importing the
+    command module. This test forces every builtin to load and asserts the
+    duplicated values stay in sync, so updates to the metadata or the click
+    command's ``hidden`` flag don't silently drift from the registry.
     """
     drift: list[str] = []
     for spec in BUILTIN_COMMAND_SPECS:
         cmd = _resolve_builtin(spec.name)
         assert cmd is not None, f"{spec.name}: failed to resolve lazy builtin"
+        # ``spec.hidden`` is consulted by ``AliasAwareGroup.format_commands`` to
+        # filter rows; it must agree with the click command's own ``hidden``
+        # flag (which click consults elsewhere, e.g. for subcommand help).
+        if cmd.hidden != spec.hidden:
+            drift.append(f"{spec.name}: spec.hidden={spec.hidden!r} != cmd.hidden={cmd.hidden!r}")
         canonical = cmd.name or spec.name
         metadata = get_help_metadata(canonical)
         if metadata is None:
