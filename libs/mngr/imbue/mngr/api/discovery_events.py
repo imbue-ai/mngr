@@ -690,8 +690,8 @@ def _discovery_stream_tail_events_file(
                         if stop_event.is_set():
                             break
                         _discovery_stream_emit_line(file_line, emitted_event_ids, emit_lock, on_line)
-        except Exception:
-            logger.exception("Error while tailing discovery events file")
+        except Exception as e:
+            logger.opt(exception=e).error("Error while tailing discovery events file")
         stop_event.wait(timeout=1.0)
 
 
@@ -717,7 +717,7 @@ def _write_unfiltered_full_snapshot_logged(mngr_ctx: MngrContext, error_behavior
     try:
         _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
     except Exception as e:
-        logger.exception("Failed to write discovery snapshot")
+        logger.opt(exception=e).error("Failed to write discovery snapshot")
         try:
             emit_discovery_error_event(
                 mngr_ctx.config,
@@ -803,7 +803,7 @@ def run_discovery_stream(
                 _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
                 # The tail thread will pick up the new snapshot and emit it
             except Exception as e:
-                logger.exception("Discovery stream poll failed (continuing)")
+                logger.opt(exception=e).error("Discovery stream poll failed (continuing)")
                 try:
                     emit_discovery_error_event(
                         mngr_ctx.config,
