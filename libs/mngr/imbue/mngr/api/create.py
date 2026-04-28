@@ -74,18 +74,24 @@ def _call_on_before_create_hooks(
     )
 
 
-def _cleanup_created_branch(
+def _cleanup_failed_worktree_create(
     work_dir_path: Path,
-    created_branch_name: str,
+    created_branch_name: str | None,
     mngr_ctx: MngrContext,
 ) -> None:
-    """Best-effort cleanup of a branch that we created during a failed create.
+    """Best-effort cleanup of a worktree (and any branch we created) after a failed create.
 
-    Mirrors the destroy-time cleanup safety: only deletes when a branch was
-    actually created by us (caller checks `created_branch_name is not None`),
-    and only when work_dir is a git worktree whose source repo we can locate.
-    For mirror mode the branch lives inside the work_dir's own .git, so it is
-    cleaned up alongside the work_dir by GC and needs no separate handling.
+    The worktree is always removed when we can locate a source repo for it,
+    because in worktree mode `host.create_agent_work_dir` always creates the
+    worktree itself. The branch is only deleted when we actually created it
+    during this invocation (caller passes a non-None `created_branch_name`),
+    which mirrors the destroy-time safety so pre-existing branches the user
+    attached to are left alone.
+
+    For mirror mode (and other non-worktree work_dirs) `find_source_repo_of_worktree`
+    returns None, so this is a no-op -- the branch lives inside the work_dir's own
+    .git and is cleaned up alongside the work_dir by GC.
+
     All errors are logged and swallowed so they cannot mask the original
     creation failure.
     """
@@ -97,7 +103,8 @@ def _cleanup_created_branch(
         remove_worktree(work_dir_path, source_repo_path, cg)
     except ProcessError as e:
         logger.warning("Failed to remove worktree {} during create cleanup: {}", work_dir_path, e)
-    delete_git_branch(created_branch_name, source_repo_path, cg)
+    if created_branch_name is not None:
+        delete_git_branch(created_branch_name, source_repo_path, cg)
 
 
 @log_call
@@ -179,10 +186,12 @@ def create(
             )
 
         # If anything below fails, the worktree (and any branch we created for
-        # it) is orphaned. On failure, remove the worktree and delete the branch
-        # we created so neither leaks into the source repo. Gated on
-        # created_branch_name so pre-existing branches the user attached to are
-        # left alone (mirrors the destroy-path safety check).
+        # it) is orphaned. On failure, remove the worktree we created and -- if
+        # we also created a new branch -- delete that branch, so neither leaks
+        # into the source repo. The branch deletion is gated on created_branch_name
+        # so pre-existing branches the user attached to are left alone (mirrors
+        # the destroy-path safety check); the worktree removal is unconditional
+        # because in worktree mode we always create the worktree ourselves.
         is_success = False
         try:
             if create_work_dir:
@@ -233,8 +242,8 @@ def create(
             emit_discovery_events_for_host(mngr_ctx.config, host)
             is_success = True
         finally:
-            if not is_success and created_branch_name is not None:
-                _cleanup_created_branch(work_dir_path, created_branch_name, mngr_ctx)
+            if not is_success:
+                _cleanup_failed_worktree_create(work_dir_path, created_branch_name, mngr_ctx)
 
     return result
 
