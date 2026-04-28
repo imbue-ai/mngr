@@ -25,9 +25,19 @@ _END_TURN_SETTLE_SECONDS: Final[float] = 5.0
 _TARGET_DISAPPEAR_GRACE_SECONDS: Final[float] = 10.0
 _INITIAL_TARGET_WAIT_SECONDS: Final[float] = 60.0
 _MNGR_LIST_TIMEOUT_SECONDS: Final[float] = 30.0
-_DEFAULT_RESULT_MAX_CHARS: Final[int] = 200000
+# ~100KB roughly matches Claude Code's native Task tool_result truncation
+# threshold (~25k tokens, observed empirically). Override via
+# MNGR_SUBAGENT_RESULT_MAX_CHARS if your subagents legitimately produce more.
+_DEFAULT_RESULT_MAX_CHARS: Final[int] = 100000
 _RESULT_TRUNCATION_SUFFIX: Final[str] = "\n\n[truncated]"
-_DESTROYED_PREFIX: Final[str] = "[mngr agent destroyed before completion] "
+
+# Prefix the body of any non-success END_TURN result so the parent agent
+# (which sees the body as its tool_result via Haiku's echo) recognizes
+# this as an error rather than a normal subagent reply. Native Claude
+# Code uses tool_result.is_error: true for this; we can't set that flag
+# from inside Haiku's assistant turn, so we ride a textual prefix.
+ERROR_PREFIX: Final[str] = "[ERROR] "
+_DESTROYED_PREFIX: Final[str] = ERROR_PREFIX + "mngr subagent destroyed before completion: "
 
 
 class SubagentWaitError(Exception):

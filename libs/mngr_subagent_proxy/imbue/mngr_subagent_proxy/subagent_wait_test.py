@@ -206,9 +206,15 @@ def test_destroyed_fallback_from_preserved_sessions(tmp_path: Path) -> None:
     ]
     events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    assert resolve_destroyed_result(target_name, location) == "[mngr agent destroyed before completion] last answer"
+    assert (
+        resolve_destroyed_result(target_name, location)
+        == "[ERROR] mngr subagent destroyed before completion: last answer"
+    )
 
     # Missing preserved-events file returns the prefix with an empty last_text.
     missing_agent_id = AgentId.generate()
     missing_location = AgentLocation(host_dir=host_dir, agent_id=missing_agent_id, work_dir=work_dir)
-    assert resolve_destroyed_result(target_name, missing_location) == "[mngr agent destroyed before completion] "
+    assert (
+        resolve_destroyed_result(target_name, missing_location)
+        == "[ERROR] mngr subagent destroyed before completion: "
+    )
