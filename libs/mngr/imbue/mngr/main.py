@@ -58,19 +58,16 @@ def _call_on_error_hook(ctx: click.Context, error: BaseException) -> None:
 # `_BUILTINS_BY_NAME` keys are both canonical names and alias names (mapping to the
 # same spec). `_BUILTIN_ALIASES_BY_CANONICAL` maps canonical name -> tuple of aliases.
 # `_BUILTINS_LOADED` caches resolved click.Command objects keyed by canonical name
-# so repeat lookups are cheap. `_BUILTINS_PLUGIN_OPTIONS_APPLIED` tracks whether
-# plugin options have already been applied to the click.Command, so that if loading
-# is re-entered (e.g. after a hook raised) we never double-apply plugin options to
-# the same module-level click.Command. `_BUILTINS_POST_LOAD_HOOK_RAN` separately
-# tracks whether the post-load hook has fired, so a one-time apply failure does not
-# permanently disable the (unrelated) post-load hook. None of these caches is
+# so repeat lookups are cheap. `_BUILTINS_PLUGIN_OPTIONS_APPLIED` separately tracks
+# whether plugin options + the post-load hook have already run for a given spec, so
+# that if loading is re-entered (e.g. after a hook raised) we never double-apply
+# plugin options to the same module-level click.Command. None of these caches is
 # cleared by reset_plugin_manager: the click.Command lives on the (cached) command
 # module, and re-applying plugin options would duplicate them.
 _BUILTINS_BY_NAME: dict[str, BuiltinCommandSpec] = {}
 _BUILTIN_ALIASES_BY_CANONICAL: dict[str, tuple[str, ...]] = {}
 _BUILTINS_LOADED: dict[str, click.Command] = {}
 _BUILTINS_PLUGIN_OPTIONS_APPLIED: set[str] = set()
-_BUILTINS_POST_LOAD_HOOK_RAN: set[str] = set()
 # Hooks invoked after a built-in command is imported, keyed by canonical name.
 # Populated at module bottom once the hook callables are defined.
 _BUILTIN_POST_LOAD_HOOKS: dict[str, Callable[[], None]] = {}
@@ -102,15 +99,8 @@ def _resolve_builtin(cmd_name: str) -> click.Command | None:
         cmd = _BUILTINS_LOADED[spec.name]
         if spec.apply_plugin_options:
             apply_plugin_cli_options(cmd, command_name=spec.name)
-    # Post-load hooks are tracked independently so that an apply-step failure
-    # above does not permanently skip them on later calls. The hook itself is
-    # also marked BEFORE invocation, since most hooks mutate global state
-    # (e.g. registering CommandHelpMetadata) and re-running on retry would
-    # duplicate or thrash that state.
-    if spec.name not in _BUILTINS_POST_LOAD_HOOK_RAN:
         post_load_hook = _BUILTIN_POST_LOAD_HOOKS.get(spec.name)
         if post_load_hook is not None:
-            _BUILTINS_POST_LOAD_HOOK_RAN.add(spec.name)
             post_load_hook()
     return _BUILTINS_LOADED[spec.name]
 
@@ -417,12 +407,11 @@ def reset_plugin_manager() -> None:
     is created for each test.
     """
     _plugin_manager_container["pm"] = None
-    # Note: `_BUILTINS_LOADED`, `_BUILTINS_PLUGIN_OPTIONS_APPLIED`, and
-    # `_BUILTINS_POST_LOAD_HOOK_RAN` are intentionally NOT cleared. Once a
-    # built-in command module has been imported and had its plugin options
-    # applied, the click.Command object lives on (modules are cached by
-    # Python). Re-applying plugin options would duplicate them, and re-running
-    # the post-load hooks would re-mutate global help-metadata state.
+    # Note: `_BUILTINS_LOADED` and `_BUILTINS_PLUGIN_OPTIONS_APPLIED` are
+    # intentionally NOT cleared. Once a built-in command module has been imported
+    # and had its plugin options applied, the click.Command object lives on
+    # (modules are cached by Python). Re-applying plugin options would duplicate
+    # them.
 
 
 # Register plugin commands. This eagerly creates the plugin manager and triggers
