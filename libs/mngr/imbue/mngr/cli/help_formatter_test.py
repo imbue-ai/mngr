@@ -683,10 +683,16 @@ def _flags_in_synopsis(synopsis: str) -> set[str]:
 
 
 def _plugin_injected_flags(command_name: str) -> set[str]:
-    """All flag forms registered by plugins for the named command.
+    """All flag forms registered by plugins for the named top-level command.
 
     Plugin-injected options live in the same option groups as built-ins, so
     the ratchet has to ask the plugin manager directly to tell them apart.
+
+    Plugins only register options on top-level commands (see
+    ``apply_plugin_cli_options`` in ``main.py``), so callers must only invoke
+    this for top-level command names; passing a subcommand's last name
+    segment would query an unrelated top-level command and produce a
+    misleading exemption set.
     """
     pm = get_or_create_plugin_manager()
     flags: set[str] = set()
@@ -756,7 +762,11 @@ def test_synopsis_lists_all_non_optout_flags(key: str, metadata: CommandHelpMeta
     per-flag commitment to ratchet against.
     """
     synopsis_flags = _flags_in_synopsis(metadata.synopsis)
-    plugin_flags = _plugin_injected_flags(key.split(".")[-1])
+    # Plugins only inject options into top-level commands (see
+    # apply_plugin_cli_options in main.py), so we must not consult
+    # plugin-injected flags for nested keys -- that would query an
+    # unrelated top-level command sharing the last name segment.
+    plugin_flags = _plugin_injected_flags(key) if "." not in key else set()
     opt_outs = _SYNOPSIS_OPTOUT_FLAGS.get(key, frozenset())
 
     missing: list[str] = []
