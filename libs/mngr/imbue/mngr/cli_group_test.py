@@ -19,13 +19,30 @@ def test_all_cli_commands_are_single_word() -> None:
     By requiring single-word commands, we avoid this ambiguity.
 
     Any future plugins that register custom commands MUST also follow this convention.
+
+    Note: built-in commands are loaded lazily via ``AliasAwareGroup`` and do not appear in
+    ``cli.commands`` until resolved, so we iterate ``list_commands`` / ``get_command`` to
+    cover both built-in and plugin-registered commands (and their aliases).
     """
     assert isinstance(cli, click.Group), "cli should be a click.Group"
 
-    invalid_commands = []
-    for command_name in cli.commands.keys():
-        if " " in command_name or "-" in command_name or "_" in command_name:
-            invalid_commands.append(command_name)
+    ctx = click.Context(cli)
+    names_to_check: set[str] = set(cli.list_commands(ctx))
+    # Plugin-registered aliases live in ``cli.commands`` but not in ``list_commands``
+    # (filtered out as duplicates), so include them explicitly.
+    names_to_check.update(cli.commands.keys())
+    # Resolve each command so its canonical name (which may differ from the registered
+    # name for aliases) is also validated.
+    for name in list(names_to_check):
+        cmd = cli.get_command(ctx, name)
+        if cmd is not None and cmd.name is not None:
+            names_to_check.add(cmd.name)
+
+    invalid_commands = sorted(
+        command_name
+        for command_name in names_to_check
+        if " " in command_name or "-" in command_name or "_" in command_name
+    )
 
     assert not invalid_commands, (
         f"CLI command names must be single words (no spaces, hyphens, or underscores) "
