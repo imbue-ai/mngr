@@ -18,11 +18,14 @@ from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
+from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
+from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
@@ -470,8 +473,12 @@ class MngrStreamManager(MutableModel):
 
     resolver: MngrCliBackendResolver = Field(frozen=True, description="Backend resolver to update with streaming data")
     mngr_binary: str = Field(default=MNGR_BINARY, frozen=True, description="Path to mngr binary")
+    notification_dispatcher: NotificationDispatcher | None = Field(
+        default=None, frozen=True, description="Optional notification dispatcher for error alerts"
+    )
 
     _cg: ConcurrencyGroup = PrivateAttr(default_factory=lambda: ConcurrencyGroup(name="mngr-stream-manager"))
+    _has_notified_error: bool = PrivateAttr(default=False)
     _known_agent_ids: set[str] = PrivateAttr(default_factory=set)
     _agent_host_map: dict[str, str] = PrivateAttr(default_factory=dict)
     _discovered_agents: tuple[DiscoveredAgent, ...] = PrivateAttr(default=())
@@ -510,6 +517,7 @@ class MngrStreamManager(MutableModel):
             on_output=self._on_discovery_stream_output,
             cwd=Path.home(),
         )
+        self._watch_process_exit(self._observe_process, "mngr observe")
 
     def stop(self) -> None:
         """Stop all streaming subprocesses.
@@ -568,6 +576,8 @@ class MngrStreamManager(MutableModel):
             self._handle_agent_destroyed(event)
         elif isinstance(event, HostDestroyedEvent):
             self._handle_host_destroyed(event)
+        elif isinstance(event, DiscoveryErrorEvent):
+            self._handle_discovery_error(event)
         elif event is None:
             logger.warning("Unrecognized discovery event line: {}", line[:200])
         else:
@@ -702,6 +712,47 @@ class MngrStreamManager(MutableModel):
         for agent_id in event.agent_ids:
             self.resolver.update_services(agent_id, {})
             self._fire_agent_destroyed_callbacks(agent_id)
+
+    def _handle_discovery_error(self, event: DiscoveryErrorEvent) -> None:
+        """Handle a discovery error event from the observe stream."""
+        logger.error(
+            "Discovery error from {}: {} ({})",
+            event.source_name,
+            event.error_message,
+            event.error_type,
+        )
+        self._on_subprocess_error(event.source_name, event.error_message)
+
+    def _on_subprocess_error(self, name: str, message: str) -> None:
+        """Handle a subprocess error by logging and optionally notifying the user."""
+        logger.error("Subprocess {} failed: {}", name, message)
+        if not self._has_notified_error and self.notification_dispatcher is not None:
+            self._has_notified_error = True
+            self.notification_dispatcher.dispatch(
+                NotificationRequest(
+                    title="Minds encountered an error",
+                    message=(
+                        f"A background process ({name}) failed. You may want to restart the app. Error: {message}"
+                    ),
+                ),
+                agent_display_name="Minds",
+            )
+
+    def _watch_process_exit(self, process: RunningProcess, name: str) -> None:
+        """Start a daemon thread that waits for a process to exit, then fires an error callback."""
+        thread = threading.Thread(
+            target=self._wait_for_process_and_notify,
+            args=(process, name),
+            daemon=True,
+            name=f"watch-{name}",
+        )
+        thread.start()
+
+    def _wait_for_process_and_notify(self, process: RunningProcess, name: str) -> None:
+        """Wait for a process to exit and fire an error callback if it exits with non-zero code."""
+        exit_code = process.wait()
+        if exit_code != 0:
+            self._on_subprocess_error(name, f"process exited with code {exit_code}")
 
     def _get_provider_name_for_agent(self, agent_id: AgentId) -> str:
         """Look up the provider name for an agent. Returns 'unknown' if not found."""
@@ -851,5 +902,6 @@ class MngrStreamManager(MutableModel):
                 cwd=Path.home(),
             )
             self._events_processes[aid_str] = process
+            self._watch_process_exit(process, f"mngr events {aid_str}")
         except InvalidConcurrencyGroupStateError:
             logger.debug("Cannot start events stream for {} -- concurrency group is no longer active", agent_id)

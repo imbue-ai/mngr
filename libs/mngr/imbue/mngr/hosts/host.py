@@ -94,6 +94,7 @@ from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 from imbue.mngr.utils.git_utils import get_current_git_branch
 from imbue.mngr.utils.git_utils import get_git_author_info
 from imbue.mngr.utils.git_utils import get_git_remote_url
+from imbue.mngr.utils.name_generator import GENERIC_AGENT_NAME_HINT
 from imbue.mngr.utils.polling import wait_for
 
 
@@ -2081,7 +2082,7 @@ class Host(BaseHost, OnlineHostInterface):
         if options.target_path is not None:
             work_dir_path = options.target_path
         else:
-            agent_name = options.name or AgentName("agent")
+            agent_name = options.name or AgentName(GENERIC_AGENT_NAME_HINT)
             work_dir_dir_name = f"{agent_name}-{uuid4().hex}"
             worktree_base = options.worktree_base_folder or (self.host_dir / "worktrees")
             work_dir_path = worktree_base / work_dir_dir_name
@@ -2142,6 +2143,11 @@ class Host(BaseHost, OnlineHostInterface):
 
             # Track generated work directories at the host level
             self._add_generated_work_dir(work_dir_path)
+
+            # `git worktree add` only checks out the committed state of the base branch.
+            # Mirror the git-mirror codepath and copy over uncommitted (and optionally
+            # gitignored) files from the source so --include-unclean works in worktree mode.
+            self._transfer_extra_files(host, source_path, work_dir_path, options)
 
             self._apply_work_dir_extra_paths(
                 host, source_path, work_dir_path, self.mngr_ctx.config.work_dir_extra_paths
@@ -2216,6 +2222,7 @@ class Host(BaseHost, OnlineHostInterface):
                 host=self,
                 agent_args=options.agent_args,
                 command_override=options.command,
+                initial_message=options.initial_message,
             )
             command_str = str(command)
 
@@ -2543,7 +2550,7 @@ class Host(BaseHost, OnlineHostInterface):
                         updated_lines.append(f"MNGR_AGENT_NAME={new_name}")
                     else:
                         updated_lines.append(line)
-                self.write_text_file(env_path, "\n".join(updated_lines) + "\n")
+                self.write_file(env_path, ("\n".join(updated_lines) + "\n").encode(), is_atomic=True)
             except FileNotFoundError:
                 logger.debug("No env file found for agent {}, skipping env update", agent.id)
 
@@ -2551,7 +2558,7 @@ class Host(BaseHost, OnlineHostInterface):
             content = self.read_text_file(data_path)
             data = json.loads(content)
             data["name"] = str(new_name)
-            self.write_text_file(data_path, json.dumps(data, indent=2))
+            self.write_file(data_path, json.dumps(data, indent=2).encode(), is_atomic=True)
             self.save_agent_data(agent.id, data)
 
             # Reload and return the updated agent

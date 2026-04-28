@@ -14,17 +14,22 @@ import base64
 import binascii
 import contextlib
 import functools
+import io
 import json
 import logging
 import os
+import shlex
 from collections.abc import Callable
 from collections.abc import Iterator
 from typing import Any
 from typing import NoReturn
 from typing import Protocol
+from uuid import UUID
 
 import httpx
 import modal
+import paramiko
+import psycopg2
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
@@ -264,6 +269,79 @@ class AgentAuth(BaseModel):
 
 
 AuthResult = AdminAuth | AgentAuth
+
+
+# -- Host pool models --
+
+
+class LeaseHostRequest(BaseModel):
+    ssh_public_key: str = Field(description="SSH public key to authorize on the leased host")
+    version: str = Field(description="Pool host version tag to match (e.g. v0.1.0)")
+
+
+class LeaseHostResponse(BaseModel):
+    host_db_id: UUID = Field(description="Database ID of the leased host")
+    vps_ip: str = Field(description="VPS IP address")
+    ssh_port: int = Field(description="SSH port on the VPS")
+    ssh_user: str = Field(description="SSH user on the VPS")
+    container_ssh_port: int = Field(description="SSH port mapped to the Docker container")
+    agent_id: str = Field(description="Pre-provisioned mngr agent ID")
+    host_id: str = Field(description="Host ID in the mngr provider")
+    version: str = Field(description="Pool host version tag")
+
+
+class ReleaseHostResponse(BaseModel):
+    status: str = Field(description="Release status (e.g. 'released')")
+
+
+class LeasedHostInfo(BaseModel):
+    host_db_id: UUID = Field(description="Database ID of the leased host")
+    vps_ip: str = Field(description="VPS IP address")
+    ssh_port: int = Field(description="SSH port on the VPS")
+    ssh_user: str = Field(description="SSH user on the VPS")
+    container_ssh_port: int = Field(description="SSH port mapped to the Docker container")
+    agent_id: str = Field(description="Pre-provisioned mngr agent ID")
+    host_id: str = Field(description="Host ID in the mngr provider")
+    version: str = Field(description="Pool host version tag")
+    leased_at: str = Field(description="ISO 8601 timestamp when the host was leased")
+
+
+# -- LiteLLM key management models --
+
+
+class CreateKeyRequest(BaseModel):
+    key_alias: str | None = Field(default=None, description="Optional human-readable alias for the key")
+    max_budget: float | None = Field(default=None, description="Optional max budget in USD (no limit if unset)")
+    budget_duration: str | None = Field(
+        default=None, description="Optional budget reset duration (e.g. '1d', '1h', '1w', '1M')"
+    )
+    metadata: dict[str, str] | None = Field(
+        default=None, description="Optional metadata (e.g. agent_id, host_id) for resource tracking"
+    )
+
+
+class CreateKeyResponse(BaseModel):
+    key: str = Field(description="The generated LiteLLM virtual key")
+    base_url: str = Field(description="The LiteLLM proxy base URL for ANTHROPIC_BASE_URL")
+
+
+class KeyInfo(BaseModel):
+    token: str = Field(description="Hashed key token identifier")
+    key_alias: str | None = Field(default=None, description="Human-readable alias")
+    key_name: str | None = Field(default=None, description="Key name")
+    spend: float = Field(default=0.0, description="Total spend in USD")
+    max_budget: float | None = Field(default=None, description="Max budget in USD")
+    budget_duration: str | None = Field(default=None, description="Budget reset duration")
+    user_id: str | None = Field(default=None, description="User ID the key belongs to")
+
+
+class UpdateBudgetRequest(BaseModel):
+    max_budget: float | None = Field(default=None, description="New max budget in USD (null to remove limit)")
+    budget_duration: str | None = Field(default=None, description="New budget reset duration (null to remove)")
+
+
+class DeleteKeyResponse(BaseModel):
+    status: str = Field(description="Deletion status")
 
 
 # ---------------------------------------------------------------------------
@@ -1175,6 +1253,46 @@ def handle_endpoint_errors() -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
+# Host pool helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_pool_db_connection() -> Any:
+    """Open a psycopg2 connection to the Neon pool database."""
+    database_url = os.environ["DATABASE_URL"]
+    return psycopg2.connect(database_url)
+
+
+def _append_authorized_key(
+    host: str,
+    port: int,
+    user: str,
+    management_key_pem: str,
+    public_key_to_add: str,
+) -> None:
+    """SSH into a host using the management key and append a public key to authorized_keys."""
+    private_key = paramiko.Ed25519Key.from_private_key(io.StringIO(management_key_pem))
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(hostname=host, port=port, username=user, pkey=private_key, timeout=15)
+        key_line = public_key_to_add.strip()
+        commands = (
+            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo {} >> ~/.ssh/authorized_keys && ".format(
+                shlex.quote(key_line)
+            )
+            + "chmod 600 ~/.ssh/authorized_keys"
+        )
+        _stdin, _stdout, stderr = client.exec_command(commands)
+        exit_status = _stdout.channel.recv_exit_status()
+        if exit_status != 0:
+            stderr_text = stderr.read().decode()
+            raise paramiko.SSHException(f"SSH command failed (exit {exit_status}): {stderr_text}")
+    finally:
+        client.close()
+
+
+# ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 
@@ -1300,6 +1418,317 @@ def set_service_auth(request: Request, tunnel_name: str, service_name: str, body
         admin = require_admin(auth)
         get_ctx().set_service_auth(tunnel_name, admin.username, service_name, body)
         return {"status": "updated"}
+
+
+# ---------------------------------------------------------------------------
+# Host pool endpoints
+# ---------------------------------------------------------------------------
+
+
+@web_app.post("/hosts/lease")
+def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
+    """Lease an available host from the pool, injecting the caller's SSH public key."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, version "
+                        "FROM pool_hosts "
+                        "WHERE status = 'available' AND version = %s "
+                        "ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+                        (body.version,),
+                    )
+                    row = cur.fetchone()
+                    if row is None:
+                        raise HTTPException(
+                            status_code=503,
+                            detail="No pre-created agents are currently ready. Please ask Josh to provision more.",
+                        )
+                    host_db_id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, version = row
+
+                    # Inject the user's SSH public key on VPS and container
+                    management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
+                    try:
+                        _append_authorized_key(vps_ip, ssh_port, ssh_user, management_key_pem, body.ssh_public_key)
+                        _append_authorized_key(
+                            vps_ip, container_ssh_port, ssh_user, management_key_pem, body.ssh_public_key
+                        )
+                    except (paramiko.SSHException, OSError) as exc:
+                        logger.warning("SSH key injection failed for host %s: %s", host_db_id, exc)
+                        raise HTTPException(
+                            status_code=502, detail=f"Failed to inject SSH key on host: {exc}"
+                        ) from exc
+
+                    cur.execute(
+                        "UPDATE pool_hosts SET status = 'leased', leased_to_user = %s, leased_at = NOW() "
+                        "WHERE id = %s",
+                        (admin.username, host_db_id),
+                    )
+        finally:
+            conn.close()
+        return LeaseHostResponse(
+            host_db_id=host_db_id,
+            vps_ip=vps_ip,
+            ssh_port=ssh_port,
+            ssh_user=ssh_user,
+            container_ssh_port=container_ssh_port,
+            agent_id=agent_id,
+            host_id=host_id,
+            version=version,
+        ).model_dump()
+
+
+@web_app.post("/hosts/{host_db_id}/release")
+def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
+    """Release a leased host back to the pool."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT leased_to_user FROM pool_hosts WHERE id = %s AND status = 'leased'",
+                    (host_db_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise HTTPException(status_code=404, detail="Leased host not found")
+                leased_to_user = row[0]
+                if leased_to_user != admin.username:
+                    raise HTTPException(status_code=403, detail="You do not own this host lease")
+                cur.execute(
+                    "UPDATE pool_hosts SET status = 'released', released_at = NOW() WHERE id = %s",
+                    (host_db_id,),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        return ReleaseHostResponse(status="released").model_dump()
+
+
+@web_app.get("/hosts")
+def list_leased_hosts(request: Request) -> list[dict[str, object]]:
+    """List all hosts currently leased by the authenticated user."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, version, leased_at "
+                    "FROM pool_hosts "
+                    "WHERE status = 'leased' AND leased_to_user = %s",
+                    (admin.username,),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [
+            LeasedHostInfo(
+                host_db_id=r[0],
+                vps_ip=r[1],
+                ssh_port=r[2],
+                ssh_user=r[3],
+                container_ssh_port=r[4],
+                agent_id=r[5],
+                host_id=r[6],
+                version=r[7],
+                leased_at=str(r[8]) if r[8] is not None else "",
+            ).model_dump()
+            for r in rows
+        ]
+
+
+# ---------------------------------------------------------------------------
+# LiteLLM key management helpers
+# ---------------------------------------------------------------------------
+
+
+def _litellm_proxy_url() -> str:
+    """Return the LiteLLM proxy URL from environment. Raises 503 if not configured."""
+    url = os.environ.get("LITELLM_PROXY_URL")
+    if not url:
+        raise HTTPException(status_code=503, detail="LiteLLM proxy not configured")
+    return url.rstrip("/")
+
+
+def _litellm_master_key() -> str:
+    """Return the LiteLLM master key from environment. Raises 503 if not configured."""
+    key = os.environ.get("LITELLM_MASTER_KEY")
+    if not key:
+        raise HTTPException(status_code=503, detail="LiteLLM master key not configured")
+    return key
+
+
+def _litellm_request(
+    method: str,
+    path: str,
+    json_body: dict[str, object] | None = None,
+    params: dict[str, str] | None = None,
+) -> httpx.Response:
+    """Make an authenticated request to the LiteLLM proxy admin API."""
+    url = _litellm_proxy_url() + path
+    headers = {"Authorization": "Bearer {}".format(_litellm_master_key())}
+    response = httpx.request(
+        method=method,
+        url=url,
+        headers=headers,
+        json=json_body,
+        params=params,
+        timeout=60.0,
+    )
+    if response.status_code >= 400:
+        detail = response.text[:500]
+        logger.warning("LiteLLM API error: %s %s -> %s %s", method, path, response.status_code, detail)
+        raise HTTPException(status_code=response.status_code, detail="LiteLLM error: {}".format(detail))
+    return response
+
+
+def _litellm_base_url_for_agents() -> str:
+    """Return the base URL agents should use as ANTHROPIC_BASE_URL."""
+    return _litellm_proxy_url()
+
+
+# ---------------------------------------------------------------------------
+# LiteLLM key management endpoints
+# ---------------------------------------------------------------------------
+
+
+@web_app.post("/keys/create")
+def create_litellm_key(request: Request, body: CreateKeyRequest) -> dict[str, object]:
+    """Create a new LiteLLM virtual key for the authenticated user."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        require_admin(auth)
+        token = request.headers.get("authorization", "")[7:]
+        user_id = _get_user_id_from_access_token(token)
+
+        litellm_body: dict[str, object] = {"user_id": user_id}
+        if body.key_alias is not None:
+            litellm_body["key_alias"] = body.key_alias
+        if body.max_budget is not None:
+            litellm_body["max_budget"] = body.max_budget
+        if body.budget_duration is not None:
+            litellm_body["budget_duration"] = body.budget_duration
+        if body.metadata is not None:
+            litellm_body["metadata"] = body.metadata
+
+        resp = _litellm_request("POST", "/key/generate", json_body=litellm_body)
+        data = resp.json()
+
+        return CreateKeyResponse(
+            key=data["key"],
+            base_url=_litellm_base_url_for_agents(),
+        ).model_dump()
+
+
+@web_app.get("/keys")
+def list_litellm_keys(request: Request) -> list[dict[str, object]]:
+    """List all LiteLLM virtual keys owned by the authenticated user."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        require_admin(auth)
+        token = request.headers.get("authorization", "")[7:]
+        user_id = _get_user_id_from_access_token(token)
+
+        resp = _litellm_request("GET", "/key/list", params={"user_id": user_id})
+        data = resp.json()
+
+        keys_raw = data if isinstance(data, list) else data.get("keys", [])
+        result: list[dict[str, object]] = []
+        for entry in keys_raw:
+            result.append(
+                KeyInfo(
+                    token=entry.get("token", ""),
+                    key_alias=entry.get("key_alias"),
+                    key_name=entry.get("key_name"),
+                    spend=entry.get("spend", 0.0),
+                    max_budget=entry.get("max_budget"),
+                    budget_duration=entry.get("budget_duration"),
+                    user_id=entry.get("user_id"),
+                ).model_dump()
+            )
+        return result
+
+
+@web_app.get("/keys/{key_id}")
+def get_litellm_key_info(request: Request, key_id: str) -> dict[str, object]:
+    """Get info (including spend and budget) for a specific LiteLLM key."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        require_admin(auth)
+        token = request.headers.get("authorization", "")[7:]
+        user_id = _get_user_id_from_access_token(token)
+
+        resp = _litellm_request("GET", "/key/info", params={"key": key_id})
+        data = resp.json()
+
+        info = data.get("info", data)
+        if info.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="Key does not belong to this user")
+
+        return KeyInfo(
+            token=info.get("token", ""),
+            key_alias=info.get("key_alias"),
+            key_name=info.get("key_name"),
+            spend=info.get("spend", 0.0),
+            max_budget=info.get("max_budget"),
+            budget_duration=info.get("budget_duration"),
+            user_id=info.get("user_id"),
+        ).model_dump()
+
+
+@web_app.put("/keys/{key_id}/budget")
+def update_litellm_key_budget(request: Request, key_id: str, body: UpdateBudgetRequest) -> dict[str, object]:
+    """Update the budget for a LiteLLM key owned by the authenticated user."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        require_admin(auth)
+        token = request.headers.get("authorization", "")[7:]
+        user_id = _get_user_id_from_access_token(token)
+
+        # Verify ownership
+        info_resp = _litellm_request("GET", "/key/info", params={"key": key_id})
+        info_data = info_resp.json()
+        info = info_data.get("info", info_data)
+        if info.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="Key does not belong to this user")
+
+        update_body: dict[str, object] = {"key": key_id}
+        update_body["max_budget"] = body.max_budget
+        if body.budget_duration is not None:
+            update_body["budget_duration"] = body.budget_duration
+
+        _litellm_request("POST", "/key/update", json_body=update_body)
+
+        return {"status": "updated"}
+
+
+@web_app.delete("/keys/{key_id}")
+def delete_litellm_key(request: Request, key_id: str) -> dict[str, object]:
+    """Delete a LiteLLM key owned by the authenticated user."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        require_admin(auth)
+        token = request.headers.get("authorization", "")[7:]
+        user_id = _get_user_id_from_access_token(token)
+
+        # Verify ownership
+        info_resp = _litellm_request("GET", "/key/info", params={"key": key_id})
+        info_data = info_resp.json()
+        info = info_data.get("info", info_data)
+        if info.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="Key does not belong to this user")
+
+        _litellm_request("POST", "/key/delete", json_body={"keys": [key_id]})
+
+        return DeleteKeyResponse(status="deleted").model_dump()
 
 
 # ---------------------------------------------------------------------------
@@ -1758,7 +2187,9 @@ def auth_get_user(user_id: str) -> UserProviderInfo:
 
 _DEPLOY_ENV = os.environ.get("MNGR_DEPLOY_ENV", "production")
 
-image = modal.Image.debian_slim().pip_install("fastapi[standard]", "httpx", "supertokens-python")
+image = modal.Image.debian_slim().pip_install(
+    "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko"
+)
 app = modal.App(name=f"remote-service-connector-{_DEPLOY_ENV}", image=image)
 
 
@@ -1867,6 +2298,9 @@ def _init_supertokens() -> None:
     secrets=[
         modal.Secret.from_name(f"cloudflare-{_DEPLOY_ENV}"),
         modal.Secret.from_name(f"supertokens-{_DEPLOY_ENV}"),
+        modal.Secret.from_name(f"neon-{_DEPLOY_ENV}"),
+        modal.Secret.from_name(f"pool-ssh-{_DEPLOY_ENV}"),
+        modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}"),
         modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV}),
     ]
 )

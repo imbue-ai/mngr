@@ -55,20 +55,31 @@ This is the same rsync that `propagate_changes` does as step 1, but it must happ
 
 ### 3. Install Electron dependencies
 
+`apps/minds/` is pnpm-managed (`pnpm-lock.yaml` is the authoritative lockfile; `pnpm-workspace.yaml` is present). Use pnpm:
+
 ```bash
-cd apps/minds && npm install && cd ../..
+cd apps/minds && pnpm install && cd ../..
 ```
 
 ### 4. Find your Docker SSH key
 
-Minds agents register their hosts under `~/.minds/mngr/`, not the default `~/.mngr/`, because the minds desktop client overrides `MNGR_HOST_DIR` (see `propagate_changes` lines ~43-46). The SSH key for a minds Docker agent lives at:
+Minds agents register their hosts under `~/.minds/mngr/` (production) or `~/.devminds/mngr` (dev), not the default `~/.mngr/`, because the minds desktop client overrides `MNGR_HOST_DIR` (see `propagate_changes` lines ~43-46). 
+The SSH key for a minds Docker agent lives at:
 ```
 ~/.minds/mngr/profiles/<profile_id>/providers/docker/docker/keys/docker_ssh_key
+```
+or for dev:
+```
+~/.devminds/mngr/profiles/<profile_id>/providers/docker/docker/keys/docker_ssh_key
 ```
 
 Find yours with:
 ```bash
 find ~/.minds/mngr/profiles -path "*/docker/*/keys/docker_ssh_key"
+```
+or for dev:
+```bash
+find ~/.devminds/mngr/profiles -path "*/docker/*/keys/docker_ssh_key"
 ```
 
 Do NOT use a key from `~/.mngr/profiles/...` -- that belongs to non-minds mngr agents and will silently fail with "Permission denied (publickey)".
@@ -93,7 +104,7 @@ TEMPLATE_BRANCH=$(cd .external_worktrees/forever-claude-template && git branch -
   export MINDS_WORKSPACE_GIT_URL="$(pwd)/.external_worktrees/forever-claude-template"
   export MINDS_WORKSPACE_NAME="mindtest"
   export MINDS_WORKSPACE_BRANCH="$TEMPLATE_BRANCH"
-  python3 -c "import subprocess; subprocess.Popen(['bash','-c','cd apps/minds && npm start'], start_new_session=True, stdout=open('/tmp/minds-electron.log','a'), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)"
+  python3 -c "import subprocess; subprocess.Popen(['bash','-c','cd apps/minds && pnpm start'], start_new_session=True, stdout=open('/tmp/minds-electron.log','a'), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)"
 )
 ```
 
@@ -176,4 +187,4 @@ The template's `.mngr/settings.toml` controls agent types, create templates, env
 ### Logs
 
 - Electron app: `/tmp/minds-electron.log`
-- Minds backend: `~/.minds/logs/minds.log` and `~/.minds/logs/minds-events.jsonl`
+- Minds backend: `~/.minds/logs/minds.log` and `~/.minds/logs/minds-events.jsonl` (production) or `~/.devminds/logs/minds.log` and `~/.devminds/logs/minds-events.jsonl` (dev)

@@ -10,7 +10,6 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
@@ -18,6 +17,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
+from imbue.mngr.api.discovery_events import emit_discovery_error_to_stdout
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
 from imbue.mngr.api.discovery_events import extract_agents_and_hosts_from_full_listing
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
@@ -39,6 +39,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
 class ErrorInfo(FrozenModel):
@@ -259,7 +260,7 @@ def _list_agents_batch(
 
     # Process each host and its agents in parallel
     futures: list[Future[None]] = []
-    with ConcurrencyGroupExecutor(
+    with mngr_executor(
         parent_cg=mngr_ctx.concurrency_group, name="list_agents_process_hosts", max_workers=32
     ) as executor:
         for host_ref, agent_refs in agents_by_host.items():
@@ -311,7 +312,7 @@ def _list_agents_streaming(
         providers = get_all_provider_instances(mngr_ctx, provider_names, reset_caches=reset_caches)
         logger.trace("Found {} provider instances", len(providers))
 
-        with ConcurrencyGroupExecutor(
+        with mngr_executor(
             parent_cg=mngr_ctx.concurrency_group, name="list_agents_streaming", max_workers=32
         ) as executor:
             streaming_futures: list[Future[None]] = []
@@ -354,7 +355,7 @@ def _discover_and_emit_details_for_provider(
 
         # Phase 2: immediately process hosts (fire on_agent for this provider)
         host_futures: list[Future[None]] = []
-        with ConcurrencyGroupExecutor(parent_cg=cg, name=f"stream_hosts_{provider.name}", max_workers=32) as executor:
+        with mngr_executor(parent_cg=cg, name=f"stream_hosts_{provider.name}", max_workers=32) as executor:
             for host_ref, agent_refs in provider_results.items():
                 if not agent_refs:
                     continue
@@ -375,9 +376,17 @@ def _discover_and_emit_details_for_provider(
         for future in host_futures:
             future.result()
 
-    except MngrError as e:
+    except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
-            raise
+            if isinstance(e, MngrError):
+                raise
+            raise MngrError(str(e)) from e
+        logger.exception("Error discovering agents for provider {}", provider.name)
+        emit_discovery_error_to_stdout(
+            error_type=type(e).__name__,
+            error_message=str(e),
+            source_name=str(provider.name),
+        )
         error_info = ProviderErrorInfo.build_for_provider(e, provider.name)
         with results_lock:
             result.errors.append(error_info)
@@ -453,9 +462,17 @@ def _process_host_with_error_handling(
             results_lock,
         )
 
-    except (MngrError, BaseMngrError) as e:
+    except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
-            raise
+            if isinstance(e, (MngrError, BaseMngrError)):
+                raise
+            raise MngrError(str(e)) from e
+        logger.exception("Error processing host {}", host_ref.host_id)
+        emit_discovery_error_to_stdout(
+            error_type=type(e).__name__,
+            error_message=str(e),
+            source_name=str(host_ref.host_id),
+        )
         error_info = HostErrorInfo.build_for_host(e, host_ref.host_id)
         with results_lock:
             result.errors.append(error_info)
