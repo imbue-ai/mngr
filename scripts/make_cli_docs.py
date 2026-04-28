@@ -683,10 +683,15 @@ def main() -> None:
     # ``cli.list_commands`` returns canonical names for both built-in commands
     # (via AliasAwareGroup's lazy registry) and plugin-registered commands
     # (which live in ``cli.commands``), so we walk the merged list once.
+    # ``ALIAS_COMMANDS`` (archive, clone, migrate) are handled separately by
+    # ``generate_alias_doc`` below; skipping them here keeps the script
+    # idempotent (otherwise both functions write conflicting content).
     ctx = click.Context(cli)
     for name in cli.list_commands(ctx):
         cmd = cli.get_command(ctx, name)
         if cmd is None or cmd.name is None:
+            continue
+        if cmd.name in ALIAS_COMMANDS:
             continue
         generate_command_doc(cmd.name, base_dir)
 
