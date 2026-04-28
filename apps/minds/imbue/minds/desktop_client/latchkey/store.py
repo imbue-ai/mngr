@@ -21,7 +21,6 @@ import os
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 from typing import Final
 
 from loguru import logger
@@ -147,27 +146,20 @@ class LatchkeyPermissionsConfig(FrozenModel):
     """In-memory representation of a Latchkey/Detent permissions config file.
 
     Minds manages this file programmatically, so we model only the subset
-    of detent's full schema that we ever produce or consume:
-
-    * ``rules`` -- the list of rules minds writes when granting/revoking;
-    * ``schemas`` -- preserved verbatim on round-trip so users can still
-      hand-author custom request schemas alongside the rules minds writes.
-
-    Detent's ``include`` directive is intentionally not modeled. Hand-edited
-    ``include`` entries are silently dropped on the next minds-driven save.
+    of detent's full schema that we ever produce: the ordered ``rules``
+    list. Detent's ``schemas`` and ``include`` directives are intentionally
+    not modeled; any hand-edited entries for those keys are silently
+    dropped on the next minds-driven save.
     """
 
     # Each rule is a single-key dict mapping a scope schema name to a list
-    # of permission schema names. We keep the wide ``Any`` value type for
-    # the schemas dict because schema bodies are arbitrary JSON Schema
-    # fragments that minds never inspects.
+    # of permission schema names. Detent's wider rule shape (multi-key
+    # dicts) is not produced by minds; we tolerate them on read but
+    # collapse them to single-key form on write via
+    # ``set_permissions_for_scope``.
     rules: tuple[dict[str, list[str]], ...] = Field(
         default_factory=tuple,
         description="Ordered rules. Each rule is one scope schema -> list of permission schemas.",
-    )
-    schemas: dict[str, Any] | None = Field(
-        default=None,
-        description="Optional user-defined schemas, preserved verbatim.",
     )
 
 
@@ -217,28 +209,20 @@ def load_permissions(path: Path) -> LatchkeyPermissionsConfig:
             normalized[scope_name] = [str(p) for p in permissions]
         rules.append(normalized)
 
-    schemas = data.get("schemas")
-    if schemas is not None and not isinstance(schemas, dict):
-        raise MalformedPermissionsConfigError(f"Expected 'schemas' to be an object in {path}")
+    # ``schemas`` and ``include`` are intentionally not modeled: minds
+    # manages this file programmatically and only reads / writes the
+    # subset of detent's schema we actually produce (the ``rules``
+    # list). Any hand-edited entries for those keys are silently dropped
+    # on the next save.
 
-    # ``include`` is intentionally not modeled: minds manages this file
-    # programmatically and only reads/writes the subset of detent's
-    # schema we actually produce. Any hand-edited ``include`` entry is
-    # dropped on the next save.
-
-    return LatchkeyPermissionsConfig(
-        rules=tuple(rules),
-        schemas=schemas,
-    )
+    return LatchkeyPermissionsConfig(rules=tuple(rules))
 
 
 def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
     """Atomically write the permissions config to disk with mode 0o600."""
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    serialized: dict[str, Any] = {"rules": [dict(rule) for rule in config.rules]}
-    if config.schemas is not None:
-        serialized["schemas"] = config.schemas
+    serialized = {"rules": [dict(rule) for rule in config.rules]}
 
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(serialized, indent=2))
@@ -247,63 +231,57 @@ def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
     logger.debug("Wrote permissions config to {} ({} rule(s))", path, len(config.rules))
 
 
-def granted_permissions_for_service(
+def granted_permissions_for_scope(
     config: LatchkeyPermissionsConfig,
-    scope_schemas: Sequence[str],
-) -> dict[str, tuple[str, ...]]:
-    """Return the currently-granted permissions for each of the given scope schemas.
+    scope: str,
+) -> tuple[str, ...]:
+    """Return the currently-granted permissions for a single scope.
 
-    A scope that is absent from any rule maps to an empty tuple.
+    A scope that does not appear in any rule yields an empty tuple. If
+    multiple rules name the same scope (minds itself never writes that),
+    the last occurrence wins -- mirroring detent's first-match-wins
+    evaluation against the rule list.
     """
-    scope_set = set(scope_schemas)
-    result: dict[str, tuple[str, ...]] = {scope: () for scope in scope_schemas}
+    granted: tuple[str, ...] = ()
     for rule in config.rules:
-        for scope, permissions in rule.items():
-            if scope in scope_set:
-                result[scope] = tuple(permissions)
-    return result
+        for rule_scope, permissions in rule.items():
+            if rule_scope == scope:
+                granted = tuple(permissions)
+    return granted
 
 
-def set_permissions_for_service(
+def set_permissions_for_scope(
     config: LatchkeyPermissionsConfig,
-    scope_schemas: Sequence[str],
+    scope: str,
     granted_permissions: Sequence[str],
 ) -> LatchkeyPermissionsConfig:
-    """Return a new config with one rule per scope schema mapping to ``granted_permissions``.
+    """Return a new config with the rule for ``scope`` set to ``granted_permissions``.
 
-    Replaces any existing rules whose key is one of ``scope_schemas`` and
-    appends new rules for any scopes that didn't have a rule yet. Rules
-    for unrelated scopes are preserved in their original order.
+    If a single-key rule for ``scope`` already exists, it is replaced in
+    place; otherwise a new rule is appended. Rules for unrelated scopes
+    are preserved verbatim. Pre-existing duplicates (two rules naming
+    the same scope -- minds never writes that, but a hand-edited file
+    might) are collapsed into the single rule we write.
+
+    Callers wanting to manage multiple scopes call this once per scope.
     """
-    if not scope_schemas:
-        raise LatchkeyStoreError("scope_schemas must be non-empty")
     if not granted_permissions:
         raise LatchkeyStoreError(
             "granted_permissions must be non-empty; the UI must block empty grants",
         )
 
-    permissions_list = list(granted_permissions)
-    scope_set = set(scope_schemas)
-    seen_scopes: set[str] = set()
     new_rules: list[dict[str, list[str]]] = []
-
-    # Keep unrelated rules in place; replace rules whose scope is being managed.
+    is_replaced = False
     for rule in config.rules:
-        if len(rule) == 1:
-            scope = next(iter(rule.keys()))
-            if scope in scope_set:
-                if scope in seen_scopes:
-                    continue
-                new_rules.append({scope: list(permissions_list)})
-                seen_scopes.add(scope)
-                continue
-        new_rules.append({scope: list(permissions) for scope, permissions in rule.items()})
-
-    # Append rules for any scopes that didn't appear in the existing config.
-    for scope in scope_schemas:
-        if scope not in seen_scopes:
-            new_rules.append({scope: list(permissions_list)})
-            seen_scopes.add(scope)
+        if scope in rule:
+            if not is_replaced:
+                new_rules.append({scope: list(granted_permissions)})
+                is_replaced = True
+            # else: drop the duplicate.
+        else:
+            new_rules.append({k: list(v) for k, v in rule.items()})
+    if not is_replaced:
+        new_rules.append({scope: list(granted_permissions)})
 
     return config.model_copy_update(
         to_update(config.field_ref().rules, tuple(new_rules)),

@@ -13,14 +13,14 @@ from imbue.minds.desktop_client.latchkey.store import LatchkeyStoreError
 from imbue.minds.desktop_client.latchkey.store import MalformedPermissionsConfigError
 from imbue.minds.desktop_client.latchkey.store import delete_gateway_info
 from imbue.minds.desktop_client.latchkey.store import gateway_log_path
-from imbue.minds.desktop_client.latchkey.store import granted_permissions_for_service
+from imbue.minds.desktop_client.latchkey.store import granted_permissions_for_scope
 from imbue.minds.desktop_client.latchkey.store import list_gateway_infos
 from imbue.minds.desktop_client.latchkey.store import load_gateway_info
 from imbue.minds.desktop_client.latchkey.store import load_permissions
 from imbue.minds.desktop_client.latchkey.store import permissions_path_for_agent
 from imbue.minds.desktop_client.latchkey.store import save_gateway_info
 from imbue.minds.desktop_client.latchkey.store import save_permissions
-from imbue.minds.desktop_client.latchkey.store import set_permissions_for_service
+from imbue.minds.desktop_client.latchkey.store import set_permissions_for_scope
 from imbue.mngr.primitives import AgentId
 
 
@@ -99,40 +99,18 @@ def test_load_permissions_returns_empty_for_missing_file(tmp_path: Path) -> None
     assert config.rules == ()
 
 
-def test_load_permissions_parses_rules_and_schemas(tmp_path: Path) -> None:
-    path = tmp_path / "latchkey_permissions.json"
-    path.write_text(
-        json.dumps(
-            {
-                "rules": [
-                    {"slack-api": ["slack-read-all"]},
-                    {"github-rest-api": ["github-read-all", "github-write-issues"]},
-                ],
-                "schemas": {"my-schema": {"properties": {"method": {"const": "GET"}}}},
-            }
-        )
-    )
-
-    config = load_permissions(path)
-
-    assert config.rules == (
-        {"slack-api": ["slack-read-all"]},
-        {"github-rest-api": ["github-read-all", "github-write-issues"]},
-    )
-    assert config.schemas == {"my-schema": {"properties": {"method": {"const": "GET"}}}}
-
-
-def test_load_permissions_silently_drops_include_directive(tmp_path: Path) -> None:
-    """Detent's ``include`` directive is intentionally not modeled.
+def test_load_permissions_silently_drops_unmodeled_keys(tmp_path: Path) -> None:
+    """Detent's ``schemas`` and ``include`` directives are not modeled.
 
     Minds owns the file and writes it programmatically; hand-edited
-    ``include`` entries are dropped on the next minds-driven save.
+    entries for either key are dropped on the next minds-driven save.
     """
     path = tmp_path / "latchkey_permissions.json"
     path.write_text(
         json.dumps(
             {
                 "rules": [{"slack-api": ["slack-read-all"]}],
+                "schemas": {"my-schema": {"properties": {"method": {"const": "GET"}}}},
                 "include": ["shared/example.json"],
             }
         )
@@ -140,28 +118,14 @@ def test_load_permissions_silently_drops_include_directive(tmp_path: Path) -> No
 
     config = load_permissions(path)
 
-    # The rules came through; ``include`` did not surface as a field on
-    # LatchkeyPermissionsConfig.
+    # The rules came through; nothing else does.
     assert config.rules == ({"slack-api": ["slack-read-all"]},)
+    assert not hasattr(config, "schemas")
     assert not hasattr(config, "include")
 
-    # Saving back to disk must not re-emit the include directive.
+    # Saving back to disk emits ``rules`` only.
     save_permissions(path, config)
-    assert "include" not in json.loads(path.read_text())
-
-
-def test_load_permissions_round_trip_preserves_unknown_schemas(tmp_path: Path) -> None:
-    path = tmp_path / "latchkey_permissions.json"
-    original_schemas = {"custom": {"properties": {"path": {"const": "/v1/widgets"}}}}
-    config = LatchkeyPermissionsConfig(
-        rules=({"custom": ["custom-read"]},),
-        schemas=original_schemas,
-    )
-
-    save_permissions(path, config)
-    reloaded = load_permissions(path)
-
-    assert reloaded == config
+    assert sorted(json.loads(path.read_text()).keys()) == ["rules"]
 
 
 def test_load_permissions_rejects_non_object_top_level(tmp_path: Path) -> None:
@@ -198,7 +162,7 @@ def test_save_permissions_writes_atomically(tmp_path: Path) -> None:
     assert leftovers == []
 
 
-def test_set_permissions_for_service_replaces_existing_rule_for_scope() -> None:
+def test_set_permissions_for_scope_replaces_existing_rule() -> None:
     config = LatchkeyPermissionsConfig(
         rules=(
             {"slack-api": ["slack-read-all"]},
@@ -206,9 +170,9 @@ def test_set_permissions_for_service_replaces_existing_rule_for_scope() -> None:
         )
     )
 
-    updated = set_permissions_for_service(
+    updated = set_permissions_for_scope(
         config,
-        scope_schemas=("slack-api",),
+        scope="slack-api",
         granted_permissions=("slack-read-all", "slack-write-messages"),
     )
 
@@ -218,12 +182,12 @@ def test_set_permissions_for_service_replaces_existing_rule_for_scope() -> None:
     )
 
 
-def test_set_permissions_for_service_appends_new_rule_when_scope_absent() -> None:
+def test_set_permissions_for_scope_appends_new_rule_when_absent() -> None:
     config = LatchkeyPermissionsConfig(rules=({"github-rest-api": ["github-read-all"]},))
 
-    updated = set_permissions_for_service(
+    updated = set_permissions_for_scope(
         config,
-        scope_schemas=("slack-api",),
+        scope="slack-api",
         granted_permissions=("slack-read-all",),
     )
 
@@ -233,52 +197,63 @@ def test_set_permissions_for_service_appends_new_rule_when_scope_absent() -> Non
     )
 
 
-def test_set_permissions_for_service_writes_one_rule_per_scope() -> None:
+def test_set_permissions_for_scope_called_per_scope_when_iterating() -> None:
+    """Multi-scope updates compose by chaining single-scope calls."""
     config = LatchkeyPermissionsConfig()
 
-    updated = set_permissions_for_service(
-        config,
-        scope_schemas=("aws-s3", "aws-ec2"),
-        granted_permissions=("aws-s3-read",),
-    )
+    for scope in ("aws-s3", "aws-ec2"):
+        config = set_permissions_for_scope(
+            config,
+            scope=scope,
+            granted_permissions=("aws-s3-read",),
+        )
 
-    assert updated.rules == (
+    assert config.rules == (
         {"aws-s3": ["aws-s3-read"]},
         {"aws-ec2": ["aws-s3-read"]},
     )
 
 
-def test_set_permissions_for_service_rejects_empty_grant() -> None:
+def test_set_permissions_for_scope_rejects_empty_grant() -> None:
     config = LatchkeyPermissionsConfig()
 
     with pytest.raises(LatchkeyStoreError):
-        set_permissions_for_service(
+        set_permissions_for_scope(
             config,
-            scope_schemas=("slack-api",),
+            scope="slack-api",
             granted_permissions=(),
         )
 
 
-def test_set_permissions_for_service_rejects_empty_scope_list() -> None:
-    config = LatchkeyPermissionsConfig()
-
-    with pytest.raises(LatchkeyStoreError):
-        set_permissions_for_service(
-            config,
-            scope_schemas=(),
-            granted_permissions=("slack-read-all",),
+def test_set_permissions_for_scope_collapses_pre_existing_duplicates() -> None:
+    """A hand-edited file with two rules naming the same scope collapses to one on rewrite."""
+    config = LatchkeyPermissionsConfig(
+        rules=(
+            {"slack-api": ["slack-read-all"]},
+            {"github-rest-api": ["github-read-all"]},
+            {"slack-api": ["slack-write-messages"]},
         )
+    )
+
+    updated = set_permissions_for_scope(
+        config,
+        scope="slack-api",
+        granted_permissions=("slack-search",),
+    )
+
+    assert updated.rules == (
+        {"slack-api": ["slack-search"]},
+        {"github-rest-api": ["github-read-all"]},
+    )
 
 
-def test_granted_permissions_for_service_returns_empty_for_missing_scope() -> None:
+def test_granted_permissions_for_scope_returns_empty_for_missing_scope() -> None:
     config = LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},))
 
-    granted = granted_permissions_for_service(config, scope_schemas=("github-rest-api",))
-
-    assert granted == {"github-rest-api": ()}
+    assert granted_permissions_for_scope(config, scope="github-rest-api") == ()
 
 
-def test_granted_permissions_for_service_returns_existing_grants() -> None:
+def test_granted_permissions_for_scope_returns_existing_grants() -> None:
     config = LatchkeyPermissionsConfig(
         rules=(
             {"slack-api": ["slack-read-all", "slack-write-messages"]},
@@ -286,15 +261,11 @@ def test_granted_permissions_for_service_returns_existing_grants() -> None:
         )
     )
 
-    granted = granted_permissions_for_service(
-        config,
-        scope_schemas=("slack-api", "github-rest-api"),
+    assert granted_permissions_for_scope(config, scope="slack-api") == (
+        "slack-read-all",
+        "slack-write-messages",
     )
-
-    assert granted == {
-        "slack-api": ("slack-read-all", "slack-write-messages"),
-        "github-rest-api": ("github-read-all",),
-    }
+    assert granted_permissions_for_scope(config, scope="github-rest-api") == ("github-read-all",)
 
 
 def test_permissions_path_for_agent_uses_agents_subdir(tmp_path: Path) -> None:
@@ -336,7 +307,7 @@ def test_save_permissions_creates_parent_directories(tmp_path: Path) -> None:
     assert deep_path.is_file()
 
 
-def test_set_permissions_for_service_preserves_unrelated_rules() -> None:
+def test_set_permissions_for_scope_preserves_unrelated_rules() -> None:
     config = LatchkeyPermissionsConfig(
         rules=(
             {"slack-api": ["slack-read-all"]},
@@ -345,9 +316,9 @@ def test_set_permissions_for_service_preserves_unrelated_rules() -> None:
         )
     )
 
-    updated = set_permissions_for_service(
+    updated = set_permissions_for_scope(
         config,
-        scope_schemas=("github-rest-api",),
+        scope="github-rest-api",
         granted_permissions=("github-read-all", "github-write-issues"),
     )
 
@@ -358,12 +329,12 @@ def test_set_permissions_for_service_preserves_unrelated_rules() -> None:
     )
 
 
-def test_save_permissions_excludes_optional_keys_when_unset(tmp_path: Path) -> None:
+def test_save_permissions_emits_only_rules_key(tmp_path: Path) -> None:
     path = tmp_path / "latchkey_permissions.json"
     save_permissions(path, LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))
 
     raw = json.loads(path.read_text())
-    assert "schemas" not in raw
+    assert sorted(raw.keys()) == ["rules"]
 
 
 def test_load_permissions_handles_world_readable_file_without_crashing(tmp_path: Path) -> None:
@@ -394,14 +365,13 @@ def test_save_permissions_overwrites_existing_file_atomically(tmp_path: Path) ->
     assert not (tmp_path / "latchkey_permissions.json.tmp").exists()
 
 
-def test_set_permissions_for_service_handles_multi_key_rule_unrelated_to_managed_scope() -> None:
-    # A multi-key rule (length > 1) cannot be matched as a single-scope rule;
-    # we must preserve it verbatim.
+def test_set_permissions_for_scope_preserves_unrelated_multi_key_rule() -> None:
+    """A multi-key rule that does not name the managed scope is kept verbatim."""
     config = LatchkeyPermissionsConfig(rules=({"foo": ["foo-read"], "bar": ["bar-read"]},))
 
-    updated = set_permissions_for_service(
+    updated = set_permissions_for_scope(
         config,
-        scope_schemas=("slack-api",),
+        scope="slack-api",
         granted_permissions=("slack-read-all",),
     )
 

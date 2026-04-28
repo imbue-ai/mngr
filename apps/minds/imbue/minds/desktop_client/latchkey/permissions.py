@@ -37,11 +37,11 @@ from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissi
 from imbue.minds.desktop_client.latchkey.services_catalog import get_service_info
 from imbue.minds.desktop_client.latchkey.store import LatchkeyPermissionsConfig
 from imbue.minds.desktop_client.latchkey.store import LatchkeyStoreError
-from imbue.minds.desktop_client.latchkey.store import granted_permissions_for_service
+from imbue.minds.desktop_client.latchkey.store import granted_permissions_for_scope
 from imbue.minds.desktop_client.latchkey.store import load_permissions
 from imbue.minds.desktop_client.latchkey.store import permissions_path_for_agent
 from imbue.minds.desktop_client.latchkey.store import save_permissions
-from imbue.minds.desktop_client.latchkey.store import set_permissions_for_service
+from imbue.minds.desktop_client.latchkey.store import set_permissions_for_scope
 from imbue.minds.desktop_client.latchkey.templates import render_latchkey_permission_dialog
 from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -410,10 +410,9 @@ class LatchkeyPermissionGrantHandler(MutableModel):
             )
             return IMPLICIT_DEFAULT_PERMISSIONS
 
-        granted_by_scope = granted_permissions_for_service(config, service_info.scope_schemas)
         granted: set[str] = set()
-        for permissions in granted_by_scope.values():
-            granted.update(permissions)
+        for scope in service_info.scope_schemas:
+            granted.update(granted_permissions_for_scope(config, scope))
         granted_in_catalog = tuple(p for p in service_info.permission_schemas if p in granted)
         if granted_in_catalog:
             return granted_in_catalog
@@ -436,11 +435,13 @@ class LatchkeyPermissionGrantHandler(MutableModel):
             )
             existing = LatchkeyPermissionsConfig()
 
-        updated = set_permissions_for_service(
-            existing,
-            scope_schemas=scope_schemas,
-            granted_permissions=granted_permissions,
-        )
+        updated = existing
+        for scope in scope_schemas:
+            updated = set_permissions_for_scope(
+                updated,
+                scope=scope,
+                granted_permissions=granted_permissions,
+            )
         save_permissions(path, updated)
 
     def _write_response_and_notify(
