@@ -21,6 +21,7 @@ from imbue.mngr.api.events import _handle_online_offline_transition
 from imbue.mngr.api.events import _maybe_emit_source_mismatch_warning
 from imbue.mngr.api.events import _parse_discovered_files
 from imbue.mngr.api.events import _pygtail_offset_file_path
+from imbue.mngr.api.events import _record_from_event_data
 from imbue.mngr.api.events import _sort_rotated_files_oldest_first
 from imbue.mngr.api.events import _start_tail_thread
 from imbue.mngr.api.events import _tail_source_thread_local
@@ -1461,6 +1462,37 @@ def test_parse_event_line_matching_source_has_no_original() -> None:
     assert result is not None
     assert result.source == "messages"
     assert result.original_source is None
+
+
+def test_record_from_event_data_does_not_mutate_input_when_source_mismatched() -> None:
+    """_record_from_event_data must not mutate caller-owned input dicts.
+
+    The function is marked @pure and now accepts dicts owned by
+    MalformedJsonLineWarner.parse(); a regression to in-place source-field
+    mutation would silently affect callers that retain the dict.
+    """
+    data = {
+        "timestamp": "2025-01-01T00:00:00Z",
+        "event_id": "evt-1",
+        "source": "wrong_source",
+    }
+    original_data = dict(data)
+    record = _record_from_event_data(data, '{"event_id":"evt-1"}', "correct_source")
+    assert record is not None
+    assert record.source == "correct_source"
+    assert record.data["source"] == "correct_source"
+    # Caller-owned input dict must be untouched.
+    assert data == original_data
+
+
+def test_record_from_event_data_does_not_mutate_input_when_source_missing() -> None:
+    """Backfilling a missing source must not mutate the caller-owned dict."""
+    data = {"timestamp": "2025-01-01T00:00:00Z", "event_id": "evt-1"}
+    original_data = dict(data)
+    record = _record_from_event_data(data, '{"event_id":"evt-1"}', "my-source")
+    assert record is not None
+    assert record.data["source"] == "my-source"
+    assert data == original_data
 
 
 # =============================================================================
