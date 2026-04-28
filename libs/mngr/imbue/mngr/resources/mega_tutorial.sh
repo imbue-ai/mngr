@@ -298,7 +298,7 @@ mngr config set commands.list.active true
 # or equivalently in your config file:
 #   [commands.list]
 #   active = true
-# to opt out for a single call, override the env var: MNGR_COMMANDS__LIST__ACTIVE=false mngr list
+# to opt out for a single call, override the env var: MNGR_COMMANDS_LIST_ACTIVE=false mngr list
 
 # note: --active only excludes hosts in CRASHED/FAILED/DESTROYED state and archived agents,
 # *not* STOPPED or DONE agents. if you want to also hide STOPPED and DONE agents from the default,
