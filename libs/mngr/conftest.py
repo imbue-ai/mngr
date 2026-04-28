@@ -144,19 +144,24 @@ def fail_on_unexpected_loguru_warnings(
         WARNINGS_ALLOWED_STACK.append(None)
         pushed_frame = True
 
-    _unexpected_warnings.clear()
-    sink_id = logger.add(_unexpected_warning_sink, level="WARNING", format="{message}")
+    # Sink setup and the stack-frame pop must share a finally so that any
+    # error during setup still pops the frame -- otherwise a setup failure
+    # could leak state across tests within the same xdist worker process.
+    sink_id: int | None = None
     try:
+        _unexpected_warnings.clear()
+        sink_id = logger.add(_unexpected_warning_sink, level="WARNING", format="{message}")
         yield
     finally:
         # Some tests call setup_logging() which invokes logger.remove() (no arg)
         # and removes all handlers including ours. In that case our sink is
         # already gone, so the resulting ValueError is expected; we still log
         # at trace level so it is observable when debugging.
-        try:
-            logger.remove(sink_id)
-        except ValueError as exc:
-            logger.trace("Warning-detection sink {} was already removed: {}", sink_id, exc)
+        if sink_id is not None:
+            try:
+                logger.remove(sink_id)
+            except ValueError as exc:
+                logger.trace("Warning-detection sink {} was already removed: {}", sink_id, exc)
         if pushed_frame:
             WARNINGS_ALLOWED_STACK.pop()
 
