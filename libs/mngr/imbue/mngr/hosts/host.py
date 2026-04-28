@@ -2139,6 +2139,16 @@ class Host(BaseHost, OnlineHostInterface):
                         f"To create a new branch instead, use --branch BASE: or --branch BASE:new-name\n"
                         f"To work directly in the existing worktree, use --in-place from that directory"
                     )
+                # `git worktree add` cannot resolve any commit reference in a
+                # repo with no commits and reports a cryptic error. Probe HEAD
+                # directly on the failure path so the empty-repo case gets a
+                # clear message regardless of git's exact stderr wording.
+                head_check = self.execute_idempotent_command(f"{git_c} rev-parse --verify HEAD")
+                if not head_check.success:
+                    raise UserInputError(
+                        f"Cannot create an agent in {source_path}: the git repository has no commits. "
+                        "Please make an initial commit first."
+                    )
                 raise MngrError(f"Failed to create git worktree: {stderr}")
 
             # Track generated work directories at the host level
@@ -2193,7 +2203,7 @@ class Host(BaseHost, OnlineHostInterface):
                 ]
             )
 
-            # Pre-create empty events.jsonl files so that `mngr events --follow`
+            # Pre-create empty events.jsonl files so that `mngr event --follow`
             # finds the sources immediately on startup, rather than waiting for a
             # 10-second rescan after the agent's services start writing events.
             services_events_file = services_events_dir / "events.jsonl"

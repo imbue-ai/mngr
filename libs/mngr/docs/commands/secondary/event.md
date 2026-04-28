@@ -1,12 +1,12 @@
 <!-- This file is auto-generated. Do not edit directly. -->
 <!-- To modify, edit the command's help metadata and run: uv run python scripts/make_cli_docs.py -->
 
-# mngr events
+# mngr event
 
 **Synopsis:**
 
 ```text
-mngr events TARGET [SOURCES...] [--source SOURCE] [--include CEL] [--exclude CEL] [--follow] [--tail N] [--head N]
+mngr event TARGET [SOURCES...] [--source SOURCE] [--include CEL] [--exclude CEL] [--follow] [--tail N] [--head N]
 ```
 
 View events from an agent or host.
@@ -29,7 +29,7 @@ Press Ctrl+C to stop.
 **Usage:**
 
 ```text
-mngr events [OPTIONS] TARGET [SOURCES]...
+mngr event [OPTIONS] TARGET [SOURCES]...
 ```
 ## Arguments
 
@@ -86,47 +86,47 @@ mngr events [OPTIONS] TARGET [SOURCES]...
 **Stream all events for an agent**
 
 ```bash
-$ mngr events my-agent
+$ mngr event my-agent
 ```
 
 **Stream only message events**
 
 ```bash
-$ mngr events my-agent messages
+$ mngr event my-agent messages
 ```
 
 **Stream events from multiple sources**
 
 ```bash
-$ mngr events my-agent messages logs/mngr
+$ mngr event my-agent messages logs/mngr
 ```
 
 **Same thing using --source**
 
 ```bash
-$ mngr events my-agent --source messages --source logs/mngr
+$ mngr event my-agent --source messages --source logs/mngr
 ```
 
 **Include only user messages**
 
 ```bash
-$ mngr events my-agent --include 'source == "messages"' --include 'data.role == "user"'
+$ mngr event my-agent --include 'source == "messages"' --include 'data.role == "user"'
 ```
 
 **Exclude log events**
 
 ```bash
-$ mngr events my-agent --exclude 'source.startsWith("logs/")'
+$ mngr event my-agent --exclude 'source.startsWith("logs/")'
 ```
 
 **View last 100 events**
 
 ```bash
-$ mngr events my-agent --tail 100
+$ mngr event my-agent --tail 100
 ```
 
 **Follow all events in real-time**
 
 ```bash
-$ mngr events my-agent --follow
+$ mngr event my-agent --follow
 ```
