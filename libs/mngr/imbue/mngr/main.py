@@ -209,10 +209,11 @@ class AliasAwareGroup(DefaultCommandGroup):
             help_text = meta.one_line_description if meta is not None else cmd.get_short_help_str(limit=limit)
             rows.append((display_name, help_text))
 
-        if rows:
-            rows.sort(key=lambda r: r[0])
-            with formatter.section("Commands"):
-                formatter.write_dl(rows)
+        # Safe: the early return above guarantees rows is non-empty here -- it either
+        # already contained built-ins, or just got plugin entries appended above.
+        rows.sort(key=lambda r: r[0])
+        with formatter.section("Commands"):
+            formatter.write_dl(rows)
 
 
 for _builtin in BUILTIN_COMMAND_SPECS:
