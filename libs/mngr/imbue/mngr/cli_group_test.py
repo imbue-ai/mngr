@@ -31,8 +31,10 @@ def test_all_cli_commands_are_single_word() -> None:
 
     ctx = click.Context(cli)
     names_to_check: set[str] = set(cli.list_commands(ctx))
-    # Plugin-registered aliases live in ``cli.commands`` but not in ``list_commands``
-    # (filtered out as duplicates), so include them explicitly.
+    # Defensive fallback: ``cli.list_commands`` already returns every key from
+    # ``cli.commands`` (click does not filter duplicates), so this merge is a
+    # no-op today. Kept in case a future click or AliasAwareGroup change stops
+    # surfacing some plugin-registered alias through ``list_commands``.
     names_to_check.update(cli.commands.keys())
     # Built-in aliases (e.g. ``ls`` -> ``list``, ``cfg`` -> ``config``) live in the
     # lazy-load registry inside ``imbue.mngr.main`` and never enter ``cli.commands`` /
