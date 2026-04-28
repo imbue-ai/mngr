@@ -384,6 +384,14 @@ class _WaitRuntime:
     target_name: str
     location: AgentLocation
     permissions_previously_waiting: bool
+    # Byte-watermark on the target's transcript: while the file size is
+    # at-or-below this value, ignore permission_waiting transitions. The
+    # caller sets this on re-entry after surfacing PERMISSION_REQUIRED to
+    # the human, so we don't re-fire on the SAME pending dialog. Once the
+    # target writes any new bytes past the watermark (i.e. the dialog has
+    # been resolved and the agent has progressed), the gate lifts and any
+    # subsequent flag transition is a genuinely new permission event.
+    permission_gate_until_transcript_past: int = 0
     tail_state: TailState = field(default_factory=TailState)
     pending_end_turn_text: str | None = None
     pending_end_turn_deadline: float | None = None
@@ -409,10 +417,34 @@ def _process_new_events(
             runtime.pending_end_turn_deadline = None
 
 
+def _current_transcript_size(runtime: _WaitRuntime) -> int:
+    """Return the current size of the target's transcript file in bytes, or 0 if unavailable."""
+    path = runtime.tail_state.path
+    if path is None:
+        return 0
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
 def _check_permissions_newly_waiting(runtime: _WaitRuntime) -> bool:
-    """Return True if permissions_waiting file newly appeared since the last poll."""
+    """Return True if permissions_waiting file newly appeared AND the
+    permission gate (transcript watermark) has lifted.
+
+    The gate is set by the caller on re-entry to suppress the same
+    pending dialog from re-firing. It lifts as soon as the target has
+    written any new transcript bytes past the watermark -- which only
+    happens after the original dialog resolves and the agent moves on.
+    """
     is_waiting_now = runtime.location.permissions_waiting_file.exists()
     if is_waiting_now and not runtime.permissions_previously_waiting:
+        if _current_transcript_size(runtime) <= runtime.permission_gate_until_transcript_past:
+            # Same dialog (or one fired before the agent has moved past
+            # the prior watermark). Track the new "is_waiting" state but
+            # don't surface yet -- caller already relayed this one.
+            runtime.permissions_previously_waiting = True
+            return False
         runtime.permissions_previously_waiting = True
         return True
     runtime.permissions_previously_waiting = is_waiting_now
@@ -466,8 +498,19 @@ def resolve_destroyed_result(target_name: str, location: AgentLocation) -> str:
     return f"{_DESTROYED_PREFIX}{last_text}"
 
 
-def wait_for_subagent(target_name: str) -> str:
-    """Block until the target mngr agent reaches end_turn, requests permission, or is destroyed."""
+def wait_for_subagent(target_name: str, transcript_watermark: int = 0) -> str:
+    """Block until the target mngr agent reaches end_turn, requests permission, or is destroyed.
+
+    ``transcript_watermark`` (default 0) suppresses re-firing of a
+    permission dialog already surfaced to the human. The caller sets this
+    to the transcript byte-size at the time of the previous
+    PERMISSION_REQUIRED return; subsequent flag transitions are ignored
+    until the target's transcript file has grown past that mark.
+
+    On PERMISSION_REQUIRED return, the result string includes
+    ``AT_BYTES:<n>`` so the caller can pass the same watermark on
+    re-entry without otherwise tracking state.
+    """
     deadline = time.monotonic() + _INITIAL_TARGET_WAIT_SECONDS
     location = _wait_for_target(target_name, deadline)
 
@@ -475,6 +518,7 @@ def wait_for_subagent(target_name: str) -> str:
         target_name=target_name,
         location=location,
         permissions_previously_waiting=location.permissions_waiting_file.exists(),
+        permission_gate_until_transcript_past=transcript_watermark,
     )
     max_chars = _get_result_max_chars()
 
@@ -494,7 +538,8 @@ def wait_for_subagent(target_name: str) -> str:
             _process_new_events(runtime, new_events, now)
 
         if _check_permissions_newly_waiting(runtime):
-            return f"PERMISSION_REQUIRED:{target_name}"
+            current_bytes = _current_transcript_size(runtime)
+            return f"PERMISSION_REQUIRED:{target_name} AT_BYTES:{current_bytes}"
 
         if (
             runtime.pending_end_turn_text is not None
@@ -514,13 +559,30 @@ def wait_for_subagent(target_name: str) -> str:
         time.sleep(_POLL_INTERVAL_SECONDS)
 
 
+_USAGE: Final[str] = (
+    "Usage: python -m imbue.mngr_subagent_proxy.subagent_wait "
+    "<target_name> [--require-transcript-advance-past <bytes>]"
+)
+
+
+def _parse_args(argv: list[str]) -> tuple[str, int]:
+    """Parse the script's CLI args. Returns (target_name, transcript_watermark)."""
+    if len(argv) == 2:
+        return argv[1], 0
+    if len(argv) == 4 and argv[2] == "--require-transcript-advance-past":
+        try:
+            return argv[1], int(argv[3])
+        except ValueError:
+            logger.error("Invalid byte count for --require-transcript-advance-past: {!r}", argv[3])
+            sys.exit(2)
+    logger.error(_USAGE)
+    sys.exit(2)
+
+
 def main() -> None:
-    if len(sys.argv) != 2:
-        logger.error("Usage: python -m imbue.mngr_subagent_proxy.subagent_wait <target_name>")
-        sys.exit(2)
-    target_name = sys.argv[1]
+    target_name, watermark = _parse_args(sys.argv)
     try:
-        result = wait_for_subagent(target_name)
+        result = wait_for_subagent(target_name, transcript_watermark=watermark)
     except TargetNotFoundError as e:
         logger.error("Target not found: {}", e)
         sys.exit(2)

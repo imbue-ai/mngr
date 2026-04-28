@@ -12,6 +12,8 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr_subagent_proxy import subagent_wait
 from imbue.mngr_subagent_proxy.subagent_wait import AgentLocation
 from imbue.mngr_subagent_proxy.subagent_wait import TailState
+from imbue.mngr_subagent_proxy.subagent_wait import _WaitRuntime
+from imbue.mngr_subagent_proxy.subagent_wait import _check_permissions_newly_waiting
 from imbue.mngr_subagent_proxy.subagent_wait import extract_assistant_text
 from imbue.mngr_subagent_proxy.subagent_wait import is_end_turn_event
 from imbue.mngr_subagent_proxy.subagent_wait import is_real_user_event
@@ -242,6 +244,58 @@ def test_destroyed_fallback_from_preserved_sessions(tmp_path: Path) -> None:
         resolve_destroyed_result(target_name, missing_location)
         == "[ERROR] mngr subagent destroyed before completion: "
     )
+
+
+def test_permission_gate_suppresses_until_transcript_advances(tmp_path: Path) -> None:
+    """The transcript watermark suppresses re-firing of PERMISSION_REQUIRED
+    on the SAME pending dialog. Once the target's transcript has grown
+    past the watermark, a subsequent flag transition is treated as a
+    genuinely new event and surfaced again.
+
+    Directly exercises the helper to avoid spinning up the full poll
+    loop in a unit test.
+    """
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    state_dir = host_dir / "agents" / "agent-test"
+    state_dir.mkdir(parents=True)
+    location = AgentLocation(host_dir=host_dir, agent_id="agent-test", work_dir=work_dir)
+
+    transcript_path = location.claude_projects_dir
+    transcript_path.mkdir(parents=True)
+    transcript_file = transcript_path / "session.jsonl"
+    transcript_file.write_bytes(b"x" * 100)
+
+    runtime = _WaitRuntime(
+        target_name="target",
+        location=location,
+        permissions_previously_waiting=False,
+        permission_gate_until_transcript_past=100,
+    )
+    runtime.tail_state.path = transcript_file
+
+    # Flag goes from absent to present, but transcript size (100) is not
+    # past the watermark (100) -- gate stays closed.
+    location.permissions_waiting_file.touch()
+    assert _check_permissions_newly_waiting(runtime) is False
+    assert runtime.permissions_previously_waiting is True
+
+    # Clear the flag, then re-set it -- still not past the watermark, so
+    # still suppressed even though there's a fresh transition.
+    location.permissions_waiting_file.unlink()
+    runtime.permissions_previously_waiting = False
+    location.permissions_waiting_file.touch()
+    assert _check_permissions_newly_waiting(runtime) is False
+
+    # Transcript advances past the watermark; clear-then-set is now a
+    # genuinely new permission event.
+    transcript_file.write_bytes(b"x" * 200)
+    location.permissions_waiting_file.unlink()
+    runtime.permissions_previously_waiting = False
+    location.permissions_waiting_file.touch()
+    assert _check_permissions_newly_waiting(runtime) is True
 
 
 def test_target_presence_recheck_is_rate_limited() -> None:
