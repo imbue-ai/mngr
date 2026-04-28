@@ -4,6 +4,7 @@ import importlib.resources
 import json
 import os
 import shlex
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -169,18 +170,18 @@ def _wrap_with_proxy_child_guard(command: str) -> str:
     return _PROXY_CHILD_GUARD_PREFIX + command
 
 
-def _guard_user_stop_hooks_against_proxy_children(settings: dict[str, Any]) -> bool:
-    """Wrap each non-mngr Stop/SubagentStop command with the proxy-child guard.
+def _iter_user_stop_hook_commands(
+    hooks: dict[str, Any],
+) -> Iterator[tuple[str, dict[str, Any], str]]:
+    """Yield (event_name, cmd_entry, command) for each well-formed
+    Stop/SubagentStop command in a hooks dict.
 
-    Returns True if any command was modified. Idempotent: re-running on
-    already-wrapped commands is a no-op. Mngr-managed commands (recognized
-    via _MNGR_MANAGED_HOOK_MARKERS) are left alone -- they already key off
-    MAIN_CLAUDE_SESSION_ID via _SESSION_GUARD and serve different purposes.
+    Skips entries whose shape doesn't match Claude Code's hooks schema
+    (non-list ``entries``, non-dict ``entry``/``cmd_entry``, missing or
+    non-str ``command``). Used by both the guard pass (which mutates
+    ``cmd_entry["command"]``) and the project-settings checker (which
+    inspects commands for offenders).
     """
-    hooks = settings.get("hooks")
-    if not isinstance(hooks, dict):
-        return False
-    changed = False
     for event_name in ("Stop", "SubagentStop"):
         entries = hooks.get(event_name)
         if not isinstance(entries, list):
@@ -197,14 +198,30 @@ def _guard_user_stop_hooks_against_proxy_children(settings: dict[str, Any]) -> b
                 command = cmd_entry.get("command")
                 if not isinstance(command, str) or not command:
                     continue
-                # Don't double-guard mngr-managed hooks; they already
-                # handle scope appropriately via _SESSION_GUARD.
-                if any(marker in command for marker in _MNGR_MANAGED_HOOK_MARKERS):
-                    continue
-                wrapped = _wrap_with_proxy_child_guard(command)
-                if wrapped != command:
-                    cmd_entry["command"] = wrapped
-                    changed = True
+                yield event_name, cmd_entry, command
+
+
+def _guard_user_stop_hooks_against_proxy_children(settings: dict[str, Any]) -> bool:
+    """Wrap each non-mngr Stop/SubagentStop command with the proxy-child guard.
+
+    Returns True if any command was modified. Idempotent: re-running on
+    already-wrapped commands is a no-op. Mngr-managed commands (recognized
+    via _MNGR_MANAGED_HOOK_MARKERS) are left alone -- they already key off
+    MAIN_CLAUDE_SESSION_ID via _SESSION_GUARD and serve different purposes.
+    """
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    changed = False
+    for _event_name, cmd_entry, command in _iter_user_stop_hook_commands(hooks):
+        # Don't double-guard mngr-managed hooks; they already handle scope
+        # appropriately via _SESSION_GUARD.
+        if any(marker in command for marker in _MNGR_MANAGED_HOOK_MARKERS):
+            continue
+        wrapped = _wrap_with_proxy_child_guard(command)
+        if wrapped != command:
+            cmd_entry["command"] = wrapped
+            changed = True
     return changed
 
 
@@ -443,27 +460,12 @@ def _check_project_settings_stop_hooks_guarded(host: OnlineHostInterface, work_d
     if not isinstance(hooks, dict):
         return
     offenders: list[str] = []
-    for event_name in ("Stop", "SubagentStop"):
-        entries = hooks.get(event_name)
-        if not isinstance(entries, list):
+    for event_name, _cmd_entry, command in _iter_user_stop_hook_commands(hooks):
+        if any(marker in command for marker in _MNGR_MANAGED_HOOK_MARKERS):
             continue
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            inner = entry.get("hooks")
-            if not isinstance(inner, list):
-                continue
-            for cmd_entry in inner:
-                if not isinstance(cmd_entry, dict):
-                    continue
-                command = cmd_entry.get("command")
-                if not isinstance(command, str) or not command:
-                    continue
-                if any(marker in command for marker in _MNGR_MANAGED_HOOK_MARKERS):
-                    continue
-                if _PROXY_CHILD_GUARD_PREFIX in command:
-                    continue
-                offenders.append(f"{event_name}: {command[:80]}")
+        if _PROXY_CHILD_GUARD_PREFIX in command:
+            continue
+        offenders.append(f"{event_name}: {command[:80]}")
     if not offenders:
         return
     listing = "\n  - ".join(offenders)
