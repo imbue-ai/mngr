@@ -102,6 +102,14 @@ def fail_on_unexpected_loguru_warnings(
                 "argument; got positional argument(s). Use "
                 "@pytest.mark.allow_warnings(match=r'...') instead."
             )
+        unknown_kwargs = sorted(set(marker.kwargs) - {"match"})
+        if unknown_kwargs:
+            raise TypeError(
+                f"@pytest.mark.allow_warnings got unexpected keyword "
+                f"argument(s): {unknown_kwargs}. The only supported keyword "
+                "argument is 'match'. Use "
+                "@pytest.mark.allow_warnings(match=r'...') instead."
+            )
         match_arg = marker.kwargs.get("match")
         pattern = re.compile(match_arg) if match_arg is not None else None
         WARNINGS_ALLOWED_STACK.append(pattern)
