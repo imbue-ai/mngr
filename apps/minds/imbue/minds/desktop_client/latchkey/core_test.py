@@ -18,7 +18,7 @@ from imbue.minds.desktop_client.latchkey.core import Latchkey
 from imbue.minds.desktop_client.latchkey.core import LatchkeyBinaryNotFoundError
 from imbue.minds.desktop_client.latchkey.core import LatchkeyDestructionHandler
 from imbue.minds.desktop_client.latchkey.core import LatchkeyDiscoveryHandler
-from imbue.minds.desktop_client.latchkey.core import LatchkeyNotStartedError
+from imbue.minds.desktop_client.latchkey.core import LatchkeyNotInitializedError
 from imbue.minds.desktop_client.latchkey.core import _cmdline_looks_like_latchkey_gateway
 from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
 from imbue.minds.desktop_client.latchkey.store import ensure_browser_log_path
@@ -43,23 +43,15 @@ def test_cmdline_matcher_accepts_plausible_latchkey_gateway() -> None:
 
 def test_ensure_gateway_started_requires_start(tmp_path: Path) -> None:
     manager = Latchkey()
-    with pytest.raises(LatchkeyNotStartedError):
+    with pytest.raises(LatchkeyNotInitializedError):
         manager.ensure_gateway_started(AgentId())
-
-
-def test_stop_is_idempotent_before_start() -> None:
-    manager = Latchkey()
-    manager.stop()
 
 
 def test_ensure_gateway_started_raises_when_binary_missing(tmp_path: Path) -> None:
     manager = Latchkey(latchkey_binary=str(tmp_path / "definitely-does-not-exist"))
-    manager.start(data_dir=tmp_path)
-    try:
-        with pytest.raises(LatchkeyBinaryNotFoundError):
-            manager.ensure_gateway_started(AgentId())
-    finally:
-        manager.stop()
+    manager.initialize(data_dir=tmp_path)
+    with pytest.raises(LatchkeyBinaryNotFoundError):
+        manager.ensure_gateway_started(AgentId())
 
 
 def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
@@ -125,7 +117,7 @@ def _wait_for_process_exit(pid: int, timeout: float = 5.0) -> bool:
 def test_ensure_gateway_started_spawns_subprocess_persists_record_and_allocates_port(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.start(data_dir=tmp_path)
+    manager.initialize(data_dir=tmp_path)
     try:
         agent_id = AgentId()
         info = manager.ensure_gateway_started(agent_id)
@@ -148,46 +140,19 @@ def test_ensure_gateway_started_spawns_subprocess_persists_record_and_allocates_
         assert len(manager.list_gateways()) == 1
     finally:
         manager.stop_gateway_for_agent(agent_id)
-        manager.stop()
-
-
-def test_manager_stop_does_not_kill_running_gateway(tmp_path: Path) -> None:
-    """After ``stop()`` the gateway process must still be running -- it must survive
-    the desktop client exiting so that in-flight container/VM agents keep working.
-    """
-    fake_binary = _make_fake_latchkey_binary(tmp_path)
-    manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.start(data_dir=tmp_path)
-    try:
-        agent_id = AgentId()
-        info = manager.ensure_gateway_started(agent_id)
-        assert _wait_for_listening(info.host, info.port)
-
-        manager.stop()
-
-        # In-memory tracking is gone, but the record and process live on.
-        assert manager.list_gateways() == ()
-        assert load_gateway_info(tmp_path, agent_id) is not None
-        assert psutil.pid_exists(info.pid)
-        assert _wait_for_listening(info.host, info.port)
-    finally:
-        # Explicit teardown: we intentionally leaked the process above to prove
-        # the survive-parent-exit behaviour, so clean it up directly.
-        try:
-            os.kill(info.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
 
 
 def test_restart_adopts_live_gateway_and_discards_stale_info(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
-    # First "session": start a gateway for a live agent, then stop the manager.
+    # First "session": start a gateway for a live agent. We don't tear down
+    # ``manager_a`` -- in production the desktop client just exits and the
+    # detached gateway keeps running. The second-session manager below must
+    # adopt the surviving subprocess from the on-disk record alone.
     manager_a = Latchkey(latchkey_binary=str(fake_binary))
-    manager_a.start(data_dir=tmp_path)
+    manager_a.initialize(data_dir=tmp_path)
     live_agent = AgentId()
     info = manager_a.ensure_gateway_started(live_agent)
     assert _wait_for_listening(info.host, info.port)
-    manager_a.stop()
 
     # Inject a stale record (pid points at an unused PID range to simulate a
     # gateway that exited between sessions).
@@ -204,7 +169,7 @@ def test_restart_adopts_live_gateway_and_discards_stale_info(tmp_path: Path) -> 
     try:
         # Second "session": manager should adopt the live record and discard the stale one.
         manager_b = Latchkey(latchkey_binary=str(fake_binary))
-        manager_b.start(data_dir=tmp_path)
+        manager_b.initialize(data_dir=tmp_path)
         try:
             adopted = manager_b.get_gateway_info(live_agent)
             assert adopted is not None
@@ -220,7 +185,6 @@ def test_restart_adopts_live_gateway_and_discards_stale_info(tmp_path: Path) -> 
             assert ensured.pid == info.pid
         finally:
             manager_b.stop_gateway_for_agent(live_agent)
-            manager_b.stop()
     finally:
         if psutil.pid_exists(info.pid):
             try:
@@ -232,7 +196,7 @@ def test_restart_adopts_live_gateway_and_discards_stale_info(tmp_path: Path) -> 
 def test_reconcile_with_known_agents_terminates_orphans(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.start(data_dir=tmp_path)
+    manager.initialize(data_dir=tmp_path)
     try:
         live_agent = AgentId()
         orphan_agent = AgentId()
@@ -253,54 +217,51 @@ def test_reconcile_with_known_agents_terminates_orphans(tmp_path: Path) -> None:
         assert psutil.pid_exists(live_info.pid)
     finally:
         manager.stop_gateway_for_agent(live_agent)
-        manager.stop()
 
 
 def test_stop_gateway_for_agent_terminates_subprocess_and_removes_record(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.start(data_dir=tmp_path)
-    try:
-        agent_id = AgentId()
-        info = manager.ensure_gateway_started(agent_id)
-        assert _wait_for_listening(info.host, info.port)
+    manager.initialize(data_dir=tmp_path)
+    agent_id = AgentId()
+    info = manager.ensure_gateway_started(agent_id)
+    assert _wait_for_listening(info.host, info.port)
 
-        manager.stop_gateway_for_agent(agent_id)
-        assert manager.get_gateway_info(agent_id) is None
-        assert load_gateway_info(tmp_path, agent_id) is None
-        assert _wait_for_process_exit(info.pid)
-    finally:
-        manager.stop()
+    manager.stop_gateway_for_agent(agent_id)
+    assert manager.get_gateway_info(agent_id) is None
+    assert load_gateway_info(tmp_path, agent_id) is None
+    assert _wait_for_process_exit(info.pid)
 
 
-def test_stop_gateway_for_agent_deletes_permissions_file(tmp_path: Path) -> None:
+def test_stop_gateway_for_agent_preserves_permissions_file(tmp_path: Path) -> None:
+    """Granted permissions must outlive the agent's gateway lifetime.
+
+    minds does not delete other per-agent state on destruction either, so
+    keeping permissions.json around is consistent and means previously
+    granted permissions survive desktop-client restarts and reboots.
+    """
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.start(data_dir=tmp_path)
-    try:
-        agent_id = AgentId()
-        info = manager.ensure_gateway_started(agent_id)
-        assert _wait_for_listening(info.host, info.port)
+    manager.initialize(data_dir=tmp_path)
+    agent_id = AgentId()
+    info = manager.ensure_gateway_started(agent_id)
+    assert _wait_for_listening(info.host, info.port)
 
-        permissions_path = tmp_path / "agents" / str(agent_id) / "permissions.json"
-        permissions_path.parent.mkdir(parents=True, exist_ok=True)
-        permissions_path.write_text('{"rules": []}')
+    permissions_path = tmp_path / "agents" / str(agent_id) / "permissions.json"
+    permissions_path.parent.mkdir(parents=True, exist_ok=True)
+    permissions_path.write_text('{"rules": []}')
 
-        manager.stop_gateway_for_agent(agent_id)
+    manager.stop_gateway_for_agent(agent_id)
 
-        assert not permissions_path.exists()
-        assert _wait_for_process_exit(info.pid)
-    finally:
-        manager.stop()
+    assert permissions_path.exists()
+    assert permissions_path.read_text() == '{"rules": []}'
+    assert _wait_for_process_exit(info.pid)
 
 
 def test_stop_gateway_for_agent_is_no_op_when_not_running(tmp_path: Path) -> None:
     manager = Latchkey()
-    manager.start(data_dir=tmp_path)
-    try:
-        manager.stop_gateway_for_agent(AgentId())
-    finally:
-        manager.stop()
+    manager.initialize(data_dir=tmp_path)
+    manager.stop_gateway_for_agent(AgentId())
 
 
 def test_discovery_handler_spawns_for_every_provider(tmp_path: Path) -> None:
@@ -308,7 +269,7 @@ def test_discovery_handler_spawns_for_every_provider(tmp_path: Path) -> None:
     on remote hosts reach the desktop via a reverse SSH tunnel."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.start(data_dir=tmp_path)
+    manager.initialize(data_dir=tmp_path)
     tunnel_manager = SSHTunnelManager()
     try:
         handler = LatchkeyDiscoveryHandler(latchkey=manager, tunnel_manager=tunnel_manager)
@@ -322,7 +283,6 @@ def test_discovery_handler_spawns_for_every_provider(tmp_path: Path) -> None:
     finally:
         for agent_id in agent_by_provider.values():
             manager.stop_gateway_for_agent(agent_id)
-        manager.stop()
         tunnel_manager.cleanup()
 
 
@@ -346,7 +306,7 @@ class _RecordingTunnelManager(SSHTunnelManager):
 def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.start(data_dir=tmp_path)
+    manager.initialize(data_dir=tmp_path)
     tunnel_manager = _RecordingTunnelManager()
     try:
         handler = LatchkeyDiscoveryHandler(latchkey=manager, tunnel_manager=tunnel_manager)
@@ -362,14 +322,13 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: 
         assert tunnel_manager._calls == [(ssh_info, info.port, AGENT_SIDE_LATCHKEY_PORT)]
     finally:
         manager.stop_gateway_for_agent(agent_id)
-        manager.stop()
 
 
 def test_discovery_handler_skips_reverse_tunnel_for_dev_agents(tmp_path: Path) -> None:
     """DEV agents (ssh_info is None) run on the bare host and need no tunnel."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.start(data_dir=tmp_path)
+    manager.initialize(data_dir=tmp_path)
     tunnel_manager = _RecordingTunnelManager()
     try:
         handler = LatchkeyDiscoveryHandler(latchkey=manager, tunnel_manager=tunnel_manager)
@@ -380,21 +339,17 @@ def test_discovery_handler_skips_reverse_tunnel_for_dev_agents(tmp_path: Path) -
         assert tunnel_manager._calls == []
     finally:
         manager.stop_gateway_for_agent(agent_id)
-        manager.stop()
 
 
 def test_discovery_handler_swallows_gateway_errors(tmp_path: Path) -> None:
     """A missing binary must not crash the discovery callback -- just log a warning."""
     manager = Latchkey(latchkey_binary=str(tmp_path / "missing"))
-    manager.start(data_dir=tmp_path)
+    manager.initialize(data_dir=tmp_path)
     tunnel_manager = _RecordingTunnelManager()
-    try:
-        handler = LatchkeyDiscoveryHandler(latchkey=manager, tunnel_manager=tunnel_manager)
-        handler(AgentId(), None, "local")
-        assert manager.list_gateways() == ()
-        assert tunnel_manager._calls == []
-    finally:
-        manager.stop()
+    handler = LatchkeyDiscoveryHandler(latchkey=manager, tunnel_manager=tunnel_manager)
+    handler(AgentId(), None, "local")
+    assert manager.list_gateways() == ()
+    assert tunnel_manager._calls == []
 
 
 def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, counter_path: Path) -> Path:
@@ -443,7 +398,7 @@ def test_ensure_browser_runs_once_on_first_spawn(tmp_path: Path, monkeypatch: py
     monkeypatch.setenv("FAKE_LATCHKEY_COUNTER", str(counter_path))
     fake_binary = _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path, counter_path)
     manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.start(data_dir=tmp_path)
+    manager.initialize(data_dir=tmp_path)
     agent_ids = [AgentId() for _ in range(3)]
     try:
         for agent_id in agent_ids:
@@ -456,41 +411,34 @@ def test_ensure_browser_runs_once_on_first_spawn(tmp_path: Path, monkeypatch: py
     finally:
         for agent_id in agent_ids:
             manager.stop_gateway_for_agent(agent_id)
-        manager.stop()
 
 
 def test_ensure_browser_not_called_when_binary_missing(tmp_path: Path) -> None:
     """If the binary is missing, the manager must raise without trying to
     spawn ``ensure-browser`` (there's nothing to run)."""
     manager = Latchkey(latchkey_binary=str(tmp_path / "missing"))
-    manager.start(data_dir=tmp_path)
-    try:
-        with pytest.raises(LatchkeyBinaryNotFoundError):
-            manager.ensure_gateway_started(AgentId())
-        assert not ensure_browser_log_path(tmp_path).exists()
-    finally:
-        manager.stop()
+    manager.initialize(data_dir=tmp_path)
+    with pytest.raises(LatchkeyBinaryNotFoundError):
+        manager.ensure_gateway_started(AgentId())
+    assert not ensure_browser_log_path(tmp_path).exists()
 
 
 def test_destruction_handler_stops_gateway(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.start(data_dir=tmp_path)
+    manager.initialize(data_dir=tmp_path)
     tunnel_manager = _RecordingTunnelManager()
-    try:
-        discovery = LatchkeyDiscoveryHandler(latchkey=manager, tunnel_manager=tunnel_manager)
-        destruction = LatchkeyDestructionHandler(latchkey=manager)
-        agent_id = AgentId()
-        discovery(agent_id, None, "docker")
-        info = manager.get_gateway_info(agent_id)
-        assert info is not None
+    discovery = LatchkeyDiscoveryHandler(latchkey=manager, tunnel_manager=tunnel_manager)
+    destruction = LatchkeyDestructionHandler(latchkey=manager)
+    agent_id = AgentId()
+    discovery(agent_id, None, "docker")
+    info = manager.get_gateway_info(agent_id)
+    assert info is not None
 
-        destruction(agent_id)
-        assert manager.get_gateway_info(agent_id) is None
-        assert load_gateway_info(tmp_path, agent_id) is None
-        assert _wait_for_process_exit(info.pid)
-    finally:
-        manager.stop()
+    destruction(agent_id)
+    assert manager.get_gateway_info(agent_id) is None
+    assert load_gateway_info(tmp_path, agent_id) is None
+    assert _wait_for_process_exit(info.pid)
 
 
 # -- services_info / auth_browser --

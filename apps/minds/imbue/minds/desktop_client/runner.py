@@ -140,7 +140,7 @@ def start_desktop_client(
     stream_manager = MngrStreamManager(resolver=backend_resolver)
     tunnel_manager = SSHTunnelManager()
     latchkey = _build_latchkey(data_directory=data_directory)
-    latchkey.start(data_dir=data_directory)
+    latchkey.initialize(data_dir=data_directory)
 
     minds_config = MindsConfig(data_dir=data_directory)
     latchkey_services_catalog = _try_load_latchkey_services_catalog()

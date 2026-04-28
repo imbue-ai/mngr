@@ -492,27 +492,24 @@ def test_agent_creator_cleans_up_pre_spawned_latchkey_gateway_on_failure(tmp_pat
     fake_binary.chmod(0o755)
 
     latchkey = Latchkey(latchkey_binary=str(fake_binary))
-    latchkey.start(data_dir=tmp_path / "gateway-data")
-    try:
-        creator = AgentCreator(
-            paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-            latchkey=latchkey,
-        )
-        # "Local path" that does not exist -- mngr create will not even get
-        # the chance to fail; _create_agent_background aborts with MngrCommandError.
-        agent_id = creator.start_creation("/definitely/not/here", launch_mode=LaunchMode.DEV)
+    latchkey.initialize(data_dir=tmp_path / "gateway-data")
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        latchkey=latchkey,
+    )
+    # "Local path" that does not exist -- mngr create will not even get
+    # the chance to fail; _create_agent_background aborts with MngrCommandError.
+    agent_id = creator.start_creation("/definitely/not/here", launch_mode=LaunchMode.DEV)
 
-        for _ in range(100):
-            info = creator.get_creation_info(agent_id)
-            if info is not None and info.status == AgentCreationStatus.FAILED:
-                break
-            threading.Event().wait(0.05)
+    for _ in range(100):
         info = creator.get_creation_info(agent_id)
-        assert info is not None
-        assert info.status == AgentCreationStatus.FAILED
-        creator.wait_for_all()
+        if info is not None and info.status == AgentCreationStatus.FAILED:
+            break
+        threading.Event().wait(0.05)
+    info = creator.get_creation_info(agent_id)
+    assert info is not None
+    assert info.status == AgentCreationStatus.FAILED
+    creator.wait_for_all()
 
-        # No lingering gateway or record for this agent.
-        assert latchkey.get_gateway_info(agent_id) is None
-    finally:
-        latchkey.stop()
+    # No lingering gateway or record for this agent.
+    assert latchkey.get_gateway_info(agent_id) is None

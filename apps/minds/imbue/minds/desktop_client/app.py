@@ -246,11 +246,9 @@ async def _managed_lifespan(
             logger.info("Stopping stream manager subprocesses...")
             stream_manager.stop()
             logger.info("Stream manager stopped.")
-        latchkey: Latchkey | None = inner_app.state.latchkey
-        if latchkey is not None:
-            logger.info("Stopping Latchkey...")
-            latchkey.stop()
-            logger.info("Latchkey stopped.")
+        # Latchkey has no shutdown step: spawned ``latchkey gateway``
+        # subprocesses are detached and intentionally outlive the desktop
+        # client so in-flight container/VM agents keep working.
         tunnel_manager: SSHTunnelManager | None = inner_app.state.tunnel_manager
         if tunnel_manager is not None:
             tunnel_manager.cleanup()

@@ -12,7 +12,6 @@ from imbue.minds.desktop_client.latchkey.store import LatchkeyStoreError
 from imbue.minds.desktop_client.latchkey.store import MalformedPermissionsConfigError
 from imbue.minds.desktop_client.latchkey.store import PermissionsConfig
 from imbue.minds.desktop_client.latchkey.store import delete_gateway_info
-from imbue.minds.desktop_client.latchkey.store import delete_permissions_for_agent
 from imbue.minds.desktop_client.latchkey.store import gateway_log_path
 from imbue.minds.desktop_client.latchkey.store import granted_permissions_for_service
 from imbue.minds.desktop_client.latchkey.store import list_gateway_infos
@@ -276,21 +275,6 @@ def test_permissions_path_for_agent_uses_agents_subdir(tmp_path: Path) -> None:
     agent_id = AgentId()
     path = permissions_path_for_agent(tmp_path, agent_id)
     assert path == tmp_path / "agents" / str(agent_id) / "permissions.json"
-
-
-def test_delete_permissions_for_agent_is_noop_when_absent(tmp_path: Path) -> None:
-    delete_permissions_for_agent(tmp_path, AgentId())
-
-
-def test_delete_permissions_for_agent_removes_existing_file(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    path = permissions_path_for_agent(tmp_path, agent_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{}")
-
-    delete_permissions_for_agent(tmp_path, agent_id)
-
-    assert not path.exists()
 
 
 def test_save_then_load_round_trip_preserves_rule_order(tmp_path: Path) -> None:

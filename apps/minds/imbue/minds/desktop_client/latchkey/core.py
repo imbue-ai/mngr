@@ -47,7 +47,6 @@ from imbue.minds.desktop_client.latchkey._spawn import spawn_detached_latchkey_e
 from imbue.minds.desktop_client.latchkey._spawn import spawn_detached_latchkey_gateway
 from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
 from imbue.minds.desktop_client.latchkey.store import delete_gateway_info
-from imbue.minds.desktop_client.latchkey.store import delete_permissions_for_agent
 from imbue.minds.desktop_client.latchkey.store import ensure_browser_log_path
 from imbue.minds.desktop_client.latchkey.store import gateway_log_path
 from imbue.minds.desktop_client.latchkey.store import list_gateway_infos
@@ -66,10 +65,9 @@ _LIVENESS_CONNECT_TIMEOUT_SECONDS: Final[float] = 1.0
 
 _TERMINATE_GRACE_SECONDS: Final[float] = 5.0
 
-# Generous timeouts: the browser auth flow can wait on a real human to
-# log in; services-info is normally instant but can stall on slow keychains.
+# Services-info is normally instant but can stall on slow keychains. The
+# auth-browser flow waits on a real human and is intentionally untimed.
 _SERVICES_INFO_TIMEOUT_SECONDS: Final[float] = 15.0
-_AUTH_BROWSER_TIMEOUT_SECONDS: Final[float] = 600.0
 
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
@@ -88,8 +86,8 @@ class LatchkeyBinaryNotFoundError(LatchkeyError, FileNotFoundError):
     """Raised when the ``latchkey`` binary is not available on PATH."""
 
 
-class LatchkeyNotStartedError(LatchkeyError, RuntimeError):
-    """Raised when ``Latchkey`` is used before ``start()`` has been called."""
+class LatchkeyNotInitializedError(LatchkeyError, RuntimeError):
+    """Raised when ``Latchkey`` is used before ``initialize()`` has been called."""
 
 
 class CredentialStatus(UpperCaseStrEnum):
@@ -264,12 +262,12 @@ class Latchkey(MutableModel):
     _data_dir: Path | None = PrivateAttr(default=None)
     _infos: dict[str, LatchkeyGatewayInfo] = PrivateAttr(default_factory=dict)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _is_started: bool = PrivateAttr(default=False)
+    _is_initialized: bool = PrivateAttr(default=False)
     _has_ensured_browser: bool = PrivateAttr(default=False)
 
     # -- Gateway lifecycle ---------------------------------------------------
 
-    def start(self, data_dir: Path) -> None:
+    def initialize(self, data_dir: Path) -> None:
         """Load persisted gateway infos from ``data_dir``, adopting still-alive ones.
 
         Dead records are removed from disk. Gateways that are still running
@@ -278,8 +276,8 @@ class Latchkey(MutableModel):
 
         Liveness probes include a TCP connect per info (up to
         ``_LIVENESS_CONNECT_TIMEOUT_SECONDS`` each), which is why they run
-        outside the lock. ``start()`` is only expected to be called once
-        before any concurrent use, so there is no real contention here.
+        outside the lock. ``initialize()`` is only expected to be called
+        once before any concurrent use, so there is no real contention here.
         """
         adopted: list[LatchkeyGatewayInfo] = []
         stale: list[LatchkeyGatewayInfo] = []
@@ -290,7 +288,7 @@ class Latchkey(MutableModel):
                 stale.append(info)
 
         with self._lock:
-            if self._is_started:
+            if self._is_initialized:
                 return
             self._data_dir = data_dir
             self._infos.clear()
@@ -310,18 +308,7 @@ class Latchkey(MutableModel):
                     info.pid,
                 )
                 delete_gateway_info(data_dir, info.agent_id)
-            self._is_started = True
-
-    def stop(self) -> None:
-        """Release in-memory state without terminating running gateways.
-
-        Gateways must survive desktop-client exit. This method only drops
-        the in-memory tracking; the persisted records and the subprocesses
-        themselves are left intact for the next desktop-client launch.
-        """
-        with self._lock:
-            self._infos.clear()
-            self._is_started = False
+            self._is_initialized = True
 
     def ensure_gateway_started(self, agent_id: AgentId) -> LatchkeyGatewayInfo:
         """Start a gateway for ``agent_id`` if one is not already running.
@@ -336,7 +323,7 @@ class Latchkey(MutableModel):
         """
         aid_str = str(agent_id)
         with self._lock:
-            data_dir = self._require_started_locked()
+            data_dir = self._require_initialized_locked()
             existing = self._infos.get(aid_str)
         if existing is not None and _is_info_alive(existing):
             return existing
@@ -350,12 +337,15 @@ class Latchkey(MutableModel):
     def stop_gateway_for_agent(self, agent_id: AgentId) -> None:
         """Terminate the gateway for ``agent_id`` and delete its records.
 
-        The in-memory entry and the on-disk record are removed atomically
-        under the lock so no other caller can observe a half-torn-down
-        state. ``_terminate_pid`` is deliberately called outside the lock
-        because it can wait up to ``_TERMINATE_GRACE_SECONDS`` for the child
-        to exit. The per-agent ``permissions.json`` is also removed so a
-        future agent reusing the same id starts with a clean slate.
+        The in-memory entry and the on-disk gateway record are removed
+        atomically under the lock so no other caller can observe a
+        half-torn-down state. ``_terminate_pid`` is deliberately called
+        outside the lock because it can wait up to
+        ``_TERMINATE_GRACE_SECONDS`` for the child to exit. The per-agent
+        ``permissions.json`` is intentionally *not* deleted: minds does not
+        currently delete other per-agent state on destruction either, and
+        keeping the file around means previously-granted permissions
+        survive desktop-client restarts and reboots.
         """
         aid_str = str(agent_id)
         with self._lock:
@@ -366,8 +356,6 @@ class Latchkey(MutableModel):
         if info is not None:
             logger.info("Stopping Latchkey gateway for agent {} (pid={})", agent_id, info.pid)
             _terminate_pid(info.pid)
-        if data_dir is not None:
-            delete_permissions_for_agent(data_dir, agent_id)
 
     def reconcile_with_known_agents(self, known_agent_ids: frozenset[AgentId]) -> None:
         """Terminate gateways whose agent is no longer in ``known_agent_ids``.
@@ -377,7 +365,7 @@ class Latchkey(MutableModel):
         agents destroyed while the desktop client was not running.
         """
         with self._lock:
-            if not self._is_started:
+            if not self._is_initialized:
                 return
             orphaned = [aid_str for aid_str in self._infos if AgentId(aid_str) not in known_agent_ids]
         for aid_str in orphaned:
@@ -464,9 +452,11 @@ class Latchkey(MutableModel):
         env = _build_env_with_latchkey_directory(self.latchkey_directory)
         cg = ConcurrencyGroup(name="latchkey-auth-browser")
         with cg:
+            # No timeout: this command waits on a real human completing
+            # the browser sign-in flow, which can take arbitrarily long.
             result = cg.run_process_to_completion(
                 command=[self.latchkey_binary, "auth", "browser", service_name],
-                timeout=_AUTH_BROWSER_TIMEOUT_SECONDS,
+                timeout=None,
                 is_checked_after=False,
                 env=env,
             )
@@ -484,10 +474,10 @@ class Latchkey(MutableModel):
 
     # -- Internals -----------------------------------------------------------
 
-    def _require_started_locked(self) -> Path:
-        if not self._is_started or self._data_dir is None:
-            raise LatchkeyNotStartedError(
-                "Latchkey.start(data_dir=...) must be called before use",
+    def _require_initialized_locked(self) -> Path:
+        if not self._is_initialized or self._data_dir is None:
+            raise LatchkeyNotInitializedError(
+                "Latchkey.initialize(data_dir=...) must be called before use",
             )
         return self._data_dir
 

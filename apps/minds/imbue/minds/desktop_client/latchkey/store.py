@@ -311,15 +311,3 @@ def set_permissions_for_service(
     return config.model_copy_update(
         to_update(config.field_ref().rules, tuple(new_rules)),
     )
-
-
-def delete_permissions_for_agent(data_dir: Path, agent_id: AgentId) -> None:
-    """Remove the per-agent permissions file (no-op if absent)."""
-    path = permissions_path_for_agent(data_dir, agent_id)
-    if not path.exists():
-        return
-    try:
-        path.unlink()
-        logger.debug("Deleted permissions file for agent {}", agent_id)
-    except OSError as e:
-        logger.warning("Failed to delete permissions file at {}: {}", path, e)
