@@ -3,6 +3,7 @@ import importlib
 import os
 import sys
 from collections.abc import Callable
+from collections.abc import Sequence
 from typing import Any
 
 import click
@@ -104,7 +105,7 @@ def _resolve_builtin(cmd_name: str) -> click.Command | None:
     return _BUILTINS_LOADED[spec.name]
 
 
-def _format_command_display_name(name: str, aliases: tuple[str, ...] | list[str]) -> str:
+def _format_command_display_name(name: str, aliases: Sequence[str]) -> str:
     """Return the "name, alias1, alias2" cell rendered next to a command in --help."""
     if not aliases:
         return name
