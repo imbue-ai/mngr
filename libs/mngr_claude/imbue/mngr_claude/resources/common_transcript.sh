@@ -63,6 +63,12 @@ import sys
 _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
 
+# Claude Code marks framework-injected user messages (stop hook output,
+# local-command caveats, etc.) with isMeta=true on the top-level event. We
+# use that flag to reclassify those messages as tool results so transcript
+# viewers show them under the tool role rather than the user role (no human
+# typed them).
+
 
 def _extract_text_content(content):
     """Extract plain text from a message content field (string or list of blocks)."""
@@ -140,6 +146,7 @@ def convert():
             event_type = raw.get("type", "")
             uuid = raw.get("uuid", "")
             timestamp = raw.get("timestamp", "")
+            is_meta = bool(raw.get("isMeta", False))
 
             if not uuid or not timestamp:
                 continue
@@ -217,20 +224,41 @@ def convert():
 
                 # Emit user text message if there is actual user text
                 if not _has_tool_results_only(content):
-                    event_id = _make_event_id(uuid, "user")
-                    if event_id not in existing_ids:
-                        text = _extract_text_content(content)
-                        if text:
+                    text = _extract_text_content(content)
+                    if is_meta:
+                        # Framework-injected message (stop hook output, etc.) --
+                        # reclassify as tool_result so it doesn't masquerade as user input.
+                        event_id = _make_event_id(uuid, "meta")
+                        if event_id not in existing_ids and text:
+                            output = text
+                            if len(output) > _MAX_OUTPUT_LENGTH:
+                                output = output[:_MAX_OUTPUT_LENGTH] + "..."
                             event = {
                                 "timestamp": timestamp,
-                                "type": "user_message",
+                                "type": "tool_result",
                                 "event_id": event_id,
                                 "source": "claude/common_transcript",
-                                "role": "user",
-                                "content": text,
+                                "tool_call_id": f"meta-{uuid}",
+                                "tool_name": "meta",
+                                "output": output,
+                                "is_error": False,
                                 "message_uuid": uuid,
                             }
                             new_events.append((timestamp, event))
+                    else:
+                        event_id = _make_event_id(uuid, "user")
+                        if event_id not in existing_ids:
+                            if text:
+                                event = {
+                                    "timestamp": timestamp,
+                                    "type": "user_message",
+                                    "event_id": event_id,
+                                    "source": "claude/common_transcript",
+                                    "role": "user",
+                                    "content": text,
+                                    "message_uuid": uuid,
+                                }
+                                new_events.append((timestamp, event))
 
                 # Emit tool result events for any tool_result blocks
                 if isinstance(content, list):
