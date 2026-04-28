@@ -12,7 +12,6 @@ from typing import assert_never
 
 from loguru import logger
 
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
@@ -38,6 +37,7 @@ from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.git_utils import parse_worktree_git_file
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
 @log_call
@@ -186,9 +186,7 @@ def gc_work_dirs(
 ) -> None:
     """Garbage collect orphaned work directories."""
     futures: list[Future[None]] = []
-    with ConcurrencyGroupExecutor(
-        parent_cg=mngr_ctx.concurrency_group, name="gc_machines", max_workers=32
-    ) as executor:
+    with mngr_executor(parent_cg=mngr_ctx.concurrency_group, name="gc_machines", max_workers=32) as executor:
         for provider_instance, host_refs in hosts_by_provider:
             for host_ref in host_refs:
                 if host_ref.host_state == HostState.DESTROYED:
@@ -275,9 +273,7 @@ def gc_machines(
     for provider, host_refs in hosts_by_provider:
         # Process hosts in parallel to avoid sequential SSH timeouts for offline hosts
         futures: list[Future[None]] = []
-        with ConcurrencyGroupExecutor(
-            parent_cg=mngr_ctx.concurrency_group, name="gc_machines", max_workers=32
-        ) as executor:
+        with mngr_executor(parent_cg=mngr_ctx.concurrency_group, name="gc_machines", max_workers=32) as executor:
             for host_ref in host_refs:
                 futures.append(
                     executor.submit(
