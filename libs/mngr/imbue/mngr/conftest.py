@@ -2,6 +2,7 @@ import importlib.metadata
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -742,19 +743,25 @@ def session_cleanup() -> Generator[None, None, None]:
     is_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER") is not None
     is_xdist_leader = not is_xdist_worker and os.environ.get("PYTEST_XDIST_TESTRUNUID") is not None
 
-    # 1. Check for leftover child processes
-    try:
-        current = psutil.Process()
-        children = list(current.children(recursive=True))
-    except psutil.NoSuchProcess:
-        children = []
+    # 1. Check for leftover child processes.
+    # Poll briefly so background-process supervisor threads that are mid-cleanup
+    # (e.g. after `terminate(force_kill_seconds=0.0)`) get a chance to deliver
+    # SIGTERM and reap their children before we declare a leak.
+    leftover_processes: list[psutil.Process] = []
+    for _ in range(20):
+        try:
+            current = psutil.Process()
+            children = list(current.children(recursive=True))
+        except psutil.NoSuchProcess:
+            children = []
 
-    # On the xdist leader, filter out xdist worker processes (they're expected)
-    if is_xdist_leader:
-        children = [c for c in children if not _is_xdist_worker_process(c)]
+        if is_xdist_leader:
+            children = [c for c in children if not _is_xdist_worker_process(c)]
 
-    # Filter out zombie/dead processes - they're not actually leaked
-    leftover_processes = [p for p in children if _is_alive_non_zombie(p)]
+        leftover_processes = [p for p in children if _is_alive_non_zombie(p)]
+        if not leftover_processes:
+            break
+        time.sleep(0.1)
 
     if leftover_processes:
         proc_info = [_format_process_info(p) for p in leftover_processes]
