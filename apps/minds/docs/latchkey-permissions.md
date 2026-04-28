@@ -41,25 +41,25 @@ and how the agent receives the answer.
    1. Runs `latchkey services info <svc>` to read `credentialStatus`.
    2. If `missing` / `invalid` / `unknown`, runs `latchkey auth browser <svc>`
       synchronously; cancellation/failure produces an `AUTH_FAILED` outcome.
-   3. Atomically rewrites the agent's `permissions.json` so the gateway
+   3. Atomically rewrites the agent's `latchkey_permissions.json` so the gateway
       enforces the chosen schemas on the next request.
    4. Appends a `GRANTED` (or `AUTH_FAILED`) response event to
       `~/.minds/events/requests/events.jsonl`.
    5. Sends the agent a plain-English `mngr message` describing the
       decision; the agent wakes up and decides whether to retry.
 7. **User denies.** The desktop client appends a `DENIED` response event
-   and sends the agent a plain-English denial message. `permissions.json`
+   and sends the agent a plain-English denial message. `latchkey_permissions.json`
    is not touched.
 
 ## Per-agent isolation
 
 Each spawned `latchkey gateway` subprocess receives its own
-`LATCHKEY_PERMISSIONS_CONFIG=~/.minds/agents/<agent_id>/permissions.json`
+`LATCHKEY_PERMISSIONS_CONFIG=~/.minds/agents/<agent_id>/latchkey_permissions.json`
 environment variable. The file is created lazily on the first grant; before
 that, latchkey treats the missing file as `allow all`, so the very first
 permission-blocked call for a service is always case (b) (no credentials).
 
-When an agent is destroyed, its `permissions.json` is also removed so a
+When an agent is destroyed, its `latchkey_permissions.json` is also removed so a
 future agent reusing the same id starts with a clean slate.
 
 `LATCHKEY_DIRECTORY` -- where credentials live -- stays shared across all
@@ -74,7 +74,7 @@ and lists every latchkey service together with:
 
 * `display_name` -- human-readable label shown in the dialog header.
 * `scope_schemas` -- detent scope schemas the service owns; used as
-  rule keys in `permissions.json`.
+  rule keys in `latchkey_permissions.json`.
 * `permission_schemas` -- granular detent permission schemas the dialog
   offers as checkboxes. The implicit ``any`` default is prepended at
   runtime; do not list it here.

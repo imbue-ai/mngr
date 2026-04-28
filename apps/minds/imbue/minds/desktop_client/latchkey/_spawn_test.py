@@ -272,7 +272,7 @@ def test_spawn_detached_latchkey_gateway_sets_permissions_config_path(
     report_path = tmp_path / "report"
     monkeypatch.setenv("FAKE_LATCHKEY_REPORT", str(report_path))
     monkeypatch.delenv("LATCHKEY_PERMISSIONS_CONFIG", raising=False)
-    permissions_path = tmp_path / "agents" / "agent-x" / "permissions.json"
+    permissions_path = tmp_path / "agents" / "agent-x" / "latchkey_permissions.json"
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))

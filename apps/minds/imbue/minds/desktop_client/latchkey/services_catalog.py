@@ -46,7 +46,7 @@ class ServicePermissionInfo(FrozenModel):
     name: str = Field(description="Latchkey service name (e.g. 'slack', 'google-gmail').")
     display_name: str = Field(description="Human-readable label shown in the dialog header.")
     scope_schemas: tuple[str, ...] = Field(
-        description="Detent scope schemas this service owns; used as keys in permissions.json rules.",
+        description="Detent scope schemas this service owns; used as keys in latchkey_permissions.json rules.",
     )
     permission_schemas: tuple[str, ...] = Field(
         description=(

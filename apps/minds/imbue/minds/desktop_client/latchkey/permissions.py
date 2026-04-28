@@ -4,7 +4,7 @@ This module owns everything that happens between a
 ``LatchkeyPermissionRequestEvent`` arriving on the inbox and the user's
 decision being applied: rendering the dialog HTML, parsing the form
 submission, probing credential status, running ``latchkey auth browser``
-when needed, rewriting the per-agent ``permissions.json``, appending the
+when needed, rewriting the per-agent ``latchkey_permissions.json``, appending the
 response event, and notifying the waiting agent via ``mngr message``.
 
 The route layer in ``app.py`` is intentionally thin: it authenticates,
@@ -154,13 +154,13 @@ class LatchkeyPermissionGrantHandler(MutableModel):
 
     Hold-time invariants when ``grant`` returns ``(True, message)``:
 
-    * ``permissions.json`` reflects the new rule.
+    * ``latchkey_permissions.json`` reflects the new rule.
     * A ``GRANTED`` response event has been appended for ``request_event_id``.
     * ``mngr message`` has been attempted (failures logged).
 
     When ``grant`` returns ``(False, message)`` (failed sign-in):
 
-    * ``permissions.json`` is unchanged.
+    * ``latchkey_permissions.json`` is unchanged.
     * A ``DENIED`` response event has been appended (the agent is told the
       reason via the message, not via a distinct status).
     * ``mngr message`` has been attempted.
@@ -231,7 +231,7 @@ class LatchkeyPermissionGrantHandler(MutableModel):
                 )
                 return False, message, response_event
 
-        # Apply the grant to permissions.json before writing the response
+        # Apply the grant to latchkey_permissions.json before writing the response
         # event so the agent can never observe a GRANTED response without
         # the corresponding rule being in effect.
         self._apply_grant_to_permissions_file(
@@ -430,7 +430,7 @@ class LatchkeyPermissionGrantHandler(MutableModel):
             existing = load_permissions(path)
         except LatchkeyStoreError as e:
             logger.warning(
-                "Existing permissions.json at {} is unreadable; replacing it: {}",
+                "Existing latchkey_permissions.json at {} is unreadable; replacing it: {}",
                 path,
                 e,
             )

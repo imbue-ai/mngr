@@ -5,10 +5,11 @@ Two kinds of per-agent files live here:
 * ``LatchkeyGatewayInfo`` -- metadata identifying the running ``latchkey
   gateway`` subprocess for an agent (host, port, pid, started_at). Used so
   the next desktop-client launch can adopt or drop existing gateways.
-* ``PermissionsConfig`` -- the contents of latchkey's ``permissions.json``
-  for an agent, in detent's rule format. Latchkey reads this file at every
-  request via ``LATCHKEY_PERMISSIONS_CONFIG``; minds rewrites it whenever
-  the user grants or revokes permissions.
+* ``PermissionsConfig`` -- the contents of latchkey's permissions config
+  file for an agent, in detent's rule format. Stored on disk as
+  ``latchkey_permissions.json``. Latchkey reads this file at every
+  request via ``LATCHKEY_PERMISSIONS_CONFIG``; minds rewrites it
+  whenever the user grants or revokes permissions.
 
 Both share the ``{data_dir}/agents/{agent_id}/...`` layout and the same
 atomic-write pattern (write to ``.tmp``, chmod, rename).
@@ -30,7 +31,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.primitives import AgentId
 
 _GATEWAY_RECORD_FILENAME: Final[str] = "latchkey_gateway.json"
-_PERMISSIONS_FILENAME: Final[str] = "permissions.json"
+_PERMISSIONS_FILENAME: Final[str] = "latchkey_permissions.json"
 _AGENTS_DIR_NAME: Final[str] = "agents"
 
 
@@ -130,7 +131,7 @@ def ensure_browser_log_path(data_dir: Path) -> Path:
     return data_dir / "latchkey_ensure_browser.log"
 
 
-# -- Permissions config (permissions.json) -------------------------------------
+# -- Permissions config (latchkey_permissions.json) ---------------------------
 
 
 class LatchkeyStoreError(Exception):
@@ -138,7 +139,7 @@ class LatchkeyStoreError(Exception):
 
 
 class MalformedPermissionsConfigError(LatchkeyStoreError, ValueError):
-    """Raised when an existing ``permissions.json`` cannot be parsed."""
+    """Raised when an existing ``latchkey_permissions.json`` cannot be parsed."""
 
 
 class PermissionsConfig(FrozenModel):

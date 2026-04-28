@@ -264,7 +264,7 @@ def test_grant_treats_failed_browser_flow_as_deny_with_distinct_message(tmp_path
     assert was_granted is False
     assert "sign-in" in message.lower()
     assert "user cancelled" in message
-    # permissions.json must NOT have been written.
+    # latchkey_permissions.json must NOT have been written.
     assert not permissions_path_for_agent(tmp_path, agent_id).exists()
     # A DENIED response event was appended (no separate AUTH_FAILED status).
     responses = load_response_events(tmp_path)

@@ -237,7 +237,7 @@ def test_stop_gateway_for_agent_preserves_permissions_file(tmp_path: Path) -> No
     """Granted permissions must outlive the agent's gateway lifetime.
 
     minds does not delete other per-agent state on destruction either, so
-    keeping permissions.json around is consistent and means previously
+    keeping latchkey_permissions.json around is consistent and means previously
     granted permissions survive desktop-client restarts and reboots.
     """
     fake_binary = _make_fake_latchkey_binary(tmp_path)
@@ -247,7 +247,7 @@ def test_stop_gateway_for_agent_preserves_permissions_file(tmp_path: Path) -> No
     info = manager.ensure_gateway_started(agent_id)
     assert _wait_for_listening(info.host, info.port)
 
-    permissions_path = tmp_path / "agents" / str(agent_id) / "permissions.json"
+    permissions_path = tmp_path / "agents" / str(agent_id) / "latchkey_permissions.json"
     permissions_path.parent.mkdir(parents=True, exist_ok=True)
     permissions_path.write_text('{"rules": []}')
 

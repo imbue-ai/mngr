@@ -100,7 +100,7 @@ def test_load_permissions_returns_empty_for_missing_file(tmp_path: Path) -> None
 
 
 def test_load_permissions_parses_rules_schemas_and_include(tmp_path: Path) -> None:
-    path = tmp_path / "permissions.json"
+    path = tmp_path / "latchkey_permissions.json"
     path.write_text(
         json.dumps(
             {
@@ -125,7 +125,7 @@ def test_load_permissions_parses_rules_schemas_and_include(tmp_path: Path) -> No
 
 
 def test_load_permissions_round_trip_preserves_unknown_schemas(tmp_path: Path) -> None:
-    path = tmp_path / "permissions.json"
+    path = tmp_path / "latchkey_permissions.json"
     original_schemas = {"custom": {"properties": {"path": {"const": "/v1/widgets"}}}}
     config = PermissionsConfig(
         rules=({"custom": ["custom-read"]},),
@@ -139,7 +139,7 @@ def test_load_permissions_round_trip_preserves_unknown_schemas(tmp_path: Path) -
 
 
 def test_load_permissions_rejects_non_object_top_level(tmp_path: Path) -> None:
-    path = tmp_path / "permissions.json"
+    path = tmp_path / "latchkey_permissions.json"
     path.write_text("[]")
 
     with pytest.raises(MalformedPermissionsConfigError):
@@ -147,7 +147,7 @@ def test_load_permissions_rejects_non_object_top_level(tmp_path: Path) -> None:
 
 
 def test_load_permissions_rejects_non_string_permission_values(tmp_path: Path) -> None:
-    path = tmp_path / "permissions.json"
+    path = tmp_path / "latchkey_permissions.json"
     path.write_text(json.dumps({"rules": [{"slack-api": ["slack-read-all", 123]}]}))
 
     with pytest.raises(MalformedPermissionsConfigError):
@@ -155,7 +155,7 @@ def test_load_permissions_rejects_non_string_permission_values(tmp_path: Path) -
 
 
 def test_save_permissions_uses_mode_0o600(tmp_path: Path) -> None:
-    path = tmp_path / "agents" / "agent-id" / "permissions.json"
+    path = tmp_path / "agents" / "agent-id" / "latchkey_permissions.json"
     save_permissions(path, PermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))
 
     mode = path.stat().st_mode & 0o777
@@ -164,11 +164,11 @@ def test_save_permissions_uses_mode_0o600(tmp_path: Path) -> None:
 
 
 def test_save_permissions_writes_atomically(tmp_path: Path) -> None:
-    path = tmp_path / "permissions.json"
+    path = tmp_path / "latchkey_permissions.json"
     save_permissions(path, PermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))
 
     # No leftover .tmp file from the swap.
-    leftovers = list(tmp_path.glob("permissions.json.*"))
+    leftovers = list(tmp_path.glob("latchkey_permissions.json.*"))
     assert leftovers == []
 
 
@@ -274,11 +274,11 @@ def test_granted_permissions_for_service_returns_existing_grants() -> None:
 def test_permissions_path_for_agent_uses_agents_subdir(tmp_path: Path) -> None:
     agent_id = AgentId()
     path = permissions_path_for_agent(tmp_path, agent_id)
-    assert path == tmp_path / "agents" / str(agent_id) / "permissions.json"
+    assert path == tmp_path / "agents" / str(agent_id) / "latchkey_permissions.json"
 
 
 def test_save_then_load_round_trip_preserves_rule_order(tmp_path: Path) -> None:
-    path = tmp_path / "permissions.json"
+    path = tmp_path / "latchkey_permissions.json"
     config = PermissionsConfig(
         rules=(
             {"slack-api": ["slack-read-all"]},
@@ -294,7 +294,7 @@ def test_save_then_load_round_trip_preserves_rule_order(tmp_path: Path) -> None:
 
 
 def test_save_permissions_serializes_to_valid_json(tmp_path: Path) -> None:
-    path = tmp_path / "permissions.json"
+    path = tmp_path / "latchkey_permissions.json"
     save_permissions(path, PermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))
 
     # Verify the file is valid JSON of the expected shape (no `tuple` markers
@@ -304,7 +304,7 @@ def test_save_permissions_serializes_to_valid_json(tmp_path: Path) -> None:
 
 
 def test_save_permissions_creates_parent_directories(tmp_path: Path) -> None:
-    deep_path = tmp_path / "a" / "b" / "c" / "permissions.json"
+    deep_path = tmp_path / "a" / "b" / "c" / "latchkey_permissions.json"
     save_permissions(deep_path, PermissionsConfig())
 
     assert deep_path.is_file()
@@ -333,7 +333,7 @@ def test_set_permissions_for_service_preserves_unrelated_rules() -> None:
 
 
 def test_save_permissions_excludes_optional_keys_when_unset(tmp_path: Path) -> None:
-    path = tmp_path / "permissions.json"
+    path = tmp_path / "latchkey_permissions.json"
     save_permissions(path, PermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))
 
     raw = json.loads(path.read_text())
@@ -344,7 +344,7 @@ def test_save_permissions_excludes_optional_keys_when_unset(tmp_path: Path) -> N
 def test_load_permissions_handles_world_readable_file_without_crashing(tmp_path: Path) -> None:
     # Latchkey enforces secure permissions on its own files, but minds writes
     # this one. Ensure that loading does not care about file mode.
-    path = tmp_path / "permissions.json"
+    path = tmp_path / "latchkey_permissions.json"
     path.write_text(json.dumps({"rules": []}))
     path.chmod(0o644)
 
@@ -356,7 +356,7 @@ def test_load_permissions_handles_world_readable_file_without_crashing(tmp_path:
 
 
 def test_save_permissions_overwrites_existing_file_atomically(tmp_path: Path) -> None:
-    path = tmp_path / "permissions.json"
+    path = tmp_path / "latchkey_permissions.json"
     save_permissions(path, PermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))
     save_permissions(
         path,
@@ -366,7 +366,7 @@ def test_save_permissions_overwrites_existing_file_atomically(tmp_path: Path) ->
     raw = json.loads(path.read_text())
     assert raw == {"rules": [{"slack-api": ["slack-read-all", "slack-write-messages"]}]}
     # Ensure no temp file was left behind.
-    assert not (tmp_path / "permissions.json.tmp").exists()
+    assert not (tmp_path / "latchkey_permissions.json.tmp").exists()
 
 
 def test_set_permissions_for_service_handles_multi_key_rule_unrelated_to_managed_scope() -> None:
@@ -387,7 +387,7 @@ def test_set_permissions_for_service_handles_multi_key_rule_unrelated_to_managed
 
 
 def test_load_permissions_propagates_os_errors(tmp_path: Path) -> None:
-    path = tmp_path / "permissions.json"
+    path = tmp_path / "latchkey_permissions.json"
     path.write_text("{}")
     path.chmod(0)
 

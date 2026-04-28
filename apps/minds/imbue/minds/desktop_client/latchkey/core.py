@@ -342,7 +342,7 @@ class Latchkey(MutableModel):
         half-torn-down state. ``_terminate_pid`` is deliberately called
         outside the lock because it can wait up to
         ``_TERMINATE_GRACE_SECONDS`` for the child to exit. The per-agent
-        ``permissions.json`` is intentionally *not* deleted: minds does not
+        ``latchkey_permissions.json`` is intentionally *not* deleted: minds does not
         currently delete other per-agent state on destruction either, and
         keeping the file around means previously-granted permissions
         survive desktop-client restarts and reboots.

@@ -4,7 +4,7 @@
 #
 #   display_name        Human-readable label shown in the permission dialog.
 #   scope_schemas       Detent scope schemas this service owns. Used as rule
-#                       keys in the agent's permissions.json.
+#                       keys in the agent's latchkey_permissions.json.
 #   permission_schemas  Detent permission schemas the user can grant. Used as
 #                       rule values. Order is reflected in the dialog.
 #

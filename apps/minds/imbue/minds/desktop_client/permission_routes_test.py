@@ -287,7 +287,7 @@ def test_post_permission_grant_unknown_service_returns_400(tmp_path: Path) -> No
 
 def test_get_permission_request_page_pre_checks_existing_grants(tmp_path: Path) -> None:
     agent_id = AgentId()
-    # Pre-populate permissions.json so the dialog should pre-check those.
+    # Pre-populate latchkey_permissions.json so the dialog should pre-check those.
     save_permissions(
         permissions_path_for_agent(tmp_path, agent_id),
         PermissionsConfig(rules=({"slack-api": ["slack-chat-read"]},)),
