@@ -24,7 +24,9 @@ else
         echo "TRIAGE.md not found at ${TRIAGE_MD}" >&2
         exit 1
     fi
-    # Extract bare issue numbers from #NNNN refs (4+ digits to avoid #473.3 sub-numbering).
+    # Extract bare issue numbers from #NNNN refs. Require 3+ digits so things
+    # like dotted sub-numbers (e.g. #473.3) reduce to the parent issue number
+    # (473), which 'sort -un' then dedupes against the standalone #473 ref.
     mapfile -t issues < <(grep -oE '#[0-9]{3,}' "${TRIAGE_MD}" | tr -d '#' | sort -un)
 fi
 
