@@ -52,12 +52,6 @@ mngr list [OPTIONS]
 | `--sort` | text | Sort by CEL expression(s) with optional direction, e.g. 'name asc, create_time desc'; enables sorted (non-streaming) output [default: create_time] | `create_time` |
 | `--limit` | integer | Limit number of results (applied after fetching from all providers) | None |
 
-## Watch Mode
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `-w`, `--watch` | integer | Continuously watch and update status at specified interval (seconds) | None |
-
 ## Error Handling
 
 | Name | Type | Description | Default |

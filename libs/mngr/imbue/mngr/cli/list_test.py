@@ -808,11 +808,10 @@ def test_streaming_renderer_tty_erases_status_on_finish() -> None:
 
 
 def test_should_use_streaming_mode_default_human() -> None:
-    """Default HUMAN format without watch/sort should use streaming mode."""
+    """Default HUMAN format without sort should use streaming mode."""
     assert (
         _should_use_streaming_mode(
             output_format=OutputFormat.HUMAN,
-            is_watch=False,
             is_sort_explicit=False,
         )
         is True
@@ -824,7 +823,6 @@ def test_should_use_streaming_mode_json_with_explicit_sort_uses_batch() -> None:
     assert (
         _should_use_streaming_mode(
             output_format=OutputFormat.JSON,
-            is_watch=False,
             is_sort_explicit=True,
         )
         is False
@@ -836,20 +834,7 @@ def test_should_use_streaming_mode_with_explicit_sort_uses_batch() -> None:
     assert (
         _should_use_streaming_mode(
             output_format=OutputFormat.HUMAN,
-            is_watch=False,
             is_sort_explicit=True,
-        )
-        is False
-    )
-
-
-def test_should_use_streaming_mode_with_watch_uses_batch() -> None:
-    """--watch should force batch mode."""
-    assert (
-        _should_use_streaming_mode(
-            output_format=OutputFormat.HUMAN,
-            is_watch=True,
-            is_sort_explicit=False,
         )
         is False
     )
@@ -860,7 +845,6 @@ def test_should_use_streaming_mode_json_format_uses_batch() -> None:
     assert (
         _should_use_streaming_mode(
             output_format=OutputFormat.JSON,
-            is_watch=False,
             is_sort_explicit=False,
         )
         is False
@@ -873,18 +857,13 @@ def test_should_use_streaming_mode_json_format_uses_batch() -> None:
 
 
 def test_is_streaming_eligible_all_conditions_met() -> None:
-    """_is_streaming_eligible should return True when no watch, no sort."""
-    assert _is_streaming_eligible(is_watch=False, is_sort_explicit=False) is True
-
-
-def test_is_streaming_eligible_watch_disables() -> None:
-    """_is_streaming_eligible should return False when watch is active."""
-    assert _is_streaming_eligible(is_watch=True, is_sort_explicit=False) is False
+    """_is_streaming_eligible should return True when no sort."""
+    assert _is_streaming_eligible(is_sort_explicit=False) is True
 
 
 def test_is_streaming_eligible_explicit_sort_disables() -> None:
     """_is_streaming_eligible should return False when sort is explicit."""
-    assert _is_streaming_eligible(is_watch=False, is_sort_explicit=True) is False
+    assert _is_streaming_eligible(is_sort_explicit=True) is False
 
 
 # =============================================================================

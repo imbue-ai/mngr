@@ -2,11 +2,8 @@ import re
 import shutil
 import string
 import sys
-import threading
-from collections.abc import Callable
 from collections.abc import Sequence
 from enum import Enum
-from pathlib import Path
 from threading import Lock
 from typing import Any
 from typing import Final
@@ -21,7 +18,6 @@ from tabulate import tabulate
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
-from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import agent_details_to_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
@@ -40,7 +36,6 @@ from imbue.mngr.config.completion_writer import write_cli_completions_cache
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
@@ -77,28 +72,24 @@ _HEADER_LABELS: Final[dict[str, str]] = {
 
 @pure
 def _is_streaming_eligible(
-    is_watch: bool,
     is_sort_explicit: bool,
 ) -> bool:
     """Whether the general conditions for streaming mode are met.
 
-    Streaming requires: no watch mode (needs repeated full fetches) and no explicit sort
-    (needs all results before sorting). A limit is compatible with streaming -- it simply
-    caps output at the first N agents to arrive, which is non-deterministic.
+    Streaming requires no explicit sort (needs all results before sorting). A limit is
+    compatible with streaming -- it simply caps output at the first N agents to arrive,
+    which is non-deterministic.
     """
-    return not is_watch and not is_sort_explicit
+    return not is_sort_explicit
 
 
 @pure
 def _should_use_streaming_mode(
     output_format: OutputFormat,
-    is_watch: bool,
     is_sort_explicit: bool,
 ) -> bool:
     """Determine whether to use streaming mode for human list output."""
-    return output_format == OutputFormat.HUMAN and _is_streaming_eligible(
-        is_watch=is_watch, is_sort_explicit=is_sort_explicit
-    )
+    return output_format == OutputFormat.HUMAN and _is_streaming_eligible(is_sort_explicit=is_sort_explicit)
 
 
 class ListCliOptions(AgentFilterCliOptions, CommonCliOptions):
@@ -120,7 +111,6 @@ class ListCliOptions(AgentFilterCliOptions, CommonCliOptions):
     header: tuple[str, ...]
     sort: str
     limit: int | None
-    watch: int | None
     ids: bool
     addrs: bool
     on_error: str
@@ -171,14 +161,6 @@ class ListCliOptions(AgentFilterCliOptions, CommonCliOptions):
     "--limit",
     type=int,
     help="Limit number of results (applied after fetching from all providers)",
-)
-@optgroup.group("Watch Mode")
-# FIXME: remove the watch option, it's pointless
-@optgroup.option(
-    "-w",
-    "--watch",
-    type=int,
-    help="Continuously watch and update status at specified interval (seconds)",
 )
 @optgroup.group("Error Handling")
 @optgroup.option(
@@ -300,7 +282,6 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
             provider_names,
             error_behavior,
             limit,
-            is_watch=bool(opts.watch),
         )
         return
 
@@ -310,7 +291,7 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
 
     # Template output path: if --format is a template string, use streaming when possible, batch otherwise
     if format_template is not None:
-        is_streaming_template = _is_streaming_eligible(is_watch=bool(opts.watch), is_sort_explicit=is_sort_explicit)
+        is_streaming_template = _is_streaming_eligible(is_sort_explicit=is_sort_explicit)
         if is_streaming_template:
             _list_streaming_template(
                 ctx,
@@ -330,7 +311,7 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     # output can pass --sort explicitly, which falls back to batch mode. When --limit is set,
     # streaming still works but produces non-deterministic results (whichever agents arrive first).
     if format_template is None and _should_use_streaming_mode(
-        output_opts.output_format, is_watch=bool(opts.watch), is_sort_explicit=is_sort_explicit
+        output_opts.output_format, is_sort_explicit=is_sort_explicit
     ):
         display_fields = fields if fields is not None else list(_DEFAULT_HUMAN_DISPLAY_FIELDS)
         _list_streaming_human(
@@ -346,7 +327,6 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         )
         return
 
-    # Batch/watch path
     iteration_params = _ListIterationParams(
         mngr_ctx=mngr_ctx,
         output_opts=output_opts,
@@ -361,19 +341,7 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         custom_headers=custom_headers,
     )
 
-    if opts.watch:
-        try:
-            _list_watch_with_stream(
-                iteration_params=iteration_params,
-                ctx=ctx,
-                mngr_ctx=mngr_ctx,
-                max_interval_seconds=opts.watch,
-            )
-        except KeyboardInterrupt:
-            logger.info("\nWatch mode stopped")
-            return
-    else:
-        _run_list_iteration(iteration_params, ctx)
+    _run_list_iteration(iteration_params, ctx)
 
 
 def _list_jsonl(
@@ -384,12 +352,8 @@ def _list_jsonl(
     provider_names: tuple[str, ...] | None,
     error_behavior: ErrorBehavior,
     limit: int | None,
-    is_watch: bool,
 ) -> None:
     """JSONL output path: stream agents as JSONL lines with optional limit."""
-    if is_watch:
-        logger.warning("Watch mode is not supported with JSONL format, running once")
-
     limited_callback = _LimitedJsonlEmitter(limit=limit)
 
     result = api_list_agents(
@@ -689,7 +653,7 @@ def _format_streaming_agent_row(
 
 
 class _ListIterationParams(BaseModel):
-    """Parameters for a single list iteration, used for watch mode."""
+    """Parameters for a single list iteration."""
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -1126,123 +1090,3 @@ All agent fields from the "Available Fields" section can be used in filter expre
 
 # Add pager-enabled help option to the list command
 add_pager_help_option(list_command)
-
-
-# === Watch Mode (stream-backed) ===
-
-
-def _list_watch_with_stream(
-    iteration_params: _ListIterationParams,
-    ctx: click.Context,
-    mngr_ctx: MngrContext,
-    max_interval_seconds: int,
-) -> None:
-    """Watch mode backed by the discovery event stream.
-
-    Does an initial full list and display, then monitors the discovery events
-    file for changes. When a change is detected (from create, destroy, etc.),
-    re-polls immediately. Also re-polls at max_interval_seconds as a safety net.
-    """
-    logger.info("Starting watch mode (stream-backed): refreshing on changes or every {} seconds", max_interval_seconds)
-    logger.info("Press Ctrl+C to stop")
-
-    events_path = get_discovery_events_path(mngr_ctx.config)
-
-    # Initial display
-    _run_list_iteration(iteration_params, ctx)
-
-    # Tail the events file and re-render when changes arrive.
-    # Use a stop_event to allow clean shutdown on KeyboardInterrupt.
-    stop_event = threading.Event()
-    try:
-        _run_watch_loop_with_event_tailing(
-            iteration_params=iteration_params,
-            ctx=ctx,
-            events_path=events_path,
-            max_interval_seconds=max_interval_seconds,
-            stop_event=stop_event,
-        )
-    finally:
-        stop_event.set()
-
-
-def _run_watch_loop_with_event_tailing(
-    iteration_params: _ListIterationParams,
-    ctx: click.Context,
-    events_path: Path,
-    max_interval_seconds: int,
-    stop_event: threading.Event,
-) -> None:
-    """Repeatedly refresh the list display, triggered by event file changes or a timeout."""
-    _run_event_driven_watch(
-        events_path=events_path,
-        max_interval_seconds=max_interval_seconds,
-        stop_event=stop_event,
-        on_refresh=lambda: _refresh_watch_display(iteration_params, ctx),
-    )
-
-
-def _refresh_watch_display(
-    iteration_params: _ListIterationParams,
-    ctx: click.Context,
-) -> None:
-    """Run a single refresh cycle for watch mode."""
-    logger.info("\nRefreshing...")
-    try:
-        _run_list_iteration(iteration_params, ctx)
-    except MngrError as e:
-        logger.error("Error in watch iteration (continuing): {}", e)
-
-
-def _poll_events_file_for_changes(
-    events_path: Path,
-    watched_size: int,
-    changed_flag: threading.Event,
-    stop_event: threading.Event,
-    max_polls: int,
-) -> None:
-    """Poll the events file until its size changes or stop_event is set."""
-    current_size = watched_size
-    for _ in range(max_polls):
-        if stop_event.is_set() or changed_flag.is_set():
-            return
-        try:
-            if events_path.exists():
-                new_size = events_path.stat().st_size
-                if new_size != current_size:
-                    changed_flag.set()
-                    return
-        except OSError as e:
-            logger.trace("OSError while polling events file: {}", e)
-        stop_event.wait(timeout=0.1)
-
-
-def _run_event_driven_watch(
-    events_path: Path,
-    max_interval_seconds: int,
-    stop_event: threading.Event,
-    on_refresh: Callable[[], None],
-) -> None:
-    """Run the watch loop, calling on_refresh each time the events file changes or the interval elapses."""
-    for _ in range(100_000):
-        if stop_event.is_set():
-            break
-
-        last_size = events_path.stat().st_size if events_path.exists() else 0
-        is_changed = threading.Event()
-
-        watcher = threading.Thread(
-            target=_poll_events_file_for_changes,
-            args=(events_path, last_size, is_changed, stop_event, max_interval_seconds * 10),
-            daemon=True,
-        )
-        watcher.start()
-
-        is_changed.wait(timeout=float(max_interval_seconds))
-        stop_event_was_set = stop_event.is_set()
-        watcher.join(timeout=2.0)
-
-        if stop_event_was_set:
-            break
-
-        on_refresh()
