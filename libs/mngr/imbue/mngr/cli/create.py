@@ -438,7 +438,7 @@ class _CreateCommand(click.Command):
 @optgroup.option("--label", multiple=True, help="Agent label KEY=VALUE [repeatable] [experimental]")
 @optgroup.option(
     "--project",
-    help="Project name for the agent (sets the 'project' label; '.' is equivalent to omitting this flag) [default: derived from git remote origin or folder name]",
+    help="Project name for the agent (sets the 'project' label; '.' means derived from git remote origin or folder name) [default: .]",
 )
 @optgroup.group("Host Options")
 @optgroup.option(
