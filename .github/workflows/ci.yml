@@ -147,7 +147,7 @@ jobs:
             exit 1
           fi
 
-      - name: Report test results (neutral on flaky recovery)
+      - name: Report test results
         if: always()
         uses: ./.github/actions/report-flaky-aware-tests
         with:
@@ -197,8 +197,10 @@ jobs:
     if: github.ref != 'refs/heads/release'
     runs-on: ubuntu-latest
     # See note on `test-offload` above: the report-flaky-aware-tests
-    # composite action needs `checks: write` to post both its junit-report
-    # check-run and (on flaky-recovered runs) its neutral check-run.
+    # composite action needs `checks: write` both for the annotate-only
+    # `mikepenz/action-junit-report@v5` step (per-failure annotations)
+    # and for its `gh api POST /repos/.../check-runs` call, which posts
+    # the unified check-run (success / neutral / failure).
     permissions:
       contents: read
       checks: write
@@ -264,7 +266,7 @@ jobs:
           path: test-results/junit.xml
           key: offload-acceptance-durations-${{ github.ref }}-${{ github.run_id }}
 
-      - name: Report test results (neutral on flaky recovery)
+      - name: Report test results
         if: always()
         uses: ./.github/actions/report-flaky-aware-tests
         with:

@@ -734,6 +734,46 @@ def _pytest_collection_finish(session: pytest.Session) -> None:
     if _is_xdist_worker():
         return
     _configure_shared_coverage_defaults(session.config)
+    _write_flaky_manifest(session)
+
+
+def _compute_junit_test_id(nodeid: str, fspath: str) -> str:
+    """Return the test ID string used to identify a test in the offload junit output.
+
+    When OFFLOAD_ROOT is set (during an offload sandbox run), prefix the node ID with
+    the test file's path relative to that root so IDs are stable across sandboxes that
+    may have different pytest rootdirs. Matches the logic applied by
+    _set_junit_test_id for the testcase `name` attribute.
+    """
+    offload_root = os.environ.get("OFFLOAD_ROOT")
+    if offload_root:
+        rel_path = os.path.relpath(fspath, offload_root)
+        nodeid_parts = nodeid.split("::")
+        return "::".join([rel_path] + nodeid_parts[1:])
+    return nodeid
+
+
+def _write_flaky_manifest(session: pytest.Session) -> None:
+    """Record flaky-marked test IDs so CI can correlate them with junit.xml results.
+
+    Offload downloads `.test_output/**` from each sandbox. Aggregating the manifest
+    files written here across all sandboxes yields the full set of tests marked
+    `@pytest.mark.flaky` for the run. Skipped when no junit xml is configured (e.g.
+    local dev runs without `--junitxml`).
+    """
+    if session.config.option.collectonly:
+        return
+    if getattr(session.config.option, "xmlpath", None) in (None, ""):
+        return
+    flaky_ids = [
+        _compute_junit_test_id(item.nodeid, str(item.path))
+        for item in session.items
+        if item.get_closest_marker("flaky") is not None
+    ]
+    if not flaky_ids:
+        return
+    output_file = _generate_output_filename("flaky_tests", ".txt")
+    output_file.write_text("\n".join(flaky_ids) + "\n")
 
 
 @pytest.hookimpl(trylast=True)
@@ -891,18 +931,7 @@ def _set_junit_test_id(request: pytest.FixtureRequest, record_xml_attribute) -> 
     Uses OFFLOAD_ROOT env var if set (for consistent paths in offload runs),
     otherwise falls back to pytest's nodeid directly.
     """
-    offload_root = os.environ.get("OFFLOAD_ROOT")
-
-    if offload_root:
-        # Build full test ID: relative_path::class::method or relative_path::method
-        fspath = str(request.node.fspath)
-        rel_path = os.path.relpath(fspath, offload_root)
-        nodeid_parts = request.node.nodeid.split("::")
-        # nodeid_parts[0] is the file path (possibly different due to rootdir), [1:] is class/method
-        test_id = "::".join([rel_path] + nodeid_parts[1:])
-    else:
-        test_id = request.node.nodeid
-
+    test_id = _compute_junit_test_id(request.node.nodeid, str(request.node.fspath))
     record_xml_attribute("name", test_id)
 
 
