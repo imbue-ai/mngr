@@ -134,6 +134,34 @@ def test_wait_script_idempotent_prelude_short_circuits_on_post_cleanup() -> None
     assert "exit 0" in guard_block
 
 
+def test_wait_script_traps_env_file_cleanup_on_failure() -> None:
+    """If `mngr create` fails (network error, host-provisioning bug, etc.),
+    the env-file containing parent secrets must still be removed. With
+    `set -euo pipefail` and no trap, a failed mngr-create exits the script
+    before the explicit shred, leaving secrets on disk.
+
+    Found live: parent's $MNGR_AGENT_STATE_DIR/proxy_commands/ accumulated
+    a stale env-<tid>.env from a run whose mngr-create had errored mid-flight.
+    """
+    script = spawn_hook.build_wait_script(
+        tool_use_id="toolu_test_trap",
+        target_name="parent--subagent-foo-trap",
+        parent_cwd="/tmp/somewhere",
+    )
+    # The init branch installs an EXIT trap before mngr-create and clears it
+    # after a successful shred. The trap line must appear before mngr create.
+    init_idx = script.find('if [ ! -f "$INIT_FLAG" ]; then')
+    create_idx = script.find("uv run mngr create")
+    trap_install_idx = script.find("trap 'shred -u")
+    trap_clear_idx = script.find("trap - EXIT")
+    assert init_idx >= 0 and create_idx >= 0
+    assert trap_install_idx >= 0, "wait-script missing EXIT trap on env-file"
+    assert trap_clear_idx >= 0, "wait-script missing trap clear after success"
+    assert init_idx < trap_install_idx < create_idx < trap_clear_idx, (
+        "EXIT trap must be installed BEFORE mngr create and cleared AFTER successful shred"
+    )
+
+
 def test_spawn_depth_limit_denies_with_reason(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> None:
     """At max depth, the hook denies the Task tool with an explanatory reason."""
     state_dir = tmp_path / "state"

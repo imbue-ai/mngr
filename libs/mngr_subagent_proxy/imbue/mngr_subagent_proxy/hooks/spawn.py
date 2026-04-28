@@ -156,6 +156,13 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
         "    env | grep -Ev "
         "'^(MNGR_AGENT_STATE_DIR|MNGR_AGENT_NAME|MAIN_CLAUDE_SESSION_ID|MNGR_HOST_DIR)=' "
         '> "$ENV_FILE"\n'
+        # Trap removes the env-file (which contains parent secrets) on ANY
+        # exit -- success, mngr-create failure, or signal. Without this,
+        # set -euo pipefail bails out of the script before the explicit
+        # shred runs and leaves the secrets on disk. The trap is scoped to
+        # this branch (cleared after touch) so it doesn't fire on the
+        # idempotent re-entry path which has no ENV_FILE to clean up.
+        '    trap \'shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\' EXIT\n'
         '    uv run mngr create "$TARGET_NAME:$PARENT_CWD" \\\n'
         "        --type mngr-proxy-child \\\n"
         "        --transfer=none \\\n"
@@ -167,6 +174,7 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
         "        --env MNGR_SUBAGENT_PROXY_CHILD=1 \\\n"
         "        --env MNGR_SUBAGENT_DEPTH=$((${MNGR_SUBAGENT_DEPTH:-0}+1))\n"
         '    shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\n'
+        "    trap - EXIT\n"
         '    touch "$INIT_FLAG"\n'
         "fi\n"
         "\n"
