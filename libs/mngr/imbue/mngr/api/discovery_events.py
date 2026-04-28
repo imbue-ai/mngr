@@ -724,18 +724,28 @@ def _emit_lines_from_offset(
     emitted_event_ids: set[str],
     emit_lock: Lock,
     on_line: Callable[[str], None] | None,
-) -> None:
-    """Read the events file from `offset` to EOF and feed every line through the warner.
+) -> int:
+    """Read the events file from `offset` to EOF and feed every complete line through the warner.
 
     Used for the synchronous read phases of run_discovery_stream so that they
     share a single warner instance with the tail thread, which lets a malformed
     line buffered in one phase still surface a warning when the next phase or
     the tail reads more data after it.
+
+    Holds back any trailing partial line (no terminating newline) so a
+    mid-flush write doesn't get split between this phase and the tail thread,
+    which would silently lose the event and produce misleading mid-file
+    corruption warnings about its two halves. Returns the byte position up to
+    which the file was actually consumed; callers should use this as the
+    starting offset for subsequent reads (e.g. the tail thread).
     """
-    with open(events_path) as f:
+    with open(events_path, "rb") as f:
         f.seek(offset)
-        for line in f:
-            _discovery_stream_emit_line(line, warner, emitted_event_ids, emit_lock, on_line)
+        new_content = f.read().decode("utf-8", errors="replace")
+    lines, bytes_consumed = split_complete_lines(new_content)
+    for line in lines:
+        _discovery_stream_emit_line(line, warner, emitted_event_ids, emit_lock, on_line)
+    return offset + bytes_consumed
 
 
 def _write_unfiltered_full_snapshot(mngr_ctx: MngrContext, error_behavior: ErrorBehavior) -> None:
@@ -799,14 +809,16 @@ def run_discovery_stream(
 
     # Phase 1: emit from the latest cached snapshot on disk (fast path)
     has_cached_snapshot = False
+    # Default to file size; overridden below to the byte position phase 1
+    # actually consumed so the tail thread re-reads any trailing partial line.
+    initial_offset = events_path.stat().st_size if events_path.exists() else 0
     if events_path.exists():
         snapshot_offset = find_latest_full_snapshot_offset(events_path)
         if snapshot_offset > 0:
             has_cached_snapshot = True
-            _emit_lines_from_offset(events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line)
-
-    # Record the current file position for tailing
-    initial_offset = events_path.stat().st_size if events_path.exists() else 0
+            initial_offset = _emit_lines_from_offset(
+                events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line
+            )
 
     # Phase 2: start tailing the events file for new events
     stop_event = threading.Event()
@@ -829,7 +841,9 @@ def run_discovery_stream(
         initial_sync.start()
     else:
         _write_unfiltered_full_snapshot_logged(mngr_ctx, error_behavior)
-        # Emit whatever the sync just wrote (the tail thread may not have picked it up yet)
+        # Emit whatever the sync just wrote (the tail thread may not have picked it up yet).
+        # The return value is intentionally ignored here: the tail thread is already running
+        # and tracking its own offset, and dedup via emitted_event_ids covers any overlap.
         if events_path.exists():
             snapshot_offset = find_latest_full_snapshot_offset(events_path)
             _emit_lines_from_offset(events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line)

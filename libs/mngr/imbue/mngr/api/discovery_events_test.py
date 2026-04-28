@@ -911,6 +911,55 @@ def test_emit_lines_from_offset_warns_on_corruption_across_calls(tmp_path: Path)
     assert "Skipped corrupt JSONL line" in log_output.getvalue()
 
 
+def test_emit_lines_from_offset_holds_back_partial_last_line(tmp_path: Path) -> None:
+    """Regression test: a partial trailing line at the time of phase-1 read must be
+    held back so the tail thread can re-read it in one piece once the writer flushes.
+
+    Before the fix, _emit_lines_from_offset used Python's text-mode line iterator,
+    which yields a trailing partial line. The partial got buffered in the warner
+    as malformed, the returned offset advanced past it, the tail thread started at
+    the post-partial position, and when the writer flushed the rest the tail saw
+    only the suffix -- losing the event and producing two misleading mid-file-
+    corruption warnings about its two halves.
+    """
+    events_path = tmp_path / "events.jsonl"
+    event_1 = make_agent_discovery_event(make_test_discovered_agent())
+    event_2 = make_agent_discovery_event(make_test_discovered_agent())
+    line_1 = json.dumps(event_1.model_dump(mode="json")) + "\n"
+    line_2 = json.dumps(event_2.model_dump(mode="json")) + "\n"
+    split_at = len(line_2) // 2
+    partial_2 = line_2[:split_at]
+    rest_2 = line_2[split_at:]
+    events_path.write_text(line_1 + partial_2)
+
+    warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
+    emitted_ids: set[str] = set()
+    lock = Lock()
+    captured: list[str] = []
+
+    with capture_loguru(level="WARNING") as log_output:
+        # Phase 1: should consume only line_1 and hold back the partial.
+        consumed_offset = _emit_lines_from_offset(events_path, 0, warner, emitted_ids, lock, captured.append)
+
+        # Writer flushes the rest of line_2.
+        with open(events_path, "a") as f:
+            f.write(rest_2)
+
+        # Tail-equivalent read from the consumed_offset must reconstruct line_2.
+        with open(events_path, "rb") as f:
+            f.seek(consumed_offset)
+            new_content = f.read().decode("utf-8")
+        # The remainder must contain the full reconstructed line_2 (partial + rest)
+        # exactly once -- not just the rest_2 suffix.
+        assert new_content == partial_2 + rest_2
+
+    # No false mid-file-corruption warnings about the partial line should fire.
+    assert "Skipped corrupt JSONL line" not in log_output.getvalue()
+    # Phase 1 emitted exactly one event (line_1).
+    assert len(captured) == 1
+    assert json.loads(captured[0])["event_id"] == str(event_1.event_id)
+
+
 # === Discovery Event Rotation Tests ===
 
 
