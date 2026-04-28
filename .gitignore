@@ -267,6 +267,7 @@
 **/.reviewer/outputs/
 **/.reviewer/settings.local.json
 **/.reviewer/.stop_hook_consecutive_blocks
+**/.reviewer/conversation-issues.jsonl
 **/.reviews/
 
 # Stuck agent tracking (stop hook escape valve)
