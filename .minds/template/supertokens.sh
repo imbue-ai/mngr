@@ -30,14 +30,3 @@ export GOOGLE_CLIENT_SECRET=
 # providers configured on the SuperTokens core itself.
 export GITHUB_CLIENT_ID=
 export GITHUB_CLIENT_SECRET=
-
-# Comma-separated list of email-domain suffixes (case-insensitive) whose
-# accounts are allowed to use "paid" remote-service-connector features:
-# leasing pool hosts (`/hosts/*`) and creating/managing LiteLLM virtual keys
-# (`/keys/*`). Non-matching accounts get HTTP 403 from those routes. Cloudflare
-# forwarding (`/tunnels/*`) is intentionally NOT gated by this -- any email-
-# verified account can still create tunnels and forward services. Leaving
-# this unset (or empty) disables paid features entirely; every match is by
-# `email.lower().endswith(suffix.lower())` so include the leading `@` if you
-# want to require an exact domain (e.g. `@imbue.com,@example.org,bob@gmail.com`).
-export PAID_ACCOUNT_SUFFIXES=

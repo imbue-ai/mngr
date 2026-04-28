@@ -57,6 +57,9 @@ This creates/updates Modal secrets named `<service>-<env>`, e.g. `cloudflare-pro
 - `AUTH_WEBSITE_DOMAIN` (optional): Public base URL embedded in password-reset and email-verification links. Must match the URL Modal assigns to the deployed function. If unset, the app derives `https://{workspace}--remote-service-connector-<env>-fastapi-app.modal.run` (using the hardcoded default workspace in `app.py`), which is only correct for that specific Modal workspace -- set this explicitly for every deploy.
 - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (optional): override Google OAuth client credentials. Leave blank to inherit from the SuperTokens core's dashboard.
 - `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` (optional): override GitHub OAuth client credentials. Leave blank to inherit from the SuperTokens core's dashboard.
+
+**paid-accounts.sh** holds the paid-feature email allowlist (kept as its own Modal secret so the allowlist can be rotated without touching SuperTokens / OAuth credentials):
+
 - `PAID_ACCOUNT_SUFFIXES` (optional): comma-separated list of email-suffix matches that gate the "paid" routes -- pool host leases (`/hosts/*`) and LiteLLM virtual keys (`/keys/*`). When set, only accounts whose verified SuperTokens email ends with one of these suffixes can use those routes; everyone else gets 403. Cloudflare forwarding (`/tunnels/*`) is intentionally NOT gated by this -- any email-verified account can still create tunnels and forward services. When unset (or empty), the paid routes are disabled for everyone. Match is case-insensitive and uses `endswith`, so include the leading `@` when you want to require an exact domain (e.g. `@imbue.com,@example.org,bob@gmail.com`).
 
 ### 2. Deploy the Modal app
