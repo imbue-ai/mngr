@@ -67,15 +67,17 @@ def _unexpected_warning_sink(message: Any) -> None:
     _unexpected_warnings.append(text)
 
 
-# Markers whose tests are auto-opted-out of the warning check. Two kinds are
-# included: (a) external-resource markers (docker, docker_sdk, tmux, modal)
-# whose tests legitimately produce a high noise of operational warnings
+# TEMPORARY: Markers whose tests are unconditionally opted out of the warning
+# check. The bulk auto-opt-out is a pragmatic shortcut for landing the
+# warning-detection fixture without first auditing every test under these
+# markers; it is NOT a final design decision. Each test in this set should be
+# examined individually -- many of them legitimately emit operational warnings
 # (Docker daemon errors, paramiko reconnects, modal sandbox noise, tmux server
-# lifecycle messages); and (b) higher-tier test markers (acceptance, release)
-# that broadly tend to exercise external systems and where forcing a per-test
-# allow_warnings marker would be impractical. Auto-opt-out preserves the
-# warning check for the vast majority of unit/integration tests without
-# forcing every integration test to carry an explicit allow_warnings marker.
+# lifecycle, etc.) and should be migrated to a tight
+# `@pytest.mark.allow_warnings(match=...)`; tests that emit nothing should
+# simply lose the auto-opt-out so the fixture catches future regressions.
+# Once that audit is complete this set should shrink (ideally to empty) and
+# this comment can go away.
 _AUTO_ALLOW_WARNINGS_MARKERS: frozenset[str] = frozenset(
     {"docker", "docker_sdk", "tmux", "modal", "acceptance", "release"}
 )
