@@ -1,10 +1,9 @@
 """Static metadata for the built-in CLI commands that ``imbue.mngr.main`` loads
 lazily.
 
-Lives in the ``utils`` layer so consumers below ``main`` (e.g.
-``imbue.mngr.config.completion_writer``) can read the alias mapping without
-violating the import-linter layer contract. ``main`` owns the actual lazy
-resolution machinery; this module is pure data.
+Pure data: ``main`` owns the actual lazy resolution machinery. The module
+lives in the ``utils`` layer so that anything below ``main`` is free to
+import it without violating the import-linter layer contract.
 """
 
 from pydantic import Field
