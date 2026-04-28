@@ -2333,7 +2333,12 @@ class Host(BaseHost, OnlineHostInterface):
         env_vars["LLM_USER_PATH"] = str(agent_state_dir / "llm_data")
 
         # 2. Add programmatic defaults
-        env_vars["GIT_BASE_BRANCH"] = (options.git.base_branch if options.git else None) or ""
+        base_branch = (options.git.base_branch if options.git else None) or ""
+        env_vars["MNGR_GIT_BASE_BRANCH"] = base_branch
+        # Also export the code-guardian-namespaced form so the plugin's stop hook
+        # picks up the per-agent base branch without needing a per-worktree
+        # .reviewer/settings.local.json. See https://github.com/imbue-ai/code-guardian
+        env_vars["CODE_GUARDIAN_STOP_HOOK__BASE_BRANCH"] = base_branch
 
         # 3. Load from env_files
         for env_file in options.environment.env_files:
