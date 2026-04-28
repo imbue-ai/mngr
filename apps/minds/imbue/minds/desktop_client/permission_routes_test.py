@@ -137,7 +137,7 @@ def _build_authenticated_client(
         http_client=None,
         paths=paths,
         request_inbox=inbox,
-        permission_handler=handler,
+        latchkey_permission_handler=handler,
     )
     client = TestClient(app, base_url="http://localhost")
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())

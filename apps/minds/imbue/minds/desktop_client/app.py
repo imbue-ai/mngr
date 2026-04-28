@@ -1325,7 +1325,9 @@ def _handle_requests_panel(
 
     cards = []
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-    permission_handler: LatchkeyPermissionGrantHandler | None = request.app.state.permission_handler
+    latchkey_permission_handler: LatchkeyPermissionGrantHandler | None = (
+        request.app.state.latchkey_permission_handler
+    )
     for req in pending:
         if isinstance(req, SharingRequestEvent):
             kind_label = "sharing"
@@ -1333,8 +1335,8 @@ def _handle_requests_panel(
         elif isinstance(req, LatchkeyPermissionRequestEvent):
             kind_label = "permission"
             service_name = (
-                permission_handler.display_name_for_event(req)
-                if permission_handler is not None
+                latchkey_permission_handler.display_name_for_event(req)
+                if latchkey_permission_handler is not None
                 else req.service_name
             )
         else:
@@ -1453,7 +1455,7 @@ def _handle_request_page(
         return HTMLResponse(content="<p>Request not found</p>", status_code=404)
 
     if isinstance(req_event, LatchkeyPermissionRequestEvent):
-        handler: LatchkeyPermissionGrantHandler | None = request.app.state.permission_handler
+        handler: LatchkeyPermissionGrantHandler | None = request.app.state.latchkey_permission_handler
         if handler is None:
             return HTMLResponse(
                 content="<p>Latchkey permission handler not configured</p>",
@@ -1693,7 +1695,7 @@ async def _handle_permission_grant(
         return _json_error("Request not found", status_code=404)
 
     if isinstance(req_event, LatchkeyPermissionRequestEvent):
-        handler: LatchkeyPermissionGrantHandler | None = request.app.state.permission_handler
+        handler: LatchkeyPermissionGrantHandler | None = request.app.state.latchkey_permission_handler
         if handler is None:
             return _json_error("Latchkey permission handler not configured", status_code=500)
         return await handler.apply_grant_request(request, req_event)
@@ -1720,7 +1722,7 @@ async def _handle_permission_deny(
         return _json_error("Request not found", status_code=404)
 
     if isinstance(req_event, LatchkeyPermissionRequestEvent):
-        handler: LatchkeyPermissionGrantHandler | None = request.app.state.permission_handler
+        handler: LatchkeyPermissionGrantHandler | None = request.app.state.latchkey_permission_handler
         if handler is None:
             return _json_error("Latchkey permission handler not configured", status_code=500)
         return await handler.apply_deny_request(request, req_event)
@@ -1901,7 +1903,7 @@ def create_desktop_client(
     session_store: MultiAccountSessionStore | None = None,
     auth_backend_client: AuthBackendClient | None = None,
     request_inbox: RequestInbox | None = None,
-    permission_handler: LatchkeyPermissionGrantHandler | None = None,
+    latchkey_permission_handler: LatchkeyPermissionGrantHandler | None = None,
     server_port: int = 0,
     output_format: OutputFormat | None = None,
 ) -> FastAPI:
@@ -1964,7 +1966,7 @@ def create_desktop_client(
     app.state.auth_backend_client = auth_backend_client
     app.state.minds_config = minds_config
     app.state.request_inbox = request_inbox
-    app.state.permission_handler = permission_handler
+    app.state.latchkey_permission_handler = latchkey_permission_handler
     app.state.auth_server_port = server_port
     app.state.auth_output_format = output_format or OutputFormat.JSONL
     # Populated with the running loop by _managed_lifespan on startup. Defined
