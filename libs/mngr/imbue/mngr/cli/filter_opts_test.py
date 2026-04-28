@@ -81,12 +81,12 @@ def test_host_label_kv() -> None:
 
 
 def test_label_without_equals_raises() -> None:
-    with pytest.raises(click.BadParameter):
+    with pytest.raises(click.BadParameter, match="Label must be in KEY=VALUE format"):
         build_agent_filter_cel(AgentFilterCliOptions(label=("noequals",)))
 
 
-def test_host_label_without_equals_raises() -> None:
-    with pytest.raises(click.BadParameter):
+def test_host_label_without_equals_raises_with_host_label_wording() -> None:
+    with pytest.raises(click.BadParameter, match="Host label must be in KEY=VALUE format"):
         build_agent_filter_cel(AgentFilterCliOptions(host_label=("noequals",)))
 
 

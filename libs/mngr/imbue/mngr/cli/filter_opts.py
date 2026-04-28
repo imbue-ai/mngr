@@ -117,12 +117,12 @@ def add_agent_filter_options(command: TDecorated) -> TDecorated:
     return command
 
 
-def _key_value_filter(specs: tuple[str, ...], cel_prefix: str, flag_name: str) -> str:
+def _key_value_filter(specs: tuple[str, ...], cel_prefix: str, flag_name: str, error_noun: str) -> str:
     """Build an OR-joined CEL fragment from KEY=VALUE specs against ``cel_prefix.KEY``."""
     parts: list[str] = []
     for spec in specs:
         if "=" not in spec:
-            raise click.BadParameter(f"Label must be in KEY=VALUE format, got: {spec}", param_hint=flag_name)
+            raise click.BadParameter(f"{error_noun} must be in KEY=VALUE format, got: {spec}", param_hint=flag_name)
         key, value = spec.split("=", 1)
         parts.append(f'{cel_prefix}.{key} == "{value}"')
     return " || ".join(parts)
@@ -158,9 +158,9 @@ def build_agent_filter_cel(
     if opts.project:
         include.append(" || ".join(f'labels.project == "{p}"' for p in opts.project))
     if opts.label:
-        include.append(_key_value_filter(opts.label, "labels", "--label"))
+        include.append(_key_value_filter(opts.label, "labels", "--label", "Label"))
     if opts.host_label:
-        include.append(_key_value_filter(opts.host_label, "host.tags", "--host-label"))
+        include.append(_key_value_filter(opts.host_label, "host.tags", "--host-label", "Host label"))
 
     include_tuple = tuple(include)
     exclude_tuple = tuple(exclude)

@@ -128,6 +128,10 @@ class ListCliOptions(AgentFilterCliOptions, CommonCliOptions):
 
 @click.command(name="list")
 @add_agent_filter_options
+# --provider and --stdin are intentionally NOT in add_agent_filter_options:
+# --provider selects which providers to query (a fan-out control passed
+# through to api_list_agents as provider_names, not a CEL filter on results),
+# and --stdin reads refs from stdin which only makes sense for batch list.
 @optgroup.option(
     "--provider",
     multiple=True,
