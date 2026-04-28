@@ -404,18 +404,25 @@ def get_relative_link(from_command: str, to_name: str) -> str:
 
 
 def format_see_also_section(command_name: str, metadata: CommandHelpMetadata) -> str:
-    """Format the See Also section from metadata with markdown links."""
+    """Format the See Also section from metadata with markdown links.
+
+    A ``ref_name`` of the form ``"list#filtering"`` links to ``list.md#filtering``;
+    the bare command name is used for category lookup and link text.
+    """
     if not metadata.see_also:
         return ""
 
     lines = ["", "## See Also", ""]
     for ref_name, description in metadata.see_also:
-        link = get_relative_link(command_name, ref_name)
+        bare_name, _, anchor = ref_name.partition("#")
+        link = get_relative_link(command_name, bare_name)
+        if anchor:
+            link = f"{link}#{anchor}"
         # Use "mngr <name>" for commands, "mngr help <name>" for topics
-        if get_command_category(ref_name) is not None:
-            link_text = f"mngr {ref_name}"
+        if get_command_category(bare_name) is not None:
+            link_text = f"mngr {bare_name}"
         else:
-            link_text = f"mngr help {ref_name}"
+            link_text = f"mngr help {bare_name}"
         lines.append(f"- [{link_text}]({link}) - {description}")
 
     lines.append("")

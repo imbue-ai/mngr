@@ -65,6 +65,8 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
 
     Binds a TCP socket on the host:port supplied via environment variables
     (matching the real binary's contract) and sleeps until terminated.
+    Also accepts ``ensure-browser`` as an immediate no-op exit, since the
+    gateway manager fires that alongside each gateway spawn.
     """
     script = tmp_path / "latchkey"
     # signal.pause() blocks indefinitely until a signal arrives, letting the
@@ -76,9 +78,19 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
     # fill it up (we never explicitly ``accept`` here -- the kernel ACKs the
     # TCP handshake for queued connections, which is all the liveness probe
     # needs). SIGTERM triggers a clean exit; signal.pause blocks indefinitely.
+    #
+    # The ``ensure-browser`` short-circuit matters for leak detection: the
+    # manager fires ``latchkey ensure-browser`` detached on first gateway
+    # spawn and intentionally does not reap it. If that subprocess is still
+    # in its Python startup when the session-level leak check scans under
+    # CI load, it gets flagged as a leak and attributed to some unrelated
+    # test. Exiting before any import keeps the process window tiny.
     script.write_text(
         "#!/usr/bin/env python3\n"
-        "import os, socket, signal, sys\n"
+        "import sys\n"
+        'if sys.argv[1] == "ensure-browser":\n'
+        "    sys.exit(0)\n"
+        "import os, socket, signal\n"
         'assert sys.argv[1] == "gateway"\n'
         "host = os.environ['LATCHKEY_GATEWAY_LISTEN_HOST']\n"
         "port = int(os.environ['LATCHKEY_GATEWAY_LISTEN_PORT'])\n"

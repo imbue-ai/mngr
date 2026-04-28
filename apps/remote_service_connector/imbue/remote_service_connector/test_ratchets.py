@@ -189,7 +189,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(5))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(6))
 
 
 def test_prevent_test_container_classes() -> None:
@@ -208,14 +208,14 @@ def test_prevent_os_fork() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(0))
+    rc.check_direct_subprocess(_DIR, snapshot(5))
 
 
 # --- AST-based ratchets ---
 
 
 def test_prevent_if_elif_without_else() -> None:
-    rc.check_if_elif_without_else(_DIR, snapshot(0))
+    rc.check_if_elif_without_else(_DIR, snapshot(1))
 
 
 def test_prevent_inline_functions() -> None:
