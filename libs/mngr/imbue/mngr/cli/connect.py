@@ -468,7 +468,7 @@ reference; the same flags work identically here.""",
         ("Connect to an agent by name", "mngr connect my-agent"),
         ("Connect without auto-starting if stopped", "mngr connect my-agent --no-start"),
         ("Show interactive agent selector", "mngr connect"),
-        ("Selector limited to running agents on a project", "mngr connect --running --project mngr"),
+        ("Selector limited to running agents on a project", "mngr connect --running --project my-project"),
     ),
     see_also=(
         ("create", "Create and connect to a new agent"),

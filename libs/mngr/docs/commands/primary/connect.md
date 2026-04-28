@@ -116,5 +116,5 @@ $ mngr connect
 **Selector limited to running agents on a project**
 
 ```bash
-$ mngr connect --running --project mngr
+$ mngr connect --running --project my-project
 ```
