@@ -356,7 +356,9 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
 
     # --project X: alias for --include 'labels.project == "X"'
     # Multiple values are OR'd together. The literal "." resolves to the current project name.
-    project_clause = build_project_filter_clause(opts.project, mngr_ctx.concurrency_group)
+    project_clause = build_project_filter_clause(
+        opts.project, mngr_ctx.concurrency_group, project_root=mngr_ctx.project_root
+    )
     if project_clause is not None:
         include_filters.append(project_clause)
 

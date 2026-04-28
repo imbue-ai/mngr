@@ -49,7 +49,9 @@ def kanpan(ctx: click.Context, **kwargs: Any) -> None:
 
     # Build include/exclude filter tuples from CLI options
     include_filters = list(opts.include)
-    project_clause = build_project_filter_clause(opts.project, mngr_ctx.concurrency_group)
+    project_clause = build_project_filter_clause(
+        opts.project, mngr_ctx.concurrency_group, project_root=mngr_ctx.project_root
+    )
     if project_clause is not None:
         include_filters.append(project_clause)
     exclude_filters = list(opts.exclude)

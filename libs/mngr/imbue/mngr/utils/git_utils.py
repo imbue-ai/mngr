@@ -79,35 +79,50 @@ def get_current_git_branch(path: Path | None, cg: ConcurrencyGroup) -> str | Non
         return None
 
 
-def resolve_project_filter_values(values: tuple[str, ...], cg: ConcurrencyGroup) -> tuple[str, ...]:
+def resolve_project_filter_values(
+    values: tuple[str, ...],
+    cg: ConcurrencyGroup,
+    *,
+    project_root: Path | None = None,
+) -> tuple[str, ...]:
     """Resolve --project filter values, expanding "." to the current project name.
 
-    The current project is derived from cwd's git remote origin (or folder name as fallback).
-    Other values are returned unchanged. The current project is derived at most once.
+    The current project is derived from ``project_root`` when provided (typically
+    ``MngrContext.project_root``, the git worktree root), falling back to the
+    current working directory when not. This is important because running from a
+    subdirectory would otherwise miss the git remote and yield the subdirectory's
+    name. Other values are returned unchanged. The current project is derived at
+    most once.
     """
     current_project: str | None = None
     resolved: list[str] = []
     for value in values:
         if value == ".":
             if current_project is None:
-                current_project = derive_project_name_from_path(Path.cwd(), cg)
+                current_project = derive_project_name_from_path(project_root or Path.cwd(), cg)
             resolved.append(current_project)
         else:
             resolved.append(value)
     return tuple(resolved)
 
 
-def build_project_filter_clause(values: tuple[str, ...], cg: ConcurrencyGroup) -> str | None:
+def build_project_filter_clause(
+    values: tuple[str, ...],
+    cg: ConcurrencyGroup,
+    *,
+    project_root: Path | None = None,
+) -> str | None:
     """Build a CEL include clause for filtering agents by project label.
 
     Returns ``None`` when ``values`` is empty, so callers can simply skip the
     filter append. Otherwise expands "." sentinels via
     ``resolve_project_filter_values`` and returns an OR-joined CEL clause like
-    ``labels.project == "foo" || labels.project == "bar"``.
+    ``labels.project == "foo" || labels.project == "bar"``. ``project_root``
+    is forwarded to ``resolve_project_filter_values`` (see its docstring).
     """
     if not values:
         return None
-    project_names = resolve_project_filter_values(values, cg)
+    project_names = resolve_project_filter_values(values, cg, project_root=project_root)
     return " || ".join(f'labels.project == "{p}"' for p in project_names)
 
 

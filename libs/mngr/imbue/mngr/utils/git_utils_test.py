@@ -100,6 +100,29 @@ def test_resolve_project_filter_values_handles_empty(cg: ConcurrencyGroup) -> No
     assert resolve_project_filter_values((), cg) == ()
 
 
+def test_resolve_project_filter_values_uses_project_root_over_cwd(
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When project_root is provided, '.' resolves from there, not the (possibly nested) cwd."""
+    project_dir = tmp_path / "my-project"
+    project_dir.mkdir()
+    nested = project_dir / "nested" / "subdir"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=project_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/remote-project.git"],
+        cwd=project_dir,
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.chdir(nested)
+
+    # Without project_root, the cwd-based derivation cannot find the remote and falls back to the
+    # subdir name -- a wrong answer for "the current project". With project_root pointing at the
+    # worktree root, the remote is found and the correct project name is returned.
+    assert resolve_project_filter_values((".",), cg, project_root=project_dir) == ("remote-project",)
+
+
 def test_build_project_filter_clause_returns_none_for_empty(cg: ConcurrencyGroup) -> None:
     """Empty input returns None so callers can skip appending a filter."""
     assert build_project_filter_clause((), cg) is None
