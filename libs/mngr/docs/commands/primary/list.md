@@ -110,7 +110,14 @@ All agent fields from the "Available Fields" section can be used in filter expre
 
 ## Available Fields
 
-**Agent fields** (same syntax for `--fields` and CEL filters):
+The fields below use the same names across the three places they can appear:
+- CEL expressions for `--include`/`--exclude` (filtering)
+- CEL expressions for `--sort` (ordering)
+- `--fields` and `--format` template strings (selecting and formatting displayed data)
+
+Each subsection notes where its fields are available; agent and host fields work in all three contexts, while computed fields are only available in the CEL contexts.
+
+**Agent fields:**
 - `name` - Agent name
 - `id` - Agent ID
 - `type` - Agent type (claude, codex, etc.)
@@ -133,10 +140,15 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `labels.$KEY` - Specific label value (e.g., `labels.project`)
 - `plugin.$PLUGIN_NAME.*` - Plugin-defined fields (e.g., `plugin.chat_history.messages`)
 
-**Host fields** (dot notation for both `--fields` and CEL filters):
+**Computed fields** (derived from other fields, available in CEL filters and `--sort`):
+- `age` - Seconds since `create_time`
+- `runtime` - Alias for `runtime_seconds`
+- `idle` - Seconds since the most recent activity across `user_activity_time`, `agent_activity_time`, and `host.ssh_activity_time` (only present when at least one is set)
+
+**Host fields** (dot notation):
 - `host.name` - Host name
 - `host.id` - Host ID
-- `host.provider_name` - Host provider (local, docker, modal, etc.) (in CEL filters, use `host.provider`)
+- `host.provider` - Host provider (local, docker, modal, etc.); also accessible as `host.provider_name`
 - `host.state` - Current host state (RUNNING, STOPPED, BUILDING, etc.)
 - `host.image` - Host image (Docker image name, Modal image ID, etc.)
 - `host.tags` - Host labels (metadata key-value pairs)

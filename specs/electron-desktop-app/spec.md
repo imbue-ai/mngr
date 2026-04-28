@@ -36,11 +36,11 @@ The goal of this project is to package Minds as a standalone desktop app that a 
 |                                                  |
 |  FastAPI desktop client                          |
 |  Auth (one-time code, signed cookies)            |
-|  Agent discovery (mngr list, mngr events)          |
+|  Agent discovery (mngr list, mngr event)           |
 |  HTTP/WebSocket proxying to agents               |
 +--------------------------------------------------+
         |
-        | subprocess: mngr list, mngr events, mngr create, git clone, ...
+        | subprocess: mngr list, mngr event, mngr create, git clone, ...
         v
 +--------------------------------------------------+
 |  Bundled Binaries                                |

@@ -56,7 +56,7 @@ SECONDARY_COMMANDS = {
     "chat",
     "cleanup",
     "config",
-    "events",
+    "event",
     "file",
     "gc",
     "help",

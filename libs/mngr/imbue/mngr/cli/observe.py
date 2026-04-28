@@ -127,7 +127,7 @@ Press Ctrl+C to stop.""",
     ),
     see_also=(
         ("list", "List available agents"),
-        ("events", "View events from an agent or host"),
+        ("event", "View events from an agent or host"),
     ),
 ).register()
 

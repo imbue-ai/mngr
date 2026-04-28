@@ -209,7 +209,7 @@ async def _managed_lifespan(
             timeout=_PROXY_TIMEOUT_SECONDS,
         )
     inner_app.state.ssh_http_clients: dict[str, httpx.AsyncClient] = {}
-    # Captured here so background callbacks (e.g. the mngr events refresh
+    # Captured here so background callbacks (e.g. the mngr event refresh
     # dispatch) can schedule async work on the server's running loop via
     # asyncio.run_coroutine_threadsafe.
     inner_app.state.event_loop = asyncio.get_running_loop()
@@ -2156,7 +2156,7 @@ def create_desktop_client(
 
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception) -> Response:
-        logger.error("Unhandled exception on {} {}: {}", request.method, request.url.path, exc, exc_info=exc)
+        logger.opt(exception=exc).error("Unhandled exception on {} {}", request.method, request.url.path)
         return Response(status_code=500, content=f"Internal Server Error: {exc}")
 
     @app.middleware("http")

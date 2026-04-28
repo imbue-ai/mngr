@@ -156,7 +156,7 @@ The Electron app shuts down cleanly via this chain:
 - ASGI lifespan shutdown hook runs `stream_manager.stop()` (terminates mngr observe/events subprocesses)
 - Uvicorn re-raises SIGTERM, process exits with code 143
 
-If this chain breaks (orphaned `mngr observe`/`mngr events` processes appear), something is wrong -- investigate, don't just kill the orphans.
+If this chain breaks (orphaned `mngr observe`/`mngr event` processes appear), something is wrong -- investigate, don't just kill the orphans.
 
 ### Env vars
 
