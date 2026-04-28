@@ -498,27 +498,62 @@ def resolve_destroyed_result(target_name: str, location: AgentLocation) -> str:
     return f"{_DESTROYED_PREFIX}{last_text}"
 
 
-def wait_for_subagent(target_name: str, transcript_watermark: int = 0) -> str:
+def _read_watermark_file(path: Path) -> int:
+    """Read an integer watermark from a sidefile; return 0 on missing/invalid."""
+    try:
+        content = path.read_text().strip()
+    except FileNotFoundError:
+        return 0
+    except OSError as e:
+        logger.warning("Failed to read watermark file {}: {}", path, e)
+        return 0
+    try:
+        return int(content)
+    except ValueError:
+        logger.warning("Invalid watermark file content {!r} in {}; ignoring", content, path)
+        return 0
+
+
+def _write_watermark_file(path: Path, value: int) -> None:
+    """Write an integer watermark to a sidefile (best-effort)."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(value))
+    except OSError as e:
+        logger.warning("Failed to write watermark file {}: {}", path, e)
+
+
+def _delete_watermark_file(path: Path) -> None:
+    """Delete a watermark sidefile (best-effort, no-op if absent)."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        logger.warning("Failed to delete watermark file {}: {}", path, e)
+
+
+def wait_for_subagent(target_name: str, watermark_file: Path | None = None) -> str:
     """Block until the target mngr agent reaches end_turn, requests permission, or is destroyed.
 
-    ``transcript_watermark`` (default 0) suppresses re-firing of a
-    permission dialog already surfaced to the human. The caller sets this
-    to the transcript byte-size at the time of the previous
-    PERMISSION_REQUIRED return; subsequent flag transitions are ignored
-    until the target's transcript file has grown past that mark.
-
-    On PERMISSION_REQUIRED return, the result string includes
-    ``AT_BYTES:<n>`` so the caller can pass the same watermark on
-    re-entry without otherwise tracking state.
+    ``watermark_file`` (optional) is a sidefile owned entirely by this
+    module. On startup, it's read for the initial transcript watermark
+    that suppresses re-firing of a previously-surfaced permission
+    dialog. On PERMISSION_REQUIRED return it's overwritten with the
+    current transcript byte-size. On terminal return (END_TURN) it's
+    deleted. Callers (the wait-script) just point this at a stable
+    per-tool_use_id path; they don't need to interpret or carry state.
     """
     deadline = time.monotonic() + _INITIAL_TARGET_WAIT_SECONDS
     location = _wait_for_target(target_name, deadline)
+
+    initial_watermark = _read_watermark_file(watermark_file) if watermark_file is not None else 0
 
     runtime = _WaitRuntime(
         target_name=target_name,
         location=location,
         permissions_previously_waiting=location.permissions_waiting_file.exists(),
-        permission_gate_until_transcript_past=transcript_watermark,
+        permission_gate_until_transcript_past=initial_watermark,
     )
     max_chars = _get_result_max_chars()
 
@@ -539,7 +574,9 @@ def wait_for_subagent(target_name: str, transcript_watermark: int = 0) -> str:
 
         if _check_permissions_newly_waiting(runtime):
             current_bytes = _current_transcript_size(runtime)
-            return f"PERMISSION_REQUIRED:{target_name} AT_BYTES:{current_bytes}"
+            if watermark_file is not None:
+                _write_watermark_file(watermark_file, current_bytes)
+            return f"PERMISSION_REQUIRED:{target_name}"
 
         if (
             runtime.pending_end_turn_text is not None
@@ -547,6 +584,8 @@ def wait_for_subagent(target_name: str, transcript_watermark: int = 0) -> str:
             and now >= runtime.pending_end_turn_deadline
         ):
             truncated = truncate_result_text(runtime.pending_end_turn_text, max_chars)
+            if watermark_file is not None:
+                _delete_watermark_file(watermark_file)
             return f"END_TURN:{truncated}"
 
         if now - runtime.last_presence_check_at >= _TARGET_PRESENCE_RECHECK_SECONDS:
@@ -554,35 +593,30 @@ def wait_for_subagent(target_name: str, transcript_watermark: int = 0) -> str:
             if _has_target_disappeared_past_grace(runtime, now):
                 destroyed_text = resolve_destroyed_result(target_name, location)
                 truncated = truncate_result_text(destroyed_text, max_chars)
+                if watermark_file is not None:
+                    _delete_watermark_file(watermark_file)
                 return f"END_TURN:{truncated}"
 
         time.sleep(_POLL_INTERVAL_SECONDS)
 
 
-_USAGE: Final[str] = (
-    "Usage: python -m imbue.mngr_subagent_proxy.subagent_wait "
-    "<target_name> [--require-transcript-advance-past <bytes>]"
-)
+_USAGE: Final[str] = "Usage: python -m imbue.mngr_subagent_proxy.subagent_wait <target_name> [--watermark-file <path>]"
 
 
-def _parse_args(argv: list[str]) -> tuple[str, int]:
-    """Parse the script's CLI args. Returns (target_name, transcript_watermark)."""
+def _parse_args(argv: list[str]) -> tuple[str, Path | None]:
+    """Parse the script's CLI args. Returns (target_name, watermark_file)."""
     if len(argv) == 2:
-        return argv[1], 0
-    if len(argv) == 4 and argv[2] == "--require-transcript-advance-past":
-        try:
-            return argv[1], int(argv[3])
-        except ValueError:
-            logger.error("Invalid byte count for --require-transcript-advance-past: {!r}", argv[3])
-            sys.exit(2)
+        return argv[1], None
+    if len(argv) == 4 and argv[2] == "--watermark-file":
+        return argv[1], Path(argv[3])
     logger.error(_USAGE)
     sys.exit(2)
 
 
 def main() -> None:
-    target_name, watermark = _parse_args(sys.argv)
+    target_name, watermark_file = _parse_args(sys.argv)
     try:
-        result = wait_for_subagent(target_name, transcript_watermark=watermark)
+        result = wait_for_subagent(target_name, watermark_file=watermark_file)
     except TargetNotFoundError as e:
         logger.error("Target not found: {}", e)
         sys.exit(2)

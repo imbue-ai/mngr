@@ -138,6 +138,11 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
         'PROMPT_FILE="$STATE_DIR/subagent_prompts/$TID.md"\n'
         'RESULT_FILE="$STATE_DIR/subagent_results/$TID.txt"\n'
         'MAP_FILE="$STATE_DIR/subagent_map/$TID.json"\n'
+        # Watermark sidefile owned entirely by subagent_wait. It writes
+        # the transcript byte-size on PERMISSION_REQUIRED and reads it
+        # on the next invocation to suppress re-firing the same dialog.
+        # Haiku never sees it -- the wait-script just passes its path.
+        'WATERMARK_FILE="$STATE_DIR/proxy_commands/watermark-$TID"\n'
         "\n"
         # Idempotent re-entry guard. PostToolUse cleans subagent_prompts/
         # and subagent_map/, so absence of either is the signal that
@@ -195,19 +200,13 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
         "    exit 0\n"
         "fi\n"
         "\n"
-        # --require-transcript-advance-past <bytes>: pass through to
-        # subagent_wait so it ignores stale permission_waiting flag
-        # transitions until the target's transcript has actually advanced
-        # past the byte mark. Used by Haiku on re-entry after surfacing
-        # the previous PERMISSION_REQUIRED via fake_tool, so the same
-        # pending dialog doesn't re-fire forever.
-        'WAIT_ARGS=("$TARGET_NAME")\n'
-        'if [ "${1:-}" = "--require-transcript-advance-past" ] && [ -n "${2:-}" ]; then\n'
-        '    WAIT_ARGS=("$TARGET_NAME" "--require-transcript-advance-past" "$2")\n'
-        "fi\n"
-        "\n"
         'mkdir -p "$(dirname "$RESULT_FILE")"\n'
-        'output=$(uv run python -m imbue.mngr_subagent_proxy.subagent_wait "${WAIT_ARGS[@]}")\n'
+        # Watermark sidefile is consulted by subagent_wait on every
+        # invocation. Haiku just re-runs the same Bash command on
+        # NEED_PERMISSION; the script's idempotence + watermark file
+        # together prevent re-firing on the same pending dialog.
+        "output=$(uv run python -m imbue.mngr_subagent_proxy.subagent_wait "
+        '"$TARGET_NAME" --watermark-file "$WATERMARK_FILE")\n'
         'case "$output" in\n'
         "    END_TURN:*)\n"
         '        printf \'%s\' "${output#END_TURN:}" > "$RESULT_FILE"\n'
@@ -375,28 +374,21 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
             f'Bash(command="bash {script_file}", timeout=1800000). '
             f"\n\n"
             f"Examine the Bash stdout:\n"
-            f"- If it contains a line of the form 'NEED_PERMISSION: <name> AT_BYTES: <N>': "
+            f"- If it contains a line of the form 'NEED_PERMISSION: <name>': "
             f"run Bash(command=\"fake_tool 'subagent <name> waiting; run in another terminal: mngr connect <name>'\", "
-            f"timeout=60000) ONCE to surface the message, then re-enter the wait by running "
-            f'Bash(command="bash {script_file} --require-transcript-advance-past <N>", timeout=1800000). '
-            f"Use the EXACT integer <N> from the NEED_PERMISSION line. The watermark stops the same "
-            f"pending dialog from re-firing; if a genuinely new permission event occurs after the "
-            f"agent has progressed, the wait will return another NEED_PERMISSION line with a higher "
-            f"AT_BYTES value -- in that case repeat the same fake_tool + re-enter pattern with the "
-            f"NEW <N>.\n"
+            f"timeout=60000), then re-run the EXACT same `bash {script_file}` command above. "
+            f"Repeat indefinitely on each NEED_PERMISSION; the script handles deduplication.\n"
             f"- If it contains a line 'MNGR_PROXY_END_OF_OUTPUT' as the last line: "
             f"reply with EXACTLY the stdout content with that final 'MNGR_PROXY_END_OF_OUTPUT' line removed, "
             f"and nothing else (no preamble, no commentary, no markdown wrappers). "
             f"Then end your turn.\n"
-            f"- If Bash times out / is killed (stderr mentions 'timeout' or 'killed', no "
-            f"MNGR_PROXY_END_OF_OUTPUT line, no NEED_PERMISSION line): re-run the same Bash "
-            f"command above (preserving any --require-transcript-advance-past <N> arg if one was "
-            f"in use). The script and the Python wait module are idempotent -- re-running just "
-            f"continues waiting. The 5-attempt cap applies ONLY to this timeout-retry branch, NOT "
-            f"to NEED_PERMISSION re-entry; do not stop on NEED_PERMISSION.\n\n"
-            f"Do NOT use shell variables, ask questions, or take any other action -- "
-            f"the path above is your only command. The stdout content (minus the sentinel) "
-            f"is the real subagent's output and is what the user is waiting for."
+            f"- If Bash times out or is killed (no MNGR_PROXY_END_OF_OUTPUT, no NEED_PERMISSION): "
+            f"re-run the EXACT same `bash {script_file}` command above. "
+            f"The 5-attempt cap applies ONLY to this timeout branch, NOT to NEED_PERMISSION.\n\n"
+            f"Do NOT use shell variables, ask questions, parse numbers from stdout, or take any "
+            f"other action -- you only ever run the exact bash command above (or the fake_tool "
+            f"call described). The stdout content (minus the sentinel) is the real subagent's "
+            f"output and is what the user is waiting for."
         )
 
     # systemMessage surfaces the spawned subagent's name into the parent

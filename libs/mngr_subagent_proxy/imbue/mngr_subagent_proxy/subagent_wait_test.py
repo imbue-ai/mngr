@@ -14,6 +14,9 @@ from imbue.mngr_subagent_proxy.subagent_wait import AgentLocation
 from imbue.mngr_subagent_proxy.subagent_wait import TailState
 from imbue.mngr_subagent_proxy.subagent_wait import _WaitRuntime
 from imbue.mngr_subagent_proxy.subagent_wait import _check_permissions_newly_waiting
+from imbue.mngr_subagent_proxy.subagent_wait import _delete_watermark_file
+from imbue.mngr_subagent_proxy.subagent_wait import _read_watermark_file
+from imbue.mngr_subagent_proxy.subagent_wait import _write_watermark_file
 from imbue.mngr_subagent_proxy.subagent_wait import extract_assistant_text
 from imbue.mngr_subagent_proxy.subagent_wait import is_end_turn_event
 from imbue.mngr_subagent_proxy.subagent_wait import is_real_user_event
@@ -244,6 +247,33 @@ def test_destroyed_fallback_from_preserved_sessions(tmp_path: Path) -> None:
         resolve_destroyed_result(target_name, missing_location)
         == "[ERROR] mngr subagent destroyed before completion: "
     )
+
+
+def test_watermark_sidefile_roundtrip(tmp_path: Path) -> None:
+    """Watermark sidefile read/write/delete helpers handle the sidefile
+    that holds the dedup-watermark between subagent_wait invocations.
+    Haiku never touches this file -- it's owned entirely by the python
+    module so the proxy prompt can stay simple.
+    """
+    path = tmp_path / "nested" / "watermark"
+
+    # Missing file reads as 0 (initial state, no prior PERMISSION_REQUIRED).
+    assert _read_watermark_file(path) == 0
+
+    # Write creates parent dirs and stores an integer round-trippable as text.
+    _write_watermark_file(path, 4242)
+    assert path.is_file()
+    assert _read_watermark_file(path) == 4242
+
+    # Garbage content reads as 0 (defensive: don't crash on corruption).
+    path.write_text("not a number")
+    assert _read_watermark_file(path) == 0
+
+    # Delete is idempotent; second call on a missing file is a no-op.
+    _write_watermark_file(path, 7)
+    _delete_watermark_file(path)
+    assert not path.exists()
+    _delete_watermark_file(path)
 
 
 def test_permission_gate_suppresses_until_transcript_advances(tmp_path: Path) -> None:

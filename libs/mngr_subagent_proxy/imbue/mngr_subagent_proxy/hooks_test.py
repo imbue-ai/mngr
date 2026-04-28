@@ -82,15 +82,16 @@ def test_spawn_rewrites_input(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> 
     # verify-and-fix run produced ~88 confused tool calls when the proxy
     # had no instruction for the timeout case.
     assert "times out" in prompt_text
-    # Permission-retry guidance: NEED_PERMISSION must reference the
-    # transcript-advance watermark so re-entry doesn't re-fire on the
-    # same pending dialog forever.
-    assert "AT_BYTES" in prompt_text
-    assert "--require-transcript-advance-past" in prompt_text
+    # Watermark plumbing must NOT leak into Haiku's prompt; Haiku has
+    # historically been unreliable at parsing/passing numeric state.
+    # The wait-script and python module own deduplication entirely.
+    assert "AT_BYTES" not in prompt_text
+    assert "--require-transcript-advance-past" not in prompt_text
+    assert "--watermark-file" not in prompt_text
     # The 5-attempt cap must be SCOPED to the timeout-retry branch -- a
-    # prior bug (commit 2a7489924) caused Haiku to apply the cap to
-    # NEED_PERMISSION too and bail after 5 permission cycles.
-    assert "ONLY to this timeout-retry branch" in prompt_text
+    # prior bug caused Haiku to apply the cap to NEED_PERMISSION too
+    # and bail after 5 permission cycles.
+    assert "ONLY to this timeout branch" in prompt_text
 
     tid = "toolu_abc12345678"
     prompt_file = state_dir / "subagent_prompts" / f"{tid}.md"
@@ -151,23 +152,22 @@ def test_wait_script_idempotent_prelude_short_circuits_on_post_cleanup() -> None
     assert "exit 0" in guard_block
 
 
-def test_wait_script_passes_through_transcript_watermark() -> None:
-    """The wait-script must pass --require-transcript-advance-past through
-    to subagent_wait when invoked with that flag, so Haiku can re-enter
-    the wait and gate on the previous PERMISSION_REQUIRED watermark.
+def test_wait_script_owns_watermark_file_path() -> None:
+    """The wait-script defines a per-tool_use_id watermark sidefile and
+    passes its path to subagent_wait. Haiku never sees this path or the
+    integer it contains -- the python module owns the dedup state.
     """
     script = spawn_hook.build_wait_script(
-        tool_use_id="toolu_test_advance",
+        tool_use_id="toolu_test_watermark",
         target_name="parent--subagent-foo-test",
         parent_cwd="/tmp/somewhere",
     )
-    # The script reads --require-transcript-advance-past and forwards it
-    # to the python wait module. Both the conditional and the forwarding
-    # form must appear.
-    assert '"${1:-}" = "--require-transcript-advance-past"' in script
-    assert "--require-transcript-advance-past" in script
-    # The wait module is invoked with the constructed arg array.
-    assert 'subagent_wait "${WAIT_ARGS[@]}"' in script
+    # The watermark file path is derived from TID, mirroring the other
+    # per-tool_use_id sidefiles.
+    assert 'WATERMARK_FILE="$STATE_DIR/proxy_commands/watermark-$TID"' in script
+    # The wait module is invoked with the watermark file flag.
+    assert "--watermark-file" in script
+    assert '"$WATERMARK_FILE"' in script
 
 
 def test_wait_script_traps_env_file_cleanup_on_failure() -> None:
