@@ -74,7 +74,7 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | `--type` | text | Which type of agent to run [default: claude] | None |
 | `-w`, `--extra-window` | text | Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names | None |
 | `--label` | text | Agent label KEY=VALUE [repeatable] [experimental] | None |
-| `--project` | text | Project name for the agent (sets the 'project' label; '.' means derived from git remote origin or folder name) [default: .] | `.` |
+| `--project` | text | Project name for the agent (sets the 'project' label; '.' inherits from --from if set, else uses git remote origin, else folder name) [default: .] | `.` |
 
 ## Host Options
 
