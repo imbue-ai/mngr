@@ -130,13 +130,28 @@ def _collect_all_options_from_cli() -> dict[str, set[str]]:
 
     Returns a dict mapping command key (e.g. "create", "config.set") to the set
     of --long option names on that command.
+
+    Uses ``cli.list_commands`` / ``cli.get_command`` rather than iterating
+    ``cli.commands`` directly so that lazy-loaded built-in commands (which are
+    not stored in ``cli.commands`` until resolved) are included.
     """
     result: dict[str, set[str]] = {}
     assert isinstance(cli, click.Group)
-    for name, cmd in cli.commands.items():
+    ctx = click.Context(cli)
+    seen_canonical: set[str] = set()
+    for name in cli.list_commands(ctx):
+        cmd = cli.get_command(ctx, name)
+        if cmd is None:
+            continue
+        canonical = cmd.name or name
+        # Skip alias entries -- only process each canonical command once.
+        if canonical in seen_canonical:
+            continue
+        seen_canonical.add(canonical)
+
         if isinstance(cmd, click.Group) and cmd.commands:
             for sub_name, sub_cmd in cmd.commands.items():
-                key = f"{cmd.name or name}.{sub_name}"
+                key = f"{canonical}.{sub_name}"
                 opts: set[str] = set()
                 for param in sub_cmd.params:
                     if isinstance(param, click.Option):
@@ -153,9 +168,8 @@ def _collect_all_options_from_cli() -> dict[str, set[str]]:
                         if opt.startswith("--"):
                             group_opts.add(opt)
             if group_opts:
-                result[cmd.name or name] = group_opts
+                result[canonical] = group_opts
         else:
-            key = cmd.name or name
             opts = set()
             for param in cmd.params:
                 if isinstance(param, click.Option):
@@ -163,7 +177,7 @@ def _collect_all_options_from_cli() -> dict[str, set[str]]:
                         if opt.startswith("--"):
                             opts.add(opt)
             if opts:
-                result[key] = opts
+                result[canonical] = opts
     return result
 
 
