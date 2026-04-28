@@ -39,7 +39,9 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostDetails
+from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
@@ -53,6 +55,8 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
@@ -369,8 +373,152 @@ def test_agent_details_to_cel_context_computes_idle() -> None:
     assert context["idle"] < 320
 
 
-def test_agent_details_to_cel_context_normalizes_host_provider() -> None:
-    """agent_details_to_cel_context should rename host.provider_name to host.provider."""
+def test_agent_details_to_cel_context_preserves_full_model_structure() -> None:
+    """Regression test: every AgentDetails / HostDetails field must be reachable at its
+    declared nesting in the CEL context.
+
+    Catches the class of bug where computed-field code or normalization reads a field at the
+    wrong level of the dict (e.g. ``result.get("ssh_activity_time")`` instead of
+    ``result["host"]["ssh_activity_time"]``). If a future change drops a field, hoists a
+    nested field to the top level, or buries a top-level field, this test fails.
+    """
+    now = datetime.now(timezone.utc)
+    host_details = HostDetails(
+        id=HostId.generate(),
+        name="full-host",
+        provider_name=ProviderInstanceName("modal"),
+        state=HostState.RUNNING,
+        image="my-image",
+        tags={"env": "prod"},
+        boot_time=now - timedelta(hours=2),
+        uptime_seconds=7200.0,
+        resource=HostResources(cpu=CpuResources(count=4), memory_gb=8.0),
+        ssh=SSHInfo(
+            host="example.com",
+            port=22,
+            user="root",
+            key_path=Path("/key"),
+            command="ssh -i /key -p 22 root@example.com",
+        ),
+        snapshots=[],
+        is_locked=False,
+        locked_time=None,
+        plugin={"some_plugin": {"k": "v"}},
+        ssh_activity_time=now - timedelta(minutes=1),
+        failure_reason=None,
+    )
+    agent = AgentDetails(
+        id=AgentId.generate(),
+        name=AgentName("full-agent"),
+        type="claude",
+        command=CommandString("sleep 100"),
+        work_dir=Path("/work"),
+        initial_branch="mngr/full-agent",
+        create_time=now - timedelta(minutes=10),
+        start_on_boot=True,
+        state=AgentLifecycleState.RUNNING,
+        url="http://example.com",
+        start_time=now - timedelta(minutes=9),
+        runtime_seconds=540.0,
+        user_activity_time=now - timedelta(minutes=8),
+        agent_activity_time=now - timedelta(minutes=7),
+        idle_seconds=420.0,
+        idle_mode=IdleMode.IO.value,
+        idle_timeout_seconds=600,
+        activity_sources=("user", "agent"),
+        labels={"project": "mngr"},
+        host=host_details,
+        plugin={"chat_history": {"messages": []}},
+    )
+    context = agent_details_to_cel_context(agent)
+
+    # Every declared AgentDetails field must appear at the top level of the context.
+    for field_name in AgentDetails.model_fields:
+        assert field_name in context, f"AgentDetails field {field_name!r} missing from CEL context"
+
+    # Every declared HostDetails field must appear under context["host"].
+    assert "host" in context and isinstance(context["host"], dict)
+    for field_name in HostDetails.model_fields:
+        assert field_name in context["host"], f"HostDetails field {field_name!r} missing from CEL context['host']"
+
+    # Host-only fields must not be silently hoisted to the top level. This catches the bug
+    # class where computed-field code reads a host field as if it were a top-level agent
+    # field (e.g. result.get("ssh_activity_time")) and gets None instead of the real value.
+    host_only_fields = set(HostDetails.model_fields) - set(AgentDetails.model_fields)
+    for field_name in host_only_fields:
+        assert field_name not in context, f"Host-only field {field_name!r} must live under context['host']"
+
+    # Computed fields must each draw from their declared inputs. A wrong-nesting bug in any
+    # of them would either drop the field or compute the wrong value.
+    assert context["age"] == pytest.approx(600, abs=10)
+    assert context["runtime"] == 540.0
+    # idle uses the most recent of user/agent/host.ssh activity; ssh is the freshest at 1 min.
+    assert context["idle"] == pytest.approx(60, abs=10)
+
+
+def test_agent_details_to_cel_context_idle_includes_host_ssh_activity() -> None:
+    """The computed `idle` field must include host SSH activity, since it lives on the host."""
+    ssh_activity = datetime.now(timezone.utc) - timedelta(minutes=5)
+    host_details = HostDetails(
+        id=HostId.generate(),
+        name="test-host",
+        provider_name=ProviderInstanceName("local"),
+        ssh_activity_time=ssh_activity,
+    )
+    agent = AgentDetails(
+        id=AgentId.generate(),
+        name=AgentName("ssh-only-agent"),
+        type="claude",
+        command=CommandString("sleep 100"),
+        work_dir=Path("/work"),
+        initial_branch="mngr/ssh-only-agent",
+        create_time=datetime.now(timezone.utc),
+        start_on_boot=False,
+        state=AgentLifecycleState.RUNNING,
+        host=host_details,
+    )
+    context = agent_details_to_cel_context(agent)
+
+    assert "idle" in context
+    assert 280 < context["idle"] < 320
+
+
+def test_agent_details_to_cel_context_idle_uses_most_recent_activity() -> None:
+    """When multiple activity sources are set, `idle` uses the most recent one."""
+    now = datetime.now(timezone.utc)
+    host_details = HostDetails(
+        id=HostId.generate(),
+        name="test-host",
+        provider_name=ProviderInstanceName("local"),
+        ssh_activity_time=now - timedelta(minutes=10),
+    )
+    agent = AgentDetails(
+        id=AgentId.generate(),
+        name=AgentName("multi-activity-agent"),
+        type="claude",
+        command=CommandString("sleep 100"),
+        work_dir=Path("/work"),
+        initial_branch="mngr/multi-activity-agent",
+        create_time=now,
+        start_on_boot=False,
+        state=AgentLifecycleState.RUNNING,
+        user_activity_time=now - timedelta(hours=1),
+        agent_activity_time=now - timedelta(minutes=30),
+        host=host_details,
+    )
+    context = agent_details_to_cel_context(agent)
+
+    # SSH activity (10 min ago) is the most recent, so idle should be ~600s.
+    assert "idle" in context
+    assert 580 < context["idle"] < 620
+
+
+def test_agent_details_to_cel_context_exposes_host_provider_under_both_names() -> None:
+    """agent_details_to_cel_context exposes host.provider_name as host.provider too.
+
+    Both names must work in CEL filters and templates so users do not have to remember
+    which form the implementation chose.
+    """
     host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
@@ -381,9 +529,8 @@ def test_agent_details_to_cel_context_normalizes_host_provider() -> None:
 
     assert "host" in context
     host = context["host"]
-    assert "provider" in host
-    assert "provider_name" not in host
     assert host["provider"] == "modal"
+    assert host["provider_name"] == "modal"
 
 
 # =============================================================================

@@ -6,15 +6,16 @@
 **Synopsis:**
 
 ```text
-mngr clone <SOURCE_AGENT> [<AGENT_NAME>] [create-options...]
+mngr clone <SOURCE> [<AGENT_NAME>] [create-options...]
 ```
 
-Create a new agent by cloning an existing one [experimental].
+Create a new agent by cloning an existing agent or git URL [experimental].
 
 This is a convenience wrapper around `mngr create --from <source>`.
-The first argument is the source agent to clone from. An optional second
-positional argument sets the new agent's name. All remaining arguments are
-passed through to the create command.
+The first argument is the source to clone from: an existing agent, or a git
+URL (https, ssh, or SCP-like form). An optional second positional argument
+sets the new agent's name. All remaining arguments are passed through to the
+create command.
 
 
 ## See Also
@@ -47,4 +48,10 @@ $ mngr clone my-agent --provider docker
 
 ```bash
 $ mngr clone my-agent -- --model opus
+```
+
+**Clone from a git URL**
+
+```bash
+$ mngr clone https://github.com/owner/repo new-agent
 ```
