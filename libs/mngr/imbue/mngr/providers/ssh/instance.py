@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import tomllib
 import uuid
+from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import Mapping
 from typing import Sequence
 
+from loguru import logger
 from pydantic import Field
+from pydantic import ValidationError
 from pyinfra.api import Host as PyinfraHost
 from pyinfra.api import State as PyinfraState
 from pyinfra.api.inventory import Inventory
@@ -52,6 +56,54 @@ class SSHProviderInstance(BaseProviderInstance):
         frozen=True,
         description="Map of host name to SSH configuration",
     )
+    dynamic_hosts_file: Path | None = Field(
+        default=None,
+        frozen=True,
+        description="Path to a TOML file with dynamically registered hosts",
+    )
+
+    def _read_dynamic_hosts(self) -> dict[str, SSHHostConfig]:
+        """Read dynamic hosts from the TOML file, if it exists.
+
+        Returns an empty dict if the file does not exist or is malformed.
+        """
+        if self.dynamic_hosts_file is None or not self.dynamic_hosts_file.exists():
+            return {}
+
+        try:
+            raw_data = self.dynamic_hosts_file.read_bytes()
+        except OSError as e:
+            logger.warning("Failed to read dynamic hosts file {}: {}", self.dynamic_hosts_file, e)
+            return {}
+
+        try:
+            parsed = tomllib.loads(raw_data.decode())
+        except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+            logger.warning("Failed to parse dynamic hosts file {}: {}", self.dynamic_hosts_file, e)
+            return {}
+
+        dynamic_hosts: dict[str, SSHHostConfig] = {}
+        for host_name, host_data in parsed.items():
+            if not isinstance(host_data, dict):
+                logger.warning("Skipped non-table entry '{}' in dynamic hosts file", host_name)
+                continue
+            try:
+                host_config = SSHHostConfig.model_validate(host_data)
+            except ValidationError as e:
+                logger.warning("Skipped malformed host '{}' in dynamic hosts file: {}", host_name, e)
+                continue
+            # Expand key_file paths
+            if host_config.key_file is not None:
+                host_config = SSHHostConfig(
+                    address=host_config.address,
+                    port=host_config.port,
+                    user=host_config.user,
+                    key_file=Path(host_config.key_file).expanduser(),
+                    known_hosts_file=host_config.known_hosts_file,
+                )
+            dynamic_hosts[host_name] = host_config
+
+        return dynamic_hosts
 
     @property
     def supports_snapshots(self) -> bool:
@@ -164,33 +216,44 @@ class SSHProviderInstance(BaseProviderInstance):
     # Discovery Methods
     # =========================================================================
 
+    def _get_all_hosts(self) -> dict[str, SSHHostConfig]:
+        """Merge static and dynamic hosts, with static taking precedence."""
+        dynamic_hosts = self._read_dynamic_hosts()
+        # Start with dynamic, then overlay static so static takes precedence
+        merged = dict(dynamic_hosts)
+        merged.update(self.hosts)
+        return merged
+
     def get_host(
         self,
         host: HostId | HostName,
     ) -> Host:
         """Get a host by ID or name."""
+        all_hosts = self._get_all_hosts()
+
         if isinstance(host, HostId):
             # Search for a host with matching ID
-            for host_name, host_config in self.hosts.items():
+            for host_name, host_config in all_hosts.items():
                 if self._host_id_for_name(host_name) == host:
                     return self._create_host_object(host_name, host_config)
             raise HostNotFoundError(host)
 
         # Search by name
         name_str = str(host)
-        if name_str not in self.hosts:
+        if name_str not in all_hosts:
             raise HostNotFoundError(host)
 
-        return self._create_host_object(name_str, self.hosts[name_str])
+        return self._create_host_object(name_str, all_hosts[name_str])
 
     def discover_hosts(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
     ) -> list[DiscoveredHost]:
-        """Discover all configured hosts."""
+        """Discover all configured hosts, including dynamic hosts from file."""
+        all_hosts = self._get_all_hosts()
         host_refs: list[DiscoveredHost] = []
-        for host_name in self.hosts:
+        for host_name in all_hosts:
             host_refs.append(
                 DiscoveredHost(
                     host_id=self._host_id_for_name(host_name),
@@ -294,9 +357,10 @@ class SSHProviderInstance(BaseProviderInstance):
     ) -> PyinfraHost:
         """Get a pyinfra connector for the host."""
         host_id = host.id if isinstance(host, HostInterface) else host
+        all_hosts = self._get_all_hosts()
 
         # Search for a host with matching ID
-        for host_name, host_config in self.hosts.items():
+        for host_name, host_config in all_hosts.items():
             if self._host_id_for_name(host_name) == host_id:
                 return self._create_pyinfra_host(host_config)
 

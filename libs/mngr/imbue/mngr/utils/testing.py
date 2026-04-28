@@ -270,7 +270,7 @@ def setup_mngr_test_environment(
     monkeypatch.setenv("MNGR_HOST_DIR", str(host_dir))
     monkeypatch.setenv("MNGR_PREFIX", prefix)
     monkeypatch.setenv("MNGR_ROOT_NAME", root_name)
-    monkeypatch.delenv("MNGR_PROJECT_DIR", raising=False)
+    monkeypatch.delenv("MNGR_PROJECT_CONFIG_DIR", raising=False)
 
     # Unison derives its config directory from $HOME. Since we override HOME
     # above, unison tries to create its config dir inside the temp home, which
