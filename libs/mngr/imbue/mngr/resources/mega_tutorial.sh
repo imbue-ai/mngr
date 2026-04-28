@@ -295,9 +295,6 @@ mngr list --active
 # you can make any of those filters the default for "mngr list" by setting it in your config.
 # for example, to hide agents from dead/destroyed hosts by default:
 mngr config set commands.list.active true
-# or equivalently in your config file:
-#   [commands.list]
-#   active = true
 # to opt out for a single call, override the env var: MNGR_COMMANDS_LIST_ACTIVE=false mngr list
 
 # note: --active only excludes hosts in CRASHED/FAILED/DESTROYED state and archived agents,
@@ -504,8 +501,6 @@ mngr archive my-task
 mngr list --ids | mngr stop -
 
 # archive all stopped agents (handy for cleaning up "mngr list" after a batch of finished work).
-# we use archive (not destroy) here so the agents remain inspectable -- they just get hidden from
-# default listings via the "archived_at" label. you can always destroy them later with --archived.
 mngr list --stopped --ids | mngr archive -
 
 # dry-run to see what would be stopped
@@ -1199,7 +1194,6 @@ done
 #   export MNGR_HOST_DIR="$PWD/.mngr-state"
 # and then "direnv allow". you can also set it as an absolute path in config:
 #   default_host_dir = "/abs/path/to/project/.mngr-state"
-# but env-var-via-direnv is more portable across machines.
 
 # work_dir_extra_paths: include extra files (outside of git) in each new agent work directory.
 # useful for things like .env files, .venv, build caches, or local config that aren't tracked in git.
@@ -1209,15 +1203,9 @@ done
 #   ".mngr/settings.local.toml" = "SHARE"
 #   ".venv" = "COPY"
 # "COPY" makes an independent copy via rsync (good for branch-dependent paths like .venv).
-# "SHARE" symlinks to the source on the same host (good for shared config like settings.local.toml).
+# "SHARE" symlinks to the source on the same host (good for shared config like settings.local.toml,
+# so that editing the one file at the project root immediately applies to every local agent).
 # "SHARE" automatically falls back to a copy when transferring to a different host.
-#
-# the SHARE example for ".mngr/settings.local.toml" is especially handy if you want to be able to
-# tweak settings for *all* of your local agents by editing one file -- with SHARE, every agent's
-# work dir symlinks back to the same settings.local.toml at the project root, so an edit there
-# immediately applies to every (local) agent. without this, each agent would get its own frozen
-# copy at create time and you'd have to re-create the agent (or edit each work dir's copy) to
-# change settings.
 
 ##############################################################################
 # OUTPUT FORMATS AND MACHINE-READABLE OUTPUT
