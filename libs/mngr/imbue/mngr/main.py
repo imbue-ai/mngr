@@ -547,8 +547,8 @@ except ConfigParseError as e:
     sys.exit(1)
 
 # Plugin CLI options for built-in commands are applied lazily inside
-# `_LazyCommandRegistry.resolve` -- only the plugin commands need eager option
-# wiring here, since they're already in `cli.commands`.
+# `_resolve_builtin` -- only the plugin commands need eager option wiring here,
+# since they're already in `cli.commands`.
 for _plugin_cmd in PLUGIN_COMMANDS:
     apply_plugin_cli_options(_plugin_cmd)
 
