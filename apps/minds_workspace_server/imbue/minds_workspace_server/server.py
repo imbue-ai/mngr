@@ -302,16 +302,41 @@ def _agent_not_found_response(agent_id: str) -> JSONResponse:
     return JSONResponse(content=error.model_dump(), status_code=404)
 
 
+def _get_combined_events(request: Request, agent_info: AgentInfo) -> list[dict[str, Any]]:
+    """Merged ordered event list for an agent: main session events plus
+    task events (tk tickets). New per-source watchers can be plugged in
+    here without growing per-source merging logic in route handlers.
+    """
+    watcher = _get_or_create_watcher(request, agent_info)
+    tickets_watcher = _get_or_create_tickets_watcher(request, agent_info)
+    merged = watcher.get_all_events()
+    if tickets_watcher is not None:
+        merged.extend(tickets_watcher.get_all_events())
+    merged.sort(key=lambda e: e.get("timestamp", ""))
+    return merged
+
+
+def _backfill_slice(merged: list[dict[str, Any]], before_event_id: str, limit: int) -> list[dict[str, Any]]:
+    """Slice of `merged` containing the `limit` events immediately before
+    the event with id `before_event_id`. Returns [] if the id isn't
+    found or sits at index 0."""
+    target_idx = -1
+    for i, event in enumerate(merged):
+        if event["event_id"] == before_event_id:
+            target_idx = i
+            break
+    if target_idx <= 0:
+        return []
+    start_idx = max(0, target_idx - limit)
+    return merged[start_idx:target_idx]
+
+
 def _get_events(agent_id: str, request: Request) -> Response:
     """Get events for an agent. Supports tail-first loading and backfill."""
     agent_info = _find_agent(agent_id, request)
     if agent_info is None:
         return _agent_not_found_response(agent_id)
 
-    watcher = _get_or_create_watcher(request, agent_info)
-    tickets_watcher = _get_or_create_tickets_watcher(request, agent_info)
-
-    # Check for backfill parameters
     before_event_id = request.query_params.get("before")
     limit_str = request.query_params.get("limit", str(_DEFAULT_TAIL_COUNT))
     try:
@@ -319,28 +344,8 @@ def _get_events(agent_id: str, request: Request) -> Response:
     except ValueError:
         limit = _DEFAULT_TAIL_COUNT
 
-    # Build the merged ordered event list: main session events + task
-    # events. Ticket events have type="task_event" and carry a separate
-    # event_id namespace; the frontend dedups normally.
-    session_events = watcher.get_all_events()
-    task_events = tickets_watcher.get_all_events() if tickets_watcher is not None else []
-    merged = session_events + task_events
-    merged.sort(key=lambda e: e.get("timestamp", ""))
-
-    if before_event_id:
-        target_idx = -1
-        for i, event in enumerate(merged):
-            if event["event_id"] == before_event_id:
-                target_idx = i
-                break
-        if target_idx <= 0:
-            events: list[dict[str, Any]] = []
-        else:
-            start_idx = max(0, target_idx - limit)
-            events = merged[start_idx:target_idx]
-    else:
-        events = merged
-
+    merged = _get_combined_events(request, agent_info)
+    events = _backfill_slice(merged, before_event_id, limit) if before_event_id else merged
     return JSONResponse(content={"events": events})
 
 

@@ -31,12 +31,6 @@ const STATUS_RANK: Record<TaskEventStatus, number> = {
   closed: 2,
 };
 
-const TASK_UI_STATUS: Record<TaskEventStatus, TaskUiStatus> = {
-  open: "pending",
-  in_progress: "active",
-  closed: "done",
-};
-
 /** Folded view of a tk ticket's full event history. */
 export interface TaskRecord {
   ticket_id: string;
@@ -89,11 +83,16 @@ export function buildTaskRecords(events: TranscriptEvent[]): Map<string, TaskRec
     if (e.type !== "task_event" || !e.ticket_id || !e.status) continue;
     const existing = records.get(e.ticket_id);
     if (existing === undefined) {
+      // started_at is set only when an in_progress event is OBSERVED.
+      // The watcher emits a single "closed" event on replay (the
+      // historical in_progress timestamp is gone), in which case we
+      // leave started_at null and the active window for tool-call
+      // attribution falls back to created_at -- see makeTaskInTurn.
       records.set(e.ticket_id, {
         ticket_id: e.ticket_id,
         title: e.title ?? e.ticket_id,
         created_at: e.created_at ?? e.timestamp,
-        started_at: e.status === "in_progress" || e.status === "closed" ? e.timestamp : null,
+        started_at: e.status === "in_progress" ? e.timestamp : null,
         closed_at: e.status === "closed" ? e.timestamp : null,
         summary: e.status === "closed" ? (e.summary ?? null) : null,
         final_status: e.status,
@@ -233,9 +232,4 @@ export function eventsInTaskWindow(task: TaskInTurn, body_events: TranscriptEven
     if (end !== "" && e.timestamp > end) return false;
     return true;
   });
-}
-
-/** Status mapping helper exposed for views. */
-export function uiStatusFromTk(status: TaskEventStatus): TaskUiStatus {
-  return TASK_UI_STATUS[status];
 }

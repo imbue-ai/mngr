@@ -4,20 +4,23 @@ Mirrors the pattern of session_watcher.AgentSessionWatcher: a background
 thread combines watchdog filesystem events with mtime-based polling, and
 emits parsed events through an `on_events(agent_id, events)` callback.
 
-Each ticket file produces up to three task events over its lifetime, one
-per status transition: open -> in_progress -> closed. Event IDs are
-derived from the ticket id + status so they're stable across watcher
-restarts (the frontend dedups by event_id).
+Each ticket file produces one event per state TRANSITION the watcher
+actually observes. Stable event ids of `<ticket_id>-<status>` let the
+frontend dedup across watcher restarts.
 
-Live (watcher running when transition happens): timestamps come from the
-file's mtime at observation time, which closely matches when the agent
-ran `tk start` / `tk close`.
+Live (watcher running through the whole ticket lifecycle): emits one
+event per status change, so a typical ticket produces three events
+(open at creation -> in_progress at `tk start` -> closed at `tk close`).
 
-Replay (watcher started against a directory that already has closed
-tickets): we cannot recover the historical mtime of a transition that
-already happened, so the in_progress timestamp falls back to the current
-mtime (i.e. close time). Frontend rendering tolerates the resulting
-zero-width "active window" gracefully.
+Replay (watcher started against a directory that already has tickets at
+some non-`open` status): we cannot recover the historical timestamps of
+transitions that already happened, so we emit a SINGLE event for the
+current status with the file's mtime. The `created_at` field on the
+event carries the ticket's frontmatter `created` value, so the frontend
+still knows when the ticket existed even if it never saw the `open`
+event. We do NOT synthesize fake `open` / `in_progress` events on
+replay -- the event stream stays a faithful description of what was
+observed, with the frontend filling in any missing lifecycle fields.
 """
 
 from __future__ import annotations
@@ -69,8 +72,7 @@ class AgentTicketsWatcher:
 
     The directory is allowed to not exist yet; the watcher just stays
     silent until it's created. Once present, it observes changes
-    (watchdog + polling fallback) and emits new events whenever a ticket
-    transitions to a status it hasn't been observed in before.
+    (watchdog + polling fallback) and emits events for status changes.
     """
 
     def __init__(
@@ -83,7 +85,7 @@ class AgentTicketsWatcher:
         self._tickets_dir = tickets_dir
         self._on_events = on_events
 
-        self._existing_event_ids: set[str] = set()
+        self._last_status_per_ticket: dict[str, str] = {}
         self._mtime_cache: dict[str, tuple[float, int]] = {}
 
         self._wake_event = threading.Event()
@@ -107,10 +109,12 @@ class AgentTicketsWatcher:
 
     def get_all_events(self) -> list[dict[str, Any]]:
         """Scan the tickets directory and return every event implied by
-        its current contents -- the full cumulative history, not just
-        what changed since the last call. Used to seed initial state
-        when an agent's chat is opened. Safe to call repeatedly."""
-        return self._collect_events(emit_only_new=False)
+        observed state changes -- the full cumulative history of
+        transitions seen by this watcher. Safe to call repeatedly; the
+        per-ticket last-status tracker keeps it idempotent for unchanged
+        files. Used to seed initial state when an agent's chat is
+        opened."""
+        return self._scan()
 
     def _run(self) -> None:
         self._setup_watchers()
@@ -120,7 +124,7 @@ class AgentTicketsWatcher:
             if self._stop_event.is_set():
                 break
 
-            new_events = self._collect_events(emit_only_new=True)
+            new_events = self._scan()
             if new_events:
                 self._on_events(self._agent_id, new_events)
 
@@ -143,20 +147,16 @@ class AgentTicketsWatcher:
         except OSError:
             logger.debug("Failed to start watchdog observer for tickets dir: %s", watch_dir)
 
-    def _collect_events(self, *, emit_only_new: bool) -> list[dict[str, Any]]:
-        """Scan and produce events for every ticket file currently on disk.
-
-        emit_only_new=True (the live polling path) skips files whose mtime
-        hasn't changed and filters out events whose event_id was already
-        emitted. emit_only_new=False (the initial-load path) returns the
-        cumulative event list reflecting current disk state, while still
-        keeping the dedup set in sync so the live path doesn't double-emit
-        afterwards.
-        """
+    def _scan(self) -> list[dict[str, Any]]:
+        """Scan the tickets directory and emit one event per OBSERVED
+        state change. On first sighting of a new ticket, emit one event
+        for its current status; on subsequent scans, emit one event each
+        time the status moves forward (open -> in_progress -> closed).
+        We never synthesize transitions we didn't observe."""
         if not self._tickets_dir.exists():
             return []
 
-        results: list[dict[str, Any]] = []
+        new_events: list[dict[str, Any]] = []
         for md_file in sorted(self._tickets_dir.glob("*.md")):
             try:
                 stat = md_file.stat()
@@ -165,7 +165,7 @@ class AgentTicketsWatcher:
 
             mtime_key = (stat.st_mtime, stat.st_size)
             cached = self._mtime_cache.get(md_file.name)
-            if emit_only_new and cached == mtime_key:
+            if cached == mtime_key:
                 continue
             self._mtime_cache[md_file.name] = mtime_key
 
@@ -173,37 +173,37 @@ class AgentTicketsWatcher:
             if state is None:
                 continue
 
-            mtime_ts = _mtime_iso(md_file)
-            for event in self._events_for_state(state, mtime_ts):
-                if emit_only_new and event["event_id"] in self._existing_event_ids:
-                    continue
-                self._existing_event_ids.add(event["event_id"])
-                results.append(event)
+            previous_status = self._last_status_per_ticket.get(state.ticket_id)
+            if previous_status == state.status:
+                continue
 
-        results.sort(key=lambda e: e["timestamp"])
-        return results
+            self._last_status_per_ticket[state.ticket_id] = state.status
 
-    def _events_for_state(self, state: TicketState, mtime_ts: str) -> list[dict[str, Any]]:
-        """Generate the events implied by a ticket's current status. Up to
-        three: open, in_progress, closed. The frontend dedups by event_id
-        so re-emitting on a no-op scan is harmless."""
-        events: list[dict[str, Any]] = [self._make_event(state, "open", state.created_at)]
-        if state.status in {"in_progress", "closed"}:
-            events.append(self._make_event(state, "in_progress", mtime_ts))
-        if state.status == "closed":
-            events.append(self._make_event(state, "closed", mtime_ts))
-        return events
+            # First-sighting timestamp choice: an `open` ticket should
+            # use its frontmatter `created` field (truthful, matches
+            # when the file appeared); other statuses fall back to the
+            # file's current mtime (the close time on replay; the
+            # transition time live).
+            if previous_status is None and state.status == "open":
+                ts = state.created_at
+            else:
+                ts = _mtime_iso(md_file)
 
-    def _make_event(self, state: TicketState, status: str, ts: str) -> dict[str, Any]:
+            new_events.append(self._make_event(state, ts))
+
+        new_events.sort(key=lambda e: e["timestamp"])
+        return new_events
+
+    def _make_event(self, state: TicketState, ts: str) -> dict[str, Any]:
         return {
             "type": "task_event",
-            "event_id": f"{state.ticket_id}-{status}",
+            "event_id": f"{state.ticket_id}-{state.status}",
             "timestamp": ts,
             "source": _SOURCE,
             "ticket_id": state.ticket_id,
             "title": state.title,
-            "status": status,
+            "status": state.status,
             "created_at": state.created_at,
-            "summary": state.summary if status == "closed" else None,
-            "summary_at": state.summary_at if status == "closed" else None,
+            "summary": state.summary if state.status == "closed" else None,
+            "summary_at": state.summary_at if state.status == "closed" else None,
         }
