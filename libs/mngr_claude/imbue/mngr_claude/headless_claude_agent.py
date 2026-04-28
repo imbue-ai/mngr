@@ -549,11 +549,16 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         # ``_read_data``.
         #
         # The "already referenced" check is an exact-equality membership
-        # test against all_extra_args, not a substring scan of the joined
-        # args: a substring scan would falsely match any arg containing
+        # test against the *unquoted* inputs (``agent_args`` and
+        # ``cli_args``), not a substring scan of the joined args: a
+        # substring scan would falsely match any arg containing
         # `.mngr-prompt` (e.g. an unrelated path) and silently drop the
-        # prompt.
-        if initial_message is not None and _MNGR_PROMPT_CAT_ARG not in all_extra_args:
+        # prompt. We cannot test against ``all_extra_args`` because each
+        # element of ``quoted_agent_args`` has been wrapped by
+        # ``shlex.quote`` and so will not compare equal to the canonical
+        # ``_MNGR_PROMPT_CAT_ARG`` literal.
+        already_referenced = _MNGR_PROMPT_CAT_ARG in agent_args or _MNGR_PROMPT_CAT_ARG in self.agent_config.cli_args
+        if initial_message is not None and not already_referenced:
             parts.append(_MNGR_PROMPT_CAT_ARG)
 
         cmd_str = " ".join(parts)
