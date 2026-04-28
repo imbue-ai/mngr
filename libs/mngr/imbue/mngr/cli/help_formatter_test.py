@@ -29,7 +29,8 @@ def _all_builtin_commands() -> list[click.Command]:
 
     Built-ins are loaded lazily by the AliasAwareGroup; this helper triggers
     the imports so tests can iterate the full set. Plugin-registered commands
-    are excluded to mirror the previous ``BUILTIN_COMMANDS`` constant.
+    (those that live in ``cli.commands``) are excluded so the result reflects
+    only the in-tree commands declared in ``BUILTIN_COMMAND_SPECS``.
     """
     ctx = click.Context(cli)
     plugin_names = set(cli.commands.keys())
