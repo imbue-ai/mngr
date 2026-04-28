@@ -1326,29 +1326,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         return self._get_agent_dir() / "plugin" / "claude" / "anthropic"
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
-        """Populate agent env file with claude-specific vars.
-
-        Sets CLAUDE_CONFIG_DIR / ORIGINAL_CLAUDE_CONFIG_DIR, propagates
-        ANTHROPIC_API_KEY from the mngr process env when present, and
-        optionally enables common transcript emission.
-
-        The ANTHROPIC_API_KEY propagation is load-bearing for headless
-        agents: `mngr ask` spawns claude inside a tmux session whose env
-        is sourced from the agent env file. In offload sandboxes the tmux
-        pane's inherited env was observed to drop ANTHROPIC_API_KEY
-        between the mngr subprocess and the claude child, so relying on
-        process-inheritance alone left claude unauthenticated and it
-        exited silently. Writing the key into the env file makes the
-        propagation explicit regardless of tmux-inheritance quirks.
-        Respects an existing value if the caller already set one (e.g.
-        via `mngr create --env ANTHROPIC_API_KEY=...`).
-        """
+        """Add CLAUDE_CONFIG_DIR, ORIGINAL_CLAUDE_CONFIG_DIR, and optionally enable common transcript emission."""
         env_vars["CLAUDE_CONFIG_DIR"] = str(self.get_claude_config_dir())
         env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"] = str(get_user_claude_config_dir())
-        if "ANTHROPIC_API_KEY" not in env_vars:
-            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            if api_key:
-                env_vars["ANTHROPIC_API_KEY"] = api_key
         config = self.agent_config
         if config.emit_common_transcript:
             env_vars["MNGR_EMIT_COMMON_TRANSCRIPT"] = "1"
