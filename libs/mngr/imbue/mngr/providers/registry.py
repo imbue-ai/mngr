@@ -44,10 +44,12 @@ def reset_backend_registry() -> None:
     _registry_state["backends_loaded"] = False
 
 
-# Provider backends that talk to external services (cloud APIs, daemons,
-# VMs). Tests use ``load_local_backend_only`` to skip these, since they
-# require credentials or system binaries.
-_REMOTE_BACKEND_NAMES: frozenset[str] = frozenset({"modal", "lima", "vultr"})
+# Provider backends that require credentials at registration time (e.g.
+# Modal SDK auth, Vultr API key). Tests use ``load_local_backend_only`` to
+# skip these. Lima is intentionally excluded: its backend defers limactl
+# checks to first use, so registering it is safe even without limactl
+# installed.
+_REMOTE_BACKEND_NAMES: frozenset[str] = frozenset({"modal", "vultr"})
 
 
 def _load_backends(pm: pluggy.PluginManager, *, include_docker: bool, include_remote: bool) -> None:
