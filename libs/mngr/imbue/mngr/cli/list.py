@@ -46,6 +46,7 @@ from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_sort_keys
 from imbue.mngr.utils.cel_utils import evaluate_cel_sort_key
+from imbue.mngr.utils.git_utils import resolve_project_filter_values
 from imbue.mngr.utils.terminal import ANSI_DIM_GRAY
 from imbue.mngr.utils.terminal import ANSI_ERASE_LINE
 from imbue.mngr.utils.terminal import ANSI_RESET
@@ -185,7 +186,7 @@ class ListCliOptions(CommonCliOptions):
 @optgroup.option(
     "--project",
     multiple=True,
-    help="Show only agents with this project label (repeatable)",
+    help="Show only agents with this project label (repeatable; '.' expands to the current project)",
 )
 @optgroup.option(
     "--label",
@@ -354,9 +355,10 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         include_filters.append("has(labels.archived_at)")
 
     # --project X: alias for --include 'labels.project == "X"'
-    # Multiple values are OR'd together
+    # Multiple values are OR'd together. The literal "." resolves to the current project name.
     if opts.project:
-        project_parts = [f'labels.project == "{p}"' for p in opts.project]
+        project_names = resolve_project_filter_values(opts.project, mngr_ctx.concurrency_group)
+        project_parts = [f'labels.project == "{p}"' for p in project_names]
         include_filters.append(" || ".join(project_parts))
 
     # --label K=V: alias for --include 'labels.K == "V"'

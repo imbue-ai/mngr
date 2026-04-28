@@ -9,6 +9,7 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr.utils.git_utils import resolve_project_filter_values
 from imbue.mngr_kanpan.tui import run_kanpan
 
 
@@ -35,7 +36,7 @@ class KanpanCliOptions(CommonCliOptions):
 @optgroup.option(
     "--project",
     multiple=True,
-    help="Show only agents with this project label (repeatable)",
+    help="Show only agents with this project label (repeatable; '.' expands to the current project)",
 )
 @add_common_options
 @click.pass_context
@@ -49,7 +50,8 @@ def kanpan(ctx: click.Context, **kwargs: Any) -> None:
     # Build include/exclude filter tuples from CLI options
     include_filters = list(opts.include)
     if opts.project:
-        project_parts = [f'labels.project == "{p}"' for p in opts.project]
+        project_names = resolve_project_filter_values(opts.project, mngr_ctx.concurrency_group)
+        project_parts = [f'labels.project == "{p}"' for p in project_names]
         include_filters.append(" || ".join(project_parts))
     exclude_filters = list(opts.exclude)
 

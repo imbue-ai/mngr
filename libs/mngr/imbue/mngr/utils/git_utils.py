@@ -79,6 +79,24 @@ def get_current_git_branch(path: Path | None, cg: ConcurrencyGroup) -> str | Non
         return None
 
 
+def resolve_project_filter_values(values: tuple[str, ...], cg: ConcurrencyGroup) -> tuple[str, ...]:
+    """Resolve --project filter values, expanding "." to the current project name.
+
+    The current project is derived from cwd's git remote origin (or folder name as fallback).
+    Other values are returned unchanged. The current project is derived at most once.
+    """
+    current_project: str | None = None
+    resolved: list[str] = []
+    for value in values:
+        if value == ".":
+            if current_project is None:
+                current_project = derive_project_name_from_path(Path.cwd(), cg)
+            resolved.append(current_project)
+        else:
+            resolved.append(value)
+    return tuple(resolved)
+
+
 def derive_project_name_from_path(path: Path, cg: ConcurrencyGroup) -> str:
     """Derive a project name from a path.
 

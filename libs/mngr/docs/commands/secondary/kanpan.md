@@ -37,7 +37,7 @@ mngr kanpan [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--include` | text | Include agents matching CEL expression (repeatable) | None |
 | `--exclude` | text | Exclude agents matching CEL expression (repeatable) | None |
-| `--project` | text | Show only agents with this project label (repeatable) | None |
+| `--project` | text | Show only agents with this project label (repeatable; '.' expands to the current project) | None |
 
 ## Common
 

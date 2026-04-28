@@ -19,6 +19,7 @@ from imbue.mngr.utils.git_utils import get_head_commit
 from imbue.mngr.utils.git_utils import is_git_repository
 from imbue.mngr.utils.git_utils import parse_project_name_from_url
 from imbue.mngr.utils.git_utils import parse_worktree_git_file
+from imbue.mngr.utils.git_utils import resolve_project_filter_values
 
 
 def test_github_https_url() -> None:
@@ -73,6 +74,28 @@ def test_empty_url() -> None:
     """Test parsing an empty URL returns None."""
     url = ""
     assert parse_project_name_from_url(url) is None
+
+
+def test_resolve_project_filter_values_passes_through_non_dot_values(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """Non-dot values are returned unchanged."""
+    assert resolve_project_filter_values(("foo", "bar"), cg) == ("foo", "bar")
+
+
+def test_resolve_project_filter_values_expands_dot_to_current_project(
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The literal '.' is expanded to the current project name (derived from cwd)."""
+    project_dir = tmp_path / "my-project"
+    project_dir.mkdir()
+    monkeypatch.chdir(project_dir)
+
+    assert resolve_project_filter_values((".",), cg) == ("my-project",)
+    assert resolve_project_filter_values((".", "other"), cg) == ("my-project", "other")
+
+
+def test_resolve_project_filter_values_handles_empty(cg: ConcurrencyGroup) -> None:
+    """Empty input returns empty output without resolving the project."""
+    assert resolve_project_filter_values((), cg) == ()
 
 
 def test_derive_from_folder_name_when_no_git(tmp_path: Path, cg: ConcurrencyGroup) -> None:
