@@ -13,6 +13,7 @@ Or to run all tests including Modal tests:
 import importlib.resources
 import os
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -487,16 +488,20 @@ def test_mngr_create_with_default_dockerfile_on_modal(
 
     tar_dir = tmp_path / "tar_output"
     tar_dir.mkdir()
-    temp_dir_with_tar = str(tar_dir)
     commit_hash = os.environ.get("GITHUB_SHA", "") or (repo_root / ".mngr/image_commit_hash").read_text().strip()
 
-    # go make the tar
+    # Package the repo at commit_hash via make_tar_of_repo.sh, then unpack
+    # producer-side so the Modal build context is a real source tree. The
+    # shared mngr Dockerfile no longer special-cases current.tar.gz; both
+    # mngr_schedule's deploy path and this test extract the tarball before
+    # handing it off as context_dir, matching offload's "context_dir is a
+    # real source tree" contract.
     subprocess.run(
         [
             "bash",
             str(repo_root / "scripts" / "make_tar_of_repo.sh"),
             commit_hash,
-            temp_dir_with_tar,
+            str(tar_dir),
         ],
         capture_output=True,
         text=True,
@@ -505,6 +510,11 @@ def test_mngr_create_with_default_dockerfile_on_modal(
         env=modal_subprocess_env.env,
         cwd=repo_root,
     )
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    with tarfile.open(tar_dir / "current.tar.gz", "r:gz") as tf:
+        tf.extractall(context_dir, filter="data")
+
     # now we can try making the agent
     result = subprocess.run(
         [
@@ -523,7 +533,7 @@ def test_mngr_create_with_default_dockerfile_on_modal(
             "-b",
             f"--file={dockerfile_path}",
             "-b",
-            f"context-dir={temp_dir_with_tar}",
+            f"context-dir={context_dir}",
             "--",
             "sleep",
             "100312",
