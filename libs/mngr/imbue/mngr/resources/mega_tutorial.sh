@@ -292,6 +292,14 @@ mngr list --archived
 # show only active agents (anything not archived/destroyed/crashed/failed)
 mngr list --active
 
+# you can make any of those filters the default for "mngr list" by setting it in your config.
+# for example, to make "mngr list" only show active agents by default:
+mngr config set commands.list.active true
+# or equivalently in your config file:
+#   [commands.list.defaults]
+#   active = true
+# you can still see everything with "mngr list --no-active" when you need to.
+
 # show only agents running locally
 mngr list --local
 
@@ -489,6 +497,9 @@ mngr archive my-task
 # stop all running agents
 mngr list --ids | mngr stop -
 
+# destroy all stopped agents (handy for cleaning up after a batch of finished work)
+mngr list --stopped --ids | mngr rm -
+
 # dry-run to see what would be stopped
 mngr list --ids | mngr stop - --dry-run
 
@@ -668,6 +679,9 @@ mngr transcript my-task --role assistant
 # view the last 5 messages
 mngr transcript my-task --tail 5
 
+# quickly peek at an agent's most recent message without connecting (handy for sanity-checking many agents)
+mngr transcript my-task --tail 1
+
 # output transcript as JSONL for programmatic use
 mngr transcript my-task --format jsonl
 
@@ -787,6 +801,13 @@ mngr create my-task --project other-project
 
 # filter agents by project using CEL expressions
 mngr list --include 'project == "my-project"'
+
+# you can make "mngr list" auto-filter to a given project by default by setting it in that
+# project's scoped config (.mngr/settings.toml) -- since project-scoped config only applies
+# when run from inside that project, you get a per-project default for free:
+#   [commands.list]
+#   include = ['labels.project == "my-project"']
+# (mngr list does not currently support a sentinel like --project=. for "the current project")
 
 # see which projects have agents by looking at the project field
 mngr list --fields "name,project,state"
@@ -1158,6 +1179,16 @@ done
 #   These options are typically less commonly used or more advanced
 ##############################################################################
 
+# work_dir_extra_paths: include extra files (outside of git) in each new agent work directory.
+# useful for things like .env files, .venv, build caches, or local config that aren't tracked in git.
+# add this to .mngr/settings.toml (or settings.local.toml):
+#   [work_dir_extra_paths]
+#   ".env" = "COPY"
+#   ".mngr/settings.local.toml" = "SHARE"
+#   ".venv" = "COPY"
+# "COPY" makes an independent copy via rsync (good for branch-dependent paths like .venv).
+# "SHARE" symlinks to the source on the same host (good for shared config like settings.local.toml).
+# "SHARE" automatically falls back to a copy when transferring to a different host.
 
 ##############################################################################
 # OUTPUT FORMATS AND MACHINE-READABLE OUTPUT
