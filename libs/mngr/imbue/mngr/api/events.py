@@ -1044,9 +1044,13 @@ def _tail_source_thread_remote(
         current_length = len(content_bytes)
 
         if current_length < byte_offset:
-            # File was rotated -- re-read from beginning, dedup via event_ids
+            # File was rotated -- re-read from beginning, dedup via event_ids.
+            # Drop any malformed line still buffered in the warner: it came from
+            # the now-rotated file's tail, so treating it as mid-file corruption
+            # in the new file would be misleading.
             logger.debug("Remote event file for source '{}' was rotated", source_path)
             byte_offset = 0
+            warner.reset()
 
         if current_length > byte_offset:
             new_content = content_bytes[byte_offset:].decode("utf-8", errors="replace")

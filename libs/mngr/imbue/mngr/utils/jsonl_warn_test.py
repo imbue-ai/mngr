@@ -115,6 +115,35 @@ def test_valid_lines_only_emit_no_warnings() -> None:
     assert log_output.getvalue() == ""
 
 
+def test_reset_drops_pending_malformed_line_silently() -> None:
+    """reset() must drop any buffered malformed line without emitting a warning."""
+    warner = MalformedJsonLineWarner(source_description="my-file")
+    with capture_loguru(level="WARNING") as log_output:
+        # Buffer a malformed line.
+        assert warner.parse("malformed{") is None
+        # Reset before any subsequent line could flush it -- simulates the data
+        # stream becoming discontinuous (e.g. file rotated/truncated).
+        warner.reset()
+        # A subsequent valid line must NOT produce a warning about the dropped line.
+        assert warner.parse('{"a": 1}') is not None
+    assert log_output.getvalue() == ""
+
+
+def test_reset_does_not_disable_future_corruption_detection() -> None:
+    """After reset(), the warner must still detect new mid-file corruption."""
+    warner = MalformedJsonLineWarner(source_description="my-file")
+    warner.parse("first malformed")
+    warner.reset()
+
+    with capture_loguru(level="WARNING") as log_output:
+        # New malformed line followed by a valid line should still warn.
+        assert warner.parse("second malformed") is None
+        assert warner.parse('{"a": 1}') is not None
+    output = log_output.getvalue()
+    assert "second malformed" in output
+    assert "first malformed" not in output
+
+
 # =============================================================================
 # split_complete_lines tests
 # =============================================================================

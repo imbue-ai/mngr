@@ -48,6 +48,18 @@ class MalformedJsonLineWarner(MutableModel):
             return None
         return data, stripped
 
+    def reset(self) -> None:
+        """Drop any pending buffered malformed line without emitting a warning.
+
+        Use when the underlying data stream becomes discontinuous (e.g. the
+        file was rotated or truncated). Any buffered malformed line could only
+        have come from the now-discarded prefix, so emitting a warning about
+        it would misleadingly point at the new content. The buffered line is
+        treated as a partial write at the prior EOF and silently dropped.
+        """
+        with self._lock:
+            self._pending_malformed_line = None
+
     def _flush_pending_warning(self) -> None:
         pending = self._pending_malformed_line
         if pending is None:
