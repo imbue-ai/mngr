@@ -32,7 +32,7 @@
   3. `/service/<name>/__sw.js` serves the scoped service worker for that service prefix.
 - All services share one origin per workspace (locally `<agent-id>.localhost:8420`, via Cloudflare `system_interface--<id>--<user>.domain`), so cookie-path rewriting to `Path=/service/<name>/` is sufficient to keep service cookies isolated.
 - The desktop client no longer dispatches or rewrites on a per-service basis. It maintains exactly one reverse connection per remote workspace (SSH tunnel to the workspace_server port only) instead of one-per-service.
-- The desktop client still tracks per-service URLs (via `MngrStreamManager` streaming `mngr events ... services --follow`) for the Cloudflare sharing toggle UI and the settings pages — those directly call `remote_service_connector` with a raw service URL, which is unchanged.
+- The desktop client still tracks per-service URLs (via `MngrStreamManager` streaming `mngr event ... services --follow`) for the Cloudflare sharing toggle UI and the settings pages — those directly call `remote_service_connector` with a raw service URL, which is unchanged.
 
 ### Behavior changes that users will notice
 
