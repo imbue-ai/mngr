@@ -50,6 +50,7 @@ from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
 from imbue.minds_workspace_server.sharing_proxy import SharingProxyError
 from imbue.minds_workspace_server.sharing_proxy import get_sharing_status
 from imbue.minds_workspace_server.sharing_proxy import request_sharing_edit
+from imbue.minds_workspace_server.tickets_watcher import AgentTicketsWatcher
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 
 _LOOPBACK_CLIENT_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
@@ -80,6 +81,7 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     event_queues = AgentEventQueues()
     application.state.event_queues = event_queues
     application.state.watchers = {}
+    application.state.tickets_watchers = {}
 
     preconfigured_agent_manager: AgentManager | None = application.state.preconfigured_agent_manager
     if preconfigured_agent_manager is None:
@@ -137,6 +139,10 @@ def _stop_all_watchers(application: FastAPI) -> None:
     for watcher in watchers.values():
         watcher.stop()
     watchers.clear()
+    tickets_watchers: dict[str, AgentTicketsWatcher] = getattr(application.state, "tickets_watchers", {})
+    for tw in tickets_watchers.values():
+        tw.stop()
+    tickets_watchers.clear()
 
 
 def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSessionWatcher:
@@ -158,6 +164,33 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
         on_events=on_events,
     )
     watchers[agent_info.id] = watcher
+    watcher.start()
+    return watcher
+
+
+def _get_or_create_tickets_watcher(request: Request, agent_info: AgentInfo) -> AgentTicketsWatcher | None:
+    """Get an existing tickets watcher for an agent, or create one. Returns
+    None if the agent has no resolvable working directory (in which case
+    there's no .tickets/ to watch)."""
+    if agent_info.work_dir is None:
+        return None
+
+    tickets_watchers: dict[str, AgentTicketsWatcher] = request.app.state.tickets_watchers
+    event_queues: AgentEventQueues = request.app.state.event_queues
+
+    if agent_info.id in tickets_watchers:
+        return tickets_watchers[agent_info.id]
+
+    def on_events(agent_id: str, events: list[dict[str, Any]]) -> None:
+        for event in events:
+            event_queues.broadcast(agent_id, event)
+
+    watcher = AgentTicketsWatcher(
+        agent_id=agent_info.id,
+        tickets_dir=Path(agent_info.work_dir) / ".tickets",
+        on_events=on_events,
+    )
+    tickets_watchers[agent_info.id] = watcher
     watcher.start()
     return watcher
 
@@ -276,6 +309,7 @@ def _get_events(agent_id: str, request: Request) -> Response:
         return _agent_not_found_response(agent_id)
 
     watcher = _get_or_create_watcher(request, agent_info)
+    tickets_watcher = _get_or_create_tickets_watcher(request, agent_info)
 
     # Check for backfill parameters
     before_event_id = request.query_params.get("before")
@@ -285,11 +319,27 @@ def _get_events(agent_id: str, request: Request) -> Response:
     except ValueError:
         limit = _DEFAULT_TAIL_COUNT
 
+    # Build the merged ordered event list: main session events + task
+    # events. Ticket events have type="task_event" and carry a separate
+    # event_id namespace; the frontend dedups normally.
+    session_events = watcher.get_all_events()
+    task_events = tickets_watcher.get_all_events() if tickets_watcher is not None else []
+    merged = session_events + task_events
+    merged.sort(key=lambda e: e.get("timestamp", ""))
+
     if before_event_id:
-        events = watcher.get_backfill_events(before_event_id, limit=limit)
+        target_idx = -1
+        for i, event in enumerate(merged):
+            if event["event_id"] == before_event_id:
+                target_idx = i
+                break
+        if target_idx <= 0:
+            events: list[dict[str, Any]] = []
+        else:
+            start_idx = max(0, target_idx - limit)
+            events = merged[start_idx:target_idx]
     else:
-        # Return only main-session events (not subagent events)
-        events = watcher.get_all_events()
+        events = merged
 
     return JSONResponse(content={"events": events})
 
@@ -301,6 +351,7 @@ def _stream_events(agent_id: str, request: Request) -> Response:
         return _agent_not_found_response(agent_id)
 
     _get_or_create_watcher(request, agent_info)
+    _get_or_create_tickets_watcher(request, agent_info)
 
     event_queues: AgentEventQueues = request.app.state.event_queues
     event_queue = event_queues.register(agent_id)

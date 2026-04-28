@@ -1431,3 +1431,250 @@ body {
 }
 
 /* share-modal-btn-create uses the base .share-modal-btn styling (dark button) */
+
+/* ─────────────────────────────────────────────────────────────────────
+   PROGRESS VIEW (per-turn task timeline rendered from tk tickets)
+   ─────────────────────────────────────────────────────────────────── */
+
+.progress-block {
+  margin: 18px 0 28px;
+  --pv-fg: var(--color-text-primary);
+  --pv-fg-soft: #5a564a;
+  --pv-fg-muted: var(--color-text-secondary);
+  --pv-fg-faint: var(--color-text-faint);
+  --pv-line: var(--color-border);
+  --pv-line-faint: var(--color-border-faint);
+  --pv-active: var(--color-accent);
+  --pv-done: #5a564a;
+  --pv-pending: #c2bfb6;
+  --pv-summary-fg: #4a473d;
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--pv-fg);
+}
+
+/* Status icons */
+.pv-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.pv-icon--done {
+  color: var(--pv-done);
+}
+.pv-icon--active {
+  color: var(--pv-active);
+  width: 16px;
+  height: 16px;
+}
+.pv-icon--pending {
+  color: var(--pv-pending);
+}
+
+.pv-spinner {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  animation: pv-spin 0.9s linear infinite;
+}
+@keyframes pv-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Chevron */
+.pv-chev {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 14px;
+  color: var(--pv-fg-faint);
+  transition: transform 0.15s ease;
+  font-weight: 400;
+}
+.pv-chev--open {
+  transform: rotate(90deg);
+  color: var(--pv-fg-muted);
+}
+
+/* Title button reset (timeline variant) */
+.pv-tl-title {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font-size: 14.5px;
+  font-weight: 500;
+  color: var(--pv-fg);
+  line-height: 1.4;
+  display: inline-flex;
+  align-items: center;
+}
+.pv-tl-title:disabled {
+  cursor: default;
+}
+
+/* Carryover marker on a task title (rendered when the same ticket
+   continued in from a prior turn) */
+.pv-carryover-tag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--pv-fg-muted);
+  background: var(--color-bg-sidebar);
+  border: 1px solid var(--pv-line-faint);
+  border-radius: 4px;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+
+/* Timeline thread + nodes */
+.pv.pv--timeline {
+  position: relative;
+  padding-left: 0;
+}
+.pv-timeline-thread {
+  position: absolute;
+  left: 7.5px;
+  top: 8px;
+  bottom: 8px;
+  width: 1px;
+  background: var(--pv-line);
+}
+.pv-tl-node {
+  position: relative;
+  display: flex;
+  gap: 14px;
+  padding: 0 0 18px 0;
+  align-items: flex-start;
+}
+.pv-tl-node--last {
+  padding-bottom: 0;
+}
+.pv-tl-bullet {
+  position: relative;
+  z-index: 1;
+  background: var(--color-bg);
+  padding: 1px 0;
+  flex-shrink: 0;
+  width: 16px;
+}
+.pv-tl-body {
+  flex: 1;
+  min-width: 0;
+}
+.pv-tl-node--done .pv-tl-title {
+  color: var(--pv-fg-soft);
+  font-weight: 400;
+}
+.pv-tl-node--pending .pv-tl-title {
+  color: var(--pv-fg-muted);
+  font-weight: 400;
+}
+.pv-tl-node--active .pv-tl-title {
+  color: var(--pv-active);
+  font-weight: 600;
+}
+
+.pv-tl-summary {
+  margin-top: 4px;
+  font-size: 13.5px;
+  color: var(--pv-summary-fg);
+  line-height: 1.55;
+}
+
+.pv-tl-expanded {
+  margin-top: 6px;
+}
+
+/* Expanded panel: matches the rest of the chat -- interleaved markdown +
+   tool-call-blocks. We just contain it with a subtle indent + left rule
+   so it's visually distinct from the surrounding progress structure. */
+.pv-expanded {
+  margin-top: 10px;
+  padding: 4px 0 4px 14px;
+  border-left: 2px solid var(--pv-line-faint);
+  font-size: 14px;
+}
+.pv-expanded p {
+  margin: 0 0 0.6em;
+  line-height: 1.65;
+  color: var(--pv-fg);
+}
+.pv-expanded p:last-child {
+  margin-bottom: 0;
+}
+.pv-expanded .tool-call-block {
+  margin: 0.5em 0;
+}
+
+.pv-expanded-empty {
+  margin-top: 8px;
+  padding: 6px 12px;
+  border-left: 2px solid var(--pv-line-faint);
+  color: var(--pv-fg-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* Final assistant message under the progress timeline */
+.pv-final {
+  margin-top: 16px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--pv-fg);
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   ACTIVITY INDICATOR (replaces the generic "Running tool..." strip)
+   ─────────────────────────────────────────────────────────────────── */
+
+.agent-activity-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 auto 8px auto;
+  width: 100%;
+  max-width: var(--width-message-column);
+  padding: 0 4px;
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+}
+
+.agent-activity-indicator__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  animation: agent-activity-pulse 1.4s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes agent-activity-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+.agent-activity-indicator__label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

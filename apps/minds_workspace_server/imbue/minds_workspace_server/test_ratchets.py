@@ -90,7 +90,11 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(1))
+    # Two getattrs on FastAPI app.state for the per-agent watchers dicts:
+    # one for session watchers, one for tickets watchers. Both guard
+    # against test paths where _lifespan() doesn't run; direct attribute
+    # access would raise AttributeError on app.state in those cases.
+    rc.check_getattr(_DIR, snapshot(2))
 
 
 def test_prevent_setattr() -> None:
@@ -234,7 +238,11 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(3))
+    # +1 for the on_events callback nested inside _get_or_create_tickets_watcher.
+    # The closure captures event_queues from the outer scope; this matches the
+    # existing pattern used by _get_or_create_watcher (which is one of the
+    # original 3).
+    rc.check_inline_functions(_DIR, snapshot(4))
 
 
 def test_prevent_underscore_imports() -> None:
@@ -242,7 +250,13 @@ def test_prevent_underscore_imports() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(4))
+    # +2 for the new tickets pipeline: AgentTicketsWatcher.__init__ (stateful
+    # background watcher, mirroring AgentSessionWatcher's __init__ pattern --
+    # a classmethod factory wouldn't help) and _TicketsChangeHandler.__init__
+    # (a watchdog FileSystemEventHandler subclass that needs the wake_event
+    # threading primitive injected, mirroring _ChangeHandler in
+    # session_watcher.py).
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(6))
 
 
 def test_prevent_cast_usage() -> None:

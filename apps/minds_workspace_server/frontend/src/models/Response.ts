@@ -19,12 +19,22 @@ export interface ToolCall {
   subagent_metadata?: SubagentMetadata;
 }
 
+/**
+ * Status vocabulary mirrored from the tk ticket tracker:
+ *   - "open"        -> rendered as "pending" in the chat progress UI
+ *   - "in_progress" -> rendered as "active"
+ *   - "closed"      -> rendered as "done"
+ * There is no failed state by design (every ticket terminates as closed
+ * with a summary; see CLAUDE.md "Task management" in the FCT side).
+ */
+export type TaskEventStatus = "open" | "in_progress" | "closed";
+
 export interface TranscriptEvent {
   timestamp: string;
-  type: "user_message" | "assistant_message" | "tool_result";
+  type: "user_message" | "assistant_message" | "tool_result" | "task_event";
   event_id: string;
   source: string;
-  message_uuid: string;
+  message_uuid?: string;
   session_id?: string;
 
   // user_message fields
@@ -48,6 +58,15 @@ export interface TranscriptEvent {
   tool_name?: string;
   output?: string;
   is_error?: boolean;
+
+  // task_event fields (emitted by the tickets_watcher; one event per
+  // (ticket_id, status) tuple, three at most per ticket lifetime).
+  ticket_id?: string;
+  title?: string;
+  status?: TaskEventStatus;
+  created_at?: string;
+  summary?: string | null;
+  summary_at?: string | null;
 }
 
 // For hook compatibility
