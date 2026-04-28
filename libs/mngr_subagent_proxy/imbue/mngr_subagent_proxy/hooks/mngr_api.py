@@ -22,7 +22,6 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.main import get_or_create_plugin_manager
 from imbue.mngr.primitives import CleanupAction
 from imbue.mngr.primitives import ErrorBehavior
-from imbue.mngr_subagent_proxy.hooks.destroy_detached import destroy_agent_detached as destroy_agent_detached
 
 
 @contextmanager
