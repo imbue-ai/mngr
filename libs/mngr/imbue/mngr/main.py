@@ -8,9 +8,7 @@ import click
 import pluggy
 import setproctitle
 from click_option_group import OptionGroup
-from pydantic import Field
 
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.cli.common_opts import TCommand
 from imbue.mngr.cli.common_opts import create_group_title_option
@@ -27,6 +25,8 @@ from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.providers.registry import get_all_provider_args_help_sections
 from imbue.mngr.providers.registry import load_all_registries
+from imbue.mngr.utils.builtin_command_specs import BUILTIN_COMMAND_SPECS
+from imbue.mngr.utils.builtin_command_specs import BuiltinCommandSpec
 from imbue.mngr.utils.click_utils import detect_alias_to_canonical
 from imbue.mngr.utils.click_utils import detect_aliases_by_command
 from imbue.mngr.utils.env_utils import parse_bool_env
@@ -34,156 +34,6 @@ from imbue.mngr.utils.env_utils import parse_bool_env
 # Module-level container for the plugin manager singleton, created lazily.
 # Using a dict avoids the need for the 'global' keyword while still allowing module-level state.
 _plugin_manager_container: dict[str, pluggy.PluginManager | None] = {"pm": None}
-
-
-class _BuiltinSpec(FrozenModel):
-    """Specification for a built-in command that is loaded lazily.
-
-    The short_help text is duplicated from the command module's
-    CommandHelpMetadata.one_line_description so the root --help can render
-    the command list without importing each command module.
-    """
-
-    name: str
-    module_path: str
-    attr_name: str
-    short_help: str
-    aliases: tuple[str, ...] = Field(default=())
-    hidden: bool = False
-    apply_plugin_options: bool = True
-
-
-# Built-in command specs. The `name` is the click command name as it appears
-# in `cli.commands` (matches @click.command(name=...) or the function name when
-# no explicit name is given). The metadata's `one_line_description` is mirrored
-# in `short_help`; if the metadata text changes, update it here as well.
-def _spec(
-    name: str,
-    module_path: str,
-    attr_name: str,
-    short_help: str,
-    *,
-    aliases: tuple[str, ...] = (),
-    hidden: bool = False,
-    apply_plugin_options: bool = True,
-) -> _BuiltinSpec:
-    return _BuiltinSpec(
-        name=name,
-        module_path=module_path,
-        attr_name=attr_name,
-        short_help=short_help,
-        aliases=aliases,
-        hidden=hidden,
-        apply_plugin_options=apply_plugin_options,
-    )
-
-
-_BUILTIN_COMMAND_SPECS: tuple[_BuiltinSpec, ...] = (
-    _spec(
-        "archive",
-        "imbue.mngr.cli.archive",
-        "archive",
-        "Archive agents (set the 'archived_at' label)",
-        apply_plugin_options=False,
-    ),
-    _spec("ask", "imbue.mngr.cli.ask", "ask", "Chat with mngr for help [experimental]"),
-    _spec("capture", "imbue.mngr.cli.capture", "capture", "Capture and display an agent's tmux pane content"),
-    _spec(
-        "dependencies", "imbue.mngr.cli.check_deps", "check_deps", "Check and install system dependencies", hidden=True
-    ),
-    _spec(
-        "cleanup",
-        "imbue.mngr.cli.cleanup",
-        "cleanup",
-        "Destroy or stop agents and hosts to free up resources [experimental]",
-        aliases=("clean",),
-    ),
-    _spec(
-        "clone",
-        "imbue.mngr.cli.clone",
-        "clone",
-        "Create a new agent by cloning an existing one [experimental]",
-        apply_plugin_options=False,
-    ),
-    _spec("config", "imbue.mngr.cli.config", "config", "Manage mngr configuration", aliases=("cfg",)),
-    _spec(
-        "connect",
-        "imbue.mngr.cli.connect",
-        "connect",
-        "Connect to an existing agent via the terminal",
-        aliases=("conn",),
-    ),
-    _spec("create", "imbue.mngr.cli.create", "create", "Create and run an agent", aliases=("c",)),
-    _spec("destroy", "imbue.mngr.cli.destroy", "destroy", "Destroy agent(s) and clean up resources", aliases=("rm",)),
-    _spec("events", "imbue.mngr.cli.events", "events", "View events from an agent or host"),
-    _spec(
-        "exec",
-        "imbue.mngr.cli.exec",
-        "exec_command",
-        "Execute a shell command on one or more agents' hosts",
-        aliases=("x",),
-    ),
-    _spec(
-        "extras",
-        "imbue.mngr.cli.extras",
-        "extras",
-        "Install optional extras (plugins, completion, Claude Code plugin)",
-        hidden=True,
-    ),
-    _spec("gc", "imbue.mngr.cli.gc", "gc", "Garbage collect unused resources"),
-    _spec("help", "imbue.mngr.cli.help", "help_command", "Show help for a command or topic"),
-    _spec("label", "imbue.mngr.cli.label", "label", "Set labels on agents"),
-    _spec(
-        "limit",
-        "imbue.mngr.cli.limit",
-        "limit",
-        "Configure limits for agents and hosts [experimental]",
-        aliases=("lim",),
-    ),
-    _spec("list", "imbue.mngr.cli.list", "list_command", "List all agents managed by mngr", aliases=("ls",)),
-    _spec("message", "imbue.mngr.cli.message", "message", "Send a message to one or more agents", aliases=("msg",)),
-    _spec(
-        "migrate",
-        "imbue.mngr.cli.migrate",
-        "migrate",
-        "Move an agent to a different host by cloning and destroying the original [experimental]",
-        apply_plugin_options=False,
-    ),
-    _spec(
-        "observe", "imbue.mngr.cli.observe", "observe", "Observe agent state changes across all hosts [experimental]"
-    ),
-    _spec("plugin", "imbue.mngr.cli.plugin", "plugin", "Manage available and active plugins", aliases=("plug",)),
-    _spec(
-        "provision",
-        "imbue.mngr.cli.provision",
-        "provision",
-        "Re-run provisioning on an existing agent [experimental]",
-        aliases=("prov",),
-    ),
-    _spec(
-        "pull",
-        "imbue.mngr.cli.pull",
-        "pull",
-        "Pull files or git commits from an agent to local machine [experimental]",
-    ),
-    _spec(
-        "push",
-        "imbue.mngr.cli.push",
-        "push",
-        "Push files or git commits from local machine to an agent [experimental]",
-    ),
-    _spec("rename", "imbue.mngr.cli.rename", "rename", "Rename an agent or host [experimental]", aliases=("mv",)),
-    _spec(
-        "snapshot",
-        "imbue.mngr.cli.snapshot",
-        "snapshot",
-        "Create, list, and destroy host snapshots",
-        aliases=("snap",),
-    ),
-    _spec("start", "imbue.mngr.cli.start", "start", "Start stopped agent(s)"),
-    _spec("stop", "imbue.mngr.cli.stop", "stop", "Stop running agent(s)"),
-    _spec("transcript", "imbue.mngr.cli.transcript", "transcript", "View the message transcript for an agent"),
-)
 
 
 def _call_on_error_hook(ctx: click.Context, error: BaseException) -> None:
@@ -209,26 +59,16 @@ def _call_on_error_hook(ctx: click.Context, error: BaseException) -> None:
 # so repeat lookups are cheap. The cache is intentionally NOT cleared by
 # reset_plugin_manager: the click.Command lives on the (cached) command module,
 # and re-applying plugin options would duplicate them.
-_BUILTINS_BY_NAME: dict[str, _BuiltinSpec] = {}
+_BUILTINS_BY_NAME: dict[str, BuiltinCommandSpec] = {}
 _BUILTIN_ALIASES_BY_CANONICAL: dict[str, tuple[str, ...]] = {}
 _BUILTINS_LOADED: dict[str, click.Command] = {}
 
 
-def _register_builtin_spec(spec: _BuiltinSpec) -> None:
+def _register_builtin_spec(spec: BuiltinCommandSpec) -> None:
     _BUILTINS_BY_NAME[spec.name] = spec
     for alias in spec.aliases:
         _BUILTINS_BY_NAME[alias] = spec
     _BUILTIN_ALIASES_BY_CANONICAL[spec.name] = spec.aliases
-
-
-def get_builtin_alias_to_canonical() -> dict[str, str]:
-    """Return a mapping of built-in alias name -> canonical command name.
-
-    Aliases are not stored in ``cli.commands`` because built-in commands are
-    loaded lazily; consumers that need the alias list (tab completion cache,
-    documentation generators) read it through this helper.
-    """
-    return {alias: canonical for canonical, aliases in _BUILTIN_ALIASES_BY_CANONICAL.items() for alias in aliases}
 
 
 def _resolve_builtin(cmd_name: str) -> click.Command | None:
@@ -356,7 +196,7 @@ class AliasAwareGroup(DefaultCommandGroup):
                 formatter.write_dl(rows)
 
 
-for _builtin in _BUILTIN_COMMAND_SPECS:
+for _builtin in BUILTIN_COMMAND_SPECS:
     _register_builtin_spec(_builtin)
 
 

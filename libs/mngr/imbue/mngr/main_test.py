@@ -5,9 +5,9 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.cli.help_formatter import get_help_metadata
-from imbue.mngr.main import _BUILTIN_COMMAND_SPECS
 from imbue.mngr.main import _resolve_builtin
 from imbue.mngr.main import create_plugin_manager
+from imbue.mngr.utils.builtin_command_specs import BUILTIN_COMMAND_SPECS
 
 
 def test_create_plugin_manager_blocks_disabled_plugins(
@@ -37,7 +37,7 @@ def test_create_plugin_manager_skips_blocking_when_load_all_plugins_set(
 
 
 def test_builtin_specs_match_command_help_metadata() -> None:
-    """Each ``_BuiltinSpec`` must mirror the command's ``CommandHelpMetadata``.
+    """Each ``BuiltinCommandSpec`` must mirror the command's ``CommandHelpMetadata``.
 
     The lazy-load registry duplicates ``one_line_description`` and ``aliases``
     so the root ``mngr --help`` can render rows without importing the command
@@ -46,7 +46,7 @@ def test_builtin_specs_match_command_help_metadata() -> None:
     drift from the registry text.
     """
     drift: list[str] = []
-    for spec in _BUILTIN_COMMAND_SPECS:
+    for spec in BUILTIN_COMMAND_SPECS:
         cmd = _resolve_builtin(spec.name)
         assert cmd is not None, f"{spec.name}: failed to resolve lazy builtin"
         canonical = cmd.name or spec.name

@@ -15,9 +15,9 @@ from imbue.mngr.config.completion_cache import CompletionCacheData
 from imbue.mngr.config.completion_cache import get_completion_cache_dir
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
-from imbue.mngr.main import get_builtin_alias_to_canonical
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.utils.builtin_command_specs import get_builtin_alias_to_canonical
 from imbue.mngr.utils.file_utils import atomic_write
 
 # Per-position positional completion spec for top-level commands.
