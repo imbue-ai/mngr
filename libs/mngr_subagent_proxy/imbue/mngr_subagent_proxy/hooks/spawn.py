@@ -137,6 +137,21 @@ def _build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> s
         'INIT_FLAG="$STATE_DIR/proxy_commands/initialized-$TID"\n'
         'PROMPT_FILE="$STATE_DIR/subagent_prompts/$TID.md"\n'
         'RESULT_FILE="$STATE_DIR/subagent_results/$TID.txt"\n'
+        'MAP_FILE="$STATE_DIR/subagent_map/$TID.json"\n'
+        "\n"
+        # Idempotent re-entry guard. Any of three states means "PostToolUse
+        # has already run for this tool_use_id" -- emit the sentinel
+        # immediately and exit 0 so Haiku ends its turn cleanly instead
+        # of error-looping:
+        #   - the prompt file was deleted (PostToolUse cleans subagent_prompts/)
+        #   - the map entry was deleted (PostToolUse cleans subagent_map/)
+        #   - the result file was already consumed (PostToolUse cleans subagent_results/)
+        # This must run before the mngr-create block: if the prompt file
+        # is gone, the create call would fail with "Path ... does not exist."
+        'if [ ! -f "$PROMPT_FILE" ] || [ ! -f "$MAP_FILE" ]; then\n'
+        '    echo "MNGR_PROXY_END_OF_OUTPUT"\n'
+        "    exit 0\n"
+        "fi\n"
         "\n"
         'if [ ! -f "$INIT_FLAG" ]; then\n'
         "    env | grep -Ev "
@@ -165,16 +180,6 @@ def _build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> s
         "fi\n"
         "\n"
         'mkdir -p "$(dirname "$RESULT_FILE")"\n'
-        # Idempotent re-entry: if PostToolUse has already cleaned up
-        # the result file but Haiku ignored the sentinel and is calling
-        # us a second time, just emit the sentinel and exit 0 so Haiku
-        # can end its turn instead of error-looping.
-        'if [ -f "$INIT_FLAG" ] && [ ! -f "$RESULT_FILE" ]; then\n'
-        '    if [ ! -d "$STATE_DIR/subagent_map" ] || [ ! -f "$STATE_DIR/subagent_map/$TID.json" ]; then\n'
-        '        echo "MNGR_PROXY_END_OF_OUTPUT"\n'
-        "        exit 0\n"
-        "    fi\n"
-        "fi\n"
         'output=$(uv run python -m imbue.mngr_subagent_proxy.subagent_wait "$TARGET_NAME")\n'
         'case "$output" in\n'
         "    END_TURN:*)\n"
