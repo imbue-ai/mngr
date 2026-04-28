@@ -4,6 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.cli.help_formatter import get_help_metadata
+from imbue.mngr.main import _BUILTIN_COMMAND_SPECS
+from imbue.mngr.main import _resolve_builtin
 from imbue.mngr.main import create_plugin_manager
 
 
@@ -31,3 +34,32 @@ def test_create_plugin_manager_skips_blocking_when_load_all_plugins_set(
     pm = create_plugin_manager()
 
     assert not pm.is_blocked("modal")
+
+
+def test_builtin_specs_match_command_help_metadata() -> None:
+    """Each ``_BuiltinSpec`` must mirror the command's ``CommandHelpMetadata``.
+
+    The lazy-load registry duplicates ``one_line_description`` and ``aliases``
+    so the root ``mngr --help`` can render rows without importing the command
+    module. This test forces every builtin to load and asserts the duplicated
+    text and aliases stay in sync, so updates to the metadata don't silently
+    drift from the registry text.
+    """
+    drift: list[str] = []
+    for spec in _BUILTIN_COMMAND_SPECS:
+        cmd = _resolve_builtin(spec.name)
+        assert cmd is not None, f"{spec.name}: failed to resolve lazy builtin"
+        canonical = cmd.name or spec.name
+        metadata = get_help_metadata(canonical)
+        if metadata is None:
+            # Hidden / undocumented commands (e.g., ``dependencies``) need not
+            # have CommandHelpMetadata registered.
+            continue
+        if metadata.one_line_description != spec.short_help:
+            drift.append(
+                f"{spec.name}: short_help={spec.short_help!r} "
+                f"!= metadata.one_line_description={metadata.one_line_description!r}"
+            )
+        if metadata.aliases != spec.aliases:
+            drift.append(f"{spec.name}: aliases={spec.aliases!r} != metadata.aliases={metadata.aliases!r}")
+    assert drift == [], "Lazy-builtin registry has drifted from CommandHelpMetadata:\n  " + "\n  ".join(drift)

@@ -354,15 +354,20 @@ def write_cli_completions_cache(
     CLI commands. Other exceptions are allowed to propagate.
     """
     try:
-        # Force lazy built-ins to load so they're included in the completion cache.
-        # AliasAwareGroup defers builtin imports; ``commands`` alone misses them.
-        all_commands_fn = typing.cast(
-            "typing.Callable[[], dict[str, click.Command]] | None",
-            getattr(cli_group, "all_commands", None),
-        )
-        all_commands: dict[str, click.Command] = (
-            all_commands_fn() if all_commands_fn is not None else dict(cli_group.commands)
-        )
+        # Walk the CLI tree via the standard click API so AliasAwareGroup's lazy
+        # built-ins are loaded on demand. Iterating ``cli_group.commands`` alone
+        # would skip the built-ins until something else has imported them.
+        ctx = click.Context(cli_group)
+        all_commands: dict[str, click.Command] = {}
+        for name in cli_group.list_commands(ctx):
+            cmd = cli_group.get_command(ctx, name)
+            if cmd is not None:
+                all_commands[name] = cmd
+        # Aliases registered with ``cli.add_command(cmd, name=...)`` show up in
+        # ``cli_group.commands`` but not in ``list_commands`` (they're filtered
+        # out as dups), so include them explicitly.
+        for name, cmd in cli_group.commands.items():
+            all_commands.setdefault(name, cmd)
         all_command_names = sorted(all_commands.keys())
         alias_to_canonical = {
             name: cmd.name for name, cmd in all_commands.items() if cmd.name is not None and name != cmd.name

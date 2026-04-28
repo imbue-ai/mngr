@@ -297,26 +297,6 @@ class AliasAwareGroup(DefaultCommandGroup):
             return cmd
         return _resolve_builtin(cmd_name)
 
-    def all_commands(self) -> dict[str, click.Command]:
-        """Return every registered command keyed by name, including aliases.
-
-        Forces lazy built-ins to load. Use this in place of ``self.commands``
-        in code that walks the full command surface (e.g., completion cache
-        generation), since ``self.commands`` only ever contains plugin-added
-        and alias-registered entries.
-        """
-        result: dict[str, click.Command] = {}
-        for canonical, aliases in _BUILTINS_CANONICAL_ALIASES.items():
-            cmd = _resolve_builtin(canonical)
-            if cmd is None:
-                continue
-            result[canonical] = cmd
-            for alias in aliases:
-                result[alias] = cmd
-        for name, cmd in self.commands.items():
-            result.setdefault(name, cmd)
-        return result
-
     def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
         """Write the command list with aliases shown inline.
 
