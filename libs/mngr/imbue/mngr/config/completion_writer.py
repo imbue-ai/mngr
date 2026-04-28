@@ -56,9 +56,9 @@ _POSITIONAL_COMPLETION_SUBCOMMAND_SPEC: Final[dict[str, list[list[str]]]] = {
     "config.get": [["config_keys"]],
     "config.set": [["config_keys"], ["config_value_for_key"]],
     "config.unset": [["config_keys"]],
-    "file.get": [["agent_names"], []],
-    "file.put": [["agent_names"], []],
-    "file.list": [["agent_names"], []],
+    "file.get": [["agent_names", "host_names"], []],
+    "file.put": [["agent_names", "host_names"], []],
+    "file.list": [["agent_names", "host_names"], []],
 }
 
 # Options (keyed as "command.--option") whose values should complete against
