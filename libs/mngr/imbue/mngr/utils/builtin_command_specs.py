@@ -15,9 +15,14 @@ from imbue.imbue_common.frozen_model import FrozenModel
 class BuiltinCommandSpec(FrozenModel):
     """Specification for a built-in command that is loaded lazily.
 
-    The short_help text is duplicated from the command module's
-    CommandHelpMetadata.one_line_description so the root --help can render
-    the command list without importing each command module.
+    Both ``short_help`` and ``aliases`` are duplicated from the command
+    module's ``CommandHelpMetadata`` (``one_line_description`` and
+    ``aliases`` respectively) so the root ``mngr --help`` can render the
+    command list without importing each command module. The
+    ``test_builtin_specs_match_command_help_metadata`` test in
+    ``libs/mngr/imbue/mngr/main_test.py`` force-resolves every builtin
+    once and asserts the duplicated values stay in sync, so any drift
+    fails CI.
     """
 
     name: str
