@@ -32,7 +32,6 @@ from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
 from imbue.mngr.cli.help import get_topic
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import get_help_metadata
-from imbue.mngr.main import PLUGIN_COMMANDS
 from imbue.mngr.main import cli
 
 # Commands categorized by their documentation location
@@ -681,11 +680,15 @@ def main() -> None:
     # Generate CLI command docs
     base_dir = repo_root / "libs" / "mngr" / "docs" / "commands"
 
+    # ``cli.list_commands`` returns canonical names for both built-in commands
+    # (via AliasAwareGroup's lazy registry) and plugin-registered commands
+    # (which live in ``cli.commands``), so we walk the merged list once.
     ctx = click.Context(cli)
-    builtin_commands = [cmd for name in cli.list_commands(ctx) if (cmd := cli.get_command(ctx, name)) is not None]
-    for cmd in builtin_commands + list(PLUGIN_COMMANDS):
-        if cmd.name is not None:
-            generate_command_doc(cmd.name, base_dir)
+    for name in cli.list_commands(ctx):
+        cmd = cli.get_command(ctx, name)
+        if cmd is None or cmd.name is None:
+            continue
+        generate_command_doc(cmd.name, base_dir)
 
     # Generate docs for alias commands
     for command_name in sorted(ALIAS_COMMANDS):
