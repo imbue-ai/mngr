@@ -123,6 +123,17 @@ Spawned proxy children are tagged with the label
 
     uv run mngr list --exclude 'labels.mngr_subagent_proxy == "child"'
 
+The inverse — show only proxy children — is useful for debugging:
+
+    uv run mngr list --include 'labels.mngr_subagent_proxy == "child"'
+
+Combine with other filters as usual, e.g. only top-level agents that
+are currently running:
+
+    uv run mngr list \
+        --exclude 'labels.mngr_subagent_proxy == "child"' \
+        --include 'state == "RUNNING"'
+
 ## Depth limit
 
 To prevent unbounded nesting, the plugin denies Task at depth
