@@ -87,6 +87,7 @@ def run(
         return
 
     target_name = ""
+    run_in_background = False
     try:
         map_data = json.loads(map_file.read_text())
     except (OSError, json.JSONDecodeError) as e:
@@ -96,6 +97,7 @@ def run(
         raw_target = map_data.get("target_name")
         if isinstance(raw_target, str):
             target_name = raw_target
+        run_in_background = bool(map_data.get("run_in_background", False))
 
     result_file = state_dir / "subagent_results" / f"{tid}.txt"
     prompt_file = state_dir / "subagent_prompts" / f"{tid}.md"
@@ -106,7 +108,14 @@ def run(
     # Destroy the actual subagent FIRST -- it's the heavy/slow piece and
     # we want it kicked off before we touch any of the local files. The
     # destroy is fire-and-forget so this returns instantly.
-    if target_name:
+    #
+    # Skip destroy entirely in background mode: the parent expects the
+    # subagent to keep running so it can be polled via `mngr transcript
+    # <name>` / `mngr connect <name>`. The subagent's own end_turn +
+    # mngr's normal lifecycle handle teardown when it's actually done,
+    # and our on_before_agent_destroy cascade catches it on parent
+    # destroy.
+    if target_name and not run_in_background:
         destroy_log = state_dir / "subagent_destroy.log"
         destroy_callable(target_name, destroy_log)
 

@@ -156,6 +156,14 @@ def _build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> s
         '    touch "$INIT_FLAG"\n'
         "fi\n"
         "\n"
+        # --spawn-only: caller (Haiku in background mode) wants to
+        # spawn the subagent and return immediately; do NOT block on
+        # subagent_wait. The subagent runs to completion in the
+        # background under mngr's normal lifecycle.
+        'if [ "${1:-}" = "--spawn-only" ]; then\n'
+        "    exit 0\n"
+        "fi\n"
+        "\n"
         'mkdir -p "$(dirname "$RESULT_FILE")"\n'
         # Idempotent re-entry: if PostToolUse has already cleaned up
         # the result file but Haiku ignored the sentinel and is calling
@@ -302,24 +310,51 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         _emit_pass_through(stdout)
         return
 
-    new_prompt = (
-        f"You are an mngr-proxy dispatcher for target agent {target_name!r}. "
-        f"Run this exact Bash call: "
-        f'Bash(command="bash {script_file}", timeout=1800000). '
-        f"\n\n"
-        f"Examine the Bash stdout:\n"
-        f"- If it contains a line 'NEED_PERMISSION: <name>': "
-        f"run Bash(command=\"fake_tool 'subagent <name> waiting; run in another terminal: mngr connect <name>'\", "
-        f"timeout=60000), then re-run the original bash command above with the same path. "
-        f"Repeat until you see the next case.\n"
-        f"- If it contains a line 'MNGR_PROXY_END_OF_OUTPUT' as the last line: "
-        f"reply with EXACTLY the stdout content with that final 'MNGR_PROXY_END_OF_OUTPUT' line removed, "
-        f"and nothing else (no preamble, no commentary, no markdown wrappers). "
-        f"Then end your turn.\n\n"
-        f"Do NOT use shell variables, ask questions, or take any other action -- "
-        f"the path above is your only command. The stdout content (minus the sentinel) "
-        f"is the real subagent's output and is what the user is waiting for."
-    )
+    if orig_run_bg:
+        # Background mode: parent expects the Task tool to return
+        # immediately with a polling handle. The wait-script's
+        # mngr-create call is fast (a few seconds), so we still pay
+        # for spawn synchronously, but Haiku must NOT block on
+        # subagent_wait. Instead it spawns the subagent and replies
+        # right away with the mngr commands the parent can use to
+        # poll, mirroring native Claude Code's {agentId, output_file}
+        # return shape but in human/agent-readable form.
+        new_prompt = (
+            f"You are an mngr-proxy dispatcher running in BACKGROUND mode for "
+            f"target agent {target_name!r}. "
+            f"Run this exact Bash call ONCE: "
+            f'Bash(command="bash {script_file} --spawn-only", timeout=300000). '
+            f"\n\n"
+            f"After it returns (regardless of stdout), reply with EXACTLY this text "
+            f"and nothing else, then end your turn:\n"
+            f"\n"
+            f"mngr_subagent_proxy: background subagent spawned\n"
+            f"  name: {target_name}\n"
+            f"  tail live output: mngr transcript {target_name}\n"
+            f"  interact:        mngr connect {target_name}\n"
+            f"  check state:     mngr list --include 'name == \"{target_name}\"'\n"
+            f"\n"
+            f"Do NOT use shell variables, ask questions, or take any other action."
+        )
+    else:
+        new_prompt = (
+            f"You are an mngr-proxy dispatcher for target agent {target_name!r}. "
+            f"Run this exact Bash call: "
+            f'Bash(command="bash {script_file}", timeout=1800000). '
+            f"\n\n"
+            f"Examine the Bash stdout:\n"
+            f"- If it contains a line 'NEED_PERMISSION: <name>': "
+            f"run Bash(command=\"fake_tool 'subagent <name> waiting; run in another terminal: mngr connect <name>'\", "
+            f"timeout=60000), then re-run the original bash command above with the same path. "
+            f"Repeat until you see the next case.\n"
+            f"- If it contains a line 'MNGR_PROXY_END_OF_OUTPUT' as the last line: "
+            f"reply with EXACTLY the stdout content with that final 'MNGR_PROXY_END_OF_OUTPUT' line removed, "
+            f"and nothing else (no preamble, no commentary, no markdown wrappers). "
+            f"Then end your turn.\n\n"
+            f"Do NOT use shell variables, ask questions, or take any other action -- "
+            f"the path above is your only command. The stdout content (minus the sentinel) "
+            f"is the real subagent's output and is what the user is waiting for."
+        )
 
     # systemMessage surfaces the spawned subagent's name into the parent
     # Claude session so the user can `mngr connect <name>` or
