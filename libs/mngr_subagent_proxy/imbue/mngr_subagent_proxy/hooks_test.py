@@ -16,9 +16,26 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr_subagent_proxy.hooks import reap as reap_hook
 from imbue.mngr_subagent_proxy.hooks import rewrite as rewrite_hook
 from imbue.mngr_subagent_proxy.hooks import spawn as spawn_hook
+
+
+def _fake_list_with_state(target_name: str, state: AgentLifecycleState) -> dict[str, AgentDetails]:
+    """Build a single-entry list-result with a minimum-fields AgentDetails."""
+    return {target_name: make_test_agent_details(name=target_name, state=state)}
+
+
+def _list_returns(agents: dict[str, AgentDetails] | None):
+    """Build a list_callable stub that returns a fixed value."""
+
+    def _stub() -> dict[str, AgentDetails] | None:
+        return agents
+
+    return _stub
 
 
 @pytest.fixture
@@ -287,7 +304,13 @@ def test_rewrite_substitutes_output_and_cleans_up(
 
     stdin_buffer = io.StringIO(json.dumps({"tool_use_id": tid, "tool_response": "ignored"}))
     stdout_buffer = io.StringIO()
-    rewrite_hook.run(stdin_buffer, stdout_buffer, destroy_callable=fake_destroy)
+    # Child is STOPPED in mngr list -> safe to destroy.
+    rewrite_hook.run(
+        stdin_buffer,
+        stdout_buffer,
+        destroy_callable=fake_destroy,
+        list_callable=_list_returns(_fake_list_with_state("foo-bar", AgentLifecycleState.STOPPED)),
+    )
 
     # PostToolUse on the built-in Task tool cannot override tool_result --
     # updatedToolOutput is MCP-only. The hook now emits no JSON; the
@@ -352,7 +375,14 @@ def test_rewrite_missing_result_preserves_subagent(
 
     stdin_buffer = io.StringIO(json.dumps({"tool_use_id": tid, "tool_response": "ignored"}))
     stdout_buffer = io.StringIO()
-    rewrite_hook.run(stdin_buffer, stdout_buffer, destroy_callable=fake_destroy)
+    # Even with the child reported STOPPED in mngr list, missing
+    # result_file alone is enough to preserve.
+    rewrite_hook.run(
+        stdin_buffer,
+        stdout_buffer,
+        destroy_callable=fake_destroy,
+        list_callable=_list_returns(_fake_list_with_state(target_name, AgentLifecycleState.STOPPED)),
+    )
 
     assert stdout_buffer.getvalue() == ""
     # Critical: child is preserved.
@@ -361,6 +391,60 @@ def test_rewrite_missing_result_preserves_subagent(
     # find the orphan later.
     assert map_file.exists()
     assert prompt_file.exists()
+
+
+def test_rewrite_live_lifecycle_preserves_subagent(
+    tmp_path: Path,
+    clean_env: pytest.MonkeyPatch,
+) -> None:
+    """Even when result_file IS present, a child still in RUNNING /
+    WAITING must be preserved -- catches edge cases where subagent_wait
+    saw an early end_turn but the child legitimately re-entered (e.g.
+    waiting for a permission prompt resolution that will produce more
+    work).
+    """
+    state_dir = tmp_path / "state"
+    for sub in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
+        (state_dir / sub).mkdir(parents=True)
+    clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
+
+    tid = "toolu_live"
+    target_name = "foo-live-target"
+    map_file = state_dir / "subagent_map" / f"{tid}.json"
+    map_file.write_text(
+        json.dumps(
+            {
+                "target_name": target_name,
+                "subagent_type": "general-purpose",
+                "parent_cwd": "/tmp",
+                "run_in_background": False,
+            }
+        )
+    )
+    result_file = state_dir / "subagent_results" / f"{tid}.txt"
+    result_file.write_text("intermediate end-turn text")
+
+    destroy_calls: list[tuple[str, Path]] = []
+
+    def fake_destroy(target_name: str, log_path: Path) -> None:
+        destroy_calls.append((target_name, log_path))
+
+    for live_state in (AgentLifecycleState.RUNNING, AgentLifecycleState.WAITING):
+        del destroy_calls[:]
+        stdin_buffer = io.StringIO(json.dumps({"tool_use_id": tid, "tool_response": "ignored"}))
+        stdout_buffer = io.StringIO()
+        rewrite_hook.run(
+            stdin_buffer,
+            stdout_buffer,
+            destroy_callable=fake_destroy,
+            list_callable=_list_returns(_fake_list_with_state(target_name, live_state)),
+        )
+        assert destroy_calls == [], f"child in {live_state} must be preserved, not destroyed"
+        # State files are retained in the live-preserve path so the
+        # SessionStart reaper / on_before_agent_destroy cascade can
+        # find the orphan later.
+        assert map_file.exists()
+        assert result_file.exists()
 
 
 def test_rewrite_ignores_unmapped_tool_use_id(
@@ -379,7 +463,12 @@ def test_rewrite_ignores_unmapped_tool_use_id(
 
     stdin_buffer = io.StringIO(json.dumps({"tool_use_id": "untracked_tid"}))
     stdout_buffer = io.StringIO()
-    rewrite_hook.run(stdin_buffer, stdout_buffer, destroy_callable=fake_destroy)
+    rewrite_hook.run(
+        stdin_buffer,
+        stdout_buffer,
+        destroy_callable=fake_destroy,
+        list_callable=_list_returns({}),
+    )
     assert stdout_buffer.getvalue() == ""
     assert destroy_calls == []
 

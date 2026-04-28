@@ -17,12 +17,28 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+from typing import Callable
+from typing import Final
 from typing import TextIO
 
 from loguru import logger
 
+from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr_subagent_proxy.hooks.destroy_detached import DestroyAgentDetachedCallable
 from imbue.mngr_subagent_proxy.hooks.destroy_detached import destroy_agent_detached
+from imbue.mngr_subagent_proxy.hooks.mngr_api import list_agents_by_name
+
+ListAgentsByNameCallable = Callable[[], dict[str, AgentDetails] | None]
+
+# Lifecycle states that mean "child is still doing real work" -- in
+# those states, PostToolUse must NOT destroy the child or we throw away
+# the user's work. Anything else (STOPPED, REPLACED, DONE,
+# RUNNING_UNKNOWN_AGENT_TYPE, missing-from-mngr-list) is treated as
+# "safe to destroy."
+_LIVE_LIFECYCLE_STATES: Final[frozenset[AgentLifecycleState]] = frozenset(
+    {AgentLifecycleState.RUNNING, AgentLifecycleState.WAITING}
+)
 
 
 def _read_stdin_json(stdin: TextIO) -> dict[str, Any] | None:
@@ -52,10 +68,33 @@ def _best_effort_unlink(path: Path) -> None:
         logger.warning("rewrite: failed to remove {}: {}", path, e)
 
 
+def _is_child_still_alive(
+    target_name: str,
+    list_callable: ListAgentsByNameCallable,
+) -> bool:
+    """Return True if the named child is currently in a live lifecycle state.
+
+    On any failure (mngr list errors, target missing, unexpected state shape),
+    return False so the caller falls back to a safe-to-destroy path. Caller
+    combines this with the result_file existence check; either signal of
+    "still doing work" wins.
+    """
+    agents = list_callable()
+    if agents is None:
+        # mngr list failed; fall back to result_file-only signal.
+        return False
+    agent = agents.get(target_name)
+    if agent is None:
+        # Already gone from the registry; nothing to preserve.
+        return False
+    return agent.state in _LIVE_LIFECYCLE_STATES
+
+
 def run(
     stdin: TextIO,
     stdout: TextIO,
     destroy_callable: DestroyAgentDetachedCallable = destroy_agent_detached,
+    list_callable: ListAgentsByNameCallable = list_agents_by_name,
 ) -> None:
     """PostToolUse:Agent hook core.
 
@@ -114,17 +153,29 @@ def run(
     # and our on_before_agent_destroy cascade catches it on parent
     # destroy.
     #
-    # Also skip destroy when result_file is absent: that means
-    # subagent_wait never observed an END_TURN for this child (Haiku
-    # gave up early -- timeout, hallucinated permission dialog, retry
-    # cap, etc.). The child is likely still RUNNING and doing real
-    # work; destroying it on the parent's PostToolUse would throw away
-    # that work and leave the user with no path to recover. Keep the
-    # child alive so the user can `mngr connect <name>` to it. The
-    # on_before_agent_destroy cascade still tears it down when the
-    # parent is destroyed.
+    # Skip destroy when result_file is absent OR the child is currently
+    # in a live lifecycle state (RUNNING / WAITING). Either signal means
+    # the child is still doing real work and destroying it on the
+    # parent's PostToolUse would throw away that work and leave the
+    # user with no recovery path.
+    #
+    # - result_file-absent: subagent_wait never observed an END_TURN
+    #   (Haiku bailed early -- timeout, hallucinated permission dialog,
+    #   retry cap, etc.).
+    # - lifecycle-live: catches edge cases the result_file proxy can
+    #   miss (e.g. result_file appeared but child is still WAITING for
+    #   permission resolution; subagent_wait crashed mid-stream after
+    #   writing result_file but before the child stopped).
+    #
+    # Either signal "alive" wins; both must say "done" to destroy. The
+    # on_before_agent_destroy cascade still tears these preserved
+    # children down when the parent is destroyed, and the SessionStart
+    # reaper sweeps orphaned ones on next parent boot.
     haiku_observed_end_turn = result_file.is_file()
-    should_destroy = target_name and not run_in_background and haiku_observed_end_turn
+    child_lifecycle_alive = bool(target_name) and _is_child_still_alive(target_name, list_callable)
+    should_destroy = (
+        bool(target_name) and not run_in_background and haiku_observed_end_turn and not child_lifecycle_alive
+    )
     if should_destroy:
         destroy_log = state_dir / "subagent_destroy.log"
         destroy_callable(target_name, destroy_log)
