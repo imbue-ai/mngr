@@ -1,9 +1,10 @@
 name: Report flaky-aware test results
 description: >-
-  Report junit test results to a GitHub check. If the test step succeeded but
-  junit.xml still records failing attempts (meaning offload retried flaky
-  tests and they ultimately passed), post the check as neutral (yellow)
-  instead of failure (red). Neutral counts as success for branch protection.
+  Report junit test results to a GitHub check. Always posts a single
+  check-run built by this action so the PR-checks surface has a
+  consistent look across clean pass, flaky-recovered, and hard-failure
+  cases. Per-test failure annotations are still produced by
+  mikepenz/action-junit-report in annotate-only mode.
 
 inputs:
   check-name:
@@ -18,82 +19,142 @@ inputs:
     description: >-
       Outcome of the test-running step (the value of its `outcome` field --
       callers typically pass the outcome expression of the step with the id
-      that ran tests). The flaky-recovered path only triggers when this is
-      "success".
+      that ran tests). Combined with the contents of junit.xml, this drives
+      the check-run conclusion: "success" + no failures in junit -> success,
+      "success" + failures in junit -> neutral (flaky-recovered),
+      anything else -> failure.
     required: true
   github-token:
     description: >-
-      Token used to POST the neutral check-run via `gh api`. Needs
+      Token used to POST the check-run via `gh api`. Needs
       `checks: write` permission.
     required: true
 
 runs:
   using: composite
   steps:
-    # Detect flaky-recovered case. The just recipes map offload's exit 2
-    # (flaky tests failed then passed on retry) to exit 0, so GitHub Actions
-    # records the test step as "success" for both offload exit 0 (no
-    # failures at all) and offload exit 2 (flaky recovery). We distinguish
-    # the two by scanning junit.xml for <failure>/<error> elements: their
-    # presence alongside a successful step outcome means flaky recovery,
-    # and we want a neutral (yellow) check rather than a red one.
-    - name: Detect flaky-recovered tests
-      id: flaky
+    # Classify the run into one of three conclusions based on the test
+    # step's outcome and whether junit.xml contains any failure/error
+    # elements. The just recipes map offload's exit 2 (flaky tests failed
+    # then passed on retry) to exit 0, so `success` + failures-in-junit
+    # means "flaky recovered" and we want a neutral (yellow) check rather
+    # than a green one.
+    - name: Classify run
+      id: classify
       if: always()
       shell: bash
       env:
         TESTS_OUTCOME: ${{ inputs.tests-outcome }}
         JUNIT_PATH: ${{ inputs.junit-path }}
       run: |
-        if [ "$TESTS_OUTCOME" = "success" ] \
-            && [ -f "$JUNIT_PATH" ] \
-            && grep -qE '<(failure|error)[ >/]' "$JUNIT_PATH"; then
-          echo "is_flaky_recovered=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "is_flaky_recovered=false" >> "$GITHUB_OUTPUT"
+        has_failures=false
+        if [ -f "$JUNIT_PATH" ] && grep -qE '<(failure|error)[ >/]' "$JUNIT_PATH"; then
+          has_failures=true
         fi
+        if [ "$TESTS_OUTCOME" = "success" ] && [ "$has_failures" = "false" ]; then
+          conclusion=success
+          title="All tests passed"
+          intro=""
+        elif [ "$TESTS_OUTCOME" = "success" ] && [ "$has_failures" = "true" ]; then
+          conclusion=neutral
+          title="Tests passed after flaky retries"
+          intro="One or more tests failed on first attempt but passed on retry. See the workflow run summary and job logs for the failed-attempt annotations and details."
+        else
+          conclusion=failure
+          title="Tests failed"
+          intro="One or more tests failed. See the workflow run summary and job logs for per-failure annotations."
+        fi
+        {
+          echo "conclusion=$conclusion"
+          echo "title=$title"
+        } >> "$GITHUB_OUTPUT"
+        {
+          echo 'intro<<CLASSIFY_INTRO_EOF'
+          echo "$intro"
+          echo CLASSIFY_INTRO_EOF
+        } >> "$GITHUB_OUTPUT"
 
-    - name: Report test results
-      if: always() && steps.flaky.outputs.is_flaky_recovered != 'true'
+    # Build the per-test retry+flaky markdown table. Appended to the run's
+    # step summary (workflow run page) and exported as a file path for
+    # the check-run body below.
+    - name: Generate retry + flaky summary
+      id: retry_summary
+      if: always()
+      shell: bash
+      env:
+        JUNIT_PATH: ${{ inputs.junit-path }}
+        CHECK_NAME: ${{ inputs.check-name }}
+      run: |
+        if [ ! -f "$JUNIT_PATH" ]; then
+          echo "junit.xml not found at $JUNIT_PATH; skipping summary" >&2
+          echo "summary_path=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        TESTS_DIR="$(dirname "$JUNIT_PATH")"
+        SUMMARY_FILE="$RUNNER_TEMP/retry-flaky-summary.md"
+        python3 "$GITHUB_WORKSPACE/scripts/junit_test_summary.py" \
+          --junit "$JUNIT_PATH" \
+          --flaky-manifest-glob "${TESTS_DIR}/**/flaky_tests_*.txt" \
+          --heading "$CHECK_NAME: retry + flaky summary" \
+          --output "$SUMMARY_FILE"
+        cat "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"
+        echo "summary_path=$SUMMARY_FILE" >> "$GITHUB_OUTPUT"
+
+    # Produce per-failure annotations. `annotate_only: true` attaches them
+    # to the workflow run rather than creating mikepenz's own check-run,
+    # so our custom check-run below is the only one on the PR checks page.
+    - name: Annotate per-test failures
+      if: always()
       uses: mikepenz/action-junit-report@v5
       with:
         report_paths: ${{ inputs.junit-path }}
         include_passed: false
-        check_name: ${{ inputs.check-name }}
-
-    - name: Report test annotations (flaky recovered)
-      if: always() && steps.flaky.outputs.is_flaky_recovered == 'true'
-      uses: mikepenz/action-junit-report@v5
-      with:
-        report_paths: ${{ inputs.junit-path }}
-        include_passed: false
-        check_name: ${{ inputs.check-name }}
         annotate_only: true
 
-    - name: Post neutral check (flaky recovered)
-      if: always() && steps.flaky.outputs.is_flaky_recovered == 'true'
+    # Single unified check-run for the PR. Built by us so clean pass,
+    # flaky-recovered, and hard-failure surfaces all look the same.
+    - name: Post check-run
+      if: always()
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         CHECK_NAME: ${{ inputs.check-name }}
         REPO: ${{ github.repository }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      # Build the JSON body with `jq -n --arg` so that any special characters
-      # in $CHECK_NAME (quotes, backslashes, etc.) are properly escaped rather
-      # than interpolated raw into a JSON string literal. `jq` is preinstalled
-      # on GitHub-hosted runners.
+        CONCLUSION: ${{ steps.classify.outputs.conclusion }}
+        TITLE: ${{ steps.classify.outputs.title }}
+        INTRO: ${{ steps.classify.outputs.intro }}
+        RETRY_SUMMARY_PATH: ${{ steps.retry_summary.outputs.summary_path }}
       run: |
+        if [ -n "$RETRY_SUMMARY_PATH" ] && [ -f "$RETRY_SUMMARY_PATH" ]; then
+          RETRY_BODY="$(cat "$RETRY_SUMMARY_PATH")"
+        else
+          RETRY_BODY=""
+        fi
+        if [ -n "$INTRO" ] && [ -n "$RETRY_BODY" ]; then
+          SUMMARY="${INTRO}"$'\n\n'"${RETRY_BODY}"
+        elif [ -n "$RETRY_BODY" ]; then
+          SUMMARY="${RETRY_BODY}"
+        else
+          SUMMARY="${INTRO}"
+        fi
+        # Build the JSON body with `jq -n --arg` so that any special
+        # characters in $CHECK_NAME / $TITLE / $SUMMARY (quotes,
+        # backslashes, etc.) are properly escaped rather than
+        # interpolated raw into a JSON string literal.
         jq -n \
           --arg name "$CHECK_NAME" \
           --arg head_sha "$HEAD_SHA" \
-          --arg summary "One or more tests failed on first attempt but passed on retry. See the workflow run summary and job logs for the failed-attempt annotations and details." \
+          --arg conclusion "$CONCLUSION" \
+          --arg title "$TITLE" \
+          --arg summary "$SUMMARY" \
           '{
             name: $name,
             head_sha: $head_sha,
             status: "completed",
-            conclusion: "neutral",
+            conclusion: $conclusion,
             output: {
-              title: "Tests passed after flaky retries",
+              title: $title,
               summary: $summary
             }
           }' | gh api --method POST "repos/$REPO/check-runs" --input -

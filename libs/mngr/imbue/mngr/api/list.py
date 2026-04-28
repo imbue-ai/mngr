@@ -381,7 +381,7 @@ def _discover_and_emit_details_for_provider(
             if isinstance(e, MngrError):
                 raise
             raise MngrError(str(e)) from e
-        logger.exception("Error discovering agents for provider {}", provider.name)
+        logger.opt(exception=e).error("Error discovering agents for provider {}", provider.name)
         emit_discovery_error_to_stdout(
             error_type=type(e).__name__,
             error_message=str(e),
@@ -467,7 +467,7 @@ def _process_host_with_error_handling(
             if isinstance(e, (MngrError, BaseMngrError)):
                 raise
             raise MngrError(str(e)) from e
-        logger.exception("Error processing host {}", host_ref.host_id)
+        logger.opt(exception=e).error("Error processing host {}", host_ref.host_id)
         emit_discovery_error_to_stdout(
             error_type=type(e).__name__,
             error_message=str(e),
