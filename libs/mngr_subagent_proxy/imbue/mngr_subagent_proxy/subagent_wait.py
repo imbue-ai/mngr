@@ -237,14 +237,27 @@ def _refresh_tail_path(state: TailState, location: AgentLocation) -> None:
     state.pending_buffer = ""
 
 
+# Stop reasons that mean "the assistant is finished talking and isn't
+# calling a tool." Any of these on an assistant message with no tool_use
+# blocks is a real end-of-turn from our perspective.
+#
+# - end_turn: normal completion.
+# - stop_sequence: model hit a configured stop sequence (Claude Code
+#   sometimes uses these for skill / agent integrations); the assistant
+#   is done with no tool call.
+# - max_tokens: model truncated; treat as done so we surface what we
+#   have rather than hanging forever.
+_TERMINAL_STOP_REASONS: Final[frozenset[str]] = frozenset({"end_turn", "stop_sequence", "max_tokens"})
+
+
 def is_end_turn_event(event: dict) -> bool:
-    """Return True for an assistant stop_reason=end_turn message with no tool_use blocks."""
+    """Return True for an assistant message that finishes the turn without a tool call."""
     if event.get("type") != "assistant":
         return False
     message = event.get("message")
     if not isinstance(message, dict):
         return False
-    if message.get("stop_reason") != "end_turn":
+    if message.get("stop_reason") not in _TERMINAL_STOP_REASONS:
         return False
     content = message.get("content")
     if not isinstance(content, list):

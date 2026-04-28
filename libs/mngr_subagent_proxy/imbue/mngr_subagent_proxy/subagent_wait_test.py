@@ -72,6 +72,29 @@ def test_end_turn_detection_with_pure_text() -> None:
     non_assistant_event = {"type": "user", "message": {"stop_reason": "end_turn", "content": []}}
     assert is_end_turn_event(non_assistant_event) is False
 
+    # stop_sequence is a real end-of-turn too; Claude Code emits it for
+    # certain skill/agent integrations. Discovered live: a verify-and-fix
+    # subagent finished with stop_reason=stop_sequence and our wait
+    # blocked indefinitely waiting for end_turn.
+    stop_sequence_event = {
+        "type": "assistant",
+        "message": {
+            "stop_reason": "stop_sequence",
+            "content": [{"type": "text", "text": "verified"}],
+        },
+    }
+    assert is_end_turn_event(stop_sequence_event) is True
+
+    # max_tokens: model truncated. Surface what we have rather than hang.
+    max_tokens_event = {
+        "type": "assistant",
+        "message": {
+            "stop_reason": "max_tokens",
+            "content": [{"type": "text", "text": "long output ..."}],
+        },
+    }
+    assert is_end_turn_event(max_tokens_event) is True
+
     multi_text_event = {
         "type": "assistant",
         "message": {
