@@ -119,6 +119,11 @@ def fail_on_unexpected_loguru_warnings(
         if match_arg is None:
             pattern = None
         else:
+            if not isinstance(match_arg, str):
+                raise TypeError(
+                    f"@pytest.mark.allow_warnings `match` must be a str regex pattern or None; "
+                    f"got {type(match_arg).__name__}: {match_arg!r}"
+                )
             try:
                 pattern = re.compile(match_arg)
             except re.error as exc:
