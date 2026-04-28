@@ -1,20 +1,20 @@
 # Open GitHub issues triage
 
-Living scratch notes. Last update: 2026-04-27.
+Living scratch notes. Last update: 2026-04-28.
 
 Refresh issue states with `./scripts/check_triage_issues.sh` (parses this file for `#NNNN` refs).
 
 ## In progress (someone working on)
 
-#1037, #1036, #1035, #1034, #1038, #1408, #1411, #1046, #1043
+#1408
 
 ## Closed since first sweep (verified via gh)
 
-#475, #491, #751, #1040, #1041, #1045, #1051, #1060, #1280, #1332
+#475, #491, #751, #1034, #1035, #1036, #1037, #1038, #1040, #1041, #1043, #1045, #1046, #1051, #1060, #1096, #1101, #1280, #1332, #1411
 
 ## Skipped from triage (not pursuing right now)
 
-#1048, #1098, #1101, #1088, #1039, #1256, #1154, #1073, #1096, #1237, #1090
+#1048, #1098, #1088, #1039, #1256, #1154, #1073, #1237, #1090
 
 ## Remaining to triage
 
