@@ -1,6 +1,6 @@
 ---
-description: Common minds-app dev tasks. launch | draft | release | create agent | delete agent <id> | status | interact <prompt>
-argument-hint: "launch | draft | release | create agent | delete agent <id> | status | interact <prompt>"
+description: Common minds-app dev tasks. launch | draft | release | create agent | delete agent <id> | status | iterate | debug-ws | integ-test | interact <prompt>
+argument-hint: "launch | draft | release | create agent | delete agent <id> | status | iterate | debug-ws | integ-test | interact <prompt>"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, WebSearch, WebFetch
 ---
 
@@ -155,7 +155,12 @@ Trigger: "iterate", "propagate", "push changes to agent", "rsync into VM", "sync
 Fast dev-loop for minds stack work: edit source in the monorepo, have the change applied to a running agent + the workspace_server inside its Lima/Docker VM, and restart. Exists so you don't have to destroy-and-recreate an agent on every code change.
 
 **Prereqs (one-time per worktree):**
-- Template worktree at `.external_worktrees/forever-claude-template` — `git worktree add` from the canonical FCT checkout.
+- Template worktree at `.external_worktrees/forever-claude-template` tracking **`pilot`** (matches drive-minds.sh's default branch). Create from the canonical FCT clone at `/Users/weishi/Developer/imbue/forever-claude-template`:
+  ```
+  cd /Users/weishi/Developer/imbue/forever-claude-template
+  git worktree add /Users/weishi/Developer/imbue/mngr/.external_worktrees/forever-claude-template pilot
+  ```
+  If the worktree is already on the wrong branch (e.g. `main`), it will be missing the Lima `extra_provision_command` and agents won't have `uv` / `minds-workspace-server` installed. `git switch pilot` inside the worktree to fix.
 - At least one running agent (see the `create lima agent` sub-command). Note the agent name, or let the script auto-detect when there's only one.
 - Electron running (the script parallels a clean Electron restart with the agent restart; if Electron isn't running, the script exits 1 on `electron_stop`). Use the `launch` sub-command first.
 
@@ -320,9 +325,49 @@ Run with `uv run --with websockets python3 /tmp/cdp_interact.py`.
 
 **When the prompt needs a workspace that doesn't exist yet**: don't drive the Create form via CDP -- the HTTP path is faster (~1:30 cold, ~30s warm) and more deterministic. Compose: run the `create agent` sub-command first, wait for `status=DONE`, then connect CDP to the resulting workspace's `/forwarding/<agent_id>/system_interface/` target. Same for cleanup: `delete agent <id>` via `mngr destroy` has real cleanup (VM + remote branch); the UI's X button only detaches.
 
+## Sub-command: debug-ws
+
+Trigger: "debug ws", "workspace server disconnected", "ws-disconnected", "why is ws not coming up".
+
+Symptom: the chat UI panel shows **"Workspace server disconnected without response"**. This means the desktop client (or its proxy) couldn't reach the workspace_server inside the agent VM at port 8000.
+
+**First, sanity-check that you're on the right path before deep diving:**
+- Did you create the agent through the canonical flow (drive-minds.sh defaulting to GitHub `pilot`)? If you went via `pnpm start` + form fill against a local template path, you may have used a stale branch (notably `main`, which has been observed to ship without the Lima `extra_provision_command` and with a half-ported `proxy.py`). Re-create with the harness from the `create lima agent` sub-command before chasing real bugs.
+- `pilot` has the full Lima `extra_provision_command` (apt deps, uv, ttyd, gh, npm build, `uv tool install` of mngr + minds_workspace_server, plugin add, playwright). `main` historically has not. If your VM has no `uv`, no `minds-workspace-server`, that's the smoking gun for "wrong branch", not a bug to fix here.
+
+**If the canonical flow still fails, diagnose inside the VM:**
+
+```bash
+VM_NAME="minds-<agent-name>-host"
+PORT=$(/opt/homebrew/bin/limactl list --format '{{.SSHLocalPort}}' "$VM_NAME")
+
+# Is anything listening on 8000? (workspace_server's expected port)
+limactl shell "$VM_NAME" -- ss -ltnp 2>/dev/null | grep -E ':8000|:8080|:7681'
+
+# What's tmux running?
+limactl shell "$VM_NAME" -- tmux list-windows -t "$VM_NAME#${VM_NAME#minds-}" \
+  -F '#{window_index} #{window_name} #{pane_current_command}'
+# Look for: svc-web, svc-cloudflared, svc-app-watcher (services should be running, not bash)
+
+# If svc-web is bash (service crashed), capture the pane:
+limactl shell "$VM_NAME" -- tmux capture-pane -t <session>:<window> -p -S -200
+```
+
+Common failures and what they mean:
+- `uv: command not found` in the bootstrap pane → `extra_provision_command` didn't run / failed. You're probably on a branch that lacks it. Switch `GIT_BRANCH=pilot` and re-create.
+- `minds-workspace-server: command not found` in the svc-web pane → same root cause as above; the `uv tool install` step in `extra_provision_command` didn't run.
+- `ImportError` / `NameError` from a Python file in `imbue/minds_workspace_server/...` → real code bug in vendor/mngr. Cross-check the same file against `pilot`'s vendor/mngr; if it's clean on pilot, you're on a branch that hasn't picked up the fix. Don't patch in the VM — fix in the source mngr repo and `iterate`.
+- `Latchkey binary not found: .../node_modules/.bin/latchkey` warnings spamming the desktop client log → unrelated to ws-disconnected, but means `pnpm install` hasn't been run since the last merge. Run it once in `apps/minds/` and it goes away.
+- `mngr_recursive` `on_host_created` hook failure (silent — `is_errors_fatal=False` by default) means uv on the host wasn't installed by mngr's recursive provisioning. On Lima this is normally taken care of by the template's `extra_provision_command` instead, so it's only diagnostic.
+
+If port 8000 IS listening but the UI still says disconnected, the issue is on the desktop-client side (reverse-tunnel, proxy routing) — different debug path; not yet documented here.
+
 ## Cross-cutting rules
 
 - **Never commit** or push anywhere unless the user says "commit" / "push".
+- **Don't manually edit `vendor/mngr/` in any forever-claude-template clone.** The mngr tree there is vendored from this monorepo and synced by either the `iterate` sub-command (fast dev loop, via `propagate_changes`) or the `release-minds` skill (production cut). Hand-edits get clobbered on next sync. If you need to test a local mngr change against an agent, use `iterate` — don't hand-rsync or edit files in `vendor/mngr/` directly.
+- **Canonical template clone is `/Users/weishi/Developer/imbue/forever-claude-template` on `pilot`.** That's the working copy for template-side edits. The `.external_worktrees/forever-claude-template` worktree used by `iterate` is a **separate** scratch worktree; if it's tracking `main` it will be stale (Lima template `extra_provision_command` only lives on `pilot`). Re-create the worktree on `pilot` if so: `cd /Users/weishi/Developer/imbue/forever-claude-template && git worktree add /Users/weishi/Developer/imbue/mngr/.external_worktrees/forever-claude-template pilot`.
+- **For creating test agents, the harness defaults to `https://github.com/imbue-ai/forever-claude-template` on `pilot`.** That's the canonical create flow. Switch `GIT_URL` / `GIT_BRANCH` only when explicitly testing a different template branch.
 - **Don't run `pkill -9 -f "/Applications/minds.app"` casually** — pattern-matches packaged Python and wrecks in-flight `limactl` destroys. Use specific PIDs instead.
 - **App launch gotchas**:
   - Never re-sign a ToDesktop adhoc bundle after `xattr -cr`.
