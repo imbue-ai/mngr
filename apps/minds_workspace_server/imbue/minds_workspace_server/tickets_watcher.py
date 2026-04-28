@@ -94,9 +94,7 @@ class AgentTicketsWatcher:
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
-        self._thread = threading.Thread(
-            target=self._run, daemon=True, name=f"tickets-watcher-{self._agent_id}"
-        )
+        self._thread = threading.Thread(target=self._run, daemon=True, name=f"tickets-watcher-{self._agent_id}")
         self._thread.start()
 
     def stop(self) -> None:
