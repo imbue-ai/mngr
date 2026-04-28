@@ -163,11 +163,20 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
         # this branch (cleared after touch) so it doesn't fire on the
         # idempotent re-entry path which has no ENV_FILE to clean up.
         '    trap \'shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\' EXIT\n'
+        # --reuse: idempotent create. If `mngr create` partially succeeded
+        # last time (e.g. host provisioned but initial-message delivery
+        # failed) and `set -euo pipefail` killed the script before INIT_FLAG
+        # was touched, the next invocation must NOT fail with "agent already
+        # exists". --reuse makes the create call adopt an existing same-named
+        # agent and (re-)deliver the message. Without this flag, a
+        # SendMessageError mid-create wedges the proxy permanently because
+        # Haiku has no path to recover.
         '    uv run mngr create "$TARGET_NAME:$PARENT_CWD" \\\n'
         "        --type mngr-proxy-child \\\n"
         "        --transfer=none \\\n"
         "        --no-ensure-clean \\\n"
         "        --no-connect \\\n"
+        "        --reuse \\\n"
         '        --env-file "$ENV_FILE" \\\n'
         '        --message-file "$PROMPT_FILE" \\\n'
         "        --label mngr_subagent_proxy=child \\\n"

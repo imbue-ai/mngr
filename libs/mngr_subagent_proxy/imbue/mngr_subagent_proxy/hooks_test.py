@@ -95,6 +95,8 @@ def test_spawn_rewrites_input(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> 
     assert "uv run mngr create" in script_contents
     assert "--type mngr-proxy-child" in script_contents
     assert "--label mngr_subagent_proxy=child" in script_contents
+    # --reuse so partial-create failures are recoverable on retry.
+    assert "--reuse" in script_contents
     assert "uv run python -m imbue.mngr_subagent_proxy.subagent_wait" in script_contents
 
     assert _mode_bits(prompt_file) == 0o600

@@ -126,7 +126,15 @@ def run(
     # the sentinel and exits 0, rather than a missing-file error that
     # keeps Haiku looping. The SessionStart reaper sweeps stale
     # wait-script + init_flag pairs on the next parent boot.
-    for path in (env_file, prompt_file, map_file, result_file):
+    #
+    # In background mode also retain the map_file: the spawned subagent
+    # is still running and the on_before_agent_destroy cascade reads
+    # subagent_map/ to find children to tear down when the parent is
+    # destroyed. Deleting it here would orphan the background child.
+    paths_to_remove = [env_file, prompt_file, result_file]
+    if not run_in_background:
+        paths_to_remove.append(map_file)
+    for path in paths_to_remove:
         _best_effort_unlink(path)
     del script_file, init_flag  # intentionally retained
 
