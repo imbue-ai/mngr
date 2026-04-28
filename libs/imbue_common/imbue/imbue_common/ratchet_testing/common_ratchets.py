@@ -225,9 +225,7 @@ PREVENT_TRAILING_COMMENTS = RegexRatchetRule(
     rule_name="trailing comments",
     rule_description=(
         "Comments should be on their own line, not trailing after code. Trailing comments make code harder to read. "
-        "Note: trailing `# ty: ignore[...]` (the type-checker pragma) is exempt and is the correct way to silence "
-        "type-check errors at a specific call site -- prefer it over `# type: ignore[...]` (mypy syntax), which is "
-        "NOT exempt and will fail this ratchet."
+        "`# ty: ignore[code]` is exempt."
     ),
     pattern_string=r"[^\s#].*[ \t]#(?![0-9a-fA-F]{3,6}[;\s])(?!\s*ty:\s*ignore\[)",
 )

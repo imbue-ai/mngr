@@ -402,7 +402,7 @@ class _CreateCommand(click.Command):
         return result
 
 
-def _project_dot_means_default(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
+def _project_dot_means_default(ctx: Any, param: Any, value: str | None) -> str | None:
     """Normalize the --project sentinel "." to None so the default-derivation chain runs.
 
     "." is accepted for cross-command UX consistency with mngr list / mngr kanpan, where
