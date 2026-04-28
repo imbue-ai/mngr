@@ -1075,7 +1075,7 @@ def test_disable_plugin_in_command_defaults_blocks_override_hook(
         [],
         obj=pm,
         catch_exceptions=False,
-        env={"MNGR_PROJECT_DIR": str(tmp_path)},
+        env={"MNGR_PROJECT_CONFIG_DIR": str(tmp_path)},
     )
     assert result.exit_code == 0
     assert len(captured_params) == 1

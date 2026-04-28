@@ -27,6 +27,7 @@ from loguru import logger
 from imbue.minds.desktop_client.auth_backend_client import AuthBackendClient
 from imbue.minds.desktop_client.auth_backend_client import AuthBackendError
 from imbue.minds.desktop_client.auth_backend_client import AuthResult
+from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.session_store import UserInfo
 from imbue.minds.desktop_client.templates_auth import render_auth_page
@@ -72,8 +73,12 @@ def _get_output_format(request: Request) -> OutputFormat:
 def _store_session_from_auth_result(
     session_store: MultiAccountSessionStore,
     result: AuthResult,
+    request: Request,
 ) -> None:
-    """Persist the session tokens + user info from a successful auth result."""
+    """Persist the session tokens + user info from a successful auth result.
+
+    On first login (no default account set), auto-sets this account as default.
+    """
     assert result.user is not None and result.tokens is not None, "AuthResult missing user/tokens"
     session_store.add_or_update_session(
         access_token=result.tokens.access_token,
@@ -82,6 +87,9 @@ def _store_session_from_auth_result(
         email=result.user.email,
         display_name=result.user.display_name,
     )
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    if minds_config is not None and minds_config.get_default_account_id() is None:
+        minds_config.set_default_account_id(result.user.user_id)
 
 
 def _auth_error_response(exc: AuthBackendError | httpx.HTTPError) -> Response:
@@ -93,9 +101,13 @@ def _auth_error_response(exc: AuthBackendError | httpx.HTTPError) -> Response:
 
 
 def _handle_auth_page(request: Request, message: str | None = None) -> HTMLResponse:
-    """Render the sign-up or sign-in page."""
-    session_store = _get_session_store(request)
-    default_to_signup = not session_store.has_signed_in_before()
+    """Render the sign-up or sign-in page.
+
+    /auth/signup always defaults to sign-up mode. /auth/login defaults
+    to sign-in mode (unless the user has never signed in before, in
+    which case it shows sign-up as a convenience).
+    """
+    default_to_signup = request.url.path.rstrip("/").endswith("/signup")
     return HTMLResponse(
         render_auth_page(
             default_to_signup=default_to_signup,
@@ -123,7 +135,7 @@ async def _handle_signup_api(request: Request) -> Response:
     if result.status != "OK":
         return _json_response({"status": result.status, "message": result.message or ""})
 
-    _store_session_from_auth_result(session_store, result)
+    _store_session_from_auth_result(session_store, result, request)
     assert result.user is not None
     return _json_response(
         {"status": "OK", "userId": result.user.user_id, "needsEmailVerification": result.needs_email_verification}
@@ -149,7 +161,7 @@ async def _handle_signin_api(request: Request) -> Response:
     if result.status != "OK":
         return _json_response({"status": result.status, "message": result.message or ""})
 
-    _store_session_from_auth_result(session_store, result)
+    _store_session_from_auth_result(session_store, result, request)
     assert result.user is not None
     return _json_response(
         {
@@ -371,7 +383,7 @@ def _handle_oauth_callback(provider_id: str, request: Request) -> HTMLResponse:
             status_code=400,
         )
 
-    _store_session_from_auth_result(session_store, result)
+    _store_session_from_auth_result(session_store, result, request)
 
     emit_event(
         "auth_success",
@@ -469,6 +481,7 @@ def create_supertokens_router(
     router = APIRouter(prefix="/auth", tags=["auth"])
 
     router.get("/login")(_handle_auth_page)
+    router.get("/signup")(_handle_auth_page)
     router.post("/api/signup")(_handle_signup_api)
     router.post("/api/signin")(_handle_signin_api)
     router.post("/api/signout")(_handle_signout_api)

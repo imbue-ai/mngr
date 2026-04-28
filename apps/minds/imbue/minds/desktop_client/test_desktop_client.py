@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
 from starlette.testclient import TestClient
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import _build_workspace_list
@@ -23,6 +24,7 @@ from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import create_sharing_request_event
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -558,10 +560,20 @@ def _create_test_server_with_agent_creator(
     """Create a desktop client with an agent creator for testing.
 
     The returned client is already authenticated with a global session.
+
+    The ``AgentCreator.root_concurrency_group`` is an ad-hoc group entered for
+    the helper and left active for the caller's test duration. These tests only
+    exercise HTTP endpoints (status polling, form rendering, etc.) -- they do
+    not actually run agent creation subprocesses against the group, so leaving
+    it in the ACTIVE state until GC is acceptable here.
     """
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    root_cg = ConcurrencyGroup(name="test-root")
+    root_cg.__enter__()
     agent_creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_cg,
+        notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
     )
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
