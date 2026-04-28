@@ -353,18 +353,28 @@ def _record_from_event_data(data: dict[str, Any], stripped_line: str, source_hin
         )
 
     source = source_hint
-    data["source"] = source
-
-    # Re-serialize raw_line if the source was corrected so downstream
-    # consumers (e.g. CLI output) see the correct source
-    corrected_raw_line = json.dumps(data, separators=(",", ":")) if original_source is not None else stripped_line
+    # Build a corrected dict only if the source field needs correcting or
+    # backfilling; never mutate the caller-owned input dict (this function is
+    # marked @pure).
+    needs_data_correction = data.get("source") != source
+    if needs_data_correction:
+        corrected_data = {**data, "source": source}
+    else:
+        corrected_data = data
+    # Re-serialize raw_line only when the JSON had a wrong source field;
+    # backfilling a missing source doesn't require re-serializing because the
+    # original line is still a faithful representation of the event.
+    if original_source is not None:
+        corrected_raw_line = json.dumps(corrected_data, separators=(",", ":"))
+    else:
+        corrected_raw_line = stripped_line
 
     return EventRecord(
         raw_line=corrected_raw_line,
         timestamp=timestamp,
         event_id=event_id,
         source=source,
-        data=data,
+        data=corrected_data,
         original_source=original_source,
     )
 
