@@ -1,12 +1,23 @@
+import re
 import shlex
 from io import StringIO
 from pathlib import Path
+from typing import Final
 
 from dotenv import dotenv_values
 
 from imbue.imbue_common.pure import pure
 
 _TRUTHY_VALUES = frozenset(("1", "true", "yes"))
+
+# Prefix used for test environments across providers (e.g. Modal environment
+# names). Defined here rather than in utils/testing.py because non-test code
+# paths (e.g. mngr_modal.backend) need to recognise these at runtime, and
+# utils/testing.py is excluded from the runtime wheel and imports pytest.
+TEST_ENV_PREFIX: Final[str] = "mngr_test-"
+
+# Matches test environment names: mngr_test-YYYY-MM-DD-HH-MM-SS[-user_id].
+TEST_ENV_PATTERN: Final[re.Pattern[str]] = re.compile(r"^mngr_test-(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})")
 
 
 @pure

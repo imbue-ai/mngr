@@ -32,12 +32,14 @@ import uvicorn
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
+from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.testing import clean_env
 
@@ -135,7 +137,18 @@ class DesktopClientFixture:
 
         backend_resolver = MngrCliBackendResolver()
         self._stream_manager = MngrStreamManager(resolver=backend_resolver)
-        agent_creator = AgentCreator(paths=paths)
+        # ``AgentCreator.root_concurrency_group`` is required; this e2e harness
+        # runs the real ``start_desktop_client`` flow so an equivalent root CG
+        # is entered here and relied on by any creator operations.
+        root_cg = ConcurrencyGroup(name="test-root")
+        root_cg.__enter__()
+        agent_creator = AgentCreator(
+            paths=paths,
+            root_concurrency_group=root_cg,
+            notification_dispatcher=NotificationDispatcher.create(
+                is_electron=False, tkinter_module=None, is_macos=False
+            ),
+        )
 
         app = create_desktop_client(
             auth_store=auth_store,

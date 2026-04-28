@@ -314,7 +314,6 @@ def test_gc_cli_options_can_be_instantiated() -> None:
         on_error="abort",
         all_providers=False,
         provider=(),
-        watch=None,
         output_format="human",
         quiet=False,
         verbose=0,

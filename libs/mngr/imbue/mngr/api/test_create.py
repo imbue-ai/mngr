@@ -37,6 +37,7 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_ctx_with_plugins
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
@@ -467,6 +468,43 @@ def test_worktree_already_checked_out_gives_helpful_error(
     )
 
     with pytest.raises(UserInputError, match="To create a new branch instead, use --branch BASE:"):
+        create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=agent_options,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+
+def test_worktree_in_repo_with_no_commits_gives_helpful_error(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    setup_git_config: None,
+) -> None:
+    """Worktree mode in a freshly init'd repo with no commits raises a clear UserInputError.
+
+    Mirrors the default `mngr create` flow, which passes both base_branch (current
+    branch, e.g. "main") and a new_branch_name. Without an initial commit, the
+    base branch reference does not resolve and `git worktree add` would fail with
+    a cryptic "fatal: invalid reference" error.
+    """
+    empty_repo = tmp_path / "empty_repo"
+    init_git_repo(empty_repo, initial_commit=False)
+
+    local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, empty_repo)
+
+    agent_options = CreateAgentOptions(
+        agent_type=AgentTypeName("worktree-test"),
+        name=AgentName("test-no-commits"),
+        command=CommandString("sleep 60"),
+        transfer_mode=TransferMode.GIT_WORKTREE,
+        git=AgentGitOptions(
+            base_branch="main",
+            new_branch_name="mngr/no-commits",
+        ),
+    )
+
+    with pytest.raises(UserInputError, match="no commits"):
         create(
             source_location=source_location,
             target_host=local_host,

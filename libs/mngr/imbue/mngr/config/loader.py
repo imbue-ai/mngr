@@ -75,8 +75,8 @@ def load_config(
 
     Precedence (lowest to highest):
     1. User config (~/.{root_name}/profiles/<profile_id>/settings.toml)
-    2. Project config (.{root_name}/settings.toml at context_dir, git root, or MNGR_PROJECT_DIR)
-    3. Local config (.{root_name}/settings.local.toml at context_dir, git root, or MNGR_PROJECT_DIR)
+    2. Project config (.{root_name}/settings.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
+    3. Local config (.{root_name}/settings.local.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
     4. Environment variables (MNGR_ROOT_NAME, MNGR_PREFIX, MNGR_HOST_DIR)
     5. CLI arguments (handled by caller)
 
@@ -86,7 +86,7 @@ def load_config(
 
     Explicit MNGR_PREFIX/MNGR_HOST_DIR values override MNGR_ROOT_NAME-derived defaults.
 
-    MNGR_PROJECT_DIR overrides where project settings are found. When set, project
+    MNGR_PROJECT_CONFIG_DIR overrides where project settings are found. When set, project
     and local config files are loaded from that directory instead of .{root_name}/
     at the git root.
 
@@ -237,7 +237,7 @@ def load_config(
         # pytest -- that's the actual leak-prevention gate.
 
     # Resolve project root for use as cwd in pre-command scripts.
-    # Note: MNGR_PROJECT_DIR is NOT used here because it points to the config
+    # Note: MNGR_PROJECT_CONFIG_DIR is NOT used here because it points to the config
     # directory (containing settings.toml), not the project root.
     project_root = context_dir or find_git_worktree_root(start=None, cg=concurrency_group)
 

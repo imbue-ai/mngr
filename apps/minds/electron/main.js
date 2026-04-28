@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -7,6 +7,10 @@ const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 
 todesktop.init();
+
+// Redirect Electron's userData directory to ~/.<MINDS_ROOT_NAME>/ so that dev
+// and production installs are fully isolated (cookies, sessions, caches, etc.).
+app.setPath('userData', paths.getDataDir());
 
 const isMac = process.platform === 'darwin';
 const TITLEBAR_HEIGHT = 38;
@@ -413,11 +417,9 @@ function registerShortcutsFor(bundle, wc) {
     // When the app menu is installed, it owns cmd+W / cmd+Q / cmd+N; handling
     // them here too would double-fire (e.g. two new windows per cmd+N).
     if (appMenuInstalled) return;
-    if (modifier && !input.shift && !input.alt && key === 'w') {
-      event.preventDefault();
-      if (!bundle.window.isDestroyed()) bundle.window.close();
-      return;
-    }
+    // Ctrl+W on non-macOS: do NOT close the window. The keystroke should
+    // reach the web content (terminal, editor) where it means "delete word"
+    // or "close tab" depending on the app.
     if (modifier && !input.shift && !input.alt && key === 'q') {
       event.preventDefault();
       initiateFullQuit();
@@ -734,7 +736,16 @@ function saveSessionState() {
       const url = b.preErrorUrl || b.currentContentUrl;
       const relative = toRelativeBackendUrl(url);
       if (!relative) continue;
-      state.push({ url: relative });
+      const bounds = b.window.getBounds();
+      const display = screen.getDisplayMatching(bounds);
+      state.push({
+        url: relative,
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+        displayId: display ? display.id : null,
+      });
     }
     const p = getSessionStatePath();
     fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -758,6 +769,36 @@ function filterRestorableUrls(state, knownAgentIdsSet) {
   return results;
 }
 
+function restoreWindowBounds(bundle, entry) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (typeof entry.x !== 'number' || typeof entry.y !== 'number') return;
+  const width = typeof entry.width === 'number' ? entry.width : 1200;
+  const height = typeof entry.height === 'number' ? entry.height : 800;
+  const savedBounds = { x: entry.x, y: entry.y, width, height };
+
+  // Check if the saved display still exists
+  const displays = screen.getAllDisplays();
+  let targetDisplay = null;
+  if (entry.displayId) {
+    targetDisplay = displays.find((d) => d.id === entry.displayId);
+  }
+  if (!targetDisplay) {
+    // Saved monitor gone -- check if bounds are visible on any display
+    targetDisplay = screen.getDisplayMatching(savedBounds);
+    const db = targetDisplay.bounds;
+    const isVisible = savedBounds.x < db.x + db.width && savedBounds.x + savedBounds.width > db.x &&
+                      savedBounds.y < db.y + db.height && savedBounds.y + savedBounds.height > db.y;
+    if (!isVisible) {
+      // Place on primary display at a reasonable offset
+      const primary = screen.getPrimaryDisplay();
+      savedBounds.x = primary.bounds.x + 50;
+      savedBounds.y = primary.bounds.y + 50;
+    }
+  }
+
+  bundle.window.setBounds(savedBounds);
+}
+
 // ---------- Centralized chrome SSE ----------
 // Every chromeView and sidebarView used to open its own EventSource to
 // /_chrome/events. Chromium caps same-host HTTP/1.1 connections at 6, so
@@ -769,12 +810,41 @@ function filterRestorableUrls(state, knownAgentIdsSet) {
 
 function handleChromeSSEEvent(evt) {
   if (evt.type === 'workspaces' && Array.isArray(evt.workspaces)) {
+    const oldIds = new Set(workspaceList.map((w) => w.id));
     latestChromeState.workspaces = evt.workspaces;
     workspaceList = evt.workspaces.map((w) => ({
       id: String(w.id),
       name: w.name ? String(w.name) : '',
       account: w.account ? String(w.account) : '',
     }));
+    const newIds = new Set(workspaceList.map((w) => w.id));
+
+    // Handle windows for destroyed workspaces: close them if other
+    // windows exist, otherwise navigate to home so the user isn't left
+    // with nothing.
+    for (const oldId of oldIds) {
+      if (!newIds.has(oldId)) {
+        const affected = [];
+        for (const b of bundles) {
+          if (!b.window.isDestroyed() && b.currentWorkspaceId === oldId) {
+            affected.push(b);
+          }
+        }
+        const liveBundleCount = [...bundles].filter((b) => !b.window.isDestroyed()).length;
+        for (const b of affected) {
+          if (liveBundleCount - affected.length >= 1) {
+            b.window.close();
+          } else {
+            b.currentWorkspaceId = null;
+            if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
+              b.contentView.webContents.loadURL(backendBaseUrl + '/');
+            }
+            updateOsTitle(b);
+          }
+        }
+      }
+    }
+
     updateAllOsTitles();
   } else if (evt.type === 'auth_status') {
     latestChromeState.authStatus = evt;
@@ -953,7 +1023,7 @@ function fetchInitialChromeState(timeoutMs = 4000) {
             const parsed = JSON.parse(payload);
             if (parsed.type === 'workspaces' && Array.isArray(parsed.workspaces)) {
               clearTimeout(timer);
-              finish({ authenticated: true, workspaces: parsed.workspaces });
+              finish({ authenticated: true, workspaces: parsed.workspaces, hasAccounts: !!parsed.has_accounts });
               return;
             }
             if (parsed.type === 'auth_required') {
@@ -1183,6 +1253,47 @@ async function startBackendWithRetry() {
 
     if (isFirstStart && initialBundle && !initialBundle.window.isDestroyed()) {
       const savedState = loadSessionState();
+
+      // Consume the one-time login code via net.request BEFORE checking
+      // chrome state. This hits /authenticate which sets the minds_session
+      // cookie in the default session (used by net.request, chromeView, and
+      // SSE). We follow the redirect so Electron processes the Set-Cookie
+      // header, then copy the cookie to the content partition.
+      await new Promise((resolve) => {
+        const authenticateUrl = loginUrl.replace('/login?', '/authenticate?');
+        console.log('[startup] Consuming one-time code via', authenticateUrl);
+        const req = net.request({ url: authenticateUrl, method: 'GET', useSessionCookies: true });
+        req.on('response', async (resp) => {
+          console.log('[startup] /authenticate response status:', resp.statusCode);
+          resp.on('data', () => {});
+          resp.on('end', async () => {
+            try {
+              const defaultCookies = await session.defaultSession.cookies.get({ name: 'minds_session' });
+              console.log('[startup] Default session cookies after /authenticate:', defaultCookies.length);
+              const contentSession = session.fromPartition(CONTENT_PARTITION);
+              for (const c of defaultCookies) {
+                const domain = (c.domain || 'localhost').replace(/^\./, '');
+                await contentSession.cookies.set({
+                  url: `http://${domain}`,
+                  name: c.name, value: c.value,
+                  httpOnly: c.httpOnly, path: c.path || '/',
+                  sameSite: c.sameSite || 'lax',
+                });
+              }
+              console.log('[startup] Cookie synced to content partition');
+            } catch (err) {
+              console.warn('[startup] Failed to sync cookie to content partition:', err);
+            }
+            resolve();
+          });
+        });
+        req.on('error', (err) => {
+          console.warn('[startup] /authenticate request failed:', err);
+          resolve();
+        });
+        req.end();
+      });
+
       const chromeState = await fetchInitialChromeState();
       const authenticated = chromeState && chromeState.authenticated;
 
@@ -1208,23 +1319,30 @@ async function startBackendWithRetry() {
       }
 
       if (!authenticated) {
-        // No valid session cookie -- route through loginUrl to consume the
-        // one-time code. Keep saved state on disk so the next quit-and-relaunch
-        // after auth can restore. Don't open any additional restored windows
-        // because they'd all 403.
+        // The one-time code was already consumed above but fetchInitialChromeState
+        // still returned unauthenticated (should not happen, but handle gracefully).
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          initialBundle.contentView.webContents.loadURL(loginUrl);
+          initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
+        }
+      } else if (!chromeState.hasAccounts && restorable.length === 0) {
+        // Locally authenticated but user has never signed in with SuperTokens
+        // and has no saved windows -- show the welcome/onboarding page.
+        if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
+          initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
         }
       } else if (restorable.length === 0) {
-        // Authenticated, but nothing to restore -- land on the home page.
+        // Has accounts but nothing to restore -- land on the create page.
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
           initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/');
         }
       } else {
+        // Restore saved windows with their positions and sizes
         const [first, ...rest] = restorable;
+        restoreWindowBounds(initialBundle, first);
         loadUrlIntoBundleContentView(initialBundle, toAbsoluteUrl(first.url));
         for (const entry of rest) {
-          openNewWindow(toAbsoluteUrl(entry.url));
+          const bundle = openNewWindow(toAbsoluteUrl(entry.url));
+          restoreWindowBounds(bundle, entry);
         }
       }
     } else {
@@ -1417,6 +1535,16 @@ ipcMain.on('retry', async (event) => {
   await shutdown();
   prepareAllWindowsForRetry();
   await startBackendWithRetry();
+});
+
+ipcMain.on('close-workspace-windows', (_event, agentId) => {
+  if (!agentId) return;
+  for (const b of bundles) {
+    if (b.window.isDestroyed()) continue;
+    if (b.currentWorkspaceId === agentId) {
+      b.window.close();
+    }
+  }
 });
 
 ipcMain.on('open-log-file', () => {

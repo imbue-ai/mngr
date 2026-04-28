@@ -36,7 +36,6 @@ class ExecCliOptions(CommonCliOptions):
     agents: tuple[str, ...]
     agent_list: tuple[str, ...]
     command_arg: str
-    user: str | None
     cwd: str | None
     timeout: float | None
     start: bool
@@ -54,11 +53,6 @@ class ExecCliOptions(CommonCliOptions):
     help="Agent name or ID to exec on (can be specified multiple times)",
 )
 @optgroup.group("Execution")
-@optgroup.option(
-    "--user",
-    default=None,
-    help="User to run the command as",
-)
 @optgroup.option(
     "--cwd",
     default=None,
@@ -121,7 +115,6 @@ def _exec_impl(ctx: click.Context, **kwargs: Any) -> None:
             agent_identifiers=agent_identifiers,
             command=opts.command_arg,
             is_all=False,
-            user=opts.user,
             cwd=opts.cwd,
             timeout_seconds=opts.timeout,
             is_start_desired=opts.start,
@@ -139,7 +132,6 @@ def _exec_impl(ctx: click.Context, **kwargs: Any) -> None:
         agent_identifiers=agent_identifiers,
         command=opts.command_arg,
         is_all=False,
-        user=opts.user,
         cwd=opts.cwd,
         timeout_seconds=opts.timeout,
         is_start_desired=opts.start,
@@ -264,7 +256,7 @@ def _emit_json_output(result: MultiExecResult) -> None:
 CommandHelpMetadata(
     key="exec",
     one_line_description="Execute a shell command on one or more agents' hosts",
-    synopsis="mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--user <USER>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>]",
+    synopsis="mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>]",
     arguments_description=(
         "- `AGENTS`: Name(s) or ID(s) of the agent(s) whose host will run the command\n"
         "- `COMMAND`: Shell command to execute on the agent's host"
@@ -284,7 +276,6 @@ Supports custom format templates via --format. Available fields: agent, stdout, 
         ("Run on multiple agents", 'mngr exec agent1 agent2 "echo hello"'),
         ("Run on all agents", 'mngr list --ids | mngr exec - "echo hello"'),
         ("Run with a custom working directory", 'mngr exec my-agent "ls -la" --cwd /tmp'),
-        ("Run as a different user", 'mngr exec my-agent "whoami" --user root'),
         ("Run with a timeout", 'mngr exec my-agent "sleep 100" --timeout 5'),
         ("Use --agent flag (repeatable)", 'mngr exec --agent my-agent --agent another-agent "echo hello"'),
         ("Custom format template output", "mngr exec my-agent \"hostname\" --format '{agent}\\t{stdout}'"),

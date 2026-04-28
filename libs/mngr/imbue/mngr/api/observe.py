@@ -326,7 +326,7 @@ class _KnownHost(FrozenModel):
 class AgentObserver(MutableModel):
     """Observes agent state changes across all hosts.
 
-    Uses 'mngr observe --discovery-only' to track hosts and 'mngr events' to stream
+    Uses 'mngr observe --discovery-only' to track hosts and 'mngr event' to stream
     activity events from each online host. When activity is detected,
     fetches agent state and emits events to local JSONL files:
 
@@ -392,7 +392,7 @@ class AgentObserver(MutableModel):
                 activity_worker.join(timeout=5.0)
 
     def _on_activity_failure(self, e: BaseException):
-        logger.error("Activity worker thread failed: {}", e)
+        logger.opt(exception=e).error("Activity worker thread failed")
         self._stop_event.set()
 
     def stop(self) -> None:
@@ -474,7 +474,7 @@ class AgentObserver(MutableModel):
             process = self._concurrency_group.run_process_in_background(
                 command=[
                     self.mngr_binary,
-                    "events",
+                    "event",
                     host_id_str,
                     str(ACTIVITY_EVENT_SOURCE),
                     "--follow",
