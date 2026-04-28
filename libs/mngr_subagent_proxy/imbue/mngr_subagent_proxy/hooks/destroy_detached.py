@@ -10,8 +10,14 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from typing import Callable
 
 from loguru import logger
+
+# DI signature for ``destroy_agent_detached``. Lives with the function so
+# every caller (plugin.py, hooks/rewrite.py, hooks/reap.py) imports the same
+# alias and tests have a single name to inject against.
+DestroyAgentDetachedCallable = Callable[[str, Path], None]
 
 
 def destroy_agent_detached(target_name: str, log_path: Path) -> None:

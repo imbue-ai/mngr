@@ -17,15 +17,12 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
-from typing import Callable
 from typing import TextIO
 
 from loguru import logger
 
+from imbue.mngr_subagent_proxy.hooks.destroy_detached import DestroyAgentDetachedCallable
 from imbue.mngr_subagent_proxy.hooks.destroy_detached import destroy_agent_detached
-
-# Type alias for the detached-destroy callable, so tests can inject a stub.
-DestroyAgentDetachedCallable = Callable[[str, Path], None]
 
 
 def _read_stdin_json(stdin: TextIO) -> dict[str, Any] | None:

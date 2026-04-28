@@ -6,7 +6,6 @@ import os
 import shlex
 from pathlib import Path
 from typing import Any
-from typing import Callable
 from typing import Final
 
 from loguru import logger
@@ -27,6 +26,7 @@ from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_subagent_proxy import hookimpl
 from imbue.mngr_subagent_proxy import resources as _subagent_proxy_resources
+from imbue.mngr_subagent_proxy.hooks.destroy_detached import DestroyAgentDetachedCallable
 from imbue.mngr_subagent_proxy.hooks.destroy_detached import destroy_agent_detached
 
 SUBAGENT_PROXY_CHILD_AGENT_TYPE: Final[str] = "mngr-proxy-child"
@@ -74,10 +74,6 @@ def register_agent_type() -> tuple[str, type[AgentInterface], type[AgentTypeConf
     """
     return (SUBAGENT_PROXY_CHILD_AGENT_TYPE, ClaudeAgent, SubagentProxyChildConfig)
 
-
-# Type alias so tests can inject a recording stub without monkey-patching
-# module-level names (mirrors hooks/reap.py's DI pattern).
-DestroyAgentDetachedCallable = Callable[[str, Path], None]
 
 _AGENT_DEFINITION: Final[str] = "mngr-proxy.agent.md"
 
