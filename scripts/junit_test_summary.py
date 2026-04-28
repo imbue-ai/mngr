@@ -159,8 +159,10 @@ def main() -> int:
         type=int,
         default=_DEFAULT_MAX_CHARS,
         help=(
-            "Maximum characters in the rendered markdown. If the full table "
-            f"exceeds this, trailing rows are omitted (default: {_DEFAULT_MAX_CHARS})."
+            "Maximum characters in the rendered markdown. If the rendered output "
+            "(stats header + per-failure detail blocks + per-test table) exceeds "
+            "this, trailing failure blocks and/or trailing table rows are dropped "
+            f"and a footer discloses the omissions (default: {_DEFAULT_MAX_CHARS})."
         ),
     )
     args = parser.parse_args()
