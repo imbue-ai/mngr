@@ -2,10 +2,10 @@ import importlib.metadata
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-from typing import Final
 from typing import Generator
 from uuid import uuid4
 
@@ -40,7 +40,6 @@ from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
 from imbue.mngr.register_guards_docker import register_docker_cli_guard
 from imbue.mngr.register_guards_docker import register_docker_sdk_guard
-from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import isolate_git
@@ -563,37 +562,6 @@ def _is_alive_non_zombie(process: psutil.Process) -> bool:
         return False
 
 
-# Background-process supervisor threads that are mid-cleanup (e.g. after
-# `terminate(force_kill_seconds=0.0)`) need a brief grace period to deliver
-# SIGTERM and reap their children before the leak detector declares a leak.
-_LEFTOVER_PROCESS_GRACE_PERIOD_SECONDS: Final[float] = 2.0
-_LEFTOVER_PROCESS_POLL_INTERVAL_SECONDS: Final[float] = 0.1
-
-
-def _get_leftover_child_processes(is_xdist_leader: bool) -> list[psutil.Process]:
-    """Return alive, non-zombie child processes, excluding xdist workers on the leader."""
-    try:
-        current = psutil.Process()
-        children = list(current.children(recursive=True))
-    except psutil.NoSuchProcess:
-        children = []
-
-    if is_xdist_leader:
-        children = [c for c in children if not _is_xdist_worker_process(c)]
-
-    return [p for p in children if _is_alive_non_zombie(p)]
-
-
-def _capture_leftover_processes(holder: list[list[psutil.Process]], is_xdist_leader: bool) -> bool:
-    """Refresh the holder with the current leftover child processes, returning True iff none remain.
-
-    Used as the predicate to `poll_until` in the leak detector so the most recent
-    snapshot is available after polling completes (whether by success or timeout).
-    """
-    holder[0] = _get_leftover_child_processes(is_xdist_leader)
-    return not holder[0]
-
-
 def _get_stale_docker_test_containers(max_age_seconds: int = 3600) -> list[tuple[str, str]]:
     """Get Docker containers from tests that are older than max_age_seconds.
 
@@ -779,13 +747,21 @@ def session_cleanup() -> Generator[None, None, None]:
     # Poll briefly so background-process supervisor threads that are mid-cleanup
     # (e.g. after `terminate(force_kill_seconds=0.0)`) get a chance to deliver
     # SIGTERM and reap their children before we declare a leak.
-    leftover_processes_holder: list[list[psutil.Process]] = [[]]
-    poll_until(
-        lambda: _capture_leftover_processes(leftover_processes_holder, is_xdist_leader),
-        timeout=_LEFTOVER_PROCESS_GRACE_PERIOD_SECONDS,
-        poll_interval=_LEFTOVER_PROCESS_POLL_INTERVAL_SECONDS,
-    )
-    leftover_processes = leftover_processes_holder[0]
+    leftover_processes: list[psutil.Process] = []
+    for _ in range(20):
+        try:
+            current = psutil.Process()
+            children = list(current.children(recursive=True))
+        except psutil.NoSuchProcess:
+            children = []
+
+        if is_xdist_leader:
+            children = [c for c in children if not _is_xdist_worker_process(c)]
+
+        leftover_processes = [p for p in children if _is_alive_non_zombie(p)]
+        if not leftover_processes:
+            break
+        time.sleep(0.1)
 
     if leftover_processes:
         proc_info = [_format_process_info(p) for p in leftover_processes]
