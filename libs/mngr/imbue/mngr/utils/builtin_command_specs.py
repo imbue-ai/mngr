@@ -166,13 +166,3 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
     _spec("stop", "imbue.mngr.cli.stop", "stop", "Stop running agent(s)"),
     _spec("transcript", "imbue.mngr.cli.transcript", "transcript", "View the message transcript for an agent"),
 )
-
-
-def get_builtin_alias_to_canonical() -> dict[str, str]:
-    """Return a mapping of built-in alias name -> canonical command name.
-
-    Aliases are not stored in ``cli.commands`` because built-in commands are
-    loaded lazily; consumers that need the alias list (tab completion cache,
-    documentation generators) read it through this helper.
-    """
-    return {alias: spec.name for spec in BUILTIN_COMMAND_SPECS for alias in spec.aliases}
