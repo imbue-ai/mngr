@@ -187,9 +187,10 @@ class AliasAwareGroup(DefaultCommandGroup):
         if not rows and not plugin_entries:
             return
 
+        # Safe: the early return above guarantees at least one of the lists is non-empty.
         builtin_widths = [len(r[0]) for r in rows]
         plugin_widths = [len(display_name) for _, display_name, _ in plugin_entries]
-        max_width = max(builtin_widths + plugin_widths) if (builtin_widths or plugin_widths) else 0
+        max_width = max(builtin_widths + plugin_widths)
         limit = formatter.width - 6 - max_width
 
         for subcommand, display_name, cmd in plugin_entries:
