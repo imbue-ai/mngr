@@ -51,7 +51,8 @@ def test_get_unknown_backend_uses_generic_hint_for_uncataloged_backend() -> None
         get_backend("xyzzy")
     formatted = exc_info.value.format_message()
     assert "imbue-mngr-xyzzy" not in formatted
-    assert "not a known mngr plugin" in formatted
+    assert "do not recognize 'xyzzy'" in formatted
+    assert "third-party plugin" in formatted
 
 
 def test_get_local_provider_instance(temp_mngr_ctx: MngrContext) -> None:

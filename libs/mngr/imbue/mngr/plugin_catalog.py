@@ -290,9 +290,8 @@ def get_plugin_install_hint(name: str) -> str:
     if entry is not None:
         return _format_install_hint(entry)
     return (
-        f"'{name}' is not a known mngr plugin. If it is provided by a"
-        " third-party plugin, install that package and ensure the plugin is"
-        " enabled. Run 'mngr extras' to see installable plugins."
+        f"We do not recognize '{name}'. If it is provided by a third-party"
+        " plugin, install that package and ensure the plugin is enabled."
     )
 
 
