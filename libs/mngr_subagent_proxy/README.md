@@ -94,9 +94,9 @@ Claude agent that has un-guarded user Stop / SubagentStop hooks in
 
       [ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; <original>
 
-- Or pass the `auto_allow_unsafe_project_stop_hooks` agent option to
-  bypass the check (intended as a temporary escape hatch; you'll likely
-  see runaway autofix loops inside subagents).
+- Or set `MNGR_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS=1` in
+  the env to bypass the check (intended as a temporary escape hatch;
+  you'll likely see runaway autofix loops inside subagents).
 
 ### Gotcha: SubagentStop / other event semantics differ across scopes
 
