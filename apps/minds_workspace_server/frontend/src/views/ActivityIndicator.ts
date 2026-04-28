@@ -34,7 +34,7 @@ const VERB_BY_TOOL: Record<string, string> = {
   Agent: "Delegating",
 };
 
-const _MAX_TARGET_LEN = 60;
+const MAX_TARGET_LEN = 60;
 
 function basename(p: string): string {
   const idx = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
@@ -60,11 +60,11 @@ function targetForToolCall(tc: ToolCall): string | null {
   const path = typeof parsed.path === "string" ? parsed.path : null;
   if (path !== null) return basename(path);
   const command = typeof parsed.command === "string" ? parsed.command : null;
-  if (command !== null) return shorten(command, _MAX_TARGET_LEN);
+  if (command !== null) return shorten(command, MAX_TARGET_LEN);
   const pattern = typeof parsed.pattern === "string" ? parsed.pattern : null;
-  if (pattern !== null) return `"${shorten(pattern, _MAX_TARGET_LEN)}"`;
+  if (pattern !== null) return `"${shorten(pattern, MAX_TARGET_LEN)}"`;
   const description = typeof parsed.description === "string" ? parsed.description : null;
-  if (description !== null) return shorten(description, _MAX_TARGET_LEN);
+  if (description !== null) return shorten(description, MAX_TARGET_LEN);
   return null;
 }
 
