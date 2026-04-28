@@ -1,5 +1,6 @@
 import json
 from collections.abc import Callable
+from uuid import UUID
 
 import httpx
 import pytest
@@ -26,8 +27,10 @@ from imbue.remote_service_connector.app import extract_username_from_tunnel_name
 from imbue.remote_service_connector.app import make_hostname
 from imbue.remote_service_connector.app import make_tunnel_name
 from imbue.remote_service_connector.app import web_app
+from imbue.remote_service_connector.testing import FakePoolBackend
 from imbue.remote_service_connector.testing import FakeSuperTokensBackend
 from imbue.remote_service_connector.testing import make_fake_forwarding_ctx
+from imbue.remote_service_connector.testing import make_fake_pool_backend
 from imbue.remote_service_connector.testing import make_fake_supertokens_backend
 from imbue.remote_service_connector.testing import make_fake_tunnel_token
 
@@ -1448,3 +1451,130 @@ def test_ctx_create_service_token_and_list() -> None:
     # FakeCloudflareOps.list_service_tokens returns []; list_service_tokens should
     # reflect that rather than pulling from an internal cache.
     assert ctx.list_service_tokens() == []
+
+
+# -- Host pool endpoint tests --
+
+
+def _make_pool_test_client(
+    monkeypatch: pytest.MonkeyPatch,
+    pool_backend: FakePoolBackend | None = None,
+) -> tuple[TestClient, FakePoolBackend]:
+    """Create a TestClient with both tunnel-auth and pool-backend fakes installed."""
+    client = _make_test_client(monkeypatch)
+    monkeypatch.setenv("POOL_SSH_PRIVATE_KEY", "fake-management-key-pem")
+    backend = pool_backend if pool_backend is not None else make_fake_pool_backend()
+    backend.install_on_app_module(app_mod, monkeypatch)
+    return client, backend
+
+
+def test_lease_host_returns_available_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/lease returns a host when one is available with matching version."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_available_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000001"), version="v0.1.0", vps_ip="10.0.0.1", agent_id="agent-111"
+    )
+    resp = client.post(
+        "/hosts/lease",
+        json={"ssh_public_key": "ssh-ed25519 AAAA testkey", "version": "v0.1.0"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["host_db_id"] == "00000000-0000-0000-0000-000000000001"
+    assert body["vps_ip"] == "10.0.0.1"
+    assert body["agent_id"] == "agent-111"
+    assert body["version"] == "v0.1.0"
+    # Verify SSH key was injected on both VPS and container
+    assert len(backend.append_key_calls) == 2
+    # Verify host was marked as leased
+    assert backend.pool_rows[0].status == "leased"
+    assert backend.pool_rows[0].leased_to_user == _ADMIN_STUB_USERNAME
+
+
+def test_lease_host_returns_503_when_pool_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/lease returns 503 when no hosts are available."""
+    client, _backend = _make_pool_test_client(monkeypatch)
+    resp = client.post(
+        "/hosts/lease",
+        json={"ssh_public_key": "ssh-ed25519 AAAA testkey", "version": "v0.1.0"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 503
+    assert "No pre-created agents" in resp.json()["detail"]
+
+
+def test_lease_host_returns_503_when_version_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/lease returns 503 when available hosts have a different version."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-000000000001"), version="v0.2.0")
+    resp = client.post(
+        "/hosts/lease",
+        json={"ssh_public_key": "ssh-ed25519 AAAA testkey", "version": "v0.1.0"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 503
+    assert "No pre-created agents" in resp.json()["detail"]
+    # Verify the host was not leased
+    assert backend.pool_rows[0].status == "available"
+
+
+def test_release_host_succeeds_for_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/release succeeds when the caller owns the lease."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000042"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
+    )
+    resp = client.post("/hosts/00000000-0000-0000-0000-000000000042/release", headers=_admin_headers())
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "released"
+    assert backend.pool_rows[0].status == "released"
+
+
+def test_release_host_returns_403_for_non_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/release returns 403 when the caller is not the lease owner."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000042"), version="v0.1.0", leased_to_user="other-user"
+    )
+    resp = client.post("/hosts/00000000-0000-0000-0000-000000000042/release", headers=_admin_headers())
+    assert resp.status_code == 403
+    assert "do not own" in resp.json()["detail"]
+    # Verify the host was not released
+    assert backend.pool_rows[0].status == "leased"
+
+
+def test_release_host_returns_404_for_unknown_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/release returns 404 when the host doesn't exist or isn't leased."""
+    client, _backend = _make_pool_test_client(monkeypatch)
+    resp = client.post("/hosts/00000000-0000-0000-0000-000000000999/release", headers=_admin_headers())
+    assert resp.status_code == 404
+
+
+def test_list_hosts_returns_leased_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GET /hosts returns only hosts leased by the authenticated user."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000001"),
+        version="v0.1.0",
+        leased_to_user=_ADMIN_STUB_USERNAME,
+        agent_id="agent-aaa",
+    )
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000002"),
+        version="v0.1.0",
+        leased_to_user="other-user",
+        agent_id="agent-bbb",
+    )
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000003"),
+        version="v0.1.0",
+        leased_to_user=_ADMIN_STUB_USERNAME,
+        agent_id="agent-ccc",
+    )
+    resp = client.get("/hosts", headers=_admin_headers())
+    assert resp.status_code == 200
+    hosts = resp.json()
+    assert len(hosts) == 2
+    host_ids = {h["host_db_id"] for h in hosts}
+    assert host_ids == {"00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000003"}
