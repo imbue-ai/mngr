@@ -39,6 +39,8 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.mock_tracking_backend_test import TrackingBackend
+from imbue.mngr.providers.mock_tracking_backend_test import tracking_backend_registered
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import make_ctx_with_plugins
 from imbue.mngr.utils.testing import make_test_agent_details
@@ -647,10 +649,27 @@ def test_run_post_cleanup_gc_provider_error_is_recorded_in_result(
     bad_ctx = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, bad_config))
 
     result = CleanupResult()
-    _run_post_cleanup_gc(bad_ctx, result)
+    _run_post_cleanup_gc(bad_ctx, result, provider_names=("bad-gc-provider",))
 
     assert len(result.errors) == 1
     assert result.errors[0].startswith("Post-cleanup garbage collection failed:")
+
+
+def test_run_post_cleanup_gc_scopes_to_provided_provider_names(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """_run_post_cleanup_gc must pass provider_names through so unrelated providers
+    are not eagerly instantiated.
+
+    Regression: previously, post-cleanup GC called get_all_provider_instances()
+    without a filter, causing every enabled backend to be instantiated even when
+    destroyed agents all lived on a single provider. For some backends (Modal),
+    instantiation has side effects like creating a cloud environment.
+    """
+    with tracking_backend_registered():
+        result = CleanupResult()
+        _run_post_cleanup_gc(temp_mngr_ctx, result, provider_names=(str(LOCAL_PROVIDER_NAME),))
+        assert TrackingBackend.build_count == 0
 
 
 def test_execute_cleanup_destroy_offline_host_success(
@@ -688,6 +707,44 @@ def test_execute_cleanup_destroy_offline_host_success(
         assert result.errors == []
         assert AgentName("offline-success-agent-one") in result.destroyed_agents
         assert AgentName("offline-success-agent-two") in result.destroyed_agents
+
+
+def test_execute_cleanup_destroy_scopes_post_destroy_gc_to_destroyed_provider(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """execute_cleanup DESTROY propagates the destroyed provider's name to post-destroy GC.
+
+    Destroying an agent on provider A must not cause GC to instantiate an unrelated
+    provider B; this prevents side effects like auto-creating a Modal environment
+    while destroying a purely local agent.
+    """
+    provider_name = ProviderInstanceName("offline-scoped-gc-provider")
+    success_provider = _OfflineHostSuccessProvider(
+        name=provider_name,
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with _injected_provider(provider_name, temp_mngr_ctx, success_provider), tracking_backend_registered():
+        agent = make_test_agent_details(
+            name="scoped-gc-agent",
+            host_id=HostId.generate(),
+            provider_name=provider_name,
+        )
+
+        result = execute_cleanup(
+            mngr_ctx=temp_mngr_ctx,
+            agents=[agent],
+            action=CleanupAction.DESTROY,
+            is_dry_run=False,
+            error_behavior=ErrorBehavior.CONTINUE,
+        )
+
+        assert AgentName("scoped-gc-agent") in result.destroyed_agents
+        # The tracking backend is unrelated to the destroyed agent's provider,
+        # so post-destroy GC must not have instantiated it.
+        assert TrackingBackend.build_count == 0
 
 
 def test_execute_cleanup_stop_on_offline_host_skips_with_warning(

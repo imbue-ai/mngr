@@ -10,11 +10,16 @@ from imbue.mngr.cli.destroy import DestroyCliOptions
 from imbue.mngr.cli.destroy import _DestroyTargets
 from imbue.mngr.cli.destroy import _OfflineHostToDestroy
 from imbue.mngr.cli.destroy import _output_result
+from imbue.mngr.cli.destroy import _run_post_destroy_gc
 from imbue.mngr.cli.destroy import destroy
 from imbue.mngr.cli.destroy import get_agent_name_from_session
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.providers.mock_tracking_backend_test import TrackingBackend
+from imbue.mngr.providers.mock_tracking_backend_test import tracking_backend_registered
 
 
 def test_get_agent_name_from_session_extracts_name() -> None:
@@ -289,3 +294,27 @@ def test_destroy_dash_strips_whitespace(
         catch_exceptions=False,
     )
     assert result.exit_code == 0
+
+
+# =============================================================================
+# Post-destroy GC provider scoping
+# =============================================================================
+
+
+def test_run_post_destroy_gc_does_not_instantiate_unrelated_providers(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Post-destroy GC should only touch providers that actually held destroyed agents.
+
+    Regression: previously, destroying a local agent eagerly instantiated every
+    enabled backend during GC (including Modal), causing side effects like
+    auto-creating Modal environments.
+    """
+    with tracking_backend_registered():
+        output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+        _run_post_destroy_gc(
+            mngr_ctx=temp_mngr_ctx,
+            output_opts=output_opts,
+            provider_names=(str(LOCAL_PROVIDER_NAME),),
+        )
+        assert TrackingBackend.build_count == 0
