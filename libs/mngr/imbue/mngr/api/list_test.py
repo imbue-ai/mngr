@@ -1096,19 +1096,18 @@ def _make_list_params(
 
 
 # =============================================================================
-# Lines 199-205: Outer MngrError catch in list_agents (CONTINUE mode)
+# Provider instantiation errors are caught per-provider in get_all_provider_instances
 # =============================================================================
 
 
-def test_list_agents_continue_mode_captures_top_level_mngr_error(
+def test_list_agents_skips_broken_provider_and_returns_working_ones(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """list_agents with CONTINUE mode catches a top-level MngrError and records it.
+    """list_agents skips a provider with an unknown backend and returns the rest.
 
     Adding a provider with an unknown backend to the config causes
-    get_all_provider_instances to raise MngrError (UnknownBackendError).
-    In CONTINUE mode, this must be caught and recorded as an error rather
-    than propagated to the caller.
+    get_all_provider_instances to skip it (catching MngrError internally)
+    and continue with working providers. No error is surfaced to the caller.
     """
     failing_config = ProviderInstanceConfig(backend=ProviderBackendName("nonexistent-backend-xyz"))
     updated_config = temp_mngr_ctx.config.model_copy_update(
@@ -1121,45 +1120,14 @@ def test_list_agents_continue_mode_captures_top_level_mngr_error(
         to_update(temp_mngr_ctx.field_ref().config, updated_config),
     )
 
-    captured_errors: list[ErrorInfo] = []
     result = list_agents(
         mngr_ctx=failing_ctx,
         is_streaming=False,
-        error_behavior=ErrorBehavior.CONTINUE,
-        on_error=lambda e: captured_errors.append(e),
+        error_behavior=ErrorBehavior.ABORT,
     )
 
-    assert len(result.errors) == 1
-    assert len(captured_errors) == 1
-    assert captured_errors[0] is result.errors[0]
-    assert "nonexistent-backend-xyz" in result.errors[0].message
-
-
-def test_list_agents_abort_mode_propagates_top_level_mngr_error(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """list_agents with ABORT mode re-raises a top-level MngrError.
-
-    The same unknown-backend configuration triggers an error, but in ABORT
-    mode it must propagate rather than be swallowed.
-    """
-    failing_config = ProviderInstanceConfig(backend=ProviderBackendName("nonexistent-backend-xyz"))
-    updated_config = temp_mngr_ctx.config.model_copy_update(
-        to_update(
-            temp_mngr_ctx.config.field_ref().providers,
-            {ProviderInstanceName("broken-provider"): failing_config},
-        ),
-    )
-    failing_ctx = temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().config, updated_config),
-    )
-
-    with pytest.raises(MngrError, match="nonexistent-backend-xyz"):
-        list_agents(
-            mngr_ctx=failing_ctx,
-            is_streaming=False,
-            error_behavior=ErrorBehavior.ABORT,
-        )
+    # No errors surfaced -- the broken provider was silently skipped
+    assert len(result.errors) == 0
 
 
 # =============================================================================

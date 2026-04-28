@@ -625,17 +625,12 @@ def test_execute_cleanup_stop_unknown_provider_with_abort_stops_processing(
     assert result.destroyed_agents == []
 
 
-def test_run_post_cleanup_gc_provider_error_is_recorded_in_result(
+def test_run_post_cleanup_gc_skips_broken_provider(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """When get_all_provider_instances raises MngrError, _run_post_cleanup_gc
-    catches it and appends a descriptive error to the result.
-
+    """When a provider has an unknown backend, get_all_provider_instances skips it
+    and _run_post_cleanup_gc proceeds with the remaining providers without error.
     """
-    # Inject a provider config with a non-existent backend.  When
-    # get_all_provider_instances() iterates configured providers and tries to
-    # build this instance, it calls get_backend("nonexistent-gc-backend") which
-    # raises UnknownBackendError (a MngrError).
     bad_providers = {
         ProviderInstanceName("bad-gc-provider"): ProviderInstanceConfig(
             backend=ProviderBackendName("nonexistent-gc-backend"),
@@ -649,8 +644,8 @@ def test_run_post_cleanup_gc_provider_error_is_recorded_in_result(
     result = CleanupResult()
     _run_post_cleanup_gc(bad_ctx, result)
 
-    assert len(result.errors) == 1
-    assert result.errors[0].startswith("Post-cleanup garbage collection failed:")
+    # The broken provider is silently skipped at the get_all_provider_instances level
+    assert len(result.errors) == 0
 
 
 def test_execute_cleanup_destroy_offline_host_success(
