@@ -76,6 +76,13 @@ def test_spawn_rewrites_input(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> 
     assert "parent-agent--subagent-" in prompt_text
     assert f"bash {state_dir}/proxy_commands/wait-toolu_abc12345678.sh" in prompt_text
     assert "MNGR_PROXY_END_OF_OUTPUT" in prompt_text
+    # Bash-timeout retry guidance: a long-running subagent will outlast
+    # Bash's 30-min timeout, and Haiku must re-run rather than hallucinate
+    # "monitor" actions or fabricate text. Found live: a 2-hour
+    # verify-and-fix run produced ~88 confused tool calls when the proxy
+    # had no instruction for the timeout case.
+    assert "times out" in prompt_text
+    assert "re-run the original" in prompt_text
 
     tid = "toolu_abc12345678"
     prompt_file = state_dir / "subagent_prompts" / f"{tid}.md"
