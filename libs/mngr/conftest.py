@@ -116,7 +116,15 @@ def fail_on_unexpected_loguru_warnings(
                 "@pytest.mark.allow_warnings(match=r'...') instead."
             )
         match_arg = marker.kwargs.get("match")
-        pattern = re.compile(match_arg) if match_arg is not None else None
+        if match_arg is None:
+            pattern = None
+        else:
+            try:
+                pattern = re.compile(match_arg)
+            except re.error as exc:
+                raise TypeError(
+                    f"@pytest.mark.allow_warnings was given an invalid regex for `match`: {match_arg!r} ({exc})"
+                ) from exc
         WARNINGS_ALLOWED_STACK.append(pattern)
         pushed_frame = True
     elif any(request.node.get_closest_marker(m) is not None for m in _AUTO_ALLOW_WARNINGS_MARKERS):
