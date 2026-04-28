@@ -54,16 +54,15 @@ def _unexpected_warning_sink(message: Any) -> None:
     matches are allowed.
     """
     # str(message) follows the sink's format ("{message}") and additionally
-    # appends an exception traceback whenever logger.exception() was used,
-    # so it can be a multi-line block. record["message"] is the bare message
-    # body (no traceback), which is what allow_warnings() match patterns are
-    # written against. We display the full text in the failure summary but
-    # match against the bare body.
+    # appends an exception traceback whenever an exception is bound to the
+    # record, so it can be a multi-line block. record["message"] is the bare
+    # message body (no traceback), which is what allow_warnings() match
+    # patterns are written against. We display the full text in the failure
+    # summary but match against the bare body.
     text = str(message).rstrip("\n")
     if WARNINGS_ALLOWED_STACK:
         pattern = WARNINGS_ALLOWED_STACK[-1]
-        record_message = message.record["message"] if hasattr(message, "record") else text
-        if pattern is None or pattern.search(record_message):
+        if pattern is None or pattern.search(message.record["message"]):
             return
     _unexpected_warnings.append(text)
 
