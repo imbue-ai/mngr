@@ -170,28 +170,31 @@ class AliasAwareGroup(DefaultCommandGroup):
         plugin_alias_to_canonical = detect_alias_to_canonical(self)
         plugin_aliases_by_cmd = detect_aliases_by_command(self)
 
-        plugin_entries: list[tuple[str, click.Command]] = []
+        # Each plugin entry carries the alias-joined display name alongside the
+        # click.Command, so width measurement and short-help truncation see the
+        # same rendered string.
+        plugin_entries: list[tuple[str, str, click.Command]] = []
         for subcommand in super().list_commands(ctx):
             if subcommand in plugin_alias_to_canonical:
                 continue
             cmd = super().get_command(ctx, subcommand)
             if cmd is None or cmd.hidden:
                 continue
-            plugin_entries.append((subcommand, cmd))
+            aliases = plugin_aliases_by_cmd.get(subcommand, [])
+            display_name = ", ".join([subcommand, *aliases]) if aliases else subcommand
+            plugin_entries.append((subcommand, display_name, cmd))
 
         if not rows and not plugin_entries:
             return
 
         builtin_widths = [len(r[0]) for r in rows]
-        plugin_widths = [len(name) for name, _ in plugin_entries]
+        plugin_widths = [len(display_name) for _, display_name, _ in plugin_entries]
         max_width = max(builtin_widths + plugin_widths) if (builtin_widths or plugin_widths) else 0
         limit = formatter.width - 6 - max_width
 
-        for subcommand, cmd in plugin_entries:
+        for subcommand, display_name, cmd in plugin_entries:
             meta = get_help_metadata(subcommand)
             help_text = meta.one_line_description if meta is not None else cmd.get_short_help_str(limit=limit)
-            aliases = plugin_aliases_by_cmd.get(subcommand, [])
-            display_name = ", ".join([subcommand, *aliases]) if aliases else subcommand
             rows.append((display_name, help_text))
 
         if rows:
