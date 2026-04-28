@@ -473,7 +473,7 @@ def plugin_manager(
     # Reset the module-level plugin manager singleton before each test
     imbue.mngr.main.reset_plugin_manager()
 
-    # Clear the registries to ensure clean state
+    # Clear the registries and caches to ensure clean state
     reset_backend_registry()
     reset_agent_registry()
     reset_provider_instances()

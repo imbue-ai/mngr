@@ -21,7 +21,6 @@ from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import format_size
 from imbue.mngr.cli.output_helpers import write_human_line
-from imbue.mngr.cli.watch_mode import run_watch_loop
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
@@ -47,7 +46,6 @@ class GcCliOptions(CommonCliOptions):
     on_error: str
     all_providers: bool
     provider: tuple[str, ...]
-    watch: int | None
 
 
 @click.command(name="gc")
@@ -74,12 +72,6 @@ class GcCliOptions(CommonCliOptions):
     default="abort",
     help="What to do when errors occur: abort (stop immediately) or continue (keep going)",
 )
-@optgroup.option(
-    "-w",
-    "--watch",
-    type=int,
-    help="Re-run garbage collection at the specified interval (seconds)",
-)
 @add_common_options
 @click.pass_context
 def gc(ctx: click.Context, **kwargs) -> None:
@@ -101,19 +93,7 @@ def _gc_impl(ctx: click.Context, **kwargs) -> None:
         command_class=GcCliOptions,
     )
 
-    # Watch mode: run gc repeatedly at the specified interval
-    if opts.watch:
-        try:
-            run_watch_loop(
-                iteration_fn=lambda: _run_gc_iteration(mngr_ctx=mngr_ctx, opts=opts, output_opts=output_opts),
-                interval_seconds=opts.watch,
-                on_error_continue=True,
-            )
-        except KeyboardInterrupt:
-            logger.info("\nWatch mode stopped")
-            return
-    else:
-        _run_gc_iteration(mngr_ctx=mngr_ctx, opts=opts, output_opts=output_opts)
+    _run_gc_iteration(mngr_ctx=mngr_ctx, opts=opts, output_opts=output_opts)
 
 
 def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: OutputOptions) -> None:

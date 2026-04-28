@@ -11,9 +11,11 @@ import and cannot accidentally pull in mngr before translation happens.
 import os
 import re
 import sys
+import tomllib
 from pathlib import Path
 from typing import Final
 
+import tomlkit
 from loguru import logger
 
 MINDS_ROOT_NAME_ENV_VAR: Final[str] = "MINDS_ROOT_NAME"
@@ -50,6 +52,70 @@ def mngr_prefix_for(root_name: str) -> str:
     return "{}-".format(root_name)
 
 
+def _ensure_mngr_settings(root_name: str) -> None:
+    """Ensure the mngr settings.toml has an SSH provider configured.
+
+    The SSH provider reads dynamic host entries written by the leased-host
+    flow. Without this provider, ``mngr rename``/``mngr start`` cannot
+    discover agents on leased hosts.
+
+    Only adds the SSH provider section if it is missing -- does not
+    overwrite any existing configuration.
+    """
+    mngr_host_dir = mngr_host_dir_for(root_name)
+    root_config_path = mngr_host_dir / "config.toml"
+    if not root_config_path.exists():
+        return
+    root_config = tomllib.loads(root_config_path.read_text())
+    profile_id = root_config.get("profile")
+    if not profile_id:
+        return
+    settings_dir = mngr_host_dir / "profiles" / profile_id
+    if not settings_dir.exists():
+        return
+    settings_path = settings_dir / "settings.toml"
+
+    data_dir = minds_data_dir_for(root_name)
+    expected_dynamic_hosts_file = str(data_dir / "ssh" / "dynamic_hosts.toml")
+
+    if settings_path.exists():
+        existing = tomllib.loads(settings_path.read_text())
+        providers = existing.get("providers", {})
+        ssh_config = providers.get("ssh", {})
+        if (
+            ssh_config.get("backend") == "ssh"
+            and ssh_config.get("dynamic_hosts_file") == expected_dynamic_hosts_file
+            and ssh_config.get("host_dir") == "/mngr"
+        ):
+            return
+    else:
+        existing = {}
+
+    # Build the config content with the SSH provider section
+    ssh_config = {
+        "providers": {
+            "ssh": {
+                "backend": "ssh",
+                "host_dir": "/mngr",
+                "dynamic_hosts_file": expected_dynamic_hosts_file,
+            },
+        },
+    }
+
+    if settings_path.exists():
+        doc = tomlkit.loads(settings_path.read_text())
+        doc.update(ssh_config)
+    else:
+        doc = tomlkit.document()
+        doc.update(ssh_config)
+
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = settings_path.with_suffix(".tmp")
+    tmp_path.write_text(tomlkit.dumps(doc))
+    tmp_path.rename(settings_path)
+    logger.debug("Updated mngr settings at {} with SSH provider config", settings_path)
+
+
 def apply_bootstrap() -> None:
     """Set MNGR_HOST_DIR and MNGR_PREFIX in os.environ from MINDS_ROOT_NAME.
 
@@ -61,3 +127,4 @@ def apply_bootstrap() -> None:
     root_name = resolve_minds_root_name()
     os.environ.setdefault("MNGR_HOST_DIR", str(mngr_host_dir_for(root_name)))
     os.environ.setdefault("MNGR_PREFIX", mngr_prefix_for(root_name))
+    _ensure_mngr_settings(root_name)
