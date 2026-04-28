@@ -102,6 +102,38 @@ def test_spawn_rewrites_input(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> 
     assert _mode_bits(script_file) == 0o755
 
 
+def test_wait_script_idempotent_prelude_short_circuits_on_post_cleanup() -> None:
+    """When prompt or map file is missing (PostToolUse already ran), the
+    wait-script must emit MNGR_PROXY_END_OF_OUTPUT and exit 0 BEFORE
+    attempting `mngr create`. Otherwise re-invocations by Haiku after
+    PostToolUse cleanup would fail mngr create with "--message-file
+    Path ... does not exist."
+
+    Found live: a verify-and-fix subagent (running through the proxy)
+    completed end_turn, PostToolUse cleaned up, Haiku re-ran the
+    wait-script, and our previous version blew up on the missing
+    prompt file.
+    """
+    script = spawn_hook.build_wait_script(
+        tool_use_id="toolu_test_idempotent",
+        target_name="parent--subagent-foo-test",
+        parent_cwd="/tmp/somewhere",
+    )
+    # The idempotent guard appears BEFORE the mngr-create block.
+    guard_idx = script.find('if [ ! -f "$PROMPT_FILE" ] || [ ! -f "$MAP_FILE" ]; then')
+    create_idx = script.find("uv run mngr create")
+    assert guard_idx >= 0, "wait-script missing idempotent prelude"
+    assert create_idx >= 0, "wait-script missing mngr create call"
+    assert guard_idx < create_idx, (
+        "idempotent prelude must run BEFORE mngr create -- otherwise a "
+        "re-invocation after PostToolUse cleanup would fail on missing prompt-file."
+    )
+    # The guard emits the sentinel and exits 0.
+    guard_block = script[guard_idx:create_idx]
+    assert "MNGR_PROXY_END_OF_OUTPUT" in guard_block
+    assert "exit 0" in guard_block
+
+
 def test_spawn_depth_limit_denies_with_reason(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> None:
     """At max depth, the hook denies the Task tool with an explanatory reason."""
     state_dir = tmp_path / "state"

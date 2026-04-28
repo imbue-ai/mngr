@@ -113,7 +113,7 @@ def slugify(text: str) -> str:
     return capped.rstrip("-")
 
 
-def _build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> str:
+def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> str:
     """Build the small per-tool_use_id shell wait-script that Haiku invokes via Bash.
 
     The wait-script is a boundary to a shell-only consumer (the Haiku proxy
@@ -139,15 +139,14 @@ def _build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> s
         'RESULT_FILE="$STATE_DIR/subagent_results/$TID.txt"\n'
         'MAP_FILE="$STATE_DIR/subagent_map/$TID.json"\n'
         "\n"
-        # Idempotent re-entry guard. Any of three states means "PostToolUse
-        # has already run for this tool_use_id" -- emit the sentinel
-        # immediately and exit 0 so Haiku ends its turn cleanly instead
-        # of error-looping:
-        #   - the prompt file was deleted (PostToolUse cleans subagent_prompts/)
-        #   - the map entry was deleted (PostToolUse cleans subagent_map/)
-        #   - the result file was already consumed (PostToolUse cleans subagent_results/)
-        # This must run before the mngr-create block: if the prompt file
-        # is gone, the create call would fail with "Path ... does not exist."
+        # Idempotent re-entry guard. PostToolUse cleans subagent_prompts/
+        # and subagent_map/, so absence of either is the signal that
+        # PostToolUse has already run for this tool_use_id -- emit the
+        # sentinel immediately and exit 0 so Haiku ends its turn cleanly
+        # instead of error-looping. This must run before the mngr-create
+        # block: if the prompt file is gone, the create call would fail
+        # with "Path ... does not exist." (We deliberately do NOT check
+        # RESULT_FILE here -- on the first call it doesn't exist yet.)
         'if [ ! -f "$PROMPT_FILE" ] || [ ! -f "$MAP_FILE" ]; then\n'
         '    echo "MNGR_PROXY_END_OF_OUTPUT"\n'
         "    exit 0\n"
@@ -307,7 +306,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         _emit_pass_through(stdout)
         return
 
-    wait_script_content = _build_wait_script(tool_use_id, target_name, parent_cwd)
+    wait_script_content = build_wait_script(tool_use_id, target_name, parent_cwd)
     try:
         _write_executable_file(script_file, wait_script_content)
     except OSError as e:
