@@ -27,6 +27,9 @@ from imbue.mngr.api.list import agent_details_to_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.filter_opts import AgentFilterCliOptions
+from imbue.mngr.cli.filter_opts import add_agent_filter_options
+from imbue.mngr.cli.filter_opts import build_agent_filter_cel
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
@@ -39,9 +42,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
-from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import ErrorBehavior
-from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_sort_keys
@@ -100,30 +101,20 @@ def _should_use_streaming_mode(
     )
 
 
-class ListCliOptions(CommonCliOptions):
+class ListCliOptions(AgentFilterCliOptions, CommonCliOptions):
     """Options passed from the CLI to the list command.
 
     This captures all the click parameters so we can pass them as a single object
     to helper functions instead of passing dozens of individual parameters.
 
-    Inherits common options (output_format, quiet, verbose, etc.) from CommonCliOptions.
+    Inherits filter options (include, exclude, running, ...) from AgentFilterCliOptions
+    and common options (output_format, quiet, verbose, ...) from CommonCliOptions.
 
     Note that this class VERY INTENTIONALLY DOES NOT use Field() decorators with descriptions, defaults, etc.
     For that information, see the click.option() and click.argument() decorators on the list() function itself.
     """
 
-    include: tuple[str, ...]
-    exclude: tuple[str, ...]
-    running: bool
-    stopped: bool
-    archived: bool
-    active: bool
-    local: bool
-    remote: bool
     provider: tuple[str, ...]
-    project: tuple[str, ...]
-    label: tuple[str, ...]
-    host_label: tuple[str, ...]
     stdin: bool
     fields: str | None
     header: tuple[str, ...]
@@ -136,66 +127,11 @@ class ListCliOptions(CommonCliOptions):
 
 
 @click.command(name="list")
-@optgroup.group("Filtering")
-@optgroup.option(
-    "--include",
-    multiple=True,
-    help="Include agents matching CEL expression (repeatable)",
-)
-@optgroup.option(
-    "--exclude",
-    multiple=True,
-    help="Exclude agents matching CEL expression (repeatable)",
-)
-@optgroup.option(
-    "--running",
-    is_flag=True,
-    help="Show only running agents (alias for --include 'state == \"RUNNING\"')",
-)
-@optgroup.option(
-    "--stopped",
-    is_flag=True,
-    help="Show only stopped agents (alias for --include 'state == \"STOPPED\"')",
-)
-@optgroup.option(
-    "--archived",
-    is_flag=True,
-    help="Show only stopped agents (alias for --include 'has(labels.archived_at)')",
-)
-@optgroup.option(
-    "--active",
-    is_flag=True,
-    help="Show only stopped agents (anything not archived/destroyed/crashed/failed)",
-)
-@optgroup.option(
-    "--local",
-    is_flag=True,
-    help="Show only local agents (alias for --include 'host.provider == \"local\"')",
-)
-@optgroup.option(
-    "--remote",
-    is_flag=True,
-    help="Show only remote agents (alias for --exclude 'host.provider == \"local\"')",
-)
+@add_agent_filter_options
 @optgroup.option(
     "--provider",
     multiple=True,
     help="Show only agents using specified provider (repeatable)",
-)
-@optgroup.option(
-    "--project",
-    multiple=True,
-    help="Show only agents with this project label (repeatable)",
-)
-@optgroup.option(
-    "--label",
-    multiple=True,
-    help="Show only agents with this label (format: KEY=VALUE, repeatable) [experimental]",
-)
-@optgroup.option(
-    "--host-label",
-    multiple=True,
-    help="Show only agents on hosts with this host label (format: KEY=VALUE, repeatable)",
 )
 @optgroup.option(
     "--stdin",
@@ -323,75 +259,19 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
             field_name, label = header_spec.split("=", 1)
             custom_headers[field_name.strip()] = label.strip()
 
-    # Build list of include filters
-    include_filters = list(opts.include)
+    # Translate filter aliases (--running, --project, etc.) into CEL strings.
+    include_filters_tuple, exclude_filters_tuple = build_agent_filter_cel(opts)
 
-    # Handle stdin input by converting to CEL filters
+    # --stdin: read agent/host refs from stdin and add as an OR'd include filter.
+    # List-specific because kanpan and other commands don't take stdin input.
     if opts.stdin:
         stdin_refs = [line.strip() for line in sys.stdin if line.strip()]
         if stdin_refs:
-            # Create a CEL filter that matches any of the provided refs against
-            # host.name, host.id, name, or id (using dot notation for nested fields)
-            ref_filters = []
-            for ref in stdin_refs:
-                ref_filter = f'(name == "{ref}" || id == "{ref}" || host.name == "{ref}" || host.id == "{ref}")'
-                ref_filters.append(ref_filter)
-            # Combine all ref filters with OR
-            combined_filter = " || ".join(ref_filters)
-            include_filters.append(combined_filter)
-
-    # --running: alias for --include 'state == "RUNNING"'
-    # --stopped: alias for --include 'state == "STOPPED"'
-    # --local: alias for --include 'host.provider == "local"'
-    # --remote: alias for --exclude 'host.provider == "local"'
-    if opts.running:
-        include_filters.append(f'state == "{AgentLifecycleState.RUNNING.value}"')
-    if opts.stopped:
-        include_filters.append(f'state == "{AgentLifecycleState.STOPPED.value}"')
-    if opts.local:
-        include_filters.append('host.provider == "local"')
-    if opts.archived:
-        include_filters.append("has(labels.archived_at)")
-
-    # --project X: alias for --include 'labels.project == "X"'
-    # Multiple values are OR'd together
-    if opts.project:
-        project_parts = [f'labels.project == "{p}"' for p in opts.project]
-        include_filters.append(" || ".join(project_parts))
-
-    # --label K=V: alias for --include 'labels.K == "V"'
-    # Multiple values are OR'd together
-    if opts.label:
-        label_parts = []
-        for label_spec in opts.label:
-            if "=" not in label_spec:
-                raise click.BadParameter(f"Label must be in KEY=VALUE format, got: {label_spec}", param_hint="--label")
-            key, value = label_spec.split("=", 1)
-            label_parts.append(f'labels.{key} == "{value}"')
-        include_filters.append(" || ".join(label_parts))
-
-    # --host-label K=V: alias for --include 'host.tags.K == "V"'
-    # Multiple values are OR'd together
-    if opts.host_label:
-        host_label_parts = []
-        for label_spec in opts.host_label:
-            if "=" not in label_spec:
-                raise click.BadParameter(
-                    f"Host label must be in KEY=VALUE format, got: {label_spec}", param_hint="--host-label"
-                )
-            key, value = label_spec.split("=", 1)
-            host_label_parts.append(f'host.tags.{key} == "{value}"')
-        include_filters.append(" || ".join(host_label_parts))
-
-    # Build list of exclude filters
-    exclude_filters = list(opts.exclude)
-    if opts.remote:
-        exclude_filters.append('host.provider == "local"')
-    if opts.active:
-        exclude_filters.append("has(labels.archived_at)")
-        include_filters.append(f'host.state != "{HostState.CRASHED.value}"')
-        include_filters.append(f'host.state != "{HostState.FAILED.value}"')
-        include_filters.append(f'host.state != "{HostState.DESTROYED.value}"')
+            ref_filters = [
+                f'(name == "{ref}" || id == "{ref}" || host.name == "{ref}" || host.id == "{ref}")'
+                for ref in stdin_refs
+            ]
+            include_filters_tuple = (*include_filters_tuple, " || ".join(ref_filters))
 
     # --sort EXPR: CEL expression(s) with optional direction, e.g. "name asc, create_time desc"
     compiled_sort_keys = compile_cel_sort_keys(opts.sort)
@@ -404,8 +284,6 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
-    include_filters_tuple = tuple(include_filters)
-    exclude_filters_tuple = tuple(exclude_filters)
     provider_names = opts.provider if opts.provider else None
 
     # Dispatch to the appropriate output path
