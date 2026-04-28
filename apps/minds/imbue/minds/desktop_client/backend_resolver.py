@@ -563,7 +563,7 @@ class MngrStreamManager(MutableModel):
         try:
             event = parse_discovery_event_line(line)
         except (json.JSONDecodeError, ValueError) as e:
-            logger.error("Failed to parse discovery event line: {} (line: {})", e, line[:200])
+            logger.opt(exception=e).error("Failed to parse discovery event line (line: {})", line[:200])
             return
 
         if isinstance(event, FullDiscoverySnapshotEvent):
@@ -874,7 +874,7 @@ class MngrStreamManager(MutableModel):
                 services[str(record.service)] = record.url
             self.resolver.update_services(agent_id, dict(services))
         except (json.JSONDecodeError, ValueError) as e:
-            logger.error("Failed to parse event line for {}: {} (line: {})", agent_id, e, stripped[:200])
+            logger.opt(exception=e).error("Failed to parse event line for {} (line: {})", agent_id, stripped[:200])
 
     def _start_events_stream(self, agent_id: AgentId) -> None:
         """Start mngr event <agent-id> services requests refresh --follow for a workspace agent."""

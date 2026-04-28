@@ -2156,7 +2156,7 @@ def create_desktop_client(
 
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception) -> Response:
-        logger.error("Unhandled exception on {} {}: {}", request.method, request.url.path, exc, exc_info=exc)
+        logger.opt(exception=exc).error("Unhandled exception on {} {}", request.method, request.url.path)
         return Response(status_code=500, content=f"Internal Server Error: {exc}")
 
     @app.middleware("http")

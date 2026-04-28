@@ -1209,7 +1209,7 @@ class AgentCreator(MutableModel):
                     on_created(agent_id)
 
         except (GitCloneError, GitOperationError, MngrCommandError, HostPoolError, ValueError, OSError) as e:
-            logger.error("Failed to create agent {}: {}", agent_id, e)
+            logger.opt(exception=e).error("Failed to create agent {}", agent_id)
             log_queue.put("[minds] ERROR: {}".format(e))
             with self._lock:
                 self._statuses[aid] = AgentCreationStatus.FAILED

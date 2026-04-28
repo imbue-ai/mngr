@@ -392,7 +392,7 @@ class AgentObserver(MutableModel):
                 activity_worker.join(timeout=5.0)
 
     def _on_activity_failure(self, e: BaseException):
-        logger.error("Activity worker thread failed: {}", e)
+        logger.opt(exception=e).error("Activity worker thread failed")
         self._stop_event.set()
 
     def stop(self) -> None:

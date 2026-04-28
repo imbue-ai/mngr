@@ -368,7 +368,7 @@ def _handle_oauth_callback(provider_id: str, request: Request) -> HTMLResponse:
             query_params=query_params,
         )
     except (httpx.HTTPError, AuthBackendError) as exc:
-        logger.error("OAuth callback failed for {}: {}", provider_id, exc)
+        logger.opt(exception=exc).error("OAuth callback failed for {}", provider_id)
         safe_exc = html.escape(str(exc), quote=True)
         return HTMLResponse(
             f"<html><body><h1>Authentication failed</h1><p>{safe_exc}</p></body></html>",
