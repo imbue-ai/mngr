@@ -20,6 +20,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.claude_config import SESSION_GUARD
+from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_config
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.plugin import ClaudeAgent
@@ -351,6 +352,10 @@ _MNGR_MANAGED_HOOK_MARKERS: Final[tuple[str, ...]] = (
     "imbue.mngr_subagent_proxy.hooks.",
     "sync_keychain_credentials.py",
     "wait_for_stop_hook.sh",
+    # Auto-allow PermissionRequest emitter installed by
+    # _install_proxy_child_auto_allow. Without this marker the strip
+    # pass would remove it on re-provisioning.
+    '"hookEventName":"PermissionRequest"',
 )
 
 
@@ -501,6 +506,43 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
     if _is_subagent_proxy_child(agent):
         _check_subagent_hooks_compat(host, agent)
         _strip_user_hooks_from_subagent(host, agent.work_dir)
+        _install_proxy_child_auto_allow(host, agent.work_dir)
+
+
+def _install_proxy_child_auto_allow(host: OnlineHostInterface, work_dir: Path) -> None:
+    """Auto-allow all permission dialogs in spawned mngr-proxy-child agents.
+
+    Why: a proxy child is a Haiku dispatcher constrained to running our
+    wait-script and fake_tool. When that child itself spawns a nested
+    Agent call (depth 2+), our PreToolUse hook proxies it as another
+    Bash invocation -- but the child's settings.local.json has no
+    auto-allow for Bash, so the nested Bash call triggers a permission
+    dialog INSIDE the child's Claude session. The parent's
+    subagent_wait then surfaces NEED_PERMISSION, but the only way to
+    resolve it is `mngr connect <child-name>` in another terminal,
+    which makes nested subagents effectively unusable.
+
+    Auto-allowing permissions in proxy children is safe: the child is
+    structurally restricted (single Bash tool, agent definition limits
+    commands) and is never user-driven. Top-level (non-child) agents
+    are unaffected -- they keep whatever permissions config the user
+    set.
+    """
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    existing_settings: dict[str, Any] = {}
+    try:
+        content = host.read_text_file(settings_path)
+        existing_settings = json.loads(content)
+    except FileNotFoundError:
+        pass
+    except json.JSONDecodeError:
+        logger.warning("Could not parse settings.local.json at {}; skipping auto-allow merge", settings_path)
+        return
+    auto_allow_config = build_permission_auto_allow_hooks_config()
+    merged = merge_hooks_config(existing_settings, auto_allow_config)
+    if merged is None:
+        return
+    host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
 
 
 def _strip_user_hooks_from_subagent(host: OnlineHostInterface, work_dir: Path) -> None:
