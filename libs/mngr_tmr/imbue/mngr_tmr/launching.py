@@ -318,14 +318,12 @@ def launch_all_test_agents(
     agents: list[TestAgentInfo] = []
     agent_hosts: dict[str, OnlineHostInterface] = {}
 
-    launch_config = config
-
-    is_local = launch_config.provider_name.lower() == LOCAL_PROVIDER_NAME
+    is_local = config.provider_name.lower() == LOCAL_PROVIDER_NAME
     host_pool: list[OnlineHostInterface] = []
     if not is_local and agents_per_host > 0:
         host_count = math.ceil(len(test_node_ids) / agents_per_host)
         if host_count > 0:
-            host_pool = _create_host_pool(host_count, launch_config, mngr_ctx, run_name, max_parallel)
+            host_pool = _create_host_pool(host_count, config, mngr_ctx, run_name, max_parallel)
 
     with ConcurrencyGroupExecutor(
         parent_cg=mngr_ctx.concurrency_group,
@@ -342,7 +340,7 @@ def launch_all_test_agents(
                 executor.submit(
                     launch_test_agent,
                     test_node_id,
-                    launch_config,
+                    config,
                     mngr_ctx,
                     pytest_flags,
                     prompt_suffix,
@@ -359,7 +357,7 @@ def launch_all_test_agents(
                 logger.warning("Failed to launch agent: {}", exc)
 
     logger.info("Launched {} agent(s)", len(agents))
-    return agents, agent_hosts, launch_config.snapshot
+    return agents, agent_hosts, config.snapshot
 
 
 def launch_with_timeout(
