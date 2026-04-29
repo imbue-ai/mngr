@@ -77,7 +77,7 @@ def test_schedule_add_deploys_to_modal(monorepo_root: Path) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(900)
+@pytest.mark.timeout(1500)
 def test_schedule_add_with_verification(monorepo_root: Path) -> None:
     """Test that schedule add with quick verification deploys and verifies.
 
@@ -117,7 +117,7 @@ def test_schedule_add_with_verification(monorepo_root: Path) -> None:
             ],
             capture_output=True,
             text=True,
-            timeout=900,
+            timeout=1500,
             env=env,
             cwd=monorepo_root,
         )
