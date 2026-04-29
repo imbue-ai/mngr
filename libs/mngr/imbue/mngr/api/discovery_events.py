@@ -592,11 +592,14 @@ def resolve_provider_names_for_identifiers(
     except DiscoverySchemaChangedError as e:
         logger.warning("Discovery event schema mismatch; regenerating snapshot and retrying ({})", e)
         _write_unfiltered_full_snapshot(mngr_ctx, ErrorBehavior.CONTINUE)
-        # Retry once. A second schema-changed error means the freshly-written
-        # snapshot itself fails to parse, which indicates a real bug rather
-        # than stale data, so we let the exception propagate. OSError here is
-        # treated the same as on the first read: surface it as None so the
-        # caller falls back to a full discovery scan.
+        # Retry once. A second schema-changed error is unrecoverable from
+        # this layer: either the freshly-written snapshot itself fails to
+        # parse (a real schema bug), or _write_unfiltered_full_snapshot ran
+        # with ErrorBehavior.CONTINUE and a provider error caused list_agents
+        # to skip appending a fresh snapshot, so the retry re-reads the same
+        # stale events. In both cases we let the exception propagate.
+        # OSError here is treated the same as on the first read: surface it
+        # as None so the caller falls back to a full discovery scan.
         try:
             provider_by_agent_id, name_by_agent_id, destroyed_agent_ids = _replay_discovery_events_for_resolution(
                 events_path
