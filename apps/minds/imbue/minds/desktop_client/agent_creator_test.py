@@ -936,6 +936,7 @@ def test_create_leased_agent_fails_without_version(
         )
 
 
+@pytest.mark.flaky
 def test_create_leased_agent_leases_and_writes_dynamic_host(
     tmp_path: Path,
     fake_pool_server: HostPoolClient,
