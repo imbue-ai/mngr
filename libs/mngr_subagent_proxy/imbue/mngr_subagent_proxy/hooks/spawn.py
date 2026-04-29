@@ -163,16 +163,17 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
         "fi\n"
         "\n"
         'if [ ! -f "$INIT_FLAG" ]; then\n'
+        # Trap removes the env-file (which contains parent secrets) on ANY
+        # exit -- success, mngr-create failure, or signal. Installed BEFORE
+        # the env capture so a signal arriving between the redirect and the
+        # trap cannot leave secrets on disk. shred / rm -f gracefully no-op
+        # if $ENV_FILE has not yet been created. The trap is scoped to this
+        # branch (cleared after touch) so it doesn't fire on the idempotent
+        # re-entry path which has no ENV_FILE to clean up.
+        '    trap \'shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\' EXIT\n'
         "    env | grep -Ev "
         "'^(MNGR_AGENT_STATE_DIR|MNGR_AGENT_NAME|MAIN_CLAUDE_SESSION_ID|MNGR_HOST_DIR)=' "
         '> "$ENV_FILE"\n'
-        # Trap removes the env-file (which contains parent secrets) on ANY
-        # exit -- success, mngr-create failure, or signal. Without this,
-        # set -euo pipefail bails out of the script before the explicit
-        # shred runs and leaves the secrets on disk. The trap is scoped to
-        # this branch (cleared after touch) so it doesn't fire on the
-        # idempotent re-entry path which has no ENV_FILE to clean up.
-        '    trap \'shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\' EXIT\n'
         # --reuse: idempotent create. If `mngr create` partially succeeded
         # last time (e.g. host provisioned but initial-message delivery
         # failed) and `set -euo pipefail` killed the script before INIT_FLAG

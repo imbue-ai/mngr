@@ -201,17 +201,21 @@ def test_wait_script_traps_env_file_cleanup_on_failure() -> None:
         target_name="parent--subagent-foo-trap",
         parent_cwd="/tmp/somewhere",
     )
-    # The init branch installs an EXIT trap before mngr-create and clears it
-    # after a successful shred. The trap line must appear before mngr create.
+    # The init branch installs an EXIT trap before the env-capture redirect
+    # (so a signal between the redirect and the trap cannot leave secrets on
+    # disk) and clears it after a successful shred.
     init_idx = script.find('if [ ! -f "$INIT_FLAG" ]; then')
-    create_idx = script.find("uv run mngr create")
+    create_idx = script.find("mngr create")
+    env_capture_idx = script.find('> "$ENV_FILE"')
     trap_install_idx = script.find("trap 'shred -u")
     trap_clear_idx = script.find("trap - EXIT")
     assert init_idx >= 0 and create_idx >= 0
+    assert env_capture_idx >= 0, "wait-script missing env-capture redirect"
     assert trap_install_idx >= 0, "wait-script missing EXIT trap on env-file"
     assert trap_clear_idx >= 0, "wait-script missing trap clear after success"
-    assert init_idx < trap_install_idx < create_idx < trap_clear_idx, (
-        "EXIT trap must be installed BEFORE mngr create and cleared AFTER successful shred"
+    assert init_idx < trap_install_idx < env_capture_idx < create_idx < trap_clear_idx, (
+        "EXIT trap must be installed BEFORE the env-capture redirect (and "
+        "before mngr create) and cleared AFTER successful shred"
     )
 
 
