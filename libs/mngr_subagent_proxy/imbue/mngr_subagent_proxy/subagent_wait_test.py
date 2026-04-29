@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from typing import Iterator
 
+import pytest
 from loguru import logger
 
 from imbue.mngr.primitives import AgentId
@@ -40,67 +41,79 @@ def _capture_loguru_messages() -> Iterator[list[str]]:
         logger.remove(handler_id)
 
 
-def test_end_turn_detection_with_pure_text() -> None:
-    """is_end_turn_event accepts pure-text end_turn and rejects tool_use / malformed events."""
-    pure_text_event = {
-        "type": "assistant",
-        "message": {
-            "stop_reason": "end_turn",
-            "content": [{"type": "text", "text": "hello"}],
+# is_end_turn_event must accept pure-text terminal events (end_turn,
+# stop_sequence, max_tokens) and reject tool-call / malformed events.
+# stop_sequence-as-terminal was discovered live: a verify-and-fix
+# subagent finished with stop_reason=stop_sequence and our wait
+# blocked indefinitely waiting for end_turn. max_tokens means the model
+# truncated; surface what we have rather than hang.
+_END_TURN_DETECTION_CASES: tuple[tuple[str, dict[str, Any], bool], ...] = (
+    (
+        "pure_text_end_turn",
+        {
+            "type": "assistant",
+            "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "hello"}]},
         },
-    }
-    assert is_end_turn_event(pure_text_event) is True
-
-    tool_use_event = {
-        "type": "assistant",
-        "message": {
-            "stop_reason": "end_turn",
-            "content": [
-                {"type": "text", "text": "calling a tool"},
-                {"type": "tool_use", "name": "Bash", "input": {"cmd": "ls"}},
-            ],
+        True,
+    ),
+    (
+        "tool_use_block_present",
+        {
+            "type": "assistant",
+            "message": {
+                "stop_reason": "end_turn",
+                "content": [
+                    {"type": "text", "text": "calling a tool"},
+                    {"type": "tool_use", "name": "Bash", "input": {"cmd": "ls"}},
+                ],
+            },
         },
-    }
-    assert is_end_turn_event(tool_use_event) is False
-
-    tool_use_stop_reason_event = {
-        "type": "assistant",
-        "message": {
-            "stop_reason": "tool_use",
-            "content": [{"type": "text", "text": "thinking"}],
+        False,
+    ),
+    (
+        "stop_reason_tool_use",
+        {
+            "type": "assistant",
+            "message": {"stop_reason": "tool_use", "content": [{"type": "text", "text": "thinking"}]},
         },
-    }
-    assert is_end_turn_event(tool_use_stop_reason_event) is False
-
-    missing_message_event = {"type": "assistant"}
-    assert is_end_turn_event(missing_message_event) is False
-
-    non_assistant_event = {"type": "user", "message": {"stop_reason": "end_turn", "content": []}}
-    assert is_end_turn_event(non_assistant_event) is False
-
-    # stop_sequence is a real end-of-turn too; Claude Code emits it for
-    # certain skill/agent integrations. Discovered live: a verify-and-fix
-    # subagent finished with stop_reason=stop_sequence and our wait
-    # blocked indefinitely waiting for end_turn.
-    stop_sequence_event = {
-        "type": "assistant",
-        "message": {
-            "stop_reason": "stop_sequence",
-            "content": [{"type": "text", "text": "verified"}],
+        False,
+    ),
+    ("missing_message", {"type": "assistant"}, False),
+    (
+        "non_assistant_role",
+        {"type": "user", "message": {"stop_reason": "end_turn", "content": []}},
+        False,
+    ),
+    (
+        "stop_sequence_terminal",
+        {
+            "type": "assistant",
+            "message": {"stop_reason": "stop_sequence", "content": [{"type": "text", "text": "verified"}]},
         },
-    }
-    assert is_end_turn_event(stop_sequence_event) is True
-
-    # max_tokens: model truncated. Surface what we have rather than hang.
-    max_tokens_event = {
-        "type": "assistant",
-        "message": {
-            "stop_reason": "max_tokens",
-            "content": [{"type": "text", "text": "long output ..."}],
+        True,
+    ),
+    (
+        "max_tokens_terminal",
+        {
+            "type": "assistant",
+            "message": {"stop_reason": "max_tokens", "content": [{"type": "text", "text": "long output ..."}]},
         },
-    }
-    assert is_end_turn_event(max_tokens_event) is True
+        True,
+    ),
+)
 
+
+@pytest.mark.parametrize(
+    ("event", "expected"),
+    [(case[1], case[2]) for case in _END_TURN_DETECTION_CASES],
+    ids=[case[0] for case in _END_TURN_DETECTION_CASES],
+)
+def test_is_end_turn_event(event: dict[str, Any], expected: bool) -> None:
+    assert is_end_turn_event(event) is expected
+
+
+def test_extract_assistant_text_concatenates_text_blocks_only() -> None:
+    """extract_assistant_text joins text blocks and ignores non-text blocks and non-dict entries."""
     multi_text_event = {
         "type": "assistant",
         "message": {
@@ -116,40 +129,48 @@ def test_end_turn_detection_with_pure_text() -> None:
     assert extract_assistant_text(multi_text_event) == "hello world"
 
 
-def test_is_real_user_event_discriminates_human_from_machine_events() -> None:
-    """is_real_user_event accepts only plain-text human prompts, rejecting tool_result and hook-injected events."""
-    # Not a user event.
-    assistant_event = {"type": "assistant", "message": {"content": "hello"}}
-    assert is_real_user_event(assistant_event) is False
-
-    # Missing or malformed message payload.
-    assert is_real_user_event({"type": "user"}) is False
-    assert is_real_user_event({"type": "user", "message": "not-a-dict"}) is False
-
-    # tool_result blocks come in as list content; must be rejected.
-    tool_result_event = {
-        "type": "user",
-        "message": {
-            "content": [{"type": "tool_result", "tool_use_id": "abc", "content": "done"}],
+# is_real_user_event must accept only plain-text human prompts and reject
+# tool_result blocks plus the synthetic hook-feedback messages Claude
+# Code emits as type=user. Hook-feedback prefixes are matched after a
+# left-strip, so leading whitespace must not bypass the filter.
+_REAL_USER_EVENT_CASES: tuple[tuple[str, dict[str, Any], bool], ...] = (
+    ("non_user_role", {"type": "assistant", "message": {"content": "hello"}}, False),
+    ("missing_message", {"type": "user"}, False),
+    ("non_dict_message", {"type": "user", "message": "not-a-dict"}, False),
+    (
+        "tool_result_list_content",
+        {
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "tool_use_id": "abc", "content": "done"}]},
         },
-    }
-    assert is_real_user_event(tool_result_event) is False
+        False,
+    ),
+    (
+        "stop_hook_feedback",
+        {"type": "user", "message": {"content": "Stop hook feedback: please continue"}},
+        False,
+    ),
+    (
+        "pretooluse_hook_feedback_with_leading_whitespace",
+        {"type": "user", "message": {"content": "   PreToolUse hook feedback: blocked"}},
+        False,
+    ),
+    ("null_content", {"type": "user", "message": {"content": None}}, False),
+    (
+        "real_human_prompt",
+        {"type": "user", "message": {"content": "please refactor foo.py"}},
+        True,
+    ),
+)
 
-    # Hook-injected synthetic user events must be rejected, including ones with
-    # leading whitespace before the prefix.
-    stop_hook_event = {"type": "user", "message": {"content": "Stop hook feedback: please continue"}}
-    assert is_real_user_event(stop_hook_event) is False
 
-    pretooluse_hook_event = {"type": "user", "message": {"content": "   PreToolUse hook feedback: blocked"}}
-    assert is_real_user_event(pretooluse_hook_event) is False
-
-    # Non-str, non-list content (e.g. None) is not a real user prompt.
-    null_content_event = {"type": "user", "message": {"content": None}}
-    assert is_real_user_event(null_content_event) is False
-
-    # Actual human prompt is accepted.
-    human_event = {"type": "user", "message": {"content": "please refactor foo.py"}}
-    assert is_real_user_event(human_event) is True
+@pytest.mark.parametrize(
+    ("event", "expected"),
+    [(case[1], case[2]) for case in _REAL_USER_EVENT_CASES],
+    ids=[case[0] for case in _REAL_USER_EVENT_CASES],
+)
+def test_is_real_user_event(event: dict[str, Any], expected: bool) -> None:
+    assert is_real_user_event(event) is expected
 
 
 def test_jsonl_tail_handles_partial_lines(tmp_path: Path) -> None:
