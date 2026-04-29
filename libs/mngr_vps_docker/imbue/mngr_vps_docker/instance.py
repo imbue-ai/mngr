@@ -921,6 +921,7 @@ class VpsDockerProvider(BaseProviderInstance):
                         docker_build_args=tuple(docker_build_args),
                         timeout_seconds=600.0,
                         on_output=_emit_docker_build_output,
+                        builder=self.config.builder,
                     )
             logger.log(LogLevel.BUILD.value, "Docker image built successfully", source="docker")
         finally:
