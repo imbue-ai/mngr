@@ -23,6 +23,8 @@ from typing import TextIO
 
 from loguru import logger
 
+from imbue.mngr_subagent_proxy.mngr_binary import get_mngr_command_shell_form
+
 _DEFAULT_MAX_DEPTH: Final[int] = 3
 _PASS_THROUGH_RESPONSE: Final[dict[str, Any]] = {
     "hookSpecificOutput": {
@@ -124,6 +126,9 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
     q_tid = shlex.quote(tool_use_id)
     q_target = shlex.quote(target_name)
     q_parent_cwd = shlex.quote(parent_cwd)
+    # Resolve mngr binary at template-generation time so the script and the
+    # python helpers stay in lockstep on per-agent vs. fallback resolution.
+    mngr_cmd = get_mngr_command_shell_form()
     return (
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
@@ -176,7 +181,7 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
         # agent and (re-)deliver the message. Without this flag, a
         # SendMessageError mid-create wedges the proxy permanently because
         # Haiku has no path to recover.
-        '    uv run mngr create "$TARGET_NAME:$PARENT_CWD" \\\n'
+        f'    {mngr_cmd} create "$TARGET_NAME:$PARENT_CWD" \\\n'
         "        --type mngr-proxy-child \\\n"
         "        --transfer=none \\\n"
         "        --no-ensure-clean \\\n"

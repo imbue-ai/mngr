@@ -17,6 +17,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.plugin import get_preserved_sessions_dir_for_host
+from imbue.mngr_subagent_proxy.mngr_binary import get_mngr_command
 
 _POLL_INTERVAL_SECONDS: Final[float] = 0.2
 _SESSION_ID_RECHECK_SECONDS: Final[float] = 2.0
@@ -96,10 +97,14 @@ class TailState:
 
 
 def _run_mngr_list() -> list[dict]:
-    """Invoke `uv run mngr list --format json` and return the parsed agents list."""
+    """Invoke `mngr list --format json` and return the parsed agents list.
+
+    Uses the per-agent mngr binary when mngr_recursive has provisioned one
+    (``$UV_TOOL_BIN_DIR/mngr``); falls back to ``uv run mngr`` otherwise.
+    """
     try:
         completed = subprocess.run(
-            ["uv", "run", "mngr", "list", "--format", "json"],
+            get_mngr_command() + ["list", "--format", "json"],
             check=True,
             capture_output=True,
             text=True,
