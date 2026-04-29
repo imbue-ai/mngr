@@ -55,8 +55,9 @@ jobs:
       - name: Build all packages
         run: |
           set -euo pipefail
-          pkg_dirs=$(uv run scripts/verify_publish.py --list-package-dirs)
-          for pkg_dir in $pkg_dirs; do
+          pkg_dirs_output=$(uv run scripts/verify_publish.py --list-package-dirs)
+          mapfile -t pkg_dirs <<< "$pkg_dirs_output"
+          for pkg_dir in "${pkg_dirs[@]}"; do
             echo "::group::Build $pkg_dir"
             pyproject-build "$pkg_dir" -o dist/
             echo "::endgroup::"
