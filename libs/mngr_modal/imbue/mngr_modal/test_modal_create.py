@@ -13,6 +13,7 @@ Or to run all tests including Modal tests:
 import importlib.resources
 import os
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -470,8 +471,7 @@ def test_mngr_create_with_default_dockerfile_on_modal(
     Assertions here are weak: ``mngr create`` returns as soon as the agent is launched
     in its detached tmux session, so the agent's own command never gates the test.
     A stronger check would add a synchronous ``mngr exec`` after create to verify
-    image contents (e.g. ``which uv && which claude``). Deferred to a follow-up that
-    also fixes the repo-root-relative path resolution so the test runs locally.
+    image contents (e.g. ``which uv && which claude``).
 
     This test is marked as release since it takes longer due to the image build.
     """
@@ -480,24 +480,41 @@ def test_mngr_create_with_default_dockerfile_on_modal(
     dockerfile_path = _get_mngr_default_dockerfile_path()
     assert dockerfile_path.exists(), f"Default Dockerfile not found at {dockerfile_path}"
 
+    # Resolve repo root from this test file's location so the test does not
+    # depend on the pytest cwd (offload sandboxes run pytest from a different
+    # cwd than /code/mngr, which is where .mngr/image_commit_hash and the
+    # make_tar_of_repo.sh script live).
+    repo_root = Path(__file__).resolve().parents[4]
+
     tar_dir = tmp_path / "tar_output"
     tar_dir.mkdir()
-    temp_dir_with_tar = str(tar_dir)
-    commit_hash = os.environ.get("GITHUB_SHA", "") or Path(".mngr/image_commit_hash").read_text().strip()
+    commit_hash = os.environ.get("GITHUB_SHA", "") or (repo_root / ".mngr/image_commit_hash").read_text().strip()
 
-    # go make the tar
+    # Package the repo at commit_hash via make_tar_of_repo.sh, then unpack
+    # producer-side so the Modal build context is a real source tree. The
+    # shared mngr Dockerfile no longer special-cases current.tar.gz; both
+    # mngr_schedule's deploy path and this test extract the tarball before
+    # handing it off as context_dir, matching offload's "context_dir is a
+    # real source tree" contract.
     subprocess.run(
         [
             "bash",
-            "-c",
-            f"./scripts/make_tar_of_repo.sh {commit_hash} {temp_dir_with_tar}",
+            str(repo_root / "scripts" / "make_tar_of_repo.sh"),
+            commit_hash,
+            str(tar_dir),
         ],
         capture_output=True,
         text=True,
         check=True,
         timeout=600,
         env=modal_subprocess_env.env,
+        cwd=repo_root,
     )
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    with tarfile.open(tar_dir / "current.tar.gz", "r:gz") as tf:
+        tf.extractall(context_dir, filter="data")
+
     # now we can try making the agent
     result = subprocess.run(
         [
@@ -516,7 +533,7 @@ def test_mngr_create_with_default_dockerfile_on_modal(
             "-b",
             f"--file={dockerfile_path}",
             "-b",
-            f"context-dir={temp_dir_with_tar}",
+            f"context-dir={context_dir}",
             "--",
             "sleep",
             "100312",

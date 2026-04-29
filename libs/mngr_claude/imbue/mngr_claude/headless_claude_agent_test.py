@@ -477,17 +477,27 @@ def test_stream_output_raises_when_empty_file(
 ) -> None:
     """stream_output should raise MngrError when stdout file exists but is empty.
 
-    Creates both stdout.jsonl (empty) and stderr.log (empty). The error
-    fallback chain reaches pane capture (which returns None -- no tmux
-    session for the test agent), then falls through to "no details available".
+    Creates both stdout.jsonl (empty) and stderr.log (empty). Stderr and the
+    (absent) tmux pane produce no content, so the raised error carries only
+    the always-appended [state-dir] diagnostic (and HeadlessClaude's
+    [work-dir] diagnostic) under the stable 'exited without producing output'
+    template.
+
+    Uses _AlwaysFinishedHeadlessClaude instead of _patch_agent_as_stopped to
+    keep the startup-grace window short: the tail loop now gates on file
+    content during the grace window, so an empty stdout means the loop
+    polls until grace expires.
     """
     _patch_agent_as_stopped(monkeypatch)
-    agent, host = _make_headless_agent(local_provider, tmp_path)
+    agent, host = _make_headless_agent(local_provider, tmp_path, agent_cls=_AlwaysFinishedHeadlessClaude)
 
     _write_fake_agent_output(host, agent)
 
-    with pytest.raises(MngrError, match="no details available"):
+    with pytest.raises(MngrError, match="exited without producing output") as exc_info:
         list(agent.stream_output())
+    # The state-dir diagnostic is unconditionally appended; its presence
+    # confirms _raise_no_output_error was reached via the expected path.
+    assert "[state-dir]" in str(exc_info.value)
 
 
 def test_stream_output_handles_file_without_trailing_newline(
@@ -620,14 +630,23 @@ def test_stream_output_combines_stderr_and_stdout_errors(
     assert "stderr-b3c4d5e6" in str(exc_info.value)
 
 
+@pytest.mark.tmux
 def test_stream_output_raises_with_stderr_content(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """stream_output should surface stderr.log content in the error when stdout is empty."""
+    """stream_output should surface stderr.log content in the error when stdout is empty.
+
+    Marked @pytest.mark.tmux because _raise_no_output_error unconditionally
+    captures the tmux pane as one of its detail sources, which invokes
+    `tmux capture-pane` via the host interface.
+
+    Uses _AlwaysFinishedHeadlessClaude for the short grace window (stdout is
+    empty, so _authoritatively_finished polls until grace elapses).
+    """
     _patch_agent_as_stopped(monkeypatch)
-    agent, host = _make_headless_agent(local_provider, tmp_path)
+    agent, host = _make_headless_agent(local_provider, tmp_path, agent_cls=_AlwaysFinishedHeadlessClaude)
 
     _write_fake_agent_output(host, agent, stderr="stderr-f7g8h9i0\n")
 
@@ -636,15 +655,16 @@ def test_stream_output_raises_with_stderr_content(
 
 
 @pytest.mark.tmux
-def test_stream_output_falls_back_to_pane_capture(
+def test_stream_output_surfaces_pane_capture_when_files_missing(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """stream_output should fall back to pane capture when no redirect files exist.
+    """stream_output should surface pane capture content when no redirect files exist.
 
     Creates a real tmux session with error text visible in the pane, then
-    verifies the fallback chain reaches pane capture and surfaces that text.
+    verifies the pane capture runs and its text is surfaced in the raised
+    error. The pane is captured unconditionally by ``_raise_no_output_error``.
     """
     _patch_agent_as_stopped(monkeypatch)
     agent, _host = _make_headless_agent(local_provider, tmp_path)
@@ -746,6 +766,59 @@ def test_file_during_grace_period_returns_true_immediately(
     assert result is True
     # Should return almost immediately, well before the grace period expires
     assert elapsed < agent._startup_grace_seconds * 0.5
+
+
+# =============================================================================
+# Tests for _get_work_dir_diagnostic
+# =============================================================================
+
+
+def test_work_dir_diagnostic_reports_missing_files(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """When neither .mngr-prompt nor .mngr-system-prompt exists, the diagnostic says so.
+
+    Guards the silent-exit branch of the work-dir diagnostic -- post-mortems need
+    to distinguish "claude never ran because its prompt inputs are missing" from
+    "claude ran and produced no output." The header must include the work_dir path
+    so triage can locate the directory; each file line must report "does not exist".
+    """
+    agent, _host = _make_headless_agent(local_provider, tmp_path)
+    diagnostic = agent._get_work_dir_diagnostic()
+    assert f"work_dir: {agent.work_dir}" in diagnostic
+    assert ".mngr-prompt:" in diagnostic
+    assert ".mngr-system-prompt:" in diagnostic
+    assert diagnostic.count("does not exist") == 2
+
+
+def test_work_dir_diagnostic_reports_char_counts(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """When the prompt files are present, the diagnostic reports each file's char count.
+
+    The work-dir call site passes no tail_chars (only char counts, no trailing
+    content) -- this asserts the wiring stays aligned with that choice so a
+    regression adding tail_chars here would be caught.
+    """
+    agent, _host = _make_headless_agent(local_provider, tmp_path)
+    # Use distinct lengths so the per-file char-count assertions are
+    # independent: "11 chars" vs "24 chars" each match only their own line.
+    # Without this, both f"{len(...)} chars" expressions could collide on the
+    # same substring and a regression that dropped one rendered line would
+    # still pass.
+    prompt = "prompt-body"
+    system_prompt = "system-prompt-body-extra"
+    assert len(prompt) != len(system_prompt), "test data must have distinct lengths"
+    (agent.work_dir / ".mngr-prompt").write_text(prompt)
+    (agent.work_dir / ".mngr-system-prompt").write_text(system_prompt)
+    diagnostic = agent._get_work_dir_diagnostic()
+    assert f"{len(prompt)} chars" in diagnostic
+    assert f"{len(system_prompt)} chars" in diagnostic
+    # With no tail_chars, the file contents themselves must NOT be echoed back.
+    assert prompt not in diagnostic
+    assert system_prompt not in diagnostic
 
 
 # =============================================================================

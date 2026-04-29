@@ -8,6 +8,7 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
@@ -36,6 +37,7 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
         expect(exec_result.stdout).to_contain(name)
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
@@ -66,6 +68,7 @@ def test_destroy_all_via_stdin(e2e: E2eSession) -> None:
     expect(list_after.stdout).to_contain("No agents found")
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal

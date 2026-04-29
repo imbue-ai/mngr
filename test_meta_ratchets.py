@@ -310,8 +310,10 @@ def test_gitignore_patterns_use_double_star() -> None:
     syntax (where bare names only match at root). Patterns with an interior /
     (like */*/_tasks/) are already path-qualified and are allowed.
 
-    The offload justfile copies .gitignore to .dockerignore at build time,
-    so keeping the formats compatible avoids a separate generation step.
+    .dockerignore is generated from .gitignore by the _generate-dockerignore
+    justfile recipe before each offload run, so the two files must use patterns
+    valid in both syntaxes. Enforcing **/ on the .gitignore side keeps the
+    generator a trivial passthrough.
     """
     gitignore = (_REPO_ROOT / ".gitignore").read_text()
     violations: list[str] = []
@@ -421,7 +423,14 @@ def test_top_level_cov_flags_are_union_of_subproject_cov_flags() -> None:
     subproject_cov: set[str] = set()
     for project_dir in _get_all_project_dirs():
         pyproject = tomlkit.parse((project_dir / "pyproject.toml").read_text())
-        subproject_cov.update(_get_cov_packages(_get_addopts(pyproject)))
+        # Only consider --cov= flags that target the `imbue.<pkg>` namespace;
+        # the top-level pyproject.toml only exposes that shape via its `source =
+        # ["imbue"]`, so flat-layout projects (e.g. apps/modal_litellm with a
+        # bare `app.py` and `--cov=app`) cannot be expressed at the root and
+        # must own their own coverage in isolation.
+        for cov in _get_cov_packages(_get_addopts(pyproject)):
+            if cov.startswith("imbue."):
+                subproject_cov.add(cov)
 
     expected_top_cov = subproject_cov - fully_omitted
     missing = expected_top_cov - top_cov
