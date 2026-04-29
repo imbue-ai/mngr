@@ -32,7 +32,7 @@ Changing those variables after creating a host is not supported.
 
 Additionally, the following variable controls where project-level config files are loaded from:
 
-- `MNGR_PROJECT_DIR` - Directory containing project-level config files (`settings.toml` and `settings.local.toml`). When set, overrides the default `.{root_name}/` directory at the git root. This only affects where project settings are loaded from; it does not affect `MNGR_HOST_DIR`. Unlike the variables above, this can be changed freely at any time.
+- `MNGR_PROJECT_CONFIG_DIR` - Directory containing project-level config files (`settings.toml` and `settings.local.toml`). When set, overrides the default `.{root_name}/` directory at the git root. This only affects where project settings are loaded from; it does not affect `MNGR_HOST_DIR`. Unlike the variables above, this can be changed freely at any time.
 
 ## Command-Specific Variables
 

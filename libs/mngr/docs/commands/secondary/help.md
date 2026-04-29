@@ -46,6 +46,7 @@ mngr help [OPTIONS] [TOPIC]...
 - agents - Agents
 - api - mngr Plugin API
 - common - Common Options
+- docker_usage - Using Docker
 - environment_variables - Environment Variables
 - hosts - Hosts
 - idle_detection - Idle Detection

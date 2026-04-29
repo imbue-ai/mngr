@@ -37,6 +37,8 @@ from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.config.loader import load_bootstrap_context
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.config.loader import parse_config
+from imbue.mngr.config.plugin_registry import _plugin_config_registry
+from imbue.mngr.config.plugin_registry import register_plugin_config
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentTypeName
@@ -222,11 +224,11 @@ def test_parse_providers_raises_on_unknown_fields() -> None:
 
 
 def test_parse_providers_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
-    """_parse_providers with strict=False should warn about unknown fields and strip them."""
+    """_parse_providers with strict=False should warn about unknown fields and not apply them to the model."""
     raw = {"my-local": {"backend": "local", "typo_field": "value"}}
     result = _parse_providers(raw, disabled_plugins=frozenset(), strict=False)
     assert ProviderInstanceName("my-local") in result
-    assert "typo_field" not in raw["my-local"]
+    assert "typo_field" not in result[ProviderInstanceName("my-local")].model_dump()
     assert any("typo_field" in msg and "providers.my-local" in msg for msg in log_warnings)
 
 
@@ -325,12 +327,12 @@ def test_parse_agent_types_raises_on_unknown_fields() -> None:
 
 
 def test_parse_agent_types_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
-    """_parse_agent_types with strict=False should warn about unknown fields and strip them."""
+    """_parse_agent_types with strict=False should warn about unknown fields and not apply them to the model."""
     raw = {"claude": {"cli_args": "--verbose", "bogus_option": True}}
     result = _parse_agent_types(raw, disabled_plugins=frozenset(), strict=False)
     assert AgentTypeName("claude") in result
     assert result[AgentTypeName("claude")].cli_args == ("--verbose",)
-    assert "bogus_option" not in raw["claude"]
+    assert "bogus_option" not in result[AgentTypeName("claude")].model_dump()
     assert any("bogus_option" in msg and "agent_types.claude" in msg for msg in log_warnings)
 
 
@@ -452,12 +454,12 @@ def test_parse_plugins_raises_on_unknown_fields() -> None:
 
 
 def test_parse_plugins_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
-    """_parse_plugins with strict=False should warn about unknown fields and strip them."""
+    """_parse_plugins with strict=False should warn about unknown fields and not apply them to the model."""
     raw = {"my-plugin": {"enabled": True, "nonexistent_setting": "abc"}}
     result = _parse_plugins(raw, strict=False)
     assert PluginName("my-plugin") in result
     assert result[PluginName("my-plugin")].enabled is True
-    assert "nonexistent_setting" not in raw["my-plugin"]
+    assert "nonexistent_setting" not in result[PluginName("my-plugin")].model_dump()
     assert any("nonexistent_setting" in msg and "plugins.my-plugin" in msg for msg in log_warnings)
 
 
@@ -547,11 +549,11 @@ def test_parse_logging_config_raises_on_unknown_fields() -> None:
 
 
 def test_parse_logging_config_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
-    """_parse_logging_config with strict=False should warn about unknown fields and strip them."""
+    """_parse_logging_config with strict=False should warn about unknown fields and not apply them to the model."""
     raw = {"file_level": "DEBUG", "unknown_log_option": 42}
     result = _parse_logging_config(raw, strict=False)
     assert isinstance(result, LoggingConfig)
-    assert "unknown_log_option" not in raw
+    assert "unknown_log_option" not in result.model_dump()
     assert any("unknown_log_option" in msg for msg in log_warnings)
 
 
@@ -1772,3 +1774,66 @@ def test_bootstrap_context_field_sync() -> None:
         f"Either add the field to BootstrapMngrContext (if bootstrap callers should see it) "
         f"or introduce a BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS constant to declare it intentionally excluded."
     )
+
+
+# =============================================================================
+# Tests for hyphen normalization in config field names
+# =============================================================================
+
+
+def test_parse_commands_normalizes_hyphens_to_underscores() -> None:
+    """_parse_commands should accept hyphenated TOML field names like `pass-env`."""
+    raw = {"create": {"pass-env": ["FOO", "BAR"]}}
+    result = _parse_commands(raw)
+    assert result["create"].defaults == {"pass_env": ["FOO", "BAR"]}
+
+
+def test_parse_commands_raises_on_hyphen_underscore_collision() -> None:
+    """_parse_commands should raise when both `pass-env` and `pass_env` are set."""
+    raw = {"create": {"pass-env": ["FOO"], "pass_env": ["BAR"]}}
+    with pytest.raises(ConfigParseError, match="both 'pass-env' and 'pass_env'"):
+        _parse_commands(raw)
+
+
+def test_parse_create_templates_normalizes_hyphens() -> None:
+    """_parse_create_templates should accept hyphenated TOML field names."""
+    raw = {"mytmpl": {"pass-env": ["FOO"], "new-host": True}}
+    result = _parse_create_templates(raw)
+    assert result[CreateTemplateName("mytmpl")].options == {"pass_env": ["FOO"], "new_host": True}
+
+
+def test_parse_config_normalizes_top_level_hyphens() -> None:
+    """parse_config should accept hyphenated top-level field names."""
+    raw = {"connect-command": "tmux attach"}
+    cfg = parse_config(raw, disabled_plugins=frozenset())
+    assert cfg.connect_command == "tmux attach"
+
+
+def test_parse_logging_config_normalizes_hyphens() -> None:
+    """_parse_logging_config should accept hyphenated TOML field names without raising."""
+    # Without normalization, an unknown `file-level` would raise (or warn); the
+    # presence of the field after normalization is what we are asserting.
+    raw = {"file-level": "DEBUG"}
+    result = _parse_logging_config(raw)
+    assert result.file_level == "DEBUG"
+
+
+def test_parse_plugins_normalizes_hyphens() -> None:
+    """_parse_plugins should accept hyphenated TOML field names within a plugin block."""
+
+    class _HyphenTestPluginConfig(PluginConfig):
+        custom_field: str = "default"
+
+    # The plugin config registry is populated at module-import time by external
+    # plugin packages (e.g. mngr_notifications), so a blanket reset here would
+    # wipe legitimate registrations and break tests in other packages that look
+    # them up. Snapshot and restore just this test's addition instead.
+    register_plugin_config("hyphen-test-plugin", _HyphenTestPluginConfig)
+    try:
+        raw = {"hyphen-test-plugin": {"custom-field": "value"}}
+        result = _parse_plugins(raw)
+        parsed = result[PluginName("hyphen-test-plugin")]
+        assert isinstance(parsed, _HyphenTestPluginConfig)
+        assert parsed.custom_field == "value"
+    finally:
+        _plugin_config_registry.pop(PluginName("hyphen-test-plugin"), None)

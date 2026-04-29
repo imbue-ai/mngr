@@ -5,6 +5,7 @@ import sys
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Final
 from typing import Generator
 from uuid import uuid4
 
@@ -25,6 +26,7 @@ from imbue.mngr.api.providers import reset_provider_instances
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.plugin_catalog import get_independent_entry_point_names
 from imbue.mngr.plugins import hookspecs
@@ -491,7 +493,7 @@ def plugin_manager(
     # Reset the module-level plugin manager singleton before each test
     imbue.mngr.main.reset_plugin_manager()
 
-    # Clear the registries to ensure clean state
+    # Clear the registries and caches to ensure clean state
     reset_backend_registry()
     reset_agent_registry()
     reset_provider_instances()
@@ -695,41 +697,77 @@ def _remove_docker_containers(containers: list[tuple[str, str]]) -> None:
         client.close()
 
 
+class _DockerdStartupError(BaseMngrError):
+    """Raised when the release-test session fixture cannot bring dockerd up."""
+
+
+# Number of times _ensure_dockerd_for_release will invoke start-dockerd.sh
+# before giving up. Kept as a named constant so the loop bound and the
+# message in the raised _DockerdStartupError stay in lockstep.
+_DOCKERD_STARTUP_ATTEMPTS: Final[int] = 3
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _ensure_dockerd_for_release() -> None:
     """Start the Docker daemon if running inside a release test sandbox.
 
-    The Dockerfile.release installs Docker static binaries and /start-dockerd.sh.
-    The sandbox CMD also runs /start-dockerd.sh at launch, but this fixture
-    is a belt-and-suspenders fallback for sessions where the CMD path didn't
-    run (e.g. offload sandboxes that exec a different entrypoint) so that
-    tests using the Docker Python SDK can connect to the socket directly.
+    The Dockerfile.release installs /start-dockerd.sh. The sandbox CMD also
+    runs it at launch, but offload overrides the entrypoint, so this session
+    fixture is how dockerd actually comes up for release tests.
 
-    Uses /usr/local/bin/docker directly to bypass the resource guard PATH
-    wrapper (which would block docker commands outside @pytest.mark.docker tests).
+    start-dockerd.sh is idempotent and polls `docker info` internally until
+    the daemon is ready. On gVisor the first attempt can flake (iptables
+    setup, IPv6 disable, dockerd bind race), so we retry up to
+    _DOCKERD_STARTUP_ATTEMPTS times and verify /var/run/docker.sock exists
+    before returning. If we still cannot bring dockerd up, we raise --
+    otherwise every docker/docker_sdk test in the session would fail with
+    an opaque FileNotFoundError on the socket.
     """
     start_script = Path("/start-dockerd.sh")
-    docker_bin = Path("/usr/local/bin/docker")
-    if not start_script.exists() or not docker_bin.exists():
+    if not start_script.exists():
         return
-    cg = ConcurrencyGroup(name="ensure-dockerd")
-    with cg:
-        result = cg.run_process_to_completion(
-            [str(docker_bin), "info"],
-            is_checked_after=False,
-        )
-        if result.returncode != 0:
-            start_result = cg.run_process_to_completion(
+
+    docker_sock = Path("/var/run/docker.sock")
+    if docker_sock.exists():
+        # dockerd already running -- typically started by the Dockerfile.release
+        # CMD at sandbox launch. Skip the startup script entirely. Some Modal
+        # sandboxes have a read-only /etc/resolv.conf, and running the script
+        # when dockerd is already up would otherwise fail there for no reason.
+        return
+
+    last_result = None
+    for attempt in range(_DOCKERD_STARTUP_ATTEMPTS):
+        cg = ConcurrencyGroup(name=f"ensure-dockerd-{attempt}")
+        with cg:
+            last_result = cg.run_process_to_completion(
                 [str(start_script)],
                 is_checked_after=False,
             )
-            if start_result.returncode != 0:
-                logger.error(
-                    "Docker daemon failed to start (exit {}). stdout: {} stderr: {}",
-                    start_result.returncode,
-                    start_result.stdout,
-                    start_result.stderr,
-                )
+        if last_result.returncode == 0 and docker_sock.exists():
+            logger.info("[_ensure_dockerd_for_release] dockerd ready on attempt {}", attempt + 1)
+            return
+        logger.warning(
+            "[_ensure_dockerd_for_release] attempt {} failed: returncode={} socket_exists={}\nstdout: {}\nstderr: {}",
+            attempt + 1,
+            last_result.returncode,
+            docker_sock.exists(),
+            last_result.stdout,
+            last_result.stderr,
+        )
+
+    # `last_result` is guaranteed non-None: range(_DOCKERD_STARTUP_ATTEMPTS)
+    # is non-empty (the constant is >= 1) and each iteration assigns it
+    # unconditionally before the early-return check. Assert to document the
+    # invariant and narrow the type for Pyright so the error template can
+    # reference `last_result.X!r` directly.
+    assert last_result is not None
+    raise _DockerdStartupError(
+        f"Failed to start dockerd after {_DOCKERD_STARTUP_ATTEMPTS} attempts. "
+        f"Last returncode={last_result.returncode}, "
+        f"socket_exists={docker_sock.exists()}. "
+        f"stdout={last_result.stdout!r} "
+        f"stderr={last_result.stderr!r}"
+    )
 
 
 @pytest.fixture(scope="session", autouse=True)
