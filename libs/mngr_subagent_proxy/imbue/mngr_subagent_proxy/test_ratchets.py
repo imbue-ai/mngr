@@ -181,7 +181,7 @@ def test_prevent_literal_with_multiple_options() -> None:
 
 
 def test_prevent_bare_generic_types() -> None:
-    rc.check_bare_generic_types(_DIR, snapshot(3))
+    rc.check_bare_generic_types(_DIR, snapshot(4))
 
 
 def test_prevent_typing_builtin_imports() -> None:

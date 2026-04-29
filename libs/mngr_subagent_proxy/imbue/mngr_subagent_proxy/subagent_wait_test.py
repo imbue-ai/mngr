@@ -19,6 +19,7 @@ from imbue.mngr_subagent_proxy.subagent_wait import _delete_watermark_file
 from imbue.mngr_subagent_proxy.subagent_wait import _read_watermark_file
 from imbue.mngr_subagent_proxy.subagent_wait import _write_watermark_file
 from imbue.mngr_subagent_proxy.subagent_wait import extract_assistant_text
+from imbue.mngr_subagent_proxy.subagent_wait import is_api_error_event
 from imbue.mngr_subagent_proxy.subagent_wait import is_end_turn_event
 from imbue.mngr_subagent_proxy.subagent_wait import is_real_user_event
 from imbue.mngr_subagent_proxy.subagent_wait import read_new_jsonl_lines
@@ -110,6 +111,49 @@ _END_TURN_DETECTION_CASES: tuple[tuple[str, dict[str, Any], bool], ...] = (
 )
 def test_is_end_turn_event(event: dict[str, Any], expected: bool) -> None:
     assert is_end_turn_event(event) is expected
+
+
+# Claude Code records API errors (rate limits, transient failures) as
+# assistant events with isApiErrorMessage=true and a terminal stop_reason.
+# is_end_turn_event treats them as end-of-turn (so the wait terminates),
+# and is_api_error_event flags them so the relayed body can be tagged
+# with the [ERROR] prefix. Found live: a rate-limit on the upstream
+# Anthropic API surfaced as "API Error: Server is temporarily limiting
+# requests..." and the chain wedged because every level above echoed
+# it as success. Both functions must agree on the rate-limit case.
+_API_ERROR_RATE_LIMIT_EVENT: dict[str, Any] = {
+    "type": "assistant",
+    "isApiErrorMessage": True,
+    "message": {
+        "role": "assistant",
+        "stop_reason": "stop_sequence",
+        "content": [
+            {
+                "type": "text",
+                "text": "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited",
+            }
+        ],
+    },
+}
+
+
+def test_is_end_turn_event_treats_api_error_as_terminal() -> None:
+    assert is_end_turn_event(_API_ERROR_RATE_LIMIT_EVENT) is True
+
+
+def test_is_api_error_event_recognizes_rate_limit() -> None:
+    assert is_api_error_event(_API_ERROR_RATE_LIMIT_EVENT) is True
+
+
+def test_is_api_error_event_rejects_non_error_assistant() -> None:
+    normal = {
+        "type": "assistant",
+        "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "ok"}]},
+    }
+    assert is_api_error_event(normal) is False
+    # Non-assistant types never count as API errors.
+    user = {"type": "user", "isApiErrorMessage": True, "message": {"content": "x"}}
+    assert is_api_error_event(user) is False
 
 
 def test_extract_assistant_text_concatenates_text_blocks_only() -> None:

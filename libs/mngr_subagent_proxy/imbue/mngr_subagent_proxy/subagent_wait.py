@@ -404,11 +404,36 @@ class _WaitRuntime:
     permission_gate_until_transcript_past: int = 0
     tail_state: TailState = field(default_factory=TailState)
     pending_end_turn_text: str | None = None
+    # True when the pending end-turn was an API error (e.g. rate-limit /
+    # transient API failure). Claude Code records these as
+    # ``isApiErrorMessage: true`` on an assistant message that still
+    # carries a terminal stop_reason -- so our normal end-turn detection
+    # picks them up, and we need to flag them at emission time so the
+    # parent's tool_result is prefixed with [ERROR]. Without this the
+    # parent sees a literal "API Error: ..." string but no signal it's
+    # an error, and treats the body as a legitimate subagent reply --
+    # which silently wedges the chain (every level above echoes the
+    # error text as success and ends its turn).
+    pending_end_turn_is_api_error: bool = False
     pending_end_turn_deadline: float | None = None
     last_heartbeat_at: float = 0.0
     last_session_id_check_at: float = 0.0
     last_presence_check_at: float = 0.0
     target_missing_since: float | None = None
+
+
+def is_api_error_event(event: dict) -> bool:
+    """Return True if the event is an assistant message Claude Code marked
+    as an API error (e.g. rate limit, transient API failure).
+
+    Claude Code emits ``isApiErrorMessage: true`` on the assistant event
+    body for these. The event still carries a terminal stop_reason and
+    no tool_use, so it passes ``is_end_turn_event`` -- but we need a
+    separate signal to tag the relayed body with our [ERROR] prefix.
+    """
+    if event.get("type") != "assistant":
+        return False
+    return bool(event.get("isApiErrorMessage"))
 
 
 def _process_new_events(
@@ -420,10 +445,12 @@ def _process_new_events(
     for event in events:
         if is_end_turn_event(event):
             runtime.pending_end_turn_text = extract_assistant_text(event)
+            runtime.pending_end_turn_is_api_error = is_api_error_event(event)
             runtime.pending_end_turn_deadline = now + _END_TURN_SETTLE_SECONDS
         elif is_real_user_event(event) and runtime.pending_end_turn_text is not None:
             logger.info("New user event during settle window; discarding pending end_turn")
             runtime.pending_end_turn_text = None
+            runtime.pending_end_turn_is_api_error = False
             runtime.pending_end_turn_deadline = None
 
 
@@ -601,7 +628,14 @@ def wait_for_subagent(target_name: str, watermark_file: Path | None = None) -> s
             and runtime.pending_end_turn_deadline is not None
             and now >= runtime.pending_end_turn_deadline
         ):
-            truncated = truncate_result_text(runtime.pending_end_turn_text, max_chars)
+            body = runtime.pending_end_turn_text
+            if runtime.pending_end_turn_is_api_error:
+                # Tag API errors so parent treats them as error tool_result.
+                # Claude Code's tool_result.is_error is unreachable from
+                # inside Haiku's reply, so we ride the textual prefix the
+                # rest of the codebase already keys off of.
+                body = ERROR_PREFIX + body
+            truncated = truncate_result_text(body, max_chars)
             if watermark_file is not None:
                 _delete_watermark_file(watermark_file)
             return f"END_TURN:{truncated}"
