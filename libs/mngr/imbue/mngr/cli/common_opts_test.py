@@ -1056,8 +1056,8 @@ def test_setup_bootstrap_command_context_suppresses_unknown_plugin_warnings(
     must not emit ``Unknown fields in providers.*`` or ``references
     unknown backend`` warnings when the project config references plugins
     not yet installed. This wires together setup_bootstrap_command_context
-    with a real project config file via MNGR_PROJECT_DIR (mirroring the
-    way ``mngr plugin add`` invokes it).
+    with a real project config file via MNGR_PROJECT_CONFIG_DIR (mirroring
+    the way ``mngr plugin add`` invokes it).
 
     Note: only ``add`` uses setup_bootstrap_command_context; the other
     plugin subcommands (``remove``/``enable``/``disable``) deliberately
