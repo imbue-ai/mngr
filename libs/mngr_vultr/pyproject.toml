@@ -5,7 +5,7 @@ description = "Vultr provider backend plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "imbue-mngr==0.2.5",
+    "imbue-mngr==0.2.6",
     "imbue-mngr-vps-docker==0.1.0",
     "requests>=2.31.0",
 ]
