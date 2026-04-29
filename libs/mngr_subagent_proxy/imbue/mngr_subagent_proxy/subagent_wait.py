@@ -462,11 +462,19 @@ def _check_permissions_newly_waiting(runtime: _WaitRuntime) -> bool:
 
 
 def _has_target_disappeared_past_grace(runtime: _WaitRuntime, now: float) -> bool:
-    """Return True if the target has been missing from `mngr list` beyond the grace window."""
+    """Return True if the target has been missing from `mngr list` beyond the grace window.
+
+    On a transient mngr-list error the grace clock is reset rather than left
+    ticking: the elapsed-since-missing window must only count time during
+    which the target was confirmed absent in a successful listing. Otherwise
+    a long mngr-list outage between an initial "missing" observation and the
+    next successful call could falsely cross the grace threshold.
+    """
     try:
         agents = _run_mngr_list()
     except SubagentWaitError as e:
         logger.warning("mngr list failed during tail of {}: {}", runtime.target_name, e)
+        runtime.target_missing_since = None
         return False
     agent = _find_agent_by_name(agents, runtime.target_name)
     if agent is None:
