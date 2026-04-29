@@ -15,8 +15,9 @@ the parent still receives a normally-shaped `tool_result`.
 - **Wait-script** invokes `mngr create` for the real subagent (registered
   type `mngr-proxy-child`), then `python -m
   imbue.mngr_subagent_proxy.subagent_wait` which tails the subagent's
-  Claude transcript JSONL until `stop_reason=end_turn`. Body is printed
-  to stdout followed by a `MNGR_PROXY_END_OF_OUTPUT` sentinel.
+  Claude transcript JSONL until a terminal `stop_reason` (`end_turn`,
+  `stop_sequence`, or `max_tokens`). Body is printed to stdout followed
+  by a `MNGR_PROXY_END_OF_OUTPUT` sentinel.
 - **Haiku** echoes the body verbatim as its final reply, ending its
   turn. Haiku's reply IS the parent's Task `tool_result` (Claude Code's
   PostToolUse `updatedToolOutput` is MCP-only and does not apply to
@@ -31,6 +32,31 @@ the parent still receives a normally-shaped `tool_result`.
 The plugin also contributes a `mngr-proxy` Claude subagent definition
 at `.claude/agents/mngr-proxy.md` and writes per-tool-use wait-scripts
 into `$MNGR_AGENT_STATE_DIR/proxy_commands/`.
+
+## Wait-script protocol
+
+`subagent_wait` exits 0 with one of two stdout payloads:
+
+- `END_TURN:<body>` -- the subagent finished its turn. The wait-script
+  strips the `END_TURN:` prefix, prints `<body>` followed by
+  `MNGR_PROXY_END_OF_OUTPUT`, and Haiku echoes that body verbatim back
+  to the parent.
+- `PERMISSION_REQUIRED:<target_name>` -- the subagent surfaced a
+  permission dialog. The wait-script prints `NEED_PERMISSION:
+  <target_name>` and Haiku is instructed to re-run the wait-script
+  after a brief `fake_tool` notification; idempotence + a per-tool-use
+  watermark sidefile prevent re-firing on the same dialog.
+
+If the subagent is destroyed before completing, `subagent_wait`
+returns `END_TURN:[ERROR] mngr subagent destroyed before completion:
+<last assistant text>`. The `[ERROR] ` prefix is the only signal the
+parent has that the proxy reply represents an error -- Claude Code's
+`tool_result.is_error` flag is unreachable from inside Haiku's reply.
+
+End-turn bodies are truncated at `MNGR_SUBAGENT_RESULT_MAX_CHARS`
+characters (default 100,000, which roughly matches Claude Code's
+native Task `tool_result` truncation) with a `\n\n[truncated]`
+suffix. Override via the env var on the parent agent.
 
 ## Spawned-subagent agent type
 
