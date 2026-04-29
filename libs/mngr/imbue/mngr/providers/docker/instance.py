@@ -593,10 +593,16 @@ kill -TERM 1
         env.setdefault("BUILDKIT_PROGRESS", "plain")
         return env
 
-    def _run_docker_creation_command(self, args: list[str], timeout: float = 300) -> FinishedProcess:
-        """Run a docker CLI command and return the result."""
+    def _run_docker_creation_command(
+        self, args: list[str], timeout: float = 300, executable: str = "docker"
+    ) -> FinishedProcess:
+        """Run a docker-compatible CLI command and return the result.
+
+        `executable` defaults to "docker"; pass "depot" to use the depot.dev
+        remote builder (only valid for build subcommands).
+        """
         return self.mngr_ctx.concurrency_group.run_process_to_completion(
-            ["docker"] + args,
+            [executable] + args,
             timeout=timeout,
             env=self._docker_env(),
             on_output=self._log_docker_creation_command_output,
@@ -609,21 +615,13 @@ kill -TERM 1
             logger.log(LogLevel.BUILD.value, "{}", line.rstrip(), source="docker")
 
     def _build_image(self, build_args: Sequence[str], tag: str) -> str:
-        """Build a Docker image. Uses depot.dev when MNGR_USE_DEPOT=1, else native docker build."""
-        use_depot = os.environ.get("MNGR_USE_DEPOT") == "1"
-        if use_depot:
-            cmd = ["depot", "build", "--load", "-t", tag] + list(build_args)
-            builder_label = "depot"
-        else:
-            cmd = ["docker", "build", "-t", tag] + list(build_args)
-            builder_label = "docker"
-        with log_span("Running {} build with {} args", builder_label, len(build_args)):
-            self.mngr_ctx.concurrency_group.run_process_to_completion(
-                cmd,
-                timeout=300,
-                env=self._docker_env(),
-                on_output=self._log_docker_creation_command_output,
-            )
+        """Build a Docker image using the configured builder (docker or depot)."""
+        builder = self.config.builder
+        # depot requires --load to import the resulting image into the local daemon.
+        extra_args = ["--load"] if builder == "depot" else []
+        args = ["build", *extra_args, "-t", tag, *build_args]
+        with log_span("Running {} build with {} args", builder, len(build_args)):
+            self._run_docker_creation_command(args, executable=builder)
         return tag
 
     def _build_default_image(self, tag: str) -> str:
