@@ -87,7 +87,7 @@ def _seed_settings_with_stop_hooks(work_dir: Path) -> Path:
 
 
 def test_plugin_raises_on_user_stop_hooks_for_subagent_proxy_child(tmp_path: Path) -> None:
-    """A proxy-child agent with user-configured Stop/SubagentStop hooks raises NotImplementedError.
+    """A proxy-child agent with user-configured Stop/SubagentStop hooks raises UnsupportedSubagentHookError.
 
     The plugin doesn't know whether a user's Stop hook is meant to fire on
     every subagent turn or only at the outer end_turn, so it refuses to
@@ -116,7 +116,7 @@ def test_plugin_allows_mngr_baseline_stop_hook_for_subagent_proxy_child(tmp_path
 
     mngr_claude's readiness Stop hook (which runs wait_for_stop_hook.sh)
     is recognized as baseline and passed through without triggering the
-    NotImplementedError.
+    UnsupportedSubagentHookError.
     """
     host_dir = tmp_path / "host"
     host_dir.mkdir()
