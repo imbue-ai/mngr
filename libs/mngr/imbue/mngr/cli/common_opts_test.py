@@ -481,8 +481,8 @@ def test_parse_output_options_invalid_template_raises(mngr_test_prefix: str) -> 
 # =============================================================================
 
 
-def test_apply_config_defaults_skips_unknown_param_names(mngr_test_prefix: str) -> None:
-    """apply_config_defaults should skip config defaults for params not in context."""
+def test_apply_config_defaults_raises_on_unknown_param_names(mngr_test_prefix: str) -> None:
+    """apply_config_defaults should raise for params not in context when strict=True."""
     ctx = _make_click_context(
         params={"name": "default"},
     )
@@ -490,9 +490,28 @@ def test_apply_config_defaults_skips_unknown_param_names(mngr_test_prefix: str) 
         prefix=mngr_test_prefix,
         commands={"create": CommandDefaults(defaults={"nonexistent_param": "value", "name": "overridden"})},
     )
-    result = apply_config_defaults(ctx, config, "create")
-    assert result["name"] == "overridden"
-    assert "nonexistent_param" not in result
+    with pytest.raises(ConfigParseError, match="nonexistent_param"):
+        apply_config_defaults(ctx, config, "create", strict=True)
+
+
+def test_apply_config_defaults_warns_on_unknown_param_when_lax(
+    mngr_test_prefix: str,
+    log_warnings: list[str],
+) -> None:
+    """apply_config_defaults should warn (not raise) when strict=False."""
+    ctx = _make_click_context(params={"name": "default"})
+
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"definitely_not_a_real_param": "x"})},
+    )
+
+    # Should not raise; the unknown param should produce a warning instead.
+    result = apply_config_defaults(ctx, config, "create", strict=False)
+    assert "definitely_not_a_real_param" not in result
+    assert any("definitely_not_a_real_param" in msg for msg in log_warnings), (
+        f"Expected a warning mentioning the unknown param, got: {log_warnings}"
+    )
 
 
 # =============================================================================
@@ -1077,7 +1096,7 @@ def test_disable_plugin_in_command_defaults_blocks_override_hook(
         catch_exceptions=False,
         env={"MNGR_PROJECT_CONFIG_DIR": str(tmp_path)},
     )
-    assert result.exit_code == 0
+    assert result.exit_code == 0, f"output={result.output!r} exception={result.exception!r}"
     assert len(captured_params) == 1
 
     extra_window = captured_params[0].get("extra_window", ())
@@ -1085,4 +1104,73 @@ def test_disable_plugin_in_command_defaults_blocks_override_hook(
     assert terminal_entries == [], (
         f"Disabled plugin's override_command_options hook still fired, "
         f"injecting: {terminal_entries}. extra_window={extra_window}"
+    )
+
+
+# =============================================================================
+# Integration tests: MNGR_ALLOW_UNKNOWN_CONFIG threaded through setup_command_context
+# =============================================================================
+
+
+def _make_strict_test_command() -> click.Command:
+    """Build a click command that runs setup_command_context for the 'create' command."""
+
+    @click.command()
+    @add_common_options
+    @click.pass_context
+    def cmd(ctx: click.Context, **kwargs: Any) -> None:
+        setup_command_context(
+            ctx=ctx,
+            command_name="create",
+            command_class=CommonCliOptions,
+        )
+
+    return cmd
+
+
+def test_setup_command_context_raises_on_unknown_command_param_by_default(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without MNGR_ALLOW_UNKNOWN_CONFIG, a typo in [commands.create] must raise."""
+    # MNGR_PROJECT_DIR points directly at the directory containing settings.toml
+    # (see resolve_project_config_dir in config/pre_readers.py).
+    (tmp_path / "settings.toml").write_text('[commands.create]\nbogus_typo_param = "x"\n')
+
+    monkeypatch.delenv("MNGR_ALLOW_UNKNOWN_CONFIG", raising=False)
+    monkeypatch.setenv("MNGR_PROJECT_DIR", str(tmp_path))
+
+    cmd = _make_strict_test_command()
+
+    result = cli_runner.invoke(cmd, [], obj=plugin_manager, catch_exceptions=True)
+
+    # ConfigParseError extends ClickException, which click catches and renders to
+    # the runner's output before exiting non-zero. Check the rendered output rather
+    # than result.exception, which becomes SystemExit(1) after click's handler runs.
+    assert result.exit_code != 0
+    assert "bogus_typo_param" in result.output
+
+
+def test_setup_command_context_warns_on_unknown_command_param_when_lax(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+    log_warnings: list[str],
+) -> None:
+    """With MNGR_ALLOW_UNKNOWN_CONFIG=1, a typo in [commands.create] should warn, not raise."""
+    (tmp_path / "settings.toml").write_text('[commands.create]\nbogus_typo_param = "x"\n')
+
+    monkeypatch.setenv("MNGR_ALLOW_UNKNOWN_CONFIG", "1")
+    monkeypatch.setenv("MNGR_PROJECT_DIR", str(tmp_path))
+
+    cmd = _make_strict_test_command()
+
+    result = cli_runner.invoke(cmd, [], obj=plugin_manager, catch_exceptions=False)
+
+    assert result.exit_code == 0, f"output={result.output!r} exception={result.exception!r}"
+    assert any("bogus_typo_param" in msg for msg in log_warnings), (
+        f"Expected a warning mentioning the unknown param, got: {log_warnings}"
     )
