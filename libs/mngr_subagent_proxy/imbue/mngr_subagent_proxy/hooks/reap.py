@@ -20,12 +20,14 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr_subagent_proxy.hooks.destroy_detached import DestroyAgentDetachedCallable
 from imbue.mngr_subagent_proxy.hooks.destroy_detached import destroy_agent_detached
+from imbue.mngr_subagent_proxy.hooks.mngr_api import ListAgentsByNameCallable
 from imbue.mngr_subagent_proxy.hooks.mngr_api import list_agents_by_name
 
 _TERMINAL_STATES: frozenset[AgentLifecycleState] = frozenset({AgentLifecycleState.DONE, AgentLifecycleState.STOPPED})
 
-# Type aliases so tests can inject stubs without monkey-patching module-level names.
-ListAgentsCallable = Callable[[], dict[str, AgentDetails] | None]
+# Stub-injection alias for the background reaper spawner. Lives here because
+# this is the only caller; the list-agents callable shares ``ListAgentsByNameCallable``
+# with hooks/rewrite.py via hooks/mngr_api.py.
 SpawnBackgroundReaperCallable = Callable[[], None]
 
 
@@ -99,7 +101,7 @@ def _process_map_file(
 
 def _do_reap(
     state_dir: Path,
-    list_callable: ListAgentsCallable,
+    list_callable: ListAgentsByNameCallable,
     destroy_callable: DestroyAgentDetachedCallable,
 ) -> None:
     """Synchronous reaper body; intended to run detached from the hook invocation."""
@@ -129,7 +131,7 @@ def spawn_background_reaper() -> None:
 
 def run(
     stdin: TextIO,
-    list_callable: ListAgentsCallable = list_agents_by_name,
+    list_callable: ListAgentsByNameCallable = list_agents_by_name,
     destroy_callable: DestroyAgentDetachedCallable = destroy_agent_detached,
     spawn_background_callable: SpawnBackgroundReaperCallable = spawn_background_reaper,
 ) -> None:
