@@ -19,6 +19,7 @@ from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.find import parse_source_string
 from imbue.mngr.api.find import resolve_agent_reference
 from imbue.mngr.api.find import resolve_host_reference
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import UserInputError
@@ -965,7 +966,7 @@ def test_find_all_matching_agents_filtered_by_host() -> None:
     assert result[0] == (host1, agent1)
 
 
-class _TimeoutCapturingAgent(BaseAgent):
+class _TimeoutCapturingAgent(BaseAgent[AgentTypeConfig]):
     """Test agent that records the timeout passed to wait_for_ready_signal."""
 
     captured_timeouts: list[float | None] = Field(default_factory=list)
