@@ -39,7 +39,7 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(4))
+    rc.check_time_sleep(_DIR, snapshot(3))
 
 
 def test_prevent_global_keyword() -> None:
@@ -47,15 +47,14 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    # Two additional violations live in hooks/spawn.py and hooks/rewrite.py
-    # where sys.stdout.write is the Claude Code hook protocol: hooks emit
-    # their JSON response by writing to stdout, and the host parses it. The
-    # ratchet's rule_description targets diagnostic and user-facing prints,
-    # neither of which applies. The third violation is the preexisting
-    # subagent_wait stdout boundary.
+    # Both violations are stdout-write boundaries: hooks/spawn.py emits the
+    # PreToolUse JSON response that Claude Code's host parses, and
+    # subagent_wait.py writes the END_TURN/PERMISSION_REQUIRED payload that
+    # the wait-script captures. The ratchet's rule_description targets
+    # diagnostic and user-facing prints, neither of which applies.
     excluded = _RATCHET_SELF_EXCLUSION
     chunks = check_ratchet_rule(PREVENT_BARE_PRINT, _DIR, excluded)
-    assert len(chunks) <= snapshot(3), PREVENT_BARE_PRINT.format_failure(chunks)
+    assert len(chunks) <= snapshot(2), PREVENT_BARE_PRINT.format_failure(chunks)
 
 
 # --- Exception handling ---
