@@ -1,18 +1,23 @@
 import queue as queue_mod
 import threading
+import time
 import tomllib
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from uuid import UUID
 
+import httpx
 import pytest
+from pydantic import Field
+from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import PLACEHOLDER_ANTHROPIC_API_KEY
+from imbue.minds.desktop_client.agent_creator import WORKSPACE_SERVER_SERVICE_NAME
 from imbue.minds.desktop_client.agent_creator import _RedactingOutputCallback
 from imbue.minds.desktop_client.agent_creator import _build_inject_anthropic_command
 from imbue.minds.desktop_client.agent_creator import _build_latchkey_gateway_url
@@ -35,6 +40,8 @@ from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import make_log_callback
 from imbue.minds.desktop_client.agent_creator import run_mngr_create
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
 from imbue.minds.desktop_client.host_pool_client import HostPoolClient
 from imbue.minds.desktop_client.latchkey.gateway import AGENT_SIDE_LATCHKEY_PORT
@@ -49,9 +56,19 @@ from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
+from imbue.minds.primitives import ServiceName
 from imbue.minds.testing import add_and_commit_git_repo
 from imbue.minds.testing import init_and_commit_git_repo
 from imbue.mngr.primitives import AgentId
+
+
+def _make_empty_resolver() -> StaticBackendResolver:
+    """Build a backend resolver with no registered services.
+
+    Tests that exercise the failure paths of ``start_creation`` never reach
+    the workspace-readiness poll, so an empty resolver is sufficient.
+    """
+    return StaticBackendResolver(url_by_agent_and_service={})
 
 
 def test_extract_repo_name_from_https_url() -> None:
@@ -424,6 +441,7 @@ def test_agent_creator_get_creation_info_returns_none_for_unknown(
 ) -> None:
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=Path("/tmp/test")),
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -442,6 +460,7 @@ def test_agent_creator_start_creation_returns_agent_id_and_tracks_status(
     """
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -463,6 +482,7 @@ def test_agent_creator_start_creation_with_custom_name(
     """Verify start_creation accepts a custom agent name."""
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -478,6 +498,7 @@ def test_agent_creator_get_log_queue_returns_none_for_unknown(
 ) -> None:
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=Path("/tmp/test")),
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -490,6 +511,7 @@ def test_agent_creator_get_log_queue_returns_queue_for_tracked(
 ) -> None:
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=Path("/tmp/test")),
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -507,6 +529,7 @@ def test_agent_creator_start_creation_with_local_path(
     """Verify start_creation with a nonexistent local path eventually reaches FAILED status."""
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -544,42 +567,210 @@ def test_make_log_callback_puts_lines_into_queue() -> None:
     assert log_queue.get_nowait() == "world"
 
 
-def test_agent_creator_accepts_server_port(
+# -- _wait_for_workspace_ready tests --
+
+
+class _CountdownReadyResolver(BackendResolverInterface):
+    """A resolver that returns None for the first N ``get_backend_url`` calls.
+
+    After ``calls_before_ready`` calls return None, subsequent calls return
+    ``url``. Used to verify the poll loop actually iterates rather than just
+    short-circuiting on the first attempt.
+    """
+
+    url: str = Field(description="URL returned once the countdown elapses")
+    calls_before_ready: int = Field(description="Number of None returns before the URL appears")
+    _call_count: int = PrivateAttr(default=0)
+
+    def get_backend_url(self, agent_id: AgentId, service_name: ServiceName) -> str | None:
+        self._call_count += 1
+        if self._call_count > self.calls_before_ready:
+            return self.url
+        return None
+
+    def list_known_agent_ids(self) -> tuple[AgentId, ...]:
+        return ()
+
+    def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
+        return ()
+
+
+def test_wait_for_workspace_ready_returns_true_once_url_appears(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    """AgentCreator exposes its configured server_port for redirect-URL construction.
+    """Polling returns True after the workspace server registers its URL.
 
-    Regression guard: the happy-path redirect URL for a newly-created agent is
-    built as ``http://<agent-id>.localhost:<server_port>/`` inside the creation
-    thread. Earlier iterations of this branch emitted ``/forwarding/<id>/`` which
-    404'd after the legacy forwarding routes were deleted.
+    The countdown resolver forces at least a few poll iterations, so this
+    also guards against a regression where the loop exits too early. The
+    HTTP probe is disabled here because the stub URL isn't reachable; the
+    probe itself is covered by dedicated tests below.
     """
+    agent_id = AgentId()
+    resolver = _CountdownReadyResolver(url="http://workspace-backend", calls_before_ready=3)
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-        server_port=12345,
+        backend_resolver=resolver,
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
+        workspace_ready_timeout_seconds=5.0,
+        workspace_ready_poll_interval_seconds=0.01,
+        workspace_ready_probe_enabled=False,
     )
-    assert creator.server_port == 12345
+    log_queue: queue_mod.Queue[str] = queue_mod.Queue()
+
+    assert creator._wait_for_workspace_ready(agent_id, log_queue) is True
 
 
-def test_agent_creator_server_port_defaults_to_zero(
+def test_wait_for_workspace_ready_returns_false_on_timeout(
+    tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    """AgentCreator.server_port defaults to 0 for legacy test callers.
+    """Polling returns False after the timeout elapses without the URL ever appearing.
 
-    Tests that don't exercise the happy-path redirect can construct an
-    AgentCreator without explicitly passing a port.
+    The creation flow still completes after timeout -- the subdomain forwarder's
+    auto-refresh retry page covers the remaining gap -- so a timeout should be
+    logged but not raised.
     """
+    agent_id = AgentId()
+    resolver = StaticBackendResolver(url_by_agent_and_service={})
     creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=Path("/tmp/test")),
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        backend_resolver=resolver,
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
+        workspace_ready_timeout_seconds=0.05,
+        workspace_ready_poll_interval_seconds=0.01,
+        workspace_ready_probe_enabled=False,
     )
-    assert creator.server_port == 0
+    log_queue: queue_mod.Queue[str] = queue_mod.Queue()
+
+    start = time.monotonic()
+    assert creator._wait_for_workspace_ready(agent_id, log_queue) is False
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= 0.05
+    # A warning log line must be emitted so the user sees why navigation
+    # happened before the server confirmed readiness.
+    lines = []
+    while not log_queue.empty():
+        lines.append(log_queue.get_nowait())
+    assert any("did not register" in line for line in lines), lines
+
+
+def test_wait_for_workspace_ready_uses_the_workspace_service_name(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    """Polling looks up the workspace server under ``WORKSPACE_SERVER_SERVICE_NAME``.
+
+    Regression guard: if this constant drifted away from what the subdomain
+    forwarder checks, creation would complete instantly (seeing some other
+    service's URL) and the user would still land on the retry page.
+    """
+    agent_id = AgentId()
+
+    observed_service_names: list[ServiceName] = []
+
+    class _RecordingResolver(BackendResolverInterface):
+        def get_backend_url(self, agent_id: AgentId, service_name: ServiceName) -> str | None:
+            observed_service_names.append(service_name)
+            return "http://workspace-backend"
+
+        def list_known_agent_ids(self) -> tuple[AgentId, ...]:
+            return ()
+
+        def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
+            return ()
+
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        backend_resolver=_RecordingResolver(),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        workspace_ready_timeout_seconds=1.0,
+        workspace_ready_poll_interval_seconds=0.01,
+        workspace_ready_probe_enabled=False,
+    )
+
+    assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is True
+    assert observed_service_names == [WORKSPACE_SERVER_SERVICE_NAME]
+
+
+# -- workspace_ready HTTP probe tests --
+
+
+def _mock_transport_always_connect_error(request: httpx.Request) -> httpx.Response:
+    """Simulate a workspace server whose URL is registered but the port isn't up yet."""
+    raise httpx.ConnectError("connection refused")
+
+
+def _mock_transport_always_ok(request: httpx.Request) -> httpx.Response:
+    """Simulate a workspace server that's answering HTTP."""
+    return httpx.Response(200, text="ok")
+
+
+def test_wait_for_workspace_ready_requires_http_readiness_not_just_url(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    """A registered URL whose server isn't answering must NOT satisfy readiness.
+
+    Reproduces the production bug: the agent writes its URL to events.jsonl
+    around server-socket bind, but the ASGI app can still be starting up.
+    Previously this returned True as soon as the resolver had a URL, and the
+    browser got redirected straight into a "Workspace server not yet
+    available" page. The probe must keep polling until the server actually
+    responds.
+    """
+    agent_id = AgentId()
+    resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(agent_id): {"system_interface": "http://workspace-backend"}},
+    )
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        backend_resolver=resolver,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        workspace_ready_timeout_seconds=0.15,
+        workspace_ready_poll_interval_seconds=0.01,
+        workspace_ready_probe_timeout_seconds=0.05,
+    )
+    creator._probe_http_client = httpx.Client(transport=httpx.MockTransport(_mock_transport_always_connect_error))
+
+    start = time.monotonic()
+    assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is False
+    elapsed = time.monotonic() - start
+    # Must have actually waited for the timeout -- not short-circuited on
+    # the "URL exists" check.
+    assert elapsed >= 0.15
+
+
+def test_wait_for_workspace_ready_returns_true_once_server_answers(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    """Once the HTTP probe gets a response, readiness is satisfied."""
+    agent_id = AgentId()
+    resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(agent_id): {"system_interface": "http://workspace-backend"}},
+    )
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        backend_resolver=resolver,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        workspace_ready_timeout_seconds=2.0,
+        workspace_ready_poll_interval_seconds=0.01,
+    )
+    creator._probe_http_client = httpx.Client(transport=httpx.MockTransport(_mock_transport_always_ok))
+
+    assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is True
 
 
 # -- LEASED mode tests --
@@ -779,6 +970,7 @@ def test_release_leased_host_with_pool_client(
     creator = AgentCreator(
         paths=paths,
         host_pool_client=fake_pool_server,
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -814,6 +1006,7 @@ def test_release_leased_host_noop_when_no_lease_info(
     paths = WorkspacePaths(data_dir=tmp_path)
     creator = AgentCreator(
         paths=paths,
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -830,6 +1023,7 @@ def test_release_leased_host_without_pool_client(
     agent_id = AgentId()
     creator = AgentCreator(
         paths=paths,
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -851,6 +1045,7 @@ def test_agent_creator_has_host_pool_client_field(
     paths = WorkspacePaths(data_dir=tmp_path)
     creator_without = AgentCreator(
         paths=paths,
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -860,6 +1055,7 @@ def test_agent_creator_has_host_pool_client_field(
     creator_with = AgentCreator(
         paths=paths,
         host_pool_client=client,
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -875,6 +1071,7 @@ def test_start_creation_leased_raises_without_pool_client(
     paths = WorkspacePaths(data_dir=tmp_path)
     creator = AgentCreator(
         paths=paths,
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -899,6 +1096,7 @@ def test_create_leased_agent_fails_without_access_token(
     creator = AgentCreator(
         paths=paths,
         host_pool_client=fake_pool_server,
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -923,6 +1121,7 @@ def test_create_leased_agent_fails_without_version(
     creator = AgentCreator(
         paths=paths,
         host_pool_client=fake_pool_server,
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -951,6 +1150,7 @@ def test_create_leased_agent_leases_and_writes_dynamic_host(
     creator = AgentCreator(
         paths=paths,
         host_pool_client=fake_pool_server,
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -980,6 +1180,7 @@ def test_cleanup_failed_lease(
     creator = AgentCreator(
         paths=paths,
         host_pool_client=fake_pool_server,
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -1097,6 +1298,7 @@ def test_agent_creator_cleans_up_pre_spawned_latchkey_gateway_on_failure(
     try:
         creator = AgentCreator(
             paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+            backend_resolver=_make_empty_resolver(),
             latchkey_gateway_manager=gateway_manager,
             root_concurrency_group=root_concurrency_group,
             notification_dispatcher=notification_dispatcher,
@@ -1158,6 +1360,7 @@ def test_agent_creator_accepts_litellm_key_client(
     client = LiteLLMKeyClient(connector_url=RemoteServiceConnectorUrl("http://127.0.0.1:1"))
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path),
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
         litellm_key_client=client,
@@ -1172,6 +1375,7 @@ def test_agent_creator_litellm_key_client_defaults_to_none(
 ) -> None:
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path),
+        backend_resolver=_make_empty_resolver(),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )

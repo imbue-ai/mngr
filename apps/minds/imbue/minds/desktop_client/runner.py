@@ -156,7 +156,7 @@ def start_desktop_client(
     litellm_key_client = _build_litellm_key_client(minds_config.remote_service_connector_url)
     agent_creator = AgentCreator(
         paths=paths,
-        server_port=port,
+        backend_resolver=backend_resolver,
         latchkey_gateway_manager=latchkey_gateway_manager,
         host_pool_client=host_pool_client,
         litellm_key_client=litellm_key_client,
