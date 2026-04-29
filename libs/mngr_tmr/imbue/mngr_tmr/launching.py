@@ -170,6 +170,9 @@ def launch_test_agent(
         source_location: HostLocation | None = None
         transfer_mode: TransferMode | None = None
         resolved_existing_host = existing_host
+        # host_name is only consulted by _create_tmr_agent when existing_host
+        # is None, so forward it for the fall-back branch.
+        effective_host_name: HostName | None = host_name
     else:
         # Remote provider with a snapshot: pre-resolve the target host (from
         # the snapshot) and source the test agent's worktree from
@@ -183,6 +186,9 @@ def launch_test_agent(
             resolved_existing_host = resolve_target_host(new_host_opts, mngr_ctx)
         source_location = HostLocation(host=resolved_existing_host, path=SNAPSHOTTER_CHECKOUT_PATH)
         transfer_mode = TransferMode.GIT_WORKTREE
+        # The host has already been materialised, so host_name is irrelevant
+        # for the downstream _create_tmr_agent call.
+        effective_host_name = None
 
     create_result = _create_tmr_agent(
         agent_name=agent_name,
@@ -191,7 +197,7 @@ def launch_test_agent(
         mngr_ctx=mngr_ctx,
         initial_message=build_test_agent_prompt(test_node_id, pytest_flags, prompt_suffix),
         existing_host=resolved_existing_host,
-        host_name=host_name,
+        host_name=effective_host_name,
         source_location=source_location,
         transfer_mode=transfer_mode,
     )
