@@ -23,11 +23,11 @@ from imbue.mngr.utils.testing import get_short_random_string
 def create_test_agent(
     local_provider: LocalProviderInstance,
     temp_work_dir: Path,
-    agent_config: AgentTypeConfig | None = None,
-    agent_type: AgentTypeName | None = None,
+    agent_config: AgentTypeConfig | None,
+    agent_type: AgentTypeName | None,
     *,
-    extra_data: Mapping[str, Any] | None = None,
-    agent_class: type[BaseAgent[AgentTypeConfig]] = BaseAgent,
+    extra_data: Mapping[str, Any] | None,
+    agent_class: type[BaseAgent[AgentTypeConfig]],
 ) -> BaseAgent[AgentTypeConfig]:
     """Create a test agent backed by a real local host filesystem.
 
