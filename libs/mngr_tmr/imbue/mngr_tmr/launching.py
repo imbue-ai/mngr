@@ -146,10 +146,13 @@ def launch_test_agent(
 ) -> tuple[TestAgentInfo, OnlineHostInterface]:
     """Launch a single agent to run and optionally fix one test.
 
-    For remote providers, the test agent's host is pre-resolved (creating a new
-    host from the snapshot if needed) and used as both the source and target,
-    transferring via git-worktree from /opt/snapshotter (which is baked into
-    the snapshot by the snapshotter agent).
+    When a snapshot is available for a remote provider, the test agent's host
+    is pre-resolved (creating a new host from the snapshot if needed) and used
+    as both the source and target, transferring via git-worktree from
+    /opt/snapshotter (which is baked into the snapshot by the snapshotter
+    agent). Without a snapshot we fall back to the natural transfer mode for
+    the provider (git-mirror from the local user checkout for remote, or
+    git-worktree from the local user checkout for local).
     """
     agent_name_suffix = sanitize_test_name_for_agent(test_node_id)
     short_id = short_random_id()
@@ -159,15 +162,19 @@ def launch_test_agent(
     logger.info("Launching agent '{}' for test: {}", agent_name, test_node_id)
 
     is_local = config.provider_name.lower() == LOCAL_PROVIDER_NAME
-    if is_local:
-        # Local provider: use the natural git-worktree from the local user checkout.
+    # The /opt/snapshotter fast path requires the host to have been built from
+    # a snapshot containing that checkout. If we have no snapshot (local
+    # provider, snapshot-incapable provider, or snapshot creation failed), we
+    # must fall back to transferring from the local user checkout.
+    if is_local or config.snapshot is None:
         source_location: HostLocation | None = None
         transfer_mode: TransferMode | None = None
         resolved_existing_host = existing_host
     else:
-        # Remote provider: pre-resolve the target host (from the snapshot) and
-        # source the test agent's worktree from /opt/snapshotter on the same
-        # host. This avoids re-uploading the git repo for every agent.
+        # Remote provider with a snapshot: pre-resolve the target host (from
+        # the snapshot) and source the test agent's worktree from
+        # /opt/snapshotter on the same host. This avoids re-uploading the git
+        # repo for every agent.
         if existing_host is not None:
             resolved_existing_host = existing_host
         else:
