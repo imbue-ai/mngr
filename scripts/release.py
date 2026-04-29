@@ -561,12 +561,12 @@ def main() -> None:
     current_versions = get_package_versions()
     if new_packages and not args.dry_run:
         confirmed_new = _confirm_new_packages(new_packages, current_versions)
-        _print_trusted_publisher_warning(confirmed_new)
     elif new_packages:
         # In dry-run mode, assume all new packages are confirmed for the preview
         confirmed_new = new_packages
     else:
         confirmed_new = set()
+    _print_trusted_publisher_warning(confirmed_new)
 
     # Remove new packages (confirmed or not) from the changed set before computing bumps.
     # Confirmed new packages are published at their current version, not bumped.
