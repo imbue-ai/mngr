@@ -1,6 +1,8 @@
 """Tests for the FastAPI server."""
 
+import asyncio
 import json
+import queue
 from pathlib import Path
 from typing import Generator
 from unittest.mock import patch
@@ -10,8 +12,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
+from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
+from imbue.minds_workspace_server.server import _run_proto_agent_logs_loop
+from imbue.minds_workspace_server.server import _run_ws_broadcast_loop
 from imbue.minds_workspace_server.server import create_application
+from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 
 # Placeholder client-side port used by the refresh-service broadcast tests.
 # Only the host portion of the TestClient ``client`` tuple is inspected by the
@@ -331,3 +337,153 @@ def test_refresh_service_broadcast_rejects_non_loopback(app: FastAPI) -> None:
     with TestClient(app, client=("10.0.0.1", _TEST_CLIENT_PORT)) as remote_client:
         response = remote_client.post("/api/refresh-service/web/broadcast")
     assert response.status_code == 403
+
+
+class _HangingWebSocket:
+    """Test double for ``WebSocket`` whose ``send_text`` never returns and tracks ``close`` calls."""
+
+    def __init__(self, close_hangs: bool = False) -> None:
+        self.send_attempt_count = 0
+        self.close_call_count = 0
+        self.close_codes: list[int] = []
+        self._close_hangs = close_hangs
+
+    async def send_text(self, text: str) -> None:
+        self.send_attempt_count += 1
+        # Hang indefinitely; callers must use asyncio.wait_for to bail out.
+        await asyncio.Event().wait()
+
+    async def close(self, code: int = 1000, reason: str | None = None) -> None:
+        self.close_call_count += 1
+        self.close_codes.append(code)
+        if self._close_hangs:
+            # Mimic a genuinely dead TCP connection where the close frame
+            # cannot be flushed; callers must use asyncio.wait_for to bail out.
+            await asyncio.Event().wait()
+
+
+@pytest.mark.timeout(5)
+def test_run_ws_broadcast_loop_aborts_when_send_hangs(
+    broadcaster: WebSocketBroadcaster,
+    agent_manager: AgentManager,
+) -> None:
+    """A hung ``send_text`` triggers the timeout path, closes the socket, and unregisters the queue."""
+    fake_websocket = _HangingWebSocket()
+
+    # The fake websocket is intentionally not a starlette ``WebSocket`` -- the
+    # ``ty: ignore`` suppression is needed because we are passing a duck-typed
+    # test double.
+    asyncio.run(
+        _run_ws_broadcast_loop(
+            websocket=fake_websocket,  # ty: ignore[invalid-argument-type]
+            agent_manager=agent_manager,
+            ws_broadcaster=broadcaster,
+            send_timeout_seconds=0.05,
+        )
+    )
+
+    # Only the first send was attempted (it hung) and the socket was explicitly
+    # closed with an internal-error code.
+    assert fake_websocket.send_attempt_count == 1
+    assert fake_websocket.close_call_count == 1
+    assert fake_websocket.close_codes == [1011]
+
+    # The handler's ``finally`` block must have unregistered its queue. We verify
+    # behaviorally: a freshly-registered queue receives any subsequent broadcast
+    # exactly once -- no zombie queue is also receiving.
+    fresh_queue = broadcaster.register()
+    broadcaster.broadcast({"type": "after_timeout"})
+    received = fresh_queue.get_nowait()
+    assert received is not None
+    assert json.loads(received) == {"type": "after_timeout"}
+    assert fresh_queue.empty()
+
+
+@pytest.mark.timeout(5)
+def test_run_ws_broadcast_loop_returns_when_close_also_hangs(
+    broadcaster: WebSocketBroadcaster,
+    agent_manager: AgentManager,
+) -> None:
+    """If both ``send_text`` and ``close`` hang, the handler still returns and unregisters."""
+    fake_websocket = _HangingWebSocket(close_hangs=True)
+
+    asyncio.run(
+        _run_ws_broadcast_loop(
+            websocket=fake_websocket,  # ty: ignore[invalid-argument-type]
+            agent_manager=agent_manager,
+            ws_broadcaster=broadcaster,
+            send_timeout_seconds=0.05,
+        )
+    )
+
+    # Both the send and the close were attempted, but neither pinned the handler.
+    assert fake_websocket.send_attempt_count == 1
+    assert fake_websocket.close_call_count == 1
+
+    # The queue was unregistered by the finally block.
+    fresh_queue = broadcaster.register()
+    broadcaster.broadcast({"type": "after_close_timeout"})
+    received = fresh_queue.get_nowait()
+    assert received is not None
+    assert json.loads(received) == {"type": "after_close_timeout"}
+    assert fresh_queue.empty()
+
+
+@pytest.mark.timeout(5)
+def test_run_proto_agent_logs_loop_aborts_when_send_hangs() -> None:
+    """A hung ``send_text`` on the proto-agent log socket triggers the timeout path and closes."""
+    fake_websocket = _HangingWebSocket()
+    log_queue: queue.Queue[str | None] = queue.Queue()
+    log_queue.put(json.dumps({"line": "starting"}))
+
+    asyncio.run(
+        _run_proto_agent_logs_loop(
+            websocket=fake_websocket,  # ty: ignore[invalid-argument-type]
+            log_queue=log_queue,
+            send_timeout_seconds=0.05,
+        )
+    )
+
+    # The first real message was attempted (it hung) and the socket was
+    # explicitly closed with an internal-error code.
+    assert fake_websocket.send_attempt_count == 1
+    assert fake_websocket.close_call_count == 1
+    assert fake_websocket.close_codes == [1011]
+
+
+@pytest.mark.timeout(5)
+def test_run_proto_agent_logs_loop_returns_when_close_also_hangs() -> None:
+    """If both ``send_text`` and ``close`` hang on the log socket, the handler still returns."""
+    fake_websocket = _HangingWebSocket(close_hangs=True)
+    log_queue: queue.Queue[str | None] = queue.Queue()
+    log_queue.put(json.dumps({"line": "starting"}))
+
+    asyncio.run(
+        _run_proto_agent_logs_loop(
+            websocket=fake_websocket,  # ty: ignore[invalid-argument-type]
+            log_queue=log_queue,
+            send_timeout_seconds=0.05,
+        )
+    )
+
+    assert fake_websocket.send_attempt_count == 1
+    assert fake_websocket.close_call_count == 1
+
+
+@pytest.mark.timeout(5)
+def test_run_proto_agent_logs_loop_not_found_path_handles_hung_send() -> None:
+    """When the proto-agent is missing and the not-found send hangs, close still happens and the handler returns."""
+    fake_websocket = _HangingWebSocket()
+
+    asyncio.run(
+        _run_proto_agent_logs_loop(
+            websocket=fake_websocket,  # ty: ignore[invalid-argument-type]
+            log_queue=None,
+            send_timeout_seconds=0.05,
+        )
+    )
+
+    # The not-found error send was attempted (it hung) and the socket was
+    # closed despite the hang.
+    assert fake_websocket.send_attempt_count == 1
+    assert fake_websocket.close_call_count == 1

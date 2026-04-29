@@ -106,7 +106,15 @@ def test_prevent_asyncio_import() -> None:
     # cancellation-aware gather; the spirit of the ratchet is "prefer the
     # project's concurrency_group for threads/procs", which doesn't apply
     # to pure asyncio tasks.
-    rc.check_asyncio_import(_DIR, snapshot(1))
+    # +1 for server.py's asyncio.wait_for around websocket.send_text and
+    # websocket.close -- needed to bound the time spent in a single send so a
+    # hung TCP connection cannot pin the broadcaster's per-client queue. Same
+    # exception applies: pure asyncio cancellation, not threads/procs.
+    # +1 for server_test.py's asyncio.run, which drives _run_ws_broadcast_loop
+    # and _run_proto_agent_logs_loop under a fake hanging websocket. Multiple
+    # asyncio.run() call sites in the same file share one import, so this is
+    # still +1, not +N.
+    rc.check_asyncio_import(_DIR, snapshot(3))
 
 
 def test_prevent_pandas_import() -> None:
