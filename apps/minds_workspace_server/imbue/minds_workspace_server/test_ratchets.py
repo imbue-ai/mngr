@@ -148,14 +148,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    # +1 for server_test.py's pyright-suppression trailing comment on a
-    # duck-typed fake websocket. Pyright's strict mode requires the
-    # suppression to live on the offending line; cast() is forbidden by the
-    # cast ratchet.
-    # +1 for the same suppression in the close-hangs variant of that test.
-    # +3 for the same suppression on the three _run_proto_agent_logs_loop
-    # tests that pass the same duck-typed fake websocket.
-    rc.check_trailing_comments(_DIR, snapshot(10))
+    rc.check_trailing_comments(_DIR, snapshot(5))
 
 
 def test_prevent_init_docstrings() -> None:

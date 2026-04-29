@@ -370,11 +370,12 @@ def test_run_ws_broadcast_loop_aborts_when_send_hangs(
     """A hung ``send_text`` triggers the timeout path, closes the socket, and unregisters the queue."""
     fake_websocket = _HangingWebSocket()
 
-    # The fake websocket is intentionally not a starlette ``WebSocket`` -- the type
-    # ignore is needed because we are passing a duck-typed test double.
+    # The fake websocket is intentionally not a starlette ``WebSocket`` -- the
+    # ``ty: ignore`` suppression is needed because we are passing a duck-typed
+    # test double.
     asyncio.run(
         _run_ws_broadcast_loop(
-            websocket=fake_websocket,  # type: ignore[arg-type]
+            websocket=fake_websocket,  # ty: ignore[invalid-argument-type]
             agent_manager=agent_manager,
             ws_broadcaster=broadcaster,
             send_timeout_seconds=0.05,
@@ -408,7 +409,7 @@ def test_run_ws_broadcast_loop_returns_when_close_also_hangs(
 
     asyncio.run(
         _run_ws_broadcast_loop(
-            websocket=fake_websocket,  # type: ignore[arg-type]
+            websocket=fake_websocket,  # ty: ignore[invalid-argument-type]
             agent_manager=agent_manager,
             ws_broadcaster=broadcaster,
             send_timeout_seconds=0.05,
@@ -437,7 +438,7 @@ def test_run_proto_agent_logs_loop_aborts_when_send_hangs() -> None:
 
     asyncio.run(
         _run_proto_agent_logs_loop(
-            websocket=fake_websocket,  # type: ignore[arg-type]
+            websocket=fake_websocket,  # ty: ignore[invalid-argument-type]
             log_queue=log_queue,
             send_timeout_seconds=0.05,
         )
@@ -459,7 +460,7 @@ def test_run_proto_agent_logs_loop_returns_when_close_also_hangs() -> None:
 
     asyncio.run(
         _run_proto_agent_logs_loop(
-            websocket=fake_websocket,  # type: ignore[arg-type]
+            websocket=fake_websocket,  # ty: ignore[invalid-argument-type]
             log_queue=log_queue,
             send_timeout_seconds=0.05,
         )
@@ -476,7 +477,7 @@ def test_run_proto_agent_logs_loop_not_found_path_handles_hung_send() -> None:
 
     asyncio.run(
         _run_proto_agent_logs_loop(
-            websocket=fake_websocket,  # type: ignore[arg-type]
+            websocket=fake_websocket,  # ty: ignore[invalid-argument-type]
             log_queue=None,
             send_timeout_seconds=0.05,
         )
