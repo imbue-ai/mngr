@@ -72,17 +72,20 @@ def _is_child_still_alive(
     target_name: str,
     list_callable: ListAgentsByNameCallable,
 ) -> bool:
-    """Return True if the named child is currently in a live lifecycle state.
+    """Return True if the named child is currently in a live lifecycle state,
+    OR if mngr list could not be consulted.
 
-    On any failure (mngr list errors, target missing, unexpected state shape),
-    return False so the caller falls back to a safe-to-destroy path. Caller
-    combines this with the result_file existence check; either signal of
-    "still doing work" wins.
+    On a transient mngr list failure we choose "alive" (preserve the child)
+    so a flaky listing call cannot accidentally destroy an in-flight child --
+    matching run()'s documented invariant that either signal of "still doing
+    work" wins. An authoritative not-found (target missing from a successful
+    listing) still returns False so completed children are cleanly torn down.
     """
     agents = list_callable()
     if agents is None:
-        # mngr list failed; fall back to result_file-only signal.
-        return False
+        # mngr list failed; conservatively treat the child as still alive
+        # so a transient listing flake never destroys an in-flight subagent.
+        return True
     agent = agents.get(target_name)
     if agent is None:
         # Already gone from the registry; nothing to preserve.

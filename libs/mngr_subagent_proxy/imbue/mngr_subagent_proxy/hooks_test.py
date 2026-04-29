@@ -451,6 +451,58 @@ def test_rewrite_live_lifecycle_preserves_subagent(
         assert result_file.exists()
 
 
+def test_rewrite_preserves_subagent_when_mngr_list_errors(
+    tmp_path: Path,
+    clean_env: pytest.MonkeyPatch,
+) -> None:
+    """A transient mngr-list failure must not destroy an in-flight child.
+
+    rewrite.run() documents the policy as "either signal alive wins; both
+    must say done to destroy." When list_callable returns None (mngr list
+    timed out / errored), the lifecycle signal is unknown -- treating it
+    as 'safely dead' would let a flaky listing call destroy a still-running
+    subagent. Conservative behavior is to preserve.
+    """
+    state_dir = tmp_path / "state"
+    for sub in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
+        (state_dir / sub).mkdir(parents=True)
+    clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
+
+    tid = "toolu_listfail"
+    target_name = "foo-listfail-target"
+    map_file = state_dir / "subagent_map" / f"{tid}.json"
+    map_file.write_text(
+        json.dumps(
+            {
+                "target_name": target_name,
+                "subagent_type": "general-purpose",
+                "parent_cwd": "/tmp",
+                "run_in_background": False,
+            }
+        )
+    )
+    result_file = state_dir / "subagent_results" / f"{tid}.txt"
+    result_file.write_text("intermediate end-turn text")
+
+    destroy_calls: list[tuple[str, Path]] = []
+
+    def fake_destroy(target_name: str, log_path: Path) -> None:
+        destroy_calls.append((target_name, log_path))
+
+    stdin_buffer = io.StringIO(json.dumps({"tool_use_id": tid, "tool_response": "ignored"}))
+    stdout_buffer = io.StringIO()
+    rewrite_hook.run(
+        stdin_buffer,
+        stdout_buffer,
+        destroy_callable=fake_destroy,
+        list_callable=_list_returns(None),
+    )
+
+    assert destroy_calls == [], "mngr-list failure must not destroy in-flight child"
+    assert map_file.exists()
+    assert result_file.exists()
+
+
 def test_rewrite_ignores_unmapped_tool_use_id(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
