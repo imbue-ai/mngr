@@ -627,12 +627,15 @@ def _read_events_from_file(
 ) -> tuple[list[EventRecord], int]:
     """Read and parse all events from a single JSONL file.
 
-    Returns (events, bytes_consumed) where bytes_consumed is the byte length of the
-    portion of the file ending in the final newline. Any trailing partial line (a
-    mid-flush write with no terminating newline) is intentionally held back so the
-    tail thread can re-read it once the writer flushes the rest, rather than letting
-    the partial be silently dropped here while the tail starts past it and sees only
-    the suffix as malformed JSON.
+    Returns (events, byte_length) where byte_length is the size of the raw content.
+
+    Note: this function intentionally does NOT hold back a trailing partial line via
+    split_complete_lines. The via-host code path reads through pyinfra, whose
+    CommandOutput.stdout strips the trailing newline (it joins lines with "\\n"),
+    so any partial-line detection here would misclassify a complete final line as
+    partial and silently drop it. The follow-tail loop in _tail_source_thread_remote
+    has its own partial-line guard (it reads bytes directly from a volume, not via
+    pyinfra), so partial-write robustness during streaming is preserved there.
     """
     try:
         content = read_event_content(target, relative_file_path)
@@ -642,8 +645,7 @@ def _read_events_from_file(
 
     events: list[EventRecord] = []
     warner = MalformedJsonLineWarner(source_description=f"event file '{relative_file_path}'")
-    lines, bytes_consumed = split_complete_lines(content)
-    for line in lines:
+    for line in content.split("\n"):
         parsed = warner.parse(line)
         if parsed is None:
             continue
@@ -652,7 +654,7 @@ def _read_events_from_file(
         if record is not None:
             events.append(record)
 
-    return events, bytes_consumed
+    return events, len(content.encode("utf-8"))
 
 
 def read_all_historical_events(

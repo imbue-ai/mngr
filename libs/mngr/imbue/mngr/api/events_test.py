@@ -589,35 +589,6 @@ def test_read_all_historical_events_silent_when_only_last_line_corrupted(tmp_pat
     assert log_output.getvalue() == ""
 
 
-def test_read_all_historical_events_holds_back_partial_last_line_for_tail(tmp_path: Path) -> None:
-    """Regression: the byte offset returned for the current file must stop at the
-    last newline so a follow-up tail re-reads any partial-write line in one piece.
-
-    Before the fix, _read_events_from_file returned len(content), so the partial
-    bytes were "consumed" by the historical read (silently dropped via the
-    warner's EOF buffer) and the tail thread started past them. When the writer
-    flushed the rest, the tail saw only the suffix -- losing the event and
-    producing misleading mid-file-corruption warnings about its halves.
-    """
-    events_dir = tmp_path / "events"
-    events_dir.mkdir()
-    (events_dir / "src").mkdir()
-    complete_line = '{"timestamp":"2026-01-01T00:00:00Z","event_id":"e1","source":"src"}\n'
-    partial = '{"timestamp":"2026-01-02T00:00:00Z","event_id":"e2"'
-    (events_dir / "src" / "events.jsonl").write_text(complete_line + partial)
-
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
-    sources = [EventSourceInfo(source_path="src", rotated_files=(), is_current_file_present=True)]
-
-    events, byte_offsets = read_all_historical_events(target, sources, [], [])
-
-    assert [e.event_id for e in events] == ["e1"]
-    # The reported offset must equal the byte length of the complete portion only,
-    # so the tail re-reads the partial after the writer flushes the rest.
-    assert byte_offsets["src"] == len(complete_line.encode("utf-8"))
-
-
 def test_read_all_historical_events_with_cel_filter(tmp_path: Path) -> None:
     """Verify CEL filter is applied to events."""
     events_dir = tmp_path / "events"
