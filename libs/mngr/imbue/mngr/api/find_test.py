@@ -993,7 +993,6 @@ def test_ensure_agent_started_uses_per_agent_ready_timeout(
     )
     assert agent.get_lifecycle_state() == AgentLifecycleState.STOPPED
 
-    assert isinstance(agent, _TimeoutCapturingAgent)
     ensure_agent_started(agent, agent.host, is_start_desired=True)
 
     assert agent.captured_timeouts == [42.0]
@@ -1014,7 +1013,6 @@ def test_ensure_agent_started_respects_env_var_when_data_unset(
     )
     assert agent.get_lifecycle_state() == AgentLifecycleState.STOPPED
 
-    assert isinstance(agent, _TimeoutCapturingAgent)
     ensure_agent_started(agent, agent.host, is_start_desired=True)
 
     assert agent.captured_timeouts == [37.5]
