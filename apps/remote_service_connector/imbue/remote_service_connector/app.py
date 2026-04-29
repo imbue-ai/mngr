@@ -315,6 +315,9 @@ class CreateKeyRequest(BaseModel):
     budget_duration: str | None = Field(
         default=None, description="Optional budget reset duration (e.g. '1d', '1h', '1w', '1M')"
     )
+    metadata: dict[str, str] | None = Field(
+        default=None, description="Optional metadata (e.g. agent_id, host_id) for resource tracking"
+    )
 
 
 class CreateKeyResponse(BaseModel):
@@ -1234,7 +1237,7 @@ def raise_as_http(exc: Exception) -> NoReturn:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if isinstance(exc, TunnelComponentTooLongError):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    logger.exception("Unexpected error in endpoint handler")
+    logger.error("Unexpected error in endpoint handler", exc_info=exc)
     raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -1578,18 +1581,18 @@ def _litellm_request(
         headers=headers,
         json=json_body,
         params=params,
-        timeout=30.0,
+        timeout=60.0,
     )
     if response.status_code >= 400:
         detail = response.text[:500]
-        logger.warning("LiteLLM API error: {} {} -> {} {}", method, path, response.status_code, detail)
+        logger.warning("LiteLLM API error: %s %s -> %s %s", method, path, response.status_code, detail)
         raise HTTPException(status_code=response.status_code, detail="LiteLLM error: {}".format(detail))
     return response
 
 
 def _litellm_base_url_for_agents() -> str:
     """Return the base URL agents should use as ANTHROPIC_BASE_URL."""
-    return _litellm_proxy_url() + "/anthropic"
+    return _litellm_proxy_url()
 
 
 # ---------------------------------------------------------------------------
@@ -1613,6 +1616,8 @@ def create_litellm_key(request: Request, body: CreateKeyRequest) -> dict[str, ob
             litellm_body["max_budget"] = body.max_budget
         if body.budget_duration is not None:
             litellm_body["budget_duration"] = body.budget_duration
+        if body.metadata is not None:
+            litellm_body["metadata"] = body.metadata
 
         resp = _litellm_request("POST", "/key/generate", json_body=litellm_body)
         data = resp.json()
@@ -1875,7 +1880,7 @@ async def auth_signup(body: SignUpRequest) -> AuthResponse:
             email=email,
         )
     except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
-        logger.error("SuperTokens SDK error during signup: %s", exc)
+        logger.error("SuperTokens SDK error during signup", exc_info=exc)
         return AuthResponse(status="ERROR", message="Auth backend unavailable")
     return AuthResponse(
         status="OK",
@@ -1919,7 +1924,7 @@ async def auth_signin(body: SignInRequest) -> AuthResponse:
                 email=email,
             )
     except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
-        logger.error("SuperTokens SDK error during signin: %s", exc)
+        logger.error("SuperTokens SDK error during signin", exc_info=exc)
         return AuthResponse(status="ERROR", message="Auth backend unavailable")
     return AuthResponse(
         status="OK",
@@ -2017,7 +2022,7 @@ async def auth_verify_email_page(request: Request) -> HTMLResponse:
     try:
         result = await verify_email_using_token(tenant_id=tenant_id, token=token)
     except (SuperTokensSessionError, SuperTokensGeneralError, ValueError) as exc:
-        logger.error("Email verification error: %s", exc)
+        logger.error("Email verification error", exc_info=exc)
         return HTMLResponse(_VERIFY_EMAIL_FAILED_HTML, status_code=400)
     if isinstance(result, VerifyEmailUsingTokenOkResult):
         return HTMLResponse(_VERIFY_EMAIL_SUCCESS_HTML)
@@ -2119,7 +2124,7 @@ async def auth_oauth_callback(body: OAuthCallbackRequest) -> AuthResponse:
         )
         oauth_user = await provider.get_user_info(oauth_tokens=oauth_tokens, user_context={})
     except (ValueError, KeyError, OSError) as exc:
-        logger.error("OAuth callback failed for %s: %s", body.provider_id, exc)
+        logger.error("OAuth callback failed for %s", body.provider_id, exc_info=exc)
         return AuthResponse(status="ERROR", message=str(exc))
 
     if oauth_user.email is None or oauth_user.email.id is None:
@@ -2295,7 +2300,7 @@ def _init_supertokens() -> None:
         modal.Secret.from_name(f"supertokens-{_DEPLOY_ENV}"),
         modal.Secret.from_name(f"neon-{_DEPLOY_ENV}"),
         modal.Secret.from_name(f"pool-ssh-{_DEPLOY_ENV}"),
-        modal.Secret.from_name(f"litellm-{_DEPLOY_ENV}"),
+        modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}"),
         modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV}),
     ]
 )

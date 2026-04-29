@@ -18,6 +18,7 @@ from imbue.mngr import resources as mngr_resources
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.headless_runner import accumulate_chunks
+from imbue.mngr.cli.headless_runner import ephemeral_work_location
 from imbue.mngr.cli.headless_runner import get_local_host
 from imbue.mngr.cli.headless_runner import headless_agent_output
 from imbue.mngr.cli.headless_runner import stream_or_accumulate_response
@@ -101,7 +102,10 @@ _QUERY_PREFIX: Final[str] = (
     "response: mngr list --running --format json\n\n"
     #
     "user: How do I watch agent status in real time?\n"
-    "response: mngr list --watch 5\n\n"
+    "response: For a human-readable refreshing table, use the Unix watch(1) command:\n"
+    "    watch -n 5 mngr list\n"
+    "For a JSONL event stream (programmatic consumers), use:\n"
+    "    mngr observe --discovery-only\n\n"
     #
     "user: How do I list all agents that are running or waiting?\n"
     "response: Use a CEL filter on the `state` field:\n"
@@ -228,6 +232,8 @@ class ClaudeBackendInterface(MutableModel, ABC):
         """Send a prompt to claude and yield response text chunks."""
 
 
+# Extra claude CLI args for ask's stream-json tailing. The user prompt is
+# passed via ``initial_message``, not included here.
 _HEADLESS_CLAUDE_ARGS: Final[tuple[str, ...]] = (
     "--system-prompt",
     '"$(cat "$MNGR_AGENT_WORK_DIR/.mngr-system-prompt")"',
@@ -238,18 +244,12 @@ _HEADLESS_CLAUDE_ARGS: Final[tuple[str, ...]] = (
     "--tools",
     '""',
     "--no-session-persistence",
-    '"$(cat "$MNGR_AGENT_WORK_DIR/.mngr-prompt")"',
 )
 
 
-def _write_claude_files(host: OnlineHostInterface, work_path: Path, prompt: str, system_prompt: str) -> None:
-    """Write prompt and system prompt files to the work directory.
-
-    The headless claude agent reads these via $(cat ...) in its agent_args,
-    avoiding tmux command length limits.
-    """
+def _write_system_prompt_file(host: OnlineHostInterface, work_path: Path, system_prompt: str) -> None:
+    """Write the ask-specific system prompt to the work directory."""
     host.write_text_file(work_path / ".mngr-system-prompt", system_prompt)
-    host.write_text_file(work_path / ".mngr-prompt", prompt)
 
 
 class HeadlessClaudeBackend(ClaudeBackendInterface):
@@ -259,15 +259,22 @@ class HeadlessClaudeBackend(ClaudeBackendInterface):
     mngr_ctx: MngrContext
 
     def query(self, prompt: str, system_prompt: str) -> Iterator[str]:
-        with headless_agent_output(
-            host=self.host,
-            mngr_ctx=self.mngr_ctx,
-            agent_type=AgentTypeName("headless_claude"),
-            agent_args=_HEADLESS_CLAUDE_ARGS,
-            label_options=AgentLabelOptions(labels={"internal": "ask"}),
-            name=AgentName("ask"),
-            pre_create_setup=lambda host, path: _write_claude_files(host, path, prompt, system_prompt),
-        ) as agent:
+        # `ask` always runs in a fresh throwaway directory -- nothing in the
+        # user's cwd should leak in, and our system-prompt file should not
+        # land in their repo.
+        with (
+            ephemeral_work_location(self.host) as work_location,
+            headless_agent_output(
+                mngr_ctx=self.mngr_ctx,
+                agent_type=AgentTypeName("headless_claude"),
+                source_location=work_location,
+                agent_args=_HEADLESS_CLAUDE_ARGS,
+                label_options=AgentLabelOptions(labels={"internal": "ask"}),
+                name=AgentName("ask"),
+                initial_message=prompt,
+                pre_create_setup=lambda host, path: _write_system_prompt_file(host, path, system_prompt),
+            ) as agent,
+        ):
             yield from agent.stream_output()
 
 

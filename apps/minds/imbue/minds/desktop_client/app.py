@@ -209,7 +209,7 @@ async def _managed_lifespan(
             timeout=_PROXY_TIMEOUT_SECONDS,
         )
     inner_app.state.ssh_http_clients: dict[str, httpx.AsyncClient] = {}
-    # Captured here so background callbacks (e.g. the mngr events refresh
+    # Captured here so background callbacks (e.g. the mngr event refresh
     # dispatch) can schedule async work on the server's running loop via
     # asyncio.run_coroutine_threadsafe.
     inner_app.state.event_loop = asyncio.get_running_loop()
@@ -685,7 +685,15 @@ async def _handle_workspace_forward_http(request: Request) -> Response:
     workspace_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
     if workspace_url is None:
         if "text/html" in request.headers.get("accept", ""):
-            return HTMLResponse(content="<p>Workspace server not yet available. Retrying...</p>")
+            return HTMLResponse(
+                content=(
+                    "<!doctype html><html><head>"
+                    '<meta http-equiv="refresh" content="1">'
+                    "</head><body>"
+                    "<p>Workspace server not yet available. Retrying...</p>"
+                    "</body></html>"
+                )
+            )
         return Response(status_code=503, content="Workspace server not yet available")
 
     try:
@@ -1408,7 +1416,10 @@ async def _handle_chrome_events(
             # Send initial workspace list and request count
             session_store: MultiAccountSessionStore | None = request.app.state.session_store
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
-            yield "data: {}\n\n".format(json.dumps({"type": "workspaces", "workspaces": last_workspace_data}))
+            has_accounts = bool(session_store and session_store.list_accounts())
+            yield "data: {}\n\n".format(
+                json.dumps({"type": "workspaces", "workspaces": last_workspace_data, "has_accounts": has_accounts})
+            )
             inbox: RequestInbox | None = request.app.state.request_inbox
             last_request_count = inbox.get_pending_count() if inbox else 0
             yield "data: {}\n\n".format(json.dumps({"type": "request_count", "count": last_request_count}))
@@ -2145,7 +2156,7 @@ def create_desktop_client(
 
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception) -> Response:
-        logger.error("Unhandled exception on {} {}: {}", request.method, request.url.path, exc, exc_info=exc)
+        logger.opt(exception=exc).error("Unhandled exception on {} {}", request.method, request.url.path)
         return Response(status_code=500, content=f"Internal Server Error: {exc}")
 
     @app.middleware("http")

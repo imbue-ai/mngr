@@ -21,6 +21,8 @@ from enum import auto
 from pathlib import Path
 from typing import Final
 from typing import assert_never
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
 from uuid import UUID
 
 import tomlkit
@@ -93,10 +95,12 @@ LOG_SENTINEL: Final[str] = "__DONE__"
 
 # Placeholder ANTHROPIC_API_KEY set on pre-created pool hosts. Must look like
 # a real Anthropic key (correct prefix, correct length ~108 chars) so that
-# Claude Code validation accepts it during provisioning. Replaced with the
-# real LiteLLM virtual key via sed during lease setup.
+# Claude Code validation accepts it during provisioning. The real LiteLLM
+# virtual key is written into the agent env file and claude config during
+# lease setup (see _build_inject_anthropic_command and
+# _build_patch_claude_config_command).
 PLACEHOLDER_ANTHROPIC_API_KEY: Final[str] = (
-    "sk-ant-api03-PLACEHOLDER00000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "sk-ant-api03-PLACEHOLDER000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 )
 
 
@@ -106,13 +110,13 @@ def _build_inject_anthropic_command(
     litellm_base_url: str,
     env_path: str,
 ) -> str:
-    """Build a shell command that replaces the placeholder ANTHROPIC_API_KEY and appends ANTHROPIC_BASE_URL."""
+    """Build a shell command that sets ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL in the agent env file."""
     return (
-        "sed -i 's|{placeholder}|{real_key}|g' {path}"
+        "sed -i '/^ANTHROPIC_API_KEY=/d' {path}"
+        " && echo 'ANTHROPIC_API_KEY={real_key}' >> {path}"
         " && sed -i '/^ANTHROPIC_BASE_URL=/d' {path}"
         " && echo 'ANTHROPIC_BASE_URL={base_url}' >> {path}"
     ).format(
-        placeholder=PLACEHOLDER_ANTHROPIC_API_KEY,
         real_key=litellm_key,
         path=env_path,
         base_url=litellm_base_url,
@@ -124,12 +128,25 @@ def _build_patch_claude_config_command(
     litellm_key: str,
     agent_id: AgentId,
 ) -> str:
-    """Build a shell command that replaces the placeholder key in the agent's claude config."""
-    claude_config_path = "/mngr/agents/{}/state/plugin/claude/anthropic/.claude.json".format(agent_id)
-    return "sed -i 's|{placeholder}|{real_key}|g' {path}".format(
-        placeholder=PLACEHOLDER_ANTHROPIC_API_KEY,
-        real_key=litellm_key,
+    """Build a shell command that patches the agent's claude config to approve the LiteLLM key."""
+    claude_config_path = "/mngr/agents/{}/plugin/claude/anthropic/.claude.json".format(agent_id)
+    key_suffix = litellm_key[-20:]
+    return (
+        'python3 -c "'
+        "import json; "
+        "p='{path}'; "
+        "d=json.load(open(p)); "
+        "d['primaryApiKey']='{key}'; "
+        "a=d.setdefault('customApiKeyResponses',{{}}).setdefault('approved',[]); "
+        "s='{suffix}'; "
+        "a.append(s) if s not in a else None; "
+        "d['customApiKeyResponses']['rejected']=[]; "
+        "json.dump(d,open(p,'w'),indent=2)"
+        '"'
+    ).format(
         path=claude_config_path,
+        key=litellm_key,
+        suffix=key_suffix,
     )
 
 
@@ -199,6 +216,58 @@ def _is_local_path(repo_source: str) -> bool:
     return repo_source.startswith(("/", "./", "../", "~"))
 
 
+def _redact_url_credentials(url: str) -> str:
+    """Strip any ``user[:password]@`` userinfo from a URL's netloc for logging.
+
+    Used to avoid leaking tokens like ``https://x-access-token:<TOKEN>@...`` into
+    debug logs. Strings that urlsplit parses with no netloc userinfo -- local
+    paths and SCP-style SSH URLs (``git@github.com:user/repo.git``, which has no
+    scheme so urlsplit produces an empty netloc) -- are returned unchanged.
+    Schemed URLs that do have userinfo (including ``ssh://git@host/...``) have
+    that userinfo stripped; losing the schemed ``user@`` prefix is harmless
+    since it isn't a secret and the remaining URL still identifies the repo.
+    """
+    parts = urlsplit(url)
+    if "@" not in parts.netloc:
+        return url
+    _, _, host = parts.netloc.rpartition("@")
+    return urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
+
+
+# Matches the ``scheme://user[:password]@`` prefix of a URL embedded anywhere
+# in a free-form string (e.g. a line of git's stderr like
+# ``fatal: unable to access 'https://x-access-token:TOKEN@github.com/...': ...``).
+# Userinfo stops at the first ``/``, ``@``, whitespace, or quote, which are all
+# invalid in the unencoded userinfo and reliably terminate it.
+_URL_CREDENTIALS_IN_TEXT_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/@\s'\"]+@")
+
+
+def _redact_url_credentials_in_text(text: str) -> str:
+    """Strip ``user[:password]@`` userinfo from any ``scheme://...`` URL inside a string.
+
+    Used to redact credentials from git's streamed stdout/stderr and from
+    error messages, which often echo the full URL the user passed in. The
+    input is arbitrary text (not a valid URL), so we can't just urlsplit it.
+    SCP-style SSH URLs (``git@host:path``, no scheme) are left alone, matching
+    :func:`_redact_url_credentials`.
+    """
+    return _URL_CREDENTIALS_IN_TEXT_RE.sub(r"\1", text)
+
+
+class _RedactingOutputCallback(FrozenModel):
+    """OutputCallback wrapper that scrubs embedded credentials from each line.
+
+    Used by :func:`clone_git_repo` to forward git's streamed stdout/stderr to
+    the caller's callback with any ``scheme://user[:password]@...`` URLs
+    redacted.
+    """
+
+    inner: OutputCallback
+
+    def __call__(self, line: str, is_stdout: bool) -> None:
+        self.inner(_redact_url_credentials_in_text(line), is_stdout)
+
+
 def _is_git_worktree(repo_dir: Path) -> bool:
     """Check if a directory is a git worktree (not the main repo).
 
@@ -224,23 +293,32 @@ def clone_git_repo(
     When is_shallow is True, clones with --depth 1 to skip history.
     Raises GitCloneError if the clone fails.
     """
-    logger.debug("Cloning {} to {}", git_url, clone_dir)
+    logger.debug("Cloning {} to {}", _redact_url_credentials(str(git_url)), clone_dir)
     command = ["git", "clone"]
     if is_shallow:
         command.extend(["--depth", "1"])
     command.extend([str(git_url), str(clone_dir)])
+
+    # Wrap the caller's on_output so git's per-line stdout/stderr is scrubbed
+    # of embedded credentials before being forwarded. Git commonly echoes the
+    # full clone URL in error messages (e.g. `fatal: unable to access '...'`),
+    # which would otherwise leak tokens from credentialed URLs into logs.
+    redacted_on_output = _RedactingOutputCallback(inner=on_output) if on_output is not None else None
+
     cg = _make_child_cg("git-clone", parent_cg)
     with cg:
         result = cg.run_process_to_completion(
             command=command,
             is_checked_after=False,
-            on_output=on_output,
+            on_output=redacted_on_output,
         )
     if result.returncode != 0:
+        stderr = result.stderr.strip()
+        stdout = result.stdout.strip()
         raise GitCloneError(
             "git clone failed (exit code {}):\n{}".format(
                 result.returncode,
-                result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+                _redact_url_credentials_in_text(stderr if stderr else stdout),
             )
         )
 
@@ -1081,7 +1159,12 @@ class AgentCreator(MutableModel):
                 )
                 return
 
-            with log_span("Creating agent {} from {} (mode: {})", agent_id, repo_source, launch_mode):
+            with log_span(
+                "Creating agent {} from {} (mode: {})",
+                agent_id,
+                _redact_url_credentials(repo_source),
+                launch_mode,
+            ):
                 if _is_local_path(repo_source):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
                     if not resolved_path.is_dir():
@@ -1131,7 +1214,7 @@ class AgentCreator(MutableModel):
                     clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(repo_name)
                     if clone_target.exists():
                         shutil.rmtree(clone_target)
-                    log_queue.put("[minds] Cloning {}...".format(repo_source))
+                    log_queue.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
                     clone_git_repo(
                         GitUrl(repo_source),
                         clone_target,
@@ -1180,8 +1263,7 @@ class AgentCreator(MutableModel):
 
                 log_queue.put("[minds] Agent created successfully.")
 
-                port_suffix = ":{}".format(self.server_port) if self.server_port else ""
-                redirect_url = "http://{}.localhost{}/".format(agent_id, port_suffix)
+                redirect_url = "/goto/{}/".format(agent_id)
 
                 # Set DONE before invoking on_created so the UI can redirect as
                 # soon as the agent is usable. ``on_created`` is expected to
@@ -1195,7 +1277,7 @@ class AgentCreator(MutableModel):
                     on_created(agent_id)
 
         except (GitCloneError, GitOperationError, MngrCommandError, HostPoolError, ValueError, OSError) as e:
-            logger.error("Failed to create agent {}: {}", agent_id, e)
+            logger.opt(exception=e).error("Failed to create agent {}", agent_id)
             log_queue.put("[minds] ERROR: {}".format(e))
             with self._lock:
                 self._statuses[aid] = AgentCreationStatus.FAILED
@@ -1332,9 +1414,13 @@ class AgentCreator(MutableModel):
             try:
                 key_result = self.litellm_key_client.create_key(
                     access_token=access_token,
-                    key_alias="agent-{}".format(agent_id),
+                    key_alias=None,
                     max_budget=100.0,
                     budget_duration="1d",
+                    metadata={
+                        "agent_id": str(agent_id),
+                        "host_id": lease_result.host_id,
+                    },
                 )
                 litellm_key = key_result.key
                 litellm_base_url = key_result.base_url
@@ -1344,11 +1430,21 @@ class AgentCreator(MutableModel):
 
         api_key = generate_api_key()
         env_path = "/mngr/agents/{}/env".format(agent_id)
+        host_env_path = "/mngr/env"
 
         # Build the inject command for MINDS_API_KEY
         inject_minds_key_command = (
             "sed -i '/^MINDS_API_KEY=/d' {path} && echo 'MINDS_API_KEY={key}' >> {path}"
         ).format(path=env_path, key=api_key)
+
+        # Inject MNGR_PREFIX into the host env so the workspace server
+        # and all services inside the container use the correct prefix
+        mngr_prefix = os.environ.get("MNGR_PREFIX", "")
+        inject_prefix_command: str | None = None
+        if mngr_prefix:
+            inject_prefix_command = (
+                "sed -i '/^MNGR_PREFIX=/d' {path} && echo 'MNGR_PREFIX={prefix}' >> {path}"
+            ).format(path=host_env_path, prefix=mngr_prefix)
 
         # Build the inject command for ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL
         inject_anthropic_command: str | None = None
@@ -1356,7 +1452,7 @@ class AgentCreator(MutableModel):
             inject_anthropic_command = _build_inject_anthropic_command(
                 litellm_key=litellm_key,
                 litellm_base_url=litellm_base_url,
-                env_path=env_path,
+                env_path=host_env_path,
             )
 
         # Build the command to patch the claude config JSON to approve the new key
@@ -1417,12 +1513,22 @@ class AgentCreator(MutableModel):
                         on_output=emit_log,
                     )
 
+                prefix_proc = None
+                if inject_prefix_command is not None:
+                    prefix_proc = cg.run_process_in_background(
+                        command=[MNGR_BINARY, "exec", address, inject_prefix_command],
+                        is_checked_by_group=True,
+                        on_output=emit_log,
+                    )
+
                 label_proc.wait()
                 minds_key_proc.wait()
                 if anthropic_proc is not None:
                     anthropic_proc.wait()
                 if claude_config_proc is not None:
                     claude_config_proc.wait()
+                if prefix_proc is not None:
+                    prefix_proc.wait()
 
                 # Step 3: start
                 log_queue.put("[minds] Starting agent '{}'...".format(parsed_name))
@@ -1439,8 +1545,7 @@ class AgentCreator(MutableModel):
         log_queue.put("[minds] API key hash stored.")
         log_queue.put("[minds] Leased agent started successfully.")
 
-        port_suffix = ":{}".format(self.server_port) if self.server_port else ""
-        redirect_url = "http://{}.localhost{}/".format(agent_id, port_suffix)
+        redirect_url = "/goto/{}/".format(agent_id)
 
         # Set DONE before invoking on_created so the UI can redirect as soon
         # as the agent is actually usable. ``on_created`` is expected to

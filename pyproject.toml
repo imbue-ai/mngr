@@ -152,21 +152,27 @@ omit = [
     # Test utility modules contain helpers only used by tests
     "*/testing.py",
     "*/utils/plugin_testing.py",
-    "libs/imbue_common/imbue/imbue_common/ratchet_testing/ratchets.py",
+    "*/conftest_hooks.py",
+    "*/ratchet_testing/*",
     # Modal provider plugin requires network access for testing
     "libs/mngr_modal/imbue/mngr_modal/*",
     # Docker provider requires a Docker daemon for testing
     "libs/mngr/imbue/mngr/providers/docker/instance.py",
     "libs/mngr/imbue/mngr/providers/docker/volume.py",
-    "libs/mngr/imbue/mngr/providers/docker/testing.py",
     # Lima provider requires Lima/QEMU for full integration testing
     "libs/mngr_lima/imbue/mngr_lima/instance.py",
     "libs/mngr_lima/imbue/mngr_lima/limactl.py",
-    "libs/mngr_lima/imbue/mngr_lima/testing.py",
     # Mind deploy modules run on Modal and require infrastructure to test
     "apps/minds/imbue/minds/deploy/cron_runner.py",
     "apps/minds/imbue/minds/deploy/remote_runner.py",
     "apps/minds/imbue/minds/deploy/verification.py",
+    # Minds telegram/supertokens integrations require external services to test
+    "apps/minds/imbue/minds/telegram/credential_extractor.py",
+    "apps/minds/imbue/minds/telegram/bot_creator.py",
+    "apps/minds/imbue/minds/telegram/injector.py",
+    "apps/minds/imbue/minds/desktop_client/supertokens_routes.py",
+    # mngr_claude keychain sync requires a real macOS keychain to test
+    "libs/mngr_claude/imbue/mngr_claude/resources/sync_keychain_credentials.py",
     # Schedule plugin cron runner and verification run on Modal and require infrastructure to test
     "libs/mngr_schedule/imbue/mngr_schedule/implementations/modal/cron_runner.py",
     "libs/mngr_schedule/imbue/mngr_schedule/implementations/modal/verification.py",

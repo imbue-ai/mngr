@@ -37,6 +37,7 @@ def test_create_key_raises_on_connection_error() -> None:
             key_alias="test",
             max_budget=100.0,
             budget_duration="1d",
+            metadata=None,
         )
 
 
@@ -75,6 +76,7 @@ def test_create_key_happy_path(fake_key_server: LiteLLMKeyClient) -> None:
         key_alias="agent-test",
         max_budget=100.0,
         budget_duration="1d",
+        metadata={"agent_id": "agent-abc123", "host_id": "host-def456"},
     )
     assert isinstance(result, CreateKeyResult)
     assert result.key == "sk-litellm-test-virtual-key-0123456789abcdef"
@@ -87,6 +89,7 @@ def test_create_key_without_optional_params(fake_key_server: LiteLLMKeyClient) -
         key_alias=None,
         max_budget=None,
         budget_duration=None,
+        metadata=None,
     )
     assert isinstance(result, CreateKeyResult)
     assert result.key == "sk-litellm-test-virtual-key-0123456789abcdef"

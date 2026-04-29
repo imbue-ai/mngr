@@ -10,7 +10,6 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
@@ -40,6 +39,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
 class ErrorInfo(FrozenModel):
@@ -260,7 +260,7 @@ def _list_agents_batch(
 
     # Process each host and its agents in parallel
     futures: list[Future[None]] = []
-    with ConcurrencyGroupExecutor(
+    with mngr_executor(
         parent_cg=mngr_ctx.concurrency_group, name="list_agents_process_hosts", max_workers=32
     ) as executor:
         for host_ref, agent_refs in agents_by_host.items():
@@ -312,7 +312,7 @@ def _list_agents_streaming(
         providers = get_all_provider_instances(mngr_ctx, provider_names, reset_caches=reset_caches)
         logger.trace("Found {} provider instances", len(providers))
 
-        with ConcurrencyGroupExecutor(
+        with mngr_executor(
             parent_cg=mngr_ctx.concurrency_group, name="list_agents_streaming", max_workers=32
         ) as executor:
             streaming_futures: list[Future[None]] = []
@@ -355,7 +355,7 @@ def _discover_and_emit_details_for_provider(
 
         # Phase 2: immediately process hosts (fire on_agent for this provider)
         host_futures: list[Future[None]] = []
-        with ConcurrencyGroupExecutor(parent_cg=cg, name=f"stream_hosts_{provider.name}", max_workers=32) as executor:
+        with mngr_executor(parent_cg=cg, name=f"stream_hosts_{provider.name}", max_workers=32) as executor:
             for host_ref, agent_refs in provider_results.items():
                 if not agent_refs:
                     continue
@@ -381,7 +381,7 @@ def _discover_and_emit_details_for_provider(
             if isinstance(e, MngrError):
                 raise
             raise MngrError(str(e)) from e
-        logger.exception("Error discovering agents for provider {}", provider.name)
+        logger.opt(exception=e).error("Error discovering agents for provider {}", provider.name)
         emit_discovery_error_to_stdout(
             error_type=type(e).__name__,
             error_message=str(e),
@@ -467,7 +467,7 @@ def _process_host_with_error_handling(
             if isinstance(e, (MngrError, BaseMngrError)):
                 raise
             raise MngrError(str(e)) from e
-        logger.exception("Error processing host {}", host_ref.host_id)
+        logger.opt(exception=e).error("Error processing host {}", host_ref.host_id)
         emit_discovery_error_to_stdout(
             error_type=type(e).__name__,
             error_message=str(e),
@@ -501,26 +501,30 @@ def agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
     if result.get("runtime_seconds") is not None:
         result["runtime"] = result["runtime_seconds"]
 
-    # Add idle_seconds if available (computed from activity times)
-    if result.get("user_activity_time") or result.get("agent_activity_time"):
-        latest_activity = None
-        for activity_field in ["user_activity_time", "agent_activity_time", "ssh_activity_time"]:
-            activity_time = result.get(activity_field)
-            if activity_time:
-                if isinstance(activity_time, str):
-                    activity_dt = datetime.fromisoformat(activity_time.replace("Z", "+00:00"))
-                else:
-                    activity_dt = activity_time
-                if latest_activity is None or activity_dt > latest_activity:
-                    latest_activity = activity_dt
-        if latest_activity:
-            result["idle"] = (datetime.now(timezone.utc) - latest_activity).total_seconds()
+    # Add idle: seconds since the most recent activity across user, agent, and host SSH.
+    host_dict = result["host"] if isinstance(result.get("host"), dict) else None
+    activity_candidates = [
+        result.get("user_activity_time"),
+        result.get("agent_activity_time"),
+        host_dict.get("ssh_activity_time") if host_dict else None,
+    ]
+    latest_activity = None
+    for activity_time in activity_candidates:
+        if not activity_time:
+            continue
+        if isinstance(activity_time, str):
+            activity_dt = datetime.fromisoformat(activity_time.replace("Z", "+00:00"))
+        else:
+            activity_dt = activity_time
+        if latest_activity is None or activity_dt > latest_activity:
+            latest_activity = activity_dt
+    if latest_activity:
+        result["idle"] = (datetime.now(timezone.utc) - latest_activity).total_seconds()
 
-    # Normalize host.provider_name to host.provider for consistency
-    if result.get("host") and isinstance(result["host"], dict):
-        host = result["host"]
-        if "provider_name" in host:
-            host["provider"] = host.pop("provider_name")
+    # Expose host.provider_name as host.provider too, so CEL filters can use either name
+    # (host.provider is the documented short form; host.provider_name matches the data type)
+    if host_dict is not None and "provider_name" in host_dict:
+        host_dict["provider"] = host_dict["provider_name"]
 
     return result
 

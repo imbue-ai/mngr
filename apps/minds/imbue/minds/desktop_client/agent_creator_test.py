@@ -13,6 +13,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import PLACEHOLDER_ANTHROPIC_API_KEY
+from imbue.minds.desktop_client.agent_creator import _RedactingOutputCallback
 from imbue.minds.desktop_client.agent_creator import _build_inject_anthropic_command
 from imbue.minds.desktop_client.agent_creator import _build_latchkey_gateway_url
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
@@ -23,6 +24,8 @@ from imbue.minds.desktop_client.agent_creator import _leased_agent_address
 from imbue.minds.desktop_client.agent_creator import _load_lease_info
 from imbue.minds.desktop_client.agent_creator import _load_or_create_leased_host_keypair
 from imbue.minds.desktop_client.agent_creator import _make_host_name
+from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
+from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import _remove_dynamic_host_entry
 from imbue.minds.desktop_client.agent_creator import _remove_lease_info
 from imbue.minds.desktop_client.agent_creator import _save_lease_info
@@ -100,6 +103,96 @@ def test_is_local_path_tilde() -> None:
 def test_is_local_path_url() -> None:
     assert _is_local_path("https://github.com/user/repo.git") is False
     assert _is_local_path("git@github.com:user/repo.git") is False
+
+
+# -- _redact_url_credentials tests --
+
+
+def test_redact_url_credentials_strips_user_password() -> None:
+    assert (
+        _redact_url_credentials("https://x-access-token:ghp_secret@github.com/user/repo.git")
+        == "https://github.com/user/repo.git"
+    )
+
+
+def test_redact_url_credentials_leaves_plain_url_untouched() -> None:
+    assert _redact_url_credentials("https://github.com/user/repo.git") == "https://github.com/user/repo.git"
+
+
+def test_redact_url_credentials_leaves_ssh_url_untouched() -> None:
+    # SSH-style URLs (git@host:path) have no scheme, so urlsplit returns an
+    # empty netloc. The function must pass them through unchanged.
+    assert _redact_url_credentials("git@github.com:user/repo.git") == "git@github.com:user/repo.git"
+
+
+def test_redact_url_credentials_leaves_local_path_untouched() -> None:
+    assert _redact_url_credentials("/home/user/my-template") == "/home/user/my-template"
+
+
+# -- _redact_url_credentials_in_text tests --
+
+
+def test_redact_url_credentials_in_text_strips_embedded_url() -> None:
+    # Typical git stderr on auth failure -- we must scrub the token but keep
+    # the rest of the message for debuggability.
+    line = "fatal: unable to access 'https://x-access-token:ghp_secret@github.com/user/repo.git/': 403"
+    assert _redact_url_credentials_in_text(line) == "fatal: unable to access 'https://github.com/user/repo.git/': 403"
+
+
+def test_redact_url_credentials_in_text_leaves_plain_text_untouched() -> None:
+    assert _redact_url_credentials_in_text("no URLs here") == "no URLs here"
+    assert _redact_url_credentials_in_text("Cloning into 'my-repo'...") == "Cloning into 'my-repo'..."
+
+
+def test_redact_url_credentials_in_text_strips_multiple_urls() -> None:
+    text = "a https://u:p@host1/x and b https://user@host2/y"
+    assert _redact_url_credentials_in_text(text) == "a https://host1/x and b https://host2/y"
+
+
+def test_redact_url_credentials_in_text_leaves_bare_scp_url_untouched() -> None:
+    # SCP-style SSH URLs don't have a scheme, so the regex won't match and
+    # the user@host prefix (not a secret) is preserved.
+    assert (
+        _redact_url_credentials_in_text("cloning from git@github.com:user/repo.git")
+        == "cloning from git@github.com:user/repo.git"
+    )
+
+
+@pytest.mark.timeout(30)
+def test_clone_git_repo_redacts_credentials_in_error(tmp_path: Path) -> None:
+    """GitCloneError must not leak embedded credentials from git's stderr."""
+    # Point at a clearly-bogus credentialed URL; git will fail and echo the
+    # URL in its stderr. The raised error must have the token stripped.
+    # Bound the run time: git's default connect behaviour is unspecified and
+    # a restrictive-firewall configuration could otherwise let this hang.
+    dest = tmp_path / "dest"
+    secret_token = "ghp_thisshouldneverappear"
+    bad_url = f"https://x-access-token:{secret_token}@127.0.0.1:1/does-not-exist.git"
+    with pytest.raises(GitCloneError) as excinfo:
+        clone_git_repo(GitUrl(bad_url), dest)
+    assert secret_token not in str(excinfo.value)
+
+
+# -- _RedactingOutputCallback tests --
+
+
+def test_redacting_output_callback_redacts_and_forwards_is_stdout_flag() -> None:
+    """The wrapper must scrub credentials and pass the is_stdout flag through."""
+    received: list[tuple[str, bool]] = []
+
+    def inner(line: str, is_stdout: bool) -> None:
+        received.append((line, is_stdout))
+
+    wrapper = _RedactingOutputCallback(inner=inner)
+    # A line with an embedded credentialed URL -- userinfo must be stripped,
+    # and the is_stdout flag must be forwarded verbatim.
+    wrapper("fatal: unable to access 'https://x-access-token:ghp_secret@github.com/u/r.git/'", False)
+    # A line with no URL -- must pass through unchanged, with is_stdout=True preserved.
+    wrapper("Cloning into 'my-repo'...", True)
+    assert received == [
+        ("fatal: unable to access 'https://github.com/u/r.git/'", False),
+        ("Cloning into 'my-repo'...", True),
+    ]
 
 
 # -- _build_mngr_create_command tests --
@@ -1085,25 +1178,24 @@ def test_agent_creator_litellm_key_client_defaults_to_none(
     assert creator.litellm_key_client is None
 
 
-def test_build_inject_anthropic_command_replaces_placeholder_and_appends_base_url() -> None:
+def test_build_inject_anthropic_command_sets_key_and_base_url() -> None:
     cmd = _build_inject_anthropic_command(
         litellm_key="sk-litellm-real-key-abc123",
         litellm_base_url="https://proxy.modal.run/anthropic",
         env_path="/mngr/agents/test-id/env",
     )
-    assert PLACEHOLDER_ANTHROPIC_API_KEY in cmd
-    assert "sk-litellm-real-key-abc123" in cmd
+    assert "ANTHROPIC_API_KEY=sk-litellm-real-key-abc123" in cmd
     assert "ANTHROPIC_BASE_URL=https://proxy.modal.run/anthropic" in cmd
     assert "/mngr/agents/test-id/env" in cmd
 
 
-def test_build_inject_anthropic_command_uses_sed_replacement() -> None:
+def test_build_inject_anthropic_command_removes_old_values_first() -> None:
     cmd = _build_inject_anthropic_command(
         litellm_key="sk-test",
         litellm_base_url="https://example.com/anthropic",
         env_path="/tmp/env",
     )
-    assert cmd.startswith("sed -i")
+    assert "sed -i '/^ANTHROPIC_API_KEY=/d'" in cmd
     assert "sed -i '/^ANTHROPIC_BASE_URL=/d'" in cmd
 
 
@@ -1113,15 +1205,17 @@ def test_build_patch_claude_config_command_targets_correct_path() -> None:
         litellm_key="sk-litellm-real-key-xyz",
         agent_id=agent_id,
     )
-    expected_path = "/mngr/agents/{}/state/plugin/claude/anthropic/.claude.json".format(agent_id)
+    expected_path = "/mngr/agents/{}/plugin/claude/anthropic/.claude.json".format(agent_id)
     assert expected_path in cmd
-    assert PLACEHOLDER_ANTHROPIC_API_KEY in cmd
     assert "sk-litellm-real-key-xyz" in cmd
 
 
-def test_build_patch_claude_config_command_uses_sed() -> None:
+def test_build_patch_claude_config_command_uses_python_json() -> None:
     cmd = _build_patch_claude_config_command(
-        litellm_key="sk-test",
+        litellm_key="sk-test-key-0123456789",
         agent_id=AgentId(),
     )
-    assert cmd.startswith("sed -i")
+    assert "python3" in cmd
+    assert "primaryApiKey" in cmd
+    assert "customApiKeyResponses" in cmd
+    assert "sk-test-key-0123456789"[-20:] in cmd
