@@ -356,6 +356,11 @@ def _get_result_max_chars() -> int:
         logger.warning("Invalid MNGR_SUBAGENT_RESULT_MAX_CHARS={!r}; using default", raw)
         return _DEFAULT_RESULT_MAX_CHARS
     if value <= 0:
+        logger.warning(
+            "Non-positive MNGR_SUBAGENT_RESULT_MAX_CHARS={}; using default {}",
+            value,
+            _DEFAULT_RESULT_MAX_CHARS,
+        )
         return _DEFAULT_RESULT_MAX_CHARS
     return value
 
