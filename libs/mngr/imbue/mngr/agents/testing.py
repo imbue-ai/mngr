@@ -27,7 +27,6 @@ def create_test_agent(
     *,
     extra_data: Mapping[str, Any] | None = None,
     agent_class: type[BaseAgent[AgentTypeConfig]] = BaseAgent,
-    extra_init_kwargs: Mapping[str, Any] | None = None,
 ) -> BaseAgent[AgentTypeConfig]:
     """Create a test agent backed by a real local host filesystem.
 
@@ -38,8 +37,7 @@ def create_test_agent(
     fields, so callers can inject things like ``ready_timeout_seconds``.
 
     ``agent_class`` lets callers substitute a ``BaseAgent`` subclass (e.g. a
-    test stub that records calls). ``extra_init_kwargs`` are forwarded to the
-    constructor so subclasses with extra fields can be instantiated.
+    test stub that records calls).
     """
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
 
@@ -67,17 +65,14 @@ def create_test_agent(
     data_path = agent_dir / "data.json"
     data_path.write_text(json.dumps(data, indent=2))
 
-    init_kwargs: dict[str, Any] = {
-        "id": agent_id,
-        "name": agent_name,
-        "agent_type": resolved_type,
-        "work_dir": temp_work_dir,
-        "create_time": create_time,
-        "host_id": host.id,
-        "host": host,
-        "mngr_ctx": local_provider.mngr_ctx,
-        "agent_config": resolved_config,
-    }
-    if extra_init_kwargs is not None:
-        init_kwargs.update(extra_init_kwargs)
-    return agent_class(**init_kwargs)
+    return agent_class(
+        id=agent_id,
+        name=agent_name,
+        agent_type=resolved_type,
+        work_dir=temp_work_dir,
+        create_time=create_time,
+        host_id=host.id,
+        host=host,
+        mngr_ctx=local_provider.mngr_ctx,
+        agent_config=resolved_config,
+    )
