@@ -272,7 +272,14 @@ def test_rewrite_substitutes_output_and_cleans_up(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
 ) -> None:
-    """PostToolUse hook swaps the tool output with the harvested result and cleans up."""
+    """PostToolUse hook destroys the child and cleans up per-tool_use_id state files.
+
+    The hook emits no stdout: output substitution for the parent's Task
+    tool_result happens via Haiku's own final reply (the wait-script in
+    hooks/spawn.py prints the body and Haiku echoes it verbatim), not via
+    this hook -- Claude Code's PostToolUse ``updatedToolOutput`` is
+    MCP-only and does not apply to built-in tools.
+    """
     state_dir = tmp_path / "state"
     for sub in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
         (state_dir / sub).mkdir(parents=True)
