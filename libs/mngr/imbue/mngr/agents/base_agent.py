@@ -17,9 +17,14 @@ from typing import Sequence
 
 from loguru import logger
 from pydantic import Field
+from tenacity import retry
+from tenacity import retry_if_exception_type
+from tenacity import stop_after_attempt
+from tenacity import wait_fixed
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import CorruptedAgentDataError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
@@ -145,17 +150,28 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """Get the path to the agent's data.json file."""
         return self._get_agent_dir() / "data.json"
 
+    @retry(
+        retry=retry_if_exception_type(json.JSONDecodeError),
+        stop=stop_after_attempt(3),
+        wait=wait_fixed(3),
+        reraise=True,
+    )
+    def _read_data_with_retry(self) -> dict[str, Any]:
+        content = self.host.read_text_file(self._get_data_path())
+        return json.loads(content)
+
     def _read_data(self) -> dict[str, Any]:
         """Read the agent's data.json file."""
         try:
-            content = self.host.read_text_file(self._get_data_path())
-            return json.loads(content)
+            return self._read_data_with_retry()
         except FileNotFoundError:
             return {}
+        except json.JSONDecodeError as e:
+            raise CorruptedAgentDataError(self.id, self._get_data_path(), e) from e
 
     def _write_data(self, data: dict[str, Any]) -> None:
         """Write the agent's data.json file and persist to external storage."""
-        self.host.write_text_file(self._get_data_path(), json.dumps(data, indent=2))
+        self.host.write_file(self._get_data_path(), json.dumps(data, indent=2).encode(), is_atomic=True)
 
         # Persist agent data to external storage (e.g., Modal volume)
         self.host.save_agent_data(self.id, data)

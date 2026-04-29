@@ -5,39 +5,15 @@ with @pytest.mark.release and @pytest.mark.timeout(600).
 """
 
 import json
-import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr_schedule.implementations.modal.deploy import get_modal_app_name
+from imbue.mngr_schedule.testing import build_subprocess_env
 from imbue.mngr_schedule.testing import cleanup_modal_app
-from imbue.mngr_schedule.testing import load_modal_creds_from_home
 from imbue.mngr_schedule.testing import resolve_modal_environment
-
-
-def _build_subprocess_env() -> dict[str, str]:
-    """Build environment for subprocess calls that need Modal credentials.
-
-    Always keeps the autouse-set HOME / MNGR_HOST_DIR / MNGR_ROOT_NAME so
-    the subprocess mngr operates on the isolated tmp profile (not loading
-    the repo's .mngr/settings.toml, which would trip is_allowed_in_pytest,
-    and keeping the host_dir under $HOME so get_files_for_deploy's
-    relative_to(user_home) call doesn't blow up). Modal credentials come
-    from env vars in CI/offload; locally we fall back to reading them out
-    of the developer's ~/.modal.toml and passing them in as
-    MODAL_TOKEN_ID/MODAL_TOKEN_SECRET so HOME can remain isolated.
-    """
-    env = os.environ.copy()
-    has_modal_env_creds = "MODAL_TOKEN_ID" in env and "MODAL_TOKEN_SECRET" in env
-    if not has_modal_env_creds:
-        env.update(load_modal_creds_from_home())
-    # Ensure the prefix starts with mngr_test- so the Modal backend's guard
-    # accepts it and the cleanup script can identify these environments.
-    env["MNGR_PREFIX"] = f"{generate_test_environment_name()}-"
-    return env
 
 
 @pytest.mark.release
@@ -53,7 +29,7 @@ def test_schedule_add_deploys_to_modal(monorepo_root: Path) -> None:
     """
     trigger_name = "test-schedule-add"
     app_name = get_modal_app_name(trigger_name)
-    env = _build_subprocess_env()
+    env = build_subprocess_env()
 
     result: subprocess.CompletedProcess[str] | None = None
     try:
@@ -101,7 +77,7 @@ def test_schedule_add_deploys_to_modal(monorepo_root: Path) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(1200)
+@pytest.mark.timeout(900)
 def test_schedule_add_with_verification(monorepo_root: Path) -> None:
     """Test that schedule add with quick verification deploys and verifies.
 
@@ -114,7 +90,7 @@ def test_schedule_add_with_verification(monorepo_root: Path) -> None:
     """
     trigger_name = "test-schedule-verify"
     app_name = get_modal_app_name(trigger_name)
-    env = _build_subprocess_env()
+    env = build_subprocess_env()
 
     result: subprocess.CompletedProcess[str] | None = None
     try:
@@ -141,7 +117,7 @@ def test_schedule_add_with_verification(monorepo_root: Path) -> None:
             ],
             capture_output=True,
             text=True,
-            timeout=1200,
+            timeout=900,
             env=env,
             cwd=monorepo_root,
         )
@@ -173,7 +149,7 @@ def test_schedule_list_shows_deployed_schedule(monorepo_root: Path) -> None:
     """
     trigger_name = "test-schedule-list"
     app_name = get_modal_app_name(trigger_name)
-    env = _build_subprocess_env()
+    env = build_subprocess_env()
 
     add_result: subprocess.CompletedProcess[str] | None = None
     try:

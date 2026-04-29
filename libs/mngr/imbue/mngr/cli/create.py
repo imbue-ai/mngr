@@ -37,6 +37,7 @@ from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import get_host_from_list_by_id
 from imbue.mngr.api.find import parse_source_string
 from imbue.mngr.api.find import resolve_source_location
+from imbue.mngr.api.gc import register_generated_source_dir
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import is_param_explicit
@@ -97,12 +98,15 @@ from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr.utils.editor import EditorSession
+from imbue.mngr.utils.git_utils import clone_git_url_to_managed_dir
 from imbue.mngr.utils.git_utils import find_git_worktree_root
 from imbue.mngr.utils.git_utils import get_current_git_branch
+from imbue.mngr.utils.git_utils import is_git_url
 from imbue.mngr.utils.git_utils import parse_project_name_from_url
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.logging import LoggingSuppressor
 from imbue.mngr.utils.name_generator import generate_agent_name
+from imbue.mngr.utils.name_generator import pick_agent_name_hint
 
 _DEFAULT_NEW_BRANCH_PATTERN: Final[str] = "mngr/*"
 _RECOVERED_MESSAGE_FILENAME: Final[str] = "recovered-message.txt"
@@ -396,7 +400,12 @@ class _CreateCommand(click.Command):
     "--from",
     "--source",
     "source",
-    help="Source data for the agent [AGENT[@HOST[.PROVIDER]][:PATH] | @HOST:PATH | :PATH]. A bare name refers to an agent; use :PATH for a directory. Defaults to git root if omitted",
+    help=(
+        "Source data for the agent [AGENT[@HOST[.PROVIDER]][:PATH] | @HOST:PATH | :PATH | GIT_URL]. "
+        "A bare name refers to an agent; use :PATH for a directory. GIT_URL (e.g. "
+        "https://github.com/owner/repo or git@gitlab.com:owner/repo.git) is cloned to "
+        "~/.mngr/clones/<name>-<id>/ using local git auth. Defaults to git root if omitted"
+    ),
 )
 @optgroup.option(
     "--rsync/--no-rsync",
@@ -1229,6 +1238,17 @@ def _resolve_source_location(
         host = provider.get_host(HostName(LOCAL_HOST_NAME))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
         return ResolvedSource(location=HostLocation(host=online_host, path=Path(source_path)))
+
+    # Git URL: clone to a managed directory and treat as a local path
+    if is_git_url(opts.source):
+        provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
+        host = provider.get_host(HostName(LOCAL_HOST_NAME))
+        online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
+        clones_base = online_host.host_dir / "clones"
+        name_hint = pick_agent_name_hint(opts.positional_name, opts.name, parse_project_name_from_url(opts.source))
+        cloned_path = clone_git_url_to_managed_dir(opts.source, clones_base, name_hint, mngr_ctx.concurrency_group)
+        register_generated_source_dir(online_host, cloned_path)
+        return ResolvedSource(location=HostLocation(host=online_host, path=cloned_path))
 
     # Parse the --from string once
     parsed = parse_source_string(opts.source)

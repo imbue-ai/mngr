@@ -14,6 +14,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from imbue.mngr.utils.testing import generate_test_environment_name
+
 # Read the real home directory at import time, BEFORE any autouse fixture
 # overrides HOME. We do NOT pass real HOME to subprocesses: doing so leaves
 # them in a split-brain state where HOME points at the developer's real home
@@ -77,7 +79,7 @@ def load_modal_creds_from_home() -> dict[str, str]:
 
 
 def build_subprocess_env() -> dict[str, str]:
-    """Build environment for subprocess calls that need real Modal credentials.
+    """Build environment for subprocess calls that need Modal credentials.
 
     Keeps the test-isolated HOME so subprocess plugin code that assumes the
     mngr host_dir lives under $HOME (e.g. get_files_for_deploy's
@@ -86,23 +88,24 @@ def build_subprocess_env() -> dict[str, str]:
     the developer's ~/.modal.toml and passing them in as
     MODAL_TOKEN_ID/MODAL_TOKEN_SECRET so HOME can remain isolated.
 
-    Sets MNGR_ROOT_NAME to an isolated value so mngr does NOT load the
-    user's personal profile (which may contain plugin config fields
-    incompatible with the deployed mngr version).
+    Keeps the autouse-set MNGR_HOST_DIR / MNGR_ROOT_NAME so the subprocess
+    mngr operates on an isolated tmp profile and does not load the repo's
+    .mngr/settings.toml (which would trip the is_allowed_in_pytest=false
+    guard). The Modal SSH key will be auto-generated on first use inside
+    the tmp profile.
+
+    Deliberately does NOT strip PYTEST_CURRENT_TEST: the Modal backend's
+    TEST_ENV_PATTERN guard and the config is_allowed_in_pytest check rely
+    on that marker, and evading them has leaked un-sweepable Modal envs
+    in the past.
     """
     env = os.environ.copy()
     has_modal_env_creds = "MODAL_TOKEN_ID" in env and "MODAL_TOKEN_SECRET" in env
     if not has_modal_env_creds:
         env.update(load_modal_creds_from_home())
-    # Use an isolated mngr config namespace so we don't load the user's
-    # personal settings (e.g. kanpan plugin config that the container
-    # mngr version may not understand).
-    env["MNGR_ROOT_NAME"] = "mngr-schedule-test"
-    # Remove other test isolation vars
-    env.pop("MNGR_HOST_DIR", None)
-    env.pop("MNGR_PREFIX", None)
-    # Remove pytest marker so mngr doesn't reject the call
-    env.pop("PYTEST_CURRENT_TEST", None)
+    # Ensure the prefix starts with mngr_test- so the Modal backend's guard
+    # accepts it and the cleanup script can identify these environments.
+    env["MNGR_PREFIX"] = f"{generate_test_environment_name()}-"
     return env
 
 
