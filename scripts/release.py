@@ -138,23 +138,31 @@ def _confirm_new_packages(new_packages: set[str], current_versions: dict[str, st
             confirmed.add(name)
         else:
             print(f"  Skipping {name}.")
-    if confirmed:
-        print()
-        print("=" * 72)
-        print("ACTION REQUIRED: register a pending Trusted Publisher on PyPI for each")
-        print("new package before the publish workflow runs:")
-        for name in sorted(confirmed):
-            print(f"  - {name}")
-        print()
-        print("  https://pypi.org/manage/account/publishing/")
-        print()
-        print("WARNING: PyPI only allows ONE pending publisher per account at a time.")
-        print("If multiple new packages are released in the same tag, the publish")
-        print("workflow will fail on each unregistered package in turn. You will need")
-        print("to register the next pending publisher and re-run the failed workflow")
-        print("ONCE PER NEW PACKAGE until all are published.")
-        print("=" * 72)
     return confirmed
+
+
+def _print_trusted_publisher_warning(confirmed_new: set[str]) -> None:
+    """Print a reminder to register pending Trusted Publishers for each new package.
+
+    No-op when `confirmed_new` is empty.
+    """
+    if not confirmed_new:
+        return
+    print()
+    print("=" * 72)
+    print("ACTION REQUIRED: register a pending Trusted Publisher on PyPI for each")
+    print("new package before the publish workflow runs:")
+    for name in sorted(confirmed_new):
+        print(f"  - {name}")
+    print()
+    print("  https://pypi.org/manage/account/publishing/")
+    print()
+    print("WARNING: PyPI only allows ONE pending publisher per account at a time.")
+    print("If multiple new packages are released in the same tag, the publish")
+    print("workflow will fail on each unregistered package in turn. You will need")
+    print("to register the next pending publisher and re-run the failed workflow")
+    print("ONCE PER NEW PACKAGE until all are published.")
+    print("=" * 72)
 
 
 def _cascade_reverse_deps(
@@ -553,6 +561,7 @@ def main() -> None:
     current_versions = get_package_versions()
     if new_packages and not args.dry_run:
         confirmed_new = _confirm_new_packages(new_packages, current_versions)
+        _print_trusted_publisher_warning(confirmed_new)
     elif new_packages:
         # In dry-run mode, assume all new packages are confirmed for the preview
         confirmed_new = new_packages
