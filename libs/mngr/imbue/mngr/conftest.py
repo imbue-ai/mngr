@@ -123,12 +123,14 @@ def log_warnings() -> Generator[list[str], None, None]:
     """
     messages: list[str] = []
     handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
-    yield messages
     try:
-        logger.remove(handler_id)
-    except ValueError:
-        # setup_logging() already removed our handler; nothing to clean up.
-        pass
+        yield messages
+    finally:
+        try:
+            logger.remove(handler_id)
+        except ValueError:
+            # setup_logging() already removed our handler; nothing to clean up.
+            pass
 
 
 @pytest.fixture
