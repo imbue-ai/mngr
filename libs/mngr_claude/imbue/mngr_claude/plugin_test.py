@@ -1,4 +1,5 @@
 import json
+import shlex
 import subprocess
 from contextlib import contextmanager
 from datetime import datetime
@@ -439,6 +440,22 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     )
 
 
+def test_claude_agent_assemble_command_quotes_agent_args_with_shell_metacharacters(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Agent args containing shell metacharacters must survive shell parsing as single tokens."""
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    prompt = "respond with only the word HELLO; echo pwned & rm -rf $HOME"
+
+    command = agent.assemble_command(host=host, agent_args=("--model", "opus", prompt), command_override=None)
+
+    # The command ends with "|| {create_cmd}" where create_cmd is the last shell statement.
+    # Split on "||" and shlex-parse the tail to confirm the prompt arrived intact.
+    create_cmd_segment = str(command).rsplit("||", 1)[1]
+    tokens = shlex.split(create_cmd_segment)
+    assert prompt in tokens, f"prompt should be a single token after shell parsing, got tokens={tokens!r}"
+
+
 # =============================================================================
 # Activity Updater Tests
 # =============================================================================
@@ -575,7 +592,7 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
 
     # Second hook: echoes the base branch for the agent's context
     assert hooks[1]["type"] == "command"
-    assert "GIT_BASE_BRANCH" in hooks[1]["command"]
+    assert "MNGR_GIT_BASE_BRANCH" in hooks[1]["command"]
 
     # Third hook: tracks current session ID for session replacement detection
     session_id_hook = hooks[2]["command"]
@@ -3832,3 +3849,28 @@ def test_write_generated_files_breaks_symlink_before_writing(tmp_path: Path, tem
     assert symlink.read_text() == rewritten_content
     # The original source file must NOT be modified
     assert json.loads(source_file.read_text()) == {"original": True}
+
+
+# =============================================================================
+# modify_env_vars Tests
+# =============================================================================
+
+
+def test_modify_env_vars_sets_claude_config_dirs(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """modify_env_vars always writes CLAUDE_CONFIG_DIR and ORIGINAL_CLAUDE_CONFIG_DIR."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert env_vars["CLAUDE_CONFIG_DIR"] == str(agent.get_claude_config_dir())
+    # ORIGINAL_CLAUDE_CONFIG_DIR points at the user's real ~/.claude dir -- we
+    # only assert it is set to a non-empty string; the exact path depends on
+    # the running user's $HOME and is not load-bearing for this test.
+    assert env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"]

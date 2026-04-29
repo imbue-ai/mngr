@@ -6,7 +6,6 @@ import pytest
 
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import poll_until
-from imbue.mngr.utils.polling import run_periodically
 from imbue.mngr.utils.polling import wait_for
 
 
@@ -104,49 +103,3 @@ def test_wait_for_custom_error_message() -> None:
     """wait_for should use custom error message."""
     with pytest.raises(TimeoutError, match="Custom error"):
         wait_for(lambda: False, timeout=0.1, poll_interval=0.05, error_message="Custom error")
-
-
-class _StopIteration(Exception):
-    """Raised by test callbacks to break out of run_periodically."""
-
-
-def test_run_periodically_calls_fn_repeatedly() -> None:
-    """run_periodically should call fn repeatedly until an exception propagates."""
-    call_count = [0]
-
-    def fn() -> None:
-        call_count[0] += 1
-        if call_count[0] >= 3:
-            raise _StopIteration()
-
-    with pytest.raises(_StopIteration):
-        run_periodically(fn, interval=0.05)
-
-    assert call_count[0] == 3
-
-
-def test_run_periodically_respects_interval() -> None:
-    """run_periodically should wait the specified interval between calls."""
-    timestamps: list[float] = []
-
-    def fn() -> None:
-        timestamps.append(time.monotonic())
-        if len(timestamps) >= 2:
-            raise _StopIteration()
-
-    with pytest.raises(_StopIteration):
-        run_periodically(fn, interval=0.3)
-
-    assert len(timestamps) == 2
-    gap = timestamps[1] - timestamps[0]
-    assert gap >= 0.25, f"Expected gap >= 0.25s (interval=0.3), got {gap:.2f}s"
-
-
-def test_run_periodically_propagates_exceptions() -> None:
-    """run_periodically should let exceptions from fn propagate."""
-
-    def fn() -> None:
-        raise _StopIteration()
-
-    with pytest.raises(_StopIteration):
-        run_periodically(fn, interval=0.05)

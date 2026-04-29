@@ -43,6 +43,22 @@
         {% endif %}
       {% endif %}
 
+      <h2 class="text-sm font-medium text-zinc-600 mt-8 mb-3 pt-5 border-t border-zinc-200">Danger zone</h2>
+      <p class="text-sm text-zinc-500 mb-3">Permanently destroy this project and release any associated resources.</p>
+      {{ ui.btn_button('Destroy project', variant='danger', id='destroy-btn') }}
+      <span id="destroy-spinner" class="hidden text-zinc-500 ml-2">Destroying...</span>
+
+      <div id="destroy-dialog" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+        <div class="bg-white rounded-xl shadow-lg border border-zinc-200 max-w-sm w-full mx-4 p-6">
+          <h2 class="text-lg font-semibold text-zinc-900 mb-3">Destroy project?</h2>
+          <p class="text-sm text-zinc-600 mb-4">This will permanently destroy <strong>{{ ws_name }}</strong> and all its data. This action cannot be undone.</p>
+          <div class="flex justify-end gap-3">
+            {{ ui.btn_button('Cancel', variant='secondary', id='destroy-cancel-btn') }}
+            {{ ui.btn_button('Destroy', variant='danger', id='destroy-confirm-btn') }}
+          </div>
+        </div>
+      </div>
+
       <div class="mt-8">
         <a href="/" class="text-blue-600 hover:underline">&larr; Back to projects</a>
       </div>
@@ -51,4 +67,64 @@
 {% endblock %}
 {% block scripts %}
   <script src="/_static/workspace_settings.js" defer></script>
+  <script>
+    (function() {
+      var destroyBtn = document.getElementById('destroy-btn');
+      var destroyDialog = document.getElementById('destroy-dialog');
+      var destroyCancelBtn = document.getElementById('destroy-cancel-btn');
+      var destroyConfirmBtn = document.getElementById('destroy-confirm-btn');
+      var destroySpinner = document.getElementById('destroy-spinner');
+      var agentId = document.getElementById('workspace-settings').dataset.agentId;
+
+      destroyBtn.addEventListener('click', function() {
+        destroyDialog.classList.remove('hidden');
+      });
+      destroyCancelBtn.addEventListener('click', function() {
+        destroyDialog.classList.add('hidden');
+      });
+      destroyDialog.addEventListener('click', function(e) {
+        if (e.target === destroyDialog) destroyDialog.classList.add('hidden');
+      });
+      function pollDestroyStatus() {
+        fetch('/api/destroy-agent/' + agentId + '/status')
+          .then(function(resp) { return resp.json(); })
+          .then(function(data) {
+            if (data.status === 'done') {
+              window.location.href = '/';
+            } else if (data.status === 'failed') {
+              destroySpinner.classList.add('hidden');
+              destroyBtn.disabled = false;
+              alert('Failed to destroy: ' + (data.error || 'unknown error'));
+            } else {
+              setTimeout(pollDestroyStatus, 1000);
+            }
+          })
+          .catch(function() { setTimeout(pollDestroyStatus, 1000); });
+      }
+
+      destroyConfirmBtn.addEventListener('click', function() {
+        destroyDialog.classList.add('hidden');
+        destroyBtn.disabled = true;
+        destroySpinner.classList.remove('hidden');
+        fetch('/api/destroy-agent/' + agentId, { method: 'POST' })
+          .then(function(resp) { return resp.json(); })
+          .then(function(data) {
+            if (data.status === 'destroying') {
+              pollDestroyStatus();
+            } else if (data.status === 'done') {
+              window.location.href = '/';
+            } else {
+              destroySpinner.classList.add('hidden');
+              destroyBtn.disabled = false;
+              alert('Failed to destroy: ' + (data.error || 'unknown error'));
+            }
+          })
+          .catch(function() {
+            destroySpinner.classList.add('hidden');
+            destroyBtn.disabled = false;
+            alert('Failed to destroy project');
+          });
+      });
+    })();
+  </script>
 {% endblock %}

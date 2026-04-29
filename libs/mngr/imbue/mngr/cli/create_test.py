@@ -30,6 +30,7 @@ from imbue.mngr.cli.create import _parse_project_name
 from imbue.mngr.cli.create import _parse_target_host
 from imbue.mngr.cli.create import _rescue_editor_content
 from imbue.mngr.cli.create import _resolve_agent_type_name
+from imbue.mngr.cli.create import _resolve_initial_message_content
 from imbue.mngr.cli.create import _resolve_source_location
 from imbue.mngr.cli.create import _resolve_target_host
 from imbue.mngr.cli.create import _split_address_and_target_path
@@ -62,6 +63,21 @@ from imbue.mngr.utils.editor import EditorSession
 from imbue.mngr.utils.logging import LoggingSuppressor
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
+
+
+def _write_agent_type_command_to_settings(settings_path: Path, type_name: str, command: str) -> None:
+    """Register ``type_name`` with ``command`` in ``settings.toml`` for tests.
+
+    Inlines the load / setdefault("agent_types") / save dance so tests that
+    declare a lightweight agent type do not need a top-level helper.
+    """
+    settings_doc = load_config_file_tomlkit(settings_path)
+    agent_types = settings_doc.setdefault("agent_types", tomlkit.table())
+    type_table = tomlkit.table()
+    type_table["command"] = command
+    agent_types[type_name] = type_table
+    save_config_file(settings_path, settings_doc)
+
 
 # =============================================================================
 # Tests for _CreateCommand.parse_args (-- passthrough arg handling)
@@ -478,6 +494,33 @@ def test_resolve_source_location_with_auto_start_enabled(
     assert result.agent is None
 
 
+def test_resolve_source_location_clones_git_url(
+    default_create_cli_opts: CreateCliOptions,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+    temp_git_repo: Path,
+) -> None:
+    """A git URL --source is cloned to <host_dir>/clones/<name>-<hex>/ and resolved to that path."""
+    url = f"file://{temp_git_repo}"
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().source, url),
+        to_update(default_create_cli_opts.field_ref().positional_name, "clone-target"),
+    )
+
+    result = _resolve_source_location(
+        opts,
+        agent_and_host_loader=lambda: {},
+        mngr_ctx=temp_mngr_ctx,
+        is_start_desired=True,
+    )
+
+    assert isinstance(result.location.host, OnlineHostInterface)
+    assert result.location.path.parent == temp_host_dir / "clones"
+    assert result.location.path.name.startswith("clone-target-")
+    assert (result.location.path / ".git").exists()
+    assert result.agent is None
+
+
 def test_resolve_target_host_with_auto_start_enabled(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -725,7 +768,49 @@ def test_resolve_agent_type_name_all_none() -> None:
 
 
 # =============================================================================
-# Tests for _create_headless
+# Tests for _resolve_initial_message_content (shared between headless + non-headless)
+# =============================================================================
+
+
+def test_resolve_initial_message_content_from_message(default_create_cli_opts: CreateCliOptions) -> None:
+    """--message is returned verbatim."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().message, "do the thing"),
+    )
+    assert _resolve_initial_message_content(opts) == "do the thing"
+
+
+def test_resolve_initial_message_content_from_file(default_create_cli_opts: CreateCliOptions, tmp_path: Path) -> None:
+    """--message-file contents are returned."""
+    message_path = tmp_path / "msg.txt"
+    message_path.write_text("from file")
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().message_file, str(message_path)),
+    )
+    assert _resolve_initial_message_content(opts) == "from file"
+
+
+def test_resolve_initial_message_content_none(default_create_cli_opts: CreateCliOptions) -> None:
+    """Neither flag set returns None."""
+    assert _resolve_initial_message_content(default_create_cli_opts) is None
+
+
+def test_resolve_initial_message_content_rejects_both(
+    default_create_cli_opts: CreateCliOptions, tmp_path: Path
+) -> None:
+    """--message and --message-file together raise UserInputError."""
+    message_path = tmp_path / "msg.txt"
+    message_path.write_text("from file")
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().message, "inline"),
+        to_update(default_create_cli_opts.field_ref().message_file, str(message_path)),
+    )
+    with pytest.raises(UserInputError, match="Cannot provide both --message and --message-file"):
+        _resolve_initial_message_content(opts)
+
+
+# =============================================================================
+# Tests for the headless CLI flow (create --foreground)
 # =============================================================================
 
 
@@ -734,26 +819,75 @@ def test_create_headless_streams_output(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     temp_host_dir: Path,
+    tmp_path: Path,
 ) -> None:
     """Creating a headless_command agent with --foreground should stream output.
 
     Registers a custom headless_command-based agent type with a specific command
-    via settings.toml (since --command is not a CLI flag).
+    via settings.toml (since --command is not a CLI flag). Uses an explicit
+    --source + --transfer=none to avoid depending on being inside a git repo
+    and to skip transfer (the shared path would otherwise try to rsync the
+    source dir, which is slow and unnecessary for a one-line ``echo`` agent).
     """
     profile_dir = get_or_create_profile_dir(temp_host_dir)
-    settings_path = profile_dir / "settings.toml"
-    settings_doc = load_config_file_tomlkit(settings_path)
-    agent_types = settings_doc.setdefault("agent_types", tomlkit.table())
-    type_table = tomlkit.table()
-    type_table["command"] = "echo headless-test-output"
-    agent_types["headless_command"] = type_table
-    save_config_file(settings_path, settings_doc)
+    _write_agent_type_command_to_settings(
+        profile_dir / "settings.toml", "headless_command", "echo headless-test-output"
+    )
+    source_dir = tmp_path / "headless-src"
+    source_dir.mkdir()
     result = cli_runner.invoke(
         create,
         [
             "--type",
             "headless_command",
             "--foreground",
+            "--source",
+            str(source_dir),
+            "--transfer",
+            "none",
+        ],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, f"CLI failed: {result.output}"
+    assert "headless-test-output" in result.output
+
+
+@pytest.mark.tmux
+def test_create_headless_with_message_does_not_raise(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_host_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Passing --message on the headless path must not blow up in api_create.
+
+    Headless agents cannot receive a message via wait_for_ready_signal +
+    send_message (both raise), so api_create must take the headless branch
+    and deliver the prompt through stage_initial_message instead. The
+    agent command here (a plain ``echo``) ignores the prompt file
+    (headless_command has no prompt semantics); the test is purely
+    checking that the flow completes when --message is supplied.
+    """
+    profile_dir = get_or_create_profile_dir(temp_host_dir)
+    _write_agent_type_command_to_settings(
+        profile_dir / "settings.toml", "headless_command", "echo headless-test-output"
+    )
+    source_dir = tmp_path / "headless-src"
+    source_dir.mkdir()
+    result = cli_runner.invoke(
+        create,
+        [
+            "--type",
+            "headless_command",
+            "--foreground",
+            "--source",
+            str(source_dir),
+            "--transfer",
+            "none",
+            "--message",
+            "user message body",
         ],
         obj=plugin_manager,
         catch_exceptions=False,
@@ -772,16 +906,20 @@ def test_create_headless_rejects_incompatible_flags(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Headless agent types should reject flags that don't apply to the headless flow."""
+    """Headless agent types should reject flags that don't apply to the headless flow.
+
+    Uses --reconnect, which is specific to the post-create connect/attach phase
+    that headless skips.
+    """
     result = cli_runner.invoke(
         create,
-        ["--type", "headless_command", "--foreground", "--env", "FOO=bar"],
+        ["--type", "headless_command", "--foreground", "--reconnect"],
         obj=plugin_manager,
     )
 
     assert result.exit_code != 0
     assert "does not support" in result.output
-    assert "--env" in result.output
+    assert "--reconnect" in result.output
 
 
 def test_create_headless_rejects_explicit_connect(
@@ -806,18 +944,19 @@ def test_create_headless_allows_no_connect(
 ) -> None:
     """--no-connect is redundant with headless (which never connects) and should be allowed.
 
-    Checks the error message for a different flag (--env) to verify --connect/--no-connect
-    are not listed as incompatible when --no-connect is passed.
+    Pairs --no-connect with --reconnect (still incompatible) so the validator
+    runs and we can confirm the incompatibility listing mentions --reconnect
+    but not --connect/--no-connect.
     """
     result = cli_runner.invoke(
         create,
-        ["--type", "headless_command", "--foreground", "--no-connect", "--env", "FOO=bar"],
+        ["--type", "headless_command", "--foreground", "--no-connect", "--reconnect"],
         obj=plugin_manager,
     )
 
     assert result.exit_code != 0
-    assert "--env" in result.output
-    assert "--connect" not in result.output
+    assert "--reconnect" in result.output
+    assert "--connect/" not in result.output
     assert "--no-connect" not in result.output
 
 
@@ -832,19 +971,57 @@ def test_create_headless_rejects_multiple_incompatible_flags(
             "--type",
             "headless_command",
             "--foreground",
-            "--message",
-            "hi",
+            "--reconnect",
             "--reuse",
-            "--env",
-            "FOO=bar",
+            "--start-on-boot",
         ],
         obj=plugin_manager,
     )
 
     assert result.exit_code != 0
-    assert "--env" in result.output
-    assert "--message" in result.output
+    assert "--reconnect" in result.output
     assert "--reuse" in result.output
+    assert "--start-on-boot" in result.output
+
+
+@pytest.mark.parametrize(
+    "no_form_flag",
+    [
+        "--no-reconnect",
+        "--no-reuse",
+        "--no-update",
+        "--no-start-on-boot",
+    ],
+)
+def test_create_headless_allows_no_forms_of_boolean_pair_flags(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    no_form_flag: str,
+) -> None:
+    """The --no-* forms of boolean-pair flags are redundant with headless and should be allowed.
+
+    Matches the --no-connect treatment: headless already does not
+    connect/reconnect/reuse/update/start-on-boot, so the --no-* form is a
+    redundant-but-compatible assertion, not a conflict. Pairs each
+    allowed flag with --attach-command (still rejected) so the validator
+    runs and we can confirm the allowed flag is not in the error listing.
+    """
+    result = cli_runner.invoke(
+        create,
+        [
+            "--type",
+            "headless_command",
+            "--foreground",
+            no_form_flag,
+            "--attach-command",
+            "tmux attach",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--attach-command" in result.output
+    assert no_form_flag not in result.output
 
 
 def test_create_headless_rejects_conflicting_positional_and_type_flag(
@@ -860,39 +1037,6 @@ def test_create_headless_rejects_conflicting_positional_and_type_flag(
 
     assert result.exit_code != 0
     assert "Conflicting agent types" in result.output
-
-
-@pytest.mark.parametrize(
-    "flag_args,expected_in_error",
-    [
-        (["--id", "abc123"], "--id"),
-        (["--label", "key=value"], "--label"),
-        (["--project", "myproj"], "--project"),
-    ],
-)
-def test_create_headless_rejects_agent_metadata_flags(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-    flag_args: list[str],
-    expected_in_error: str,
-) -> None:
-    """Agent identity/metadata flags (--id, --label, --project) are consumed on
-    the non-headless path but not by _create_headless. They must be rejected
-    rather than silently dropped.
-
-    --host-label is intentionally *not* in this list: _create_headless applies
-    it to the resolved host (both existing and new), matching the non-headless
-    path.
-    """
-    result = cli_runner.invoke(
-        create,
-        ["--type", "headless_command", "--foreground", *flag_args],
-        obj=plugin_manager,
-    )
-
-    assert result.exit_code != 0
-    assert expected_in_error in result.output
-    assert "does not support" in result.output
 
 
 # =============================================================================
@@ -948,15 +1092,65 @@ def test_create_foreground_without_type_is_rejected(
 
 
 # =============================================================================
+# Tests for shared source/transfer/git handling on the headless path
+# =============================================================================
+
+
+@pytest.mark.tmux
+def test_create_headless_with_source_and_transfer_none_runs_in_place(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_host_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Headless with --source and --transfer=none should run the agent in the given directory.
+
+    Headless shares the non-headless source / transfer handling: the
+    default transfer strategy creates a worktree (or rsyncs) rather than
+    running in-place. ``--transfer=none`` is the explicit opt-in to
+    in-place. Uses a ``pwd`` command so the streamed output contains the
+    work directory path.
+    """
+    profile_dir = get_or_create_profile_dir(temp_host_dir)
+    _write_agent_type_command_to_settings(profile_dir / "settings.toml", "headless_command", "pwd")
+    # Use a nested dir so the source-must-not-contain-state-dir check (which
+    # scans for ``.mngr/``) does not fire against the shared pytest tmp root.
+    source_dir = tmp_path / "headless-src"
+    source_dir.mkdir()
+    # Canonicalize before asserting: on macOS `/var` is a symlink to
+    # `/private/var`, so pytest's ``tmp_path`` string and the ``pwd`` output
+    # can disagree on the ``/private`` prefix even though they reference the
+    # same directory.
+    resolved_source_dir = source_dir.resolve()
+    result = cli_runner.invoke(
+        create,
+        [
+            "--type",
+            "headless_command",
+            "--foreground",
+            "--source",
+            str(source_dir),
+            "--transfer",
+            "none",
+        ],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, f"CLI failed: {result.output}"
+    assert str(resolved_source_dir) in result.output
+
+
+# =============================================================================
 # Tests for _apply_host_labels
 # =============================================================================
 #
-# _create_headless calls _apply_host_labels on the resolved online host so
-# that --host-label KEY=VALUE entries are honored on the headless create path
-# (both for existing/local hosts and as a second, idempotent application on
-# newly-created hosts). These tests pin down the helper's behavior so a
-# refactor cannot silently re-introduce the silent-drop bug that the headless
-# path originally had.
+# _create_agent calls _apply_host_labels on resolved online hosts so that
+# --host-label KEY=VALUE entries are honored for both headless and
+# interactive create (both for existing/local hosts and as a second,
+# idempotent application on newly-created hosts). These tests pin down
+# that behavior so a refactor cannot silently skip the host-label
+# application on any of those paths.
 
 
 def test_apply_host_labels_adds_tags_to_local_host(
@@ -1002,8 +1196,9 @@ def test_apply_host_labels_raises_on_entries_without_equals(
 
     _parse_target_host raises UserInputError for missing '=' on the new-host
     branch. _apply_host_labels mirrors that validation so malformed entries
-    cannot slip through on the existing-host or headless-create paths --
-    silently dropping them would hide user mistakes.
+    cannot slip through on the existing-host or local-host paths, where
+    _parse_target_host returns early before its own label validator runs.
+    Silently dropping them would hide user mistakes.
     """
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
 
