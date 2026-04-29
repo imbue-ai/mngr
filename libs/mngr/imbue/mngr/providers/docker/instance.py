@@ -7,6 +7,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import Literal
 from typing import Mapping
 from typing import Sequence
 from urllib.parse import urlparse
@@ -594,7 +595,7 @@ kill -TERM 1
         return env
 
     def _run_docker_creation_command(
-        self, args: list[str], timeout: float = 300, executable: str = "docker"
+        self, args: list[str], timeout: float = 300, executable: Literal["docker", "depot"] = "docker"
     ) -> FinishedProcess:
         """Run a docker-compatible CLI command and return the result.
 
