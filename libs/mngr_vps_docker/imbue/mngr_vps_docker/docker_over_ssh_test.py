@@ -7,7 +7,6 @@ from unittest.mock import patch
 import pytest
 from loguru import logger as loguru_logger
 
-from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr_vps_docker.docker_over_ssh import DockerOverSsh
 from imbue.mngr_vps_docker.docker_over_ssh import _redact_secret_env
 from imbue.mngr_vps_docker.errors import ContainerSetupError
@@ -206,28 +205,14 @@ def test_upload_directory_rsync_failure(docker_ssh: DockerOverSsh, tmp_path: Pat
             docker_ssh.upload_directory(local_dir, "/tmp/build-ctx")
 
 
-def test_build_image_success(docker_ssh: DockerOverSsh) -> None:
-    mock_result = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr="")
-    with patch("subprocess.run", return_value=mock_result) as mock_run:
-        tag = docker_ssh.build_image("my-tag", "/tmp/ctx", ("--file=Dockerfile",))
-        assert tag == "my-tag"
-        call_args = mock_run.call_args[0][0]
-        remote_cmd = call_args[-1]
-        assert "docker build" in remote_cmd
-        assert "my-tag" in remote_cmd
-        assert "/tmp/ctx" in remote_cmd
-
-
-def test_build_image_with_depot_builder_includes_install_and_env_prefix(
-    docker_ssh: DockerOverSsh, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """DEPOT path emits the install snippet, forwards both env vars, and runs `depot build --load`."""
+def test_build_image_emits_install_and_env_prefix(docker_ssh: DockerOverSsh, monkeypatch: pytest.MonkeyPatch) -> None:
+    """build_image emits the depot install snippet, forwards both env vars, and runs `depot build --load`."""
     # Use values with shell metacharacters to verify shlex.quote is applied.
     monkeypatch.setenv("DEPOT_TOKEN", "tok xyz")
     monkeypatch.setenv("DEPOT_PROJECT_ID", "proj abc")
     mock_result = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr="")
     with patch("subprocess.run", return_value=mock_result) as mock_run:
-        tag = docker_ssh.build_image("my-tag", "/tmp/ctx", (), builder=DockerBuilder.DEPOT)
+        tag = docker_ssh.build_image("my-tag", "/tmp/ctx", ("--file=Dockerfile",))
         assert tag == "my-tag"
         remote_cmd = mock_run.call_args[0][0][-1]
         assert "command -v depot" in remote_cmd
@@ -240,28 +225,24 @@ def test_build_image_with_depot_builder_includes_install_and_env_prefix(
         assert "/tmp/ctx" in remote_cmd
 
 
-def test_build_image_with_depot_builder_omits_unset_project_id(
-    docker_ssh: DockerOverSsh, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_build_image_omits_unset_project_id(docker_ssh: DockerOverSsh, monkeypatch: pytest.MonkeyPatch) -> None:
     """DEPOT_PROJECT_ID is optional: when unset, only DEPOT_TOKEN is forwarded."""
     monkeypatch.setenv("DEPOT_TOKEN", "tok-xyz")
     monkeypatch.delenv("DEPOT_PROJECT_ID", raising=False)
     mock_result = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr="")
     with patch("subprocess.run", return_value=mock_result) as mock_run:
-        docker_ssh.build_image("my-tag", "/tmp/ctx", (), builder=DockerBuilder.DEPOT)
+        docker_ssh.build_image("my-tag", "/tmp/ctx", ())
         remote_cmd = mock_run.call_args[0][0][-1]
         assert "DEPOT_TOKEN=tok-xyz" in remote_cmd
         assert "DEPOT_PROJECT_ID" not in remote_cmd
 
 
-def test_build_image_with_depot_builder_raises_when_token_missing(
-    docker_ssh: DockerOverSsh, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_build_image_raises_when_token_missing(docker_ssh: DockerOverSsh, monkeypatch: pytest.MonkeyPatch) -> None:
     """Missing DEPOT_TOKEN raises ContainerSetupError before SSH is attempted."""
     monkeypatch.delenv("DEPOT_TOKEN", raising=False)
     with patch("subprocess.run") as mock_run:
         with pytest.raises(ContainerSetupError, match="DEPOT_TOKEN"):
-            docker_ssh.build_image("my-tag", "/tmp/ctx", (), builder=DockerBuilder.DEPOT)
+            docker_ssh.build_image("my-tag", "/tmp/ctx", ())
         mock_run.assert_not_called()
 
 

@@ -297,7 +297,6 @@ jobs:
     if: github.ref != 'refs/heads/release'
     runs-on: ubuntu-latest
     env:
-      MNGR_USE_DEPOT: "1"
       DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
       # depot CLI looks for depot.json in the build context dir, not repo root.
       # Tests build from /tmp/<tempdir>, so set the project ID via env instead.
@@ -346,7 +345,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      MNGR_USE_DEPOT: "1"
       DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
       DEPOT_PROJECT_ID: "fsjzltqvxq"
 

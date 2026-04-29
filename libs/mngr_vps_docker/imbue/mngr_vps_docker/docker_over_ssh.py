@@ -13,7 +13,6 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr_vps_docker.errors import ContainerSetupError
 from imbue.mngr_vps_docker.errors import VpsConnectionError
 
@@ -282,35 +281,29 @@ class DockerOverSsh(MutableModel):
         docker_build_args: Sequence[str],
         timeout_seconds: float = 600.0,
         on_output: Callable[[str], None] | None = None,
-        builder: DockerBuilder = DockerBuilder.DOCKER,
     ) -> str:
-        """Build a Docker image on the VPS from a remote build context. Returns the image tag.
+        """Build a Docker image on the VPS via depot.dev. Returns the image tag.
 
-        When `builder` is DEPOT, ensures the depot CLI is installed on the VPS,
-        forwards DEPOT_TOKEN (required) from the agent's environment, optionally
-        forwards DEPOT_PROJECT_ID when set, and runs `depot build --load` (which
-        imports the resulting image into the local Docker daemon on the VPS so
-        subsequent `docker run` works).
+        Ensures the depot CLI is installed on the VPS (idempotent), forwards
+        DEPOT_TOKEN (required) and DEPOT_PROJECT_ID (optional, when set) from
+        the agent's environment, and runs `depot build --load` so the result
+        is imported into the local Docker daemon on the VPS for subsequent
+        `docker run`.
         """
-        if builder is DockerBuilder.DEPOT:
-            depot_token = os.environ.get("DEPOT_TOKEN", "")
-            depot_project_id = os.environ.get("DEPOT_PROJECT_ID", "")
-            if not depot_token:
-                raise ContainerSetupError(
-                    "builder=DEPOT requires DEPOT_TOKEN in the agent's environment. "
-                    "Set DEPOT_TOKEN (and DEPOT_PROJECT_ID if no depot.json is on the VPS), "
-                    "or set builder=DOCKER."
-                )
-            args = ["build", "--load", "-t", tag] + list(docker_build_args) + [build_context_path]
-            quoted = " ".join(shlex.quote(a) for a in args)
-            env_prefix_parts = [f"DEPOT_TOKEN={shlex.quote(depot_token)}"]
-            if depot_project_id:
-                env_prefix_parts.append(f"DEPOT_PROJECT_ID={shlex.quote(depot_project_id)}")
-            env_prefix = " ".join(env_prefix_parts)
-            remote_cmd = f"{_DEPOT_INSTALL_CMD} && {env_prefix} depot {quoted}"
-        else:
-            args = ["build", "-t", tag] + list(docker_build_args) + [build_context_path]
-            remote_cmd = "docker " + " ".join(shlex.quote(a) for a in args)
+        depot_token = os.environ.get("DEPOT_TOKEN", "")
+        depot_project_id = os.environ.get("DEPOT_PROJECT_ID", "")
+        if not depot_token:
+            raise ContainerSetupError(
+                "VPS image builds require DEPOT_TOKEN in the agent's environment. "
+                "Set DEPOT_TOKEN (and DEPOT_PROJECT_ID if no depot.json is on the VPS)."
+            )
+        args = ["build", "--load", "-t", tag] + list(docker_build_args) + [build_context_path]
+        quoted = " ".join(shlex.quote(a) for a in args)
+        env_prefix_parts = [f"DEPOT_TOKEN={shlex.quote(depot_token)}"]
+        if depot_project_id:
+            env_prefix_parts.append(f"DEPOT_PROJECT_ID={shlex.quote(depot_project_id)}")
+        env_prefix = " ".join(env_prefix_parts)
+        remote_cmd = f"{_DEPOT_INSTALL_CMD} && {env_prefix} depot {quoted}"
         if on_output is not None:
             self.run_ssh_streaming(remote_cmd, on_output=on_output, timeout_seconds=timeout_seconds)
         else:

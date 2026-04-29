@@ -2,10 +2,7 @@
 
 from pathlib import Path
 
-import pytest
-
 from imbue.mngr.primitives import ActivitySource
-from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
@@ -48,42 +45,3 @@ def test_custom_config_values() -> None:
     assert config.default_idle_timeout == 600
     assert config.container_ssh_port == 3333
     assert config.default_start_args == ("--cpus=2", "--memory=4g")
-
-
-@pytest.mark.parametrize(
-    "env_value",
-    ["1", "true", "yes", "TRUE", "Yes", "True"],
-)
-def test_builder_defaults_to_depot_when_mngr_use_depot_truthy(env_value: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """MNGR_USE_DEPOT recognises the same truthy values as parse_bool_env."""
-    monkeypatch.setenv("MNGR_USE_DEPOT", env_value)
-    config = VpsDockerProviderConfig(backend=ProviderBackendName("test-backend"))
-    assert config.builder is DockerBuilder.DEPOT
-
-
-@pytest.mark.parametrize(
-    "env_value",
-    ["0", "false", "no", "", "anything-else"],
-)
-def test_builder_defaults_to_docker_when_mngr_use_depot_falsy(env_value: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Any non-truthy MNGR_USE_DEPOT value (including empty / unrecognised) selects the docker builder."""
-    monkeypatch.setenv("MNGR_USE_DEPOT", env_value)
-    config = VpsDockerProviderConfig(backend=ProviderBackendName("test-backend"))
-    assert config.builder is DockerBuilder.DOCKER
-
-
-def test_builder_defaults_to_docker_when_mngr_use_depot_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With MNGR_USE_DEPOT unset, the default builder is docker."""
-    monkeypatch.delenv("MNGR_USE_DEPOT", raising=False)
-    config = VpsDockerProviderConfig(backend=ProviderBackendName("test-backend"))
-    assert config.builder is DockerBuilder.DOCKER
-
-
-def test_explicit_builder_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Explicit `builder` argument wins over the MNGR_USE_DEPOT-driven default."""
-    monkeypatch.setenv("MNGR_USE_DEPOT", "1")
-    config = VpsDockerProviderConfig(
-        backend=ProviderBackendName("test-backend"),
-        builder=DockerBuilder.DOCKER,
-    )
-    assert config.builder is DockerBuilder.DOCKER
