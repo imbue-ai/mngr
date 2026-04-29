@@ -7,6 +7,7 @@ invocation never crashes on transient mngr failures.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from typing import Callable
 from typing import Iterator
 
 from loguru import logger
@@ -22,6 +23,12 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.main import get_or_create_plugin_manager
 from imbue.mngr.primitives import CleanupAction
 from imbue.mngr.primitives import ErrorBehavior
+
+# DI signature for ``list_agents_by_name``. Lives with the function so every
+# caller (hooks/rewrite.py, hooks/reap.py) imports the same alias and tests
+# have a single name to inject against. Mirrors the pattern of
+# ``DestroyAgentDetachedCallable`` in ``hooks/destroy_detached.py``.
+ListAgentsByNameCallable = Callable[[], dict[str, AgentDetails] | None]
 
 
 @contextmanager

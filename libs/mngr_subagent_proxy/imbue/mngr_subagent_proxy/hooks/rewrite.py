@@ -17,19 +17,16 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
-from typing import Callable
 from typing import Final
 from typing import TextIO
 
 from loguru import logger
 
-from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr_subagent_proxy.hooks.destroy_detached import DestroyAgentDetachedCallable
 from imbue.mngr_subagent_proxy.hooks.destroy_detached import destroy_agent_detached
+from imbue.mngr_subagent_proxy.hooks.mngr_api import ListAgentsByNameCallable
 from imbue.mngr_subagent_proxy.hooks.mngr_api import list_agents_by_name
-
-ListAgentsByNameCallable = Callable[[], dict[str, AgentDetails] | None]
 
 # Lifecycle states that mean "child is still doing real work" -- in
 # those states, PostToolUse must NOT destroy the child or we throw away
