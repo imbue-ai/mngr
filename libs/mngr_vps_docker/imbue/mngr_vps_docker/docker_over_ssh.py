@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shlex
 import subprocess
 from collections.abc import Callable
@@ -20,6 +21,25 @@ from imbue.mngr_vps_docker.errors import VpsConnectionError
 # /usr/local/bin via depot.dev's official installer. Run once per build (cheap
 # no-op when already present); avoids needing a separate provisioning step.
 _DEPOT_INSTALL_CMD: Final[str] = "command -v depot >/dev/null 2>&1 || curl -fsSL https://depot.dev/install-cli.sh | sh"
+
+# Env-var assignments whose values are secrets and must be redacted before any
+# remote_command string ends up in logs or exception messages.
+_SECRET_ENV_VARS: Final[tuple[str, ...]] = ("DEPOT_TOKEN",)
+# Matches `VAR=value` where value is either a single-quoted string (with no
+# embedded single quotes -- the form shlex.quote produces) or a run of
+# non-whitespace characters. The leading word boundary prevents matching
+# substrings like FOO_DEPOT_TOKEN=...
+_SECRET_ENV_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b(" + "|".join(_SECRET_ENV_VARS) + r")=(?:'[^']*'|\S+)")
+
+
+def _redact_secret_env(remote_command: str) -> str:
+    """Return remote_command with values of known-secret env-var assignments replaced.
+
+    Used for log messages and exception messages so secrets like DEPOT_TOKEN
+    never appear in trace logs or surface to the user.
+    """
+    return _SECRET_ENV_PATTERN.sub(r"\1=<redacted>", remote_command)
+
 
 _SSH_BASE_OPTIONS: Final[tuple[str, ...]] = (
     "-o",
@@ -55,7 +75,8 @@ class DockerOverSsh(MutableModel):
     def run_ssh(self, remote_command: str, timeout_seconds: float = 60.0) -> str:
         """Run an arbitrary command on the VPS via SSH. Returns stdout."""
         cmd = self._build_ssh_command(remote_command)
-        logger.trace("SSH exec: {}", remote_command)
+        safe_command = _redact_secret_env(remote_command)
+        logger.trace("SSH exec: {}", safe_command)
         try:
             result = subprocess.run(
                 cmd,
@@ -64,7 +85,7 @@ class DockerOverSsh(MutableModel):
                 timeout=timeout_seconds,
             )
         except subprocess.TimeoutExpired as e:
-            raise VpsConnectionError(f"SSH command timed out after {timeout_seconds}s: {remote_command}") from e
+            raise VpsConnectionError(f"SSH command timed out after {timeout_seconds}s: {safe_command}") from e
         except OSError as e:
             raise VpsConnectionError(f"SSH command failed: {e}") from e
         if result.returncode != 0:
@@ -87,7 +108,8 @@ class DockerOverSsh(MutableModel):
         if the command exits non-zero (with all captured output in the message).
         """
         cmd = self._build_ssh_command(remote_command)
-        logger.trace("SSH streaming: {}", remote_command)
+        safe_command = _redact_secret_env(remote_command)
+        logger.trace("SSH streaming: {}", safe_command)
         collected_output: list[str] = []
         try:
             process = subprocess.Popen(
@@ -108,7 +130,7 @@ class DockerOverSsh(MutableModel):
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
-            raise VpsConnectionError(f"SSH command timed out after {timeout_seconds}s: {remote_command}") from None
+            raise VpsConnectionError(f"SSH command timed out after {timeout_seconds}s: {safe_command}") from None
         if returncode != 0:
             error_output = "\n".join(collected_output[-50:])
             raise ContainerSetupError(f"Remote command failed (exit {returncode}): {error_output}")
