@@ -658,7 +658,7 @@ def _run_tmr_pipeline(
     if use_batched:
         _emit_agents_launched(len(agent_infos), output_opts)
 
-    # Step 8: Gather final results (branches already pulled during polling for
+    # Step 9: Gather final results (branches already pulled during polling for
     # remote providers; gather_results re-attempts for any that were missed)
     results = gather_results(
         agents=agent_infos,
@@ -671,10 +671,10 @@ def _run_tmr_pipeline(
         cached_results=cached_results,
     )
 
-    # Step 9: Write report with final results (artifacts already pulled during polling)
+    # Step 10: Write report with final results (artifacts already pulled during polling)
     generate_html_report(results, html_path, test_artifacts_dir=output_dir)
 
-    # Step 10: Build integrator config (defaults to local provider) and integrate
+    # Step 11: Build integrator config (defaults to local provider) and integrate
     integrator_agent_type = opts.integrator_type if opts.integrator_type is not None else opts.agent_type
     integrator_templates = opts.integrator_template if opts.integrator_template else opts.agent_template
     integrator_config = TmrLaunchConfig(
