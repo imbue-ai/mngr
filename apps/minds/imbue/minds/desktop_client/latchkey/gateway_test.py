@@ -354,11 +354,6 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: 
         manager.stop()
 
 
-# Flaky on offload: session-level teardown occasionally finds the ``ensure-browser``
-# child process still alive, even though the fake binary calls ``sys.exit(0)``
-# immediately. Race between subprocess exit and pytest's leak scan; needs a
-# proper fix in ``LatchkeyGatewayManager.stop()`` to track + reap that spawn.
-@pytest.mark.flaky
 def test_discovery_handler_skips_reverse_tunnel_for_dev_agents(tmp_path: Path) -> None:
     """DEV agents (ssh_info is None) run on the bare host and need no tunnel."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
