@@ -33,6 +33,7 @@ from imbue.minds_workspace_server.agent_discovery import send_message
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
 from imbue.minds_workspace_server.event_queues import AgentEventQueues
+from imbue.minds_workspace_server.events import BufferBehavior
 from imbue.minds_workspace_server.models import AgentCreationError
 from imbue.minds_workspace_server.models import AgentListItem
 from imbue.minds_workspace_server.models import AgentListResponse
@@ -149,8 +150,11 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
         return watchers[agent_info.id]
 
     def on_events(agent_id: str, events: list[dict[str, Any]]) -> None:
+        # IGNORE: session events are persisted in JSONL and recoverable via
+        # the REST /events endpoint; storing them in the in-memory replay
+        # buffer would grow unboundedly for the agent's lifetime.
         for event in events:
-            event_queues.broadcast(agent_id, event)
+            event_queues.broadcast(agent_id, {**event, "buffer_behavior": BufferBehavior.IGNORE})
 
     watcher = AgentSessionWatcher(
         agent_id=agent_info.id,
