@@ -397,9 +397,15 @@ def test_rewrite_missing_result_preserves_subagent(
     assert prompt_file.exists()
 
 
+@pytest.mark.parametrize(
+    "live_state",
+    [AgentLifecycleState.RUNNING, AgentLifecycleState.WAITING],
+    ids=["running", "waiting"],
+)
 def test_rewrite_live_lifecycle_preserves_subagent(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
+    live_state: AgentLifecycleState,
 ) -> None:
     """Even when result_file IS present, a child still in RUNNING /
     WAITING must be preserved -- catches edge cases where subagent_wait
@@ -433,22 +439,20 @@ def test_rewrite_live_lifecycle_preserves_subagent(
     def fake_destroy(target_name: str, log_path: Path) -> None:
         destroy_calls.append((target_name, log_path))
 
-    for live_state in (AgentLifecycleState.RUNNING, AgentLifecycleState.WAITING):
-        del destroy_calls[:]
-        stdin_buffer = io.StringIO(json.dumps({"tool_use_id": tid, "tool_response": "ignored"}))
-        stdout_buffer = io.StringIO()
-        rewrite_hook.run(
-            stdin_buffer,
-            stdout_buffer,
-            destroy_callable=fake_destroy,
-            list_callable=_list_returns(_fake_list_with_state(target_name, live_state)),
-        )
-        assert destroy_calls == [], f"child in {live_state} must be preserved, not destroyed"
-        # State files are retained in the live-preserve path so the
-        # SessionStart reaper / on_before_agent_destroy cascade can
-        # find the orphan later.
-        assert map_file.exists()
-        assert result_file.exists()
+    stdin_buffer = io.StringIO(json.dumps({"tool_use_id": tid, "tool_response": "ignored"}))
+    stdout_buffer = io.StringIO()
+    rewrite_hook.run(
+        stdin_buffer,
+        stdout_buffer,
+        destroy_callable=fake_destroy,
+        list_callable=_list_returns(_fake_list_with_state(target_name, live_state)),
+    )
+    assert destroy_calls == [], f"child in {live_state} must be preserved, not destroyed"
+    # State files are retained in the live-preserve path so the
+    # SessionStart reaper / on_before_agent_destroy cascade can
+    # find the orphan later.
+    assert map_file.exists()
+    assert result_file.exists()
 
 
 def test_rewrite_preserves_subagent_when_mngr_list_errors(
