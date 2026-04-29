@@ -938,7 +938,7 @@ class TodoNotificationService(MutableModel):
         try:
             self._send_notification(reminder)
         except ConnectionError as e:
-            logger.exception(e, "Failed to send notification")
+            logger.opt(exception=e).error("Failed to send notification")
             raise
 
 
