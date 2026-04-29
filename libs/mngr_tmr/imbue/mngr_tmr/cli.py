@@ -24,8 +24,7 @@ from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.errors import HostError
-from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
@@ -220,7 +219,7 @@ def _run_reintegrate(
                     host_ref = host_provider.get_host(HostName(detail.host.name))
                     host, _ = ensure_host_started(host_ref, is_start_desired=True, provider=host_provider)
                     agent_hosts[agent_id_str] = host
-                except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
+                except (BaseMngrError, OSError, BaseExceptionGroup) as exc:
                     logger.warning("Could not connect to host for agent '{}': {}", detail.name, exc)
 
     # Compute output directory
@@ -319,7 +318,7 @@ def _run_integrator_phase(
             config=config,
             mngr_ctx=mngr_ctx,
         )
-    except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
+    except (BaseMngrError, OSError, BaseExceptionGroup) as exc:
         logger.warning("Failed to launch integrator agent: {}", exc)
         return None
 

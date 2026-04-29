@@ -13,8 +13,7 @@ from imbue.mngr.api.create import resolve_target_host
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import HostError
-from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentGitOptions
@@ -255,7 +254,7 @@ def stop_agent_on_host(host: OnlineHostInterface, agent_id: AgentId, agent_name:
     try:
         host.stop_agents([agent_id])
         logger.info("Stopped agent '{}'", agent_name)
-    except (MngrError, HostError) as exc:
+    except BaseMngrError as exc:
         logger.warning("Failed to stop agent '{}': {}", agent_name, exc)
 
 
@@ -283,7 +282,7 @@ def _create_host_pool(
         for future in futures:
             try:
                 hosts.append(future.result())
-            except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
+            except (BaseMngrError, OSError, BaseExceptionGroup) as exc:
                 logger.warning("Failed to create host: {}", exc)
 
     logger.info("Created {} host(s) for agent placement", len(hosts))
@@ -303,7 +302,7 @@ def ensure_snapshot(config: TmrLaunchConfig, mngr_ctx: MngrContext) -> TmrLaunch
         return config
     try:
         snapshot_name = _create_snapshot_host(config, mngr_ctx)
-    except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
+    except (BaseMngrError, OSError, BaseExceptionGroup) as exc:
         logger.warning("Failed to create snapshot, launching agents without snapshot: {}", exc)
         return config
     return config.model_copy_update(to_update(config.field_ref().snapshot, snapshot_name))
@@ -366,7 +365,7 @@ def launch_all_test_agents(
                 info, host = future.result()
                 agents.append(info)
                 agent_hosts[str(info.agent_id)] = host
-            except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
+            except (BaseMngrError, OSError, BaseExceptionGroup) as exc:
                 logger.warning("Failed to launch agent: {}", exc)
 
     logger.info("Launched {} agent(s)", len(agents))
@@ -410,7 +409,7 @@ def launch_agents_up_to_limit(
         except TimeoutError:
             logger.warning("Agent creation timed out after {}s for {}", _AGENT_CREATION_TIMEOUT_SECONDS, test_node_id)
             continue
-        except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
+        except (BaseMngrError, OSError, BaseExceptionGroup) as exc:
             logger.warning("Failed to launch agent for {}: {}", test_node_id, exc)
             continue
         all_agents.append(info)
