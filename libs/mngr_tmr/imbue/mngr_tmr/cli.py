@@ -38,6 +38,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr_tmr.api import collect_tests
+from imbue.mngr_tmr.api import ensure_snapshot
 from imbue.mngr_tmr.api import gather_results
 from imbue.mngr_tmr.api import get_base_commit
 from imbue.mngr_tmr.api import launch_all_test_agents
@@ -74,7 +75,6 @@ class TmrCliOptions(CommonCliOptions):
     env: tuple[str, ...]
     label: tuple[str, ...]
     prompt_suffix: str | None
-    use_snapshot: bool
     snapshot: str | None
     max_parallel: int
     agents_per_host: int
@@ -416,15 +416,9 @@ def _run_integrator_phase(
     help="Additional text to append to the agent prompt",
 )
 @click.option(
-    "--use-snapshot",
-    is_flag=True,
-    default=False,
-    help="Build one agent first, snapshot its host, then launch remaining agents from the snapshot (faster for remote providers)",
-)
-@click.option(
     "--snapshot",
     default=None,
-    help="Use an existing snapshot/image ID for all agents (skips building; implies --use-snapshot behavior)",
+    help="Use an existing snapshot/image ID for all agents (skips building one). The snapshot must contain a /opt/snapshotter git checkout.",
 )
 @click.option(
     "--max-parallel",
@@ -580,7 +574,6 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
             source_host,
             label_options,
             test_node_ids,
-            provided_snapshot,
             env_options,
         )
     except KeyboardInterrupt:
@@ -602,7 +595,6 @@ def _run_tmr_pipeline(
     source_host: OnlineHostInterface,
     label_options: AgentLabelOptions,
     test_node_ids: list[str],
-    provided_snapshot: SnapshotName | None,
     env_options: AgentEnvironmentOptions,
 ) -> None:
     """Run the main TMR pipeline (launch, poll, gather, integrate, report)."""
@@ -615,26 +607,27 @@ def _run_tmr_pipeline(
         html_path = output_dir / "index.html"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 7: Launch and poll agents
+    # Step 7: Build a snapshot up front (if the provider supports it). All
+    # subsequent test agents launch from this snapshot and reuse the
+    # /opt/snapshotter checkout via git-worktree, avoiding repeated repo uploads.
+    config = ensure_snapshot(config, mngr_ctx)
+
+    # Step 8: Launch and poll agents
     # When max_agents > 0, agents are launched incrementally as earlier ones finish.
     # Otherwise, all agents are launched up front and then polled via the same function.
     use_batched = opts.max_agents > 0 and opts.max_agents < len(test_node_ids)
 
     if use_batched:
-        if opts.use_snapshot:
-            write_human_line("WARNING: --use-snapshot is not supported with --max-agents and will be ignored")
         agent_infos: list[TestAgentInfo] = []
         agent_hosts: dict[str, OnlineHostInterface] = {}
         remaining_node_ids = test_node_ids
     else:
-        # When --snapshot is provided, all agents use it directly (no need for --use-snapshot)
         agent_infos, agent_hosts, _snapshot_name = launch_all_test_agents(
             test_node_ids=test_node_ids,
             config=config,
             mngr_ctx=mngr_ctx,
             pytest_flags=testing_flags,
             prompt_suffix=opts.prompt_suffix or "",
-            use_snapshot=opts.use_snapshot and provided_snapshot is None,
             max_parallel=opts.max_parallel,
             launch_delay_seconds=opts.launch_delay,
             agents_per_host=opts.agents_per_host,
@@ -731,7 +724,7 @@ def _print_run_commands(run_name: str, integrated_branch: str | None = None) -> 
 CommandHelpMetadata(
     key="tmr",
     one_line_description="Run and fix tests in parallel using agents (test map-reduce)",
-    synopsis="mngr tmr [TEST_PATHS...] [-- TESTING_FLAGS...] [--provider <PROVIDER>] [--use-snapshot] [--env KEY=VALUE] [--label KEY=VALUE] [--timeout <SECS>] [--agent-type <TYPE>]",
+    synopsis="mngr tmr [TEST_PATHS...] [-- TESTING_FLAGS...] [--provider <PROVIDER>] [--snapshot <ID>] [--env KEY=VALUE] [--label KEY=VALUE] [--timeout <SECS>] [--agent-type <TYPE>]",
     description="""This command implements a map-reduce pattern for tests:
 
 1. Collects tests using pytest --collect-only, passing through all arguments.
@@ -755,8 +748,10 @@ This discovers tests with `pytest --collect-only tests/e2e -m release` and runs
 each test with `pytest tests/e2e/test_foo.py::test_bar -m release`.
 
 Use --provider to run agents on a specific provider (e.g. docker, modal).
-Use --use-snapshot with remote providers to build and provision one host first,
-snapshot it, then launch all remaining agents from the snapshot (much faster).
+For remote providers that support snapshots, a snapshotter agent is built
+and snapshotted first, then all test agents launch from that snapshot and
+share its /opt/snapshotter checkout via git-worktree. Use --snapshot to
+reuse an existing snapshot instead.
 Use --env to pass environment variables and --label to tag all agents.
 Use --prompt-suffix to append custom instructions to the agent prompt.
 Use --max-agents to limit how many agents run simultaneously (0 = no limit).
@@ -769,7 +764,7 @@ tests_passing_before/after booleans, and a markdown summary.""",
         ("Run tests in a specific file", "mngr tmr tests/test_foo.py"),
         ("Run tests with a marker", "mngr tmr tests/e2e -- -m release"),
         ("Use Docker provider", "mngr tmr --provider docker tests/"),
-        ("Modal with snapshot", "mngr tmr --provider modal --use-snapshot tests/"),
+        ("Modal with explicit snapshot", "mngr tmr --provider modal --snapshot snap-abc tests/"),
         ("Pass env vars and labels", "mngr tmr --env API_KEY=xxx --label batch=run1"),
         ("Limit to 4 concurrent agents", "mngr tmr --max-agents 4 tests/"),
         ("Custom poll interval", "mngr tmr --poll-interval 30"),

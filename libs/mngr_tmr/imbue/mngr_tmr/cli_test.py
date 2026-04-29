@@ -36,7 +36,7 @@ def test_cli_help_contains_provider_env_label_options(cli_runner: CliRunner) -> 
     assert "--env" in result.output
     assert "--label" in result.output
     assert "--prompt-suffix" in result.output
-    assert "--use-snapshot" in result.output
+    assert "--snapshot" in result.output
 
 
 def test_cli_help_contains_timeout_options(cli_runner: CliRunner) -> None:
