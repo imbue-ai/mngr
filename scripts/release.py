@@ -138,6 +138,22 @@ def _confirm_new_packages(new_packages: set[str], current_versions: dict[str, st
             confirmed.add(name)
         else:
             print(f"  Skipping {name}.")
+    if confirmed:
+        print()
+        print("=" * 72)
+        print("ACTION REQUIRED: register a pending Trusted Publisher on PyPI for each")
+        print("new package before the publish workflow runs:")
+        for name in sorted(confirmed):
+            print(f"  - {name}")
+        print()
+        print("  https://pypi.org/manage/account/publishing/")
+        print()
+        print("WARNING: PyPI only allows ONE pending publisher per account at a time.")
+        print("If multiple new packages are released in the same tag, the publish")
+        print("workflow will fail on each unregistered package in turn. You will need")
+        print("to register the next pending publisher and re-run the failed workflow")
+        print("ONCE PER NEW PACKAGE until all are published.")
+        print("=" * 72)
     return confirmed
 
 
