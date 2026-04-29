@@ -594,10 +594,16 @@ def resolve_provider_names_for_identifiers(
         _write_unfiltered_full_snapshot(mngr_ctx, ErrorBehavior.CONTINUE)
         # Retry once. A second schema-changed error means the freshly-written
         # snapshot itself fails to parse, which indicates a real bug rather
-        # than stale data, so we let the exception propagate.
-        provider_by_agent_id, name_by_agent_id, destroyed_agent_ids = _replay_discovery_events_for_resolution(
-            events_path
-        )
+        # than stale data, so we let the exception propagate. OSError here is
+        # treated the same as on the first read: surface it as None so the
+        # caller falls back to a full discovery scan.
+        try:
+            provider_by_agent_id, name_by_agent_id, destroyed_agent_ids = _replay_discovery_events_for_resolution(
+                events_path
+            )
+        except OSError as retry_e:
+            logger.trace("Failed to read discovery events for provider resolution after retry: {}", retry_e)
+            return None
     except OSError as e:
         logger.trace("Failed to read discovery events for provider resolution: {}", e)
         return None
