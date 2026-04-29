@@ -70,7 +70,8 @@ _GOLDEN_PATH_PROMPT: Final[str] = (
 )
 
 # For the depth-limit test we set MNGR_SUBAGENT_DEPTH>=MNGR_MAX_SUBAGENT_DEPTH
-# so the spawn_proxy_subagent hook's depth guard triggers immediately on the
+# so the PreToolUse:Agent depth-limit guard in
+# imbue.mngr_subagent_proxy.hooks.spawn triggers immediately on the
 # parent's first Task call.
 _DEPTH_LIMIT_PROMPT: Final[str] = (
     "Use the Task tool exactly once with subagent_type 'general-purpose' "
