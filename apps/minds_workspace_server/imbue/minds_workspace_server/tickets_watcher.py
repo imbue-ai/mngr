@@ -160,6 +160,7 @@ class AgentTicketsWatcher:
         # watch limits on busy checkouts.
         parent_dir = self._tickets_dir.parent
         if not parent_dir.exists():
+            logger.debug("Tickets parent dir {} does not exist; running in poll-only mode", parent_dir)
             return
         try:
             observer = Observer()
