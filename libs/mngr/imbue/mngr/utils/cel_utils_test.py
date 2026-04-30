@@ -420,7 +420,7 @@ def test_tolerant_marker_at_depth_in_strict_dict() -> None:
     independent of celpy version while still proving the marker is honored
     only at the wrapped level.
     """
-    raw_context: dict = {"host": {"tags": tolerant_dict({}), "name": "h1"}}
+    raw_context = {"host": {"tags": tolerant_dict({}), "name": "h1"}}
     cel_context = build_cel_context(raw_context)
     host = cel_context["host"]
     assert isinstance(host, celpy.celtypes.MapType)
