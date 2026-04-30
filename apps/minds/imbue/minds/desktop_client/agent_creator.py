@@ -999,17 +999,6 @@ class AgentCreator(MutableModel):
         with self._lock:
             return self._log_queues.get(str(agent_id))
 
-    def _is_workspace_ready_once(self, agent_id: AgentId) -> bool:
-        """Return True if the workspace server for ``agent_id`` is currently serving its UI page."""
-        url = self.backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME)
-        if url is None:
-            return False
-        return probe_workspace_ready(
-            self._probe_http_client,
-            url,
-            self.workspace_ready_probe_timeout_seconds,
-        )
-
     def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> bool:
         """Block until the agent's workspace server is serving its UI page.
 
