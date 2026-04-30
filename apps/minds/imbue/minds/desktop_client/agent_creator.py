@@ -1649,6 +1649,8 @@ class AgentCreator(MutableModel):
         log_queue.put("[minds] Waiting for workspace server to come online...")
         if self._wait_for_workspace_ready(agent_id, log_queue):
             log_queue.put("[minds] Workspace server is ready.")
+        else:
+            log_queue.put("[minds] Loading the workspace anyway.")
 
         redirect_url = "/goto/{}/".format(agent_id)
 
