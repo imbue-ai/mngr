@@ -198,7 +198,12 @@ class AgentTicketsWatcher:
             for md_file in sorted(self._tickets_dir.glob("*.md")):
                 try:
                     stat = md_file.stat()
-                except OSError:
+                except OSError as e:
+                    # Most commonly the file was deleted between glob() and
+                    # stat() -- benign -- but permission errors etc. would
+                    # also land here. Log at debug so the skip is traceable
+                    # without spamming production logs.
+                    logger.debug("Skipping ticket file {}: {}", md_file, e)
                     continue
 
                 mtime_key = (stat.st_mtime, stat.st_size)
