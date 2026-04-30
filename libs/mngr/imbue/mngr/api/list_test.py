@@ -1319,11 +1319,8 @@ def test_list_agents_batch_continue_mode_records_failing_provider_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """In batch CONTINUE mode, a provider that fails to instantiate is recorded
-    as an ErrorInfo via the top-level except in list_agents.
-
-    Batch mode constructs all providers up front via get_all_provider_instances,
-    so any single provider's failure aborts the up-front construction. The
-    error is then caught by list_agents's outer except in CONTINUE mode.
+    as a per-provider error in result.errors and the listing proceeds with the
+    remaining providers.
     """
     failing_ctx = _make_broken_provider_ctx(temp_mngr_ctx)
 

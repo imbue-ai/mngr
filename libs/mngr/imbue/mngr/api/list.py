@@ -14,7 +14,6 @@ from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
 from imbue.mngr.api.discovery_events import emit_discovery_error_to_stdout
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
@@ -237,6 +236,72 @@ def _maybe_write_full_discovery_snapshot(
         logger.warning("Failed to write full discovery snapshot: {}", e)
 
 
+def _load_agents_per_provider(
+    mngr_ctx: MngrContext,
+    provider_names: tuple[str, ...] | None,
+    params: _ListAgentsParams,
+    result: ListResult,
+    results_lock: Lock,
+    reset_caches: bool,
+) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[ProviderInstanceInterface]]:
+    """Construct each provider and run discovery in its own thread, returning the
+    merged host/agent map plus the list of providers that completed successfully.
+
+    Per-provider failures (construction or discovery) are reported as
+    ProviderErrorInfo on `result.errors` in CONTINUE mode, or re-raised in ABORT
+    mode -- so a single broken provider does not silently drop the rest of the
+    listing while still respecting `--on-error`.
+    """
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
+    providers: list[ProviderInstanceInterface] = []
+    providers_lock = Lock()
+
+    def _load_one(provider_name: ProviderInstanceName) -> None:
+        try:
+            provider = get_provider_instance(provider_name, mngr_ctx)
+            if reset_caches:
+                provider.reset_caches()
+            provider_results = provider.discover_hosts_and_agents(
+                cg=mngr_ctx.concurrency_group, include_destroyed=True
+            )
+        except Exception as e:
+            if params.error_behavior == ErrorBehavior.ABORT:
+                if isinstance(e, MngrError):
+                    raise
+                raise MngrError(str(e)) from e
+            logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
+            emit_discovery_error_to_stdout(
+                error_type=type(e).__name__,
+                error_message=str(e),
+                source_name=str(provider_name),
+            )
+            error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
+            with results_lock:
+                result.errors.append(error_info)
+            if params.on_error:
+                params.on_error(error_info)
+            return
+
+        with providers_lock:
+            providers.append(provider)
+        with results_lock:
+            agents_by_host.update(provider_results)
+
+    with log_span("Loading agents from all providers"):
+        names = list_provider_names_to_load(mngr_ctx, provider_names)
+        with mngr_executor(
+            parent_cg=mngr_ctx.concurrency_group, name="list_agents_load_providers", max_workers=32
+        ) as executor:
+            futures = [executor.submit(_load_one, name) for name in names]
+
+        # Re-raise any thread exceptions (ABORT-mode errors)
+        for future in futures:
+            future.result()
+
+    warn_on_duplicate_host_names(agents_by_host)
+    return agents_by_host, providers
+
+
 def _list_agents_batch(
     mngr_ctx: MngrContext,
     provider_names: tuple[str, ...] | None,
@@ -246,14 +311,14 @@ def _list_agents_batch(
     reset_caches: bool = False,
 ) -> None:
     """Batch mode: load all agents from all providers, then process hosts."""
-    with log_span("Loading agents from all providers"):
-        agents_by_host, providers = discover_hosts_and_agents(
-            mngr_ctx,
-            provider_names=provider_names,
-            agent_identifiers=None,
-            include_destroyed=True,
-            reset_caches=reset_caches,
-        )
+    agents_by_host, providers = _load_agents_per_provider(
+        mngr_ctx=mngr_ctx,
+        provider_names=provider_names,
+        params=params,
+        result=result,
+        results_lock=results_lock,
+        reset_caches=reset_caches,
+    )
     provider_map = {provider.name: provider for provider in providers}
     logger.trace("Found {} hosts with agents", len(agents_by_host))
 
