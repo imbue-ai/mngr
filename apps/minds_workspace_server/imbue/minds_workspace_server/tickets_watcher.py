@@ -150,7 +150,7 @@ class AgentTicketsWatcher:
             observer.start()
             self._observer = observer
         except OSError:
-            logger.debug("Failed to start watchdog observer for tickets dir: %s", parent_dir)
+            logger.debug("Failed to start watchdog observer for tickets dir: {}", parent_dir)
 
     def _scan(self) -> list[dict[str, Any]]:
         """Scan the tickets directory and emit one event per OBSERVED
