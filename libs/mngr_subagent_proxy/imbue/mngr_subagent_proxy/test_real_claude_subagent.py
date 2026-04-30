@@ -456,14 +456,19 @@ def _create_parent_claude_agent(
     prompt: str,
     *,
     extra_env: dict[str, str] | None = None,
+    claude_args: tuple[str, ...] = ("--dangerously-skip-permissions",),
 ) -> subprocess.CompletedProcess[str]:
     """Create a Claude agent via the ``mngr create`` CLI with the given prompt.
 
     Uses ``--transfer=none`` so the agent shares the source repo in-place,
     ``--no-connect`` so we don't attach a TUI, ``--no-ensure-clean`` because
-    provisioning may touch settings.local.json, and
+    provisioning may touch settings.local.json, and (by default)
     ``--dangerously-skip-permissions`` (after ``--``) so Claude never blocks
     on permission dialogs. Trust is pre-seeded via ``~/.claude.json``.
+
+    ``claude_args`` lets a caller substitute a different set of flags --
+    e.g. ``--permission-mode plan`` for plan-mode propagation tests, where
+    bypassPermissions and plan are mutually exclusive permission modes.
     """
     cmd_args: list[str] = [
         "create",
@@ -480,7 +485,8 @@ def _create_parent_claude_agent(
     if extra_env:
         for key, value in extra_env.items():
             cmd_args.extend(["--env", f"{key}={value}"])
-    cmd_args.extend(["--", "--dangerously-skip-permissions"])
+    cmd_args.append("--")
+    cmd_args.extend(claude_args)
     return mngr.run(cmd_args, timeout=_DEFAULT_SPAWN_TIMEOUT_SECONDS)
 
 
@@ -740,6 +746,97 @@ def test_task_run_in_background_returns_immediately(
         assert _BANANA_SENTINEL in child_transcript, (
             f"Child {subagent_name!r} did not emit {_BANANA_SENTINEL!r}. "
             f"Transcript length: {len(child_transcript)} chars."
+        )
+    finally:
+        _destroy_agents_quietly(mngr, iter(created_agents))
+
+
+# Plan-mode regression: a parent in plan mode delegates research-only work
+# via Task. The subagent it spawns MUST inherit plan mode -- otherwise the
+# read-only guarantee leaks (the subagent could mutate state the parent
+# itself was forbidden from touching). Plan mode in Claude Code is
+# selected via ``--permission-mode plan`` and is mutually exclusive with
+# ``bypassPermissions`` (i.e. ``--dangerously-skip-permissions``), so
+# this test substitutes the parent's CLI flags rather than appending.
+_PLAN_MODE_PROMPT: Final[str] = (
+    "Use the Task tool exactly once. Set subagent_type to 'general-purpose'. "
+    "Set the prompt to: Say exactly the word BANANA and nothing else, then end your turn. "
+    "Then end your own turn. Do not use any other tools."
+)
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_plan_mode_propagates_to_subagent(
+    _skip_if_no_real_claude: None,
+    _mngr_subprocess_env: _MngrSubprocess,
+    _source_repo: Path,
+    temp_host_dir: Path,
+) -> None:
+    """A parent in plan mode spawns subagents that also run in plan mode.
+
+    Plan mode (``--permission-mode plan``) restricts a Claude Code agent
+    to read-only tools: no Edit, no Write, no mutating Bash. When such a
+    parent delegates research via the Task tool, the spawned subagent
+    MUST inherit plan mode -- otherwise the subagent can freely mutate
+    state that the parent itself was forbidden from touching, defeating
+    the read-only guarantee plan mode is supposed to provide.
+
+    The proxy spawns its child via ``mngr create --type mngr-proxy-child``
+    (see ``hooks/spawn.py:build_wait_script``), so the child's claude
+    command line -- exposed by ``mngr list --format json`` as the
+    ``command`` field on AgentDetails -- is the authoritative observable
+    for plan-mode propagation. We assert that command contains
+    ``--permission-mode plan`` (in either argv-pair or ``=``-joined form).
+    """
+    mngr = _mngr_subprocess_env
+    parent_name = _make_parent_agent_name()
+    created_agents: list[str] = [parent_name]
+
+    try:
+        create_result = _create_parent_claude_agent(
+            mngr,
+            parent_name,
+            _PLAN_MODE_PROMPT,
+            claude_args=("--permission-mode", "plan"),
+        )
+        assert create_result.returncode == 0, (
+            f"mngr create failed (exit={create_result.returncode})\n"
+            f"stderr:\n{create_result.stderr}\nstdout:\n{create_result.stdout}"
+        )
+
+        subagent_prefix = f"{parent_name}--subagent-"
+        subagent = _poll_for_agent_by_name_prefix(
+            mngr,
+            subagent_prefix,
+            timeout=_DEFAULT_WAIT_TIMEOUT_SECONDS,
+        )
+        if subagent is None:
+            diagnostics = _diagnose_subagent_proxy_failure(mngr, parent_name, _source_repo, temp_host_dir)
+            pytest.fail(
+                f"No mngr-managed subagent with prefix {subagent_prefix!r} appeared within "
+                f"{_DEFAULT_WAIT_TIMEOUT_SECONDS}s. Plan-mode parent never reached the "
+                f"Task tool, or the spawn hook did not fire."
+                f"{diagnostics}"
+            )
+        subagent_name = subagent["name"]
+        created_agents.append(subagent_name)
+
+        child_command = subagent.get("command")
+        assert isinstance(child_command, str) and child_command, (
+            f"Spawned subagent {subagent_name!r} is missing a 'command' field in mngr list output: {subagent!r}"
+        )
+        # Accept both argv-pair (``--permission-mode plan``) and equals-joined
+        # (``--permission-mode=plan``) forms; mngr_claude assembles cli_args
+        # via shell join, so either survives round-trip into the command field.
+        has_plan_flag = "--permission-mode plan" in child_command or "--permission-mode=plan" in child_command
+        assert has_plan_flag, (
+            f"Subagent {subagent_name!r} did NOT inherit plan mode. Its claude "
+            f"command line is: {child_command!r}. Plan-mode's read-only guarantee "
+            f"requires the spawn hook to propagate ``--permission-mode plan`` to "
+            f"the child's mngr-create call (see hooks/spawn.py)."
         )
     finally:
         _destroy_agents_quietly(mngr, iter(created_agents))
