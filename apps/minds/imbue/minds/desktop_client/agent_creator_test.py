@@ -2,6 +2,7 @@ import queue as queue_mod
 import threading
 import time
 import tomllib
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -595,6 +596,55 @@ class _CountdownReadyResolver(BackendResolverInterface):
         return ()
 
 
+def _mock_transport_always_connect_error(request: httpx.Request) -> httpx.Response:
+    """Simulate a workspace server whose URL is registered but the port isn't up yet."""
+    raise httpx.ConnectError("connection refused")
+
+
+def _mock_transport_always_ok(request: httpx.Request) -> httpx.Response:
+    """Simulate a workspace server that's answering HTTP."""
+    return httpx.Response(200, text="ok")
+
+
+def _mock_transport_always_503(request: httpx.Request) -> httpx.Response:
+    """Simulate a workspace server that's answering HTTP but isn't ready yet."""
+    return httpx.Response(503, text="not ready")
+
+
+def _make_workspace_ready_creator(
+    *,
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+    backend_resolver: BackendResolverInterface,
+    transport: Callable[[httpx.Request], httpx.Response] | None = _mock_transport_always_ok,
+    workspace_ready_timeout_seconds: float = 1.0,
+    workspace_ready_poll_interval_seconds: float = 0.01,
+    workspace_ready_probe_timeout_seconds: float = 0.05,
+) -> AgentCreator:
+    """Construct an ``AgentCreator`` wired up for ``_wait_for_workspace_ready`` tests.
+
+    All five readiness tests share the same constructor boilerplate; this
+    helper centralizes it so each test only has to specify what it actually
+    cares about (the resolver and the simulated HTTP probe behavior).
+    Pass ``transport=None`` to skip injecting a probe client and let the
+    default ``httpx.Client`` factory run -- the URL-registration timeout
+    test never reaches the probe stage and so doesn't need one.
+    """
+    kwargs: dict[str, object] = dict(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        backend_resolver=backend_resolver,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        workspace_ready_timeout_seconds=workspace_ready_timeout_seconds,
+        workspace_ready_poll_interval_seconds=workspace_ready_poll_interval_seconds,
+        workspace_ready_probe_timeout_seconds=workspace_ready_probe_timeout_seconds,
+    )
+    if transport is not None:
+        kwargs["probe_http_client"] = httpx.Client(transport=httpx.MockTransport(transport))
+    return AgentCreator(**kwargs)
+
+
 def test_wait_for_workspace_ready_returns_true_once_url_appears(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
@@ -609,15 +659,12 @@ def test_wait_for_workspace_ready_returns_true_once_url_appears(
     dedicated tests below.
     """
     agent_id = AgentId()
-    resolver = _CountdownReadyResolver(url="http://workspace-backend", calls_before_ready=3)
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-        backend_resolver=resolver,
+    creator = _make_workspace_ready_creator(
+        tmp_path=tmp_path,
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
+        backend_resolver=_CountdownReadyResolver(url="http://workspace-backend", calls_before_ready=3),
         workspace_ready_timeout_seconds=5.0,
-        workspace_ready_poll_interval_seconds=0.01,
-        probe_http_client=httpx.Client(transport=httpx.MockTransport(_mock_transport_always_ok)),
     )
     log_queue: queue_mod.Queue[str] = queue_mod.Queue()
 
@@ -636,14 +683,14 @@ def test_wait_for_workspace_ready_returns_false_on_timeout(
     but not raised.
     """
     agent_id = AgentId()
-    resolver = StaticBackendResolver(url_by_agent_and_service={})
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-        backend_resolver=resolver,
+    creator = _make_workspace_ready_creator(
+        tmp_path=tmp_path,
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        # Stage-1 timeout fires before the probe runs, so no transport needed.
+        transport=None,
         workspace_ready_timeout_seconds=0.05,
-        workspace_ready_poll_interval_seconds=0.01,
     )
     log_queue: queue_mod.Queue[str] = queue_mod.Queue()
 
@@ -686,14 +733,11 @@ def test_wait_for_workspace_ready_uses_the_workspace_service_name(
         def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
             return ()
 
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-        backend_resolver=_RecordingResolver(),
+    creator = _make_workspace_ready_creator(
+        tmp_path=tmp_path,
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
-        workspace_ready_timeout_seconds=1.0,
-        workspace_ready_poll_interval_seconds=0.01,
-        probe_http_client=httpx.Client(transport=httpx.MockTransport(_mock_transport_always_ok)),
+        backend_resolver=_RecordingResolver(),
     )
 
     assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is True
@@ -701,16 +745,6 @@ def test_wait_for_workspace_ready_uses_the_workspace_service_name(
 
 
 # -- workspace_ready HTTP probe tests --
-
-
-def _mock_transport_always_connect_error(request: httpx.Request) -> httpx.Response:
-    """Simulate a workspace server whose URL is registered but the port isn't up yet."""
-    raise httpx.ConnectError("connection refused")
-
-
-def _mock_transport_always_ok(request: httpx.Request) -> httpx.Response:
-    """Simulate a workspace server that's answering HTTP."""
-    return httpx.Response(200, text="ok")
 
 
 def test_wait_for_workspace_ready_requires_http_readiness_not_just_url(
@@ -727,18 +761,15 @@ def test_wait_for_workspace_ready_requires_http_readiness_not_just_url(
     polling until the server actually responds with a 200.
     """
     agent_id = AgentId()
-    resolver = StaticBackendResolver(
-        url_by_agent_and_service={str(agent_id): {"system_interface": "http://workspace-backend"}},
-    )
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-        backend_resolver=resolver,
+    creator = _make_workspace_ready_creator(
+        tmp_path=tmp_path,
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
+        backend_resolver=StaticBackendResolver(
+            url_by_agent_and_service={str(agent_id): {"system_interface": "http://workspace-backend"}},
+        ),
+        transport=_mock_transport_always_connect_error,
         workspace_ready_timeout_seconds=0.15,
-        workspace_ready_poll_interval_seconds=0.01,
-        workspace_ready_probe_timeout_seconds=0.05,
-        probe_http_client=httpx.Client(transport=httpx.MockTransport(_mock_transport_always_connect_error)),
     )
 
     start = time.monotonic()
@@ -747,11 +778,6 @@ def test_wait_for_workspace_ready_requires_http_readiness_not_just_url(
     # Must have actually waited for the timeout -- not short-circuited on
     # the "URL exists" check.
     assert elapsed >= 0.15
-
-
-def _mock_transport_always_503(request: httpx.Request) -> httpx.Response:
-    """Simulate a workspace server that's answering HTTP but isn't ready yet."""
-    return httpx.Response(503, text="not ready")
 
 
 def test_wait_for_workspace_ready_rejects_non_200_response(
@@ -766,18 +792,15 @@ def test_wait_for_workspace_ready_rejects_non_200_response(
     while initialization is still in progress.
     """
     agent_id = AgentId()
-    resolver = StaticBackendResolver(
-        url_by_agent_and_service={str(agent_id): {"system_interface": "http://workspace-backend"}},
-    )
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-        backend_resolver=resolver,
+    creator = _make_workspace_ready_creator(
+        tmp_path=tmp_path,
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
+        backend_resolver=StaticBackendResolver(
+            url_by_agent_and_service={str(agent_id): {"system_interface": "http://workspace-backend"}},
+        ),
+        transport=_mock_transport_always_503,
         workspace_ready_timeout_seconds=0.1,
-        workspace_ready_poll_interval_seconds=0.01,
-        workspace_ready_probe_timeout_seconds=0.05,
-        probe_http_client=httpx.Client(transport=httpx.MockTransport(_mock_transport_always_503)),
     )
 
     assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is False
@@ -790,17 +813,14 @@ def test_wait_for_workspace_ready_returns_true_once_server_answers(
 ) -> None:
     """Once the HTTP probe gets a 200, readiness is satisfied."""
     agent_id = AgentId()
-    resolver = StaticBackendResolver(
-        url_by_agent_and_service={str(agent_id): {"system_interface": "http://workspace-backend"}},
-    )
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-        backend_resolver=resolver,
+    creator = _make_workspace_ready_creator(
+        tmp_path=tmp_path,
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
+        backend_resolver=StaticBackendResolver(
+            url_by_agent_and_service={str(agent_id): {"system_interface": "http://workspace-backend"}},
+        ),
         workspace_ready_timeout_seconds=2.0,
-        workspace_ready_poll_interval_seconds=0.01,
-        probe_http_client=httpx.Client(transport=httpx.MockTransport(_mock_transport_always_ok)),
     )
 
     assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is True
