@@ -14,6 +14,7 @@ from pydantic import Field
 
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -79,7 +80,7 @@ def register_agent_type() -> tuple[str, type[AgentInterface], type[AgentTypeConf
 _AGENT_DEFINITION: Final[str] = "mngr-proxy.agent.md"
 
 _SPAWN_MODULE: Final[str] = "imbue.mngr_subagent_proxy.hooks.spawn"
-_REWRITE_MODULE: Final[str] = "imbue.mngr_subagent_proxy.hooks.rewrite"
+_CLEANUP_MODULE: Final[str] = "imbue.mngr_subagent_proxy.hooks.cleanup"
 _REAP_MODULE: Final[str] = "imbue.mngr_subagent_proxy.hooks.reap"
 
 
@@ -103,7 +104,7 @@ def build_subagent_proxy_hooks_config() -> dict[str, Any]:
     - SessionStart: reap orphaned proxy subagents from prior sessions.
     """
     spawn_cmd = _python_hook_command(_SPAWN_MODULE)
-    rewrite_cmd = _python_hook_command(_REWRITE_MODULE)
+    cleanup_cmd = _python_hook_command(_CLEANUP_MODULE)
     reap_cmd = _python_hook_command(_REAP_MODULE)
     return {
         "hooks": {
@@ -125,7 +126,7 @@ def build_subagent_proxy_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": rewrite_cmd,
+                            "command": cleanup_cmd,
                             "timeout": 15,
                         },
                     ],
@@ -317,9 +318,9 @@ def _discover_plugin_hooks_files() -> list[Path]:
             logger.warning("Could not enumerate user plugin hooks under {}: {}", user_plugins, e)
 
     # Per-agent plugin caches live under <host_dir>/agents/<id>/plugin/claude/anthropic/plugins/.
-    # Default host dir is ~/.mngr; mngr can also use other dirs but
-    # for the local-host case this is the one that matters.
-    host_agents_root = Path.home() / ".mngr" / "agents"
+    # `read_default_host_dir` resolves MNGR_HOST_DIR (explicit override) or
+    # falls back to ~/.mngr -- so we honor user-customized host dirs.
+    host_agents_root = read_default_host_dir() / "agents"
     if host_agents_root.is_dir():
         try:
             candidates.extend(host_agents_root.glob("*/plugin/claude/anthropic/plugins/**/hooks/hooks.json"))

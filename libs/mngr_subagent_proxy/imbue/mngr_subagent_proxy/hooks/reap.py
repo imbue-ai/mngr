@@ -27,7 +27,7 @@ _TERMINAL_STATES: frozenset[AgentLifecycleState] = frozenset({AgentLifecycleStat
 
 # Stub-injection alias for the background reaper spawner. Lives here because
 # this is the only caller; the list-agents callable shares ``ListAgentsByNameCallable``
-# with hooks/rewrite.py via hooks/mngr_api.py.
+# with hooks/cleanup.py via hooks/mngr_api.py.
 SpawnBackgroundReaperCallable = Callable[[], None]
 
 

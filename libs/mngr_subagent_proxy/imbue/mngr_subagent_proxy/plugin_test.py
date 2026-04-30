@@ -79,7 +79,7 @@ def test_plugin_hooks_register_on_claude_agent(work_dir: Path, fake_host: FakeHo
     post_cmd = hooks["PostToolUse"][0]["hooks"][0]["command"]
     session_cmd = hooks["SessionStart"][0]["hooks"][0]["command"]
     assert python_prefix + "spawn" in pre_cmd
-    assert python_prefix + "rewrite" in post_cmd
+    assert python_prefix + "cleanup" in post_cmd
     assert python_prefix + "reap" in session_cmd
 
 

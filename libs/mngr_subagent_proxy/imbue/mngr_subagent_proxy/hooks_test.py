@@ -19,8 +19,8 @@ import pytest
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.testing import make_test_agent_details
+from imbue.mngr_subagent_proxy.hooks import cleanup as cleanup_hook
 from imbue.mngr_subagent_proxy.hooks import reap as reap_hook
-from imbue.mngr_subagent_proxy.hooks import rewrite as rewrite_hook
 from imbue.mngr_subagent_proxy.hooks import spawn as spawn_hook
 
 
@@ -314,11 +314,9 @@ def test_rewrite_substitutes_output_and_cleans_up(
         destroy_calls.append((target_name, log_path))
 
     stdin_buffer = io.StringIO(json.dumps({"tool_use_id": tid, "tool_response": "ignored"}))
-    stdout_buffer = io.StringIO()
     # Child is STOPPED in mngr list -> safe to destroy.
-    rewrite_hook.run(
+    cleanup_hook.run(
         stdin_buffer,
-        stdout_buffer,
         destroy_callable=fake_destroy,
         list_callable=_list_returns(_fake_list_with_state("foo-bar", AgentLifecycleState.STOPPED)),
     )
@@ -327,7 +325,6 @@ def test_rewrite_substitutes_output_and_cleans_up(
     # updatedToolOutput is MCP-only. The hook now emits no JSON; the
     # subagent end-turn text reaches the parent via Haiku's own final
     # reply (see hooks/spawn.py wait-script + mngr-proxy.agent.md).
-    assert stdout_buffer.getvalue() == ""
     # Result file remains on disk for diagnostics? No: the hook still
     # cleans up side files because they are no longer needed once Haiku
     # has captured the content from the wait-script's stdout.
@@ -385,17 +382,14 @@ def test_rewrite_missing_result_preserves_subagent(
         destroy_calls.append((target_name, log_path))
 
     stdin_buffer = io.StringIO(json.dumps({"tool_use_id": tid, "tool_response": "ignored"}))
-    stdout_buffer = io.StringIO()
     # Even with the child reported STOPPED in mngr list, missing
     # result_file alone is enough to preserve.
-    rewrite_hook.run(
+    cleanup_hook.run(
         stdin_buffer,
-        stdout_buffer,
         destroy_callable=fake_destroy,
         list_callable=_list_returns(_fake_list_with_state(target_name, AgentLifecycleState.STOPPED)),
     )
 
-    assert stdout_buffer.getvalue() == ""
     # Critical: child is preserved.
     assert destroy_calls == []
     # Critical: state files are preserved so the user / reaper can
@@ -447,10 +441,8 @@ def test_rewrite_live_lifecycle_preserves_subagent(
         destroy_calls.append((target_name, log_path))
 
     stdin_buffer = io.StringIO(json.dumps({"tool_use_id": tid, "tool_response": "ignored"}))
-    stdout_buffer = io.StringIO()
-    rewrite_hook.run(
+    cleanup_hook.run(
         stdin_buffer,
-        stdout_buffer,
         destroy_callable=fake_destroy,
         list_callable=_list_returns(_fake_list_with_state(target_name, live_state)),
     )
@@ -501,10 +493,8 @@ def test_rewrite_preserves_subagent_when_mngr_list_errors(
         destroy_calls.append((target_name, log_path))
 
     stdin_buffer = io.StringIO(json.dumps({"tool_use_id": tid, "tool_response": "ignored"}))
-    stdout_buffer = io.StringIO()
-    rewrite_hook.run(
+    cleanup_hook.run(
         stdin_buffer,
-        stdout_buffer,
         destroy_callable=fake_destroy,
         list_callable=_list_returns(None),
     )
@@ -529,14 +519,11 @@ def test_rewrite_ignores_unmapped_tool_use_id(
         destroy_calls.append((target_name, log_path))
 
     stdin_buffer = io.StringIO(json.dumps({"tool_use_id": "untracked_tid"}))
-    stdout_buffer = io.StringIO()
-    rewrite_hook.run(
+    cleanup_hook.run(
         stdin_buffer,
-        stdout_buffer,
         destroy_callable=fake_destroy,
         list_callable=_list_returns({}),
     )
-    assert stdout_buffer.getvalue() == ""
     assert destroy_calls == []
 
 

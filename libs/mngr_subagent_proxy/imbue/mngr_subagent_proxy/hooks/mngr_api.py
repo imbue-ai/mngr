@@ -25,7 +25,7 @@ from imbue.mngr.primitives import CleanupAction
 from imbue.mngr.primitives import ErrorBehavior
 
 # DI signature for ``list_agents_by_name``. Lives with the function so every
-# caller (hooks/rewrite.py, hooks/reap.py) imports the same alias and tests
+# caller (hooks/cleanup.py, hooks/reap.py) imports the same alias and tests
 # have a single name to inject against. Mirrors the pattern of
 # ``DestroyAgentDetachedCallable`` in ``hooks/destroy_detached.py``.
 ListAgentsByNameCallable = Callable[[], dict[str, AgentDetails] | None]

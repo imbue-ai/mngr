@@ -42,14 +42,14 @@ def _read_stdin_json(stdin: TextIO) -> dict[str, Any] | None:
     try:
         raw = stdin.read()
     except OSError as e:
-        logger.warning("rewrite: failed to read stdin: {}", e)
+        logger.warning("cleanup: failed to read stdin: {}", e)
         return None
     if not raw:
         return None
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as e:
-        logger.warning("rewrite: malformed stdin JSON: {}", e)
+        logger.warning("cleanup: malformed stdin JSON: {}", e)
         return None
     if not isinstance(parsed, dict):
         return None
@@ -62,7 +62,7 @@ def _best_effort_unlink(path: Path) -> None:
     except FileNotFoundError:
         return
     except OSError as e:
-        logger.warning("rewrite: failed to remove {}: {}", path, e)
+        logger.warning("cleanup: failed to remove {}: {}", path, e)
 
 
 def _is_child_still_alive(
@@ -92,15 +92,20 @@ def _is_child_still_alive(
 
 def run(
     stdin: TextIO,
-    stdout: TextIO,
     destroy_callable: DestroyAgentDetachedCallable = destroy_agent_detached,
     list_callable: ListAgentsByNameCallable = list_agents_by_name,
 ) -> None:
     """PostToolUse:Agent hook core.
 
-    Takes I/O streams and the detached-destroy callable explicitly so tests
-    can inject StringIO buffers and a stub destroy function without
-    monkey-patching module-level names.
+    Takes the input stream and side-effecting callables explicitly so
+    tests can inject a StringIO buffer and stub destroy / list
+    functions without monkey-patching module-level names.
+
+    Doesn't take a stdout: PostToolUse on the built-in Task tool cannot
+    override tool_result (Claude Code's `updatedToolOutput` is MCP-only),
+    so this hook never emits any JSON. The relayed body reaches the
+    parent via Haiku's own final reply -- see hooks/spawn.py wait-script
+    + mngr-proxy.agent.md.
     """
     os.umask(0o077)
 
@@ -127,7 +132,7 @@ def run(
     try:
         map_data = json.loads(map_file.read_text())
     except (OSError, json.JSONDecodeError) as e:
-        logger.warning("rewrite: failed to read map file {}: {}", map_file, e)
+        logger.warning("cleanup: failed to read map file {}: {}", map_file, e)
         map_data = None
     if isinstance(map_data, dict):
         raw_target = map_data.get("target_name")
@@ -207,8 +212,8 @@ def run(
 
 
 def main() -> None:
-    """PostToolUse:Agent hook entry point. Wires up the real stdin/stdout."""
-    run(sys.stdin, sys.stdout)
+    """PostToolUse:Agent hook entry point. Wires up the real stdin."""
+    run(sys.stdin)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from typing import Callable
 from loguru import logger
 
 # DI signature for ``destroy_agent_detached``. Lives with the function so
-# every caller (plugin.py, hooks/rewrite.py, hooks/reap.py) imports the same
+# every caller (plugin.py, hooks/cleanup.py, hooks/reap.py) imports the same
 # alias and tests have a single name to inject against.
 DestroyAgentDetachedCallable = Callable[[str, Path], None]
 

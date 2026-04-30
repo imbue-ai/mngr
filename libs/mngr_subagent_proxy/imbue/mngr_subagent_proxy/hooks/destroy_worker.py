@@ -1,6 +1,6 @@
 """Module entry-point for a detached single-agent destroy worker.
 
-Invoked by ``hooks/rewrite.py`` and ``hooks/reap.py`` as::
+Invoked by ``hooks/cleanup.py`` and ``hooks/reap.py`` as::
 
     python -m imbue.mngr_subagent_proxy.hooks.destroy_worker <target_name>
 
