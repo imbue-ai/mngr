@@ -841,10 +841,6 @@ class AgentCreator(MutableModel):
     # answering HTTP, rather than redirecting the browser into a dead page
     # that just happens to have a registered URL.
     workspace_ready_probe_timeout_seconds: float = Field(default=2.0, frozen=True)
-    # When False, skip the HTTP probe and treat "URL registered" as ready.
-    # Used by tests that exercise the resolver-polling path with a stub URL
-    # that isn't actually reachable.
-    workspace_ready_probe_enabled: bool = Field(default=True, frozen=True)
 
     _statuses: dict[str, AgentCreationStatus] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
@@ -1013,8 +1009,6 @@ class AgentCreator(MutableModel):
         url = self.backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME)
         if url is None:
             return False
-        if not self.workspace_ready_probe_enabled:
-            return True
         return self._probe_workspace_http(url)
 
     def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> bool:

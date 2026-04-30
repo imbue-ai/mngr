@@ -603,9 +603,10 @@ def test_wait_for_workspace_ready_returns_true_once_url_appears(
     """Polling returns True after the workspace server registers its URL.
 
     The countdown resolver forces at least a few poll iterations, so this
-    also guards against a regression where the loop exits too early. The
-    HTTP probe is disabled here because the stub URL isn't reachable; the
-    probe itself is covered by dedicated tests below.
+    also guards against a regression where the loop exits too early. A
+    MockTransport stands in for the HTTP probe so tests don't need a real
+    server bound to the stub URL; the probe behavior itself is covered by
+    dedicated tests below.
     """
     agent_id = AgentId()
     resolver = _CountdownReadyResolver(url="http://workspace-backend", calls_before_ready=3)
@@ -616,8 +617,8 @@ def test_wait_for_workspace_ready_returns_true_once_url_appears(
         notification_dispatcher=notification_dispatcher,
         workspace_ready_timeout_seconds=5.0,
         workspace_ready_poll_interval_seconds=0.01,
-        workspace_ready_probe_enabled=False,
     )
+    creator._probe_http_client = httpx.Client(transport=httpx.MockTransport(_mock_transport_always_ok))
     log_queue: queue_mod.Queue[str] = queue_mod.Queue()
 
     assert creator._wait_for_workspace_ready(agent_id, log_queue) is True
@@ -643,7 +644,6 @@ def test_wait_for_workspace_ready_returns_false_on_timeout(
         notification_dispatcher=notification_dispatcher,
         workspace_ready_timeout_seconds=0.05,
         workspace_ready_poll_interval_seconds=0.01,
-        workspace_ready_probe_enabled=False,
     )
     log_queue: queue_mod.Queue[str] = queue_mod.Queue()
 
@@ -693,8 +693,8 @@ def test_wait_for_workspace_ready_uses_the_workspace_service_name(
         notification_dispatcher=notification_dispatcher,
         workspace_ready_timeout_seconds=1.0,
         workspace_ready_poll_interval_seconds=0.01,
-        workspace_ready_probe_enabled=False,
     )
+    creator._probe_http_client = httpx.Client(transport=httpx.MockTransport(_mock_transport_always_ok))
 
     assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is True
     assert observed_service_names == [WORKSPACE_SERVER_SERVICE_NAME]
