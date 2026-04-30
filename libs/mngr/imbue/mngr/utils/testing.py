@@ -137,6 +137,13 @@ def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     or modifying the real home directory. Use this directly for lightweight
     test suites (e.g. minds). For full mngr test isolation (MNGR_HOST_DIR,
     MNGR_PREFIX, tmux server, etc.) use setup_test_mngr_env instead.
+
+    Also writes a minimal .gitconfig with `safe.directory = *` so subprocess
+    git invocations (e.g. mngr schedule add shelling out to
+    `git rev-parse --show-toplevel` inside /code/mngr on release sandboxes)
+    don't get blocked by git's repo-ownership guard. The image-time entry
+    /root/.gitconfig is invisible once HOME is redirected, so every
+    isolate_home() call must re-establish the exemption.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
@@ -144,6 +151,12 @@ def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # to the temp HOME, not an inherited agent config dir.
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("ORIGINAL_CLAUDE_CONFIG_DIR", raising=False)
+
+    # Write a minimal .gitconfig with safe.directory='*' so subprocess git
+    # calls from this HOME don't trip git's ownership check. isolate_git()
+    # overwrites this with a richer config when both are used together.
+    gitconfig = tmp_path / ".gitconfig"
+    gitconfig.write_text("[safe]\n\tdirectory = *\n")
 
 
 @contextmanager
@@ -206,22 +219,42 @@ def isolate_git(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Isolate git from system config and provide default user config.
 
     Sets GIT_CONFIG_NOSYSTEM to skip /etc/gitconfig, GIT_TERMINAL_PROMPT to
-    prevent interactive credential prompts, and writes a .gitconfig in the
-    fake HOME (set by isolate_home) with default user info and
-    ``init.defaultBranch``.
+    prevent interactive credential prompts, and (over)writes a .gitconfig in
+    the fake HOME (set by isolate_home) with default user info,
+    ``init.defaultBranch``, and ``safe.directory = *``. The .gitconfig is
+    always rewritten -- isolate_home() also writes a minimal [safe]-only
+    .gitconfig, so overwriting here ensures this function's richer contents
+    win regardless of fixture call order.
+
+    ``isolate_home()`` MUST have been called first. This function unconditionally
+    overwrites ``Path.home() / ".gitconfig"``, so without HOME redirection it
+    would clobber the developer's real ``~/.gitconfig``. The contract is
+    enforced via ``assert_home_is_temp_directory()`` -- a misuse raises an
+    AssertionError before any write happens.
 
     Tests that create git repos should use a subdirectory of tmp_path rather
     than tmp_path itself, so that .gitconfig does not appear as an untracked
     file in ``git status --porcelain``.
     """
+    # Safety check before the unconditional .gitconfig overwrite below:
+    # refuse to run if HOME is not in a temp directory, so a caller who
+    # forgets to run isolate_home() first cannot wipe the real ~/.gitconfig.
+    assert_home_is_temp_directory()
+
     for key, value in _GIT_ISOLATION_ENV.items():
         monkeypatch.setenv(key, value)
 
+    # Overwrite the minimal .gitconfig isolate_home() wrote with the richer
+    # [user] + [init] + [safe] config this function promises. safe.directory='*'
+    # is load-bearing for release tests: they run as root against /code/mngr
+    # in the offload sandbox, and the image-time /root/.gitconfig exemption is
+    # invisible once isolate_home() points HOME at a tmp dir.
     gitconfig = Path.home() / ".gitconfig"
-    if not gitconfig.exists():
-        gitconfig.write_text(
-            "[user]\n\tname = Test User\n\temail = test@example.com\n[init]\n\tdefaultBranch = main\n"
-        )
+    gitconfig.write_text(
+        "[user]\n\tname = Test User\n\temail = test@example.com\n"
+        "[init]\n\tdefaultBranch = main\n"
+        "[safe]\n\tdirectory = *\n"
+    )
 
     yield
 
