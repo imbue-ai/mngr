@@ -43,6 +43,7 @@ def make_message_event(
     channel_id: str = "C123",
     channel_name: str = "general",
     ts: str = "1700000000.000001",
+    raw: dict[str, Any] | None = None,
 ) -> MessageEvent:
     return MessageEvent(
         timestamp=FIXED_TIMESTAMP,
@@ -52,7 +53,7 @@ def make_message_event(
         channel_id=SlackChannelId(channel_id),
         channel_name=SlackChannelName(channel_name),
         message_ts=SlackMessageTimestamp(ts),
-        raw={"ts": ts, "text": "hello"},
+        raw=raw if raw is not None else {"ts": ts, "text": "hello"},
     )
 
 
