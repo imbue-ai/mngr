@@ -243,6 +243,65 @@ def test_index_injects_hostname_meta_tag(tmp_path: Path) -> None:
         assert "minds-workspace-server-hostname" in response.text
 
 
+def _make_iframe_log_payload(service_name: str = "web", mind_id: str = "agent-abc") -> dict[str, object]:
+    return {
+        "records": [
+            {
+                "level": "error",
+                "message": "iframe bug",
+                "frame_url": f"http://{mind_id}.localhost:8420/service/{service_name}/",
+                "source_id": f"http://{mind_id}.localhost:8420/service/{service_name}/bundle.js",
+                "line": 42,
+                "service_name": service_name,
+                "mind_id": mind_id,
+                "client_timestamp": "2026-04-23T12:00:00.000Z",
+            },
+        ],
+    }
+
+
+def test_post_iframe_logs_writes_to_host_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Posting a batch of iframe logs appends them to logs/iframe/events.jsonl."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    test_app = create_application()
+    with TestClient(test_app) as test_client:
+        response = test_client.post("/api/iframe-logs", json=_make_iframe_log_payload())
+
+    assert response.status_code == 200
+    assert response.json() == {"written": 1}
+    events_file = tmp_path / "logs" / "iframe" / "events.jsonl"
+    assert events_file.exists()
+    lines = [json.loads(line) for line in events_file.read_text().splitlines() if line]
+    assert len(lines) == 1
+    assert lines[0]["source"] == "electron/renderer/service/web/agent-abc"
+    assert lines[0]["type"] == "electron"
+    assert lines[0]["level"] == "error"
+    assert lines[0]["message"] == "iframe bug"
+
+
+def test_post_iframe_logs_rejects_invalid_payload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A payload missing required fields returns 400."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    test_app = create_application()
+    with TestClient(test_app) as test_client:
+        response = test_client.post("/api/iframe-logs", json={"records": [{"level": "info"}]})
+
+    assert response.status_code == 400
+    assert "Invalid iframe-logs payload" in response.json()["detail"]
+
+
+def test_post_iframe_logs_empty_batch_is_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty batch is accepted (no records written, no file created)."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    test_app = create_application()
+    with TestClient(test_app) as test_client:
+        response = test_client.post("/api/iframe-logs", json={"records": []})
+
+    assert response.status_code == 200
+    assert response.json() == {"written": 0}
+    assert not (tmp_path / "logs" / "iframe" / "events.jsonl").exists()
+
+
 def test_random_name_endpoint(client: TestClient) -> None:
     """The random name endpoint returns a non-empty name."""
     response = client.get("/api/random-name")

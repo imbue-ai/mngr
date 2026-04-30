@@ -33,6 +33,7 @@ from imbue.minds_workspace_server.agent_discovery import send_message
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
 from imbue.minds_workspace_server.event_queues import AgentEventQueues
+from imbue.minds_workspace_server.iframe_log_writer import IframeLogWriter
 from imbue.minds_workspace_server.models import AgentCreationError
 from imbue.minds_workspace_server.models import AgentListItem
 from imbue.minds_workspace_server.models import AgentListResponse
@@ -41,6 +42,8 @@ from imbue.minds_workspace_server.models import CreateChatRequest
 from imbue.minds_workspace_server.models import CreateWorktreeRequest
 from imbue.minds_workspace_server.models import DestroyAgentResponse
 from imbue.minds_workspace_server.models import ErrorResponse
+from imbue.minds_workspace_server.models import IframeLogsRequest
+from imbue.minds_workspace_server.models import IframeLogsResponse
 from imbue.minds_workspace_server.models import RandomNameResponse
 from imbue.minds_workspace_server.models import SendMessageRequest
 from imbue.minds_workspace_server.models import SendMessageResponse
@@ -100,6 +103,12 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
         timeout=30.0,
     )
 
+    # Thread-safe JSONL writer for iframe console logs forwarded from the
+    # Electron desktop client. Owned by the app so the file handle and
+    # rotation state outlive individual requests.
+    iframe_log_path = _get_host_dir() / "logs" / "iframe" / "events.jsonl"
+    application.state.iframe_log_writer = IframeLogWriter(file_path=iframe_log_path)
+
     plugin_manager = get_plugin_manager()
     plugin_manager.hook.register_event_broadcaster(broadcaster=event_queues.broadcast)
 
@@ -129,6 +138,7 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
         agent_manager.stop()
     _stop_all_watchers(application)
     await application.state.http_client.aclose()
+    application.state.iframe_log_writer.close()
     if is_main_thread and original_sigint_handler is not None:
         signal.signal(signal.SIGINT, original_sigint_handler)
 
@@ -725,6 +735,27 @@ def _inject_agent_id_meta_tag(html_content: str) -> str:
     return html_content.replace("</head>", f"{meta_tag}\n</head>")
 
 
+async def _post_iframe_logs(request: Request) -> JSONResponse:
+    """Persist a batch of renderer console logs forwarded by the Electron client.
+
+    The Electron main process captures ``console-message`` events for
+    agent-owned service iframes (URLs starting with ``/service/<name>/``)
+    and POSTs them here. Records are appended to
+    ``<host_dir>/logs/iframe/events.jsonl`` via ``IframeLogWriter``.
+    """
+    try:
+        body = await request.json()
+        payload = IframeLogsRequest(**body)
+    except (ValueError, TypeError) as exc:
+        error = ErrorResponse(detail=f"Invalid iframe-logs payload: {exc}")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    writer: IframeLogWriter = request.app.state.iframe_log_writer
+    records_as_dicts = [record.model_dump() for record in payload.records]
+    written = await run_in_threadpool(writer.write_records, records_as_dicts)
+    return JSONResponse(content=IframeLogsResponse(written=written).model_dump())
+
+
 def create_application(
     config: Config | None = None,
     provider_names: tuple[str, ...] | None = None,
@@ -767,6 +798,7 @@ def create_application(
     application.add_api_route("/api/agents/{agent_id}/destroy", _destroy_agent, methods=["POST"])
     application.add_api_route("/api/sharing/{service_name}", _get_sharing_status_endpoint, methods=["GET"])
     application.add_api_route("/api/sharing/{service_name}/request", _request_sharing_edit_endpoint, methods=["POST"])
+    application.add_api_route("/api/iframe-logs", _post_iframe_logs, methods=["POST"])
     application.add_api_route(
         "/api/refresh-service/{service_name}", _refresh_service_request_endpoint, methods=["POST"]
     )

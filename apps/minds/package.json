@@ -10,7 +10,8 @@
     "build": "node scripts/build.js",
     "dist": "pnpm build && pnpm exec todesktop build",
     "fetch-tailwind": "bash scripts/fetch_tailwind.sh",
-    "postinstall": "bash scripts/fetch_tailwind.sh"
+    "postinstall": "bash scripts/fetch_tailwind.sh",
+    "test": "node --test electron/classify-frame.test.js electron/log-writer.test.js electron/iframe-log-buffer.test.js electron/log-router.test.js"
   },
   "dependencies": {
     "@todesktop/runtime": "^1.6.0",
