@@ -9,8 +9,8 @@
 # at module scope. Modal runs this file as a standalone app — its Python
 # interpreter does NOT inherit the uv-tool-managed mngr install's site-packages,
 # so `from imbue.mngr_schedule... import X` raises ModuleNotFoundError at deploy
-# time. Values that mirror imbue enums (RUNNING_STATES, VALID_VERIFY_MODES,
-# AGENT_MISSING_STATE, RESULT_SENTINEL) must therefore be duplicated here as
+# time. Values that mirror imbue enums (RUNNING_STATES, VALID_VERIFY_MODES)
+# and the RESULT_SENTINEL must therefore be duplicated here as
 # bare literals; verification.py defines the deploy-side copies. Any changes
 # must be mirrored by hand in both files.
 #
@@ -37,7 +37,6 @@ import re
 import shlex
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -164,13 +163,6 @@ RUNNING_STATES: frozenset[str] = frozenset({"RUNNING", "WAITING", "REPLACED", "R
 # duplicated here because Modal runs this file outside the imbue namespace.
 VALID_VERIFY_MODES: frozenset[str] = frozenset({"none", "quick", "full"})
 
-# Sentinel returned by `_get_lifecycle_state` when the named agent is absent
-# from `mngr list` output. Deliberately distinct from any real
-# AgentLifecycleState value so the deploy-side verifier can distinguish
-# "agent vanished" from "agent reached an unexpected terminal state".
-# Must match verification._AGENT_MISSING_STATE exactly.
-AGENT_MISSING_STATE: str = "MISSING"
-
 # Sentinel line prefix used to communicate a structured verification result
 # to the deploying machine. Must match verification._RESULT_SENTINEL exactly.
 RESULT_SENTINEL: str = "__MNGR_SCHEDULE_VERIFY__"
@@ -179,17 +171,14 @@ RESULT_SENTINEL: str = "__MNGR_SCHEDULE_VERIFY__"
 # a line like: "Starting agent <name> ..." once the agent has been created.
 _AGENT_NAME_PATTERN: re.Pattern[str] = re.compile(r"Starting agent\s+(\S+)")
 
-# How often to poll the agent's lifecycle state during full verification.
-_AGENT_POLL_INTERVAL_SECONDS: float = 10.0
-
 # Maximum time to wait for the agent to reach a terminal state during full
 # verification. Kept far enough below the Modal function timeout (3600s) that
-# the full timeout path -- poll loop exhausts, best-effort destroy (its own
-# 300s subprocess timeout), sentinel emission -- still fits, even after
-# `mngr create` has already consumed some of the function's budget. Rough
-# accounting: 3600 - 180 (mngr create) - 300 (destroy) - 20 (overhead) = 3100s;
-# using 3000s leaves additional slack so the container is never killed before
-# `_print_result_sentinel` runs.
+# the full timeout path -- mngr wait exits with code 2, best-effort destroy
+# (its own 300s subprocess timeout), sentinel emission -- still fits, even
+# after `mngr create` has already consumed some of the function's budget.
+# Rough accounting: 3600 - 180 (mngr create) - 300 (destroy) - 20 (overhead)
+# = 3100s; using 3000s leaves additional slack so the container is never
+# killed before `_print_result_sentinel` runs.
 _AGENT_FINISH_TIMEOUT_SECONDS: float = 3000.0
 
 
@@ -209,8 +198,8 @@ def _run_and_stream(
     # Direct stdlib spawn rather than ConcurrencyGroup: cron_runner.py
     # is forbidden from importing imbue.* at module scope (Modal can't
     # see the namespace), so the in-container verify path uses the
-    # stdlib directly. Same reason applies to _get_lifecycle_state and
-    # _destroy_agent below.
+    # stdlib directly. Same reason applies to _wait_for_agent_terminal_state
+    # and _destroy_agent below.
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -234,85 +223,56 @@ def _run_and_stream(
     return process.returncode, full_output
 
 
-def _get_lifecycle_state(agent_name: str) -> str | None:
-    """Look up the lifecycle state of the named agent.
+def _wait_for_agent_terminal_state(
+    agent_name: str,
+    timeout_seconds: float = _AGENT_FINISH_TIMEOUT_SECONDS,
+) -> str:
+    """Block until the agent reaches a terminal lifecycle state, via `mngr wait`.
 
-    Shells `mngr list --provider local --include 'name == "<agent_name>"'
-    --format json` and parses the result. A transient subprocess failure
-    yields None so the caller can retry; an absent agent yields
-    `AGENT_MISSING_STATE`; otherwise yields the state string reported by
-    mngr.
+    Returns the final agent state. Raises CronRunnerError on timeout or
+    if mngr wait fails (agent not found, non-zero exit, malformed JSON).
+    `mngr wait` already handles transient state-lookup failures internally;
+    we don't need our own poll loop on top.
     """
-    # Agent names from `Starting agent <name>` are produced by mngr itself and
-    # use a restricted character set ([\w-]+), so interpolating into the CEL
-    # expression is safe. Guard against unexpected characters defensively.
     if not re.fullmatch(r"[\w-]+", agent_name):
-        raise CronRunnerError(f"unexpected agent name for lifecycle lookup: {agent_name!r}")
+        raise CronRunnerError(f"unexpected agent name for wait: {agent_name!r}")
     try:
-        # No `--provider local` filter: walk all providers so full-verify
-        # works regardless of where the trigger's `mngr create` placed the
-        # agent (local-in-container, modal, ssh, etc.). This matches the
-        # quick-verify path's `mngr destroy --force <name>`, which is also
-        # provider-agnostic.
         completed = subprocess.run(
             [
                 "mngr",
-                "list",
-                "--include",
-                f'name == "{agent_name}"',
+                "wait",
+                agent_name,
+                "--timeout",
+                f"{int(timeout_seconds)}s",
                 "--format",
                 "json",
             ],
             capture_output=True,
             text=True,
-            timeout=60,
+            # +60s slack so mngr wait's own timeout fires (returncode=2)
+            # before our subprocess.TimeoutExpired hides it.
+            timeout=timeout_seconds + 60,
         )
     except subprocess.TimeoutExpired as exc:
-        # Surface the failure so a persistently-hanging `mngr list` is
-        # visible in the container logs rather than only manifesting as a
-        # generic "timed out waiting for agent" at the end of the poll loop.
-        print(f"mngr list for agent {agent_name!r} timed out after {exc.timeout}s")
-        return None
+        raise CronRunnerError(f"mngr wait for agent '{agent_name}' did not exit within {exc.timeout:.0f}s") from exc
+    if completed.returncode == 2:
+        raise CronRunnerError(f"mngr wait timed out waiting for agent '{agent_name}' after {timeout_seconds:.0f}s")
     if completed.returncode != 0:
-        # Truncate stderr so a runaway error doesn't flood the logs every
-        # poll interval; the tail is what matters for diagnostics.
         stderr_tail = completed.stderr[-2000:] if completed.stderr else ""
-        print(
-            f"mngr list for agent {agent_name!r} exited with code {completed.returncode}; stderr tail:\n{stderr_tail}"
+        raise CronRunnerError(
+            f"mngr wait for agent '{agent_name}' exited with code {completed.returncode}; stderr tail:\n{stderr_tail}"
         )
-        return None
     try:
         data = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
         stdout_preview = completed.stdout[:2000] if completed.stdout else ""
-        print(
-            f"mngr list for agent {agent_name!r} returned non-JSON output ({exc}); stdout preview:\n{stdout_preview}"
-        )
-        return None
-    agents = data.get("agents", [])
-    if not agents:
-        return AGENT_MISSING_STATE
-    state = agents[0].get("state")
-    return str(state) if state is not None else None
-
-
-def _poll_until_done(
-    agent_name: str,
-    timeout_seconds: float = _AGENT_FINISH_TIMEOUT_SECONDS,
-    poll_interval_seconds: float = _AGENT_POLL_INTERVAL_SECONDS,
-) -> str:
-    """Poll the agent's lifecycle state until it leaves the running states.
-
-    Returns the final state string. Raises CronRunnerError on timeout.
-    """
-    deadline = time.monotonic() + timeout_seconds
-    while True:
-        state = _get_lifecycle_state(agent_name)
-        if state is not None and state not in RUNNING_STATES:
-            return state
-        if time.monotonic() >= deadline:
-            raise CronRunnerError(f"Timed out waiting for agent '{agent_name}' to finish after {timeout_seconds:.0f}s")
-        time.sleep(poll_interval_seconds)
+        raise CronRunnerError(
+            f"mngr wait returned non-JSON output ({exc}); stdout preview:\n{stdout_preview}"
+        ) from exc
+    final_state = data.get("final_agent_state")
+    if not isinstance(final_state, str):
+        raise CronRunnerError(f"mngr wait result missing 'final_agent_state' string field; got: {data!r}")
+    return final_state
 
 
 def _destroy_agent(agent_name: str) -> tuple[int, str]:
@@ -482,13 +442,14 @@ def run_scheduled_trigger(verify_mode: str = "none") -> dict[str, Any]:
         }
     else:
         try:
-            final_state = _poll_until_done(agent_name)
+            final_state = _wait_for_agent_terminal_state(agent_name)
         except CronRunnerError as exc:
-            # Full-verify hit its inner timeout. Best-effort destroy so the
-            # agent is not orphaned, then report the timeout via the sentinel
-            # (instead of propagating the error, which would bypass
-            # _print_result_sentinel and leave the deploy side with only a
-            # generic non-zero-exit error).
+            # Full-verify could not observe a terminal state (mngr wait
+            # timed out, or returned an error). Best-effort destroy so
+            # the agent is not orphaned, then report the failure via the
+            # sentinel (instead of propagating the error, which would
+            # bypass _print_result_sentinel and leave the deploy side
+            # with only a generic non-zero-exit error).
             destroy_exit_code, destroy_stderr = _destroy_agent(agent_name)
             result["verify"] = {
                 "status": "timeout",
