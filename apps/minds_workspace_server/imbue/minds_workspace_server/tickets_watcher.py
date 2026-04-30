@@ -119,22 +119,19 @@ class AgentTicketsWatcher:
         them -- so other connected websocket subscribers for the same
         agent would silently miss those events until they too refetched.
         """
-        # Snapshot the cumulative log size before the scan so we can
-        # tell which events the scan newly appended. _scan() takes
-        # _scan_lock internally; we re-acquire it after to slice off the
-        # newly-appended suffix consistently with respect to a concurrent
-        # _run().
-        with self._scan_lock:
-            previous_count = len(self._emitted_events)
-        self._scan()
+        # _scan() returns exactly the events IT appended on this call
+        # (under _scan_lock), so it is the canonical "what did this call
+        # newly emit" answer regardless of any concurrent _run() scans
+        # that interleave before or after. The snapshot is taken under
+        # the lock purely for the return value; broadcast happens outside
+        # the lock since _on_events is foreign code (today it just
+        # enqueues to a thread-safe queue, but we don't want to hold our
+        # lock across arbitrary callbacks).
+        new_events = self._scan()
         with self._scan_lock:
             snapshot = list(self._emitted_events)
-        newly_emitted = snapshot[previous_count:]
-        # Broadcast outside the lock: _on_events is foreign code (today
-        # it just enqueues to a thread-safe queue, but we don't want to
-        # hold our lock across arbitrary callbacks).
-        if newly_emitted:
-            self._on_events(self._agent_id, newly_emitted)
+        if new_events:
+            self._on_events(self._agent_id, new_events)
         return snapshot
 
     def _run(self) -> None:
