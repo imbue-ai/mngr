@@ -200,6 +200,10 @@ def test_prevent_click_echo() -> None:
     rc.check_click_echo(_DIR, snapshot(2))
 
 
+def test_prevent_logger_exception() -> None:
+    rc.check_logger_exception(_DIR, snapshot(0))
+
+
 # --- Testing conventions ---
 
 

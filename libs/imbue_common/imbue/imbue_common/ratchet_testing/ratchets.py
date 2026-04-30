@@ -571,6 +571,14 @@ def find_bash_scripts_without_strict_mode(cwd: Path) -> list[str]:
 
     violations: list[str] = []
     for sh_file in sh_files:
+        # Skip files that git tracks but aren't present on disk. This happens
+        # in offload release sandboxes where .dockerignore omits some tracked
+        # paths (e.g. .minds/template/*) from the COPY context but those paths
+        # remain in the in-image .git index after the `git init + git add -A`
+        # normalization. The ratchet is about actual scripts that could run,
+        # not index entries.
+        if not sh_file.is_file():
+            continue
         content = sh_file.read_text()
         if not strict_mode_pattern.search(content):
             violations.append(str(sh_file))

@@ -303,6 +303,18 @@ PREVENT_FSTRING_LOGGING = RegexRatchetRule(
     pattern_string=r"logger\.(trace|debug|info|warning|error|exception)\(f[\"']",
 )
 
+PREVENT_LOGGER_EXCEPTION = RegexRatchetRule(
+    rule_name="logger.exception() usages",
+    rule_description=(
+        "Never use logger.exception() -- it relies on sys.exc_info(), which is unreliable "
+        "in threaded code (the exception context can be cleared or replaced by another "
+        "thread between the except block and the actual log emission). Use "
+        "logger.opt(exception=exc).error(msg) instead so the exception is bound explicitly "
+        "and the traceback is captured deterministically."
+    ),
+    pattern_string=r"\w*logger\.exception\(",
+)
+
 PREVENT_CLICK_ECHO = RegexRatchetRule(
     rule_name="click.echo usage",
     rule_description=(

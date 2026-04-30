@@ -81,9 +81,15 @@ class HeadlessCommand(BaseHeadlessAgent[HeadlessCommandConfig]):
         host: OnlineHostInterface,
         agent_args: tuple[str, ...],
         command_override: CommandString | None,
+        initial_message: str | None = None,
     ) -> CommandString:
-        """Build the command with stdout/stderr redirected to files."""
-        base_command = super().assemble_command(host, agent_args, command_override)
+        """Build the command with stdout/stderr redirected to files.
+
+        ``HeadlessCommand`` has no prompt-file protocol, so ``--message``
+        content cannot be delivered; the default ``stage_initial_message``
+        logs a warning when it is supplied.
+        """
+        base_command = super().assemble_command(host, agent_args, command_override, initial_message=initial_message)
         return CommandString(
             f'{base_command} > "$MNGR_AGENT_STATE_DIR/stdout.log" 2> "$MNGR_AGENT_STATE_DIR/stderr.log"'
         )

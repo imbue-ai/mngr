@@ -75,8 +75,8 @@ def load_config(
 
     Precedence (lowest to highest):
     1. User config (~/.{root_name}/profiles/<profile_id>/settings.toml)
-    2. Project config (.{root_name}/settings.toml at context_dir, git root, or MNGR_PROJECT_DIR)
-    3. Local config (.{root_name}/settings.local.toml at context_dir, git root, or MNGR_PROJECT_DIR)
+    2. Project config (.{root_name}/settings.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
+    3. Local config (.{root_name}/settings.local.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
     4. Environment variables (MNGR_ROOT_NAME, MNGR_PREFIX, MNGR_HOST_DIR)
     5. CLI arguments (handled by caller)
 
@@ -86,7 +86,7 @@ def load_config(
 
     Explicit MNGR_PREFIX/MNGR_HOST_DIR values override MNGR_ROOT_NAME-derived defaults.
 
-    MNGR_PROJECT_DIR overrides where project settings are found. When set, project
+    MNGR_PROJECT_CONFIG_DIR overrides where project settings are found. When set, project
     and local config files are loaded from that directory instead of .{root_name}/
     at the git root.
 
@@ -115,14 +115,11 @@ def load_config(
         providers={},
         plugins={},
         logging=LoggingConfig(),
-        commands={"create": CommandDefaults(defaults={"pass_host_env": ["EDITOR"]})},
+        commands={},
     )
 
     if strict is None:
-        # When MNGR_ALLOW_UNKNOWN_CONFIG is set, unknown fields in config files produce
-        # warnings instead of errors.  This is useful during development when a branch
-        # adds a new config field but other branches don't know about it yet.
-        strict = not parse_bool_env(os.environ.get("MNGR_ALLOW_UNKNOWN_CONFIG", ""))
+        strict = resolve_strict_from_env()
 
     # Load and merge config files in precedence order (user, project, local)
     for raw in (
@@ -237,7 +234,7 @@ def load_config(
         # pytest -- that's the actual leak-prevention gate.
 
     # Resolve project root for use as cwd in pre-command scripts.
-    # Note: MNGR_PROJECT_DIR is NOT used here because it points to the config
+    # Note: MNGR_PROJECT_CONFIG_DIR is NOT used here because it points to the config
     # directory (containing settings.toml), not the project root.
     project_root = context_dir or find_git_worktree_root(start=None, cg=concurrency_group)
 
@@ -287,6 +284,44 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
 # =============================================================================
 
 
+def resolve_strict_from_env() -> bool:
+    """Return the strict policy implied by the MNGR_ALLOW_UNKNOWN_CONFIG env var.
+
+    Strict (True) is the default. When MNGR_ALLOW_UNKNOWN_CONFIG is set to a
+    truthy value, unknown fields produce warnings instead of errors, which is
+    useful when older mngr installations encounter newer config files.
+
+    Centralized here so that ``load_config`` and ``setup_command_context`` agree
+    on the policy and the env var is read in exactly one place.
+    """
+    return not parse_bool_env(os.environ.get("MNGR_ALLOW_UNKNOWN_CONFIG", ""))
+
+
+def _normalize_field_keys(raw: dict[str, Any], context: str) -> dict[str, Any]:
+    """Replace hyphens with underscores in dict keys.
+
+    TOML conventionally uses hyphens (`pass-env`), but Python dataclasses use
+    underscores (`pass_env`). Normalize so both forms map to the same field.
+    Raises ConfigParseError if normalization would create a duplicate key.
+
+    Always returns a fresh dict, so callers can freely mutate the result
+    (e.g. via `del` in `_check_unknown_fields` or `pop` in `parse_config`)
+    without affecting the caller's input.
+    """
+    result: dict[str, Any] = {}
+    seen_originals: dict[str, str] = {}
+    for key, value in raw.items():
+        normalized = key.replace("-", "_")
+        if normalized in result:
+            raise ConfigParseError(
+                f"Config in {context} has both '{seen_originals[normalized]}' and '{key}' "
+                f"which both normalize to '{normalized}'. Use one or the other."
+            )
+        result[normalized] = value
+        seen_originals[normalized] = key
+    return result
+
+
 def _check_unknown_fields(
     raw_config: dict[str, Any],
     model_class: type[BaseModel],
@@ -331,6 +366,7 @@ def _parse_providers(
     known_backends = set(list_registered_provider_backend_names())
 
     for name, raw_config in raw_providers.items():
+        raw_config = _normalize_field_keys(raw_config, f"providers.{name}")
         backend = raw_config.get("backend") or name
         plugin = raw_config.get("plugin") or backend
         if plugin in disabled_plugins:
@@ -451,6 +487,10 @@ def _parse_agent_types(
     """
     agent_types: dict[AgentTypeName, AgentTypeConfig] = {}
 
+    # Normalize hyphens in field names up front so _has_disabled_ancestor can
+    # read normalized `plugin` / `parent_type` fields as it walks the chain.
+    raw_types = {name: _normalize_field_keys(raw, f"agent_types.{name}") for name, raw in raw_types.items()}
+
     for name, raw_config in raw_types.items():
         # Custom types with a parent_type should use the parent's config class,
         # since the parent type defines the valid fields (e.g., ClaudeAgentConfig
@@ -481,6 +521,7 @@ def _parse_plugins(
     plugins: dict[PluginName, PluginConfig] = {}
 
     for name, raw_config in raw_plugins.items():
+        raw_config = _normalize_field_keys(raw_config, f"plugins.{name}")
         config_class = get_plugin_config_class(name)
         _check_unknown_fields(raw_config, config_class, f"plugins.{name}", strict=strict)
         plugins[PluginName(name)] = config_class.model_construct(**raw_config)
@@ -559,6 +600,7 @@ def _parse_retry_config(raw_retry: dict[str, Any], *, strict: bool = True) -> Re
 
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
+    raw_retry = _normalize_field_keys(raw_retry, "retry")
     _check_unknown_fields(raw_retry, RetryConfig, "retry", strict=strict)
     return RetryConfig.model_construct(**raw_retry)
 
@@ -568,6 +610,7 @@ def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True) -
 
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
+    raw_logging = _normalize_field_keys(raw_logging, "logging")
     _check_unknown_fields(raw_logging, LoggingConfig, "logging", strict=strict)
     return LoggingConfig.model_construct(**raw_logging)
 
@@ -589,8 +632,10 @@ def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, Comman
     commands: dict[str, CommandDefaults] = {}
 
     for command_name, raw_defaults in raw_commands.items():
-        # Make a mutable copy so we don't mutate the caller's dict
-        defaults_copy = dict(raw_defaults)
+        # Normalize hyphens to underscores so TOML-style `pass-env` matches `pass_env`.
+        # _normalize_field_keys always returns a fresh dict, so the pop() below
+        # cannot mutate the caller's input.
+        defaults_copy = _normalize_field_keys(raw_defaults, f"commands.{command_name}")
         default_subcommand = defaults_copy.pop("default_subcommand", None)
         commands[command_name] = CommandDefaults.model_construct(
             defaults=defaults_copy,
@@ -613,6 +658,7 @@ def _parse_create_templates(raw_templates: dict[str, dict[str, Any]]) -> dict[Cr
     templates: dict[CreateTemplateName, CreateTemplate] = {}
 
     for template_name, raw_options in raw_templates.items():
+        raw_options = _normalize_field_keys(raw_options, f"create_templates.{template_name}")
         # make sure the options don't define anything that cannot be handled:
         for field in raw_options.keys():
             if field not in CreateCliOptions.model_fields:
@@ -639,6 +685,7 @@ def parse_config(
     When strict=False, logs a warning and ignores unknown fields (used when
     MNGR_ALLOW_UNKNOWN_CONFIG is set to allow forward-compatible config files).
     """
+    raw = _normalize_field_keys(raw, "top-level config")
     # Build kwargs with None for unset scalar fields
     kwargs: dict[str, Any] = {}
     kwargs["prefix"] = raw.pop("prefix", None)
