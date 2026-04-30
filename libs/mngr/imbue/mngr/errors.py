@@ -149,6 +149,15 @@ class SendMessageError(AgentError):
         super().__init__(f"Failed to send message to agent {agent_name}: {reason}")
 
 
+class InterruptAgentError(AgentError):
+    """Failed to send an interrupt signal to an agent."""
+
+    def __init__(self, agent_name: str, reason: str) -> None:
+        self.agent_name = agent_name
+        self.reason = reason
+        super().__init__(f"Failed to interrupt agent {agent_name}: {reason}")
+
+
 class DuplicateAgentNameError(AgentError, MngrError):
     """An agent with this name already exists on the host."""
 

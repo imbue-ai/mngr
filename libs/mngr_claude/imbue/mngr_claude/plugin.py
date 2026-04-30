@@ -38,6 +38,7 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import InterruptAgentError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
@@ -45,6 +46,7 @@ from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import InterruptibleAgentMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import RelativePath
 from imbue.mngr.interfaces.data_types import VolumeFileType
@@ -1294,7 +1296,7 @@ class CostThresholdDialogIndicator(DialogIndicator):
         return self._MATCH_SPENDING_TEXT in content and self._MATCH_DOCS_URL in content
 
 
-class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
+class ClaudeAgent(BaseAgent[ClaudeAgentConfig], InterruptibleAgentMixin):
     """Agent implementation for Claude with session resumption support."""
 
     @classmethod
@@ -1345,6 +1347,23 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             if self._check_file_exists(self._get_agent_dir() / "permissions_waiting"):
                 return AgentLifecycleState.WAITING
         return state
+
+    def interrupt_current_turn(self) -> None:
+        """Abort Claude's current turn by sending Ctrl-C to its tmux pane.
+
+        Claude Code treats Ctrl-C during a turn as "abort and return to prompt",
+        so the session remains alive and ready to accept a new message. No-op
+        when the agent is not processing a turn (state != RUNNING).
+        """
+        if self.get_lifecycle_state() != AgentLifecycleState.RUNNING:
+            return
+        cmd = f"tmux send-keys -t '{self.tmux_target}' C-c"
+        result = self.host.execute_stateful_command(cmd)
+        if not result.success:
+            raise InterruptAgentError(
+                str(self.name),
+                f"tmux send-keys C-c failed: {result.stderr or result.stdout}",
+            )
 
     def get_expected_process_name(self) -> str:
         """Return 'claude' as the expected process name.
