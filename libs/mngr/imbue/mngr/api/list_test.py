@@ -516,43 +516,44 @@ def test_agent_details_to_cel_context_idle_uses_most_recent_activity() -> None:
     assert 580 < context["idle"] < 620
 
 
-def test_agent_details_to_cel_context_wraps_labels_tolerantly() -> None:
-    """Empty labels must filter cleanly without per-agent warnings.
+@pytest.mark.parametrize(
+    "field_path,exclude_expr",
+    [
+        ("labels", 'labels.mngr_subagent_proxy == "child"'),
+        ("plugin", 'plugin.some_plugin_field == "x"'),
+        ("host.tags", 'host.tags.foo == "x"'),
+        ("host.plugin", 'host.plugin.some_plugin_field == "x"'),
+    ],
+)
+def test_agent_details_to_cel_context_wraps_schemaless_fields_tolerantly(field_path: str, exclude_expr: str) -> None:
+    """Schemaless fields must filter cleanly without per-agent warnings.
 
     Reproduces the bug where `--exclude 'labels.X == "Y"'` warned for every
-    agent without that label, since `labels` is a schemaless dict[str, str].
+    agent without that label. `labels`, `plugin`, `host.tags`, and `host.plugin`
+    are all schemaless dicts and must each be wrapped to tolerate missing keys.
     """
     host_details = _make_host_details()
     agent = _make_agent_details("test-agent", host_details)
+
+    # Verify the relevant raw field defaults to an empty dict (so the missing
+    # key in the filter is genuinely missing).
     assert agent.labels == {}
+    assert agent.plugin == {}
+    assert agent.host.tags == {}
+    assert agent.host.plugin == {}
 
+    # Sanity check the wrapper: build_cel_context must produce a TolerantMapType
+    # at the wrapped level for each schemaless field.
     cel_context = build_cel_context(agent_details_to_cel_context(agent))
-    assert isinstance(cel_context["labels"], TolerantMapType)
+    if "." in field_path:
+        outer, inner = field_path.split(".", 1)
+        assert isinstance(cel_context[outer][inner], TolerantMapType)
+    else:
+        assert isinstance(cel_context[field_path], TolerantMapType)
 
     include_filters, exclude_filters = compile_cel_filters(
         include_filters=(),
-        exclude_filters=('labels.mngr_subagent_proxy == "child"',),
-    )
-    with capture_loguru(level="WARNING") as log_output:
-        result = apply_cel_filters_to_context(
-            context=agent_details_to_cel_context(agent),
-            include_filters=include_filters,
-            exclude_filters=exclude_filters,
-            error_context_description=f"agent {agent.name}",
-        )
-    assert result is True
-    assert "Error evaluating" not in log_output.getvalue()
-
-
-def test_agent_details_to_cel_context_wraps_host_tags_tolerantly() -> None:
-    """Empty host.tags must filter cleanly without per-agent warnings."""
-    host_details = _make_host_details()
-    assert host_details.tags == {}
-    agent = _make_agent_details("test-agent", host_details)
-
-    include_filters, exclude_filters = compile_cel_filters(
-        include_filters=(),
-        exclude_filters=('host.tags.foo == "x"',),
+        exclude_filters=(exclude_expr,),
     )
     with capture_loguru(level="WARNING") as log_output:
         result = apply_cel_filters_to_context(
