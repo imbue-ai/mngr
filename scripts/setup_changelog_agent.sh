@@ -83,6 +83,16 @@ echo "Creating schedule '${TRIGGER_NAME}' (provider=$PROVIDER, verify=$VERIFY)..
 # scripts/changelog_consolidation_prompt.md.  --dangerously-skip-permissions
 # is required so claude can run python3 / git / gh as tools; IS_SANDBOX=1
 # (passed in via the agent env) lets it accept that flag as root.
+#
+# Note: --dangerously-skip-permissions is passed via `-S agent_types.
+# headless_claude.cli_args=...` rather than as `-- --dangerously-skip-
+# permissions` agent_args. cron_runner appends `--host-env-file
+# /staging/secrets/.env` to every create invocation; when our --args
+# end with a `--` passthrough section, the appended --host-env-file
+# lands inside the passthrough and gets handed to the claude binary
+# (which doesn't recognize it). cli_args go through the same path
+# without crossing the `--` boundary, so cron_runner's append stays in
+# the mngr-flag section and is consumed correctly.
 uv run mngr schedule add "$TRIGGER_NAME" \
     --command create \
     --schedule "$SCHEDULE" \
@@ -98,7 +108,7 @@ uv run mngr schedule add "$TRIGGER_NAME" \
     --pass-env IS_SANDBOX \
     --no-auto-fix-args \
     $DISABLE_PLUGIN_ARGS \
-    --args "--type headless_claude --foreground --branch ':mngr/changelog-consolidation-{DATE}' --message-file /code/project/scripts/changelog_consolidation_prompt.md -- --dangerously-skip-permissions"
+    --args "--type headless_claude --foreground --branch ':mngr/changelog-consolidation-{DATE}' --message-file /code/project/scripts/changelog_consolidation_prompt.md -S agent_types.headless_claude.cli_args=[\"--dangerously-skip-permissions\"]"
 
 echo "Schedule '${TRIGGER_NAME}' created successfully."
 echo ""
