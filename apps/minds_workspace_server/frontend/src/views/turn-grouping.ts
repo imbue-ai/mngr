@@ -229,14 +229,37 @@ function makeTaskInTurn(record: TaskRecord, turn: Turn, is_carryover: boolean): 
 }
 
 /** Pick out the body_events that fall inside a task's active window.
- *  Used to populate the expanded panel for a given task. */
+ *  Used to populate the expanded panel for a given task.
+ *
+ *  Tool results whose timestamp lands just after `active_window_end` are
+ *  pulled in when their `tool_call_id` matches a tool_use already in the
+ *  window -- otherwise the expanded panel would render the tool_use as
+ *  "unresolved" purely because the result arrived a few ms after the
+ *  ticket closed. */
 export function eventsInTaskWindow(task: TaskInTurn, body_events: TranscriptEvent[]): TranscriptEvent[] {
   const start = task.active_window_start ?? "";
   const end = task.active_window_end ?? "";
   if (start === "") return [];
-  return body_events.filter((e) => {
+  const inWindow = body_events.filter((e) => {
     if (e.timestamp < start) return false;
     if (end !== "" && e.timestamp > end) return false;
     return true;
   });
+  if (end === "") return inWindow;
+  // Collect tool_call_ids issued by tool_uses that landed in the window
+  // so we can pull their (slightly-later) tool_results back in.
+  const inWindowCallIds = new Set<string>();
+  for (const e of inWindow) {
+    if (e.type === "assistant_message" && e.tool_calls) {
+      for (const tc of e.tool_calls) {
+        inWindowCallIds.add(tc.tool_call_id);
+      }
+    }
+  }
+  if (inWindowCallIds.size === 0) return inWindow;
+  const trailingResults = body_events.filter(
+    (e) => e.type === "tool_result" && e.timestamp > end && !!e.tool_call_id && inWindowCallIds.has(e.tool_call_id),
+  );
+  if (trailingResults.length === 0) return inWindow;
+  return [...inWindow, ...trailingResults].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 }

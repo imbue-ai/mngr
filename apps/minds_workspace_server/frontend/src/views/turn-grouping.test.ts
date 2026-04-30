@@ -239,4 +239,37 @@ describe("eventsInTaskWindow", () => {
     const body = [toolUse("2026-04-28T01:00:25Z", "Read", "tc1"), toolUse("2026-04-28T01:00:45Z", "Edit", "tc2")];
     expect(eventsInTaskWindow(task, body)).toHaveLength(2);
   });
+
+  it("pulls in a trailing tool_result whose tool_use was in window", () => {
+    // The tool_use lands inside the window; its tool_result arrives a few
+    // ms after closed_at. Without the trailing-result fallback the
+    // expanded panel would render the tool call as unresolved.
+    const task = {
+      ticket_id: "t1",
+      title: "Step 1",
+      status: "done" as const,
+      summary: "Did it",
+      is_carryover: false,
+      active_window_start: "2026-04-28T01:00:20Z",
+      active_window_end: "2026-04-28T01:00:50Z",
+    };
+    function toolResult(ts: string, callId: string): TranscriptEvent {
+      return {
+        timestamp: ts,
+        type: "tool_result",
+        event_id: `r-${callId}`,
+        source: "test",
+        tool_call_id: callId,
+        output: "ok",
+      };
+    }
+    const body = [
+      toolUse("2026-04-28T01:00:45Z", "Read", "tc-late"),
+      // Result timestamp is 1 second past closed_at -- still belongs to
+      // this task's expanded panel.
+      toolResult("2026-04-28T01:00:51Z", "tc-late"),
+    ];
+    const result = eventsInTaskWindow(task, body);
+    expect(result.map((e) => e.event_id)).toEqual(["a-tc-late", "r-tc-late"]);
+  });
 });
