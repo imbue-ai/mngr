@@ -9,8 +9,8 @@ set -euo pipefail
 # The scheduled agent runs at midnight PST as a headless_claude agent. The
 # orchestration steps live in scripts/changelog_consolidation_prompt.md and
 # are executed by claude itself (running consolidate_changelog.py, summarizing
-# the new section, committing, pushing a branch, writing status.json). See
-# the BEFORE-MERGE TODOs at the bottom of that prompt file.
+# the new section, committing, pushing a branch, opening a PR, writing
+# status.json).
 #
 # Usage:
 #   ./scripts/setup_changelog_agent.sh
