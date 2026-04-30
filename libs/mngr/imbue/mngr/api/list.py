@@ -306,11 +306,6 @@ def _list_agents_streaming(
     """Streaming mode: each provider loads and processes hosts independently.
 
     Fast providers fire on_agent callbacks while slow providers are still loading.
-
-    Provider construction happens inside each per-provider thread so a single
-    provider failing to instantiate (e.g. Modal with no credentials) does not
-    prevent other providers from being listed. The same try/except handles both
-    construction and discovery errors uniformly per --on-error semantics.
     """
     with log_span("Loading agents from all providers (streaming)"):
         names = list_provider_names_to_load(mngr_ctx, provider_names)
@@ -351,10 +346,6 @@ def _construct_discover_and_emit_for_provider(
     Streaming counterpart to the batch approach. Each provider independently
     constructs, loads hosts, fetches agent references, then processes hosts --
     firing on_agent callbacks without waiting for other providers.
-
-    Wrapping construction and discovery in the same try/except means a single
-    provider's failure (auth missing, daemon unreachable, etc.) is reported as
-    a ProviderErrorInfo without blocking the rest of the listing.
     """
     cg = mngr_ctx.concurrency_group
     try:

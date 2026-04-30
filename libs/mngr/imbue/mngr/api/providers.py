@@ -111,12 +111,7 @@ def list_provider_names_to_load(
     mngr_ctx: MngrContext,
     provider_names: tuple[str, ...] | None = None,
 ) -> list[ProviderInstanceName]:
-    """Return the names of providers that should be loaded for the given context.
-
-    Applies the same filtering rules as get_all_provider_instances but does not
-    instantiate any providers. This lets callers construct each provider in a
-    per-thread try/except so a single broken provider does not block others
-    (e.g. Modal failing auth should not prevent Lima from being listed).
+    """Return name of the providers that should be loaded for the given context.
 
     Returns names from configured providers (config.providers) plus default
     instances for all registered backends not already configured, excluding:
