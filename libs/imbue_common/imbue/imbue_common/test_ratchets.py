@@ -262,7 +262,7 @@ def test_prevent_cast_usage() -> None:
 
 
 def test_prevent_assert_isinstance() -> None:
-    rc.check_assert_isinstance(_DIR, snapshot(0))
+    rc.check_assert_isinstance(_DIR, snapshot(1))
 
 
 # --- Project-level checks ---
