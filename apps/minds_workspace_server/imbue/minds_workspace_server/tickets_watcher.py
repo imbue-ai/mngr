@@ -93,6 +93,12 @@ class AgentTicketsWatcher:
         # the full history -- _scan() itself is incremental and only
         # surfaces transitions observed since the last scan.
         self._emitted_events: list[dict[str, Any]] = []
+        # Serialises _scan / get_all_events. The watcher's _run() thread
+        # and FastAPI request handler threads (via get_all_events) both
+        # mutate _last_status_per_ticket / _mtime_cache / _emitted_events;
+        # without this lock concurrent _scan() calls can double-emit the
+        # same transition.
+        self._scan_lock = threading.Lock()
 
         self._wake_event = threading.Event()
         self._stop_event = threading.Event()
@@ -124,9 +130,11 @@ class AgentTicketsWatcher:
         """
         # Run a fresh scan so any transitions that happened between the
         # last poll and this call are captured; the scan also appends to
-        # _emitted_events.
+        # _emitted_events. Both calls go through _scan_lock so the snapshot
+        # we hand back is consistent with respect to a concurrent _run().
         self._scan()
-        return list(self._emitted_events)
+        with self._scan_lock:
+            return list(self._emitted_events)
 
     def _run(self) -> None:
         self._setup_watchers()
@@ -175,55 +183,62 @@ class AgentTicketsWatcher:
         state change. On first sighting of a new ticket, emit one event
         for its current status; on subsequent scans, emit one event each
         time the status moves forward (open -> in_progress -> closed).
-        We never synthesize transitions we didn't observe."""
-        if not self._tickets_dir.exists():
-            return []
+        We never synthesize transitions we didn't observe.
 
-        new_events: list[dict[str, Any]] = []
-        for md_file in sorted(self._tickets_dir.glob("*.md")):
-            try:
-                stat = md_file.stat()
-            except OSError:
-                continue
+        Holds _scan_lock for the entirety of the scan so a concurrent
+        get_all_events() call from a request handler thread cannot
+        race with the background _run() loop and double-emit the same
+        transition.
+        """
+        with self._scan_lock:
+            if not self._tickets_dir.exists():
+                return []
 
-            mtime_key = (stat.st_mtime, stat.st_size)
-            cached = self._mtime_cache.get(md_file.name)
-            if cached == mtime_key:
-                continue
-            self._mtime_cache[md_file.name] = mtime_key
+            new_events: list[dict[str, Any]] = []
+            for md_file in sorted(self._tickets_dir.glob("*.md")):
+                try:
+                    stat = md_file.stat()
+                except OSError:
+                    continue
 
-            state = parse_ticket_file(md_file)
-            if state is None:
-                continue
+                mtime_key = (stat.st_mtime, stat.st_size)
+                cached = self._mtime_cache.get(md_file.name)
+                if cached == mtime_key:
+                    continue
+                self._mtime_cache[md_file.name] = mtime_key
 
-            previous_status = self._last_status_per_ticket.get(state.ticket_id)
-            if previous_status == state.status:
-                continue
+                state = parse_ticket_file(md_file)
+                if state is None:
+                    continue
 
-            self._last_status_per_ticket[state.ticket_id] = state.status
+                previous_status = self._last_status_per_ticket.get(state.ticket_id)
+                if previous_status == state.status:
+                    continue
 
-            # First-sighting timestamp choice: an `open` ticket should
-            # use its frontmatter `created` field (truthful, matches
-            # when the file appeared); other statuses fall back to the
-            # file's current mtime (the close time on replay; the
-            # transition time live).
-            #
-            # If the frontmatter `created` field is empty (malformed
-            # ticket), fall back to mtime as well -- an empty string
-            # would sort to the very front of the merged event list and
-            # break turn attribution on the frontend.
-            if previous_status is None and state.status == "open" and state.created_at:
-                ts = state.created_at
-            else:
-                ts = _mtime_iso(stat.st_mtime)
+                self._last_status_per_ticket[state.ticket_id] = state.status
 
-            new_events.append(self._make_event(state, ts))
+                # First-sighting timestamp choice: an `open` ticket should
+                # use its frontmatter `created` field (truthful, matches
+                # when the file appeared); other statuses fall back to the
+                # file's current mtime (the close time on replay; the
+                # transition time live).
+                #
+                # If the frontmatter `created` field is empty (malformed
+                # ticket), fall back to mtime as well -- an empty string
+                # would sort to the very front of the merged event list and
+                # break turn attribution on the frontend.
+                if previous_status is None and state.status == "open" and state.created_at:
+                    ts = state.created_at
+                else:
+                    ts = _mtime_iso(stat.st_mtime)
 
-        new_events.sort(key=lambda e: e["timestamp"])
-        # Accumulate so get_all_events() can replay the full history on
-        # subsequent calls (e.g. page reloads).
-        self._emitted_events.extend(new_events)
-        return new_events
+                new_events.append(self._make_event(state, ts))
+
+            new_events.sort(key=lambda e: e["timestamp"])
+            # Accumulate so get_all_events() can replay the full history on
+            # subsequent calls (e.g. page reloads).
+            self._emitted_events.extend(new_events)
+            return new_events
 
     def _make_event(self, state: TicketState, ts: str) -> dict[str, Any]:
         return {
