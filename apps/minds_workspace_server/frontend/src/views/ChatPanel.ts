@@ -25,6 +25,9 @@ import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
 import { renderUserMessage, renderAssistantMessage } from "./message-renderers";
 import { getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
+import { buildTurns } from "./turn-grouping";
+import { ProgressBlock } from "./ProgressBlock";
+import { ActivityIndicator } from "./ActivityIndicator";
 
 function getAgentTerminalUrl(agentId: string): string {
   const baseUrl = getTerminalUrl();
@@ -371,15 +374,48 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       }
     }
 
-    const messageNodes: m.Vnode[] = [];
-    for (const event of events) {
-      if (event.type === "user_message") {
-        const userNode = renderUserMessage(event);
-        if (userNode !== null) {
-          messageNodes.push(userNode);
+    // Group events into turns and decide per turn whether to render the
+    // tk-driven progress view or the plain (legacy) chat view. A turn is
+    // a "progress turn" iff it has at least one task attributed to it;
+    // turns with no tasks render exactly as today (assistant text +
+    // inline tool blocks). Sessions that predate the tk integration have
+    // zero task_events, so every turn is plain -- backwards-compatible.
+    const turns = buildTurns(events);
+
+    const messageNodes: m.Children[] = [];
+    for (const turn of turns) {
+      const userNode = renderUserMessage(turn.user_event);
+      if (userNode !== null) {
+        messageNodes.push(userNode);
+      }
+      if (turn.tasks.length > 0) {
+        // Final message: latest non-empty assistant_message text in the
+        // turn. The activity indicator (in the footer) handles the
+        // "still working" case; we just show whatever the agent has
+        // written so far.
+        let finalMessage: string | null = null;
+        for (let i = turn.body_events.length - 1; i >= 0; i--) {
+          const ev = turn.body_events[i];
+          if (ev.type === "assistant_message" && ev.text) {
+            finalMessage = ev.text;
+            break;
+          }
         }
-      } else if (event.type === "assistant_message") {
-        messageNodes.push(renderAssistantMessage(event, toolResults, agentId));
+        messageNodes.push(
+          m(ProgressBlock, {
+            tasks: turn.tasks,
+            body_events: turn.body_events,
+            final_message: finalMessage,
+            agentId,
+            key: `progress-${turn.user_event.event_id}`,
+          }),
+        );
+      } else {
+        for (const ev of turn.body_events) {
+          if (ev.type === "assistant_message") {
+            messageNodes.push(renderAssistantMessage(ev, toolResults, agentId));
+          }
+        }
       }
     }
 
@@ -423,6 +459,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
           ? null
           : m("footer", { class: "app-footer" }, [
               m(EmptySlot, { name: "conversation-before-input" }),
+              m(ActivityIndicator, { events: getEventsForAgent(agentId) }),
               m(MessageInput, { agentId }),
               m("div", { class: "chat-agent-terminal-link" }, [
                 m(
