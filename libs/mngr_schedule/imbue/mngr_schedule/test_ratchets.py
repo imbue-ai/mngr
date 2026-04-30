@@ -238,7 +238,7 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    # testing.py files are test infrastructure and excluded alongside test files.
+    # testing.py files are test infrastructure and excluded alongside test files
     excluded = TEST_FILE_PATTERNS + ("testing.py",)
     rc.check_direct_subprocess(_DIR, snapshot(7), excluded_patterns=excluded)
 
