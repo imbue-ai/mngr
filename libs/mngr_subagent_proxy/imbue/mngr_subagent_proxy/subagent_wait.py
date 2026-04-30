@@ -522,23 +522,32 @@ def resolve_destroyed_result(target_name: str, location: AgentLocation) -> str:
     last_text = ""
     if events_path.exists():
         try:
-            with events_path.open("r", encoding="utf-8", errors="replace") as handle:
-                for line in handle:
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    try:
-                        event = json.loads(stripped)
-                    except json.JSONDecodeError as e:
-                        logger.trace("Skipping malformed line in {}: {}", events_path, e)
-                        continue
-                    if not isinstance(event, dict):
-                        continue
-                    if event.get("type") != "assistant_message":
-                        continue
-                    text = event.get("text")
-                    if isinstance(text, str) and text:
-                        last_text = text
+            # Materialize so we can distinguish "final line" (race-prone:
+            # may be a partial write captured during preservation finalize)
+            # from earlier lines (a malformed earlier line is a real anomaly).
+            raw_lines = events_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for idx, line in enumerate(raw_lines):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    event = json.loads(stripped)
+                except json.JSONDecodeError as e:
+                    is_final = idx == len(raw_lines) - 1
+                    if is_final:
+                        # Race with preserve-finalize: last line may be a
+                        # mid-write partial. Don't surface as a warning.
+                        logger.trace("Skipping malformed final line in {}: {}", events_path, e)
+                    else:
+                        logger.warning("Malformed JSONL line in {}: {}", events_path, e)
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if event.get("type") != "assistant_message":
+                    continue
+                text = event.get("text")
+                if isinstance(text, str) and text:
+                    last_text = text
         except OSError as e:
             logger.warning("Failed to read preserved events {}: {}", events_path, e)
     return f"{_DESTROYED_PREFIX}{last_text}"
