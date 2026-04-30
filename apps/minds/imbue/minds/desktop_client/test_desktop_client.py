@@ -1407,3 +1407,77 @@ def test_subdomain_forward_preserves_non_session_cookies(tmp_path: Path) -> None
     assert received_cookie is not None
     assert "app_preference=dark-mode-92741" in received_cookie
     assert SESSION_COOKIE_NAME not in received_cookie
+
+
+# -- Loopback fallback gate tests --
+#
+# A registered workspace_server URL pointing at localhost is only safely
+# reachable through an SSH tunnel into the agent's container. If no tunnel
+# exists, the proxy used to silently fall back to dialing the host's
+# loopback interface, which can serve an unrelated process bound to that
+# port as the agent's UI. The gate must refuse those requests instead.
+
+
+def _create_loopback_subdomain_client(
+    tmp_path: Path,
+    agent_id: AgentId,
+    workspace_url: str,
+) -> tuple[TestClient, FileAuthStore]:
+    """Build a desktop client whose resolver returns a loopback workspace URL
+    and which has no SSH tunnel manager available (so ``_get_ssh_info`` is None).
+    """
+    auth_dir = tmp_path / "auth"
+    auth_store = FileAuthStore(data_directory=auth_dir)
+
+    discovered_agents = make_agents_json(agent_id)
+    resolver = make_resolver_with_data(
+        agents_json=discovered_agents,
+        service_logs={str(agent_id): make_service_log("system_interface", workspace_url)},
+    )
+
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=None,
+    )
+    client = TestClient(app, base_url=f"http://{agent_id}.localhost")
+    return client, auth_store
+
+
+def test_subdomain_forward_loopback_url_without_tunnel_returns_502(tmp_path: Path) -> None:
+    """Loopback registered URL + no SSH tunnel must NOT fall back to the host's
+    loopback interface; it must 502 with a clear message instead."""
+    agent_id = AgentId()
+    workspace_url = "http://localhost:8000"
+    client, auth_store = _create_loopback_subdomain_client(tmp_path, agent_id, workspace_url)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/")
+    assert response.status_code == 502
+    body = response.text
+    assert "refusing to dial host loopback" in body
+    assert str(agent_id) in body
+
+
+def test_subdomain_forward_loopback_127_url_without_tunnel_returns_502(tmp_path: Path) -> None:
+    """Same gate must apply to the IPv4 loopback literal."""
+    agent_id = AgentId()
+    workspace_url = "http://127.0.0.1:8000"
+    client, auth_store = _create_loopback_subdomain_client(tmp_path, agent_id, workspace_url)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/")
+    assert response.status_code == 502
+    assert "refusing to dial host loopback" in response.text
+
+
+def test_subdomain_forward_loopback_ipv6_url_without_tunnel_returns_502(tmp_path: Path) -> None:
+    """Same gate must apply to the IPv6 loopback literal."""
+    agent_id = AgentId()
+    workspace_url = "http://[::1]:8000"
+    client, auth_store = _create_loopback_subdomain_client(tmp_path, agent_id, workspace_url)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/")
+    assert response.status_code == 502
+    assert "refusing to dial host loopback" in response.text

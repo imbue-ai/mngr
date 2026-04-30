@@ -1,6 +1,7 @@
 import asyncio
 import concurrent.futures
 import html
+import ipaddress
 import json
 import os
 import queue
@@ -423,6 +424,21 @@ def _get_tunnel_socket_path(
     )
 
 
+def _is_loopback_backend_url(backend_url: str) -> bool:
+    """Whether ``backend_url`` resolves to a loopback address on this host.
+
+    A registered workspace URL pointing at loopback is only safely reachable
+    via an SSH tunnel into the agent's container. Dialing it directly from
+    the host would hit whatever local process happens to bind that port,
+    which is a different program than the agent's workspace_server.
+    """
+    host, _ = parse_url_host_port(backend_url)
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.lower() == "localhost"
+
+
 def _get_tunnel_http_client(
     app: FastAPI,
     agent_id: AgentId,
@@ -704,6 +720,15 @@ async def _handle_workspace_forward_http(request: Request) -> Response:
         logger.warning("SSH tunnel setup failed for workspace {}: {}", agent_id, e)
         return Response(status_code=502, content=f"SSH tunnel to remote workspace failed: {e}")
 
+    if tunnel_client is None and _is_loopback_backend_url(workspace_url):
+        return Response(
+            status_code=502,
+            content=(
+                f"workspace server unreachable: no SSH tunnel available for agent {agent_id}; "
+                f"refusing to dial host loopback at {workspace_url}"
+            ),
+        )
+
     active_client = tunnel_client or request.app.state.http_client
     return await _forward_workspace_http(
         request=request, workspace_backend_url=workspace_url, http_client=active_client
@@ -748,6 +773,20 @@ async def _handle_workspace_forward_websocket(websocket: WebSocket) -> None:
         logger.debug("SSH tunnel setup failed for workspace WS {}: {}", agent_id, e)
         try:
             await websocket.close(code=1011, reason="SSH tunnel failed")
+        except RuntimeError:
+            pass
+        return
+
+    if tunnel_socket_path is None and _is_loopback_backend_url(workspace_url):
+        # WebSocket close reasons are capped at 123 bytes by the protocol, so
+        # the human-readable detail goes to the log; the wire reason is short.
+        logger.warning(
+            "Refusing loopback WS dial for workspace {}: no SSH tunnel available; registered url={}",
+            agent_id,
+            workspace_url,
+        )
+        try:
+            await websocket.close(code=1013, reason="no SSH tunnel; refusing loopback dial")
         except RuntimeError:
             pass
         return
