@@ -40,6 +40,7 @@ class MockProviderInstance(BaseProviderInstance):
     mock_hosts: list[HostInterface] = Field(default_factory=list)
     mock_offline_hosts: dict[str, HostInterface] = Field(default_factory=dict)
     deleted_hosts: list[HostId] = Field(default_factory=list)
+    destroyed_hosts: list[HostId] = Field(default_factory=list)
     deleted_snapshots: list[tuple[HostId, SnapshotId]] = Field(default_factory=list)
     deleted_volumes: list[VolumeId] = Field(default_factory=list)
 
@@ -95,7 +96,8 @@ class MockProviderInstance(BaseProviderInstance):
         ]
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
-        raise NotImplementedError()
+        host_id = host.id if isinstance(host, HostInterface) else host
+        self.destroyed_hosts.append(host_id)
 
     def delete_host(self, host: HostInterface) -> None:
         self.deleted_hosts.append(host.id)
