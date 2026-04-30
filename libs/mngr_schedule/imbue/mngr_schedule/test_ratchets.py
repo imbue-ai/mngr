@@ -72,7 +72,10 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(1))
+    # cron_runner_drift_test.py imports cron_runner.py inside its fixture
+    # body (after stubbing required deploy-time env vars). Top-level import
+    # would crash at collection time on a developer machine.
+    rc.check_inline_imports(_DIR, snapshot(2))
 
 
 def test_prevent_relative_imports() -> None:
