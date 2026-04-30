@@ -113,7 +113,7 @@ def parse_ticket_file(path: Path) -> TicketState | None:
     failure or invalid content."""
     try:
         text = path.read_text()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     return parse_ticket_text(text)
 

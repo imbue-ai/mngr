@@ -37,6 +37,36 @@ def test_silent_when_tickets_dir_missing(tmp_path: Path) -> None:
     assert watcher.get_all_events() == []
 
 
+def test_scan_skips_files_with_invalid_utf8(tmp_path: Path) -> None:
+    """A *.md file containing non-UTF-8 bytes must not crash the watcher;
+    it should be skipped silently like any other unreadable file. Without
+    this, a single malformed file would propagate UnicodeDecodeError up
+    through _scan() and kill the watcher's background thread."""
+    tickets_dir = tmp_path / ".tickets"
+    _write_ticket(
+        tickets_dir,
+        """---
+id: tt-good
+status: open
+deps: []
+links: []
+created: 2026-04-28T01:00:00Z
+type: task
+priority: 2
+---
+# Valid ticket
+""",
+    )
+    bad_file = tickets_dir / "tt-bad.md"
+    bad_file.write_bytes(b"---\nid: tt-bad\nstatus: open\n---\n# \xff\xfe\xfd not utf-8\n")
+
+    _calls, cb = _capture()
+    watcher = AgentTicketsWatcher("agent-1", tickets_dir, cb)
+    events = watcher.get_all_events()
+    # The valid ticket comes through; the malformed one is silently skipped.
+    assert [e["ticket_id"] for e in events] == ["tt-good"]
+
+
 def test_open_ticket_emits_one_event_with_created_at_timestamp(tmp_path: Path) -> None:
     """A freshly-discovered open ticket emits a single open event whose
     timestamp comes from the frontmatter `created` field (truthful)."""
