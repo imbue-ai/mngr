@@ -68,8 +68,10 @@ from imbue.minds.desktop_client.request_events import create_request_response_ev
 from imbue.minds.desktop_client.request_events import parse_request_event
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.session_store import derive_user_id_prefix
+from imbue.minds.desktop_client.ssh_tunnel import LoopbackWithoutTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
+from imbue.minds.desktop_client.ssh_tunnel import is_loopback_url
 from imbue.minds.desktop_client.ssh_tunnel import parse_url_host_port
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
 from imbue.minds.desktop_client.templates import render_accounts_page
@@ -407,12 +409,21 @@ def _get_tunnel_socket_path(
     backend_url: str,
     backend_resolver: BackendResolverInterface,
 ) -> Path | None:
-    """Get the Unix socket path for tunneling to a remote backend, or None for local."""
-    if tunnel_manager is None:
-        return None
+    """Get the Unix socket path for tunneling to a remote backend.
 
-    ssh_info = backend_resolver.get_ssh_info(agent_id)
+    Returns the path to a Unix socket if the agent has SSH info registered,
+    or ``None`` if the backend URL is reachable directly (a real network
+    address with no tunnel needed).
+
+    Raises ``LoopbackWithoutTunnelError`` if the backend URL is loopback and
+    no SSH tunnel can be established. The proxy must NOT fall through to a
+    direct host dial in that case -- the registered URL points at the
+    agent's container interface, not the host's.
+    """
+    ssh_info = backend_resolver.get_ssh_info(agent_id) if tunnel_manager is not None else None
     if ssh_info is None:
+        if is_loopback_url(backend_url):
+            raise LoopbackWithoutTunnelError(agent_id=str(agent_id), backend_url=backend_url)
         return None
 
     remote_host, remote_port = parse_url_host_port(backend_url)
@@ -700,6 +711,9 @@ async def _handle_workspace_forward_http(request: Request) -> Response:
         tunnel_client = await asyncio.get_running_loop().run_in_executor(
             None, _get_tunnel_http_client, request.app, agent_id, workspace_url, backend_resolver
         )
+    except LoopbackWithoutTunnelError as e:
+        logger.warning("Refusing loopback dial for workspace {}: {}", agent_id, e)
+        return Response(status_code=502, content=f"workspace server unreachable: {e}")
     except (SSHTunnelError, paramiko.SSHException, OSError) as e:
         logger.warning("SSH tunnel setup failed for workspace {}: {}", agent_id, e)
         return Response(status_code=502, content=f"SSH tunnel to remote workspace failed: {e}")
@@ -744,6 +758,15 @@ async def _handle_workspace_forward_websocket(websocket: WebSocket) -> None:
             workspace_url,
             backend_resolver,
         )
+    except LoopbackWithoutTunnelError as e:
+        # WebSocket close reasons are capped at 123 bytes by the protocol,
+        # so the full detail goes to the log and the wire reason is short.
+        logger.warning("Refusing loopback WS dial for workspace {}: {}", agent_id, e)
+        try:
+            await websocket.close(code=1013, reason="no SSH tunnel; refusing loopback dial")
+        except RuntimeError:
+            pass
+        return
     except (SSHTunnelError, paramiko.SSHException, OSError) as e:
         logger.debug("SSH tunnel setup failed for workspace WS {}: {}", agent_id, e)
         try:
@@ -2035,6 +2058,9 @@ async def _dispatch_refresh_broadcast(app: FastAPI, agent_id: AgentId, service_n
         tunnel_client = await asyncio.get_running_loop().run_in_executor(
             None, _get_tunnel_http_client, app, agent_id, backend_url, backend_resolver
         )
+    except LoopbackWithoutTunnelError as e:
+        logger.warning("Dropping refresh broadcast for agent {}: {}", agent_id, e)
+        return
     except (SSHTunnelError, paramiko.SSHException, OSError) as e:
         logger.warning("Refresh broadcast tunnel setup for {} failed: {}", url, e)
         return
