@@ -429,4 +429,4 @@ def test_tolerant_marker_at_depth_in_strict_dict() -> None:
     assert isinstance(tags, TolerantMapType)
     assert tags[celpy.json_to_cel("foo")] is None
     with pytest.raises(KeyError):
-        _ = host[celpy.json_to_cel("providr")]
+        _ = host[celpy.json_to_cel("missing")]
