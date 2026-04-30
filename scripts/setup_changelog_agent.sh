@@ -6,11 +6,11 @@ set -euo pipefail
 # This script ensures exactly one "changelog-consolidation" schedule exists.
 # Safe to run multiple times: skips creation if the schedule already exists.
 #
-# The scheduled agent runs at midnight PST as a headless_claude agent that:
-#   1. Runs scripts/consolidate_changelog.py (deterministic consolidation)
-#   2. Summarizes the new section into CHANGELOG.md
-#   3. Commits, pushes a fresh branch, and opens a PR
-#   4. Writes status.json to $MNGR_AGENT_STATE_DIR for post-hoc inspection
+# The scheduled agent runs at midnight PST as a headless_claude agent. The
+# orchestration steps live in scripts/changelog_consolidation_prompt.md and
+# are executed by claude itself (running consolidate_changelog.py, summarizing
+# the new section, committing, pushing a branch, writing status.json). See
+# the BEFORE-MERGE TODOs at the bottom of that prompt file.
 #
 # Usage:
 #   ./scripts/setup_changelog_agent.sh
@@ -53,7 +53,7 @@ export IS_SANDBOX=1
 # minimum set the scheduled run needs.
 DISABLE_PLUGIN_ARGS=$(uv run python -c "
 import importlib.metadata
-enabled = {'schedule', 'modal', 'headless_command', 'file'}
+enabled = {'schedule', 'modal', 'headless_claude', 'claude', 'file'}
 names = sorted({ep.name for ep in importlib.metadata.entry_points(group='mngr')} - enabled)
 print(' '.join(f'--disable-plugin {n}' for n in names))
 ")
@@ -79,9 +79,10 @@ fi
 
 echo "Creating schedule '${TRIGGER_NAME}' (provider=$PROVIDER, verify=$VERIFY)..."
 
-# headless_command + bash wrapper. We tried headless_claude (with --message)
-# but claude --print exits silently in the Modal container with no stderr,
-# making it undebuggable. The bash wrapper is more verbose but reliably runs.
+# headless_claude with the orchestration spec staged from
+# scripts/changelog_consolidation_prompt.md.  --dangerously-skip-permissions
+# is required so claude can run python3 / git / gh as tools; IS_SANDBOX=1
+# (passed in via the agent env) lets it accept that flag as root.
 uv run mngr schedule add "$TRIGGER_NAME" \
     --command create \
     --schedule "$SCHEDULE" \
@@ -94,9 +95,10 @@ uv run mngr schedule add "$TRIGGER_NAME" \
     --pass-env GH_TOKEN \
     --pass-env ANTHROPIC_API_KEY \
     --pass-env MNGR_ROOT_NAME \
+    --pass-env IS_SANDBOX \
     --no-auto-fix-args \
     $DISABLE_PLUGIN_ARGS \
-    --args "--type headless_command --foreground -S agent_types.headless_command.command='bash -c \"cd /code/project && bash scripts/run_changelog_consolidation.sh\"'"
+    --args "--type headless_claude --message-file /code/project/scripts/changelog_consolidation_prompt.md -- --dangerously-skip-permissions"
 
 echo "Schedule '${TRIGGER_NAME}' created successfully."
 echo ""
