@@ -481,6 +481,17 @@ def _process_host_with_error_handling(
             params.on_error(error_info)
 
 
+def _wrap_dict_field_tolerantly(target: dict[str, Any], key: str) -> None:
+    """If target[key] is a dict, replace it in target with a tolerant_dict wrapper.
+
+    Mutates `target` in place. Used to mark schemaless dict fields so missing-key
+    CEL lookups against them evaluate cleanly instead of warning per agent.
+    """
+    value = target.get(key)
+    if isinstance(value, dict):
+        target[key] = tolerant_dict(value)
+
+
 @pure
 def agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
     """Convert an AgentDetails object to a CEL-friendly dict.
@@ -528,19 +539,11 @@ def agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
         host_dict["provider"] = host_dict["provider_name"]
 
     # Schemaless fields: missing keys must not produce per-agent warnings.
-    labels = result.get("labels")
-    if isinstance(labels, dict):
-        result["labels"] = tolerant_dict(labels)
-    plugin = result.get("plugin")
-    if isinstance(plugin, dict):
-        result["plugin"] = tolerant_dict(plugin)
+    _wrap_dict_field_tolerantly(result, "labels")
+    _wrap_dict_field_tolerantly(result, "plugin")
     if host_dict is not None:
-        host_tags = host_dict.get("tags")
-        if isinstance(host_tags, dict):
-            host_dict["tags"] = tolerant_dict(host_tags)
-        host_plugin = host_dict.get("plugin")
-        if isinstance(host_plugin, dict):
-            host_dict["plugin"] = tolerant_dict(host_plugin)
+        _wrap_dict_field_tolerantly(host_dict, "tags")
+        _wrap_dict_field_tolerantly(host_dict, "plugin")
 
     return result
 
