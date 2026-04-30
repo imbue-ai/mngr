@@ -600,12 +600,17 @@ def _export_single_channel(
         api_caller=api_caller,
     )
     if refresh_fetched:
-        _save_refreshed_messages(
-            refresh_fetched=refresh_fetched,
-            known_message_keys=known_message_keys,
-            existing_message_by_key=existing_message_by_key,
+        _diff_and_save(
+            fresh_items=refresh_fetched,
+            existing_by_key={
+                _message_event_key(channel_id, ts): event
+                for (channel_id, ts), event in existing_message_by_key.items()
+            },
+            get_key=lambda m: _message_event_key(m.channel_id, m.message_ts),
+            get_raw=lambda m: m.raw,
+            save_fn=save_message_events,
             output_dir=settings.output_dir,
-            channel_name=channel_config.name,
+            entity_name=f"refreshed messages in channel {channel_config.name}",
         )
 
     # Forward + refresh combined: refresh may surface updated reaction data and newly
@@ -826,39 +831,9 @@ def _refresh_window_fetch(
     )
 
 
-def _save_refreshed_messages(
-    refresh_fetched: list[MessageEvent],
-    known_message_keys: set[tuple[SlackChannelId, SlackMessageTimestamp]],
-    existing_message_by_key: dict[tuple[SlackChannelId, SlackMessageTimestamp], MessageEvent],
-    output_dir: Path,
-    channel_name: SlackChannelName,
-) -> None:
-    """Persist refreshed parent messages: new keys go to created+updated, changed raws go
-    to updated only, unchanged are skipped so the store stays honest."""
-    new_messages: list[MessageEvent] = []
-    updated_messages: list[MessageEvent] = []
-    for msg in refresh_fetched:
-        key = (msg.channel_id, msg.message_ts)
-        if key not in known_message_keys:
-            new_messages.append(msg)
-            continue
-        existing = existing_message_by_key.get(key)
-        if existing is None or existing.raw != msg.raw:
-            updated_messages.append(msg)
-
-    if new_messages:
-        save_message_events(output_dir, StreamType.CREATED, new_messages)
-    all_to_update = new_messages + updated_messages
-    if all_to_update:
-        save_message_events(output_dir, StreamType.UPDATED, all_to_update)
-    if new_messages:
-        logger.info("  Refresh: saved %d newly-discovered messages in channel %s", len(new_messages), channel_name)
-    if updated_messages:
-        logger.info(
-            "  Refresh: saved %d updated messages in channel %s (e.g. new reply_count)",
-            len(updated_messages),
-            channel_name,
-        )
+def _message_event_key(channel_id: SlackChannelId, message_ts: SlackMessageTimestamp) -> str:
+    """Stringify a (channel_id, message_ts) pair for use as a dict key in _diff_and_save."""
+    return f"{channel_id}:{message_ts}"
 
 
 def _fetch_all_messages_for_channel(
