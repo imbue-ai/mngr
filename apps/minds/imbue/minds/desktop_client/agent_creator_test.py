@@ -617,8 +617,8 @@ def test_wait_for_workspace_ready_returns_true_once_url_appears(
         notification_dispatcher=notification_dispatcher,
         workspace_ready_timeout_seconds=5.0,
         workspace_ready_poll_interval_seconds=0.01,
+        probe_http_client=httpx.Client(transport=httpx.MockTransport(_mock_transport_always_ok)),
     )
-    creator._probe_http_client = httpx.Client(transport=httpx.MockTransport(_mock_transport_always_ok))
     log_queue: queue_mod.Queue[str] = queue_mod.Queue()
 
     assert creator._wait_for_workspace_ready(agent_id, log_queue) is True
@@ -693,8 +693,8 @@ def test_wait_for_workspace_ready_uses_the_workspace_service_name(
         notification_dispatcher=notification_dispatcher,
         workspace_ready_timeout_seconds=1.0,
         workspace_ready_poll_interval_seconds=0.01,
+        probe_http_client=httpx.Client(transport=httpx.MockTransport(_mock_transport_always_ok)),
     )
-    creator._probe_http_client = httpx.Client(transport=httpx.MockTransport(_mock_transport_always_ok))
 
     assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is True
     assert observed_service_names == [WORKSPACE_SERVER_SERVICE_NAME]
@@ -738,8 +738,8 @@ def test_wait_for_workspace_ready_requires_http_readiness_not_just_url(
         workspace_ready_timeout_seconds=0.15,
         workspace_ready_poll_interval_seconds=0.01,
         workspace_ready_probe_timeout_seconds=0.05,
+        probe_http_client=httpx.Client(transport=httpx.MockTransport(_mock_transport_always_connect_error)),
     )
-    creator._probe_http_client = httpx.Client(transport=httpx.MockTransport(_mock_transport_always_connect_error))
 
     start = time.monotonic()
     assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is False
@@ -777,8 +777,8 @@ def test_wait_for_workspace_ready_rejects_non_200_response(
         workspace_ready_timeout_seconds=0.1,
         workspace_ready_poll_interval_seconds=0.01,
         workspace_ready_probe_timeout_seconds=0.05,
+        probe_http_client=httpx.Client(transport=httpx.MockTransport(_mock_transport_always_503)),
     )
-    creator._probe_http_client = httpx.Client(transport=httpx.MockTransport(_mock_transport_always_503))
 
     assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is False
 
@@ -800,8 +800,8 @@ def test_wait_for_workspace_ready_returns_true_once_server_answers(
         notification_dispatcher=notification_dispatcher,
         workspace_ready_timeout_seconds=2.0,
         workspace_ready_poll_interval_seconds=0.01,
+        probe_http_client=httpx.Client(transport=httpx.MockTransport(_mock_transport_always_ok)),
     )
-    creator._probe_http_client = httpx.Client(transport=httpx.MockTransport(_mock_transport_always_ok))
 
     assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is True
 

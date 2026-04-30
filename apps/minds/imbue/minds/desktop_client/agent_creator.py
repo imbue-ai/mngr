@@ -29,6 +29,7 @@ from uuid import UUID
 import httpx
 import tomlkit
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -803,6 +804,11 @@ class AgentCreator(MutableModel):
     Thread-safe: all status reads/writes are guarded by an internal lock.
     """
 
+    # ``probe_http_client`` is an ``httpx.Client``, which is not a pydantic
+    # model. ``MutableModel`` defaults to ``arbitrary_types_allowed=False``
+    # so we re-enable it here just for this class.
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
     paths: WorkspacePaths = Field(frozen=True, description="Filesystem paths for minds data")
     backend_resolver: BackendResolverInterface = Field(
         frozen=True,
@@ -878,6 +884,16 @@ class AgentCreator(MutableModel):
             "can't stall the overall poll loop."
         ),
     )
+    probe_http_client: httpx.Client = Field(
+        default_factory=httpx.Client,
+        frozen=True,
+        description=(
+            "HTTP client used to probe workspace-server readiness. Reused across polls so we "
+            "don't pay the connection-pool setup cost on every tick. Exposed as a constructor "
+            "field so tests can inject an ``httpx.MockTransport``-backed client without "
+            "reaching into private state."
+        ),
+    )
 
     _statuses: dict[str, AgentCreationStatus] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
@@ -887,9 +903,6 @@ class AgentCreator(MutableModel):
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _destroy_statuses: dict[str, AgentDestructionStatus] = PrivateAttr(default_factory=dict)
     _destroy_errors: dict[str, str] = PrivateAttr(default_factory=dict)
-    # Reused across polls so we don't pay the connection-pool setup cost on
-    # every tick.
-    _probe_http_client: httpx.Client = PrivateAttr(default_factory=httpx.Client)
 
     def start_creation(
         self,
@@ -1054,7 +1067,7 @@ class AgentCreator(MutableModel):
         remaining = max(deadline - time.monotonic(), 0.0)
         if poll_until(
             lambda: probe_workspace_ready(
-                self._probe_http_client,
+                self.probe_http_client,
                 url,
                 self.workspace_ready_probe_timeout_seconds,
             ),
