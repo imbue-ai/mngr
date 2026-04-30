@@ -33,31 +33,16 @@ from typing import Any
 from typing import Callable
 
 from loguru import logger as _loguru_logger
-from watchdog.events import FileSystemEvent
-from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from imbue.minds_workspace_server.tickets_parser import TicketState
 from imbue.minds_workspace_server.tickets_parser import parse_ticket_file
+from imbue.minds_workspace_server.watcher_common import POLL_INTERVAL_SECONDS
+from imbue.minds_workspace_server.watcher_common import WakeOnChangeHandler
 
 logger = _loguru_logger
 
-_NON_CHANGE_EVENT_TYPES = frozenset({"opened", "closed", "closed_no_write"})
-
-_POLL_INTERVAL_SECONDS = 1.0
 _SOURCE = "tk"
-
-
-class _TicketsChangeHandler(FileSystemEventHandler):
-    """Wakes the watcher loop on real filesystem changes."""
-
-    def __init__(self, wake_event: threading.Event) -> None:
-        self._wake_event = wake_event
-
-    def on_any_event(self, event: FileSystemEvent) -> None:
-        if event.event_type in _NON_CHANGE_EVENT_TYPES:
-            return
-        self._wake_event.set()
 
 
 def _mtime_iso(mtime: float) -> str:
@@ -139,7 +124,7 @@ class AgentTicketsWatcher:
     def _run(self) -> None:
         self._setup_watchers()
         while not self._stop_event.is_set():
-            self._wake_event.wait(timeout=_POLL_INTERVAL_SECONDS)
+            self._wake_event.wait(timeout=POLL_INTERVAL_SECONDS)
             self._wake_event.clear()
             if self._stop_event.is_set():
                 break
@@ -165,7 +150,7 @@ class AgentTicketsWatcher:
             return
         try:
             observer = Observer()
-            handler = _TicketsChangeHandler(self._wake_event)
+            handler = WakeOnChangeHandler(self._wake_event)
             observer.schedule(handler, str(parent_dir), recursive=False)
             if self._tickets_dir.exists():
                 observer.schedule(handler, str(self._tickets_dir), recursive=False)

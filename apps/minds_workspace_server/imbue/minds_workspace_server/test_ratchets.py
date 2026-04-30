@@ -254,13 +254,15 @@ def test_prevent_underscore_imports() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    # +2 for the new tickets pipeline: AgentTicketsWatcher.__init__ (stateful
-    # background watcher, mirroring AgentSessionWatcher's __init__ pattern --
-    # a classmethod factory wouldn't help) and _TicketsChangeHandler.__init__
-    # (a watchdog FileSystemEventHandler subclass that needs the wake_event
-    # threading primitive injected, mirroring _ChangeHandler in
-    # session_watcher.py).
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(6))
+    # +1 since the introduction of the tickets pipeline:
+    # AgentTicketsWatcher.__init__ (stateful background watcher, mirroring
+    # AgentSessionWatcher's __init__ pattern -- a classmethod factory
+    # wouldn't help). The watchdog file-change handler's __init__ is
+    # already counted toward the project's existing total (it lived in
+    # session_watcher.py before the tickets pipeline arrived; it now
+    # lives in watcher_common.py as the shared WakeOnChangeHandler
+    # consumed by both watchers).
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(5))
 
 
 def test_prevent_cast_usage() -> None:
