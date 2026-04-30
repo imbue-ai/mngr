@@ -19,6 +19,7 @@ import pytest
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.testing import make_test_agent_details
+from imbue.mngr_subagent_proxy import _stop_hook_guard
 from imbue.mngr_subagent_proxy.hooks import cleanup as cleanup_hook
 from imbue.mngr_subagent_proxy.hooks import reap as reap_hook
 from imbue.mngr_subagent_proxy.hooks import spawn as spawn_hook
@@ -644,3 +645,128 @@ def test_spawn_env_vars_from_real_os_env(clean_env: pytest.MonkeyPatch) -> None:
     assert spawn_hook._parse_int_env("__DOES_NOT_EXIST__", 42) == 42
     clean_env.setenv("__SPAWN_TEST_INT__", "7")
     assert spawn_hook._parse_int_env("__SPAWN_TEST_INT__", 0) == 7
+
+
+# guard_per_agent_plugin_cache wraps every Stop / SubagentStop command in
+# the per-agent Claude Code plugin cache with the
+# MNGR_SUBAGENT_PROXY_CHILD env-conditional guard.
+#
+# Found live: a spawned proxy child was running the imbue-code-guardian
+# stop_hook_orchestrator -- and being held responsible for the parent's
+# uncommitted changes / failing CI -- because Claude Code populates the
+# per-agent cache by fetching FRESH FROM GITHUB at session start, not
+# by copying the user marketplace dir. The provisioning-time wrap of
+# the user marketplace never reached the cache. Fix: call this helper
+# from a SessionStart hook.
+def _write_unguarded_orchestrator_hooks(path: Path) -> None:
+    """Helper: write a hooks.json mimicking what Claude Code fetches from
+    a stop-hook plugin marketplace (un-guarded orchestrator command)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "timeout": 900,
+                                    "command": "${CLAUDE_PLUGIN_ROOT}/scripts/stop_hook_orchestrator.sh",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        )
+        + "\n"
+    )
+
+
+def test_guard_per_agent_plugin_cache_wraps_unguarded_stop_hooks(tmp_path: Path) -> None:
+    """Walks every hooks.json under the per-agent plugin cache and prepends
+    the proxy-child guard to each Stop/SubagentStop command. Idempotent on
+    second pass.
+    """
+    state_dir = tmp_path / "agent-state"
+    cache_root = state_dir / "plugin" / "claude" / "anthropic" / "plugins"
+    # Two plugins under two different marketplaces -- mirrors the real
+    # ~/.mngr/agents/<id>/plugin/claude/anthropic/plugins/<marketplace>/<plugin> shape.
+    paths = [
+        cache_root / "marketplaces" / "alpha" / "plugins" / "p1" / "hooks" / "hooks.json",
+        cache_root / "marketplaces" / "beta" / "plugins" / "p2" / "hooks" / "hooks.json",
+    ]
+    for p in paths:
+        _write_unguarded_orchestrator_hooks(p)
+
+    _stop_hook_guard.guard_per_agent_plugin_cache(state_dir)
+
+    for p in paths:
+        data = json.loads(p.read_text())
+        cmd = data["hooks"]["Stop"][0]["hooks"][0]["command"]
+        assert cmd.startswith('[ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; '), (
+            f"Stop-hook command in {p} is not guarded after pass: {cmd!r}"
+        )
+
+    # Idempotent: re-running does not double-wrap.
+    _stop_hook_guard.guard_per_agent_plugin_cache(state_dir)
+    for p in paths:
+        cmd = json.loads(p.read_text())["hooks"]["Stop"][0]["hooks"][0]["command"]
+        # Exactly one guard prefix -- verify it doesn't appear twice.
+        assert cmd.count('[ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; ') == 1, (
+            f"Idempotency broken: command was double-wrapped: {cmd!r}"
+        )
+
+
+def test_guard_per_agent_plugin_cache_noop_when_cache_missing(tmp_path: Path) -> None:
+    """No-op when the per-agent plugin cache directory does not exist.
+
+    SessionStart fires for every claude session, including ones whose
+    plugin cache hasn't been populated (or where the agent has no
+    plugins configured). Helper must tolerate the missing-dir case
+    silently.
+    """
+    state_dir = tmp_path / "agent-state-no-plugins"
+    state_dir.mkdir()
+    # Should not raise.
+    _stop_hook_guard.guard_per_agent_plugin_cache(state_dir)
+
+
+def test_reap_run_invokes_per_agent_plugin_cache_guard(
+    tmp_path: Path,
+    clean_env: pytest.MonkeyPatch,
+) -> None:
+    """The SessionStart reap hook calls guard_per_agent_plugin_cache for
+    the agent's own state dir BEFORE the orphan-reap fast path. This
+    closes the bug where a fresh-from-GitHub per-agent cache contained
+    an unguarded orchestrator that fired inside spawned subagents.
+    """
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    cache_hooks = (
+        state_dir
+        / "plugin"
+        / "claude"
+        / "anthropic"
+        / "plugins"
+        / "marketplaces"
+        / "x"
+        / "plugins"
+        / "p"
+        / "hooks"
+        / "hooks.json"
+    )
+    _write_unguarded_orchestrator_hooks(cache_hooks)
+    clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
+
+    # Empty subagent_map -- trips the fast-path `return`. The cache wrap
+    # must run BEFORE that early return; if it ran later (or only in the
+    # background-worker branch) this test would fail.
+    reap_hook.run(io.StringIO(""), spawn_background_callable=lambda: None)
+
+    cmd = json.loads(cache_hooks.read_text())["hooks"]["Stop"][0]["hooks"][0]["command"]
+    assert cmd.startswith('[ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; '), (
+        f"reap.run did not guard the per-agent plugin cache. Command after run: {cmd!r}. "
+        f"The SessionStart wrap of the cache must run before the orphan-reap fast path."
+    )
