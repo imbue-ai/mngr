@@ -10,7 +10,6 @@ from typing import Any
 import pluggy
 import pytest
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
@@ -1147,71 +1146,6 @@ class _RaisingDetailProviderInstance(MockProviderInstance):
         raise MngrError("simulated detail retrieval failure from test")
 
 
-class _MismatchedProviderInstance(MockProviderInstance):
-    """Provider that returns hosts whose provider_name differs from self.name.
-
-    Used to exercise the ProviderInstanceNotFoundError path in
-    _list_agents_batch (lines 271-279).
-    """
-
-    def discover_hosts_and_agents(
-        self,
-        cg: ConcurrencyGroup,
-        include_destroyed: bool = False,
-    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
-        mismatched_host = DiscoveredHost(
-            host_id=HostId.generate(),
-            host_name=HostName("mismatched-host"),
-            provider_name=ProviderInstanceName("nonexistent-provider-xyz"),
-        )
-        agent = DiscoveredAgent(
-            host_id=mismatched_host.host_id,
-            agent_id=AgentId.generate(),
-            agent_name=AgentName("mismatched-agent"),
-            provider_name=ProviderInstanceName("nonexistent-provider-xyz"),
-        )
-        return {mismatched_host: [agent]}
-
-
-_MISMATCHED_BACKEND_NAME = ProviderBackendName("test-mismatched-backend")
-
-
-class _MismatchedProviderBackend(ProviderBackendInterface):
-    """Backend that creates a _MismatchedProviderInstance."""
-
-    @staticmethod
-    def get_name() -> ProviderBackendName:
-        return _MISMATCHED_BACKEND_NAME
-
-    @staticmethod
-    def get_description() -> str:
-        return "Test backend that returns mismatched provider names"
-
-    @staticmethod
-    def get_config_class() -> type[ProviderInstanceConfig]:
-        return ProviderInstanceConfig
-
-    @staticmethod
-    def get_build_args_help() -> str:
-        return "No arguments supported."
-
-    @staticmethod
-    def get_start_args_help() -> str:
-        return "No arguments supported."
-
-    @staticmethod
-    def build_provider_instance(
-        name: ProviderInstanceName,
-        config: ProviderInstanceConfig,
-        mngr_ctx: MngrContext,
-    ) -> ProviderInstanceInterface:
-        return _MismatchedProviderInstance(
-            name=name,
-            host_dir=mngr_ctx.config.default_host_dir,
-            mngr_ctx=mngr_ctx,
-        )
-
-
 _RAISING_DISCOVERY_BACKEND_NAME = ProviderBackendName("test-raising-discovery-backend")
 
 
@@ -1436,67 +1370,7 @@ def test_maybe_write_full_discovery_snapshot_emits_ssh_host_info(
 
 
 # =============================================================================
-# Lines 271-279: ProviderInstanceNotFoundError in batch mode
-# =============================================================================
-
-
-def test_list_agents_batch_continue_mode_handles_mismatched_provider_name(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """list_agents batch mode records a ProviderErrorInfo when a host's provider is unknown.
-
-    The _MismatchedProviderInstance returns hosts with a provider_name that does
-    not match any entry in the provider_map built by _list_agents_batch.
-    In CONTINUE mode this triggers a ProviderInstanceNotFoundError that should
-    be recorded (not raised).
-    """
-    _backend_registry[_MISMATCHED_BACKEND_NAME] = _MismatchedProviderBackend
-    _provider_config_registry[_MISMATCHED_BACKEND_NAME] = ProviderInstanceConfig
-    try:
-        captured_errors: list[ErrorInfo] = []
-        result = list_agents(
-            mngr_ctx=temp_mngr_ctx,
-            is_streaming=False,
-            error_behavior=ErrorBehavior.CONTINUE,
-            on_error=lambda e: captured_errors.append(e),
-        )
-
-        provider_errors = [e for e in result.errors if isinstance(e, ProviderErrorInfo)]
-        assert len(provider_errors) >= 1
-        assert any("nonexistent-provider-xyz" in str(e.provider_name) for e in provider_errors)
-        assert len(captured_errors) >= 1
-        assert all(isinstance(e, ProviderErrorInfo) for e in captured_errors)
-    finally:
-        del _backend_registry[_MISMATCHED_BACKEND_NAME]
-        del _provider_config_registry[_MISMATCHED_BACKEND_NAME]
-
-
-def test_list_agents_batch_abort_mode_raises_for_mismatched_provider_name(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """list_agents batch mode propagates the error in ABORT mode.
-
-    Same scenario as the CONTINUE test, but with ABORT mode the
-    ProviderInstanceNotFoundError must propagate (wrapped by the
-    ConcurrencyGroupExecutor) rather than be swallowed.
-    """
-    _backend_registry[_MISMATCHED_BACKEND_NAME] = _MismatchedProviderBackend
-    _provider_config_registry[_MISMATCHED_BACKEND_NAME] = ProviderInstanceConfig
-    try:
-        with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
-            list_agents(
-                mngr_ctx=temp_mngr_ctx,
-                is_streaming=False,
-                error_behavior=ErrorBehavior.ABORT,
-            )
-        assert exc_info.value.only_exception_is_instance_of(MngrError)
-    finally:
-        del _backend_registry[_MISMATCHED_BACKEND_NAME]
-        del _provider_config_registry[_MISMATCHED_BACKEND_NAME]
-
-
-# =============================================================================
-# Lines 348-385: Provider-level MngrError in streaming mode
+# Provider-level MngrError in streaming mode
 # =============================================================================
 
 

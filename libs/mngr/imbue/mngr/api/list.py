@@ -14,7 +14,6 @@ from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
 from imbue.mngr.api.discovery_events import emit_discovery_error_to_stdout
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
@@ -25,7 +24,6 @@ from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -173,28 +171,19 @@ def list_agents(
             field_generators=field_generators,
         )
 
-        if is_streaming:
-            # Streaming mode: each provider loads hosts, gets agent refs, and processes
-            # hosts immediately -- so fast providers fire on_agent callbacks while slow
-            # providers are still loading
-            _list_agents_streaming(
-                mngr_ctx=mngr_ctx,
-                provider_names=provider_names,
-                params=params,
-                result=result,
-                results_lock=results_lock,
-                reset_caches=reset_caches,
-            )
-        else:
-            # Batch mode: load all agents first, then process
-            _list_agents_batch(
-                mngr_ctx=mngr_ctx,
-                provider_names=provider_names,
-                params=params,
-                result=result,
-                results_lock=results_lock,
-                reset_caches=reset_caches,
-            )
+        # Batch and streaming share the per-provider parallel pipeline -- they differ
+        # only in how the CLI consumes the result. Streaming callers receive each agent
+        # via params.on_agent as soon as its host's details are collected; batch callers
+        # typically pass on_agent=None and process result.agents after this call returns.
+        _run_per_provider_listing(
+            mngr_ctx=mngr_ctx,
+            provider_names=provider_names,
+            params=params,
+            result=result,
+            results_lock=results_lock,
+            reset_caches=reset_caches,
+            executor_name="list_agents_streaming" if is_streaming else "list_agents_batch",
+        )
 
     except MngrError as e:
         if error_behavior == ErrorBehavior.ABORT:
@@ -237,99 +226,41 @@ def _maybe_write_full_discovery_snapshot(
         logger.warning("Failed to write full discovery snapshot: {}", e)
 
 
-def _list_agents_batch(
+def _run_per_provider_listing(
     mngr_ctx: MngrContext,
     provider_names: tuple[str, ...] | None,
     params: _ListAgentsParams,
     result: ListResult,
     results_lock: Lock,
-    reset_caches: bool = False,
+    reset_caches: bool,
+    executor_name: str,
 ) -> None:
-    """Batch mode: load all agents from all providers, then process hosts."""
-    with log_span("Loading agents from all providers"):
-        agents_by_host, providers = discover_hosts_and_agents(
-            mngr_ctx,
-            provider_names=provider_names,
-            agent_identifiers=None,
-            include_destroyed=True,
-            reset_caches=reset_caches,
-        )
-    provider_map = {provider.name: provider for provider in providers}
-    logger.trace("Found {} hosts with agents", len(agents_by_host))
+    """Per-provider parallel listing pipeline shared by batch and streaming modes.
 
-    # Process each host and its agents in parallel
-    futures: list[Future[None]] = []
-    with mngr_executor(
-        parent_cg=mngr_ctx.concurrency_group, name="list_agents_process_hosts", max_workers=32
-    ) as executor:
-        for host_ref, agent_refs in agents_by_host.items():
-            if not agent_refs:
-                continue
-
-            provider = provider_map.get(host_ref.provider_name)
-            if not provider:
-                exception = ProviderInstanceNotFoundError(host_ref.provider_name)
-                if params.error_behavior == ErrorBehavior.ABORT:
-                    raise exception
-                error_info = ProviderErrorInfo.build_for_provider(exception, host_ref.provider_name)
-                with results_lock:
-                    result.errors.append(error_info)
-                if params.on_error:
-                    params.on_error(error_info)
-                continue
-
-            futures.append(
-                executor.submit(
-                    _process_host_with_error_handling,
-                    host_ref,
-                    agent_refs,
-                    provider,
-                    params,
-                    result,
-                    results_lock,
-                )
-            )
-
-    # Re-raise any thread exceptions (e.g. abort-mode errors)
-    for future in futures:
-        future.result()
-
-
-def _list_agents_streaming(
-    mngr_ctx: MngrContext,
-    provider_names: tuple[str, ...] | None,
-    params: _ListAgentsParams,
-    result: ListResult,
-    results_lock: Lock,
-    reset_caches: bool = False,
-) -> None:
-    """Streaming mode: each provider loads and processes hosts independently.
-
-    Fast providers fire on_agent callbacks while slow providers are still loading.
+    Iterates the provider names that should be loaded, constructs each in its own
+    thread, runs discovery, and processes hosts -- so a single provider failing
+    (e.g. Modal with no credentials) does not block the others.
     """
-    with log_span("Loading agents from all providers (streaming)"):
+    with log_span("Loading agents from all providers"):
         names = list_provider_names_to_load(mngr_ctx, provider_names)
         logger.trace("Found {} provider names to load", len(names))
 
-        with mngr_executor(
-            parent_cg=mngr_ctx.concurrency_group, name="list_agents_streaming", max_workers=32
-        ) as executor:
-            streaming_futures: list[Future[None]] = []
-            for name in names:
-                streaming_futures.append(
-                    executor.submit(
-                        _construct_discover_and_emit_for_provider,
-                        name,
-                        mngr_ctx,
-                        params,
-                        result,
-                        results_lock,
-                        reset_caches,
-                    )
+        with mngr_executor(parent_cg=mngr_ctx.concurrency_group, name=executor_name, max_workers=32) as executor:
+            futures: list[Future[None]] = [
+                executor.submit(
+                    _construct_discover_and_emit_for_provider,
+                    name,
+                    mngr_ctx,
+                    params,
+                    result,
+                    results_lock,
+                    reset_caches,
                 )
+                for name in names
+            ]
 
-        # Re-raise any thread exceptions
-        for future in streaming_futures:
+        # Re-raise any thread exceptions (e.g. ABORT-mode errors)
+        for future in futures:
             future.result()
 
 
