@@ -118,7 +118,12 @@ class MngrMessageSender(MutableModel):
         cg = ConcurrencyGroup(name="mngr-message")
         with cg:
             result = cg.run_process_to_completion(
-                command=[self.mngr_binary, "message", str(agent_id), text],
+                # ``-m`` and ``--`` are required: ``mngr message`` treats every
+                # positional argument as an agent identifier (``nargs=-1``), so
+                # passing the text as a positional would be parsed as a second
+                # agent and the actual message content would be read from
+                # stdin (silently empty in this subprocess context).
+                command=[self.mngr_binary, "message", "-m", text, "--", str(agent_id)],
                 timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS,
                 is_checked_after=False,
             )

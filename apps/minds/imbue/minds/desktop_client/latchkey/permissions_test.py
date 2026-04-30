@@ -154,7 +154,13 @@ def test_mngr_message_sender_invokes_message_subcommand(tmp_path: Path) -> None:
     sender.send(agent_id, "hello")
 
     recording = _read_recording(tmp_path / "mngr_report.jsonl")
-    assert recording == [{"argv": ["message", str(agent_id), "hello"], "env_LATCHKEY_DIRECTORY": ""}]
+    # ``mngr message`` collects every positional into ``agents`` (nargs=-1),
+    # so the message text MUST be passed via ``-m`` -- otherwise it would be
+    # parsed as a second agent identifier and the message content would be
+    # read from (silently empty) stdin in this subprocess context.
+    assert recording == [
+        {"argv": ["message", "-m", "hello", "--", str(agent_id)], "env_LATCHKEY_DIRECTORY": ""}
+    ]
 
 
 def test_mngr_message_sender_does_not_raise_on_failure(tmp_path: Path) -> None:
