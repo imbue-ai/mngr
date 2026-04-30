@@ -7,8 +7,7 @@
 > permission round-trip, etc. -- see "Deferred / out-of-scope" at the
 > bottom), and the design depends on Claude Code internals (hook
 > protocol, plugin cache layout, marketplace fetch behavior) that may
-> shift between Claude Code releases. Do NOT enable this on a workflow
-> you can't easily back out of, and watch `mngr list` for orphaned
+> shift between Claude Code releases. Watch `mngr list` for orphaned
 > children if a session ends abnormally.
 
 mngr plugin that owns Claude Code subagents.
@@ -153,6 +152,18 @@ its turn cleanly instead of error-looping. The cost when this happens
 is ~50 cheap Haiku Bash calls before it gives up; not catastrophic
 but non-zero.
 
+### Gotcha: `WAITING` reported while a child is actively thinking
+
+`mngr list` will report a proxy child as `WAITING` while the child is
+in the middle of a long thinking turn -- not because the child is
+idle but because the `permissions_waiting` flag set by mngr_claude's
+`PermissionRequest` readiness hook is still on the disk between that
+hook and the next `PostToolUse`. The flag clears as soon as the
+child issues its next tool call. Cosmetic only -- doesn't affect
+correctness; the child IS doing useful work. This lives in
+mngr_claude's readiness-hook semantics, not this plugin, and is not
+on the roadmap to fix.
+
 ## Hiding proxy children from `mngr list`
 
 Spawned proxy children are tagged with the label
@@ -281,11 +292,3 @@ on the parent.
 
 Unit-tested for the read path; never verified live with a real
 `/resume` mid-Task.
-
-#### Diagnose `WAITING`-while-thinking lifecycle reporting
-
-Cosmetic but confusing: `mngr list` reports `WAITING` for proxy
-children that are actively thinking, because `permissions_waiting`
-flag stays set between a PermissionRequest hook and the next
-PostToolUse. This isn't owned by this plugin (lives in mngr_claude's
-readiness hooks) but it makes the proxy's lifecycle harder to read.
