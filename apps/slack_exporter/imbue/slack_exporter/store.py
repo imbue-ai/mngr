@@ -93,15 +93,27 @@ def load_existing_channels(
 
 def load_existing_message_state(
     output_dir: Path,
-) -> tuple[dict[SlackChannelId, ChannelExportState], set[tuple[SlackChannelId, SlackMessageTimestamp]]]:
-    """Load existing message events to derive per-channel state and known message keys."""
+) -> tuple[
+    dict[SlackChannelId, ChannelExportState],
+    set[tuple[SlackChannelId, SlackMessageTimestamp]],
+    dict[tuple[SlackChannelId, SlackMessageTimestamp], MessageEvent],
+]:
+    """Load existing message events to derive per-channel state, known message keys, and the
+    latest stored event per (channel_id, message_ts) for diffing against re-fetched data.
+
+    Iterates created first, then updated, so later appends in the updated stream shadow
+    earlier ones for the same key.
+    """
     state_by_channel_id: dict[SlackChannelId, ChannelExportState] = {}
     known_message_keys: set[tuple[SlackChannelId, SlackMessageTimestamp]] = set()
+    latest_by_key: dict[tuple[SlackChannelId, SlackMessageTimestamp], MessageEvent] = {}
 
     for stream in StreamType:
         for record in _load_jsonl_records(_events_path(output_dir, DataType.MESSAGE, stream)):
             event = MessageEvent.model_validate(record)
-            known_message_keys.add((event.channel_id, event.message_ts))
+            key = (event.channel_id, event.message_ts)
+            known_message_keys.add(key)
+            latest_by_key[key] = event
 
             existing = state_by_channel_id.get(event.channel_id)
             is_newer = (
@@ -117,7 +129,7 @@ def load_existing_message_state(
                 )
 
     logger.info("Loaded %d known messages from store", len(known_message_keys))
-    return state_by_channel_id, known_message_keys
+    return state_by_channel_id, known_message_keys, latest_by_key
 
 
 def load_existing_users(output_dir: Path) -> dict[SlackUserId, UserEvent]:
