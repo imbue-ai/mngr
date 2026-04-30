@@ -39,6 +39,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr.utils.cel_utils import tolerant_dict
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
@@ -525,6 +526,21 @@ def agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
     # (host.provider is the documented short form; host.provider_name matches the data type)
     if host_dict is not None and "provider_name" in host_dict:
         host_dict["provider"] = host_dict["provider_name"]
+
+    # Schemaless fields: missing keys must not produce per-agent warnings.
+    labels = result.get("labels")
+    if isinstance(labels, dict):
+        result["labels"] = tolerant_dict(labels)
+    plugin = result.get("plugin")
+    if isinstance(plugin, dict):
+        result["plugin"] = tolerant_dict(plugin)
+    if host_dict is not None:
+        host_tags = host_dict.get("tags")
+        if isinstance(host_tags, dict):
+            host_dict["tags"] = tolerant_dict(host_tags)
+        host_plugin = host_dict.get("plugin")
+        if isinstance(host_plugin, dict):
+            host_dict["plugin"] = tolerant_dict(host_plugin)
 
     return result
 

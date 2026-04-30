@@ -63,6 +63,9 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
 from imbue.mngr.providers.registry import _backend_registry
+from imbue.mngr.utils.cel_utils import TolerantMapType
+from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
+from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.testing import capture_loguru
 
@@ -511,6 +514,55 @@ def test_agent_details_to_cel_context_idle_uses_most_recent_activity() -> None:
     # SSH activity (10 min ago) is the most recent, so idle should be ~600s.
     assert "idle" in context
     assert 580 < context["idle"] < 620
+
+
+def test_agent_details_to_cel_context_wraps_labels_tolerantly() -> None:
+    """Empty labels must filter cleanly without per-agent warnings.
+
+    Reproduces the bug where `--exclude 'labels.X == "Y"'` warned for every
+    agent without that label, since `labels` is a schemaless dict[str, str].
+    """
+    host_details = _make_host_details()
+    agent = _make_agent_details("test-agent", host_details)
+    assert agent.labels == {}
+
+    cel_context = build_cel_context(agent_details_to_cel_context(agent))
+    assert isinstance(cel_context["labels"], TolerantMapType)
+
+    include_filters, exclude_filters = compile_cel_filters(
+        include_filters=(),
+        exclude_filters=('labels.mngr_subagent_proxy == "child"',),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result = apply_cel_filters_to_context(
+            context=agent_details_to_cel_context(agent),
+            include_filters=include_filters,
+            exclude_filters=exclude_filters,
+            error_context_description=f"agent {agent.name}",
+        )
+    assert result is True
+    assert "Error evaluating" not in log_output.getvalue()
+
+
+def test_agent_details_to_cel_context_wraps_host_tags_tolerantly() -> None:
+    """Empty host.tags must filter cleanly without per-agent warnings."""
+    host_details = _make_host_details()
+    assert host_details.tags == {}
+    agent = _make_agent_details("test-agent", host_details)
+
+    include_filters, exclude_filters = compile_cel_filters(
+        include_filters=(),
+        exclude_filters=('host.tags.foo == "x"',),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result = apply_cel_filters_to_context(
+            context=agent_details_to_cel_context(agent),
+            include_filters=include_filters,
+            exclude_filters=exclude_filters,
+            error_context_description=f"agent {agent.name}",
+        )
+    assert result is True
+    assert "Error evaluating" not in log_output.getvalue()
 
 
 def test_agent_details_to_cel_context_exposes_host_provider_under_both_names() -> None:
