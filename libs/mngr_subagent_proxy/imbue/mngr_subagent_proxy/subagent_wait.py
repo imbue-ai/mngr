@@ -529,7 +529,8 @@ def resolve_destroyed_result(target_name: str, location: AgentLocation) -> str:
                         continue
                     try:
                         event = json.loads(stripped)
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as e:
+                        logger.trace("Skipping malformed line in {}: {}", events_path, e)
                         continue
                     if not isinstance(event, dict):
                         continue

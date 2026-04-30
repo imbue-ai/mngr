@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,30 @@ from imbue.mngr_subagent_proxy.testing import FakeHost
 # None sentinel doesn't leak argument-type noise to every call site.
 _provision: Any = on_after_provisioning
 _destroy: Any = on_before_agent_destroy
+
+
+@dataclass
+class _ProvisionEnv:
+    """Pre-created host_dir + work_dir pair plus a FakeHost rooted in host_dir.
+
+    Every plugin test wires up the same trio (host_dir/work_dir directories
+    plus a FakeHost). Bundling them in one fixture removes the boilerplate
+    while keeping fields named so call sites stay readable.
+    """
+
+    host_dir: Path
+    work_dir: Path
+    host: FakeHost
+
+
+@pytest.fixture
+def provision_env(tmp_path: Path) -> _ProvisionEnv:
+    """Standard host_dir / work_dir / FakeHost trio used by every plugin test."""
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    return _ProvisionEnv(host_dir=host_dir, work_dir=work_dir, host=FakeHost(host_dir))
 
 
 def test_plugin_hooks_register_on_claude_agent(tmp_path: Path) -> None:
