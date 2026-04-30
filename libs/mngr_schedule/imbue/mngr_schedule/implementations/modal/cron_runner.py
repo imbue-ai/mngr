@@ -237,11 +237,19 @@ def _wait_for_agent_terminal_state(
     if not re.fullmatch(r"[\w-]+", agent_name):
         raise CronRunnerError(f"unexpected agent name for wait: {agent_name!r}")
     try:
+        # Pass terminal-success states explicitly. `mngr wait <agent>` with
+        # no state arg defaults to "any terminal state" but interprets that
+        # via host stop, not agent DONE -- a long-lived local-in-container
+        # host never stops, so we'd hang.
         completed = subprocess.run(
             [
                 "mngr",
                 "wait",
                 agent_name,
+                "--state",
+                "DONE",
+                "--state",
+                "STOPPED",
                 "--timeout",
                 f"{int(timeout_seconds)}s",
                 "--format",

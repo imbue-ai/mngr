@@ -69,10 +69,14 @@ def cron_runner(tmp_path_factory: pytest.TempPathFactory) -> Iterator[ModuleType
     dockerfile = tmp / "Dockerfile"
     dockerfile.write_text("FROM python:3.12-slim\n")
 
+    # Placeholder values: nothing under cron_runner's `if modal.is_local()`
+    # branch actually executes during a drift-test import beyond storing
+    # these in module-level vars and constructing a (lazy) modal.App, so
+    # they don't have to resemble real production values.
     deploy_config = {
-        "app_name": "cron-runner-drift-test",
-        "cron_schedule": "0 0 * * *",
-        "cron_timezone": "UTC",
+        "app_name": "PLACEHOLDER-app-name",
+        "cron_schedule": "PLACEHOLDER-cron-schedule",
+        "cron_timezone": "PLACEHOLDER-cron-timezone",
     }
     with _isolated_module(_CRON_RUNNER_MODULE), pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setenv("SCHEDULE_DEPLOY_CONFIG", json.dumps(deploy_config))
