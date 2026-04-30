@@ -83,33 +83,32 @@ def cron_runner(tmp_path_factory: pytest.TempPathFactory) -> Iterator[ModuleType
             sys.modules[_CRON_RUNNER_MODULE] = saved_module
 
 
-def test_cron_runner_running_states_match_lifecycle_enum(cron_runner: ModuleType) -> None:
-    expected = frozenset(
-        {
-            AgentLifecycleState.RUNNING.value,
-            AgentLifecycleState.WAITING.value,
-            AgentLifecycleState.REPLACED.value,
-            AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE.value,
-        }
-    )
-    assert cron_runner.RUNNING_STATES == expected
+def test_every_lifecycle_state_is_classified(cron_runner: ModuleType) -> None:
+    """Every AgentLifecycleState value must be classified as either running
+    (cron_runner.RUNNING_STATES, keep polling) or terminal-success
+    (verification._TERMINAL_SUCCESS_STATES, exit poll loop), and the two
+    sets must be disjoint.
 
+    Adding a new state to AgentLifecycleState without putting it in one
+    of these two sets would silently mis-handle it: full-verify would
+    treat it as terminal-failure (state not in success-set, raise
+    ScheduleDeployError) even though it might still be running.
 
-def test_agent_lifecycle_state_enum_pinned() -> None:
-    """Pin the full enum so any addition or removal forces a manual reconcile.
-
-    Adding a new RUNNING_* variant upstream without updating cron_runner's
-    inlined RUNNING_STATES would silently treat the new state as terminal in
-    full-verify polling. Pin the closed set here to surface the change.
+    Going via the enum (rather than hardcoded literals in the test) keeps
+    this an actual cross-module check rather than a third copy that has
+    to stay in sync manually.
     """
-    assert {state.value for state in AgentLifecycleState} == {
-        "RUNNING",
-        "WAITING",
-        "REPLACED",
-        "RUNNING_UNKNOWN_AGENT_TYPE",
-        "STOPPED",
-        "DONE",
-    }
+    running = cron_runner.RUNNING_STATES
+    terminal_success = verification._TERMINAL_SUCCESS_STATES
+    all_lifecycle = {state.value for state in AgentLifecycleState}
+
+    assert running.isdisjoint(terminal_success), (
+        f"running and terminal-success classifications overlap: {running & terminal_success}"
+    )
+    assert running | terminal_success == all_lifecycle, (
+        f"unclassified lifecycle states: {all_lifecycle - (running | terminal_success)}; "
+        f"unknown values in classification: {(running | terminal_success) - all_lifecycle}"
+    )
 
 
 def test_cron_runner_valid_verify_modes_match_verify_mode_enum(cron_runner: ModuleType) -> None:
