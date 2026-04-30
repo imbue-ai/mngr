@@ -592,7 +592,7 @@ def _export_single_channel(
     else:
         logger.info("  No new messages in channel %s", channel_config.name)
 
-    # Refresh pass: re-fetch recent history up to (but not past) the forward cursor so that
+    # Refresh pass: re-fetch recent history up to and including the forward cursor so that
     # new replies / edits to already-exported parent messages are noticed. Without this,
     # messages whose key is already stored never get re-examined and their reply_count /
     # latest_reply fields stay frozen at whatever we saw on first export.
