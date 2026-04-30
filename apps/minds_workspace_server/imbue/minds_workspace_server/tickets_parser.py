@@ -36,9 +36,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from loguru import logger as _loguru_logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+
+logger = _loguru_logger
 
 _VALID_STATUSES = frozenset({"open", "in_progress", "closed"})
 
@@ -113,7 +116,8 @@ def parse_ticket_file(path: Path) -> TicketState | None:
     failure or invalid content."""
     try:
         text = path.read_text()
-    except (OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError) as e:
+        logger.debug("Skipping unreadable ticket file {}: {}", path, e)
         return None
     return parse_ticket_text(text)
 
