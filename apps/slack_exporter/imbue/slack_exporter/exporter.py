@@ -617,8 +617,14 @@ def _export_single_channel(
         )
 
     # Forward + refresh combined: refresh may surface updated reaction data and newly
-    # threaded replies on older parents, so downstream passes need both.
-    all_messages_for_downstream = all_fetched + refresh_fetched
+    # threaded replies on older parents, so downstream passes need both. Deduplicate by
+    # message_ts: when a more-recent --since causes the backfill range (inside all_fetched)
+    # to overlap the refresh range, the same parent would otherwise be processed twice and
+    # trigger duplicate conversations.replies calls.
+    fetched_message_ts = {m.message_ts for m in all_fetched}
+    all_messages_for_downstream = all_fetched + [
+        m for m in refresh_fetched if m.message_ts not in fetched_message_ts
+    ]
 
     # Extract reactions from fetched messages (no extra API calls needed).
     message_reactions = _extract_reactions_from_messages(all_messages_for_downstream)
