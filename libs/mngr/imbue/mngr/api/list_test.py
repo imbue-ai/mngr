@@ -26,7 +26,7 @@ from imbue.mngr.api.list import ProviderErrorInfo
 from imbue.mngr.api.list import _ListAgentsParams
 from imbue.mngr.api.list import _apply_cel_filters
 from imbue.mngr.api.list import _collect_and_emit_details_for_host
-from imbue.mngr.api.list import _discover_and_emit_details_for_provider
+from imbue.mngr.api.list import _construct_discover_and_emit_for_provider
 from imbue.mngr.api.list import _handle_listing_error
 from imbue.mngr.api.list import _maybe_write_full_discovery_snapshot
 from imbue.mngr.api.list import _process_host_with_error_handling
@@ -1212,6 +1212,45 @@ class _MismatchedProviderBackend(ProviderBackendInterface):
         )
 
 
+_RAISING_DISCOVERY_BACKEND_NAME = ProviderBackendName("test-raising-discovery-backend")
+
+
+class _RaisingDiscoveryProviderBackend(ProviderBackendInterface):
+    """Backend that creates a _RaisingDiscoveryProviderInstance."""
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _RAISING_DISCOVERY_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend whose provider raises during discovery"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        return _RaisingDiscoveryProviderInstance(
+            name=name,
+            host_dir=mngr_ctx.config.default_host_dir,
+            mngr_ctx=mngr_ctx,
+        )
+
+
 def _make_list_params(
     error_behavior: ErrorBehavior = ErrorBehavior.CONTINUE,
     on_error: Any = None,
@@ -1234,19 +1273,12 @@ def _make_list_params(
 
 
 # =============================================================================
-# Provider instantiation errors are caught per-provider in get_all_provider_instances
+# Provider instantiation errors honor --on-error in get_all_provider_instances
 # =============================================================================
 
 
-def test_list_agents_skips_broken_provider_and_returns_working_ones(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """list_agents skips a provider with an unknown backend and returns the rest.
-
-    Adding a provider with an unknown backend to the config causes
-    get_all_provider_instances to skip it (catching MngrError internally)
-    and continue with working providers. No error is surfaced to the caller.
-    """
+def _make_broken_provider_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
+    """Build a MngrContext with a configured provider that has an unknown backend."""
     failing_config = ProviderInstanceConfig(backend=ProviderBackendName("nonexistent-backend-xyz"))
     updated_config = temp_mngr_ctx.config.model_copy_update(
         to_update(
@@ -1254,18 +1286,73 @@ def test_list_agents_skips_broken_provider_and_returns_working_ones(
             {ProviderInstanceName("broken-provider"): failing_config},
         ),
     )
-    failing_ctx = temp_mngr_ctx.model_copy_update(
+    return temp_mngr_ctx.model_copy_update(
         to_update(temp_mngr_ctx.field_ref().config, updated_config),
     )
+
+
+def test_list_agents_streaming_continue_mode_records_failing_provider_error(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """In streaming CONTINUE mode, a provider that fails to instantiate becomes a
+    ProviderErrorInfo in result.errors -- other providers are still listed.
+
+    Streaming mode constructs each provider in its own thread. The broken
+    provider's failure is captured as a per-provider error without aborting
+    the listing.
+    """
+    failing_ctx = _make_broken_provider_ctx(temp_mngr_ctx)
+
+    result = list_agents(
+        mngr_ctx=failing_ctx,
+        is_streaming=True,
+        error_behavior=ErrorBehavior.CONTINUE,
+    )
+
+    provider_errors = [e for e in result.errors if isinstance(e, ProviderErrorInfo)]
+    assert len(provider_errors) == 1
+    assert provider_errors[0].provider_name == ProviderInstanceName("broken-provider")
+    assert "nonexistent-backend-xyz" in provider_errors[0].message
+
+
+def test_list_agents_batch_continue_mode_records_failing_provider_error(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """In batch CONTINUE mode, a provider that fails to instantiate is recorded
+    as an ErrorInfo via the top-level except in list_agents.
+
+    Batch mode constructs all providers up front via get_all_provider_instances,
+    so any single provider's failure aborts the up-front construction. The
+    error is then caught by list_agents's outer except in CONTINUE mode.
+    """
+    failing_ctx = _make_broken_provider_ctx(temp_mngr_ctx)
 
     result = list_agents(
         mngr_ctx=failing_ctx,
         is_streaming=False,
-        error_behavior=ErrorBehavior.ABORT,
+        error_behavior=ErrorBehavior.CONTINUE,
     )
 
-    # No errors surfaced -- the broken provider was silently skipped
-    assert len(result.errors) == 0
+    assert len(result.errors) == 1
+    assert "nonexistent-backend-xyz" in result.errors[0].message
+
+
+def test_list_agents_abort_mode_propagates_top_level_mngr_error(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """list_agents with ABORT mode re-raises a top-level MngrError.
+
+    The same unknown-backend configuration triggers an error, but in ABORT
+    mode it must propagate rather than be swallowed.
+    """
+    failing_ctx = _make_broken_provider_ctx(temp_mngr_ctx)
+
+    with pytest.raises(MngrError, match="nonexistent-backend-xyz"):
+        list_agents(
+            mngr_ctx=failing_ctx,
+            is_streaming=False,
+            error_behavior=ErrorBehavior.ABORT,
+        )
 
 
 # =============================================================================
@@ -1413,124 +1500,113 @@ def test_list_agents_batch_abort_mode_raises_for_mismatched_provider_name(
 # =============================================================================
 
 
-def test_discover_and_emit_details_for_provider_continue_mode_records_error(
+def _make_raising_provider_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
+    """Build a MngrContext that has one configured provider whose discovery raises."""
+    provider_config = ProviderInstanceConfig(backend=_RAISING_DISCOVERY_BACKEND_NAME)
+    updated_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(
+            temp_mngr_ctx.config.field_ref().providers,
+            {ProviderInstanceName("raising-provider"): provider_config},
+        ),
+    )
+    return temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().config, updated_config),
+    )
+
+
+def test_construct_discover_and_emit_for_provider_continue_mode_records_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_discover_and_emit_details_for_provider records a ProviderErrorInfo in CONTINUE mode.
+    """_construct_discover_and_emit_for_provider records a ProviderErrorInfo in CONTINUE mode.
 
-    When the provider raises MngrError from discover_hosts_and_agents, the
-    error must be caught and stored as a ProviderErrorInfo on the result, and
-    the on_error callback must be called.
+    When the provider raises MngrError from discover_hosts_and_agents, the error
+    must be caught and stored as a ProviderErrorInfo on the result, and the
+    on_error callback must be called.
     """
-    provider = _RaisingDiscoveryProviderInstance(
-        name=ProviderInstanceName("raising-provider"),
-        host_dir=temp_mngr_ctx.config.default_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-    )
-    result = ListResult()
-    lock = Lock()
-    captured_errors: list[ErrorInfo] = []
-    params = _make_list_params(
-        error_behavior=ErrorBehavior.CONTINUE,
-        on_error=lambda e: captured_errors.append(e),
-    )
+    _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME] = _RaisingDiscoveryProviderBackend
+    _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        mngr_ctx = _make_raising_provider_ctx(temp_mngr_ctx)
+        result = ListResult()
+        lock = Lock()
+        captured_errors: list[ErrorInfo] = []
+        params = _make_list_params(
+            error_behavior=ErrorBehavior.CONTINUE,
+            on_error=lambda e: captured_errors.append(e),
+        )
 
-    _discover_and_emit_details_for_provider(
-        provider=provider,
-        params=params,
-        result=result,
-        results_lock=lock,
-        cg=temp_mngr_ctx.concurrency_group,
-    )
-
-    assert len(result.errors) == 1
-    assert isinstance(result.errors[0], ProviderErrorInfo)
-    assert result.errors[0].provider_name == ProviderInstanceName("raising-provider")
-    assert "simulated discovery failure from test" in result.errors[0].message
-    assert len(captured_errors) == 1
-    assert captured_errors[0] is result.errors[0]
-
-
-def test_discover_and_emit_details_for_provider_abort_mode_propagates_error(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """_discover_and_emit_details_for_provider re-raises the MngrError in ABORT mode."""
-    provider = _RaisingDiscoveryProviderInstance(
-        name=ProviderInstanceName("raising-provider"),
-        host_dir=temp_mngr_ctx.config.default_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-    )
-    result = ListResult()
-    lock = Lock()
-    params = _make_list_params(error_behavior=ErrorBehavior.ABORT)
-
-    with pytest.raises(MngrError, match="simulated discovery failure from test"):
-        _discover_and_emit_details_for_provider(
-            provider=provider,
+        _construct_discover_and_emit_for_provider(
+            provider_name=ProviderInstanceName("raising-provider"),
+            mngr_ctx=mngr_ctx,
             params=params,
             result=result,
             results_lock=lock,
-            cg=temp_mngr_ctx.concurrency_group,
+            reset_caches=False,
         )
 
-    assert result.errors == []
+        assert len(result.errors) == 1
+        assert isinstance(result.errors[0], ProviderErrorInfo)
+        assert result.errors[0].provider_name == ProviderInstanceName("raising-provider")
+        assert "simulated discovery failure from test" in result.errors[0].message
+        assert len(captured_errors) == 1
+        assert captured_errors[0] is result.errors[0]
+    finally:
+        del _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME]
+        del _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME]
 
 
-def test_discover_and_emit_details_for_provider_success_path_processes_agents(
+def test_construct_discover_and_emit_for_provider_abort_mode_propagates_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_discover_and_emit_details_for_provider processes hosts and agents when discovery succeeds.
+    """_construct_discover_and_emit_for_provider re-raises the MngrError in ABORT mode."""
+    _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME] = _RaisingDiscoveryProviderBackend
+    _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        mngr_ctx = _make_raising_provider_ctx(temp_mngr_ctx)
+        result = ListResult()
+        lock = Lock()
+        params = _make_list_params(error_behavior=ErrorBehavior.ABORT)
 
-    Uses a MockProviderInstance with a host and agents configured via mock data.
-    This exercises the success path (lines 353-376): warn_on_duplicate_host_names,
-    the host-submission loop, and future.result() teardown.
+        with pytest.raises(MngrError, match="simulated discovery failure from test"):
+            _construct_discover_and_emit_for_provider(
+                provider_name=ProviderInstanceName("raising-provider"),
+                mngr_ctx=mngr_ctx,
+                params=params,
+                result=result,
+                results_lock=lock,
+                reset_caches=False,
+            )
+
+        assert result.errors == []
+    finally:
+        del _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME]
+        del _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME]
+
+
+def test_construct_discover_and_emit_for_provider_success_path_processes_agents(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """_construct_discover_and_emit_for_provider processes hosts and agents when discovery succeeds.
+
+    Uses the local provider (registered by default) and tests the success path:
+    construction, discovery, and host submission to the executor all complete
+    without errors. The local provider has no agents in a fresh tmpdir so
+    no agent details are emitted, but result.errors must be empty.
     """
-    host_id = HostId.generate()
-    provider = MockProviderInstance(
-        name=ProviderInstanceName("test-provider"),
-        host_dir=temp_mngr_ctx.config.default_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-    )
-    certified_data = CertifiedHostData(
-        host_id=str(host_id),
-        host_name="streaming-host",
-        created_at=datetime.now(timezone.utc) - timedelta(hours=1),
-        updated_at=datetime.now(timezone.utc),
-    )
-    offline_host = make_offline_host(certified_data, provider, temp_mngr_ctx)
-    provider.mock_hosts.append(offline_host)
-
-    agent_id = AgentId.generate()
-    provider.mock_agent_data = [
-        {
-            "id": str(agent_id),
-            "name": "streaming-agent",
-            "type": "generic",
-            "command": "sleep 1",
-            "work_dir": "/tmp",
-        }
-    ]
-
     result = ListResult()
     lock = Lock()
-    collected_agents: list[AgentDetails] = []
-    params = _make_list_params(
-        error_behavior=ErrorBehavior.CONTINUE,
-        on_agent=lambda a: collected_agents.append(a),
-    )
+    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE)
 
-    _discover_and_emit_details_for_provider(
-        provider=provider,
+    _construct_discover_and_emit_for_provider(
+        provider_name=ProviderInstanceName("local"),
+        mngr_ctx=temp_mngr_ctx,
         params=params,
         result=result,
         results_lock=lock,
-        cg=temp_mngr_ctx.concurrency_group,
+        reset_caches=False,
     )
 
     assert result.errors == []
-    assert len(result.agents) == 1
-    assert str(result.agents[0].name) == "streaming-agent"
-    assert len(collected_agents) == 1
 
 
 # =============================================================================

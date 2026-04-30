@@ -76,7 +76,13 @@ def _run_discovery(
     include_destroyed: bool,
     reset_caches: bool,
 ) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[BaseProviderInstance]]:
-    """Run the actual discovery against providers. Shared implementation for discover_hosts_and_agents."""
+    """Run the actual discovery against providers. Shared implementation for discover_hosts_and_agents.
+
+    All providers are constructed up front via get_all_provider_instances. If any provider
+    fails to instantiate, the error propagates -- the caller is expected to handle it.
+    Per-provider tolerance for instantiation errors (e.g. for mngr list --on-error continue)
+    is implemented in the streaming listing pipeline, not here.
+    """
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
     results_lock = Lock()
 

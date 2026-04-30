@@ -264,11 +264,12 @@ def test_get_all_provider_instances_excludes_disabled_plugins(
     assert "local" not in provider_names
 
 
-def test_get_all_provider_instances_skips_failing_provider(
+def test_get_all_provider_instances_raises_for_failing_provider(
     temp_mngr_ctx: MngrContext, mngr_test_prefix: str
 ) -> None:
-    """get_all_provider_instances should skip a provider whose build_provider_instance
-    raises MngrError and still return the remaining providers."""
+    """get_all_provider_instances propagates the MngrError when a provider's
+    build_provider_instance raises. Per-provider error tolerance for streaming
+    listing is implemented in the listing pipeline (list.py), not here."""
     broken_name = ProviderInstanceName("broken")
     config = MngrConfig(
         default_host_dir=temp_mngr_ctx.config.default_host_dir,
@@ -280,10 +281,5 @@ def test_get_all_provider_instances_skips_failing_provider(
         },
     )
     mngr_ctx = MngrContext(config=config, pm=temp_mngr_ctx.pm, profile_dir=temp_mngr_ctx.profile_dir)
-    providers = get_all_provider_instances(mngr_ctx)
-
-    provider_names = [str(p.name) for p in providers]
-    # The broken provider should be skipped
-    assert "broken" not in provider_names
-    # But local (from default backends) should still be present
-    assert "local" in provider_names
+    with pytest.raises(UnknownBackendError):
+        get_all_provider_instances(mngr_ctx)

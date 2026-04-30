@@ -9,7 +9,6 @@ from typing import Any
 from loguru import logger
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
@@ -21,7 +20,8 @@ from imbue.mngr.api.discovery_events import emit_discovery_error_to_stdout
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
 from imbue.mngr.api.discovery_events import extract_agents_and_hosts_from_full_listing
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
-from imbue.mngr.api.providers import get_all_provider_instances
+from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
@@ -36,7 +36,6 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.thread_cleanup import mngr_executor
@@ -307,24 +306,30 @@ def _list_agents_streaming(
     """Streaming mode: each provider loads and processes hosts independently.
 
     Fast providers fire on_agent callbacks while slow providers are still loading.
+
+    Provider construction happens inside each per-provider thread so a single
+    provider failing to instantiate (e.g. Modal with no credentials) does not
+    prevent other providers from being listed. The same try/except handles both
+    construction and discovery errors uniformly per --on-error semantics.
     """
     with log_span("Loading agents from all providers (streaming)"):
-        providers = get_all_provider_instances(mngr_ctx, provider_names, reset_caches=reset_caches)
-        logger.trace("Found {} provider instances", len(providers))
+        names = list_provider_names_to_load(mngr_ctx, provider_names)
+        logger.trace("Found {} provider names to load", len(names))
 
         with mngr_executor(
             parent_cg=mngr_ctx.concurrency_group, name="list_agents_streaming", max_workers=32
         ) as executor:
             streaming_futures: list[Future[None]] = []
-            for provider in providers:
+            for name in names:
                 streaming_futures.append(
                     executor.submit(
-                        _discover_and_emit_details_for_provider,
-                        provider,
+                        _construct_discover_and_emit_for_provider,
+                        name,
+                        mngr_ctx,
                         params,
                         result,
                         results_lock,
-                        mngr_ctx.concurrency_group,
+                        reset_caches,
                     )
                 )
 
@@ -333,20 +338,30 @@ def _list_agents_streaming(
             future.result()
 
 
-def _discover_and_emit_details_for_provider(
-    provider: BaseProviderInstance,
+def _construct_discover_and_emit_for_provider(
+    provider_name: ProviderInstanceName,
+    mngr_ctx: MngrContext,
     params: _ListAgentsParams,
     result: ListResult,
     results_lock: Lock,
-    cg: ConcurrencyGroup,
+    reset_caches: bool,
 ) -> None:
-    """Load hosts from a single provider, get agent refs, and immediately process them.
+    """Construct a single provider, load its hosts, and process them.
 
-    This is the streaming counterpart to the batch approach. Each provider independently
-    loads hosts, fetches agent references, then processes hosts -- firing on_agent callbacks
-    without waiting for other providers.
+    Streaming counterpart to the batch approach. Each provider independently
+    constructs, loads hosts, fetches agent references, then processes hosts --
+    firing on_agent callbacks without waiting for other providers.
+
+    Wrapping construction and discovery in the same try/except means a single
+    provider's failure (auth missing, daemon unreachable, etc.) is reported as
+    a ProviderErrorInfo without blocking the rest of the listing.
     """
+    cg = mngr_ctx.concurrency_group
     try:
+        provider = get_provider_instance(provider_name, mngr_ctx)
+        if reset_caches:
+            provider.reset_caches()
+
         # Phase 1: list hosts and get agent refs
         provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=True)
 
@@ -381,13 +396,13 @@ def _discover_and_emit_details_for_provider(
             if isinstance(e, MngrError):
                 raise
             raise MngrError(str(e)) from e
-        logger.opt(exception=e).error("Error discovering agents for provider {}", provider.name)
+        logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
         emit_discovery_error_to_stdout(
             error_type=type(e).__name__,
             error_message=str(e),
-            source_name=str(provider.name),
+            source_name=str(provider_name),
         )
-        error_info = ProviderErrorInfo.build_for_provider(e, provider.name)
+        error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
         with results_lock:
             result.errors.append(error_info)
         if params.on_error:
