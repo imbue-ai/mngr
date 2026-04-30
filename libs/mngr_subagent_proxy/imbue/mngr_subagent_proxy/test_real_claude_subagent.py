@@ -78,6 +78,19 @@ _DEPTH_LIMIT_PROMPT: Final[str] = (
     "and prompt 'Say hello'. Then tell me what the subagent said."
 )
 
+# Prompt for the background-mode test. We tell Claude to call Task with
+# run_in_background=true; the proxy's spawn hook flips into "spawn-only"
+# mode (see hooks/spawn.py) and Haiku replies immediately with the poll
+# handles instead of blocking on the child's end_turn.
+_BACKGROUND_TASK_PROMPT: Final[str] = (
+    "Use the Task tool exactly once with subagent_type 'general-purpose', "
+    "run_in_background set to true, and prompt: 'Say exactly the word BANANA "
+    "and nothing else, then end your turn.' "
+    "After the Task tool returns (which should happen immediately because "
+    "run_in_background=true), reply to me with exactly: TASK_RETURNED=<verbatim "
+    "tool_result content>. Do not use any other tools."
+)
+
 # Dialog keys to dismiss in the test-HOME's ~/.claude.json so the agent
 # starts without blocking dialogs. Mirrors mngr_claude's internal
 # _ALL_DIALOGS_DISMISSED.
@@ -613,5 +626,120 @@ def test_depth_limit_denies_task(
             assert not (isinstance(name, str) and name.startswith(subagent_prefix)), (
                 f"Depth-limited parent should NOT have spawned an mngr subagent, but found: {name!r}"
             )
+    finally:
+        _destroy_agents_quietly(mngr, iter(created_agents))
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_task_run_in_background_returns_immediately(
+    _skip_if_no_real_claude: None,
+    _mngr_subprocess_env: _MngrSubprocess,
+    _source_repo: Path,
+    temp_host_dir: Path,
+) -> None:
+    """``run_in_background: true`` makes Task return poll handles immediately.
+
+    End-to-end: verifies the spawn hook's background path
+    (``hooks/spawn.py`` ``--spawn-only`` branch). Specifically:
+
+    1. The parent's Task call returns to the parent BEFORE the child
+       reaches its own end_turn -- distinguishable because the parent
+       sees the poll-handle text we synthesize in
+       ``hooks/spawn.py:new_prompt`` for the background branch
+       (``mngr connect <name>`` / ``mngr transcript <name>``), not the
+       child's actual reply body.
+    2. The mngr-managed child IS spawned and runs the actual prompt to
+       completion (reaches WAITING / END_OF_TURN with the real reply
+       in its transcript).
+    3. The parent reaches WAITING / END_OF_TURN itself -- the
+       background path does not block the parent.
+    """
+    mngr = _mngr_subprocess_env
+    parent_name = _make_parent_agent_name()
+    created_agents: list[str] = [parent_name]
+
+    try:
+        create_result = _create_parent_claude_agent(mngr, parent_name, _BACKGROUND_TASK_PROMPT)
+        assert create_result.returncode == 0, (
+            f"mngr create failed (exit={create_result.returncode})\n"
+            f"stderr:\n{create_result.stderr}\nstdout:\n{create_result.stdout}"
+        )
+
+        subagent_prefix = f"{parent_name}--subagent-"
+        subagent = _poll_for_agent_by_name_prefix(
+            mngr,
+            subagent_prefix,
+            timeout=_DEFAULT_WAIT_TIMEOUT_SECONDS,
+        )
+        if subagent is None:
+            diagnostics = _diagnose_subagent_proxy_failure(mngr, parent_name, _source_repo, temp_host_dir)
+            pytest.fail(
+                f"No mngr-managed subagent with prefix {subagent_prefix!r} appeared within "
+                f"{_DEFAULT_WAIT_TIMEOUT_SECONDS}s. The PreToolUse hook did not spawn the "
+                f"background child."
+                f"{diagnostics}"
+            )
+        subagent_name = subagent["name"]
+        created_agents.append(subagent_name)
+
+        # The parent must reach WAITING/END_OF_TURN. Its tool_result for the
+        # Task call is the synthetic poll-handle text, NOT the child's reply,
+        # so the parent doesn't block on the child's end_turn.
+        final_parent = _poll_for_agent_state(
+            mngr,
+            parent_name,
+            _is_waiting_end_of_turn,
+            timeout=_DEFAULT_WAIT_TIMEOUT_SECONDS,
+        )
+        if final_parent is None or not _is_waiting_end_of_turn(final_parent):
+            diagnostics = _diagnose_subagent_proxy_failure(mngr, parent_name, _source_repo, temp_host_dir)
+            pytest.fail(
+                f"Parent {parent_name!r} never reached WAITING/END_OF_TURN within "
+                f"{_DEFAULT_WAIT_TIMEOUT_SECONDS}s. Background mode should NOT block "
+                f"the parent on the child's end_turn."
+                f"{diagnostics}"
+            )
+
+        # The parent's transcript should contain the poll-handle text we
+        # synthesized in spawn.py's background branch -- specifically the
+        # `mngr transcript <name>` line. This confirms the proxy returned
+        # the poll handles (not the child's actual reply) as the
+        # tool_result.
+        parent_transcript = _agent_transcript_text(final_parent, temp_host_dir)
+        expected_handle = f"mngr transcript {subagent_name}"
+        assert expected_handle in parent_transcript, (
+            f"Parent transcript missing poll-handle text {expected_handle!r}. "
+            f"This means the proxy did NOT return poll handles to the parent on "
+            f"run_in_background=true; it likely fell through to the foreground "
+            f"path or Haiku synthesized something else. Transcript length: "
+            f"{len(parent_transcript)} chars."
+        )
+
+        # The child should still reach end_turn under normal mngr lifecycle
+        # -- background mode just means the parent doesn't block waiting for
+        # it. The child runs to completion regardless.
+        final_sub = _poll_for_agent_state(
+            mngr,
+            subagent_name,
+            _is_waiting_end_of_turn,
+            timeout=_DEFAULT_WAIT_TIMEOUT_SECONDS,
+        )
+        assert final_sub is not None and _is_waiting_end_of_turn(final_sub), (
+            f"Background subagent {subagent_name!r} never reached "
+            f"WAITING/END_OF_TURN within {_DEFAULT_WAIT_TIMEOUT_SECONDS}s. "
+            f"Last seen: {final_sub!r}"
+        )
+
+        # The child's own transcript should contain the BANANA reply. The
+        # parent never sees this directly (it got poll handles); the user
+        # would observe it via `mngr transcript <child>`.
+        child_transcript = _agent_transcript_text(final_sub, temp_host_dir)
+        assert _BANANA_SENTINEL in child_transcript, (
+            f"Child {subagent_name!r} did not emit {_BANANA_SENTINEL!r}. "
+            f"Transcript length: {len(child_transcript)} chars."
+        )
     finally:
         _destroy_agents_quietly(mngr, iter(created_agents))
