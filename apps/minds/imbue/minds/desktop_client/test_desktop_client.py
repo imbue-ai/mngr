@@ -1240,6 +1240,34 @@ def test_refresh_event_without_system_interface_backend_is_noop(tmp_path: Path) 
     assert received == []
 
 
+def test_refresh_event_with_loopback_url_and_no_tunnel_is_dropped(tmp_path: Path) -> None:
+    """A refresh event for an agent whose system_interface URL is loopback and
+    which has no SSH tunnel must NOT POST to the host's loopback. The broadcast
+    is dropped silently (errors are non-fatal here)."""
+    agent_id = AgentId()
+
+    # Resolver knows about the agent and registers a loopback system_interface
+    # URL, but provides no SSH info -- this is the same shape a stopped Docker
+    # agent has when it's still listed by `mngr list`.
+    resolver = make_resolver_with_data(
+        agents_json=make_agents_json(agent_id),
+        service_logs={str(agent_id): make_service_log("system_interface", "http://localhost:8000")},
+    )
+    app, received = _build_refresh_test_app(tmp_path, resolver)
+
+    with TestClient(app):
+        raw_line = json.dumps({"source": "refresh", "type": "refresh_service", "service_name": "web"})
+        resolver._fire_on_refresh(str(agent_id), raw_line)
+        # Allow time for any (incorrect) POST to land. The gate must drop the
+        # broadcast rather than dialing host loopback.
+        poll_until(lambda: len(received) > 0, timeout=0.3, poll_interval=0.02)
+
+    assert received == [], (
+        f"refresh broadcast must not fall through to host loopback when no SSH "
+        f"tunnel exists, but received: {[str(r.url) for r in received]}"
+    )
+
+
 def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path) -> None:
     """A refresh event that fires before the app's lifespan has run does not crash.
 

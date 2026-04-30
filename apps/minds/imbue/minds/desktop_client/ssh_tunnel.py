@@ -1,4 +1,5 @@
 import hashlib
+import ipaddress
 import os
 import select
 import shlex
@@ -50,6 +51,26 @@ class SSHTunnelError(Exception):
     """Raised when an SSH tunnel operation fails."""
 
     ...
+
+
+class LoopbackWithoutTunnelError(SSHTunnelError):
+    """Raised when a backend URL points at loopback but no SSH tunnel is available.
+
+    A registered loopback URL (e.g. ``http://localhost:8000`` for a Docker
+    agent's workspace_server) is only safely reachable via an SSH tunnel into
+    the agent's container. Dialing it directly would hit whatever process
+    happens to be bound on the host's loopback interface, which is a
+    different program than the agent's. Callers must surface this as a
+    user-visible error rather than falling through to a host dial.
+    """
+
+    def __init__(self, agent_id: str, backend_url: str) -> None:
+        self.agent_id = agent_id
+        self.backend_url = backend_url
+        super().__init__(
+            f"no SSH tunnel available for agent {agent_id}; "
+            f"refusing to dial host loopback at {backend_url}"
+        )
 
 
 def _ssh_connection_is_active(client: paramiko.SSHClient) -> bool:
@@ -703,3 +724,21 @@ def parse_url_host_port(url: str) -> tuple[str, int]:
     else:
         port = 80
     return host, port
+
+
+def is_loopback_url(url: str) -> bool:
+    """Whether ``url``'s host is a loopback address (``127.0.0.0/8`` or ``::1``).
+
+    Used by the desktop client's proxy to decide whether a registered backend
+    URL is only safely reachable through an SSH tunnel: a loopback URL points
+    at the agent container's interface, not the host's, so dialing it
+    directly from the host would hit an unrelated process. Hostnames that
+    are not IP literals (``example.com``, ``ws-backend``, etc.) are not
+    loopback even if they happen to resolve there in some environments --
+    only literal loopback URLs are gated.
+    """
+    host, _ = parse_url_host_port(url)
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False

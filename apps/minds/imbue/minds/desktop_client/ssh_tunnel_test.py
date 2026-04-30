@@ -20,6 +20,7 @@ from imbue.minds.desktop_client.ssh_tunnel import _ssh_connection_is_active
 from imbue.minds.desktop_client.ssh_tunnel import _ssh_connection_transport
 from imbue.minds.desktop_client.ssh_tunnel import _tunnel_accept_loop
 from imbue.minds.desktop_client.ssh_tunnel import _wait_for_socket
+from imbue.minds.desktop_client.ssh_tunnel import is_loopback_url
 from imbue.minds.desktop_client.ssh_tunnel import parse_url_host_port
 
 
@@ -268,6 +269,36 @@ def test_parse_url_host_port_normalizes_localhost_to_ipv4() -> None:
     host, port = parse_url_host_port("http://localhost:8080")
     assert host == "127.0.0.1"
     assert port == 8080
+
+
+# -- is_loopback_url tests --
+
+
+def test_is_loopback_url_recognizes_localhost() -> None:
+    assert is_loopback_url("http://localhost:8000") is True
+
+
+def test_is_loopback_url_recognizes_ipv4_loopback() -> None:
+    assert is_loopback_url("http://127.0.0.1:8000") is True
+
+
+def test_is_loopback_url_recognizes_other_127_addresses() -> None:
+    # The whole 127.0.0.0/8 range is loopback per RFC 1122.
+    assert is_loopback_url("http://127.5.6.7:9000") is True
+
+
+def test_is_loopback_url_recognizes_ipv6_loopback() -> None:
+    assert is_loopback_url("http://[::1]:8000") is True
+
+
+def test_is_loopback_url_rejects_real_hostnames() -> None:
+    assert is_loopback_url("http://example.com") is False
+    assert is_loopback_url("http://ws-backend:9000") is False
+
+
+def test_is_loopback_url_rejects_non_loopback_ip() -> None:
+    assert is_loopback_url("http://10.0.0.1:9000") is False
+    assert is_loopback_url("http://192.168.1.5:9000") is False
 
 
 # -- SSHTunnelManager tests --
