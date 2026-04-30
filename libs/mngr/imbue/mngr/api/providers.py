@@ -113,8 +113,7 @@ def list_provider_names_to_load(
 ) -> list[ProviderInstanceName]:
     """Return name of the providers that should be loaded for the given context.
 
-    Returns names from configured providers (config.providers) plus default
-    instances for all registered backends not already configured, excluding:
+    Returns names from configured providers plus default instances for all registered backends not already configured, excluding:
     - Backends disabled via --disable-plugin
     - Provider instances with is_enabled=False in their config
     - Backends not in enabled_backends list (if the list is non-empty)
@@ -178,10 +177,8 @@ def get_all_provider_instances(
     - Backends not in enabled_backends list (if the list is non-empty)
     - Providers not in provider_names (if provider_names is specified)
 
-    Raises MngrError if any provider fails to instantiate. Callers that want to
-    tolerate per-provider instantiation errors (e.g. mngr list --on-error continue)
-    should use list_provider_names_to_load and construct each provider themselves
-    via get_provider_instance, wrapping in try/except.
+    Raises MngrError if ANY provider fails to instantiate. Callers that want to
+    tolerate per-provider instantiation errors should use list_provider_names_to_load.
     """
     providers: list[BaseProviderInstance] = [
         get_provider_instance(name, mngr_ctx) for name in list_provider_names_to_load(mngr_ctx, provider_names)

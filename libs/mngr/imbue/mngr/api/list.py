@@ -236,7 +236,7 @@ def _maybe_write_full_discovery_snapshot(
         logger.warning("Failed to write full discovery snapshot: {}", e)
 
 
-def _load_one_provider_into(
+def _construct_and_discover_for_provider(
     provider_name: ProviderInstanceName,
     mngr_ctx: MngrContext,
     params: _ListAgentsParams,
@@ -247,11 +247,10 @@ def _load_one_provider_into(
     providers: list[ProviderInstanceInterface],
     providers_lock: Lock,
 ) -> None:
-    """Construct one provider, run discovery, and merge results under the given locks.
+    """Construct one provider and discover its hosts/agents, merging into shared dicts.
 
-    Per-thread worker for `_load_agents_per_provider`. On failure, honors
-    `params.error_behavior`: ABORT re-raises (wrapped to `MngrError`); CONTINUE
-    records a `ProviderErrorInfo` on `result.errors` and returns.
+    On failure, honors `params.error_behavior`: ABORT re-raises (wrapped to
+    `MngrError`); CONTINUE records a `ProviderErrorInfo` on `result.errors`.
     """
     try:
         provider = get_provider_instance(provider_name, mngr_ctx)
@@ -284,7 +283,7 @@ def _load_one_provider_into(
         agents_by_host.update(provider_results)
 
 
-def _load_agents_per_provider(
+def _construct_and_discover_all_providers(
     mngr_ctx: MngrContext,
     provider_names: tuple[str, ...] | None,
     params: _ListAgentsParams,
@@ -292,13 +291,12 @@ def _load_agents_per_provider(
     results_lock: Lock,
     reset_caches: bool,
 ) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[ProviderInstanceInterface]]:
-    """Construct each provider and run discovery in its own thread, returning the
-    merged host/agent map plus the list of providers that completed successfully.
+    """Run `_construct_and_discover_for_provider` for every provider in parallel.
 
-    Per-provider failures (construction or discovery) are reported as
-    ProviderErrorInfo on `result.errors` in CONTINUE mode, or re-raised in ABORT
-    mode -- so a single broken provider does not silently drop the rest of the
-    listing while still respecting `--on-error`.
+    Returns the merged host/agent map plus the providers that completed
+    successfully. Per-provider failures honor `params.error_behavior` (recorded
+    as `ProviderErrorInfo` in CONTINUE mode, re-raised in ABORT mode), so a
+    single broken provider does not drop the rest of the listing.
     """
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
     providers: list[ProviderInstanceInterface] = []
@@ -307,11 +305,11 @@ def _load_agents_per_provider(
     with log_span("Loading agents from all providers"):
         names = list_provider_names_to_load(mngr_ctx, provider_names)
         with mngr_executor(
-            parent_cg=mngr_ctx.concurrency_group, name="list_agents_load_providers", max_workers=32
+            parent_cg=mngr_ctx.concurrency_group, name="list_agents_construct_and_discover", max_workers=32
         ) as executor:
             futures = [
                 executor.submit(
-                    _load_one_provider_into,
+                    _construct_and_discover_for_provider,
                     name,
                     mngr_ctx,
                     params,
@@ -342,7 +340,7 @@ def _list_agents_batch(
     reset_caches: bool = False,
 ) -> None:
     """Batch mode: load all agents from all providers, then process hosts."""
-    agents_by_host, providers = _load_agents_per_provider(
+    agents_by_host, providers = _construct_and_discover_all_providers(
         mngr_ctx=mngr_ctx,
         provider_names=provider_names,
         params=params,
