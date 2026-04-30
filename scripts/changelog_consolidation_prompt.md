@@ -29,10 +29,13 @@ exit non-zero.
 7. `git add -A` and `git commit -m "Consolidate changelog entries for <date>"`,
    substituting the date from step 3.
 
-8. Create a fresh branch named
-   `mngr/changelog-consolidation-$(date -u +%Y-%m-%d-%H-%M-%S)` (use a real
-   shell command to produce the timestamp -- do not hardcode). Push it to
-   origin with `--set-upstream`.
+8. The scheduled `mngr create` already placed this agent on a per-run
+   branch named `mngr/changelog-consolidation-<timestamp>` (created by the
+   `--branch ':mngr/changelog-consolidation-{DATE}'` flag in
+   `scripts/setup_changelog_agent.sh`). Capture that branch name with
+   `git rev-parse --abbrev-ref HEAD` and push it to origin with
+   `git push --set-upstream origin <branch>`. Do not create a second
+   branch.
 
 9. Do NOT run `gh pr create`. PR creation is intentionally disabled until
    these scripts have landed on `main` (chicken-and-egg: opening real PRs
@@ -51,8 +54,9 @@ exit non-zero.
     - `pr_url`: string PR URL if a PR was created, else `null` (currently
       always `null` since step 9 is disabled)
     - `notes`: freeform human-readable string. On success: short note
-      like `"Pushed branch mngr/changelog-consolidation-<timestamp>; PR
-      creation disabled."` On failure: which step failed and the error
+      like `"Pushed branch <branch>; PR creation disabled."` where
+      `<branch>` is the value captured from `git rev-parse --abbrev-ref
+      HEAD` in step 8. On failure: which step failed and the error
       detail. Multi-line OK.
 
 11. Exit 0 on success, non-zero on any failure.
@@ -66,8 +70,10 @@ lands on `main`, but cannot be tested end-to-end until then:
    contain ONLY changelog changes, not every diff on the dev branch the
    container was deployed from. Sketch: between steps 2 and 5, stash the
    resulting `CHANGELOG.md` / `UNABRIDGED_CHANGELOG.md` / changelog/
-   deletions; `git fetch origin main && git checkout -B "$BRANCH"
-   origin/main`; re-apply the stashed changes; then continue from step 5.
+   deletions; capture the current branch with `BRANCH=$(git rev-parse
+   --abbrev-ref HEAD)`; `git fetch origin main && git checkout -B
+   "$BRANCH" origin/main`; re-apply the stashed changes; then continue
+   from step 5.
 
 2. **Re-enable real PR creation in step 9** as described above. Capture
    stdout-only for the `pr_url` value (stderr has progress lines that
