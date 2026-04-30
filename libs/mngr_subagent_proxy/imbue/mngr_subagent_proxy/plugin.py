@@ -4,7 +4,6 @@ import importlib.resources
 import json
 import os
 import shlex
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -28,6 +27,10 @@ from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_subagent_proxy import hookimpl
 from imbue.mngr_subagent_proxy import resources as _subagent_proxy_resources
+from imbue.mngr_subagent_proxy._stop_hook_guard import MNGR_MANAGED_HOOK_MARKERS
+from imbue.mngr_subagent_proxy._stop_hook_guard import PROXY_CHILD_GUARD_PREFIX
+from imbue.mngr_subagent_proxy._stop_hook_guard import guard_user_stop_hooks_against_proxy_children
+from imbue.mngr_subagent_proxy._stop_hook_guard import iter_user_stop_hook_commands
 from imbue.mngr_subagent_proxy.hooks.destroy_detached import DestroyAgentDetachedCallable
 from imbue.mngr_subagent_proxy.hooks.destroy_detached import destroy_agent_detached
 
@@ -154,78 +157,6 @@ def _write_proxy_agent_definition(host: OnlineHostInterface, work_dir: Path) -> 
     host.write_text_file(agents_dir / "mngr-proxy.md", content)
 
 
-_PROXY_CHILD_GUARD_PREFIX: Final[str] = '[ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; '
-
-
-def _wrap_with_proxy_child_guard(command: str) -> str:
-    """Prepend the guard so the command no-ops inside spawned subagents.
-
-    The wait-script sets MNGR_SUBAGENT_PROXY_CHILD=1 in the spawned
-    subagent's env. Wrapping every non-mngr Stop/SubagentStop command
-    with this guard means: in the parent (env unset) the command runs
-    normally; in a spawned subagent (env set) it exits 0 immediately.
-    Already-wrapped commands are left alone (idempotent).
-    """
-    if _PROXY_CHILD_GUARD_PREFIX in command:
-        return command
-    return _PROXY_CHILD_GUARD_PREFIX + command
-
-
-def _iter_user_stop_hook_commands(
-    hooks: dict[str, Any],
-) -> Iterator[tuple[str, dict[str, Any], str]]:
-    """Yield (event_name, cmd_entry, command) for each well-formed
-    Stop/SubagentStop command in a hooks dict.
-
-    Skips entries whose shape doesn't match Claude Code's hooks schema
-    (non-list ``entries``, non-dict ``entry``/``cmd_entry``, missing or
-    non-str ``command``). Used by both the guard pass (which mutates
-    ``cmd_entry["command"]``) and the project-settings checker (which
-    inspects commands for offenders).
-    """
-    for event_name in ("Stop", "SubagentStop"):
-        entries = hooks.get(event_name)
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            inner = entry.get("hooks")
-            if not isinstance(inner, list):
-                continue
-            for cmd_entry in inner:
-                if not isinstance(cmd_entry, dict):
-                    continue
-                command = cmd_entry.get("command")
-                if not isinstance(command, str) or not command:
-                    continue
-                yield event_name, cmd_entry, command
-
-
-def _guard_user_stop_hooks_against_proxy_children(settings: dict[str, Any]) -> bool:
-    """Wrap each non-mngr Stop/SubagentStop command with the proxy-child guard.
-
-    Returns True if any command was modified. Idempotent: re-running on
-    already-wrapped commands is a no-op. Mngr-managed commands (recognized
-    via _MNGR_MANAGED_HOOK_MARKERS) are left alone -- they already key off
-    MAIN_CLAUDE_SESSION_ID via _SESSION_GUARD and serve different purposes.
-    """
-    hooks = settings.get("hooks")
-    if not isinstance(hooks, dict):
-        return False
-    changed = False
-    for _event_name, cmd_entry, command in _iter_user_stop_hook_commands(hooks):
-        # Don't double-guard mngr-managed hooks; they already handle scope
-        # appropriately via _SESSION_GUARD.
-        if any(marker in command for marker in _MNGR_MANAGED_HOOK_MARKERS):
-            continue
-        wrapped = _wrap_with_proxy_child_guard(command)
-        if wrapped != command:
-            cmd_entry["command"] = wrapped
-            changed = True
-    return changed
-
-
 def _merge_subagent_proxy_hooks(host: OnlineHostInterface, work_dir: Path) -> None:
     """Merge the subagent-proxy hooks into the agent's .claude/settings.local.json.
 
@@ -254,7 +185,7 @@ def _merge_subagent_proxy_hooks(host: OnlineHostInterface, work_dir: Path) -> No
     if merged is None:
         merged = existing_settings
 
-    guard_changed = _guard_user_stop_hooks_against_proxy_children(merged)
+    guard_changed = guard_user_stop_hooks_against_proxy_children(merged)
 
     if merged is not existing_settings or guard_changed:
         host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
@@ -295,7 +226,7 @@ def _guard_stop_hooks_in_file(host: OnlineHostInterface, path: Path) -> None:
         return
     if not isinstance(data, dict):
         return
-    if not _guard_user_stop_hooks_against_proxy_children(data):
+    if not guard_user_stop_hooks_against_proxy_children(data):
         return
     logger.info("Wrapped Stop hooks in {} with MNGR_SUBAGENT_PROXY_CHILD guard", path)
     host.write_text_file(path, json.dumps(data, indent=2) + "\n")
@@ -351,26 +282,9 @@ class UnsupportedSubagentHookError(NotImplementedError):
     """
 
 
-# Substrings that mark a hook command as mngr-managed (readiness,
-# credential sync, subagent-proxy, wait pipeline). Anything whose command
-# doesn't contain one of these is treated as a user-configured hook --
-# i.e. a regular hook whose top-level-vs-subagent semantics we don't
-# know how to reason about, and which gets stripped from the spawned
-# subagent's settings. ``MAIN_CLAUDE_SESSION_ID`` matches the session-guard
-# prefix shared by every mngr_claude readiness hook, so readiness entries
-# that happen not to touch $MNGR_AGENT_STATE_DIR (e.g. the tmux
-# submit-signal in UserPromptSubmit) are still recognized.
-_MNGR_MANAGED_HOOK_MARKERS: Final[tuple[str, ...]] = (
-    "$MNGR_AGENT_STATE_DIR",
-    "MAIN_CLAUDE_SESSION_ID",
-    "imbue.mngr_subagent_proxy.hooks.",
-    "sync_keychain_credentials.py",
-    "wait_for_stop_hook.sh",
-    # Auto-allow PermissionRequest emitter installed by
-    # _install_proxy_child_auto_allow. Without this marker the strip
-    # pass would remove it on re-provisioning.
-    '"hookEventName":"PermissionRequest"',
-)
+# Marker tuple lives in _stop_hook_guard.py so reap.py can use it without
+# importing this module. Re-imported above and re-exported here for
+# backwards-compat with the local-shadow patterns just below.
 
 
 def _is_known_safe_hook(hook_entry: dict[str, Any]) -> bool:
@@ -384,7 +298,7 @@ def _is_known_safe_hook(hook_entry: dict[str, Any]) -> bool:
         command = cmd_entry.get("command")
         if not isinstance(command, str):
             return False
-        if not any(marker in command for marker in _MNGR_MANAGED_HOOK_MARKERS):
+        if not any(marker in command for marker in MNGR_MANAGED_HOOK_MARKERS):
             return False
     return True
 
@@ -461,10 +375,10 @@ def _check_project_settings_stop_hooks_guarded(host: OnlineHostInterface, work_d
     if not isinstance(hooks, dict):
         return
     offenders: list[str] = []
-    for event_name, _cmd_entry, command in _iter_user_stop_hook_commands(hooks):
-        if any(marker in command for marker in _MNGR_MANAGED_HOOK_MARKERS):
+    for event_name, _cmd_entry, command in iter_user_stop_hook_commands(hooks):
+        if any(marker in command for marker in MNGR_MANAGED_HOOK_MARKERS):
             continue
-        if _PROXY_CHILD_GUARD_PREFIX in command:
+        if PROXY_CHILD_GUARD_PREFIX in command:
             continue
         offenders.append(f"{event_name}: {command[:80]}")
     if not offenders:

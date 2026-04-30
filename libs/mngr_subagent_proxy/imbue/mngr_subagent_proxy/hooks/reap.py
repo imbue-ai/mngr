@@ -18,6 +18,7 @@ from loguru import logger
 
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr_subagent_proxy._stop_hook_guard import guard_per_agent_plugin_cache
 from imbue.mngr_subagent_proxy.hooks.destroy_detached import DestroyAgentDetachedCallable
 from imbue.mngr_subagent_proxy.hooks.destroy_detached import destroy_agent_detached
 from imbue.mngr_subagent_proxy.hooks.mngr_api import ListAgentsByNameCallable
@@ -156,6 +157,15 @@ def run(
     if is_background_worker:
         _do_reap(state_dir, list_callable, destroy_callable)
         return
+
+    # Synchronously wrap any Stop hooks in this agent's plugin cache.
+    # Claude Code populates the per-agent cache with files freshly
+    # fetched from GitHub (not copied from the user marketplace) at
+    # session start, so the provisioning-time wrap of the user
+    # marketplace doesn't reach the cache. Doing the wrap here -- in a
+    # SessionStart hook that fires before the FIRST Stop hook -- closes
+    # the gap. The wrap is idempotent on subsequent SessionStarts.
+    guard_per_agent_plugin_cache(state_dir)
 
     # Fast path: nothing to reap.
     if not _map_files(state_dir):

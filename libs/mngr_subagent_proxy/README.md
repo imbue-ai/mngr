@@ -175,3 +175,92 @@ NOT run in CI. To run them locally:
 
 They require `ANTHROPIC_API_KEY` (or `MNGR_TEST_REAL_CLAUDE_JSON`) and
 spawn real Claude agents.
+
+## Deferred / out-of-scope (followup work)
+
+Things that came up during the initial implementation but were
+deliberately punted. Listed here so they don't get lost.
+
+### Stop-instead-of-destroy via mngr GC
+
+Today PostToolUse / on_before_agent_destroy / SessionStart-reaper all
+**destroy** spawned proxy children once their work is done. The agent
+state is gone immediately. This makes mid-iteration recovery
+impossible: if a downstream consumer (e.g. autofix orchestration)
+later wants to read the child's transcript or `mngr connect` after
+the parent's Task call has returned, it can't.
+
+Better behavior: **stop** the children (transition to STOPPED but
+keep the state dir + transcript on disk), and let mngr's normal GC
+sweep them according to its retention policy. The parent's
+`on_before_agent_destroy` cascade-destroy can stay as a fallback for
+the actual cleanup. This requires plumbing through a "stop" action
+in `destroy_agent_detached` / `destroy_worker.py` that calls
+`mngr stop` rather than `mngr destroy`.
+
+### Deny-Task mode that just tells claude to run mngr
+
+Right now we always intercept the parent's `Task` tool and route it
+through a Haiku relay + spawned mngr child. For users who don't want
+the proxy at all -- they'd rather just be told to run
+`uv run mngr create` themselves -- offer a deny-Task mode where the
+PreToolUse hook returns `permissionDecision: "deny"` with a
+`permissionDecisionReason` that contains a copy-pasteable
+`mngr create` invocation matching the parent's intent. Same hook
+plumbing, simpler UX, no Haiku confabulation surface.
+
+### Backgrounded autofix end-to-end
+
+`run_in_background: true` Task calls are implemented (see
+`hooks/spawn.py`'s `--spawn-only` branch and the background-mode
+prompt) but never validated end-to-end against real Claude in this
+branch. Open: parent gets the poll-handle reply, child runs to its
+own end_turn under normal mngr lifecycle, `on_before_agent_destroy`
+cascade-cleans on parent destroy, `subagent_map` retained throughout.
+
+### Parallel background tasks (N=3+)
+
+N independent mngr children sharing the same parent's
+`subagent_map/`, `proxy_commands/`, watermark sidefiles. The path is
+unit-tested for shape but not raced live. Possibly more resilient than
+sequential because each tool_use_id has its own sidefile prefix, but
+worth verifying.
+
+### Transparent permission resolution (Option B)
+
+Today, when a spawned child raises a permission dialog, the proxy
+relays a `NEED_PERMISSION` line to the parent and the user has to
+`mngr connect <child>` in another terminal to resolve it. The
+already-considered-and-deferred Option B (see plan): a wrapper that
+intercepts the dialog at the parent level and round-trips the
+decision back to the child. Defers all the way back to the original
+plan; not picked up here for simplicity.
+
+### Tighter mngr_recursive integration
+
+`mngr_binary.py` was copied from `mngr_recursive.watcher_common.get_mngr_command`
+with a `uv run mngr` fallback (see module docstring). If
+mngr_recursive grows another caller that diverges from our copy, the
+two will need to be re-synced. Better: extract a thin shared package
+or add an mngr core helper both can depend on.
+
+### mngr_recursive end-to-end
+
+Our `get_mngr_command` happily prefers `$UV_TOOL_BIN_DIR/mngr` when
+mngr_recursive has provisioned one, but the integrated path has only
+been unit-tested -- never run with `mngr_recursive` actually enabled
+on the parent.
+
+### Plan-mode propagation, session-id resume, depth-limit pass-through
+
+All have unit-test coverage; none have been verified live. See
+`test_real_claude_subagent.py` for the existing release-test surface
+and add cases for these as standalone tests.
+
+### Diagnose `WAITING`-while-thinking lifecycle reporting
+
+Cosmetic but confusing: `mngr list` reports `WAITING` for proxy
+children that are actively thinking, because `permissions_waiting`
+flag stays set between a PermissionRequest hook and the next
+PostToolUse. This isn't owned by this plugin (lives in mngr_claude's
+readiness hooks) but it makes the proxy's lifecycle harder to read.
