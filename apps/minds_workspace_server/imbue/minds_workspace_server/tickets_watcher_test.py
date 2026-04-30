@@ -24,9 +24,9 @@ def _capture() -> tuple[list[tuple[str, list[dict[str, Any]]]], Any]:
     return calls, cb
 
 
-def _write_ticket(tickets_dir: Path, content: str) -> Path:
+def _write_ticket(tickets_dir: Path, ticket_id: str, content: str) -> Path:
     tickets_dir.mkdir(parents=True, exist_ok=True)
-    path = tickets_dir / f"{content.split('id: ')[1].split(chr(10))[0].strip()}.md"
+    path = tickets_dir / f"{ticket_id}.md"
     path.write_text(content)
     return path
 
@@ -45,6 +45,7 @@ def test_scan_skips_files_with_invalid_utf8(tmp_path: Path) -> None:
     tickets_dir = tmp_path / ".tickets"
     _write_ticket(
         tickets_dir,
+        "tt-good",
         """---
 id: tt-good
 status: open
@@ -73,6 +74,7 @@ def test_open_ticket_emits_one_event_with_created_at_timestamp(tmp_path: Path) -
     tickets_dir = tmp_path / ".tickets"
     _write_ticket(
         tickets_dir,
+        "tt-aaaa",
         """---
 id: tt-aaaa
 status: open
@@ -102,6 +104,7 @@ def test_replayed_in_progress_ticket_emits_only_current_status(tmp_path: Path) -
     tickets_dir = tmp_path / ".tickets"
     _write_ticket(
         tickets_dir,
+        "tt-bbbb",
         """---
 id: tt-bbbb
 status: in_progress
@@ -132,6 +135,7 @@ def test_replayed_closed_ticket_emits_only_closed_event_with_summary(tmp_path: P
     tickets_dir = tmp_path / ".tickets"
     _write_ticket(
         tickets_dir,
+        "tt-cccc",
         """---
 id: tt-cccc
 status: closed
@@ -166,6 +170,7 @@ def test_summary_only_on_closed_event(tmp_path: Path) -> None:
     tickets_dir = tmp_path / ".tickets"
     _write_ticket(
         tickets_dir,
+        "tt-dddd",
         """---
 id: tt-dddd
 status: in_progress
@@ -200,6 +205,7 @@ def test_repeated_get_all_events_is_idempotent(tmp_path: Path) -> None:
     tickets_dir = tmp_path / ".tickets"
     _write_ticket(
         tickets_dir,
+        "tt-eeee",
         """---
 id: tt-eeee
 status: open
