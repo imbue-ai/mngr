@@ -93,22 +93,25 @@ def test_spawn_rewrites_input(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> 
     assert "parent-agent--subagent-" in prompt_text
     assert f"bash {state_dir}/proxy_commands/wait-toolu_abc12345678.sh" in prompt_text
     assert "MNGR_PROXY_END_OF_OUTPUT" in prompt_text
-    # Bash-timeout retry guidance: a long-running subagent will outlast
-    # Bash's 30-min timeout, and Haiku must re-run rather than hallucinate
-    # "monitor" actions or fabricate text. Found live: a 2-hour
-    # verify-and-fix run produced ~88 confused tool calls when the proxy
-    # had no instruction for the timeout case.
-    assert "times out" in prompt_text
+    # The prompt must classify Haiku's behavior into three rigid cases
+    # and forbid invention -- prior versions left Haiku with enough
+    # latitude to fabricate "permission dialog" / "monitor" / "rate limit"
+    # explanations when the underlying child errored or timed out.
+    assert "(A) the literal line 'MNGR_PROXY_END_OF_OUTPUT'" in prompt_text
+    assert "(B) a line starting with the literal 'NEED_PERMISSION: '" in prompt_text
+    assert "no retry cap" in prompt_text
+    assert "fake_tool" in prompt_text
     # Watermark plumbing must NOT leak into Haiku's prompt; Haiku has
     # historically been unreliable at parsing/passing numeric state.
     # The wait-script and python module own deduplication entirely.
     assert "AT_BYTES" not in prompt_text
     assert "--require-transcript-advance-past" not in prompt_text
     assert "--watermark-file" not in prompt_text
-    # The 5-attempt cap must be SCOPED to the timeout-retry branch -- a
-    # prior bug caused Haiku to apply the cap to NEED_PERMISSION too
-    # and bail after 5 permission cycles.
-    assert "ONLY to this timeout branch" in prompt_text
+    # The retry cap was removed -- per-iteration cost is just one Bash
+    # boundary, and capping it caused real autofix runs to bail
+    # prematurely.
+    assert "5-attempt" not in prompt_text
+    assert "5 attempts" not in prompt_text
 
     tid = "toolu_abc12345678"
     prompt_file = state_dir / "subagent_prompts" / f"{tid}.md"
