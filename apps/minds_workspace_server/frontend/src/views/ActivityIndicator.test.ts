@@ -118,4 +118,27 @@ describe("deriveActivityLabel", () => {
     ];
     expect(deriveActivityLabel(events)).toBe("Thinking…");
   });
+
+  it("ignores trailing task_event entries when deciding idle vs thinking", () => {
+    // The merged event stream sorts by timestamp, so a task_event whose
+    // mtime lands after the agent's final assistant_message can be the
+    // last event in the list. The indicator must not flip to
+    // "Thinking…" because of that -- the agent is idle.
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z"),
+      assistantText("2026-04-28T01:00:01Z", "All done."),
+      {
+        timestamp: "2026-04-28T01:00:02Z",
+        type: "task_event",
+        event_id: "t1-closed",
+        source: "tk",
+        ticket_id: "t1",
+        title: "Some task",
+        status: "closed",
+        created_at: "2026-04-28T01:00:00Z",
+        summary: "wrapped up",
+      },
+    ];
+    expect(deriveActivityLabel(events)).toBe(null);
+  });
 });

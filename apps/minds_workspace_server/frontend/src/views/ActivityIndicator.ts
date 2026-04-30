@@ -112,15 +112,25 @@ export function deriveActivityLabel(events: TranscriptEvent[]): string | null {
   if (pending !== null) return labelForToolCall(pending);
 
   // No pending tools. Decide between "thinking" and idle by looking at
-  // the latest event.
-  const last = events[events.length - 1];
-  if (last.type === "assistant_message") {
-    // Most recent message from the agent has no pending tools -- idle.
-    return null;
+  // the latest CONVERSATION event -- task_event entries from the tickets
+  // watcher can land after the agent's final assistant_message in the
+  // timestamp-sorted merged stream, and they don't reflect agent
+  // activity, so they must not flip an idle agent into "Thinking…".
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.type === "assistant_message") {
+      // Most recent message from the agent has no pending tools -- idle.
+      return null;
+    }
+    if (e.type === "user_message" || e.type === "tool_result") {
+      // Latest conversation event is a user_message or tool_result with
+      // no follow-up assistant_message -> agent is processing.
+      return "Thinking…";
+    }
   }
-  // last event is user_message or tool_result with no follow-up
-  // assistant_message -> agent is processing.
-  return "Thinking…";
+  // No conversation events at all (e.g. a stream consisting only of
+  // task_events): nothing actionable to show.
+  return null;
 }
 
 interface ActivityIndicatorAttrs {
