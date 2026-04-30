@@ -126,11 +126,6 @@ omit = [
   # prevents their lower coverage from dragging the combined mean down.
   "*/mngr_vps_docker/*",
   "*/mngr_vultr/*",
-  # mngr_subagent_proxy: hooks/* + subagent_wait.py are subprocess-driven
-  # (Claude Code hook protocol over JSON stdin/stdout) and most of their
-  # coverage comes from the @pytest.mark.release suite that hits real
-  # Claude. Release tests don't run in CI, so unit coverage is low; the
-  # package gates itself at fail_under=5 individually.
   "*/mngr_subagent_proxy/*",
 ]
 
