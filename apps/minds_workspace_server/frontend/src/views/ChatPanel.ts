@@ -387,15 +387,12 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     // Fallback: if no turns were derived (no user_message exists yet, e.g.
     // a stalled agent that emitted assistant text before any user input),
     // render every event in order so that content is never silently
-    // dropped. Matches the pre-progress-view rendering behavior.
+    // dropped. Matches the pre-progress-view rendering behavior. buildTurns
+    // returns [] only when there are no user_messages, so we render only
+    // assistant_messages here -- a user_message branch would be unreachable.
     if (turns.length === 0) {
       for (const event of events) {
-        if (event.type === "user_message") {
-          const userNode = renderUserMessage(event);
-          if (userNode !== null) {
-            messageNodes.push(userNode);
-          }
-        } else if (event.type === "assistant_message") {
+        if (event.type === "assistant_message") {
           messageNodes.push(renderAssistantMessage(event, toolResults, agentId));
         }
       }
