@@ -207,7 +207,12 @@ class AgentTicketsWatcher:
             # when the file appeared); other statuses fall back to the
             # file's current mtime (the close time on replay; the
             # transition time live).
-            if previous_status is None and state.status == "open":
+            #
+            # If the frontmatter `created` field is empty (malformed
+            # ticket), fall back to mtime as well -- an empty string
+            # would sort to the very front of the merged event list and
+            # break turn attribution on the frontend.
+            if previous_status is None and state.status == "open" and state.created_at:
                 ts = state.created_at
             else:
                 ts = _mtime_iso(stat.st_mtime)
