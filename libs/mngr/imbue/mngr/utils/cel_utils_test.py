@@ -1,14 +1,19 @@
 """Tests for CEL utilities."""
 
+import celpy
+import celpy.celtypes
 import pytest
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.cel_utils import TolerantMapType
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.cel_utils import compile_cel_sort_keys
 from imbue.mngr.utils.cel_utils import evaluate_cel_sort_key
 from imbue.mngr.utils.cel_utils import parse_cel_sort_spec
+from imbue.mngr.utils.cel_utils import tolerant_dict
+from imbue.mngr.utils.testing import capture_loguru
 
 
 def test_cel_string_contains_method() -> None:
@@ -283,3 +288,145 @@ def test_evaluate_cel_sort_key_returns_none_for_missing_field() -> None:
     cel_ctx = build_cel_context({"name": "test-agent"})
     result = evaluate_cel_sort_key(program, cel_ctx)
     assert result is None
+
+
+# =============================================================================
+# Tests for tolerant_dict / TolerantMapType
+# =============================================================================
+
+
+def test_tolerant_map_missing_key_does_not_warn_in_exclude() -> None:
+    """Excluding by labels.X on an empty tolerant labels dict must not warn."""
+    includes, excludes = compile_cel_filters(
+        include_filters=(),
+        exclude_filters=('labels.mngr_subagent_proxy == "child"',),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result = apply_cel_filters_to_context(
+            context={"labels": tolerant_dict({})},
+            include_filters=includes,
+            exclude_filters=excludes,
+            error_context_description="agent test",
+        )
+    assert result is True
+    assert "Error evaluating" not in log_output.getvalue()
+
+
+def test_tolerant_map_missing_key_in_include_filter_evaluates_false() -> None:
+    """Including by labels.X on an empty tolerant labels dict evaluates False without warning."""
+    includes, excludes = compile_cel_filters(
+        include_filters=('labels.project == "mngr"',),
+        exclude_filters=(),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result = apply_cel_filters_to_context(
+            context={"labels": tolerant_dict({})},
+            include_filters=includes,
+            exclude_filters=excludes,
+            error_context_description="agent test",
+        )
+    assert result is False
+    assert "Error evaluating" not in log_output.getvalue()
+
+
+def test_tolerant_map_present_key_compares_normally() -> None:
+    """Tolerant maps still compare normally when the key is present."""
+    includes, excludes = compile_cel_filters(
+        include_filters=('labels.project == "mngr"',),
+        exclude_filters=(),
+    )
+    result = apply_cel_filters_to_context(
+        context={"labels": tolerant_dict({"project": "mngr"})},
+        include_filters=includes,
+        exclude_filters=excludes,
+        error_context_description="agent test",
+    )
+    assert result is True
+
+
+def test_strict_map_type_raises_on_missing_key() -> None:
+    """Plain MapType still raises KeyError on missing-key access (regression guard).
+
+    This is what the strict-warning code path hangs on: the per-agent warning
+    is logged when a strict map raises and the filter eval surfaces a
+    CELEvalError. The tolerant subclass deliberately diverges from this for
+    schemaless fields; the strict default must remain.
+    """
+    strict = celpy.celtypes.MapType({celpy.json_to_cel("present"): celpy.json_to_cel("v")})
+    assert strict[celpy.json_to_cel("present")] == celpy.json_to_cel("v")
+    with pytest.raises(KeyError):
+        _ = strict[celpy.json_to_cel("missing")]
+
+
+def test_tolerant_map_type_returns_none_on_missing_key() -> None:
+    """TolerantMapType returns None on missing-key access (the core change)."""
+    tolerant = TolerantMapType({celpy.json_to_cel("present"): celpy.json_to_cel("v")})
+    assert tolerant[celpy.json_to_cel("present")] == celpy.json_to_cel("v")
+    assert tolerant[celpy.json_to_cel("missing")] is None
+
+
+def test_tolerant_map_has_macro_always_true() -> None:
+    """has() on a TolerantMapType always returns True.
+
+    Trade-off documented on TolerantMapType: cel-python's has() macro reports
+    "is this expression non-erroring?", so a tolerant lookup that returns None
+    instead of raising is treated as present. Use `field != null` or direct
+    comparison to test for presence on tolerant fields.
+    """
+    includes, excludes = compile_cel_filters(
+        include_filters=("has(labels.archived_at)",),
+        exclude_filters=(),
+    )
+    result_missing = apply_cel_filters_to_context(
+        context={"labels": tolerant_dict({})},
+        include_filters=includes,
+        exclude_filters=excludes,
+        error_context_description="agent test",
+    )
+    result_present = apply_cel_filters_to_context(
+        context={"labels": tolerant_dict({"archived_at": "2024-01-01"})},
+        include_filters=includes,
+        exclude_filters=excludes,
+        error_context_description="agent test",
+    )
+    assert result_missing is True
+    assert result_present is True
+
+
+def test_tolerant_map_nested_dict_inner_missing_key() -> None:
+    """A nested tolerant dict inside another tolerant dict swallows missing keys cleanly."""
+    includes, excludes = compile_cel_filters(
+        include_filters=(),
+        exclude_filters=('plugin.foo.bar == "x"',),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result = apply_cel_filters_to_context(
+            context={"plugin": tolerant_dict({"foo": tolerant_dict({})})},
+            include_filters=includes,
+            exclude_filters=excludes,
+            error_context_description="agent test",
+        )
+    assert result is True
+    assert "Error evaluating" not in log_output.getvalue()
+
+
+def test_tolerant_marker_at_depth_in_strict_dict() -> None:
+    """Marking a nested dict only relaxes that level; siblings stay strict.
+
+    The build_cel_context output is inspected directly because cel-python's
+    behavior on missing-key access has shifted between versions (0.4.0 returns
+    BoolType(False) silently; 0.5.0 raises CELEvalError that the filter loop
+    reports as a warning). Asserting on the runtime types makes this test
+    independent of celpy version while still proving the marker is honored
+    only at the wrapped level.
+    """
+    raw_context: dict = {"host": {"tags": tolerant_dict({}), "name": "h1"}}
+    cel_context = build_cel_context(raw_context)
+    host = cel_context["host"]
+    assert isinstance(host, celpy.celtypes.MapType)
+    assert not isinstance(host, TolerantMapType)
+    tags = host[celpy.json_to_cel("tags")]
+    assert isinstance(tags, TolerantMapType)
+    assert tags[celpy.json_to_cel("foo")] is None
+    with pytest.raises(KeyError):
+        _ = host[celpy.json_to_cel("providr")]

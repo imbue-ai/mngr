@@ -10,6 +10,53 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
 
 
+class TolerantMapType(celpy.celtypes.MapType):
+    """A CEL MapType whose missing-key access returns None instead of raising.
+
+    Used for schemaless fields (e.g. agent labels) where the absence of a key
+    should evaluate to a clean False in equality checks rather than emit a
+    per-agent warning at filter time.
+
+    The canonical CEL idiom for this would be optional-type field selection
+    (`labels.?key`, see cel-spec proposal 246), but cel-python does not yet
+    implement optional types, so we hand-roll this targeted subclass instead.
+    Drop this once cel-python supports `?`-prefixed field selection.
+
+    Trade-off: cel-python's `has(map.key)` macro is implemented as "did the
+    expression error?" (`celpy/evaluation.py::macro_has_eval`). Because
+    TolerantMapType returns None instead of raising on missing keys, `has()`
+    against a TolerantMapType always returns True. Use `map.key != null` or
+    direct comparison (`map.key == "x"`) to test for presence on tolerant
+    fields.
+    """
+
+    def __getitem__(self, key: Any) -> Any:
+        try:
+            return super().__getitem__(key)
+        except KeyError:
+            return None
+
+
+class _TolerantDict(dict):
+    """Marker subclass of dict signaling that the value should be converted to
+    a TolerantMapType when the CEL context is built.
+
+    Production sites use the public `tolerant_dict()` constructor; consumers
+    only need to know that a `_TolerantDict` value in the raw context produces
+    a `TolerantMapType` after `build_cel_context`.
+    """
+
+
+def tolerant_dict(value: dict[str, Any]) -> _TolerantDict:
+    """Wrap a dict to mark it as schemaless for CEL filtering.
+
+    The marker is honored anywhere in the value tree: marking a nested dict
+    produces a TolerantMapType only at that level, with surrounding dicts
+    converted to plain (strict) MapType.
+    """
+    return _TolerantDict(value)
+
+
 @pure
 def compile_cel_filters(
     include_filters: Sequence[str],
@@ -44,12 +91,19 @@ def compile_cel_filters(
 
 
 def _convert_to_cel_value(value: Any) -> Any:
-    """Convert a Python value to a CEL-compatible value.
+    """Convert a raw Python value to a CEL-compatible value.
 
-    All values are converted using celpy.json_to_cel() so that CEL string methods
-    (contains, startsWith, endsWith) work correctly on string values, and nested
-    dicts support dot notation access.
+    Container types (dict, list, tuple) are walked here so that `_TolerantDict`
+    markers nested at any depth produce `TolerantMapType` (missing keys evaluate
+    to None). Plain dicts produce strict `MapType`. Leaf types delegate to
+    `celpy.json_to_cel` (which handles bool/int/float/str/datetime/None).
     """
+    if isinstance(value, _TolerantDict):
+        return TolerantMapType({celpy.json_to_cel(k): _convert_to_cel_value(v) for k, v in value.items()})
+    if isinstance(value, dict):
+        return celpy.celtypes.MapType({celpy.json_to_cel(k): _convert_to_cel_value(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return celpy.celtypes.ListType([_convert_to_cel_value(v) for v in value])
     return celpy.json_to_cel(value)
 
 
