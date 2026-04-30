@@ -41,12 +41,13 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    # cron_runner.py cannot import loguru (forbidden from imbue.* or 3rd-party
-    # packages at module-level per the file docstring), so its result sentinel
-    # for in-container verify must go via sys.stdout.write, and diagnostics
-    # for `mngr list` failures in the verify poll loop must go via bare
-    # print() calls.
-    rc.check_bare_print(_DIR, snapshot(16))
+    # cron_runner.py is deployed standalone into Modal and cannot import
+    # loguru (or anything from imbue.*) at module scope, so all of its
+    # diagnostics + the structured-result sentinel must go via bare
+    # print() / sys.stdout.write(). Exempt the whole file rather than
+    # bumping the count for each new diagnostic.
+    excluded = TEST_FILE_PATTERNS + ("cron_runner.py",)
+    rc.check_bare_print(_DIR, snapshot(2), excluded_patterns=excluded)
 
 
 # --- Exception handling ---
@@ -65,16 +66,13 @@ def test_prevent_base_exception_catch() -> None:
 
 
 def test_prevent_builtin_exception_raises() -> None:
-    rc.check_builtin_exception_raises(_DIR, snapshot(12))
+    rc.check_builtin_exception_raises(_DIR, snapshot(6))
 
 
 # --- Import style ---
 
 
 def test_prevent_inline_imports() -> None:
-    # cron_runner_drift_test.py imports cron_runner.py inside its fixture
-    # body (after stubbing required deploy-time env vars). Top-level import
-    # would crash at collection time on a developer machine.
     rc.check_inline_imports(_DIR, snapshot(2))
 
 
@@ -151,7 +149,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(13))
+    rc.check_trailing_comments(_DIR, snapshot(11))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -191,7 +189,7 @@ def test_prevent_short_uuid_ids() -> None:
 
 
 def test_prevent_model_copy() -> None:
-    rc.check_model_copy(_DIR, snapshot(6))
+    rc.check_model_copy(_DIR, snapshot(2))
 
 
 # --- Logging ---
@@ -240,10 +238,7 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    # cron_runner.py cannot import ConcurrencyGroup (forbidden from imbue.*
-    # imports), so its new in-container verify helpers (`mngr list` lookup and
-    # `mngr destroy`) must use subprocess.run directly. testing.py files are
-    # test infrastructure and excluded alongside test files.
+    # testing.py files are test infrastructure and excluded alongside test files.
     excluded = TEST_FILE_PATTERNS + ("testing.py",)
     rc.check_direct_subprocess(_DIR, snapshot(7), excluded_patterns=excluded)
 
@@ -252,11 +247,11 @@ def test_prevent_direct_subprocess() -> None:
 
 
 def test_prevent_if_elif_without_else() -> None:
-    rc.check_if_elif_without_else(_DIR, snapshot(3))
+    rc.check_if_elif_without_else(_DIR, snapshot(1))
 
 
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(3))
+    rc.check_inline_functions(_DIR, snapshot(1))
 
 
 def test_prevent_underscore_imports() -> None:

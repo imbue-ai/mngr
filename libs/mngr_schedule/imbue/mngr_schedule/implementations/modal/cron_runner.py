@@ -206,6 +206,11 @@ def _run_and_stream(
     the full stdout+stderr of the command. On failure, the last 50 lines
     are included in the RuntimeError for diagnostics.
     """
+    # Direct stdlib spawn rather than ConcurrencyGroup: cron_runner.py
+    # is forbidden from importing imbue.* at module scope (Modal can't
+    # see the namespace), so the in-container verify path uses the
+    # stdlib directly. Same reason applies to _get_lifecycle_state and
+    # _destroy_agent below.
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,

@@ -20,6 +20,7 @@ to a comprehension would break the parser). Importing under stub env
 catches refactors a parser would miss.
 """
 
+import contextlib
 import json
 import sys
 from collections.abc import Iterator
@@ -34,6 +35,24 @@ from imbue.mngr_schedule.implementations.modal import verification
 _CRON_RUNNER_MODULE: str = "imbue.mngr_schedule.implementations.modal.cron_runner"
 
 
+@contextlib.contextmanager
+def _isolated_module(module_name: str) -> Iterator[None]:
+    """Pop ``module_name`` from sys.modules for the duration of the block,
+    then restore the prior entry on exit.
+
+    The next import inside the block re-runs the module-level code (under
+    whatever env is set at that point); the restore on exit means other
+    tests still see whichever already-imported version they had.
+    """
+    saved = sys.modules.pop(module_name, None)
+    try:
+        yield
+    finally:
+        sys.modules.pop(module_name, None)
+        if saved is not None:
+            sys.modules[module_name] = saved
+
+
 @pytest.fixture(scope="module")
 def cron_runner(tmp_path_factory: pytest.TempPathFactory) -> Iterator[ModuleType]:
     """Import cron_runner.py under stubbed deploy-time env vars.
@@ -45,10 +64,6 @@ def cron_runner(tmp_path_factory: pytest.TempPathFactory) -> Iterator[ModuleType
     The image itself is lazy at import (Modal only builds it during
     `modal deploy`), so a placeholder Dockerfile and empty context dir
     are sufficient.
-
-    `MonkeyPatch.context()` handles env var save/restore. We additionally
-    pop cron_runner from sys.modules on teardown so any future import
-    re-runs the module-level code with whatever env is current then.
     """
     tmp = tmp_path_factory.mktemp("cron_runner_drift_stub")
     dockerfile = tmp / "Dockerfile"
@@ -59,20 +74,14 @@ def cron_runner(tmp_path_factory: pytest.TempPathFactory) -> Iterator[ModuleType
         "cron_schedule": "0 0 * * *",
         "cron_timezone": "UTC",
     }
-    saved_module = sys.modules.pop(_CRON_RUNNER_MODULE, None)
-    try:
-        with pytest.MonkeyPatch.context() as monkeypatch:
-            monkeypatch.setenv("SCHEDULE_DEPLOY_CONFIG", json.dumps(deploy_config))
-            monkeypatch.setenv("SCHEDULE_BUILD_CONTEXT_DIR", str(tmp))
-            monkeypatch.setenv("SCHEDULE_STAGING_DIR", str(tmp))
-            monkeypatch.setenv("SCHEDULE_DOCKERFILE", str(dockerfile))
-            import imbue.mngr_schedule.implementations.modal.cron_runner as cron_runner_module
+    with _isolated_module(_CRON_RUNNER_MODULE), pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("SCHEDULE_DEPLOY_CONFIG", json.dumps(deploy_config))
+        monkeypatch.setenv("SCHEDULE_BUILD_CONTEXT_DIR", str(tmp))
+        monkeypatch.setenv("SCHEDULE_STAGING_DIR", str(tmp))
+        monkeypatch.setenv("SCHEDULE_DOCKERFILE", str(dockerfile))
+        import imbue.mngr_schedule.implementations.modal.cron_runner as cron_runner_module
 
-            yield cron_runner_module
-    finally:
-        sys.modules.pop(_CRON_RUNNER_MODULE, None)
-        if saved_module is not None:
-            sys.modules[_CRON_RUNNER_MODULE] = saved_module
+        yield cron_runner_module
 
 
 def test_every_lifecycle_state_is_classified(cron_runner: ModuleType) -> None:
