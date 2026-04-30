@@ -1010,8 +1010,12 @@ class AgentCreator(MutableModel):
         2. Probe ``GET <url>/`` until it returns 200, which means uvicorn's
            lifespan completed and the frontend bundle is being served.
 
-        Returns True if both stages pass before the timeout, False otherwise.
+        Emits the surrounding "waiting" / "ready" / "loading anyway" log
+        lines itself so callers in both creation paths just need a single
+        invocation. Returns True if both stages pass before the timeout,
+        False otherwise.
         """
+        log_queue.put("[minds] Waiting for workspace server to come online...")
         deadline = time.monotonic() + self.workspace_ready_timeout_seconds
         poll = self.workspace_ready_poll_interval_seconds
         timeout_seconds = self.workspace_ready_timeout_seconds
@@ -1025,6 +1029,7 @@ class AgentCreator(MutableModel):
             log_queue.put(
                 "[minds] Workspace server did not register within {:.0f}s.".format(timeout_seconds)
             )
+            log_queue.put("[minds] Loading the workspace anyway.")
             return False
 
         log_queue.put("[minds] Workspace server online; waiting for it to be ready...")
@@ -1038,10 +1043,12 @@ class AgentCreator(MutableModel):
             timeout=remaining,
             poll_interval=poll,
         ):
+            log_queue.put("[minds] Workspace server is ready.")
             return True
         log_queue.put(
             "[minds] Workspace server did not become ready within {:.0f}s.".format(timeout_seconds)
         )
+        log_queue.put("[minds] Loading the workspace anyway.")
         return False
 
     def release_leased_host(self, agent_id: AgentId, access_token: str) -> None:
@@ -1353,11 +1360,7 @@ class AgentCreator(MutableModel):
                 # still registering). Wait synchronously so the user stays on
                 # the log-streaming progress page until the workspace is
                 # actually reachable.
-                log_queue.put("[minds] Waiting for workspace server to come online...")
-                if self._wait_for_workspace_ready(agent_id, log_queue):
-                    log_queue.put("[minds] Workspace server is ready.")
-                else:
-                    log_queue.put("[minds] Loading the workspace anyway.")
+                self._wait_for_workspace_ready(agent_id, log_queue)
 
                 log_queue.put("[minds] Agent created successfully.")
 
@@ -1647,11 +1650,7 @@ class AgentCreator(MutableModel):
         # answering yet (the container/SSH host is still bringing it up).
         # Wait synchronously so the user stays on the log-streaming progress
         # page until the workspace is actually reachable.
-        log_queue.put("[minds] Waiting for workspace server to come online...")
-        if self._wait_for_workspace_ready(agent_id, log_queue):
-            log_queue.put("[minds] Workspace server is ready.")
-        else:
-            log_queue.put("[minds] Loading the workspace anyway.")
+        self._wait_for_workspace_ready(agent_id, log_queue)
 
         redirect_url = "/goto/{}/".format(agent_id)
 
