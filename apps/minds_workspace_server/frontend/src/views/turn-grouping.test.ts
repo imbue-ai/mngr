@@ -79,6 +79,16 @@ describe("buildTaskRecords", () => {
     const records = buildTaskRecords(events);
     expect(records.size).toBe(0);
   });
+
+  it("falls back to the event timestamp when created_at is an empty string", () => {
+    // Malformed ticket missing the `created:` frontmatter line: the watcher
+    // emits an empty created_at. Without the `||` fallback, the resulting
+    // TaskRecord has created_at="" and the task gets silently dropped from
+    // every turn in buildTurns (empty string fails the window check).
+    const events = [taskEvent("t1", "open", "2026-04-28T01:00:00Z", { created_at: "" })];
+    const records = buildTaskRecords(events);
+    expect(records.get("t1")?.created_at).toBe("2026-04-28T01:00:00Z");
+  });
 });
 
 describe("buildTurns", () => {

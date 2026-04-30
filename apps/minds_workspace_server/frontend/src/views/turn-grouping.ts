@@ -91,7 +91,14 @@ export function buildTaskRecords(events: TranscriptEvent[]): Map<string, TaskRec
       records.set(e.ticket_id, {
         ticket_id: e.ticket_id,
         title: e.title ?? e.ticket_id,
-        created_at: e.created_at ?? e.timestamp,
+        // `||` (not `??`) so an empty-string created_at -- which the
+        // watcher emits for malformed tickets that lack a `created:`
+        // frontmatter line -- falls back to the event's own timestamp.
+        // An empty record.created_at would never satisfy the
+        // `record.created_at >= turn.start_ts` window check in
+        // buildTurns and the task would be silently dropped from every
+        // turn.
+        created_at: e.created_at || e.timestamp,
         started_at: e.status === "in_progress" ? e.timestamp : null,
         closed_at: e.status === "closed" ? e.timestamp : null,
         summary: e.status === "closed" ? (e.summary ?? null) : null,
