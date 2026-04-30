@@ -35,8 +35,9 @@ from imbue.mngr_schedule.data_types import VerifyMode
 from imbue.mngr_schedule.errors import ScheduleDeployError
 
 # Duplicated from cron_runner.py; that file is deployed standalone into Modal
-# and cannot import imbue.* at module scope, so we can't share this via a
+# and cannot import imbue.* at module scope, so we can't share these via a
 # sibling module. Any change must be mirrored in both files.
+_AGENT_MISSING_STATE: Final[str] = "MISSING"
 _RESULT_SENTINEL: Final[str] = "__MNGR_SCHEDULE_VERIFY__"
 
 # Three timers stack for full-verify:
@@ -266,6 +267,13 @@ def verify_schedule_deployment(
                 final_state,
             )
             return
+        if final_state == _AGENT_MISSING_STATE:
+            raise ScheduleDeployError(
+                f"Full verification of schedule '{trigger_name}' could not find agent "
+                f"{result.get('agent_name')!r} in `mngr list` output before it reached a terminal "
+                f"state. The agent may have been destroyed externally or never registered with the "
+                f"local provider inside the container."
+            )
         raise ScheduleDeployError(
             f"Full verification of schedule '{trigger_name}' finished with non-terminal-success "
             f"state {final_state!r} for agent {result.get('agent_name')!r}."

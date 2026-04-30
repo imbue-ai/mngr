@@ -4,8 +4,8 @@ cron_runner.py is deployed standalone into Modal, where the Python
 interpreter does NOT see the imbue namespace. It cannot import from
 `imbue.mngr.primitives` or `imbue.mngr_schedule.data_types` at module
 scope, so values that mirror those enums (RUNNING_STATES,
-VALID_VERIFY_MODES) and the RESULT_SENTINEL it shares with
-verification.py are duplicated as bare literals.
+VALID_VERIFY_MODES) and sentinel values shared with verification.py
+(AGENT_MISSING_STATE, RESULT_SENTINEL) are duplicated as bare literals.
 
 These tests import cron_runner.py directly (with stubbed deploy-time
 env vars) and compare the literal values against the authoritative
@@ -114,6 +114,15 @@ def test_every_lifecycle_state_is_classified(cron_runner: ModuleType) -> None:
 
 def test_cron_runner_valid_verify_modes_match_verify_mode_enum(cron_runner: ModuleType) -> None:
     assert cron_runner.VALID_VERIFY_MODES == frozenset(mode.value.lower() for mode in VerifyMode)
+
+
+def test_agent_missing_state_matches_between_files(cron_runner: ModuleType) -> None:
+    assert cron_runner.AGENT_MISSING_STATE == verification._AGENT_MISSING_STATE
+
+
+def test_agent_missing_state_disjoint_from_lifecycle_enum(cron_runner: ModuleType) -> None:
+    """The sentinel must not collide with any real lifecycle state."""
+    assert cron_runner.AGENT_MISSING_STATE not in {state.value for state in AgentLifecycleState}
 
 
 def test_result_sentinel_matches_between_files(cron_runner: ModuleType) -> None:
