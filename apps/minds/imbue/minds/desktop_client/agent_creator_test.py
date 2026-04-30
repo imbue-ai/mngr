@@ -631,9 +631,9 @@ def test_wait_for_workspace_ready_returns_false_on_timeout(
 ) -> None:
     """Polling returns False after the timeout elapses without the URL ever appearing.
 
-    The creation flow still completes after timeout -- the subdomain forwarder's
-    auto-refresh retry page covers the remaining gap -- so a timeout should be
-    logged but not raised.
+    The creation flow still completes after timeout (the user is redirected
+    and sees whatever the forwarder produces), so a timeout should be logged
+    but not raised.
     """
     agent_id = AgentId()
     resolver = StaticBackendResolver(url_by_agent_and_service={})
@@ -668,8 +668,8 @@ def test_wait_for_workspace_ready_uses_the_workspace_service_name(
     """Polling looks up the workspace server under ``WORKSPACE_SERVER_SERVICE_NAME``.
 
     Regression guard: if this constant drifted away from what the subdomain
-    forwarder checks, creation would complete instantly (seeing some other
-    service's URL) and the user would still land on the retry page.
+    forwarder checks, creation would complete against some other service's
+    URL and the user would land on a workspace that isn't actually ready.
     """
     agent_id = AgentId()
 
@@ -723,9 +723,8 @@ def test_wait_for_workspace_ready_requires_http_readiness_not_just_url(
     Reproduces the production bug: the agent writes its URL to events.jsonl
     around server-socket bind, but the ASGI app can still be starting up.
     Previously this returned True as soon as the resolver had a URL, and the
-    browser got redirected straight into a "Workspace server not yet
-    available" page. The probe must keep polling until the server actually
-    responds.
+    browser got redirected straight into a dead page. The probe must keep
+    polling until the server actually responds with a 200.
     """
     agent_id = AgentId()
     resolver = StaticBackendResolver(
@@ -750,12 +749,46 @@ def test_wait_for_workspace_ready_requires_http_readiness_not_just_url(
     assert elapsed >= 0.15
 
 
+def _mock_transport_always_503(request: httpx.Request) -> httpx.Response:
+    """Simulate a workspace server that's answering HTTP but isn't ready yet."""
+    return httpx.Response(503, text="not ready")
+
+
+def test_wait_for_workspace_ready_rejects_non_200_response(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    """A server that answers HTTP but with a non-200 status is not yet ready.
+
+    Without this guard the probe would say "ready" the moment the workspace
+    server's TCP layer returned any response, even an error page produced
+    while initialization is still in progress.
+    """
+    agent_id = AgentId()
+    resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(agent_id): {"system_interface": "http://workspace-backend"}},
+    )
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        backend_resolver=resolver,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        workspace_ready_timeout_seconds=0.1,
+        workspace_ready_poll_interval_seconds=0.01,
+        workspace_ready_probe_timeout_seconds=0.05,
+    )
+    creator._probe_http_client = httpx.Client(transport=httpx.MockTransport(_mock_transport_always_503))
+
+    assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is False
+
+
 def test_wait_for_workspace_ready_returns_true_once_server_answers(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    """Once the HTTP probe gets a response, readiness is satisfied."""
+    """Once the HTTP probe gets a 200, readiness is satisfied."""
     agent_id = AgentId()
     resolver = StaticBackendResolver(
         url_by_agent_and_service={str(agent_id): {"system_interface": "http://workspace-backend"}},
