@@ -91,47 +91,55 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
         return null;
       }
 
+      // Mithril 2 enforces that all children of a fragment are either all
+      // keyed or all unkeyed; the timeline-thread div is unkeyed while
+      // the task nodes carry per-ticket keys for stable expand state.
+      // Putting the keyed task vnodes inside their own container keeps
+      // them a homogeneous (all-keyed) fragment and lets the unkeyed
+      // thread sit next to them without violating the rule.
+      const taskNodes = tasks.map((task, idx) => {
+        const isLast = idx === tasks.length - 1;
+        const taskEvents = eventsInTaskWindow(task, body_events);
+        // A task is "expandable" only if there are raw events to show.
+        // Expanding is allowed for done/active tasks; pending tasks
+        // typically have no events anyway.
+        const canExpand = taskEvents.length > 0;
+        const isExpanded = expanded.has(task.ticket_id);
+        const nodeClasses = ["pv-tl-node", `pv-tl-node--${task.status}`, isLast ? "pv-tl-node--last" : ""]
+          .filter(Boolean)
+          .join(" ");
+
+        return m("div", { class: nodeClasses, key: task.ticket_id + (task.is_carryover ? "-carry" : "") }, [
+          m("div.pv-tl-bullet", statusIcon(task.status)),
+          m("div.pv-tl-body", [
+            m(
+              "button",
+              {
+                type: "button",
+                class: "pv-tl-title",
+                disabled: !canExpand,
+                onclick: canExpand ? () => toggle(task.ticket_id) : undefined,
+              },
+              [
+                task.title,
+                task.is_carryover
+                  ? m("span.pv-carryover-tag", { title: "Continued from a previous turn" }, "continued")
+                  : null,
+                canExpand
+                  ? m("span", { class: `pv-chev ${isExpanded ? "pv-chev--open" : ""}` }, m.trust("&rsaquo;"))
+                  : null,
+              ],
+            ),
+            task.status === "done" && task.summary ? m("div.pv-tl-summary", task.summary) : null,
+            isExpanded ? m("div.pv-tl-expanded", renderExpandedTaskBody(taskEvents, agentId)) : null,
+          ]),
+        ]);
+      });
+
       return m("div.progress-block", [
         m("div.pv.pv--timeline", [
           m("div.pv-timeline-thread", { "aria-hidden": "true" }),
-          tasks.map((task, idx) => {
-            const isLast = idx === tasks.length - 1;
-            const taskEvents = eventsInTaskWindow(task, body_events);
-            // A task is "expandable" only if there are raw events to show.
-            // Expanding is allowed for done/active tasks; pending tasks
-            // typically have no events anyway.
-            const canExpand = taskEvents.length > 0;
-            const isExpanded = expanded.has(task.ticket_id);
-            const nodeClasses = ["pv-tl-node", `pv-tl-node--${task.status}`, isLast ? "pv-tl-node--last" : ""]
-              .filter(Boolean)
-              .join(" ");
-
-            return m("div", { class: nodeClasses, key: task.ticket_id + (task.is_carryover ? "-carry" : "") }, [
-              m("div.pv-tl-bullet", statusIcon(task.status)),
-              m("div.pv-tl-body", [
-                m(
-                  "button",
-                  {
-                    type: "button",
-                    class: "pv-tl-title",
-                    disabled: !canExpand,
-                    onclick: canExpand ? () => toggle(task.ticket_id) : undefined,
-                  },
-                  [
-                    task.title,
-                    task.is_carryover
-                      ? m("span.pv-carryover-tag", { title: "Continued from a previous turn" }, "continued")
-                      : null,
-                    canExpand
-                      ? m("span", { class: `pv-chev ${isExpanded ? "pv-chev--open" : ""}` }, m.trust("&rsaquo;"))
-                      : null,
-                  ],
-                ),
-                task.status === "done" && task.summary ? m("div.pv-tl-summary", task.summary) : null,
-                isExpanded ? m("div.pv-tl-expanded", renderExpandedTaskBody(taskEvents, agentId)) : null,
-              ]),
-            ]);
-          }),
+          m("div.pv-timeline-nodes", taskNodes),
         ]),
         final_message ? m("div.pv-final", m(MarkdownContent, { content: final_message })) : null,
       ]);
