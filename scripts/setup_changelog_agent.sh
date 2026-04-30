@@ -93,6 +93,15 @@ echo "Creating schedule '${TRIGGER_NAME}' (provider=$PROVIDER, verify=$VERIFY)..
 # (which doesn't recognize it). cli_args go through the same path
 # without crossing the `--` boundary, so cron_runner's append stays in
 # the mngr-flag section and is consumed correctly.
+#
+# IMPORTANT: the `-S` value must be wrapped in single quotes. cron_runner
+# runs `shlex.split` on the stored args string before invoking
+# `mngr create`, and POSIX-mode shlex strips bare double quotes. Without
+# the surrounding single quotes the JSON `["--dangerously-skip-permissions"]`
+# gets reduced to `[--dangerously-skip-permissions]` (no quotes), which
+# fails JSON parsing inside `_parse_setting_value` and falls through to a
+# plain-string value. The single quotes survive shlex.split as part of the
+# token, so json.loads sees the original quoted JSON list.
 uv run mngr schedule add "$TRIGGER_NAME" \
     --command create \
     --schedule "$SCHEDULE" \
@@ -108,7 +117,7 @@ uv run mngr schedule add "$TRIGGER_NAME" \
     --pass-env IS_SANDBOX \
     --no-auto-fix-args \
     $DISABLE_PLUGIN_ARGS \
-    --args "--type headless_claude --foreground --branch ':mngr/changelog-consolidation-{DATE}' --message-file /code/project/scripts/changelog_consolidation_prompt.md -S agent_types.headless_claude.cli_args=[\"--dangerously-skip-permissions\"]"
+    --args "--type headless_claude --foreground --branch ':mngr/changelog-consolidation-{DATE}' --message-file /code/project/scripts/changelog_consolidation_prompt.md -S 'agent_types.headless_claude.cli_args=[\"--dangerously-skip-permissions\"]'"
 
 echo "Schedule '${TRIGGER_NAME}' created successfully."
 echo ""
