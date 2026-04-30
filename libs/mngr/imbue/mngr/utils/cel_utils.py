@@ -50,9 +50,9 @@ class _TolerantDict(dict):
 def tolerant_dict(value: dict[str, Any]) -> _TolerantDict:
     """Wrap a dict to mark it as schemaless for CEL filtering.
 
-    The marker is honored anywhere in the value tree: marking a nested dict
-    produces a TolerantMapType only at that level, with surrounding dicts
-    converted to plain (strict) MapType.
+    Only the wrapped dict becomes tolerant; sibling and parent dicts in the
+    input remain strict (plain MapType). The wrapper can be applied at any
+    depth in the input tree (each tolerant_dict call relaxes exactly one level).
     """
     return _TolerantDict(value)
 
