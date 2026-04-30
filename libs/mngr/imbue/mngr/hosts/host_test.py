@@ -2027,13 +2027,13 @@ def test_host_get_reported_plugin_state_files_lists_files(
 def test_host_add_and_check_generated_work_dir(
     local_host: Host,
 ) -> None:
-    """_add_generated_work_dir and is_generated_work_dir should track correctly."""
+    """_add_generated_work_dir and _is_generated_work_dir should track correctly."""
     host = local_host
     work_dir = Path("/tmp/test-workdir")
-    assert host.is_generated_work_dir(work_dir) is False
+    assert host._is_generated_work_dir(work_dir) is False
 
     host._add_generated_work_dir(work_dir)
-    assert host.is_generated_work_dir(work_dir) is True
+    assert host._is_generated_work_dir(work_dir) is True
 
 
 def test_host_remove_generated_work_dir(
@@ -2043,10 +2043,10 @@ def test_host_remove_generated_work_dir(
     host = local_host
     work_dir = Path("/tmp/test-workdir")
     host._add_generated_work_dir(work_dir)
-    assert host.is_generated_work_dir(work_dir) is True
+    assert host._is_generated_work_dir(work_dir) is True
 
     host._remove_generated_work_dir(work_dir)
-    assert host.is_generated_work_dir(work_dir) is False
+    assert host._is_generated_work_dir(work_dir) is False
 
 
 # =========================================================================
