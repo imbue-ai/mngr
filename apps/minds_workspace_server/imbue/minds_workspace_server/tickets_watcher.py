@@ -60,10 +60,11 @@ class _TicketsChangeHandler(FileSystemEventHandler):
         self._wake_event.set()
 
 
-def _mtime_iso(path: Path) -> str:
+def _mtime_iso(mtime: float) -> str:
     """File mtime formatted as a UTC ISO-8601 timestamp (matches tk's own
-    `created:` field format)."""
-    mtime = path.stat().st_mtime
+    `created:` field format). Caller passes the already-obtained
+    `stat_result.st_mtime` so we don't re-stat (and risk an OSError if
+    the file was deleted between calls)."""
     return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -196,7 +197,7 @@ class AgentTicketsWatcher:
             if previous_status is None and state.status == "open":
                 ts = state.created_at
             else:
-                ts = _mtime_iso(md_file)
+                ts = _mtime_iso(stat.st_mtime)
 
             new_events.append(self._make_event(state, ts))
 
