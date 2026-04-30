@@ -231,6 +231,83 @@ def test_get_state_returns_crashed_when_no_stop_reason(offline_host: OfflineHost
     assert state == HostState.CRASHED
 
 
+# =========================================================================
+# observed_state: provider's live view preferred over stored-record derivation.
+#
+# Regression for: reboot / external-limactl-stop false-positive CRASHED.
+# When the provider observed the host Stopped at get_host time, that
+# observation reflects reality -- the stored record's stop_reason=None
+# is just mngr never having been told. get_state() must trust the
+# observation, not the pessimistic derivation.
+# =========================================================================
+
+
+def test_get_state_uses_observed_state_when_provided(
+    fake_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """When observed_state is set, get_state returns it regardless of stored stop_reason."""
+    now = datetime.now(timezone.utc)
+    certified_data = CertifiedHostData(
+        host_id=str(HostId.generate()),
+        host_name="rebooted-host",
+        # stop_reason None -> stored derivation would return CRASHED
+        stop_reason=None,
+        created_at=now - timedelta(days=1),
+        updated_at=now - timedelta(days=1),
+    )
+
+    observed = make_offline_host(
+        certified_data, fake_provider, temp_mngr_ctx, observed_state=HostState.STOPPED
+    )
+
+    # Provider observation wins over the stored "None -> CRASHED" fallback.
+    assert observed.get_state() == HostState.STOPPED
+
+
+def test_get_state_falls_back_to_derivation_when_observed_state_none(
+    fake_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """When observed_state is None (no provider observation available), falls back to
+    derive_offline_host_state reading only the stored record. Preserves the legacy
+    behavior for any caller that constructs OfflineHost without querying the provider
+    (e.g. to_offline_host, failed-host paths)."""
+    now = datetime.now(timezone.utc)
+    certified_data = CertifiedHostData(
+        host_id=str(HostId.generate()),
+        host_name="no-observation-host",
+        stop_reason=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+    host = make_offline_host(certified_data, fake_provider, temp_mngr_ctx, observed_state=None)
+
+    assert host.get_state() == HostState.CRASHED  # same as legacy behavior
+
+
+def test_get_state_observed_state_takes_precedence_over_stop_reason(
+    fake_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """Observation wins even when stored stop_reason disagrees. Scenario: stored
+    record says STOPPED (mngr did a graceful stop at some point), but the VM was
+    later started externally and is now Running -- provider says RUNNING, we should
+    believe the provider."""
+    now = datetime.now(timezone.utc)
+    certified_data = CertifiedHostData(
+        host_id=str(HostId.generate()),
+        host_name="resumed-host",
+        stop_reason=HostState.STOPPED.value,
+        created_at=now - timedelta(hours=2),
+        updated_at=now - timedelta(hours=2),
+    )
+
+    host = make_offline_host(
+        certified_data, fake_provider, temp_mngr_ctx, observed_state=HostState.RUNNING
+    )
+
+    assert host.get_state() == HostState.RUNNING
+
+
 def test_get_state_returns_crashed_when_provider_does_not_support_snapshots_and_no_stop_reason(
     offline_host: OfflineHost, fake_provider: MockProviderInstance
 ) -> None:

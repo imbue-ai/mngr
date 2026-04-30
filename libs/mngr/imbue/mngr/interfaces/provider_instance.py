@@ -405,6 +405,26 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """Return an offline representation of the given host for use when it is unreachable."""
         ...
 
+    def get_observed_host_state(self, host_id: HostId) -> HostState | None:
+        """Provider's best current observation of this host's state.
+
+        Unlike ``derive_offline_host_state`` (which reads only the stored
+        record), this queries the underlying provider directly, so it reflects
+        external state changes the stored record never learned about -- user
+        rebooted their Mac, someone ran ``limactl stop`` outside mngr, a
+        sandbox terminated, etc.
+
+        Returns the observed ``HostState`` when the provider can answer;
+        returns ``None`` when the provider cannot (daemon unreachable, etc.)
+        in which case callers should fall back to the stored-record derivation.
+
+        The default implementation returns ``None`` so providers that haven't
+        implemented this yet keep the legacy "derive from stored record"
+        behavior. Providers that can observe cheaply (Lima's ``limactl list``,
+        Docker's ``docker inspect``, Modal's sandbox SDK) should override.
+        """
+        return None
+
     @abstractmethod
     def discover_hosts(
         self,

@@ -290,14 +290,24 @@ class LimaProviderInstance(BaseProviderInstance):
             )
             self._host_store.write_host_record(updated_host_record)
 
-    def _create_offline_host(self, host_record: HostRecord) -> OfflineHost:
-        """Create an OfflineHost from a host record."""
+    def _create_offline_host(
+        self, host_record: HostRecord, observed_state: HostState | None = None
+    ) -> OfflineHost:
+        """Create an OfflineHost from a host record.
+
+        ``observed_state`` is the lima-reported state at the moment of
+        construction, when the caller has already done a ``limactl_list``
+        query. Passing it through lets ``OfflineHost.get_state()`` reflect
+        external state changes (Mac reboot, ``limactl stop`` outside mngr)
+        instead of the pessimistic ``stop_reason == None → CRASHED`` default.
+        """
         host_id = HostId(host_record.certified_host_data.host_id)
         return OfflineHost(
             id=host_id,
             certified_host_data=host_record.certified_host_data,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
+            observed_state=observed_state,
             on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
                 callback_host_id, certified_data
             ),
@@ -731,19 +741,50 @@ sudo poweroff
             # Failed or offline host
             return self._create_offline_host(host_record)
 
-        # Check if the Lima instance is running
+        # Check Lima's live status. Used for two things: deciding Online vs
+        # Offline below, AND -- critically -- passing the observed state
+        # through to OfflineHost so its get_state() reflects reality rather
+        # than the stop_reason-None → CRASHED default.
         instances = limactl_list(self.mngr_ctx.concurrency_group)
         instance_name = host_record.config.instance_name
-        is_running = any(inst.get("name") == instance_name and inst.get("status") == "Running" for inst in instances)
-
-        if not is_running:
-            return self._create_offline_host(host_record)
+        lima_status = next(
+            (inst.get("status") for inst in instances if inst.get("name") == instance_name),
+            None,
+        )
+        if lima_status != "Running":
+            observed = _LIMA_STATUS_TO_HOST_STATE.get(lima_status) if lima_status is not None else None
+            return self._create_offline_host(host_record, observed_state=observed)
 
         # Instance is running -- create online host
         ssh_config = self._get_ssh_config(instance_name)
         host_obj = self._create_host_object(host_id, ssh_config)
         self._evict_cached_host(host_id, replacement=host_obj)
         return host_obj
+
+    def get_observed_host_state(self, host_id: HostId) -> HostState | None:
+        """Lima's current view of this host, mapped to HostState.
+
+        Returns None if we can't find the instance in lima's list (daemon
+        down, instance never existed, or was deleted externally). Callers
+        should treat None as 'no observation available' and fall back to
+        stored-record derivation.
+        """
+        host_record = self._host_store.read_host_record(host_id, use_cache=True)
+        if host_record is None or host_record.config is None:
+            return None
+        try:
+            instances = limactl_list(self.mngr_ctx.concurrency_group)
+        except (LimaCommandError, OSError) as e:
+            logger.debug("Failed to query lima for observed state of {}: {}", host_id, e)
+            return None
+        instance_name = host_record.config.instance_name
+        lima_status = next(
+            (inst.get("status") for inst in instances if inst.get("name") == instance_name),
+            None,
+        )
+        if lima_status is None:
+            return None
+        return _LIMA_STATUS_TO_HOST_STATE.get(lima_status)
 
     def _get_host_by_name(self, name: HostName) -> HostInterface:
         """Get a host by name."""
