@@ -138,6 +138,68 @@ def test_schedule_add_with_verification(monorepo_root: Path) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(500)
+def test_schedule_add_with_full_verification(monorepo_root: Path) -> None:
+    """Test that schedule add with full verification deploys and waits.
+
+    Full-verify polls the agent's lifecycle state inside the cron runner's
+    container until it reaches a terminal state (DONE/STOPPED). This is a
+    different code path from quick-verify (which destroys the agent
+    immediately): it exercises `_poll_until_done` and `mngr list` polling.
+
+    The trigger creates an `echo` agent that finishes immediately, so the
+    poll loop should exit on its first iteration with state == DONE.
+    """
+    trigger_name = "test-schedule-full-verify"
+    app_name = get_modal_app_name(trigger_name)
+    env = build_subprocess_env()
+
+    result: subprocess.CompletedProcess[str] | None = None
+    try:
+        result = subprocess.run(
+            [
+                "uv",
+                "run",
+                "mngr",
+                "schedule",
+                "add",
+                trigger_name,
+                "--command",
+                "create",
+                "--args",
+                "test-agent echo --no-connect --no-ensure-clean -- hello-full-verify",
+                "--schedule",
+                "0 3 * * *",
+                "--provider",
+                "modal",
+                "--verify",
+                "full",
+                "--no-ensure-safe-commands",
+                "--no-auto-merge",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=500,
+            env=env,
+            cwd=monorepo_root,
+        )
+
+        assert result.returncode == 0, (
+            f"schedule add with full verify failed\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert app_name in result.stdout or app_name in result.stderr, (
+            f"Expected app name '{app_name}' in output\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+    finally:
+        cleanup_modal_app(
+            app_name,
+            env,
+            resolve_modal_environment(result.stderr if result is not None else ""),
+            cwd=monorepo_root,
+        )
+
+
+@pytest.mark.release
 @pytest.mark.timeout(600)
 def test_schedule_list_shows_deployed_schedule(monorepo_root: Path) -> None:
     """Test that schedule list shows a schedule after it has been deployed.

@@ -244,12 +244,15 @@ def _get_lifecycle_state(agent_name: str) -> str | None:
     if not re.fullmatch(r"[\w-]+", agent_name):
         raise CronRunnerError(f"unexpected agent name for lifecycle lookup: {agent_name!r}")
     try:
+        # No `--provider local` filter: walk all providers so full-verify
+        # works regardless of where the trigger's `mngr create` placed the
+        # agent (local-in-container, modal, ssh, etc.). This matches the
+        # quick-verify path's `mngr destroy --force <name>`, which is also
+        # provider-agnostic.
         completed = subprocess.run(
             [
                 "mngr",
                 "list",
-                "--provider",
-                "local",
                 "--include",
                 f'name == "{agent_name}"',
                 "--format",
