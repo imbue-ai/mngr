@@ -251,11 +251,22 @@ mngr_recursive has provisioned one, but the integrated path has only
 been unit-tested -- never run with `mngr_recursive` actually enabled
 on the parent.
 
-### Plan-mode propagation, session-id resume, depth-limit pass-through
+### Plan-mode propagation
 
-All have unit-test coverage; none have been verified live. See
-`test_real_claude_subagent.py` for the existing release-test surface
-and add cases for these as standalone tests.
+**Not implemented.** The wait-script's `mngr create` for the child
+doesn't pass through the parent's `--permission-mode plan` flag, so a
+parent in plan mode delegates to a non-plan-mode child -- the
+read-only guarantee leaks. `test_plan_mode_propagates_to_subagent`
+documents the intended behavior; today it fails. Fix path: read the
+parent agent's permission_mode from the spawn hook's invocation
+context, forward it via `mngr create --` to the child's claude
+invocation.
+
+### Session-id resume, depth-limit pass-through
+
+Have unit-test coverage; depth-limit also has a release test
+(`test_depth_limit_denies_task`). Session-id resume is unit-tested
+for the read path but never verified live.
 
 ### Diagnose `WAITING`-while-thinking lifecycle reporting
 
