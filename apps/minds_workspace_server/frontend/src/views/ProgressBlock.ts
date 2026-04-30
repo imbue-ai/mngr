@@ -12,7 +12,7 @@
 import m from "mithril";
 import { MarkdownContent } from "../markdown";
 import type { TranscriptEvent } from "../models/Response";
-import { renderToolCallBlock, renderSubagentCard } from "./message-renderers";
+import { renderAssistantMessageChildren } from "./message-renderers";
 import type { TaskInTurn, TaskUiStatus } from "./turn-grouping";
 import { eventsInTaskWindow } from "./turn-grouping";
 
@@ -50,7 +50,8 @@ function renderExpandedTaskBody(events: TranscriptEvent[], agentId: string): m.V
     return m("div.pv-expanded-empty", "No raw work captured for this step.");
   }
 
-  // Collect tool_results so we can match them back to tool_use entries.
+  // Collect tool_results so renderAssistantMessageChildren can match them
+  // back to tool_use entries.
   const toolResults = new Map<string, TranscriptEvent>();
   for (const e of events) {
     if (e.type === "tool_result" && e.tool_call_id) {
@@ -58,19 +59,13 @@ function renderExpandedTaskBody(events: TranscriptEvent[], agentId: string): m.V
     }
   }
 
+  // Reuse renderAssistantMessageChildren so the expanded panel renders
+  // assistant text + tool calls identically to the rest of the chat
+  // (interleaved markdown + tool-call-block chrome).
   const children: m.Children[] = [];
   for (const e of events) {
     if (e.type !== "assistant_message") continue;
-    if (e.text) {
-      children.push(m(MarkdownContent, { content: e.text }));
-    }
-    for (const tc of e.tool_calls ?? []) {
-      if (tc.tool_name === "Agent" && tc.subagent_metadata) {
-        children.push(renderSubagentCard(tc, agentId));
-      } else {
-        children.push(renderToolCallBlock(tc, toolResults.get(tc.tool_call_id) ?? null));
-      }
-    }
+    children.push(...renderAssistantMessageChildren(e, toolResults, agentId));
   }
 
   return m("div.pv-expanded.markdown-content", children);
