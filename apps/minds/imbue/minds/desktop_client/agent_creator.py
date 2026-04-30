@@ -21,6 +21,8 @@ from enum import auto
 from pathlib import Path
 from typing import Final
 from typing import assert_never
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
 from uuid import UUID
 
 import tomlkit
@@ -214,6 +216,58 @@ def _is_local_path(repo_source: str) -> bool:
     return repo_source.startswith(("/", "./", "../", "~"))
 
 
+def _redact_url_credentials(url: str) -> str:
+    """Strip any ``user[:password]@`` userinfo from a URL's netloc for logging.
+
+    Used to avoid leaking tokens like ``https://x-access-token:<TOKEN>@...`` into
+    debug logs. Strings that urlsplit parses with no netloc userinfo -- local
+    paths and SCP-style SSH URLs (``git@github.com:user/repo.git``, which has no
+    scheme so urlsplit produces an empty netloc) -- are returned unchanged.
+    Schemed URLs that do have userinfo (including ``ssh://git@host/...``) have
+    that userinfo stripped; losing the schemed ``user@`` prefix is harmless
+    since it isn't a secret and the remaining URL still identifies the repo.
+    """
+    parts = urlsplit(url)
+    if "@" not in parts.netloc:
+        return url
+    _, _, host = parts.netloc.rpartition("@")
+    return urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
+
+
+# Matches the ``scheme://user[:password]@`` prefix of a URL embedded anywhere
+# in a free-form string (e.g. a line of git's stderr like
+# ``fatal: unable to access 'https://x-access-token:TOKEN@github.com/...': ...``).
+# Userinfo stops at the first ``/``, ``@``, whitespace, or quote, which are all
+# invalid in the unencoded userinfo and reliably terminate it.
+_URL_CREDENTIALS_IN_TEXT_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/@\s'\"]+@")
+
+
+def _redact_url_credentials_in_text(text: str) -> str:
+    """Strip ``user[:password]@`` userinfo from any ``scheme://...`` URL inside a string.
+
+    Used to redact credentials from git's streamed stdout/stderr and from
+    error messages, which often echo the full URL the user passed in. The
+    input is arbitrary text (not a valid URL), so we can't just urlsplit it.
+    SCP-style SSH URLs (``git@host:path``, no scheme) are left alone, matching
+    :func:`_redact_url_credentials`.
+    """
+    return _URL_CREDENTIALS_IN_TEXT_RE.sub(r"\1", text)
+
+
+class _RedactingOutputCallback(FrozenModel):
+    """OutputCallback wrapper that scrubs embedded credentials from each line.
+
+    Used by :func:`clone_git_repo` to forward git's streamed stdout/stderr to
+    the caller's callback with any ``scheme://user[:password]@...`` URLs
+    redacted.
+    """
+
+    inner: OutputCallback
+
+    def __call__(self, line: str, is_stdout: bool) -> None:
+        self.inner(_redact_url_credentials_in_text(line), is_stdout)
+
+
 def _is_git_worktree(repo_dir: Path) -> bool:
     """Check if a directory is a git worktree (not the main repo).
 
@@ -239,23 +293,32 @@ def clone_git_repo(
     When is_shallow is True, clones with --depth 1 to skip history.
     Raises GitCloneError if the clone fails.
     """
-    logger.debug("Cloning {} to {}", git_url, clone_dir)
+    logger.debug("Cloning {} to {}", _redact_url_credentials(str(git_url)), clone_dir)
     command = ["git", "clone"]
     if is_shallow:
         command.extend(["--depth", "1"])
     command.extend([str(git_url), str(clone_dir)])
+
+    # Wrap the caller's on_output so git's per-line stdout/stderr is scrubbed
+    # of embedded credentials before being forwarded. Git commonly echoes the
+    # full clone URL in error messages (e.g. `fatal: unable to access '...'`),
+    # which would otherwise leak tokens from credentialed URLs into logs.
+    redacted_on_output = _RedactingOutputCallback(inner=on_output) if on_output is not None else None
+
     cg = _make_child_cg("git-clone", parent_cg)
     with cg:
         result = cg.run_process_to_completion(
             command=command,
             is_checked_after=False,
-            on_output=on_output,
+            on_output=redacted_on_output,
         )
     if result.returncode != 0:
+        stderr = result.stderr.strip()
+        stdout = result.stdout.strip()
         raise GitCloneError(
             "git clone failed (exit code {}):\n{}".format(
                 result.returncode,
-                result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+                _redact_url_credentials_in_text(stderr if stderr else stdout),
             )
         )
 
@@ -1096,7 +1159,12 @@ class AgentCreator(MutableModel):
                 )
                 return
 
-            with log_span("Creating agent {} from {} (mode: {})", agent_id, repo_source, launch_mode):
+            with log_span(
+                "Creating agent {} from {} (mode: {})",
+                agent_id,
+                _redact_url_credentials(repo_source),
+                launch_mode,
+            ):
                 if _is_local_path(repo_source):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
                     if not resolved_path.is_dir():
@@ -1146,7 +1214,7 @@ class AgentCreator(MutableModel):
                     clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(repo_name)
                     if clone_target.exists():
                         shutil.rmtree(clone_target)
-                    log_queue.put("[minds] Cloning {}...".format(repo_source))
+                    log_queue.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
                     clone_git_repo(
                         GitUrl(repo_source),
                         clone_target,
