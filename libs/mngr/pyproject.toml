@@ -126,7 +126,6 @@ omit = [
   # prevents their lower coverage from dragging the combined mean down.
   "*/mngr_vps_docker/*",
   "*/mngr_vultr/*",
-  "*/mngr_subagent_proxy/*",
 ]
 
 [tool.inline-snapshot]

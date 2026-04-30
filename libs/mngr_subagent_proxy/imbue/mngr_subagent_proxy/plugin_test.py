@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,46 +27,39 @@ _provision: Any = on_after_provisioning
 _destroy: Any = on_before_agent_destroy
 
 
-@dataclass
-class _ProvisionEnv:
-    """Pre-created host_dir + work_dir pair plus a FakeHost rooted in host_dir.
-
-    Every plugin test wires up the same trio (host_dir/work_dir directories
-    plus a FakeHost). Bundling them in one fixture removes the boilerplate
-    while keeping fields named so call sites stay readable.
-    """
-
-    host_dir: Path
-    work_dir: Path
-    host: FakeHost
+@pytest.fixture
+def host_dir(tmp_path: Path) -> Path:
+    """Standard ``host`` subdir under tmp_path; pre-created."""
+    path = tmp_path / "host"
+    path.mkdir()
+    return path
 
 
 @pytest.fixture
-def provision_env(tmp_path: Path) -> _ProvisionEnv:
-    """Standard host_dir / work_dir / FakeHost trio used by every plugin test."""
-    host_dir = tmp_path / "host"
-    host_dir.mkdir()
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    return _ProvisionEnv(host_dir=host_dir, work_dir=work_dir, host=FakeHost(host_dir))
+def work_dir(tmp_path: Path) -> Path:
+    """Standard ``work`` subdir under tmp_path; pre-created."""
+    path = tmp_path / "work"
+    path.mkdir()
+    return path
 
 
-def test_plugin_hooks_register_on_claude_agent(tmp_path: Path) -> None:
+@pytest.fixture
+def fake_host(host_dir: Path) -> FakeHost:
+    """FakeHost rooted at ``host_dir``."""
+    return FakeHost(host_dir)
+
+
+def test_plugin_hooks_register_on_claude_agent(work_dir: Path, fake_host: FakeHost) -> None:
     """The plugin's provisioning hook wires up hooks and the proxy agent.
 
     This is the golden-path CI check: verify that invoking on_after_provisioning
     for a Claude agent writes the mngr-proxy agent definition and merges the
     python-module hooks into .claude/settings.local.json.
     """
-    host_dir = tmp_path / "host"
-    host_dir.mkdir()
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    host = FakeHost(host_dir)
     agent_id = AgentId.generate()
     agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig())
 
-    _provision(agent, host, None)
+    _provision(agent, fake_host, None)
 
     settings_path = work_dir / ".claude" / "settings.local.json"
     assert settings_path.exists()
@@ -111,18 +103,13 @@ def _seed_settings_with_stop_hooks(work_dir: Path) -> Path:
     return settings_path
 
 
-def test_plugin_raises_on_user_stop_hooks_for_subagent_proxy_child(tmp_path: Path) -> None:
+def test_plugin_raises_on_user_stop_hooks_for_subagent_proxy_child(work_dir: Path, fake_host: FakeHost) -> None:
     """A proxy-child agent with user-configured Stop/SubagentStop hooks raises UnsupportedSubagentHookError.
 
     The plugin doesn't know whether a user's Stop hook is meant to fire on
     every subagent turn or only at the outer end_turn, so it refuses to
     proceed rather than silently guess.
     """
-    host_dir = tmp_path / "host"
-    host_dir.mkdir()
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    host = FakeHost(host_dir)
     agent_id = AgentId.generate()
     agent = FakeAgent(
         agent_id,
@@ -133,7 +120,7 @@ def test_plugin_raises_on_user_stop_hooks_for_subagent_proxy_child(tmp_path: Pat
     _seed_settings_with_stop_hooks(work_dir)
 
     with pytest.raises(UnsupportedSubagentHookError):
-        _provision(agent, host, None)
+        _provision(agent, fake_host, None)
 
 
 def test_plugin_allows_mngr_baseline_stop_hook_for_subagent_proxy_child(tmp_path: Path) -> None:
