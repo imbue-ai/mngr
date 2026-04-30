@@ -98,7 +98,7 @@ uv run mngr schedule add "$TRIGGER_NAME" \
     --pass-env IS_SANDBOX \
     --no-auto-fix-args \
     $DISABLE_PLUGIN_ARGS \
-    --args "--type headless_claude --branch ':changelog-consolidation-{DATE}' --message-file /code/project/scripts/changelog_consolidation_prompt.md -- --dangerously-skip-permissions"
+    --args "--type headless_claude --branch ':mngr/changelog-consolidation-{DATE}' --message-file /code/project/scripts/changelog_consolidation_prompt.md -- --dangerously-skip-permissions"
 
 echo "Schedule '${TRIGGER_NAME}' created successfully."
 echo ""
