@@ -88,6 +88,11 @@ class AgentTicketsWatcher:
 
         self._last_status_per_ticket: dict[str, str] = {}
         self._mtime_cache: dict[str, tuple[float, int]] = {}
+        # Cumulative log of every event _scan() has emitted. Returned by
+        # get_all_events() so consumers (e.g. /events on page reload) see
+        # the full history -- _scan() itself is incremental and only
+        # surfaces transitions observed since the last scan.
+        self._emitted_events: list[dict[str, Any]] = []
 
         self._wake_event = threading.Event()
         self._stop_event = threading.Event()
@@ -107,13 +112,21 @@ class AgentTicketsWatcher:
             self._thread.join(timeout=5.0)
 
     def get_all_events(self) -> list[dict[str, Any]]:
-        """Scan the tickets directory and return every event implied by
-        observed state changes -- the full cumulative history of
-        transitions seen by this watcher. Safe to call repeatedly; the
-        per-ticket last-status tracker keeps it idempotent for unchanged
-        files. Used to seed initial state when an agent's chat is
-        opened."""
-        return self._scan()
+        """Return every event observed by this watcher so far -- the full
+        cumulative history of state transitions, in timestamp order.
+
+        Idempotent across calls: an unchanged tickets directory yields
+        the same list every time. Used to seed the chat view's initial
+        state on each GET /events (matching the contract of
+        AgentSessionWatcher.get_all_events()), so multiple page reloads
+        keep returning the full history. The live broadcast path in
+        _run() consumes new transitions separately via _scan().
+        """
+        # Run a fresh scan so any transitions that happened between the
+        # last poll and this call are captured; the scan also appends to
+        # _emitted_events.
+        self._scan()
+        return list(self._emitted_events)
 
     def _run(self) -> None:
         self._setup_watchers()
@@ -202,6 +215,9 @@ class AgentTicketsWatcher:
             new_events.append(self._make_event(state, ts))
 
         new_events.sort(key=lambda e: e["timestamp"])
+        # Accumulate so get_all_events() can replay the full history on
+        # subsequent calls (e.g. page reloads).
+        self._emitted_events.extend(new_events)
         return new_events
 
     def _make_event(self, state: TicketState, ts: str) -> dict[str, Any]:

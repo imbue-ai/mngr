@@ -192,8 +192,11 @@ Interim note that should not appear as a summary yet.
     assert events[0]["summary_at"] is None
 
 
-def test_repeated_scan_is_idempotent(tmp_path: Path) -> None:
-    """Re-scanning an unchanged directory emits no new events."""
+def test_repeated_get_all_events_is_idempotent(tmp_path: Path) -> None:
+    """Re-calling get_all_events() against an unchanged directory yields
+    the same cumulative history. This is the contract _get_combined_events
+    in server.py relies on: every page reload re-issues GET /events and
+    expects the full event list back, not just deltas since the last poll."""
     tickets_dir = tmp_path / ".tickets"
     _write_ticket(
         tickets_dir,
@@ -212,15 +215,16 @@ priority: 2
     _calls, cb = _capture()
     watcher = AgentTicketsWatcher("agent-1", tickets_dir, cb)
     first = watcher.get_all_events()
-    assert len(first) == 1
+    assert [e["event_id"] for e in first] == ["tt-eeee-open"]
     second = watcher.get_all_events()
-    assert second == []
+    assert second == first
 
 
-def test_lifecycle_emits_one_event_per_observed_transition(tmp_path: Path) -> None:
+def test_lifecycle_accumulates_one_event_per_observed_transition(tmp_path: Path) -> None:
     """A ticket the watcher observes through its full lifecycle (open
-    -> in_progress -> closed) emits exactly three events, one per
-    observed transition."""
+    -> in_progress -> closed) accumulates exactly three events in the
+    cumulative history, one per observed transition. get_all_events()
+    returns the full accumulated list each call."""
     tickets_dir = tmp_path / ".tickets"
     path = tickets_dir / "tt-ffff.md"
     tickets_dir.mkdir(parents=True, exist_ok=True)
@@ -259,7 +263,7 @@ priority: 2
 """
     )
     events2 = watcher.get_all_events()
-    assert [e["event_id"] for e in events2] == ["tt-ffff-in_progress"]
+    assert [e["event_id"] for e in events2] == ["tt-ffff-open", "tt-ffff-in_progress"]
 
     path.write_text(
         """---
@@ -281,5 +285,5 @@ All done.
 """
     )
     events3 = watcher.get_all_events()
-    assert [e["event_id"] for e in events3] == ["tt-ffff-closed"]
-    assert events3[0]["summary"] == "All done."
+    assert [e["event_id"] for e in events3] == ["tt-ffff-open", "tt-ffff-in_progress", "tt-ffff-closed"]
+    assert events3[-1]["summary"] == "All done."
