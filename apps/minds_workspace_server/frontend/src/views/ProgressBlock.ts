@@ -46,10 +46,8 @@ function statusIcon(status: TaskUiStatus): m.Vnode {
 }
 
 function renderExpandedTaskBody(events: TranscriptEvent[], agentId: string): m.Vnode {
-  if (events.length === 0) {
-    return m("div.pv-expanded-empty", "No raw work captured for this step.");
-  }
-
+  // Callers must only mount this when there are events to render
+  // (ProgressBlock guards on canExpand = taskEvents.length > 0).
   // Collect tool_results so renderAssistantMessageChildren can match them
   // back to tool_use entries.
   const toolResults = new Map<string, TranscriptEvent>();

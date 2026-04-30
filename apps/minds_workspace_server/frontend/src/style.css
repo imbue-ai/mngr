@@ -1618,15 +1618,6 @@ body {
   margin: 0.5em 0;
 }
 
-.pv-expanded-empty {
-  margin-top: 8px;
-  padding: 6px 12px;
-  border-left: 2px solid var(--pv-line-faint);
-  color: var(--pv-fg-muted);
-  font-size: 13px;
-  font-style: italic;
-}
-
 /* Final assistant message under the progress timeline */
 .pv-final {
   margin-top: 16px;
