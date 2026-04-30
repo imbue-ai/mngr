@@ -22,6 +22,9 @@
 import m from "mithril";
 import type { ToolCall, TranscriptEvent } from "../models/Response";
 
+// Note: Agent / Task are intentionally NOT in this map. labelForToolCall
+// short-circuits with the "Delegating to sub-agent…" label for those tools
+// before consulting this verb table.
 const VERB_BY_TOOL: Record<string, string> = {
   Read: "Reading",
   Edit: "Editing",
@@ -30,8 +33,6 @@ const VERB_BY_TOOL: Record<string, string> = {
   Bash: "Running",
   Grep: "Searching",
   Glob: "Searching",
-  Task: "Delegating",
-  Agent: "Delegating",
 };
 
 const MAX_TARGET_LEN = 60;
