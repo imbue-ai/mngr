@@ -128,12 +128,22 @@ def _extract_latest_note(body: str) -> tuple[str | None, str | None]:
     Returns (note_text, note_timestamp), or (None, None) if there are no
     notes. "Most recent" is determined by lexicographic timestamp order,
     which matches ISO-8601 chronological order for the format tk emits.
+
+    The `## Notes` marker must appear as a heading -- a line whose stripped
+    contents are exactly `## Notes`. A bare substring match would be a
+    false-positive risk if the ticket description prose happens to contain
+    `## Notes` mid-line (e.g. inline reference to the section, or pasted
+    output containing the literal text).
     """
-    notes_marker = "## Notes"
-    notes_idx = body.find(notes_marker)
-    if notes_idx < 0:
+    notes_section: str | None = None
+    cursor = 0
+    for line in body.splitlines(keepends=True):
+        if line.strip() == "## Notes":
+            notes_section = body[cursor + len(line) :]
+            break
+        cursor += len(line)
+    if notes_section is None:
         return (None, None)
-    notes_section = body[notes_idx + len(notes_marker) :]
 
     latest_text: str | None = None
     latest_ts: str | None = None

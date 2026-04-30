@@ -158,3 +158,32 @@ Some **bold prose** here that is not a note.
     result = parse_ticket_text(text)
     assert result is not None
     assert result.summary is None
+
+
+def test_inline_notes_substring_does_not_anchor_notes_section() -> None:
+    """A `## Notes` substring appearing mid-line (or mid-paragraph) must
+    NOT be treated as the start of the Notes section. The real Notes
+    heading -- a line whose stripped contents are exactly `## Notes` --
+    is the only valid anchor; otherwise prose `**...**` runs after a
+    false-positive marker could leak in as the summary.
+    """
+    text = """---
+id: tt-prose
+status: closed
+created: 2026-04-28T01:17:08Z
+---
+# Title
+
+The user mentioned "## Notes" inline as part of their description, so
+the parser must not anchor on that. **Not a real note timestamp.**
+
+## Notes
+
+**2026-04-28T01:30:00Z**
+
+Real summary in the real notes section.
+"""
+    result = parse_ticket_text(text)
+    assert result is not None
+    assert result.summary == "Real summary in the real notes section."
+    assert result.summary_at == "2026-04-28T01:30:00Z"
