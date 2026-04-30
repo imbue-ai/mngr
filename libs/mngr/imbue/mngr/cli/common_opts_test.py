@@ -1135,12 +1135,12 @@ def test_setup_command_context_raises_on_unknown_command_param_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Without MNGR_ALLOW_UNKNOWN_CONFIG, a typo in [commands.create] must raise."""
-    # MNGR_PROJECT_DIR points directly at the directory containing settings.toml
+    # MNGR_PROJECT_CONFIG_DIR points directly at the directory containing settings.toml
     # (see resolve_project_config_dir in config/pre_readers.py).
     (tmp_path / "settings.toml").write_text('[commands.create]\nbogus_typo_param = "x"\n')
 
     monkeypatch.delenv("MNGR_ALLOW_UNKNOWN_CONFIG", raising=False)
-    monkeypatch.setenv("MNGR_PROJECT_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
 
     cmd = _make_strict_test_command()
 
@@ -1164,7 +1164,7 @@ def test_setup_command_context_warns_on_unknown_command_param_when_lax(
     (tmp_path / "settings.toml").write_text('[commands.create]\nbogus_typo_param = "x"\n')
 
     monkeypatch.setenv("MNGR_ALLOW_UNKNOWN_CONFIG", "1")
-    monkeypatch.setenv("MNGR_PROJECT_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
 
     cmd = _make_strict_test_command()
 
