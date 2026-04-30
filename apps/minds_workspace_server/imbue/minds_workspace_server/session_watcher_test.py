@@ -94,33 +94,6 @@ def test_get_all_events_with_tail(tmp_path: Path) -> None:
     assert result[9]["content"] == "Message 9"
 
 
-def test_get_backfill_events(tmp_path: Path) -> None:
-    events = [
-        {
-            "type": "user",
-            "uuid": f"uuid-{i}",
-            "timestamp": f"2026-01-01T00:00:{i:02d}Z",
-            "message": {"role": "user", "content": f"Message {i}"},
-        }
-        for i in range(10)
-    ]
-
-    agent_state_dir, claude_config_dir, _ = _setup_agent(tmp_path, events)
-
-    watcher = AgentSessionWatcher(
-        agent_id="test-agent",
-        agent_state_dir=agent_state_dir,
-        claude_config_dir=claude_config_dir,
-        on_events=lambda aid, evts: None,
-    )
-
-    # Get events before uuid-5-user
-    result = watcher.get_backfill_events("uuid-5-user", limit=3)
-    assert len(result) == 3
-    assert result[0]["content"] == "Message 2"
-    assert result[2]["content"] == "Message 4"
-
-
 def test_watcher_detects_new_events(tmp_path: Path) -> None:
     events = [
         {

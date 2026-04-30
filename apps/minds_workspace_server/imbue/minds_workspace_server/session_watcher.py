@@ -124,24 +124,6 @@ class AgentSessionWatcher:
         self._enrich_subagent_metadata(all_events)
         return all_events
 
-    def get_backfill_events(
-        self, before_event_id: str, limit: int = 50, session_id: str | None = None
-    ) -> list[dict[str, Any]]:
-        """Get events before a given event_id for backfill pagination."""
-        all_events = self.get_all_events(session_id=session_id)
-
-        target_idx = -1
-        for i, event in enumerate(all_events):
-            if event["event_id"] == before_event_id:
-                target_idx = i
-                break
-
-        if target_idx <= 0:
-            return []
-
-        start_idx = max(0, target_idx - limit)
-        return all_events[start_idx:target_idx]
-
     def get_subagent_metadata(self, subagent_session_id: str) -> dict[str, str] | None:
         """Get metadata for a subagent by its session ID."""
         self._discover_sessions()
