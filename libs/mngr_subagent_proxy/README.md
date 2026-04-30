@@ -1,5 +1,16 @@
 # imbue-mngr-subagent-proxy
 
+> ⚠️ **EXPERIMENTAL.** This plugin intercepts Claude Code's built-in
+> `Task` tool and reroutes subagent execution through mngr-managed
+> agents via a Haiku dispatcher. Expect rough edges: there are known
+> gaps (plan-mode propagation, stop-instead-of-destroy via mngr GC,
+> permission round-trip, etc. -- see "Deferred / out-of-scope" at the
+> bottom), and the design depends on Claude Code internals (hook
+> protocol, plugin cache layout, marketplace fetch behavior) that may
+> shift between Claude Code releases. Do NOT enable this on a workflow
+> you can't easily back out of, and watch `mngr list` for orphaned
+> children if a session ends abnormally.
+
 mngr plugin that owns Claude Code subagents.
 
 When a Claude agent is provisioned, this plugin installs hooks so that
