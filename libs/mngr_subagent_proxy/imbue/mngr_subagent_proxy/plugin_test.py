@@ -123,17 +123,13 @@ def test_plugin_raises_on_user_stop_hooks_for_subagent_proxy_child(work_dir: Pat
         _provision(agent, fake_host, None)
 
 
-def test_plugin_allows_mngr_baseline_stop_hook_for_subagent_proxy_child(tmp_path: Path) -> None:
+def test_plugin_allows_mngr_baseline_stop_hook_for_subagent_proxy_child(work_dir: Path, fake_host: FakeHost) -> None:
     """A proxy-child agent inheriting only mngr-managed Stop hooks provisions cleanly.
 
     mngr_claude's readiness Stop hook (which runs wait_for_stop_hook.sh)
     is recognized as baseline and passed through without triggering the
     UnsupportedSubagentHookError.
     """
-    host_dir = tmp_path / "host"
-    host_dir.mkdir()
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
     claude_dir = work_dir / ".claude"
     claude_dir.mkdir()
     settings_path = claude_dir / "settings.local.json"
@@ -158,7 +154,6 @@ def test_plugin_allows_mngr_baseline_stop_hook_for_subagent_proxy_child(tmp_path
         )
         + "\n"
     )
-    host = FakeHost(host_dir)
     agent = FakeAgent(
         AgentId.generate(),
         work_dir,
@@ -166,7 +161,7 @@ def test_plugin_allows_mngr_baseline_stop_hook_for_subagent_proxy_child(tmp_path
         name=AgentName("reviewer--subagent-code-review-abcd1234"),
     )
 
-    _provision(agent, host, None)
+    _provision(agent, fake_host, None)
 
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
@@ -174,18 +169,13 @@ def test_plugin_allows_mngr_baseline_stop_hook_for_subagent_proxy_child(tmp_path
     assert "PreToolUse" in hooks
 
 
-def test_plugin_preserves_stop_hooks_for_top_level_agent(tmp_path: Path) -> None:
+def test_plugin_preserves_stop_hooks_for_top_level_agent(work_dir: Path, fake_host: FakeHost) -> None:
     """A plain top-level agent (no --subagent- infix) keeps its Stop/SubagentStop hooks."""
-    host_dir = tmp_path / "host"
-    host_dir.mkdir()
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    host = FakeHost(host_dir)
     agent_id = AgentId.generate()
     agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
     settings_path = _seed_settings_with_stop_hooks(work_dir)
 
-    _provision(agent, host, None)
+    _provision(agent, fake_host, None)
 
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
@@ -208,27 +198,20 @@ def _seed_project_settings_with_unguarded_stop(work_dir: Path) -> Path:
     return settings_path
 
 
-def test_plugin_raises_on_unguarded_project_stop_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_plugin_raises_on_unguarded_project_stop_hook(
+    work_dir: Path, fake_host: FakeHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """An un-guarded Stop hook in .claude/settings.json blocks provisioning."""
     monkeypatch.delenv("MNGR_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS", raising=False)
-    host_dir = tmp_path / "host"
-    host_dir.mkdir()
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
     _seed_project_settings_with_unguarded_stop(work_dir)
-    host = FakeHost(host_dir)
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
 
     with pytest.raises(UnguardedProjectStopHookError):
-        _provision(agent, host, None)
+        _provision(agent, fake_host, None)
 
 
-def test_plugin_allows_guarded_project_stop_hook(tmp_path: Path) -> None:
+def test_plugin_allows_guarded_project_stop_hook(work_dir: Path, fake_host: FakeHost) -> None:
     """A Stop hook in settings.json that has the env-conditional guard provisions cleanly."""
-    host_dir = tmp_path / "host"
-    host_dir.mkdir()
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
     claude_dir = work_dir / ".claude"
     claude_dir.mkdir(parents=True)
     (claude_dir / "settings.json").write_text(
@@ -251,46 +234,37 @@ def test_plugin_allows_guarded_project_stop_hook(tmp_path: Path) -> None:
         )
         + "\n"
     )
-    host = FakeHost(host_dir)
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
 
-    _provision(agent, host, None)
+    _provision(agent, fake_host, None)
 
 
 def test_plugin_project_stop_hook_check_can_be_bypassed_via_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    work_dir: Path, fake_host: FakeHost, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Setting the opt-out env var bypasses the un-guarded check."""
     monkeypatch.setenv("MNGR_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS", "1")
-    host_dir = tmp_path / "host"
-    host_dir.mkdir()
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
     _seed_project_settings_with_unguarded_stop(work_dir)
-    host = FakeHost(host_dir)
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
 
-    _provision(agent, host, None)
+    _provision(agent, fake_host, None)
 
 
-def test_plugin_skips_non_claude_agents(tmp_path: Path) -> None:
+def test_plugin_skips_non_claude_agents(work_dir: Path, fake_host: FakeHost) -> None:
     """Provisioning is a no-op for agents whose config is not ClaudeAgentConfig."""
-    host_dir = tmp_path / "host"
-    host_dir.mkdir()
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    host = FakeHost(host_dir)
     # Use a plain sentinel that is not a ClaudeAgentConfig instance.
     agent = FakeAgent(AgentId.generate(), work_dir, object())
 
-    _provision(agent, host, None)
+    _provision(agent, fake_host, None)
 
-    assert len(host.written_files) == 0
-    assert host.executed_commands == []
+    assert len(fake_host.written_files) == 0
+    assert fake_host.executed_commands == []
     assert not (work_dir / ".claude").exists()
 
 
-def test_plugin_preserves_readiness_user_prompt_submit_for_subagent_proxy_child(tmp_path: Path) -> None:
+def test_plugin_preserves_readiness_user_prompt_submit_for_subagent_proxy_child(
+    work_dir: Path, fake_host: FakeHost
+) -> None:
     """mngr_claude's UserPromptSubmit readiness entry survives the subagent-proxy strip.
 
     The UserPromptSubmit entry contains two inner commands: one touches
@@ -299,10 +273,6 @@ def test_plugin_preserves_readiness_user_prompt_submit_for_subagent_proxy_child(
     must be recognized as mngr-managed and left in place rather than
     stripped along with user-configured hooks.
     """
-    host_dir = tmp_path / "host"
-    host_dir.mkdir()
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
     claude_dir = work_dir / ".claude"
     claude_dir.mkdir()
     settings_path = claude_dir / "settings.local.json"
@@ -331,7 +301,6 @@ def test_plugin_preserves_readiness_user_prompt_submit_for_subagent_proxy_child(
         )
         + "\n"
     )
-    host = FakeHost(host_dir)
     agent = FakeAgent(
         AgentId.generate(),
         work_dir,
@@ -339,7 +308,7 @@ def test_plugin_preserves_readiness_user_prompt_submit_for_subagent_proxy_child(
         name=AgentName("parent--subagent-slug-deadbeef"),
     )
 
-    _provision(agent, host, None)
+    _provision(agent, fake_host, None)
 
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
@@ -380,22 +349,17 @@ def test_cascade_destroy_recorded_children_fires_for_every_map_entry(tmp_path: P
     assert all(log == state_dir / "subagent_cascade_destroy.log" for _, log in calls)
 
 
-def test_on_before_agent_destroy_skips_non_claude_agents(tmp_path: Path) -> None:
+def test_on_before_agent_destroy_skips_non_claude_agents(host_dir: Path, work_dir: Path, fake_host: FakeHost) -> None:
     """The cascade hook is a no-op for non-Claude agents (even if a subagent_map exists)."""
-    host_dir = tmp_path / "host"
-    host_dir.mkdir()
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
     agent_id = AgentId.generate()
     state_dir = host_dir / "agents" / str(agent_id)
     map_dir = state_dir / "subagent_map"
     map_dir.mkdir(parents=True)
     (map_dir / "toolu_xxx.json").write_text(json.dumps({"target_name": "should-not-be-destroyed"}))
 
-    host = FakeHost(host_dir)
     agent = FakeAgent(agent_id, work_dir, object(), name=AgentName("non-claude"))
     # Should not raise, should not produce a cascade log file.
-    _destroy(agent, host)
+    _destroy(agent, fake_host)
     assert not (state_dir / "subagent_cascade_destroy.log").exists()
 
 
@@ -415,13 +379,8 @@ def test_cascade_destroy_recorded_children_no_op_without_map_dir(tmp_path: Path)
     assert not (state_dir / "subagent_cascade_destroy.log").exists()
 
 
-def test_plugin_strip_hooks_is_safe_when_settings_missing(tmp_path: Path) -> None:
+def test_plugin_strip_hooks_is_safe_when_settings_missing(work_dir: Path, fake_host: FakeHost) -> None:
     """A subagent-proxy-child agent with no pre-existing settings.local.json provisions without error."""
-    host_dir = tmp_path / "host"
-    host_dir.mkdir()
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    host = FakeHost(host_dir)
     agent_id = AgentId.generate()
     agent = FakeAgent(
         agent_id,
@@ -430,7 +389,7 @@ def test_plugin_strip_hooks_is_safe_when_settings_missing(tmp_path: Path) -> Non
         name=AgentName("parent--subagent-slug-deadbeef"),
     )
 
-    _provision(agent, host, None)
+    _provision(agent, fake_host, None)
 
     # Provisioning still wrote the merged settings (PreToolUse/PostToolUse/SessionStart),
     # and the to-be-stripped keys were never present to begin with.
