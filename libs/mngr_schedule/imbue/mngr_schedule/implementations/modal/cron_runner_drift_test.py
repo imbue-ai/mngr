@@ -21,7 +21,6 @@ catches refactors a parser would miss.
 """
 
 import json
-import os
 import sys
 from collections.abc import Iterator
 from types import ModuleType
@@ -47,8 +46,9 @@ def cron_runner(tmp_path_factory: pytest.TempPathFactory) -> Iterator[ModuleType
     `modal deploy`), so a placeholder Dockerfile and empty context dir
     are sufficient.
 
-    Restores prior env / sys.modules state on teardown so other tests
-    in the session aren't affected.
+    `MonkeyPatch.context()` handles env var save/restore. We additionally
+    pop cron_runner from sys.modules on teardown so any future import
+    re-runs the module-level code with whatever env is current then.
     """
     tmp = tmp_path_factory.mktemp("cron_runner_drift_stub")
     dockerfile = tmp / "Dockerfile"
@@ -59,25 +59,17 @@ def cron_runner(tmp_path_factory: pytest.TempPathFactory) -> Iterator[ModuleType
         "cron_schedule": "0 0 * * *",
         "cron_timezone": "UTC",
     }
-    env_overrides = {
-        "SCHEDULE_DEPLOY_CONFIG": json.dumps(deploy_config),
-        "SCHEDULE_BUILD_CONTEXT_DIR": str(tmp),
-        "SCHEDULE_STAGING_DIR": str(tmp),
-        "SCHEDULE_DOCKERFILE": str(dockerfile),
-    }
-    saved_env = {k: os.environ.get(k) for k in env_overrides}
     saved_module = sys.modules.pop(_CRON_RUNNER_MODULE, None)
     try:
-        os.environ.update(env_overrides)
-        import imbue.mngr_schedule.implementations.modal.cron_runner as cron_runner_module
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setenv("SCHEDULE_DEPLOY_CONFIG", json.dumps(deploy_config))
+            monkeypatch.setenv("SCHEDULE_BUILD_CONTEXT_DIR", str(tmp))
+            monkeypatch.setenv("SCHEDULE_STAGING_DIR", str(tmp))
+            monkeypatch.setenv("SCHEDULE_DOCKERFILE", str(dockerfile))
+            import imbue.mngr_schedule.implementations.modal.cron_runner as cron_runner_module
 
-        yield cron_runner_module
+            yield cron_runner_module
     finally:
-        for key, value in saved_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
         sys.modules.pop(_CRON_RUNNER_MODULE, None)
         if saved_module is not None:
             sys.modules[_CRON_RUNNER_MODULE] = saved_module
