@@ -91,8 +91,7 @@ Examples:
         default=30,
         help=(
             "On incremental runs, re-fetch the last N days of history to notice new replies "
-            "on already-exported parent messages. Pass a non-positive number to disable. "
-            "Default: 30"
+            "on already-exported parent messages. Pass 0 to disable. Default: 30"
         ),
     )
     parser.add_argument(
