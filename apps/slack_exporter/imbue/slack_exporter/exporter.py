@@ -608,9 +608,12 @@ def _export_single_channel(
             channel_name=channel_config.name,
         )
 
-    # Extract reactions from fetched messages (no extra API calls needed). The refreshed
-    # set may include updated reaction data on older parents, so include it here too.
-    message_reactions = _extract_reactions_from_messages(all_fetched + refresh_fetched)
+    # Forward + refresh combined: refresh may surface updated reaction data and newly
+    # threaded replies on older parents, so downstream passes need both.
+    all_messages_for_downstream = all_fetched + refresh_fetched
+
+    # Extract reactions from fetched messages (no extra API calls needed).
+    message_reactions = _extract_reactions_from_messages(all_messages_for_downstream)
     if message_reactions:
         _diff_and_save(
             fresh_items=message_reactions,
@@ -623,11 +626,10 @@ def _export_single_channel(
         )
 
     # Export replies and detect relevant threads (reply reactions deferred to end of export).
-    # Include refresh_fetched so threads newly created on older parents are picked up.
     relevant_threads, thread_replies = _export_replies_for_channel(
         channel_id=channel_id,
         channel_name=channel_config.name,
-        all_message_events=all_fetched + refresh_fetched,
+        all_message_events=all_messages_for_downstream,
         known_reply_keys=known_reply_keys,
         latest_reply_by_thread=latest_reply_by_thread,
         user_id=user_id,
