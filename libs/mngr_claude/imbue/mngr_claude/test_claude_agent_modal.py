@@ -53,6 +53,12 @@ def _create_modal_agent(
             "--no-ensure-clean",
             "--source",
             str(source_dir),
+            # Plumb the test sandbox's ANTHROPIC_API_KEY into the agent env file
+            # so claude inside the Modal agent can authenticate. The agent runs
+            # in a separate Modal sandbox from this subprocess, so process-env
+            # inheritance does not reach it.
+            "--pass-env",
+            "ANTHROPIC_API_KEY",
             "--",
             "--dangerously-skip-permissions",
             "-p",
@@ -118,6 +124,7 @@ def _assert_sessions_preserved(host_dir: Path, agent_name: str) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.rsync
 @pytest.mark.timeout(600)
 def test_claude_agent_provisioning_on_modal(
     temp_source_dir: Path,
@@ -153,6 +160,7 @@ def test_claude_agent_provisioning_on_modal(
 
 
 @pytest.mark.release
+@pytest.mark.rsync
 @pytest.mark.timeout(600)
 def test_destroy_modal_agent_preserves_sessions_locally(
     temp_source_dir: Path,
@@ -186,6 +194,7 @@ def test_destroy_modal_agent_preserves_sessions_locally(
 
 
 @pytest.mark.release
+@pytest.mark.rsync
 @pytest.mark.timeout(600)
 def test_destroy_stopped_modal_agent_preserves_sessions_from_volume(
     temp_source_dir: Path,

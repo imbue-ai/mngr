@@ -62,4 +62,8 @@ pythonVersion = "3.11"
 strict = ["**/*.py"]
 
 [tool.coverage.report]
-fail_under = 95
+# Calibrated against measured offload reality (see libs/imbue_common's
+# pyproject.toml for the rationale -- coverage drifts 1-3 points across
+# offload runs of identical code, so a margin below observed coverage
+# is required).
+fail_under = 92

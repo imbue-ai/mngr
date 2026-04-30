@@ -34,7 +34,7 @@ relative paths always resolve against the host directory.""",
         ("exec", "Execute a shell command on an agent's host"),
         ("push", "Push files or git commits to an agent"),
         ("pull", "Pull files or git commits from an agent"),
-        ("events", "View agent and host event files"),
+        ("event", "View agent and host event files"),
     ),
 ).register()
 

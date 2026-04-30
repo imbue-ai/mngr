@@ -1,20 +1,38 @@
 # offload configuration for running mngr tests on Modal
 [offload]
 max_parallel = 50
-test_timeout_secs = 60
+# Per-batch timeout; 0.8.1 strictly enforces this (0.7.x was laxer). 60s
+# wasn't enough for a handful of slower unit/integration batches under
+# Modal sandbox cold-start, so give them 5 minutes of headroom.
+test_timeout_secs = 300
 stream_output = true
 sandbox_project_root = "/code/mngr"
-# git add -A syncs the index after git apply, which only updates the working
-# tree. Without it, git ls-files would still list files deleted by the patch.
-sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && git add -A && uv sync --all-packages"
 
 [provider]
 type = "modal"
 dockerfile = "libs/mngr/imbue/mngr/resources/Dockerfile"
 
+[checkpoint]
+# Commits touching any of these files trigger a fresh checkpoint image.
+# Everything else rides the checkpoint via thin git diff.
+#
+# pyproject.toml + uv.lock are here because Python deps are installed
+# at image build time via `uv sync --all-packages` in the mngr Dockerfile.
+# If dep churn starts invalidating the checkpoint too often, the
+# alternative is to drop these two from build_inputs and add a second
+# `uv sync` call at sandbox startup (e.g. via offload's sandbox_init_cmd
+# or the CMD) on top of the existing build-time one -- the Dockerfile
+# RUN still provides the baseline install, and the startup sync picks
+# up whatever drifted since the checkpoint. Trade-off is slower
+# per-sandbox startup vs faster warm-cache hit rate.
+build_inputs = [
+    "libs/mngr/imbue/mngr/resources/Dockerfile",
+    "pyproject.toml",
+    "uv.lock",
+]
+
 [framework]
 type = "pytest"
-paths = ["."]
 command = "uv run pytest"
 run_args = "--cov-fail-under=0 -p no:xdist"
 

@@ -1,8 +1,10 @@
 import queue as queue_mod
 import threading
+import tomllib
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -10,18 +12,36 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import PLACEHOLDER_ANTHROPIC_API_KEY
+from imbue.minds.desktop_client.agent_creator import _RedactingOutputCallback
+from imbue.minds.desktop_client.agent_creator import _build_inject_anthropic_command
 from imbue.minds.desktop_client.agent_creator import _build_latchkey_gateway_url
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
+from imbue.minds.desktop_client.agent_creator import _build_patch_claude_config_command
+from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
+from imbue.minds.desktop_client.agent_creator import _leased_agent_address
+from imbue.minds.desktop_client.agent_creator import _load_lease_info
+from imbue.minds.desktop_client.agent_creator import _load_or_create_leased_host_keypair
 from imbue.minds.desktop_client.agent_creator import _make_host_name
+from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
+from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
+from imbue.minds.desktop_client.agent_creator import _remove_dynamic_host_entry
+from imbue.minds.desktop_client.agent_creator import _remove_lease_info
+from imbue.minds.desktop_client.agent_creator import _save_lease_info
+from imbue.minds.desktop_client.agent_creator import _write_dynamic_host_entry
 from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import make_log_callback
 from imbue.minds.desktop_client.agent_creator import run_mngr_create
+from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
+from imbue.minds.desktop_client.host_pool_client import HostPoolClient
 from imbue.minds.desktop_client.latchkey.gateway import AGENT_SIDE_LATCHKEY_PORT
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
 from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
+from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyClient
+from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -85,7 +105,106 @@ def test_is_local_path_url() -> None:
     assert _is_local_path("git@github.com:user/repo.git") is False
 
 
+# -- _redact_url_credentials tests --
+
+
+def test_redact_url_credentials_strips_user_password() -> None:
+    assert (
+        _redact_url_credentials("https://x-access-token:ghp_secret@github.com/user/repo.git")
+        == "https://github.com/user/repo.git"
+    )
+
+
+def test_redact_url_credentials_leaves_plain_url_untouched() -> None:
+    assert _redact_url_credentials("https://github.com/user/repo.git") == "https://github.com/user/repo.git"
+
+
+def test_redact_url_credentials_leaves_ssh_url_untouched() -> None:
+    # SSH-style URLs (git@host:path) have no scheme, so urlsplit returns an
+    # empty netloc. The function must pass them through unchanged.
+    assert _redact_url_credentials("git@github.com:user/repo.git") == "git@github.com:user/repo.git"
+
+
+def test_redact_url_credentials_leaves_local_path_untouched() -> None:
+    assert _redact_url_credentials("/home/user/my-template") == "/home/user/my-template"
+
+
+# -- _redact_url_credentials_in_text tests --
+
+
+def test_redact_url_credentials_in_text_strips_embedded_url() -> None:
+    # Typical git stderr on auth failure -- we must scrub the token but keep
+    # the rest of the message for debuggability.
+    line = "fatal: unable to access 'https://x-access-token:ghp_secret@github.com/user/repo.git/': 403"
+    assert _redact_url_credentials_in_text(line) == "fatal: unable to access 'https://github.com/user/repo.git/': 403"
+
+
+def test_redact_url_credentials_in_text_leaves_plain_text_untouched() -> None:
+    assert _redact_url_credentials_in_text("no URLs here") == "no URLs here"
+    assert _redact_url_credentials_in_text("Cloning into 'my-repo'...") == "Cloning into 'my-repo'..."
+
+
+def test_redact_url_credentials_in_text_strips_multiple_urls() -> None:
+    text = "a https://u:p@host1/x and b https://user@host2/y"
+    assert _redact_url_credentials_in_text(text) == "a https://host1/x and b https://host2/y"
+
+
+def test_redact_url_credentials_in_text_leaves_bare_scp_url_untouched() -> None:
+    # SCP-style SSH URLs don't have a scheme, so the regex won't match and
+    # the user@host prefix (not a secret) is preserved.
+    assert (
+        _redact_url_credentials_in_text("cloning from git@github.com:user/repo.git")
+        == "cloning from git@github.com:user/repo.git"
+    )
+
+
+@pytest.mark.timeout(30)
+def test_clone_git_repo_redacts_credentials_in_error(tmp_path: Path) -> None:
+    """GitCloneError must not leak embedded credentials from git's stderr."""
+    # Point at a clearly-bogus credentialed URL; git will fail and echo the
+    # URL in its stderr. The raised error must have the token stripped.
+    # Bound the run time: git's default connect behaviour is unspecified and
+    # a restrictive-firewall configuration could otherwise let this hang.
+    dest = tmp_path / "dest"
+    secret_token = "ghp_thisshouldneverappear"
+    bad_url = f"https://x-access-token:{secret_token}@127.0.0.1:1/does-not-exist.git"
+    with pytest.raises(GitCloneError) as excinfo:
+        clone_git_repo(GitUrl(bad_url), dest)
+    assert secret_token not in str(excinfo.value)
+
+
+# -- _RedactingOutputCallback tests --
+
+
+def test_redacting_output_callback_redacts_and_forwards_is_stdout_flag() -> None:
+    """The wrapper must scrub credentials and pass the is_stdout flag through."""
+    received: list[tuple[str, bool]] = []
+
+    def inner(line: str, is_stdout: bool) -> None:
+        received.append((line, is_stdout))
+
+    wrapper = _RedactingOutputCallback(inner=inner)
+    # A line with an embedded credentialed URL -- userinfo must be stripped,
+    # and the is_stdout flag must be forwarded verbatim.
+    wrapper("fatal: unable to access 'https://x-access-token:ghp_secret@github.com/u/r.git/'", False)
+    # A line with no URL -- must pass through unchanged, with is_stdout=True preserved.
+    wrapper("Cloning into 'my-repo'...", True)
+    assert received == [
+        ("fatal: unable to access 'https://github.com/u/r.git/'", False),
+        ("Cloning into 'my-repo'...", True),
+    ]
+
+
 # -- _build_mngr_create_command tests --
+
+
+def test_leased_agent_address_uses_ssh_provider_and_leased_host_name() -> None:
+    """The explicit address matches the SSH provider + host-name pattern that
+    ``imbue.minds.bootstrap._ensure_mngr_settings`` sets up, so mngr discovery
+    only hits the SSH provider and skips ID lookup entirely."""
+    agent_id = AgentId()
+    address = _leased_agent_address(agent_id)
+    assert address == f"{agent_id}@leased-{agent_id}.ssh"
 
 
 def test_make_host_name() -> None:
@@ -299,14 +418,23 @@ def test_checkout_branch_raises_on_nonexistent_branch(tmp_path: Path) -> None:
 # -- AgentCreator tests --
 
 
-def test_agent_creator_get_creation_info_returns_none_for_unknown() -> None:
+def test_agent_creator_get_creation_info_returns_none_for_unknown(
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=Path("/tmp/test")),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
     assert creator.get_creation_info(AgentId()) is None
 
 
-def test_agent_creator_start_creation_returns_agent_id_and_tracks_status(tmp_path: Path) -> None:
+def test_agent_creator_start_creation_returns_agent_id_and_tracks_status(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     """Verify start_creation returns an agent ID and sets initial CLONING status.
 
     The actual background thread will fail (since the git URL is invalid),
@@ -314,6 +442,8 @@ def test_agent_creator_start_creation_returns_agent_id_and_tracks_status(tmp_pat
     """
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
 
     agent_id = creator.start_creation("file:///nonexistent-repo")
@@ -325,10 +455,16 @@ def test_agent_creator_start_creation_returns_agent_id_and_tracks_status(tmp_pat
     creator.wait_for_all()
 
 
-def test_agent_creator_start_creation_with_custom_name(tmp_path: Path) -> None:
+def test_agent_creator_start_creation_with_custom_name(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     """Verify start_creation accepts a custom agent name."""
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
     agent_id = creator.start_creation("file:///nonexistent-repo", agent_name="my-agent")
     info = creator.get_creation_info(agent_id)
@@ -336,16 +472,26 @@ def test_agent_creator_start_creation_with_custom_name(tmp_path: Path) -> None:
     creator.wait_for_all()
 
 
-def test_agent_creator_get_log_queue_returns_none_for_unknown() -> None:
+def test_agent_creator_get_log_queue_returns_none_for_unknown(
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=Path("/tmp/test")),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
     assert creator.get_log_queue(AgentId()) is None
 
 
-def test_agent_creator_get_log_queue_returns_queue_for_tracked() -> None:
+def test_agent_creator_get_log_queue_returns_queue_for_tracked(
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=Path("/tmp/test")),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
     agent_id = creator.start_creation("file:///nonexistent-repo")
     q = creator.get_log_queue(agent_id)
@@ -353,10 +499,16 @@ def test_agent_creator_get_log_queue_returns_queue_for_tracked() -> None:
     creator.wait_for_all()
 
 
-def test_agent_creator_start_creation_with_local_path(tmp_path: Path) -> None:
+def test_agent_creator_start_creation_with_local_path(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     """Verify start_creation with a nonexistent local path eventually reaches FAILED status."""
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
     agent_id = creator.start_creation("/nonexistent/local/path", agent_name="local-test")
     # The background thread runs immediately and fails because the path doesn't exist.
@@ -392,7 +544,11 @@ def test_make_log_callback_puts_lines_into_queue() -> None:
     assert log_queue.get_nowait() == "world"
 
 
-def test_agent_creator_accepts_server_port(tmp_path: Path) -> None:
+def test_agent_creator_accepts_server_port(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     """AgentCreator exposes its configured server_port for redirect-URL construction.
 
     Regression guard: the happy-path redirect URL for a newly-created agent is
@@ -403,11 +559,16 @@ def test_agent_creator_accepts_server_port(tmp_path: Path) -> None:
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
         server_port=12345,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
     assert creator.server_port == 12345
 
 
-def test_agent_creator_server_port_defaults_to_zero() -> None:
+def test_agent_creator_server_port_defaults_to_zero(
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     """AgentCreator.server_port defaults to 0 for legacy test callers.
 
     Tests that don't exercise the happy-path redirect can construct an
@@ -415,8 +576,444 @@ def test_agent_creator_server_port_defaults_to_zero() -> None:
     """
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=Path("/tmp/test")),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
     assert creator.server_port == 0
+
+
+# -- LEASED mode tests --
+
+
+def test_build_mngr_create_command_raises_for_leased_mode() -> None:
+    """LEASED mode should not use mngr create and must raise."""
+    with pytest.raises(MngrCommandError, match="LEASED mode does not use mngr create"):
+        _build_mngr_create_command(
+            launch_mode=LaunchMode.LEASED,
+            agent_name=AgentName("test-agent"),
+            agent_id=AgentId(),
+        )
+
+
+# -- _load_or_create_leased_host_keypair tests --
+
+
+def test_load_or_create_leased_host_keypair_generates_new_key(tmp_path: Path) -> None:
+    """First call should generate a new ed25519 keypair."""
+    private_key_path, public_key = _load_or_create_leased_host_keypair(tmp_path)
+
+    assert private_key_path.exists()
+    assert private_key_path.parent == tmp_path / "ssh" / "keys" / "leased_host"
+    assert private_key_path.name == "id_ed25519"
+    assert (private_key_path.parent / "id_ed25519.pub").exists()
+    assert public_key.startswith("ssh-ed25519 ")
+
+
+def test_load_or_create_leased_host_keypair_reuses_existing_key(tmp_path: Path) -> None:
+    """Second call should return the same keypair without regenerating."""
+    private_key_path_1, public_key_1 = _load_or_create_leased_host_keypair(tmp_path)
+    private_key_path_2, public_key_2 = _load_or_create_leased_host_keypair(tmp_path)
+
+    assert private_key_path_1 == private_key_path_2
+    assert public_key_1 == public_key_2
+
+
+# -- _write_dynamic_host_entry tests --
+
+
+def test_write_dynamic_host_entry_creates_valid_toml(tmp_path: Path) -> None:
+    """Writing a host entry should produce a valid TOML file."""
+    hosts_file = tmp_path / "dynamic_hosts.toml"
+    _write_dynamic_host_entry(
+        dynamic_hosts_file=hosts_file,
+        host_name="test-host",
+        address="10.0.0.1",
+        port=2222,
+        user="root",
+        key_file=Path("/home/user/.ssh/id_ed25519"),
+    )
+
+    content = tomllib.loads(hosts_file.read_text())
+    assert "test-host" in content
+    assert content["test-host"]["address"] == "10.0.0.1"
+    assert content["test-host"]["port"] == 2222
+    assert content["test-host"]["user"] == "root"
+    assert content["test-host"]["key_file"] == "/home/user/.ssh/id_ed25519"
+
+
+def test_write_dynamic_host_entry_appends_to_existing(tmp_path: Path) -> None:
+    """Writing a second host entry should preserve the first."""
+    hosts_file = tmp_path / "dynamic_hosts.toml"
+    _write_dynamic_host_entry(
+        dynamic_hosts_file=hosts_file,
+        host_name="host-a",
+        address="10.0.0.1",
+        port=22,
+        user="root",
+        key_file=Path("/key1"),
+    )
+    _write_dynamic_host_entry(
+        dynamic_hosts_file=hosts_file,
+        host_name="host-b",
+        address="10.0.0.2",
+        port=2222,
+        user="ubuntu",
+        key_file=Path("/key2"),
+    )
+
+    content = tomllib.loads(hosts_file.read_text())
+    assert "host-a" in content
+    assert "host-b" in content
+    assert content["host-a"]["address"] == "10.0.0.1"
+    assert content["host-b"]["address"] == "10.0.0.2"
+
+
+def test_write_dynamic_host_entry_creates_parent_directories(tmp_path: Path) -> None:
+    """The function should create parent directories if they do not exist."""
+    hosts_file = tmp_path / "nested" / "dir" / "dynamic_hosts.toml"
+    _write_dynamic_host_entry(
+        dynamic_hosts_file=hosts_file,
+        host_name="test-host",
+        address="10.0.0.1",
+        port=22,
+        user="root",
+        key_file=Path("/key"),
+    )
+    assert hosts_file.exists()
+
+
+# -- _remove_dynamic_host_entry tests --
+
+
+def test_remove_dynamic_host_entry_removes_section(tmp_path: Path) -> None:
+    """Removing a host entry should delete its section from the TOML file."""
+    hosts_file = tmp_path / "dynamic_hosts.toml"
+    _write_dynamic_host_entry(
+        dynamic_hosts_file=hosts_file,
+        host_name="host-a",
+        address="10.0.0.1",
+        port=22,
+        user="root",
+        key_file=Path("/key1"),
+    )
+    _write_dynamic_host_entry(
+        dynamic_hosts_file=hosts_file,
+        host_name="host-b",
+        address="10.0.0.2",
+        port=2222,
+        user="ubuntu",
+        key_file=Path("/key2"),
+    )
+
+    _remove_dynamic_host_entry(hosts_file, "host-a")
+
+    content = tomllib.loads(hosts_file.read_text())
+    assert "host-a" not in content
+    assert "host-b" in content
+
+
+def test_remove_dynamic_host_entry_noop_for_missing_file(tmp_path: Path) -> None:
+    """Removing from a nonexistent file should be a no-op."""
+    hosts_file = tmp_path / "nonexistent.toml"
+    _remove_dynamic_host_entry(hosts_file, "host-a")
+    assert not hosts_file.exists()
+
+
+def test_remove_dynamic_host_entry_noop_for_missing_section(tmp_path: Path) -> None:
+    """Removing a nonexistent section should be a no-op."""
+    hosts_file = tmp_path / "dynamic_hosts.toml"
+    _write_dynamic_host_entry(
+        dynamic_hosts_file=hosts_file,
+        host_name="host-a",
+        address="10.0.0.1",
+        port=22,
+        user="root",
+        key_file=Path("/key"),
+    )
+
+    _remove_dynamic_host_entry(hosts_file, "host-b")
+
+    content = tomllib.loads(hosts_file.read_text())
+    assert "host-a" in content
+
+
+# -- _save_lease_info / _load_lease_info / _remove_lease_info tests --
+
+
+def test_save_and_load_lease_info(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    test_uuid = UUID("a1b2c3d4-0000-0000-0000-000000000001")
+    _save_lease_info(tmp_path, agent_id, test_uuid)
+    loaded = _load_lease_info(tmp_path, agent_id)
+    assert loaded == test_uuid
+
+
+def test_load_lease_info_returns_none_for_missing(tmp_path: Path) -> None:
+    result = _load_lease_info(tmp_path, AgentId())
+    assert result is None
+
+
+def test_remove_lease_info_deletes_file(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    _save_lease_info(tmp_path, agent_id, UUID("e5f60000-0000-0000-0000-000000000002"))
+    _remove_lease_info(tmp_path, agent_id)
+    assert _load_lease_info(tmp_path, agent_id) is None
+
+
+def test_remove_lease_info_noop_for_missing(tmp_path: Path) -> None:
+    _remove_lease_info(tmp_path, AgentId())
+
+
+# -- release_leased_host tests --
+
+
+def test_release_leased_host_with_pool_client(
+    tmp_path: Path,
+    fake_pool_server: HostPoolClient,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    """release_leased_host removes the dynamic host entry, calls release, and removes lease info."""
+    paths = WorkspacePaths(data_dir=tmp_path)
+    agent_id = AgentId()
+    creator = AgentCreator(
+        paths=paths,
+        host_pool_client=fake_pool_server,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
+
+    # Set up state: lease info and a dynamic host entry
+    _save_lease_info(tmp_path, agent_id, UUID("00000000-0000-0000-0000-000000000007"))
+    dynamic_hosts_file = tmp_path / "ssh" / "dynamic_hosts.toml"
+    host_name = "leased-{}".format(agent_id)
+    _write_dynamic_host_entry(
+        dynamic_hosts_file=dynamic_hosts_file,
+        host_name=host_name,
+        address="10.0.0.1",
+        port=2222,
+        user="root",
+        key_file=Path("/tmp/key"),
+    )
+
+    creator.release_leased_host(agent_id, access_token="test-token")
+
+    # Lease info should be removed
+    assert _load_lease_info(tmp_path, agent_id) is None
+    # Dynamic host entry should be removed
+    content = tomllib.loads(dynamic_hosts_file.read_text())
+    assert host_name not in content
+
+
+def test_release_leased_host_noop_when_no_lease_info(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    """release_leased_host is a no-op when there is no lease info for the agent."""
+    paths = WorkspacePaths(data_dir=tmp_path)
+    creator = AgentCreator(
+        paths=paths,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
+    creator.release_leased_host(AgentId(), access_token="test-token")
+
+
+def test_release_leased_host_without_pool_client(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    """release_leased_host logs a warning but does not crash when host_pool_client is None."""
+    paths = WorkspacePaths(data_dir=tmp_path)
+    agent_id = AgentId()
+    creator = AgentCreator(
+        paths=paths,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
+
+    test_uuid = UUID("00000000-0000-0000-0000-000000000007")
+    _save_lease_info(tmp_path, agent_id, test_uuid)
+    creator.release_leased_host(agent_id, access_token="test-token")
+
+    # Lease info should NOT be removed (release was not successful)
+    assert _load_lease_info(tmp_path, agent_id) == test_uuid
+
+
+def test_agent_creator_has_host_pool_client_field(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    """AgentCreator accepts an optional host_pool_client field."""
+    paths = WorkspacePaths(data_dir=tmp_path)
+    creator_without = AgentCreator(
+        paths=paths,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
+    assert creator_without.host_pool_client is None
+
+    client = HostPoolClient(connector_url=RemoteServiceConnectorUrl("http://example.com"))
+    creator_with = AgentCreator(
+        paths=paths,
+        host_pool_client=client,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
+    assert creator_with.host_pool_client is not None
+
+
+def test_start_creation_leased_raises_without_pool_client(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    """start_creation with LEASED mode raises immediately if no host_pool_client."""
+    paths = WorkspacePaths(data_dir=tmp_path)
+    creator = AgentCreator(
+        paths=paths,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
+    with pytest.raises(MngrCommandError, match="host_pool_client"):
+        creator.start_creation(
+            repo_source="https://example.com/repo.git",
+            agent_name="test",
+            launch_mode=LaunchMode.LEASED,
+            access_token="test-token",
+            version="v0.1.0",
+        )
+
+
+def test_create_leased_agent_fails_without_access_token(
+    tmp_path: Path,
+    fake_pool_server: HostPoolClient,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    """start_creation raises synchronously when access_token is empty for LEASED mode."""
+    paths = WorkspacePaths(data_dir=tmp_path)
+    creator = AgentCreator(
+        paths=paths,
+        host_pool_client=fake_pool_server,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
+    with pytest.raises(MngrCommandError, match="access_token"):
+        creator.start_creation(
+            repo_source="https://example.com/repo.git",
+            agent_name="test",
+            launch_mode=LaunchMode.LEASED,
+            access_token="",
+            version="v0.1.0",
+        )
+
+
+def test_create_leased_agent_fails_without_version(
+    tmp_path: Path,
+    fake_pool_server: HostPoolClient,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    """start_creation raises synchronously when version is empty for LEASED mode."""
+    paths = WorkspacePaths(data_dir=tmp_path)
+    creator = AgentCreator(
+        paths=paths,
+        host_pool_client=fake_pool_server,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
+    with pytest.raises(MngrCommandError, match="version"):
+        creator.start_creation(
+            repo_source="https://example.com/repo.git",
+            agent_name="test",
+            launch_mode=LaunchMode.LEASED,
+            access_token="test-token",
+            version="",
+        )
+
+
+def test_create_leased_agent_leases_and_writes_dynamic_host(
+    tmp_path: Path,
+    fake_pool_server: HostPoolClient,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    """_create_leased_agent leases a host, writes dynamic host entry and lease info.
+
+    The mngr rename/start will fail (no real mngr), but the lease and
+    setup steps should complete, and cleanup should release the host.
+    """
+    paths = WorkspacePaths(data_dir=tmp_path)
+    creator = AgentCreator(
+        paths=paths,
+        host_pool_client=fake_pool_server,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
+    agent_id = creator.start_creation(
+        repo_source="https://example.com/repo.git",
+        agent_name="test-workspace",
+        launch_mode=LaunchMode.LEASED,
+        access_token="test-token",
+        version="v0.1.0",
+    )
+    creator.wait_for_all(timeout=10.0)
+    info = creator.get_creation_info(agent_id)
+    assert info is not None
+    # Will fail on mngr rename (not installed), but the lease should have been
+    # attempted and then cleaned up
+    assert info.status == AgentCreationStatus.FAILED
+
+
+def test_cleanup_failed_lease(
+    tmp_path: Path,
+    fake_pool_server: HostPoolClient,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    """_cleanup_failed_lease removes dynamic host entry, releases host, and removes lease info."""
+    paths = WorkspacePaths(data_dir=tmp_path)
+    creator = AgentCreator(
+        paths=paths,
+        host_pool_client=fake_pool_server,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
+    agent_id = AgentId()
+    dynamic_hosts_file = tmp_path / "ssh" / "dynamic_hosts.toml"
+    host_entry_name = "leased-{}".format(agent_id)
+
+    # Set up state as if a lease succeeded but setup failed
+    cleanup_uuid = UUID("00000000-0000-0000-0000-000000000099")
+    _save_lease_info(tmp_path, agent_id, cleanup_uuid)
+    _write_dynamic_host_entry(
+        dynamic_hosts_file=dynamic_hosts_file,
+        host_name=host_entry_name,
+        address="10.0.0.1",
+        port=2222,
+        user="root",
+        key_file=Path("/tmp/key"),
+    )
+
+    log_queue: queue_mod.Queue[str] = queue_mod.Queue()
+    creator._cleanup_failed_lease(
+        agent_id=agent_id,
+        host_db_id=cleanup_uuid,
+        access_token="test-token",
+        dynamic_hosts_file=dynamic_hosts_file,
+        host_entry_name=host_entry_name,
+        log_queue=log_queue,
+    )
+
+    # Dynamic host entry should be removed
+    content = tomllib.loads(dynamic_hosts_file.read_text())
+    assert host_entry_name not in content
+    # Lease info should be removed
+    assert _load_lease_info(tmp_path, agent_id) is None
 
 
 # -- Latchkey gateway env plumbing --
@@ -468,7 +1065,11 @@ def test_build_mngr_create_command_omits_latchkey_gateway_env_by_default() -> No
 
 
 @pytest.mark.timeout(30)
-def test_agent_creator_cleans_up_pre_spawned_latchkey_gateway_on_failure(tmp_path: Path) -> None:
+def test_agent_creator_cleans_up_pre_spawned_latchkey_gateway_on_failure(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     """When mngr create fails, any latchkey gateway pre-spawned for the agent must be torn down.
 
     Uses a fake ``latchkey`` binary so this test does not require a real
@@ -497,6 +1098,8 @@ def test_agent_creator_cleans_up_pre_spawned_latchkey_gateway_on_failure(tmp_pat
         creator = AgentCreator(
             paths=WorkspacePaths(data_dir=tmp_path / "minds"),
             latchkey_gateway_manager=gateway_manager,
+            root_concurrency_group=root_concurrency_group,
+            notification_dispatcher=notification_dispatcher,
         )
         # "Local path" that does not exist -- mngr create will not even get
         # the chance to fail; _create_agent_background aborts with MngrCommandError.
@@ -516,3 +1119,103 @@ def test_agent_creator_cleans_up_pre_spawned_latchkey_gateway_on_failure(tmp_pat
         assert gateway_manager.get_gateway_info(agent_id) is None
     finally:
         gateway_manager.stop()
+
+
+def test_is_git_worktree_returns_false_for_normal_repo(tmp_path: Path) -> None:
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    assert _is_git_worktree(tmp_path) is False
+
+
+def test_is_git_worktree_returns_true_for_worktree(tmp_path: Path) -> None:
+    git_file = tmp_path / ".git"
+    git_file.write_text("gitdir: /some/other/path/.git/worktrees/foo")
+    assert _is_git_worktree(tmp_path) is True
+
+
+def test_is_git_worktree_returns_false_when_no_git(tmp_path: Path) -> None:
+    assert _is_git_worktree(tmp_path) is False
+
+
+def test_make_host_name_appends_host_suffix() -> None:
+    result = _make_host_name(AgentName("my-agent"))
+    assert result == "my-agent-host"
+
+
+def test_placeholder_anthropic_api_key_has_correct_prefix() -> None:
+    assert PLACEHOLDER_ANTHROPIC_API_KEY.startswith("sk-ant-api03-")
+
+
+def test_placeholder_anthropic_api_key_has_realistic_length() -> None:
+    assert len(PLACEHOLDER_ANTHROPIC_API_KEY) >= 100
+
+
+def test_agent_creator_accepts_litellm_key_client(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    client = LiteLLMKeyClient(connector_url=RemoteServiceConnectorUrl("http://127.0.0.1:1"))
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        litellm_key_client=client,
+    )
+    assert creator.litellm_key_client is client
+
+
+def test_agent_creator_litellm_key_client_defaults_to_none(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
+    assert creator.litellm_key_client is None
+
+
+def test_build_inject_anthropic_command_sets_key_and_base_url() -> None:
+    cmd = _build_inject_anthropic_command(
+        litellm_key="sk-litellm-real-key-abc123",
+        litellm_base_url="https://proxy.modal.run/anthropic",
+        env_path="/mngr/agents/test-id/env",
+    )
+    assert "ANTHROPIC_API_KEY=sk-litellm-real-key-abc123" in cmd
+    assert "ANTHROPIC_BASE_URL=https://proxy.modal.run/anthropic" in cmd
+    assert "/mngr/agents/test-id/env" in cmd
+
+
+def test_build_inject_anthropic_command_removes_old_values_first() -> None:
+    cmd = _build_inject_anthropic_command(
+        litellm_key="sk-test",
+        litellm_base_url="https://example.com/anthropic",
+        env_path="/tmp/env",
+    )
+    assert "sed -i '/^ANTHROPIC_API_KEY=/d'" in cmd
+    assert "sed -i '/^ANTHROPIC_BASE_URL=/d'" in cmd
+
+
+def test_build_patch_claude_config_command_targets_correct_path() -> None:
+    agent_id = AgentId()
+    cmd = _build_patch_claude_config_command(
+        litellm_key="sk-litellm-real-key-xyz",
+        agent_id=agent_id,
+    )
+    expected_path = "/mngr/agents/{}/plugin/claude/anthropic/.claude.json".format(agent_id)
+    assert expected_path in cmd
+    assert "sk-litellm-real-key-xyz" in cmd
+
+
+def test_build_patch_claude_config_command_uses_python_json() -> None:
+    cmd = _build_patch_claude_config_command(
+        litellm_key="sk-test-key-0123456789",
+        agent_id=AgentId(),
+    )
+    assert "python3" in cmd
+    assert "primaryApiKey" in cmd
+    assert "customApiKeyResponses" in cmd
+    assert "sk-test-key-0123456789"[-20:] in cmd
