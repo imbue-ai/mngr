@@ -9,8 +9,10 @@ set -euo pipefail
 # The scheduled agent runs at midnight PST as a headless_claude agent. The
 # orchestration steps live in scripts/changelog_consolidation_prompt.md and
 # are executed by claude itself (running consolidate_changelog.py, summarizing
-# the new section, committing, pushing a branch, opening a PR, writing
-# status.json).
+# the new section, committing, pushing a branch, opening a PR). Claude's
+# final assistant message is a single JSON object describing the outcome
+# ({status, pr_url, notes}) -- visible in `mngr schedule run` stdout and
+# Modal logs, no separate state-volume artifact needed.
 #
 # Usage:
 #   ./scripts/setup_changelog_agent.sh
@@ -132,6 +134,6 @@ uv run mngr schedule add "$TRIGGER_NAME" \
 
 echo "Schedule '${TRIGGER_NAME}' created successfully."
 echo ""
-echo "To check the result of a run (works even if sandbox has exited):"
-echo "  uv run mngr list --format json $DISABLE_PLUGIN_ARGS"
-echo "  uv run mngr file get <agent-id> status.json --relative-to state $DISABLE_PLUGIN_ARGS"
+echo "To trigger a run on demand and read its outcome JSON:"
+echo "  uv run mngr schedule run $TRIGGER_NAME --provider $PROVIDER $DISABLE_PLUGIN_ARGS"
+echo "(claude's final assistant message is a single JSON object: {status, pr_url, notes})"
