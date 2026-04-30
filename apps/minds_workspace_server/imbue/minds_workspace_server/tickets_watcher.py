@@ -149,8 +149,12 @@ class AgentTicketsWatcher:
                 observer.schedule(handler, str(self._tickets_dir), recursive=False)
             observer.start()
             self._observer = observer
-        except OSError:
-            logger.debug("Failed to start watchdog observer for tickets dir: {}", parent_dir)
+        except OSError as e:
+            # Watchdog start failure (typically inotify watch limit reached or
+            # a permissions issue). Log at warning so operators see the
+            # degradation; the polling-only fallback in _run keeps the
+            # watcher functional, just with higher latency.
+            logger.warning("Failed to start watchdog observer for tickets dir {}: {}", parent_dir, e)
 
     def _scan(self) -> list[dict[str, Any]]:
         """Scan the tickets directory and emit one event per OBSERVED
