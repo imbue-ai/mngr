@@ -141,8 +141,8 @@ def _stop_all_watchers(application: FastAPI) -> None:
         watcher.stop()
     watchers.clear()
     tickets_watchers: dict[str, AgentTicketsWatcher] = getattr(application.state, "tickets_watchers", {})
-    for tw in tickets_watchers.values():
-        tw.stop()
+    for tickets_watcher in tickets_watchers.values():
+        tickets_watcher.stop()
     tickets_watchers.clear()
 
 
