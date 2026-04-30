@@ -40,6 +40,10 @@ slack-exporter --max-recent-threads-for-reactions 20
 # Force re-fetch of cached data (channels, users, identity)
 slack-exporter --refresh
 
+# On incremental runs, re-fetch the last N days of channel history so that new replies
+# on already-exported parent messages are noticed (default: 30; pass 0 to disable)
+slack-exporter --refresh-window-days 60
+
 # Configure cache TTL via environment variable (default: 600 seconds / 10 minutes)
 SLACK_EXPORTER_CACHE_TTL_SECONDS=300 slack-exporter
 
@@ -55,10 +59,11 @@ slack-exporter -v
 4. Fetches unread markers (`last_read` position) per channel via `conversations.info` and saves when changed
 5. Fetches the user list from Slack (via `users.list`) and saves only new users -- cached for `SLACK_EXPORTER_CACHE_TTL_SECONDS`
 6. For each configured channel, fetches new messages (via `conversations.history`) starting from the most recent message already exported (or the configured oldest date on first run). If the configured oldest date is earlier than the oldest date already searched from, also backfills older messages down to that date
-7. For messages with threads (reply_count > 0), uses the `latest_reply` field to skip threads with no new replies, then fetches replies (via `conversations.replies`) only for threads that have changed
-8. Extracts reactions from fetched messages and saves when new or changed
-9. Detects threads relevant to the authenticated user (threads where the user replied or was mentioned) and records them as `relevant_threads` events
-10. After all channels are exported, checks reactions on the most recent relevant threads (sorted by latest reply, controlled by `--max-recent-threads-for-reactions`, default 50)
+7. On incremental runs, runs a refresh pass over the last `--refresh-window-days` days of channel history (default: 30) and appends changed parent messages to `message/updated`, so that replies added after a parent was first exported are picked up on subsequent runs
+8. For messages with threads (reply_count > 0) -- including parents discovered or refreshed in the previous step -- uses the `latest_reply` field to skip threads with no new replies, then fetches replies (via `conversations.replies`) only for threads that have changed
+9. Extracts reactions from fetched messages and saves when new or changed
+10. Detects threads relevant to the authenticated user (threads where the user replied or was mentioned) and records them as `relevant_threads` events
+11. After all channels are exported, checks reactions on the most recent relevant threads (sorted by latest reply, controlled by `--max-recent-threads-for-reactions`, default 50)
 
 Use `--refresh` to bypass the cache and force re-fetching of all data.
 
