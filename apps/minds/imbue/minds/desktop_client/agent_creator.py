@@ -852,14 +852,32 @@ class AgentCreator(MutableModel):
             "Cloudflare tunnel setup task) to the user as OS notifications."
         ),
     )
-    # Upper bound on how long to wait for the workspace server to register and
-    # start serving HTTP after mngr create returns. On timeout, creation still
-    # completes and the user is redirected -- they'll see whatever error the
-    # subdomain forwarder produces if the server still isn't up. Configurable
-    # so tests can lower it.
-    workspace_ready_timeout_seconds: float = Field(default=60.0, frozen=True)
-    workspace_ready_poll_interval_seconds: float = Field(default=0.2, frozen=True)
-    workspace_ready_probe_timeout_seconds: float = Field(default=2.0, frozen=True)
+    workspace_ready_timeout_seconds: float = Field(
+        default=60.0,
+        frozen=True,
+        description=(
+            "Total budget for both stages of the workspace-readiness wait (URL registration "
+            "plus HTTP 200 probe) after ``mngr create`` returns. On timeout, creation still "
+            "completes and the user is redirected -- they'll see whatever error the subdomain "
+            "forwarder produces if the server still isn't up. Configurable so tests can lower it."
+        ),
+    )
+    workspace_ready_poll_interval_seconds: float = Field(
+        default=0.2,
+        frozen=True,
+        description=(
+            "Sleep between polls for both the URL-resolution stage and the HTTP-probe stage of "
+            "``_wait_for_workspace_ready``."
+        ),
+    )
+    workspace_ready_probe_timeout_seconds: float = Field(
+        default=2.0,
+        frozen=True,
+        description=(
+            "Per-attempt HTTP timeout passed to ``probe_workspace_ready`` so a single probe "
+            "can't stall the overall poll loop."
+        ),
+    )
 
     _statuses: dict[str, AgentCreationStatus] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
