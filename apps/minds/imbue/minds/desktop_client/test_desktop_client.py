@@ -2,11 +2,13 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
@@ -1509,3 +1511,22 @@ def test_subdomain_forward_loopback_ipv6_url_without_tunnel_returns_502(tmp_path
     response = client.get("/")
     assert response.status_code == 502
     assert "refusing to dial host loopback" in response.text
+
+
+def test_subdomain_forward_websocket_loopback_url_without_tunnel_closes_with_1013(tmp_path: Path) -> None:
+    """Loopback registered URL + no SSH tunnel must close the WebSocket with 1013
+    (Try Again Later) instead of dialing the host's loopback interface."""
+    agent_id = AgentId()
+    workspace_url = "http://localhost:8000"
+    client, auth_store = _create_loopback_subdomain_client(tmp_path, agent_id, workspace_url)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    # Starlette's TestClient ignores base_url for the WebSocket Host header, so
+    # set it explicitly to route through the workspace subdomain handler.
+    host_header = f"{agent_id}.localhost:8420"
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect("/", headers={"host": host_header}) as ws:
+            ws.receive_text()
+
+    assert exc_info.value.code == 1013
+    assert "loopback" in (exc_info.value.reason or "")
