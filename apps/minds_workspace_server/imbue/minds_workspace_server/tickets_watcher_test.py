@@ -24,10 +24,44 @@ def _capture() -> tuple[list[tuple[str, list[dict[str, Any]]]], Any]:
     return calls, cb
 
 
-def _write_ticket(tickets_dir: Path, ticket_id: str, content: str) -> Path:
+def _ticket_text(
+    ticket_id: str,
+    status: str,
+    *,
+    title: str = "Sample task",
+    created: str = "2026-04-28T01:00:00Z",
+    notes: str | None = None,
+) -> str:
+    """Build a tk-shaped ticket body. Centralizes the boilerplate frontmatter
+    so individual tests only describe the parts that actually vary
+    (id / status / notes / title)."""
+    body = f"""---
+id: {ticket_id}
+status: {status}
+deps: []
+links: []
+created: {created}
+type: task
+priority: 2
+---
+# {title}
+"""
+    if notes is not None:
+        body += f"\n## Notes\n\n{notes}\n"
+    return body
+
+
+def _write_ticket_with_status(
+    tickets_dir: Path,
+    ticket_id: str,
+    status: str,
+    *,
+    title: str = "Sample task",
+    notes: str | None = None,
+) -> Path:
     tickets_dir.mkdir(parents=True, exist_ok=True)
     path = tickets_dir / f"{ticket_id}.md"
-    path.write_text(content)
+    path.write_text(_ticket_text(ticket_id, status, title=title, notes=notes))
     return path
 
 
@@ -43,21 +77,7 @@ def test_scan_skips_files_with_invalid_utf8(tmp_path: Path) -> None:
     this, a single malformed file would propagate UnicodeDecodeError up
     through _scan() and kill the watcher's background thread."""
     tickets_dir = tmp_path / ".tickets"
-    _write_ticket(
-        tickets_dir,
-        "tt-good",
-        """---
-id: tt-good
-status: open
-deps: []
-links: []
-created: 2026-04-28T01:00:00Z
-type: task
-priority: 2
----
-# Valid ticket
-""",
-    )
+    _write_ticket_with_status(tickets_dir, "tt-good", "open", title="Valid ticket")
     bad_file = tickets_dir / "tt-bad.md"
     bad_file.write_bytes(b"---\nid: tt-bad\nstatus: open\n---\n# \xff\xfe\xfd not utf-8\n")
 
@@ -72,21 +92,7 @@ def test_open_ticket_emits_one_event_with_created_at_timestamp(tmp_path: Path) -
     """A freshly-discovered open ticket emits a single open event whose
     timestamp comes from the frontmatter `created` field (truthful)."""
     tickets_dir = tmp_path / ".tickets"
-    _write_ticket(
-        tickets_dir,
-        "tt-aaaa",
-        """---
-id: tt-aaaa
-status: open
-deps: []
-links: []
-created: 2026-04-28T01:00:00Z
-type: task
-priority: 2
----
-# Hello world
-""",
-    )
+    _write_ticket_with_status(tickets_dir, "tt-aaaa", "open", title="Hello world")
     _calls, cb = _capture()
     watcher = AgentTicketsWatcher("agent-1", tickets_dir, cb)
     events = watcher.get_all_events()
@@ -102,21 +108,7 @@ def test_replayed_in_progress_ticket_emits_only_current_status(tmp_path: Path) -
     transitioning from open -- so we emit a single in_progress event,
     NOT a synthetic open event."""
     tickets_dir = tmp_path / ".tickets"
-    _write_ticket(
-        tickets_dir,
-        "tt-bbbb",
-        """---
-id: tt-bbbb
-status: in_progress
-deps: []
-links: []
-created: 2026-04-28T01:00:00Z
-type: task
-priority: 2
----
-# In progress task
-""",
-    )
+    _write_ticket_with_status(tickets_dir, "tt-bbbb", "in_progress", title="In progress task")
     _calls, cb = _capture()
     watcher = AgentTicketsWatcher("agent-1", tickets_dir, cb)
     events = watcher.get_all_events()
@@ -133,26 +125,12 @@ def test_replayed_closed_ticket_emits_only_closed_event_with_summary(tmp_path: P
     no synthetic in_progress is generated. Summary still rides on the
     closed event."""
     tickets_dir = tmp_path / ".tickets"
-    _write_ticket(
+    _write_ticket_with_status(
         tickets_dir,
         "tt-cccc",
-        """---
-id: tt-cccc
-status: closed
-deps: []
-links: []
-created: 2026-04-28T01:00:00Z
-type: task
-priority: 2
----
-# Done task
-
-## Notes
-
-**2026-04-28T01:05:00Z**
-
-Final summary text for this task.
-""",
+        "closed",
+        title="Done task",
+        notes="**2026-04-28T01:05:00Z**\n\nFinal summary text for this task.",
     )
     _calls, cb = _capture()
     watcher = AgentTicketsWatcher("agent-1", tickets_dir, cb)
@@ -168,26 +146,12 @@ def test_summary_only_on_closed_event(tmp_path: Path) -> None:
     """A ticket with notes still in_progress: no summary leaks; the
     in_progress event's summary field is None."""
     tickets_dir = tmp_path / ".tickets"
-    _write_ticket(
+    _write_ticket_with_status(
         tickets_dir,
         "tt-dddd",
-        """---
-id: tt-dddd
-status: in_progress
-deps: []
-links: []
-created: 2026-04-28T01:00:00Z
-type: task
-priority: 2
----
-# Still working
-
-## Notes
-
-**2026-04-28T01:02:00Z**
-
-Interim note that should not appear as a summary yet.
-""",
+        "in_progress",
+        title="Still working",
+        notes="**2026-04-28T01:02:00Z**\n\nInterim note that should not appear as a summary yet.",
     )
     _calls, cb = _capture()
     watcher = AgentTicketsWatcher("agent-1", tickets_dir, cb)
@@ -203,21 +167,7 @@ def test_repeated_get_all_events_is_idempotent(tmp_path: Path) -> None:
     in server.py relies on: every page reload re-issues GET /events and
     expects the full event list back, not just deltas since the last poll."""
     tickets_dir = tmp_path / ".tickets"
-    _write_ticket(
-        tickets_dir,
-        "tt-eeee",
-        """---
-id: tt-eeee
-status: open
-deps: []
-links: []
-created: 2026-04-28T01:00:00Z
-type: task
-priority: 2
----
-# Stable
-""",
-    )
+    _write_ticket_with_status(tickets_dir, "tt-eeee", "open", title="Stable")
     _calls, cb = _capture()
     watcher = AgentTicketsWatcher("agent-1", tickets_dir, cb)
     first = watcher.get_all_events()
@@ -232,22 +182,10 @@ def test_lifecycle_accumulates_one_event_per_observed_transition(tmp_path: Path)
     cumulative history, one per observed transition. get_all_events()
     returns the full accumulated list each call."""
     tickets_dir = tmp_path / ".tickets"
-    path = tickets_dir / "tt-ffff.md"
     tickets_dir.mkdir(parents=True, exist_ok=True)
+    path = tickets_dir / "tt-ffff.md"
 
-    path.write_text(
-        """---
-id: tt-ffff
-status: open
-deps: []
-links: []
-created: 2026-04-28T01:00:00Z
-type: task
-priority: 2
----
-# Lifecycle test
-"""
-    )
+    path.write_text(_ticket_text("tt-ffff", "open", title="Lifecycle test"))
 
     _calls, cb = _capture()
     watcher = AgentTicketsWatcher("agent-1", tickets_dir, cb)
@@ -255,40 +193,17 @@ priority: 2
     events1 = watcher.get_all_events()
     assert [e["event_id"] for e in events1] == ["tt-ffff-open"]
 
-    path.write_text(
-        """---
-id: tt-ffff
-status: in_progress
-deps: []
-links: []
-created: 2026-04-28T01:00:00Z
-type: task
-priority: 2
----
-# Lifecycle test
-"""
-    )
+    path.write_text(_ticket_text("tt-ffff", "in_progress", title="Lifecycle test"))
     events2 = watcher.get_all_events()
     assert [e["event_id"] for e in events2] == ["tt-ffff-open", "tt-ffff-in_progress"]
 
     path.write_text(
-        """---
-id: tt-ffff
-status: closed
-deps: []
-links: []
-created: 2026-04-28T01:00:00Z
-type: task
-priority: 2
----
-# Lifecycle test
-
-## Notes
-
-**2026-04-28T01:10:00Z**
-
-All done.
-"""
+        _ticket_text(
+            "tt-ffff",
+            "closed",
+            title="Lifecycle test",
+            notes="**2026-04-28T01:10:00Z**\n\nAll done.",
+        )
     )
     events3 = watcher.get_all_events()
     assert [e["event_id"] for e in events3] == ["tt-ffff-open", "tt-ffff-in_progress", "tt-ffff-closed"]
