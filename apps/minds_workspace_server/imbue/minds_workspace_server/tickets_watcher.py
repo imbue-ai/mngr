@@ -110,16 +110,32 @@ class AgentTicketsWatcher:
         the same list every time. Used to seed the chat view's initial
         state on each GET /events (matching the contract of
         AgentSessionWatcher.get_all_events()), so multiple page reloads
-        keep returning the full history. The live broadcast path in
-        _run() consumes new transitions separately via _scan().
+        keep returning the full history.
+
+        Any transitions discovered by THIS call's catch-up scan are also
+        forwarded through `_on_events`. Without that, a request-handler
+        scan would mark transitions as "seen" in the watcher's internal
+        cache before the background `_run` loop got a chance to observe
+        them -- so other connected websocket subscribers for the same
+        agent would silently miss those events until they too refetched.
         """
-        # Run a fresh scan so any transitions that happened between the
-        # last poll and this call are captured; the scan also appends to
-        # _emitted_events. Both calls go through _scan_lock so the snapshot
-        # we hand back is consistent with respect to a concurrent _run().
+        # Snapshot the cumulative log size before the scan so we can
+        # tell which events the scan newly appended. _scan() takes
+        # _scan_lock internally; we re-acquire it after to slice off the
+        # newly-appended suffix consistently with respect to a concurrent
+        # _run().
+        with self._scan_lock:
+            previous_count = len(self._emitted_events)
         self._scan()
         with self._scan_lock:
-            return list(self._emitted_events)
+            snapshot = list(self._emitted_events)
+        newly_emitted = snapshot[previous_count:]
+        # Broadcast outside the lock: _on_events is foreign code (today
+        # it just enqueues to a thread-safe queue, but we don't want to
+        # hold our lock across arbitrary callbacks).
+        if newly_emitted:
+            self._on_events(self._agent_id, newly_emitted)
+        return snapshot
 
     def _run(self) -> None:
         self._setup_watchers()
