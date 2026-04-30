@@ -69,6 +69,14 @@ class ExporterSettings(FrozenModel):
         default=50,
         description="Number of most recent relevant threads to check for reaction changes after export",
     )
+    refresh_window_days: int | None = Field(
+        default=30,
+        description=(
+            "On incremental runs, re-fetch the last N days of channel history to refresh "
+            "already-exported parent messages' reply_count / latest_reply metadata, so that "
+            "new replies on older parents are noticed. Set to None to disable."
+        ),
+    )
     cache_ttl_seconds: int = Field(
         default=600,
         description="How long to cache channel/user/identity data before re-fetching (seconds)",
