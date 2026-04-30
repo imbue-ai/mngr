@@ -627,11 +627,14 @@ def _make_workspace_ready_creator(
     All five readiness tests share the same constructor boilerplate; this
     helper centralizes it so each test only has to specify what it actually
     cares about (the resolver and the simulated HTTP probe behavior).
-    Pass ``transport=None`` to skip injecting a probe client and let the
-    default ``httpx.Client`` factory run -- the URL-registration timeout
-    test never reaches the probe stage and so doesn't need one.
+    Pass ``transport=None`` to skip the explicit probe-client injection and
+    let the default ``httpx.Client`` factory run -- the URL-registration
+    timeout test never reaches the probe stage and so doesn't need one.
     """
-    kwargs: dict[str, object] = dict(
+    probe_http_client = (
+        httpx.Client(transport=httpx.MockTransport(transport)) if transport is not None else httpx.Client()
+    )
+    return AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
         backend_resolver=backend_resolver,
         root_concurrency_group=root_concurrency_group,
@@ -639,10 +642,8 @@ def _make_workspace_ready_creator(
         workspace_ready_timeout_seconds=workspace_ready_timeout_seconds,
         workspace_ready_poll_interval_seconds=workspace_ready_poll_interval_seconds,
         workspace_ready_probe_timeout_seconds=workspace_ready_probe_timeout_seconds,
+        probe_http_client=probe_http_client,
     )
-    if transport is not None:
-        kwargs["probe_http_client"] = httpx.Client(transport=httpx.MockTransport(transport))
-    return AgentCreator(**kwargs)
 
 
 def test_wait_for_workspace_ready_returns_true_once_url_appears(
