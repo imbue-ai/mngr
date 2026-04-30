@@ -208,3 +208,32 @@ def test_lifecycle_accumulates_one_event_per_observed_transition(tmp_path: Path)
     events3 = watcher.get_all_events()
     assert [e["event_id"] for e in events3] == ["tt-ffff-open", "tt-ffff-in_progress", "tt-ffff-closed"]
     assert events3[-1]["summary"] == "All done."
+
+
+def test_get_all_events_forwards_newly_emitted_events_through_callback(tmp_path: Path) -> None:
+    """`get_all_events()` documents that any transitions discovered by its
+    catch-up scan are forwarded through `on_events`, so other connected
+    websocket subscribers don't silently miss those events. Without this
+    contract a request-handler scan would mark transitions "seen" in the
+    watcher's cache before the background `_run` loop got a chance to
+    observe them."""
+    tickets_dir = tmp_path / ".tickets"
+    path = _write_ticket_with_status(tickets_dir, "tt-cb-1", "open", title="First")
+    calls, cb = _capture()
+    watcher = AgentTicketsWatcher("agent-1", tickets_dir, cb)
+
+    # First call discovers tt-cb-1 -> one callback invocation with one event.
+    watcher.get_all_events()
+    assert len(calls) == 1
+    assert calls[0][0] == "agent-1"
+    assert [e["event_id"] for e in calls[0][1]] == ["tt-cb-1-open"]
+
+    # No new transitions: the next call is a no-op for the callback.
+    watcher.get_all_events()
+    assert len(calls) == 1
+
+    # A new transition triggers another forward.
+    path.write_text(_ticket_text("tt-cb-1", "in_progress", title="First"))
+    watcher.get_all_events()
+    assert len(calls) == 2
+    assert [e["event_id"] for e in calls[1][1]] == ["tt-cb-1-in_progress"]
