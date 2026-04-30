@@ -236,6 +236,54 @@ def _maybe_write_full_discovery_snapshot(
         logger.warning("Failed to write full discovery snapshot: {}", e)
 
 
+def _load_one_provider_into(
+    provider_name: ProviderInstanceName,
+    mngr_ctx: MngrContext,
+    params: _ListAgentsParams,
+    result: ListResult,
+    results_lock: Lock,
+    reset_caches: bool,
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
+    providers: list[ProviderInstanceInterface],
+    providers_lock: Lock,
+) -> None:
+    """Construct one provider, run discovery, and merge results under the given locks.
+
+    Per-thread worker for `_load_agents_per_provider`. On failure, honors
+    `params.error_behavior`: ABORT re-raises (wrapped to `MngrError`); CONTINUE
+    records a `ProviderErrorInfo` on `result.errors` and returns.
+    """
+    try:
+        provider = get_provider_instance(provider_name, mngr_ctx)
+        if reset_caches:
+            provider.reset_caches()
+        provider_results = provider.discover_hosts_and_agents(
+            cg=mngr_ctx.concurrency_group, include_destroyed=True
+        )
+    except Exception as e:
+        if params.error_behavior == ErrorBehavior.ABORT:
+            if isinstance(e, MngrError):
+                raise
+            raise MngrError(str(e)) from e
+        logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
+        emit_discovery_error_to_stdout(
+            error_type=type(e).__name__,
+            error_message=str(e),
+            source_name=str(provider_name),
+        )
+        error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
+        with results_lock:
+            result.errors.append(error_info)
+        if params.on_error:
+            params.on_error(error_info)
+        return
+
+    with providers_lock:
+        providers.append(provider)
+    with results_lock:
+        agents_by_host.update(provider_results)
+
+
 def _load_agents_per_provider(
     mngr_ctx: MngrContext,
     provider_names: tuple[str, ...] | None,
@@ -256,43 +304,26 @@ def _load_agents_per_provider(
     providers: list[ProviderInstanceInterface] = []
     providers_lock = Lock()
 
-    def _load_one(provider_name: ProviderInstanceName) -> None:
-        try:
-            provider = get_provider_instance(provider_name, mngr_ctx)
-            if reset_caches:
-                provider.reset_caches()
-            provider_results = provider.discover_hosts_and_agents(
-                cg=mngr_ctx.concurrency_group, include_destroyed=True
-            )
-        except Exception as e:
-            if params.error_behavior == ErrorBehavior.ABORT:
-                if isinstance(e, MngrError):
-                    raise
-                raise MngrError(str(e)) from e
-            logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
-            emit_discovery_error_to_stdout(
-                error_type=type(e).__name__,
-                error_message=str(e),
-                source_name=str(provider_name),
-            )
-            error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
-            with results_lock:
-                result.errors.append(error_info)
-            if params.on_error:
-                params.on_error(error_info)
-            return
-
-        with providers_lock:
-            providers.append(provider)
-        with results_lock:
-            agents_by_host.update(provider_results)
-
     with log_span("Loading agents from all providers"):
         names = list_provider_names_to_load(mngr_ctx, provider_names)
         with mngr_executor(
             parent_cg=mngr_ctx.concurrency_group, name="list_agents_load_providers", max_workers=32
         ) as executor:
-            futures = [executor.submit(_load_one, name) for name in names]
+            futures = [
+                executor.submit(
+                    _load_one_provider_into,
+                    name,
+                    mngr_ctx,
+                    params,
+                    result,
+                    results_lock,
+                    reset_caches,
+                    agents_by_host,
+                    providers,
+                    providers_lock,
+                )
+                for name in names
+            ]
 
         # Re-raise any thread exceptions (ABORT-mode errors)
         for future in futures:
