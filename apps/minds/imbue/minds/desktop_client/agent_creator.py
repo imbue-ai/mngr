@@ -807,10 +807,11 @@ class AgentCreator(MutableModel):
     backend_resolver: BackendResolverInterface = Field(
         frozen=True,
         description=(
-            "Resolver used to poll for workspace-server readiness after ``mngr create`` returns. "
-            "The creating-progress page stays on its log-streaming view until the workspace "
-            "server registers its URL, giving the user visible progress instead of the bare "
-            "auto-refresh retry page on the target subdomain."
+            "Resolver used to poll for workspace-server readiness after ``mngr create`` "
+            "returns. Creation blocks on URL registration plus an HTTP 200 probe of the "
+            "workspace UI so the creating-progress page stays on its log-streaming view "
+            "until the workspace server is actually reachable, rather than redirecting "
+            "the user into a 502/503 from the subdomain forwarder."
         ),
     )
     host_pool_client: HostPoolClient | None = Field(
