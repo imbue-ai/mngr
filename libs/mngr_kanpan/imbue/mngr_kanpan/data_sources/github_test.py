@@ -87,7 +87,7 @@ def test_github_data_source_field_types_disabled() -> None:
     assert "ci" not in types
 
 
-# === _get_cached_repo_path ===
+# === _get_cached_repo_field ===
 
 
 def test_get_cached_repo_field_found() -> None:
