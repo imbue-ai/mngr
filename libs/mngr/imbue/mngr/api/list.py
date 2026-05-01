@@ -9,19 +9,18 @@ from typing import Any
 from loguru import logger
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
 from imbue.mngr.api.discovery_events import emit_discovery_error_to_stdout
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
 from imbue.mngr.api.discovery_events import extract_agents_and_hosts_from_full_listing
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
-from imbue.mngr.api.providers import get_all_provider_instances
+from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
@@ -36,7 +35,6 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.thread_cleanup import mngr_executor
@@ -238,6 +236,101 @@ def _maybe_write_full_discovery_snapshot(
         logger.warning("Failed to write full discovery snapshot: {}", e)
 
 
+def _construct_and_discover_for_provider(
+    provider_name: ProviderInstanceName,
+    mngr_ctx: MngrContext,
+    params: _ListAgentsParams,
+    result: ListResult,
+    results_lock: Lock,
+    reset_caches: bool,
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
+    providers: list[ProviderInstanceInterface],
+    providers_lock: Lock,
+) -> None:
+    """Construct one provider and discover its hosts/agents, merging into shared dicts.
+
+    On failure, honors `params.error_behavior`: ABORT re-raises (wrapped to
+    `MngrError`); CONTINUE records a `ProviderErrorInfo` on `result.errors`.
+    """
+    try:
+        provider = get_provider_instance(provider_name, mngr_ctx)
+        if reset_caches:
+            provider.reset_caches()
+        provider_results = provider.discover_hosts_and_agents(
+            cg=mngr_ctx.concurrency_group, include_destroyed=True
+        )
+    except Exception as e:
+        if params.error_behavior == ErrorBehavior.ABORT:
+            if isinstance(e, MngrError):
+                raise
+            raise MngrError(str(e)) from e
+        logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
+        emit_discovery_error_to_stdout(
+            error_type=type(e).__name__,
+            error_message=str(e),
+            source_name=str(provider_name),
+        )
+        error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
+        with results_lock:
+            result.errors.append(error_info)
+        if params.on_error:
+            params.on_error(error_info)
+        return
+
+    with providers_lock:
+        providers.append(provider)
+    with results_lock:
+        agents_by_host.update(provider_results)
+
+
+def _construct_and_discover_all_providers(
+    mngr_ctx: MngrContext,
+    provider_names: tuple[str, ...] | None,
+    params: _ListAgentsParams,
+    result: ListResult,
+    results_lock: Lock,
+    reset_caches: bool,
+) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[ProviderInstanceInterface]]:
+    """Run `_construct_and_discover_for_provider` for every provider in parallel.
+
+    Returns the merged host/agent map plus the providers that completed
+    successfully. Per-provider failures honor `params.error_behavior` (recorded
+    as `ProviderErrorInfo` in CONTINUE mode, re-raised in ABORT mode), so a
+    single broken provider does not drop the rest of the listing.
+    """
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
+    providers: list[ProviderInstanceInterface] = []
+    providers_lock = Lock()
+
+    with log_span("Loading agents from all providers"):
+        names = list_provider_names_to_load(mngr_ctx, provider_names)
+        with mngr_executor(
+            parent_cg=mngr_ctx.concurrency_group, name="list_agents_construct_and_discover", max_workers=32
+        ) as executor:
+            futures = [
+                executor.submit(
+                    _construct_and_discover_for_provider,
+                    name,
+                    mngr_ctx,
+                    params,
+                    result,
+                    results_lock,
+                    reset_caches,
+                    agents_by_host,
+                    providers,
+                    providers_lock,
+                )
+                for name in names
+            ]
+
+        # Re-raise any thread exceptions (ABORT-mode errors)
+        for future in futures:
+            future.result()
+
+    warn_on_duplicate_host_names(agents_by_host)
+    return agents_by_host, providers
+
+
 def _list_agents_batch(
     mngr_ctx: MngrContext,
     provider_names: tuple[str, ...] | None,
@@ -247,14 +340,14 @@ def _list_agents_batch(
     reset_caches: bool = False,
 ) -> None:
     """Batch mode: load all agents from all providers, then process hosts."""
-    with log_span("Loading agents from all providers"):
-        agents_by_host, providers = discover_hosts_and_agents(
-            mngr_ctx,
-            provider_names=provider_names,
-            agent_identifiers=None,
-            include_destroyed=True,
-            reset_caches=reset_caches,
-        )
+    agents_by_host, providers = _construct_and_discover_all_providers(
+        mngr_ctx=mngr_ctx,
+        provider_names=provider_names,
+        params=params,
+        result=result,
+        results_lock=results_lock,
+        reset_caches=reset_caches,
+    )
     provider_map = {provider.name: provider for provider in providers}
     logger.trace("Found {} hosts with agents", len(agents_by_host))
 
@@ -309,22 +402,23 @@ def _list_agents_streaming(
     Fast providers fire on_agent callbacks while slow providers are still loading.
     """
     with log_span("Loading agents from all providers (streaming)"):
-        providers = get_all_provider_instances(mngr_ctx, provider_names, reset_caches=reset_caches)
-        logger.trace("Found {} provider instances", len(providers))
+        names = list_provider_names_to_load(mngr_ctx, provider_names)
+        logger.trace("Found {} provider names to load", len(names))
 
         with mngr_executor(
             parent_cg=mngr_ctx.concurrency_group, name="list_agents_streaming", max_workers=32
         ) as executor:
             streaming_futures: list[Future[None]] = []
-            for provider in providers:
+            for name in names:
                 streaming_futures.append(
                     executor.submit(
-                        _discover_and_emit_details_for_provider,
-                        provider,
+                        _construct_discover_and_emit_for_provider,
+                        name,
+                        mngr_ctx,
                         params,
                         result,
                         results_lock,
-                        mngr_ctx.concurrency_group,
+                        reset_caches,
                     )
                 )
 
@@ -333,20 +427,26 @@ def _list_agents_streaming(
             future.result()
 
 
-def _discover_and_emit_details_for_provider(
-    provider: BaseProviderInstance,
+def _construct_discover_and_emit_for_provider(
+    provider_name: ProviderInstanceName,
+    mngr_ctx: MngrContext,
     params: _ListAgentsParams,
     result: ListResult,
     results_lock: Lock,
-    cg: ConcurrencyGroup,
+    reset_caches: bool,
 ) -> None:
-    """Load hosts from a single provider, get agent refs, and immediately process them.
+    """Construct a single provider, load its hosts, and process them.
 
-    This is the streaming counterpart to the batch approach. Each provider independently
-    loads hosts, fetches agent references, then processes hosts -- firing on_agent callbacks
-    without waiting for other providers.
+    Streaming counterpart to the batch approach. Each provider independently
+    constructs, loads hosts, fetches agent references, then processes hosts --
+    firing on_agent callbacks without waiting for other providers.
     """
+    cg = mngr_ctx.concurrency_group
     try:
+        provider = get_provider_instance(provider_name, mngr_ctx)
+        if reset_caches:
+            provider.reset_caches()
+
         # Phase 1: list hosts and get agent refs
         provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=True)
 
@@ -381,13 +481,13 @@ def _discover_and_emit_details_for_provider(
             if isinstance(e, MngrError):
                 raise
             raise MngrError(str(e)) from e
-        logger.opt(exception=e).error("Error discovering agents for provider {}", provider.name)
+        logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
         emit_discovery_error_to_stdout(
             error_type=type(e).__name__,
             error_message=str(e),
-            source_name=str(provider.name),
+            source_name=str(provider_name),
         )
-        error_info = ProviderErrorInfo.build_for_provider(e, provider.name)
+        error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
         with results_lock:
             result.errors.append(error_info)
         if params.on_error:

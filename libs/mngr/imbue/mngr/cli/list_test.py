@@ -33,6 +33,7 @@ from imbue.mngr.cli.list import list_command
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
@@ -827,11 +828,12 @@ def test_streaming_renderer_tty_erases_status_on_finish() -> None:
 
 
 def test_should_use_streaming_mode_default_human() -> None:
-    """Default HUMAN format without sort should use streaming mode."""
+    """Default HUMAN format without sort, with CONTINUE, should use streaming mode."""
     assert (
         _should_use_streaming_mode(
             output_format=OutputFormat.HUMAN,
             is_sort_explicit=False,
+            error_behavior=ErrorBehavior.CONTINUE,
         )
         is True
     )
@@ -843,6 +845,7 @@ def test_should_use_streaming_mode_json_with_explicit_sort_uses_batch() -> None:
         _should_use_streaming_mode(
             output_format=OutputFormat.JSON,
             is_sort_explicit=True,
+            error_behavior=ErrorBehavior.CONTINUE,
         )
         is False
     )
@@ -854,6 +857,7 @@ def test_should_use_streaming_mode_with_explicit_sort_uses_batch() -> None:
         _should_use_streaming_mode(
             output_format=OutputFormat.HUMAN,
             is_sort_explicit=True,
+            error_behavior=ErrorBehavior.CONTINUE,
         )
         is False
     )
@@ -865,6 +869,23 @@ def test_should_use_streaming_mode_json_format_uses_batch() -> None:
         _should_use_streaming_mode(
             output_format=OutputFormat.JSON,
             is_sort_explicit=False,
+            error_behavior=ErrorBehavior.CONTINUE,
+        )
+        is False
+    )
+
+
+def test_should_use_streaming_mode_abort_forces_batch() -> None:
+    """ABORT mode forces batch even when other streaming conditions are met.
+
+    Streaming may flush per-provider rows to stdout before a later provider's failure
+    aborts the listing, which contradicts ABORT's all-or-nothing contract.
+    """
+    assert (
+        _should_use_streaming_mode(
+            output_format=OutputFormat.HUMAN,
+            is_sort_explicit=False,
+            error_behavior=ErrorBehavior.ABORT,
         )
         is False
     )
@@ -876,13 +897,18 @@ def test_should_use_streaming_mode_json_format_uses_batch() -> None:
 
 
 def test_is_streaming_eligible_all_conditions_met() -> None:
-    """_is_streaming_eligible should return True when no sort."""
-    assert _is_streaming_eligible(is_sort_explicit=False) is True
+    """_is_streaming_eligible should return True with no sort and CONTINUE."""
+    assert _is_streaming_eligible(is_sort_explicit=False, error_behavior=ErrorBehavior.CONTINUE) is True
 
 
 def test_is_streaming_eligible_explicit_sort_disables() -> None:
     """_is_streaming_eligible should return False when sort is explicit."""
-    assert _is_streaming_eligible(is_sort_explicit=True) is False
+    assert _is_streaming_eligible(is_sort_explicit=True, error_behavior=ErrorBehavior.CONTINUE) is False
+
+
+def test_is_streaming_eligible_abort_disables() -> None:
+    """_is_streaming_eligible should return False when ABORT, even without an explicit sort."""
+    assert _is_streaming_eligible(is_sort_explicit=False, error_behavior=ErrorBehavior.ABORT) is False
 
 
 # =============================================================================
