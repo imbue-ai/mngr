@@ -44,4 +44,10 @@ if [[ -n "$PR_URL" ]]; then
     fi
 fi
 
+# Append code-guardian gate status on a second line if produced.
+GUARDIAN_LINE=$("${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_code_guardian_status.sh" 2>/dev/null || true)
+if [[ -n "$GUARDIAN_LINE" ]]; then
+    STATUS_LINE="$STATUS_LINE"$'\n'"$GUARDIAN_LINE"
+fi
+
 printf '%s' "$STATUS_LINE"
