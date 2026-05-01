@@ -509,8 +509,10 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
       write the mngr-proxy agent definition, guard project Stop hooks.
     - ``DENY``: install only the deny hook. None of the other plumbing
       runs (no PostToolUse, no SessionStart reaper, no Stop-hook guard,
-      no project settings.json check). The deny hook never spawns a
-      subagent, so there is nothing for the heavier machinery to manage.
+      no project settings.json check). The deny hook itself never
+      directly invokes ``mngr create`` -- only the wait-script it
+      generates does, and only when Claude runs it via Bash -- so the
+      cascade-destroy / reaper machinery has nothing to track.
     """
     if not isinstance(agent.agent_config, ClaudeAgentConfig):
         return
