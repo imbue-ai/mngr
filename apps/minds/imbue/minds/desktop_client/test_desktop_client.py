@@ -574,6 +574,7 @@ def _create_test_server_with_agent_creator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_cg,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
+        backend_resolver=backend_resolver,
     )
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
@@ -1407,3 +1408,108 @@ def test_subdomain_forward_preserves_non_session_cookies(tmp_path: Path) -> None
     assert received_cookie is not None
     assert "app_preference=dark-mode-92741" in received_cookie
     assert SESSION_COOKIE_NAME not in received_cookie
+
+
+def _create_pending_subdomain_test_client(tmp_path: Path, agent_id: AgentId) -> tuple[TestClient, FileAuthStore]:
+    """Build a desktop client where the given agent is a known workspace whose
+    workspace_server URL has not yet been registered (service_logs is empty).
+
+    This exercises the ``workspace_url is None`` branch in the subdomain
+    forwarder.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    resolver = make_resolver_with_data(
+        agents_json=make_agents_json(agent_id),
+        service_logs=None,
+    )
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=httpx.AsyncClient(),
+    )
+    client = TestClient(app, base_url=f"http://{agent_id}.localhost")
+    return client, auth_store
+
+
+def test_subdomain_forward_pending_workspace_returns_503(tmp_path: Path) -> None:
+    # Agent is a known workspace but its system_interface URL hasn't been
+    # registered yet (the workspace server is still booting). All clients get
+    # a plain 503 -- the desktop client gates the user-facing redirect on a
+    # readiness probe so this state shouldn't be reached during creation.
+    agent_id = AgentId()
+    client, auth_store = _create_pending_subdomain_test_client(tmp_path, agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    html_response = client.get("/", headers={"accept": "text/html"})
+    api_response = client.get("/api/layout", headers={"accept": "application/json"})
+
+    assert html_response.status_code == 503
+    assert api_response.status_code == 503
+
+
+def _create_subdomain_test_client_with_failing_backend(
+    tmp_path: Path, agent_id: AgentId, backend_error: Exception
+) -> tuple[TestClient, FileAuthStore]:
+    """Build a desktop client where the workspace backend URL is registered but
+    every forwarded request raises *backend_error*.
+
+    Simulates the window where the agent has written its service URL to
+    events.jsonl but the workspace server itself hasn't finished coming up --
+    either because nothing is listening on the port yet (``httpx.ConnectError``)
+    or because the TCP layer is up but the ASGI app isn't serving HTTP yet
+    (``httpx.RemoteProtocolError``).
+    """
+
+    class _FailingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            raise backend_error
+
+    routing_client = httpx.AsyncClient(transport=_FailingTransport(), follow_redirects=False, timeout=5.0)
+
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    resolver = make_resolver_with_data(
+        agents_json=make_agents_json(agent_id),
+        service_logs={str(agent_id): make_service_log("system_interface", "http://workspace-backend")},
+    )
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=routing_client,
+    )
+    client = TestClient(app, base_url=f"http://{agent_id}.localhost")
+    return client, auth_store
+
+
+def test_subdomain_forward_connect_error_returns_502(tmp_path: Path) -> None:
+    # Workspace URL is registered but nothing is listening on the port. The
+    # forwarder surfaces a 502 to all clients (HTML and non-HTML alike); the
+    # creating-page readiness probe is what gates the user-facing redirect
+    # so this state shouldn't be reached via the normal creation flow.
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_test_client_with_failing_backend(
+        tmp_path, agent_id, httpx.ConnectError("connection refused")
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    html_response = client.get("/", headers={"accept": "text/html"})
+    api_response = client.get("/api/layout", headers={"accept": "application/json"})
+
+    assert html_response.status_code == 502
+    assert api_response.status_code == 502
+
+
+def test_subdomain_forward_remote_protocol_error_returns_502(tmp_path: Path) -> None:
+    # The TCP socket accepted the connection but the server closed it before
+    # sending an HTTP response (uvicorn's window between bind and lifespan
+    # completing). The forwarder surfaces a 502 to all clients.
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_test_client_with_failing_backend(
+        tmp_path, agent_id, httpx.RemoteProtocolError("Server disconnected without sending a response.")
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    html_response = client.get("/", headers={"accept": "text/html"})
+    api_response = client.get("/api/layout", headers={"accept": "application/json"})
+
+    assert html_response.status_code == 502
+    assert api_response.status_code == 502

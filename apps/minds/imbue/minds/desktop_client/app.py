@@ -39,6 +39,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.agent_creator import WORKSPACE_SERVER_SERVICE_NAME
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.api_v1 import get_cf_client_with_auth
@@ -500,7 +501,6 @@ _WORKSPACE_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^(agent-[a-f0-9]+)\.(?:localhost|127\.0\.0\.1)(?::\d+)?$",
     re.IGNORECASE,
 )
-_WORKSPACE_SERVER_SERVICE_NAME: Final[ServiceName] = ServiceName("system_interface")
 
 
 def _parse_workspace_subdomain(host_header: str) -> AgentId | None:
@@ -682,18 +682,8 @@ async def _handle_workspace_forward_http(request: Request) -> Response:
     if agent_id not in backend_resolver.list_known_workspace_ids():
         return Response(status_code=404, content=f"Unknown workspace: {agent_id}")
 
-    workspace_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
+    workspace_url = backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME)
     if workspace_url is None:
-        if "text/html" in request.headers.get("accept", ""):
-            return HTMLResponse(
-                content=(
-                    "<!doctype html><html><head>"
-                    '<meta http-equiv="refresh" content="1">'
-                    "</head><body>"
-                    "<p>Workspace server not yet available. Retrying...</p>"
-                    "</body></html>"
-                )
-            )
         return Response(status_code=503, content="Workspace server not yet available")
 
     try:
@@ -730,7 +720,7 @@ async def _handle_workspace_forward_websocket(websocket: WebSocket) -> None:
         await websocket.close(code=4004, reason=f"Unknown workspace: {agent_id}")
         return
 
-    workspace_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
+    workspace_url = backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME)
     if workspace_url is None:
         await websocket.close(code=1013, reason="Workspace server not yet available")
         return
@@ -2018,7 +2008,7 @@ async def _dispatch_refresh_broadcast(app: FastAPI, agent_id: AgentId, service_n
     swallowed -- a missed refresh is never worth crashing on.
     """
     backend_resolver: BackendResolverInterface = app.state.backend_resolver
-    backend_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
+    backend_url = backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME)
     if backend_url is None:
         logger.debug(
             "No system_interface backend for agent {}; dropping refresh for service {}",
