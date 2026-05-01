@@ -13,11 +13,6 @@ import pytest
 from imbue.mngr_subagent_proxy.hooks import deny as deny_hook
 
 
-def _set_hook_env(monkeypatch: pytest.MonkeyPatch, state_dir: Path) -> None:
-    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
-    monkeypatch.setenv("MNGR_AGENT_NAME", "parent-agent")
-
-
 def _hook_input(
     *,
     tool_use_id: str = "toolu_abc12345678",
@@ -62,7 +57,7 @@ def _run_deny(
 def test_deny_emits_short_deny_with_wait_script_path(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """Golden path: the deny hook emits a short reason pointing at a per-Task wait-script.
 
@@ -71,9 +66,8 @@ def test_deny_emits_short_deny_with_wait_script_path(
     reason. The reason itself is a one-liner so it does not crowd the
     parent's transcript on every Task call.
     """
-    _set_hook_env(clean_env, state_dir)
 
-    response = _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=clean_env)
+    response = _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=hook_env)
 
     hook_out = response["hookSpecificOutput"]
     assert hook_out["hookEventName"] == "PreToolUse"
@@ -92,16 +86,15 @@ def test_deny_emits_short_deny_with_wait_script_path(
 def test_deny_writes_wait_script_with_executable_perms(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """Per-Task wait-script lands at proxy_commands/wait-<tid>.sh with 0755 perms.
 
     The script is what Claude executes in Bash. It must be readable +
     executable by the user; permissions match the proxy-mode wait-script.
     """
-    _set_hook_env(clean_env, state_dir)
 
-    _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=clean_env)
+    _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=hook_env)
 
     script = state_dir / "proxy_commands" / "wait-toolu_abc12345678.sh"
     assert script.is_file()
@@ -147,7 +140,7 @@ def test_deny_wait_script_traps_env_file_cleanup() -> None:
 def test_deny_uses_target_name_with_parent_and_slug(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """The wait-script bakes in the target name <parent>--subagent-<slug>-<tid_suffix>.
 
@@ -155,12 +148,11 @@ def test_deny_uses_target_name_with_parent_and_slug(
     deny-mode-spawned children with `mngr list --include
     'labels.mngr_subagent_proxy == "child"'`.
     """
-    _set_hook_env(clean_env, state_dir)
 
     _run_deny(
         _hook_input(tool_use_id="toolu_xyz98765432", description="Code Review!"),
         cwd_for_test=tmp_path,
-        monkeypatch=clean_env,
+        monkeypatch=hook_env,
     )
 
     script_body = (state_dir / "proxy_commands" / "wait-toolu_xyz98765432.sh").read_text()
@@ -170,7 +162,7 @@ def test_deny_uses_target_name_with_parent_and_slug(
 def test_deny_writes_prompt_sidefile_with_secure_perms(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """The prompt is written to subagent_prompts/<tid>.md with 0600 perms.
 
@@ -178,10 +170,9 @@ def test_deny_writes_prompt_sidefile_with_secure_perms(
     --message-file``, which avoids embedding multi-line prompts in
     shell args and lets the prompt contain shell metacharacters safely.
     """
-    _set_hook_env(clean_env, state_dir)
 
     payload = _hook_input(prompt="Look for `ls -la`; report 'count=5'.\nMulti-line ok.")
-    _run_deny(payload, cwd_for_test=tmp_path, monkeypatch=clean_env)
+    _run_deny(payload, cwd_for_test=tmp_path, monkeypatch=hook_env)
 
     prompt_file = state_dir / "subagent_prompts" / "toolu_abc12345678.md"
     assert prompt_file.is_file()
@@ -192,7 +183,7 @@ def test_deny_writes_prompt_sidefile_with_secure_perms(
 def test_deny_does_not_create_proxy_only_machinery(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """Deny mode does NOT create subagent_map/, subagent_results/, or watermark sidefiles.
 
@@ -200,9 +191,8 @@ def test_deny_does_not_create_proxy_only_machinery(
     permission redo machinery need them. Deny mode uses just the prompt
     sidefile and the wait-script.
     """
-    _set_hook_env(clean_env, state_dir)
 
-    _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=clean_env)
+    _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=hook_env)
 
     assert not (state_dir / "subagent_map").exists()
     assert not (state_dir / "subagent_results").exists()
@@ -216,19 +206,18 @@ def test_deny_does_not_create_proxy_only_machinery(
 def test_deny_run_in_background_uses_spawn_only_flag(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """When run_in_background=True the deny reason instructs Claude to pass --spawn-only.
 
     Same wait-script handles both modes; the flag tells it to skip the
     blocking subagent_wait step.
     """
-    _set_hook_env(clean_env, state_dir)
 
     response = _run_deny(
         _hook_input(run_in_background=True),
         cwd_for_test=tmp_path,
-        monkeypatch=clean_env,
+        monkeypatch=hook_env,
     )
 
     reason = response["hookSpecificOutput"]["permissionDecisionReason"]
@@ -240,7 +229,7 @@ def test_deny_run_in_background_uses_spawn_only_flag(
 def test_deny_wait_script_baked_with_parent_cwd(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """The wait-script bakes the parent's cwd in as PARENT_CWD.
 
@@ -250,9 +239,8 @@ def test_deny_wait_script_baked_with_parent_cwd(
     """
     cwd_for_test = tmp_path / "the-parent-cwd"
     cwd_for_test.mkdir()
-    _set_hook_env(clean_env, state_dir)
 
-    _run_deny(_hook_input(), cwd_for_test=cwd_for_test, monkeypatch=clean_env)
+    _run_deny(_hook_input(), cwd_for_test=cwd_for_test, monkeypatch=hook_env)
 
     script_body = (state_dir / "proxy_commands" / "wait-toolu_abc12345678.sh").read_text()
     assert f"PARENT_CWD={cwd_for_test}" in script_body
@@ -281,12 +269,11 @@ def test_deny_handles_missing_state_dir_with_generic_reason(
 def test_deny_handles_empty_stdin_with_generic_deny(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """Empty stdin still emits a deny (never an allow pass-through)."""
-    _set_hook_env(clean_env, state_dir)
 
-    clean_env.chdir(tmp_path)
+    hook_env.chdir(tmp_path)
     stdin_buffer = io.StringIO("")
     stdout_buffer = io.StringIO()
     deny_hook.run(stdin_buffer, stdout_buffer)
@@ -300,12 +287,11 @@ def test_deny_handles_empty_stdin_with_generic_deny(
 def test_deny_handles_malformed_json_with_generic_deny(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """Malformed stdin JSON falls back to a generic deny."""
-    _set_hook_env(clean_env, state_dir)
 
-    clean_env.chdir(tmp_path)
+    hook_env.chdir(tmp_path)
     stdin_buffer = io.StringIO("{not json")
     stdout_buffer = io.StringIO()
     deny_hook.run(stdin_buffer, stdout_buffer)
@@ -318,12 +304,11 @@ def test_deny_handles_malformed_json_with_generic_deny(
 def test_deny_handles_non_object_json_with_generic_deny(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """JSON that decodes to a non-dict (e.g. a list) falls back to generic deny."""
-    _set_hook_env(clean_env, state_dir)
 
-    clean_env.chdir(tmp_path)
+    hook_env.chdir(tmp_path)
     stdin_buffer = io.StringIO("[1, 2, 3]")
     stdout_buffer = io.StringIO()
     deny_hook.run(stdin_buffer, stdout_buffer)
@@ -336,16 +321,15 @@ def test_deny_handles_non_object_json_with_generic_deny(
 def test_deny_handles_missing_prompt_with_generic_deny(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """A hook payload without a prompt emits a generic deny (no prompt to write)."""
-    _set_hook_env(clean_env, state_dir)
 
     payload: dict[str, object] = {
         "tool_use_id": "toolu_abc12345678",
         "tool_input": {"description": "no prompt here"},
     }
-    response = _run_deny(payload, cwd_for_test=tmp_path, monkeypatch=clean_env)
+    response = _run_deny(payload, cwd_for_test=tmp_path, monkeypatch=hook_env)
 
     hook_out = response["hookSpecificOutput"]
     assert hook_out["permissionDecision"] == "deny"
@@ -357,13 +341,12 @@ def test_deny_handles_missing_prompt_with_generic_deny(
 def test_deny_handles_missing_tool_use_id_with_generic_deny(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """A hook payload without tool_use_id emits a generic deny."""
-    _set_hook_env(clean_env, state_dir)
 
     payload: dict[str, object] = {"tool_input": {"prompt": "hi"}}
-    response = _run_deny(payload, cwd_for_test=tmp_path, monkeypatch=clean_env)
+    response = _run_deny(payload, cwd_for_test=tmp_path, monkeypatch=hook_env)
 
     hook_out = response["hookSpecificOutput"]
     assert hook_out["permissionDecision"] == "deny"
@@ -415,7 +398,7 @@ def test_deny_never_allows_passthrough(
 def test_deny_long_prompt_written_to_file_only(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """A long prompt is written to the sidefile, NEVER inline in the deny reason.
 
@@ -423,11 +406,10 @@ def test_deny_long_prompt_written_to_file_only(
     parent's transcript. The new short-reason design makes this even
     more important: the deny reason should always be a one-liner.
     """
-    _set_hook_env(clean_env, state_dir)
 
     # ~60KB of body text -- well past any reasonable inline budget.
     long_prompt = "Lorem ipsum " * 5000
-    response = _run_deny(_hook_input(prompt=long_prompt), cwd_for_test=tmp_path, monkeypatch=clean_env)
+    response = _run_deny(_hook_input(prompt=long_prompt), cwd_for_test=tmp_path, monkeypatch=hook_env)
 
     reason = response["hookSpecificOutput"]["permissionDecisionReason"]
     # Reason stays short; no inline prompt content.
@@ -442,15 +424,14 @@ def test_deny_long_prompt_written_to_file_only(
 def test_deny_target_name_slug_falls_back_when_description_missing(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """An empty description still produces a usable, deterministic target name."""
-    _set_hook_env(clean_env, state_dir)
 
     _run_deny(
         _hook_input(description=""),
         cwd_for_test=tmp_path,
-        monkeypatch=clean_env,
+        monkeypatch=hook_env,
     )
 
     script_body = (state_dir / "proxy_commands" / "wait-toolu_abc12345678.sh").read_text()
@@ -460,7 +441,7 @@ def test_deny_target_name_slug_falls_back_when_description_missing(
 def test_deny_handles_failed_prompt_write_with_generic_reason(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """If the prompt sidefile can't be written, fall back to a generic deny.
 
@@ -474,9 +455,8 @@ def test_deny_handles_failed_prompt_write_with_generic_reason(
     ``FileExistsError`` (an OSError subclass).
     """
     (state_dir / "subagent_prompts").write_text("not a directory")
-    _set_hook_env(clean_env, state_dir)
 
-    response = _run_deny(_hook_input(prompt="search the repo"), cwd_for_test=tmp_path, monkeypatch=clean_env)
+    response = _run_deny(_hook_input(prompt="search the repo"), cwd_for_test=tmp_path, monkeypatch=hook_env)
 
     hook_out = response["hookSpecificOutput"]
     assert hook_out["permissionDecision"] == "deny"
@@ -488,7 +468,7 @@ def test_deny_handles_failed_prompt_write_with_generic_reason(
 def test_deny_handles_failed_wait_script_write_with_generic_reason(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """If the wait-script can't be written, fall back to a generic deny.
 
@@ -498,9 +478,8 @@ def test_deny_handles_failed_wait_script_write_with_generic_reason(
     """
     # Pre-create proxy_commands as a file -- mkdir(parents=True) then raises.
     (state_dir / "proxy_commands").write_text("not a directory")
-    _set_hook_env(clean_env, state_dir)
 
-    response = _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=clean_env)
+    response = _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=hook_env)
 
     hook_out = response["hookSpecificOutput"]
     assert hook_out["permissionDecision"] == "deny"
@@ -512,7 +491,7 @@ def test_deny_handles_failed_wait_script_write_with_generic_reason(
 def test_deny_at_max_depth_emits_depth_limit_deny(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """At/above ``MNGR_MAX_SUBAGENT_DEPTH``, deny mode emits a depth-limit reason.
 
@@ -522,11 +501,10 @@ def test_deny_at_max_depth_emits_depth_limit_deny(
     The README's "Depth limit" section advertises this guard plugin-wide,
     so it must hold in DENY mode too.
     """
-    _set_hook_env(clean_env, state_dir)
-    clean_env.setenv("MNGR_SUBAGENT_DEPTH", "3")
-    clean_env.setenv("MNGR_MAX_SUBAGENT_DEPTH", "3")
+    hook_env.setenv("MNGR_SUBAGENT_DEPTH", "3")
+    hook_env.setenv("MNGR_MAX_SUBAGENT_DEPTH", "3")
 
-    response = _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=clean_env)
+    response = _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=hook_env)
 
     hook_out = response["hookSpecificOutput"]
     assert hook_out["permissionDecision"] == "deny"
@@ -542,7 +520,7 @@ def test_deny_at_max_depth_emits_depth_limit_deny(
 def test_deny_below_max_depth_emits_normal_reason(
     tmp_path: Path,
     state_dir: Path,
-    clean_env: pytest.MonkeyPatch,
+    hook_env: pytest.MonkeyPatch,
 ) -> None:
     """Below the depth limit, deny mode emits its normal short reason.
 
@@ -550,11 +528,10 @@ def test_deny_below_max_depth_emits_normal_reason(
     reason and writes the wait-script. Only depth >= max_depth flips to
     the depth-limit reason.
     """
-    _set_hook_env(clean_env, state_dir)
-    clean_env.setenv("MNGR_SUBAGENT_DEPTH", "2")
-    clean_env.setenv("MNGR_MAX_SUBAGENT_DEPTH", "3")
+    hook_env.setenv("MNGR_SUBAGENT_DEPTH", "2")
+    hook_env.setenv("MNGR_MAX_SUBAGENT_DEPTH", "3")
 
-    response = _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=clean_env)
+    response = _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=hook_env)
 
     reason = response["hookSpecificOutput"]["permissionDecisionReason"]
     assert "Use a mngr subagent" in reason

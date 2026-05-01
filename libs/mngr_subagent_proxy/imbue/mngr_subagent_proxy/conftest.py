@@ -45,3 +45,18 @@ def state_dir(tmp_path: Path) -> Path:
     path = tmp_path / "state"
     path.mkdir()
     return path
+
+
+@pytest.fixture
+def hook_env(clean_env: pytest.MonkeyPatch, state_dir: Path) -> pytest.MonkeyPatch:
+    """``clean_env`` plus ``MNGR_AGENT_STATE_DIR`` / ``MNGR_AGENT_NAME`` seeded.
+
+    Both PROXY (``hooks/spawn.py``) and DENY (``hooks/deny.py``) entry
+    points require these two env vars on every non-pass-through path.
+    Returns the same ``pytest.MonkeyPatch`` so tests can compose
+    additional ``setenv`` / ``delenv`` calls (e.g. depth-limit env vars)
+    on top of the seeded baseline.
+    """
+    clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
+    clean_env.setenv("MNGR_AGENT_NAME", "parent-agent")
+    return clean_env
