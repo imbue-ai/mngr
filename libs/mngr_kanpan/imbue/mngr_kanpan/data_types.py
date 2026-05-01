@@ -153,7 +153,7 @@ KanpanCommand = Annotated[CustomCommand | ActionBuiltinCommand | MarkableBuiltin
 # `refresh_interval_seconds` so values that weren't updated in the last cycle
 # show as stale, but values that were just refreshed within their cycle don't
 # briefly grey out near the cycle boundary.
-_STALENESS_FRACTION_OF_REFRESH_INTERVAL = 0.9
+STALENESS_FRACTION_OF_REFRESH_INTERVAL = 0.9
 
 
 class KanpanPluginConfig(PluginConfig):
@@ -221,7 +221,7 @@ class KanpanPluginConfig(PluginConfig):
         """Resolved staleness threshold: explicit value, or 90% of refresh interval."""
         if self.staleness_threshold_seconds is not None:
             return self.staleness_threshold_seconds
-        return _STALENESS_FRACTION_OF_REFRESH_INTERVAL * self.refresh_interval_seconds
+        return STALENESS_FRACTION_OF_REFRESH_INTERVAL * self.refresh_interval_seconds
 
     def merge_with(self, override: "PluginConfig") -> "KanpanPluginConfig":
         """Merge this config with an override config."""

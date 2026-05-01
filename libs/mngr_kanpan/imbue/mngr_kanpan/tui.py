@@ -49,6 +49,7 @@ from imbue.mngr_kanpan.data_types import KanpanCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 from imbue.mngr_kanpan.data_types import MarkableBuiltinCommand
 from imbue.mngr_kanpan.data_types import MarkableBuiltinRole
+from imbue.mngr_kanpan.data_types import STALENESS_FRACTION_OF_REFRESH_INTERVAL
 from imbue.mngr_kanpan.fetcher import FetchResult
 from imbue.mngr_kanpan.fetcher import collect_data_sources
 from imbue.mngr_kanpan.fetcher import compute_section
@@ -61,7 +62,7 @@ from imbue.mngr_kanpan.fetcher import toggle_agent_mute
 DEFAULT_REFRESH_INTERVAL_SECONDS: float = 600.0
 # Fallback used by the dataclass default and a couple of tests; runtime always
 # resolves the threshold from KanpanPluginConfig.effective_staleness_threshold_seconds().
-DEFAULT_STALENESS_THRESHOLD_SECONDS: float = 0.9 * DEFAULT_REFRESH_INTERVAL_SECONDS
+DEFAULT_STALENESS_THRESHOLD_SECONDS: float = STALENESS_FRACTION_OF_REFRESH_INTERVAL * DEFAULT_REFRESH_INTERVAL_SECONDS
 
 # Default column order when column_order is not explicitly configured.
 # User-configured label/shell columns are appended after these.
