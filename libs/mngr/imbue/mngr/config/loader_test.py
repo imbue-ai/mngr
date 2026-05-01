@@ -354,6 +354,57 @@ def test_parse_agent_types_uses_parent_type_config_class() -> None:
         reset_agent_config_registry()
 
 
+def test_parse_agent_types_unknown_field_hints_at_missing_plugin() -> None:
+    """When the agent type has no registered config class and no plugins are
+    disabled, the unknown-field error should suggest the providing plugin
+    package may not be installed."""
+    reset_agent_config_registry()
+    try:
+        # claude is intentionally not registered here -- simulates the plugin
+        # not being installed while the user has [agent_types.claude] config.
+        raw = {"claude": {"is_fast": True}}
+        with pytest.raises(ConfigParseError) as exc_info:
+            _parse_agent_types(raw, disabled_plugins=frozenset())
+        msg = str(exc_info.value)
+        assert "is_fast" in msg
+        assert "plugin package that provides agent type 'claude' may not be installed" in msg
+    finally:
+        reset_agent_config_registry()
+
+
+def test_parse_agent_types_unknown_field_hints_when_other_plugins_disabled() -> None:
+    """When some plugins are disabled but not the unknown type itself, the
+    error should list the disabled plugins so the user can spot a match."""
+    reset_agent_config_registry()
+    try:
+        raw = {"claude": {"is_fast": True}}
+        with pytest.raises(ConfigParseError) as exc_info:
+            _parse_agent_types(raw, disabled_plugins=frozenset({"codex"}))
+        msg = str(exc_info.value)
+        assert "is_fast" in msg
+        assert "Currently disabled plugins" in msg
+        assert "codex" in msg
+    finally:
+        reset_agent_config_registry()
+
+
+def test_parse_agent_types_no_plugin_hint_when_type_is_registered() -> None:
+    """When the agent type IS registered, the hint about missing plugins
+    should NOT be added -- the user really did make a typo."""
+    reset_agent_config_registry()
+    try:
+        register_agent_config("claude", _TestParentConfig)
+
+        raw = {"claude": {"bogus_option": True}}
+        with pytest.raises(ConfigParseError) as exc_info:
+            _parse_agent_types(raw, disabled_plugins=frozenset())
+        msg = str(exc_info.value)
+        assert "bogus_option" in msg
+        assert "not installed" not in msg
+    finally:
+        reset_agent_config_registry()
+
+
 def test_parse_agent_types_rejects_unknown_fields_even_with_parent_type() -> None:
     """Custom types with parent_type should still reject truly unknown fields."""
     reset_agent_config_registry()
