@@ -277,7 +277,9 @@ def save_field_cache(
     """Persist cached fields to a local JSON file atomically.
 
     Writes a temporary file then renames it to avoid partial reads.
-    Each field is stored as {field_key: {type: class_name, data: model_dump}}.
+    Each field is stored as ``{field_key: model_dump}`` -- the dump
+    includes the FieldValue subclass's ``kind`` discriminator, so no
+    separate type envelope is needed.
     """
     cache_path = _cache_file_path(mngr_ctx)
     tmp_path: str | None = None
