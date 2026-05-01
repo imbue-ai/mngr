@@ -84,9 +84,10 @@ class ShellCommandDataSource(FrozenModel):
             errors.append(f"Shell '{self.config.name}': {n_failed} process(es) timed out or failed")
             logger.debug("Shell '{}' concurrency group error: {}", self.config.name, exc)
 
-        # Shell output's `created` is the oldest of (now, every cached field
-        # exposed to the script as MNGR_FIELD_<KEY>). We can't statically tell
-        # which env vars a shell command actually reads, so we conservatively
+        # Shell output's `created` is the oldest `created` among the cached
+        # fields exposed to the script as MNGR_FIELD_<KEY>, falling back to
+        # `now` when no cached inputs exist. We can't statically tell which
+        # env vars a shell command actually reads, so we conservatively
         # propagate staleness from any cached input the agent had access to.
         now = now_utc()
         for agent_name, proc in processes:
