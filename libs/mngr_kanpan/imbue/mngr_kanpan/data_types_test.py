@@ -185,9 +185,24 @@ def test_kanpan_config_merge_with_shell_commands() -> None:
     assert "jira" in merged.shell_commands
 
 
-def test_kanpan_plugin_config_staleness_threshold_default() -> None:
+def test_kanpan_plugin_config_staleness_threshold_default_unset() -> None:
     config = KanpanPluginConfig()
-    assert config.staleness_threshold_seconds == 1800.0
+    assert config.staleness_threshold_seconds is None
+
+
+def test_effective_staleness_threshold_defaults_to_90_percent_of_refresh_interval() -> None:
+    config = KanpanPluginConfig(refresh_interval_seconds=600.0)
+    assert config.effective_staleness_threshold_seconds() == 540.0
+
+
+def test_effective_staleness_threshold_tracks_custom_refresh_interval() -> None:
+    config = KanpanPluginConfig(refresh_interval_seconds=120.0)
+    assert config.effective_staleness_threshold_seconds() == 108.0
+
+
+def test_effective_staleness_threshold_uses_explicit_value_when_set() -> None:
+    config = KanpanPluginConfig(refresh_interval_seconds=600.0, staleness_threshold_seconds=42.0)
+    assert config.effective_staleness_threshold_seconds() == 42.0
 
 
 def test_kanpan_plugin_config_merge_with_staleness_threshold() -> None:

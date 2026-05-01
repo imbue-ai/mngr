@@ -59,7 +59,9 @@ from imbue.mngr_kanpan.fetcher import save_field_cache
 from imbue.mngr_kanpan.fetcher import toggle_agent_mute
 
 DEFAULT_REFRESH_INTERVAL_SECONDS: float = 600.0
-DEFAULT_STALENESS_THRESHOLD_SECONDS: float = 1800.0
+# Fallback used by the dataclass default and a couple of tests; runtime always
+# resolves the threshold from KanpanPluginConfig.effective_staleness_threshold_seconds().
+DEFAULT_STALENESS_THRESHOLD_SECONDS: float = 0.9 * DEFAULT_REFRESH_INTERVAL_SECONDS
 
 # Default column order when column_order is not explicitly configured.
 # User-configured label/shell columns are appended after these.
@@ -1625,7 +1627,7 @@ def run_kanpan(
         commands=commands,
         refresh_interval_seconds=plugin_config.refresh_interval_seconds,
         retry_cooldown_seconds=plugin_config.retry_cooldown_seconds,
-        staleness_threshold_seconds=plugin_config.staleness_threshold_seconds,
+        staleness_threshold_seconds=plugin_config.effective_staleness_threshold_seconds(),
         mark_attr_names=mark_attr_names,
         column_defs=column_defs,
         data_sources=data_sources,
