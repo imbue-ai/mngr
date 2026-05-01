@@ -245,3 +245,17 @@ def test_deserialize_fields_polymorphic_via_discriminator() -> None:
     assert pr_result["pr"].number == 7
     assert isinstance(create_result["pr"], CreatePrUrlField)
     assert create_result["pr"].url == "https://example.com/compare"
+
+
+def test_deserialize_fields_drops_invalid_payload_keeps_others() -> None:
+    """A payload that fails pydantic validation is logged and dropped, while
+    the rest of the dict still loads. Locks in the swallow path so a future
+    change can't quietly turn a bad cache row into a full-cache wipe.
+    """
+    types: dict[str, TypeAdapter[FieldValue]] = {"pr": TypeAdapter(PrField), "ci": TypeAdapter(CiField)}
+    # PrField requires number/url/title/state/head_branch/is_draft -- {} fails.
+    raw = {"pr": {}, "ci": {"kind": "ci", "status": "PASSING"}}
+    result = deserialize_fields(raw, types)
+    assert "pr" not in result
+    assert isinstance(result["ci"], CiField)
+    assert result["ci"].status == CiStatus.PASSING
