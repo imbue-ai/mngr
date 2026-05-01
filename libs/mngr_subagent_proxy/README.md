@@ -244,9 +244,11 @@ What deny mode installs:
   - `proxy_commands/initialized-<tool_use_id>` (init marker for retries).
 
 What deny mode does NOT install or run (vs. PROXY):
-- No `PostToolUse:Agent` cleanup -- nothing to clean up since the
-  plugin never spawns a child.
-- No `SessionStart` reaper -- same reason.
+- No `PostToolUse:Agent` cleanup -- the deny hook itself never runs
+  `mngr create` (only the Claude-invoked wait-script does), so there
+  is no per-Task-call cascade-destroy state on the parent to clean up.
+- No `SessionStart` reaper -- same reason: the plugin doesn't track
+  spawned children, so there is nothing to reap.
 - No `mngr-proxy.md` Haiku dispatcher.
 - No `_check_project_settings_stop_hooks_guarded` check on
   `.claude/settings.json`.
