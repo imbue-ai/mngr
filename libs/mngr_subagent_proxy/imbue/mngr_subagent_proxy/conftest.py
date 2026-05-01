@@ -1,10 +1,13 @@
 """Shared test fixtures for mngr_subagent_proxy unit tests.
 
 Both ``hooks_test.py`` and ``hooks/deny_test.py`` need to clear the same
-set of subagent-proxy env vars so individual tests can set only what they
-need. Per the project style guide (CLAUDE.md), shared test fixtures
-belong in ``conftest.py`` rather than being duplicated in each test file.
+set of subagent-proxy env vars and stand up a fresh ``state_dir`` under
+``tmp_path``. Per the project style guide (CLAUDE.md), shared test
+fixtures belong in ``conftest.py`` rather than being duplicated in each
+test file.
 """
+
+from pathlib import Path
 
 import pytest
 
@@ -28,3 +31,17 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     ):
         monkeypatch.delenv(name, raising=False)
     return monkeypatch
+
+
+@pytest.fixture
+def state_dir(tmp_path: Path) -> Path:
+    """A pre-created ``$MNGR_AGENT_STATE_DIR`` under the per-test ``tmp_path``.
+
+    Hook entry points read ``MNGR_AGENT_STATE_DIR`` from the env and write
+    sidefiles into it; tests need a real directory on disk. Co-located
+    under ``tmp_path`` so pytest's per-test temp-dir cleanup handles
+    disposal.
+    """
+    path = tmp_path / "state"
+    path.mkdir()
+    return path
