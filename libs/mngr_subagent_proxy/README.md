@@ -227,8 +227,10 @@ the full spawn + wait + print in a single Bash call:
    subagent ends its turn.
 4. Strips the `END_TURN:` prefix and prints the body to stdout.
 
-For `run_in_background=true` Task calls, the deny reason includes a
-`--spawn-only` flag that makes the script exit after step 2.
+The deny reason does not branch on `run_in_background`. A Task call
+that wanted backgrounding can invoke the wait-script via Claude
+Code's `Bash` tool with `run_in_background=true` and `BashOutput` it
+later -- no DENY-specific flag is needed.
 
 If the spawned subagent itself raises a permission dialog the script
 prints `NEED_PERMISSION: <name>` on stderr and exits 1. Claude (or the
