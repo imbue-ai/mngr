@@ -107,8 +107,11 @@ def test_deny_writes_wait_script_with_executable_perms(
     # --reuse keeps creation idempotent on partial-create failures.
     assert "--reuse" in body
     assert "uv run python -m imbue.mngr_subagent_proxy.subagent_wait" in body
-    # Spawn-only branch for run_in_background; same flag the script
-    # accepts when run by the deny hook in background mode.
+    # The shared wait-script scaffolding (used by both PROXY and DENY)
+    # still has the --spawn-only branch. DENY mode does not tell Claude
+    # to use it -- backgrounding goes through Claude Code's Bash
+    # run_in_background -- but the branch is harmless and useful for
+    # PROXY mode, so we keep the assertion.
     assert '"${1:-}" = "--spawn-only"' in body
 
 
@@ -203,27 +206,35 @@ def test_deny_does_not_create_proxy_only_machinery(
     assert files == ["wait-toolu_abc12345678.sh"]
 
 
-def test_deny_run_in_background_uses_spawn_only_flag(
+def test_deny_reason_does_not_branch_on_run_in_background(
     tmp_path: Path,
     state_dir: Path,
     hook_env: pytest.MonkeyPatch,
 ) -> None:
-    """When run_in_background=True the deny reason instructs Claude to pass --spawn-only.
+    """The deny reason text is the same regardless of ``run_in_background``.
 
-    Same wait-script handles both modes; the flag tells it to skip the
-    blocking subagent_wait step.
+    Claude Code's Bash tool already accepts ``run_in_background=true``,
+    so a Task call that wanted backgrounding can just bash the
+    wait-script that way and ``BashOutput`` it later. A second
+    DENY-specific ``--spawn-only`` flag would be a redundant way to
+    say the same thing; this test pins that the deny reason does not
+    surface one.
     """
-
-    response = _run_deny(
+    response_sync = _run_deny(
+        _hook_input(run_in_background=False),
+        cwd_for_test=tmp_path,
+        monkeypatch=hook_env,
+    )
+    response_bg = _run_deny(
         _hook_input(run_in_background=True),
         cwd_for_test=tmp_path,
         monkeypatch=hook_env,
     )
 
-    reason = response["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "--spawn-only" in reason
-    assert "background" in reason.lower()
-    assert "mngr-subagents" in reason
+    sync_reason = response_sync["hookSpecificOutput"]["permissionDecisionReason"]
+    bg_reason = response_bg["hookSpecificOutput"]["permissionDecisionReason"]
+    assert sync_reason == bg_reason
+    assert "--spawn-only" not in sync_reason
 
 
 def test_deny_wait_script_baked_with_parent_cwd(
@@ -524,7 +535,7 @@ def test_build_deny_reason_quotes_special_characters_in_paths() -> None:
     """
     spaced_script = Path("/with spaces/wait-x.sh")
 
-    reason = deny_hook.build_deny_reason(spaced_script, run_in_background=False)
+    reason = deny_hook.build_deny_reason(spaced_script)
 
     # shlex.quote wraps the path in single quotes since it has spaces.
     assert "'/with spaces/wait-x.sh'" in reason

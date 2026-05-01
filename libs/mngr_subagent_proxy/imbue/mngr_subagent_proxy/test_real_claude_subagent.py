@@ -1124,64 +1124,9 @@ def test_deny_mode_settings_file_is_minimal_compared_to_proxy_mode(
         _destroy_agents_quietly(mngr, iter(created_agents))
 
 
-# Background-mode prompt for deny mode: same shape as the proxy-mode
-# background prompt but we don't expect a poll-handle reply -- Claude
-# will see a deny.
-_DENY_MODE_BACKGROUND_PROMPT: Final[str] = (
-    "Use the Task tool exactly once with subagent_type 'general-purpose', "
-    "run_in_background set to true, and prompt: 'Say BANANA'."
-)
-
-
-@pytest.mark.release
-@pytest.mark.tmux
-@pytest.mark.rsync
-@pytest.mark.timeout(900)
-def test_deny_mode_handles_run_in_background(
-    _skip_if_no_real_claude: None,
-    _mngr_subprocess_env_deny_mode: _MngrSubprocess,
-    _source_repo: Path,
-    temp_host_dir: Path,
-) -> None:
-    """Background Task calls in deny mode produce a background-flavored deny reason.
-
-    The deny reason text differs slightly between sync and background
-    Task calls -- background mode says ``run_in_background=true`` and
-    omits the synchronous ``subagent_wait`` step. End-to-end check that
-    Claude's transcript records the background variant.
-    """
-    mngr = _mngr_subprocess_env_deny_mode
-    parent_name = _make_parent_agent_name()
-    created_agents: list[str] = [parent_name]
-
-    try:
-        create_result = _create_parent_claude_agent(mngr, parent_name, _DENY_MODE_BACKGROUND_PROMPT)
-        assert create_result.returncode == 0
-
-        final_parent = _poll_for_agent_state(
-            mngr,
-            parent_name,
-            _is_waiting_end_of_turn,
-            timeout=_DEFAULT_WAIT_TIMEOUT_SECONDS,
-        )
-        assert final_parent is not None and _is_waiting_end_of_turn(final_parent), (
-            f"Parent {parent_name!r} never reached WAITING/END_OF_TURN. Last seen: {final_parent!r}"
-        )
-
-        transcript = _agent_transcript_text(final_parent, temp_host_dir)
-        # Background-mode deny reason mentions --spawn-only and stays
-        # short (skill + wait-script pointer, same one-liner shape).
-        assert "--spawn-only" in transcript, (
-            f"Background-mode deny reason marker --spawn-only not found in transcript. "
-            f"Either Claude did not call Task with run_in_background=true, or the "
-            f"deny hook returned the synchronous reason. Transcript tail:\n"
-            f"{transcript[-3000:]}"
-        )
-        # Best-effort cleanup of any children Claude may have spawned via
-        # Bash by following the deny instructions itself.
-        for agent in mngr.list_agents():
-            name = agent.get("name", "")
-            if isinstance(name, str) and name.startswith(f"{parent_name}--subagent-"):
-                created_agents.append(name)
-    finally:
-        _destroy_agents_quietly(mngr, iter(created_agents))
+# Note: there is intentionally no DENY-mode background-Task release
+# test. The deny reason no longer branches on run_in_background --
+# Claude Code's Bash tool already accepts run_in_background=true, so a
+# Task call that wanted backgrounding can just bash the wait-script
+# that way. A separate DENY-specific test would have asserted that we
+# surface a redundant --spawn-only flag, which we deliberately do not.

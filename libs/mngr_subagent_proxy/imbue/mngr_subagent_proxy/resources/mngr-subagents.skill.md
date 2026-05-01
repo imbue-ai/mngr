@@ -11,7 +11,7 @@ would normally call `Task`, your call is denied and the deny reason
 points you at a concrete `bash` command. Run that command instead of
 giving up, retrying `Task`, or improvising your own monitoring.
 
-## Synchronous subagent (default)
+## Running the wait-script
 
 The deny reason includes a path to a per-Task-call wait-script:
 
@@ -31,16 +31,12 @@ turn. Do not invent your own polling, do not `tail -f` the agent's
 output file, do not re-run `mngr create` yourself: the wait-script
 already does spawn + wait + print in a single call.
 
-## Background subagent (`run_in_background=true`)
-
-When the original Task call had `run_in_background=true`, the deny
-reason gives you the same wait-script path with a `--spawn-only` flag:
-
-    bash <wait_script_path> --spawn-only
-
-This spawns the subagent and exits immediately. Continue your turn;
-the subagent runs to completion in the background. Inspect it later
-via `mngr connect <name>` or `mngr transcript <name>`.
+If the original Task call had `run_in_background=true` (or you simply
+do not want to block on it), invoke the wait-script via the `Bash`
+tool's own `run_in_background=true` parameter and `BashOutput` it
+later when you need the reply. There is no separate DENY-specific
+background flag -- Claude Code's existing Bash backgrounding is
+sufficient.
 
 ## Permission dialogs
 

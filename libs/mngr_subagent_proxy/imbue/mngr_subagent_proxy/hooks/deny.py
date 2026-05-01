@@ -2,12 +2,17 @@
 
 Reads the hook JSON from stdin and emits a PreToolUse decision JSON on
 stdout that DENIES the Task tool with a short ``permissionDecisionReason``
-of the form (synchronous variant; ``run_in_background=true`` adds
-``--spawn-only`` and a one-line note instead of the closing sentence)::
+of the form:
 
     Use a mngr subagent instead of Task. Run: bash <wait_script_path>
     (see the `mngr-subagents` skill for context). The script's stdout
     is the subagent's reply -- treat it as the Task tool's tool_result.
+
+We do not branch on ``run_in_background`` here -- Claude Code's ``Bash``
+tool already accepts ``run_in_background=true``, so a Task call that
+wanted backgrounding can just bash the wait-script that way. Surfacing
+a separate DENY-specific background flag would create two redundant
+ways to do the same thing.
 
 The accompanying ``mngr-subagents`` Claude skill (provisioned in deny
 mode at ``.claude/skills/mngr-subagents/SKILL.md``) explains the full
@@ -60,20 +65,19 @@ _GENERIC_DENY_REASON: Final[str] = (
 )
 
 
-def build_deny_reason(wait_script: Path, run_in_background: bool) -> str:
+def build_deny_reason(wait_script: Path) -> str:
     """Build the short deny reason addressed to Claude.
 
     Verbose context (when to use, parsing protocol, inspection commands)
     lives in the ``mngr-subagents`` skill, not here. The deny reason is
     a one-liner pointer + the concrete command for this Task call.
+
+    There is no separate "background" branch: Claude Code's ``Bash``
+    tool already accepts ``run_in_background=true``, so a Task call
+    that wanted backgrounding can just bash the wait-script that way
+    and ``BashOutput`` it later. Surfacing a second --spawn-only flag
+    here only created two redundant ways to do the same thing.
     """
-    if run_in_background:
-        return (
-            f"Use a mngr subagent instead of Task. "
-            f"Run: bash {shlex.quote(str(wait_script))} --spawn-only "
-            f"(see the `mngr-subagents` skill for context). "
-            f"The script returns immediately; the subagent runs in the background."
-        )
     return (
         f"Use a mngr subagent instead of Task. "
         f"Run: bash {shlex.quote(str(wait_script))} "
@@ -189,7 +193,6 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         tool_input = {}
     orig_prompt = tool_input.get("prompt") or ""
     orig_desc = tool_input.get("description") or ""
-    orig_run_bg = bool(tool_input.get("run_in_background", False))
 
     if not isinstance(tool_use_id, str) or not tool_use_id or not isinstance(orig_prompt, str) or not orig_prompt:
         logger.warning("deny: missing tool_use_id or prompt in hook input; emitting generic deny")
@@ -223,7 +226,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         emit_pre_tool_deny(stdout, _GENERIC_DENY_REASON)
         return
 
-    emit_pre_tool_deny(stdout, build_deny_reason(wait_script, orig_run_bg))
+    emit_pre_tool_deny(stdout, build_deny_reason(wait_script))
 
 
 def main() -> None:

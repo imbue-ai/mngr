@@ -463,10 +463,12 @@ def test_deny_mode_writes_mngr_subagents_skill(
     # Body must mention the wait-script protocol that the deny reason
     # points to -- otherwise the skill is useless for its purpose.
     assert "wait-script" in body or "wait_script" in body
-    # Background-mode and permission-dialog handling are the key
-    # protocol details the skill documents beyond "just run the script".
-    assert "--spawn-only" in body
+    # Permission-dialog handling is the load-bearing protocol detail
+    # the skill documents beyond "just run the script". Backgrounding
+    # is delegated to Claude Code's Bash run_in_background, so the
+    # skill points at that rather than introducing a DENY-specific flag.
     assert "NEED_PERMISSION" in body
+    assert "run_in_background" in body
 
 
 def test_proxy_mode_does_not_write_mngr_subagents_skill(
