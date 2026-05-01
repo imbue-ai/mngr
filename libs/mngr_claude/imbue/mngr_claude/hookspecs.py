@@ -52,18 +52,25 @@ def claude_extra_per_agent_settings(
     mngr_ctx: MngrContext,
     source_settings: dict[str, Any],
     agent_state_dir: Path,
+    is_local: bool,
 ) -> ClaudeExtraSettingsContribution | None:
     """Contribute statusline / env / scripts to a Claude agent's per-agent config.
 
-    Called once per agent during ``_setup_per_agent_config_dir``. Plugins may
-    inspect ``source_settings`` (the user's ``~/.claude/settings.json`` already
-    parsed into a dict) to capture e.g. an existing ``statusLine.command`` so it
-    can be wrapped or forwarded.
+    Called once per agent during provisioning. Plugins may inspect
+    ``source_settings`` (the user's ``~/.claude/settings.json`` already parsed
+    into a dict) to capture e.g. an existing ``statusLine.command`` so it can
+    be wrapped or forwarded.
 
-    ``agent_state_dir`` is the path to ``$MNGR_AGENT_STATE_DIR`` for this agent;
-    plugins should reference resources at ``$MNGR_AGENT_STATE_DIR/commands/<script>``
-    in any commands they install. ``mngr_ctx`` gives access to the user's
-    ``profile_dir`` for shared on-disk state.
+    ``agent_state_dir`` is the path to ``$MNGR_AGENT_STATE_DIR`` for this
+    agent; plugins should reference resources at
+    ``$MNGR_AGENT_STATE_DIR/commands/<script>`` in any commands they install.
+    ``mngr_ctx`` gives access to the user's ``profile_dir`` for shared
+    on-disk state.
+
+    ``is_local`` is True when the agent runs on the local host (i.e. shares
+    the user's filesystem). Plugins should typically return ``None`` for
+    remote hosts, since paths under the local user's profile_dir won't exist
+    in the remote agent's environment.
 
     Return a ``ClaudeExtraSettingsContribution`` to contribute, or ``None`` to abstain.
     """

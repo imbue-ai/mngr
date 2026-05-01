@@ -61,6 +61,7 @@ from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _check_settings_local_gitignored
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
+from imbue.mngr_claude.plugin import _gather_claude_extra_settings
 from imbue.mngr_claude.plugin import _generate_installed_plugins_content
 from imbue.mngr_claude.plugin import _generate_known_marketplaces_content
 from imbue.mngr_claude.plugin import _get_claude_version
@@ -3630,33 +3631,83 @@ class _FakeExtraSettingsPlugin:
     @staticmethod
     @_HOOKIMPL
     def claude_extra_per_agent_settings(
-        mngr_ctx: MngrContext, source_settings: dict[str, object], agent_state_dir: Path
-    ) -> ClaudeExtraSettingsContribution:
+        mngr_ctx: MngrContext,
+        source_settings: dict[str, object],
+        agent_state_dir: Path,
+        is_local: bool,
+    ) -> ClaudeExtraSettingsContribution | None:
+        if not is_local:
+            return None
         return ClaudeExtraSettingsContribution(
             statusline_command="echo wrapped",
             env={"FOO": "bar"},
         )
 
 
-def test_build_settings_json_applies_extra_settings_contribution(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    """A claude_extra_per_agent_settings hookimpl should inject statusLine and env."""
-    # Hookspec is loaded by mngr/conftest.py's load_plugin_hookspecs call; only
-    # the impl needs to be registered here.
+def test_build_settings_json_applies_extra_settings_contribution() -> None:
+    """_build_settings_json should merge a contribution's statusLine and env into settings.json."""
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(check_installation=False)
+    contribution = ClaudeExtraSettingsContribution(
+        statusline_command="echo wrapped",
+        env={"FOO": "bar"},
+    )
+    content = _build_settings_json(
+        Path.home() / ".claude",
+        config,
+        ctx,
+        sync_local=False,
+        extra_contributions=(contribution,),
+    )
+    data = json.loads(content)
+    assert data["statusLine"] == {"type": "command", "command": "echo wrapped"}
+    assert data["env"]["FOO"] == "bar"
+
+
+def test_build_settings_json_overwrites_user_statusline(tmp_path: Path) -> None:
+    """When the user has an existing statusLine, the contribution must overwrite it.
+
+    The pre-existing user command is the hookimpl's responsibility to capture
+    into the contribution's env (e.g. MNGR_USER_STATUSLINE_CMD); _build_settings_json
+    just installs the wrapper.
+    """
+    # Plant a user-side settings.json with a pre-existing statusLine
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"statusLine": {"type": "command", "command": "/path/to/user.sh"}})
+    )
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(check_installation=False)
+    contribution = ClaudeExtraSettingsContribution(
+        statusline_command="echo wrapped",
+        env={"MNGR_USER_STATUSLINE_CMD": "/path/to/user.sh"},
+    )
+    content = _build_settings_json(
+        claude_dir,
+        config,
+        ctx,
+        sync_local=True,
+        extra_contributions=(contribution,),
+    )
+    data = json.loads(content)
+    assert data["statusLine"] == {"type": "command", "command": "echo wrapped"}
+    assert data["env"]["MNGR_USER_STATUSLINE_CMD"] == "/path/to/user.sh"
+
+
+def test_gather_claude_extra_settings_skips_remote_hosts(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """The _FakeExtraSettingsPlugin returns None when is_local=False, exercising the remote-skip path."""
     temp_mngr_ctx.pm.register(_FakeExtraSettingsPlugin)
     try:
-        ctx = ProvisioningContext(is_unattended=False)
-        config = ClaudeAgentConfig(check_installation=False)
-        content = _build_settings_json(
-            Path.home() / ".claude",
-            config,
-            ctx,
-            sync_local=False,
-            mngr_ctx=temp_mngr_ctx,
-            agent_state_dir=tmp_path / "agent_state",
+        local = _gather_claude_extra_settings(
+            temp_mngr_ctx, source_settings={}, agent_state_dir=tmp_path, is_local=True
         )
-        data = json.loads(content)
-        assert data["statusLine"] == {"type": "command", "command": "echo wrapped"}
-        assert data["env"]["FOO"] == "bar"
+        remote = _gather_claude_extra_settings(
+            temp_mngr_ctx, source_settings={}, agent_state_dir=tmp_path, is_local=False
+        )
+        assert len(local) == 1
+        assert local[0].statusline_command == "echo wrapped"
+        assert remote == ()
     finally:
         temp_mngr_ctx.pm.unregister(_FakeExtraSettingsPlugin)
 

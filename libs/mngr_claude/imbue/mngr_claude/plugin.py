@@ -429,6 +429,7 @@ def _gather_claude_extra_settings(
     mngr_ctx: MngrContext | None,
     source_settings: dict[str, Any],
     agent_state_dir: Path,
+    is_local: bool,
 ) -> tuple[ClaudeExtraSettingsContribution, ...]:
     """Call the claude_extra_per_agent_settings hook and return non-None contributions.
 
@@ -441,6 +442,7 @@ def _gather_claude_extra_settings(
         mngr_ctx=mngr_ctx,
         source_settings=source_settings,
         agent_state_dir=agent_state_dir,
+        is_local=is_local,
     )
     return tuple(c for c in raw if c is not None)
 
@@ -450,8 +452,7 @@ def _build_settings_json(
     config: ClaudeAgentConfig,
     ctx: ProvisioningContext,
     sync_local: bool,
-    mngr_ctx: MngrContext | None = None,
-    agent_state_dir: Path | None = None,
+    extra_contributions: Sequence[ClaudeExtraSettingsContribution] = (),
 ) -> str:
     """Build settings.json content for per-agent config dirs.
 
@@ -459,9 +460,11 @@ def _build_settings_json(
     otherwise uses generated defaults. Applies context-dependent flags
     (e.g. skipDangerousModePermissionPrompt for unattended) and user overrides.
 
-    When ``pm`` and ``agent_state_dir`` are provided, calls the
-    ``claude_extra_per_agent_settings`` hook so plugins can install a
-    statusline command, contribute env vars, or request resource scripts.
+    ``extra_contributions`` are merged in last: a contribution's
+    ``statusline_command`` overwrites any existing ``statusLine`` (the user's
+    pre-existing command should already be captured into the contribution's
+    env block via ``_extract_user_statusline_command`` in the hookimpl), and
+    its ``env`` entries merge into ``settings.json``'s env block.
     """
     source_settings = _read_source_claude_settings(source_claude_dir)
 
@@ -472,15 +475,13 @@ def _build_settings_json(
     data.update(compute_settings_json_flags(ctx))
     data.update(config.settings_overrides)
 
-    if mngr_ctx is not None and agent_state_dir is not None:
-        contributions = _gather_claude_extra_settings(mngr_ctx, source_settings, agent_state_dir)
-        for contribution in contributions:
-            if contribution.statusline_command is not None and "statusLine" not in data:
-                data["statusLine"] = {"type": "command", "command": contribution.statusline_command}
-            if contribution.env:
-                env_block = data.setdefault("env", {})
-                if isinstance(env_block, dict):
-                    env_block.update(contribution.env)
+    for contribution in extra_contributions:
+        if contribution.statusline_command is not None:
+            data["statusLine"] = {"type": "command", "command": contribution.statusline_command}
+        if contribution.env:
+            env_block = data.setdefault("env", {})
+            if isinstance(env_block, dict):
+                env_block.update(contribution.env)
 
     return json.dumps(data, indent=2) + "\n"
 
@@ -1813,6 +1814,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         host: OnlineHostInterface,
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
+        extra_contributions: Sequence[ClaudeExtraSettingsContribution] = (),
     ) -> None:
         """Create and populate the per-agent Claude config directory.
 
@@ -1865,8 +1867,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             config,
             ctx,
             sync_local=config.sync_home_settings,
-            mngr_ctx=mngr_ctx,
-            agent_state_dir=self._get_agent_dir(),
+            extra_contributions=extra_contributions,
         )
 
         generated_files: dict[Path, str] = {
@@ -1943,12 +1944,15 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         with mngr_ctx.concurrency_group.make_concurrency_group("claude_provisioning") as concurrency_group:
             config = self.agent_config
 
-            # Gather plugin contributions so any contributed resource scripts
-            # ride along with the standard background scripts.
+            # Gather plugin contributions once, then thread the result through both
+            # _setup_per_agent_config_dir (settings.json overlay) and
+            # _provision_background_scripts (resource scripts) so the hook isn't
+            # invoked twice per agent.
             extra_contributions = _gather_claude_extra_settings(
                 mngr_ctx,
                 _read_source_claude_settings(get_user_claude_config_dir()),
                 self._get_agent_dir(),
+                is_local=host.is_local,
             )
 
             # Provision background task scripts to the agent state directory
@@ -2032,7 +2036,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                 self._transfer_source_plugin_data(host, options.source_agent_state_dir)
 
             # Set up per-agent config directory (for both local and remote hosts)
-            self._setup_per_agent_config_dir(host, options, mngr_ctx)
+            self._setup_per_agent_config_dir(host, options, mngr_ctx, extra_contributions)
 
             # Configure readiness hooks (for both local and remote hosts)
             self._configure_agent_hooks(host)

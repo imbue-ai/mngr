@@ -59,6 +59,7 @@ def claude_extra_per_agent_settings(
     mngr_ctx: MngrContext,
     source_settings: dict[str, Any],
     agent_state_dir: Path,
+    is_local: bool,
 ) -> ClaudeExtraSettingsContribution | None:
     """Install the rate-limit statusline shim into per-agent Claude settings.
 
@@ -66,12 +67,20 @@ def claude_extra_per_agent_settings(
     composability is preserved. Resource scripts are provisioned to
     $MNGR_AGENT_STATE_DIR/commands/ via the standard mngr_claude path.
 
+    Skips remote hosts: the cache lives under the local user's profile_dir and
+    is not reachable from a remote agent's filesystem, so installing the shim
+    there would silently write to a remote-only path that `mngr usage` (run
+    locally) never reads.
+
     Env vars steered into the per-agent settings.json:
         MNGR_RATE_LIMITS_WRITER  Path to claude_rate_limits_writer.sh
         MNGR_RATE_LIMITS_CACHE   Path to the shared cache (under profile_dir)
         MNGR_PROFILE_DIR         Profile dir (used as fallback inside the writer)
         MNGR_USER_STATUSLINE_CMD The user's pre-existing statusLine.command (optional)
     """
+    if not is_local:
+        return None
+
     cache_path = mngr_ctx.profile_dir / CACHE_RELATIVE_PATH
     env: dict[str, str] = {
         "MNGR_RATE_LIMITS_WRITER": str(agent_state_dir / "commands" / _RATE_LIMITS_WRITER_SCRIPT),
