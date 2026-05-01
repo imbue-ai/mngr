@@ -9,6 +9,7 @@ import os
 import random
 import shlex
 import tempfile
+import types
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Mapping
@@ -65,6 +66,7 @@ from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.git_utils import find_git_common_dir
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_claude import hookimpl
+from imbue.mngr_claude import hookspecs as claude_hookspecs
 from imbue.mngr_claude import resources as _claude_resources
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
@@ -89,6 +91,7 @@ from imbue.mngr_claude.claude_config import is_source_directory_trusted
 from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.claude_config import read_claude_config
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
+from imbue.mngr_claude.hookspecs import ClaudeExtraSettingsContribution
 
 _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
 
@@ -409,29 +412,76 @@ def _rewrite_installed_plugins_paths(content: str, source_claude_dir: Path, targ
     return json.dumps(data, indent=2) + "\n"
 
 
+def _read_source_claude_settings(source_claude_dir: Path) -> dict[str, Any]:
+    """Parse ~/.claude/settings.json into a dict, returning {} if missing or corrupt."""
+    source = source_claude_dir / "settings.json"
+    if not source.exists():
+        return {}
+    try:
+        loaded = json.loads(source.read_text())
+    except json.JSONDecodeError:
+        logger.warning("Corrupt settings.json at {}, treating as empty", source)
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _gather_claude_extra_settings(
+    mngr_ctx: MngrContext | None,
+    source_settings: dict[str, Any],
+    agent_state_dir: Path,
+) -> tuple[ClaudeExtraSettingsContribution, ...]:
+    """Call the claude_extra_per_agent_settings hook and return non-None contributions.
+
+    Returns an empty tuple if mngr_ctx is None (e.g. in deploy / test paths that
+    skip plugin invocation).
+    """
+    if mngr_ctx is None:
+        return ()
+    raw = mngr_ctx.pm.hook.claude_extra_per_agent_settings(
+        mngr_ctx=mngr_ctx,
+        source_settings=source_settings,
+        agent_state_dir=agent_state_dir,
+    )
+    return tuple(c for c in raw if c is not None)
+
+
 def _build_settings_json(
     source_claude_dir: Path,
     config: ClaudeAgentConfig,
     ctx: ProvisioningContext,
     sync_local: bool,
+    mngr_ctx: MngrContext | None = None,
+    agent_state_dir: Path | None = None,
 ) -> str:
     """Build settings.json content for per-agent config dirs.
 
     Uses the local file as a base when sync_local is True and the file exists,
     otherwise uses generated defaults. Applies context-dependent flags
     (e.g. skipDangerousModePermissionPrompt for unattended) and user overrides.
+
+    When ``pm`` and ``agent_state_dir`` are provided, calls the
+    ``claude_extra_per_agent_settings`` hook so plugins can install a
+    statusline command, contribute env vars, or request resource scripts.
     """
-    source = source_claude_dir / "settings.json"
-    if sync_local and source.exists():
-        try:
-            data: dict[str, Any] = json.loads(source.read_text())
-        except json.JSONDecodeError:
-            logger.warning("Corrupt settings.json at {}, using defaults", source)
-            data = _generate_claude_home_settings()
+    source_settings = _read_source_claude_settings(source_claude_dir)
+
+    if sync_local and source_settings:
+        data: dict[str, Any] = dict(source_settings)
     else:
         data = _generate_claude_home_settings()
     data.update(compute_settings_json_flags(ctx))
     data.update(config.settings_overrides)
+
+    if mngr_ctx is not None and agent_state_dir is not None:
+        contributions = _gather_claude_extra_settings(mngr_ctx, source_settings, agent_state_dir)
+        for contribution in contributions:
+            if contribution.statusline_command is not None and "statusLine" not in data:
+                data["statusLine"] = {"type": "command", "command": contribution.statusline_command}
+            if contribution.env:
+                env_block = data.setdefault("env", {})
+                if isinstance(env_block, dict):
+                    env_block.update(contribution.env)
+
     return json.dumps(data, indent=2) + "\n"
 
 
@@ -1022,8 +1072,18 @@ def _load_claude_resource_script(filename: str) -> str:
     return script_path.read_text()
 
 
+def _load_resource_script_from_module(module: types.ModuleType, filename: str) -> str:
+    """Load a resource script from any plugin's resource module."""
+    resource_files = importlib.resources.files(module)
+    script_path = resource_files.joinpath(filename)
+    return script_path.read_text()
+
+
 def _provision_background_scripts(
-    host: OnlineHostInterface, agent_state_dir: Path, concurrency_group: ConcurrencyGroup
+    host: OnlineHostInterface,
+    agent_state_dir: Path,
+    concurrency_group: ConcurrencyGroup,
+    extra_contributions: Sequence[ClaudeExtraSettingsContribution] = (),
 ) -> None:
     """Write the background task scripts to $MNGR_AGENT_STATE_DIR/commands/.
 
@@ -1040,14 +1100,31 @@ def _provision_background_scripts(
 
     # Claude-specific scripts from this plugin's resources
     threads: list[ObservableThread] = []
-    for script_name in (
-        "stream_transcript.sh",
-        "claude_background_tasks.sh",
-        "common_transcript.sh",
-        "wait_for_stop_hook.sh",
-        "sync_keychain_credentials.py",
-    ):
-        script_content = _load_claude_resource_script(script_name)
+    builtin_scripts: tuple[tuple[types.ModuleType, str], ...] = tuple(
+        (_claude_resources, name)
+        for name in (
+            "stream_transcript.sh",
+            "claude_background_tasks.sh",
+            "common_transcript.sh",
+            "wait_for_stop_hook.sh",
+            "sync_keychain_credentials.py",
+        )
+    )
+    extra_scripts: list[tuple[types.ModuleType, str]] = []
+    for contribution in extra_contributions:
+        if not contribution.resource_scripts:
+            continue
+        if contribution.resource_module is None:
+            logger.warning(
+                "Plugin contribution requested resource_scripts {} but provided no resource_module; skipping",
+                contribution.resource_scripts,
+            )
+            continue
+        for name in contribution.resource_scripts:
+            extra_scripts.append((contribution.resource_module, name))
+
+    for module, script_name in (*builtin_scripts, *extra_scripts):
+        script_content = _load_resource_script_from_module(module, script_name)
         script_path = commands_dir / script_name
         with log_span("Writing {} to agent state dir", script_name):
             try:
@@ -1783,7 +1860,14 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         )
         approve_api_key_for_claude(claude_json_data)
 
-        settings_json = _build_settings_json(source_claude_dir, config, ctx, sync_local=config.sync_home_settings)
+        settings_json = _build_settings_json(
+            source_claude_dir,
+            config,
+            ctx,
+            sync_local=config.sync_home_settings,
+            mngr_ctx=mngr_ctx,
+            agent_state_dir=self._get_agent_dir(),
+        )
 
         generated_files: dict[Path, str] = {
             Path("settings.json"): settings_json,
@@ -1859,9 +1943,18 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         with mngr_ctx.concurrency_group.make_concurrency_group("claude_provisioning") as concurrency_group:
             config = self.agent_config
 
+            # Gather plugin contributions so any contributed resource scripts
+            # ride along with the standard background scripts.
+            extra_contributions = _gather_claude_extra_settings(
+                mngr_ctx,
+                _read_source_claude_settings(get_user_claude_config_dir()),
+                self._get_agent_dir(),
+            )
+
             # Provision background task scripts to the agent state directory
             provision_backgroun_script_thread = concurrency_group.start_new_thread(
-                _provision_background_scripts, (host, self._get_agent_dir(), concurrency_group)
+                _provision_background_scripts,
+                (host, self._get_agent_dir(), concurrency_group, extra_contributions),
             )
 
             if host.is_local:
@@ -2364,6 +2457,12 @@ def _generate_claude_json(version: str | None, current_time: datetime | None = N
 def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentTypeConfig]]:
     """Register the claude agent type."""
     return ("claude", ClaudeAgent, ClaudeAgentConfig)
+
+
+@hookimpl
+def register_hookspecs() -> types.ModuleType:
+    """Register Claude-specific hookspecs (e.g. claude_extra_per_agent_settings)."""
+    return claude_hookspecs
 
 
 class WaitingReason(UpperCaseStrEnum):

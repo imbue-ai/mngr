@@ -51,6 +51,7 @@ from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
+from imbue.mngr_claude.hookspecs import ClaudeExtraSettingsContribution
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
@@ -3620,6 +3621,44 @@ def test_build_settings_json_local_context_no_flags() -> None:
     assert "skipDangerousModePermissionPrompt" in data
     # Local (attended) context does not force fastMode
     assert "fastMode" not in data
+
+
+_HOOKIMPL = pluggy.HookimplMarker("mngr")
+
+
+class _FakeExtraSettingsPlugin:
+    @staticmethod
+    @_HOOKIMPL
+    def claude_extra_per_agent_settings(
+        mngr_ctx: MngrContext, source_settings: dict[str, object], agent_state_dir: Path
+    ) -> ClaudeExtraSettingsContribution:
+        return ClaudeExtraSettingsContribution(
+            statusline_command="echo wrapped",
+            env={"FOO": "bar"},
+        )
+
+
+def test_build_settings_json_applies_extra_settings_contribution(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """A claude_extra_per_agent_settings hookimpl should inject statusLine and env."""
+    # Hookspec is loaded by mngr/conftest.py's load_plugin_hookspecs call; only
+    # the impl needs to be registered here.
+    temp_mngr_ctx.pm.register(_FakeExtraSettingsPlugin)
+    try:
+        ctx = ProvisioningContext(is_unattended=False)
+        config = ClaudeAgentConfig(check_installation=False)
+        content = _build_settings_json(
+            Path.home() / ".claude",
+            config,
+            ctx,
+            sync_local=False,
+            mngr_ctx=temp_mngr_ctx,
+            agent_state_dir=tmp_path / "agent_state",
+        )
+        data = json.loads(content)
+        assert data["statusLine"] == {"type": "command", "command": "echo wrapped"}
+        assert data["env"]["FOO"] == "bar"
+    finally:
+        temp_mngr_ctx.pm.unregister(_FakeExtraSettingsPlugin)
 
 
 # =============================================================================

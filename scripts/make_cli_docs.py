@@ -72,6 +72,7 @@ SECONDARY_COMMANDS = {
     "tmr",
     "transcript",
     "tutor",
+    "usage",
     "wait",
     "notify",
 }
