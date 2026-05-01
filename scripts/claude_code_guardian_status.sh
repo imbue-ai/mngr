@@ -69,14 +69,21 @@ else
     STOP_GATE=$(fmt_gate "stop hook" "$DIM" "·")
 fi
 
-# autofix: per-commit completion file.
+# autofix: per-commit completion file. Append "(major+critical)" when
+# configured to ignore minor issues; detected via the unique marker phrase
+# the reviewer-autofix-ignore-minor-issues skill writes into append_to_prompt.
 AUTOFIX_ENABLED=$(read_setting "autofix.is_enabled" "true")
+AUTOFIX_PROMPT=$(read_setting "autofix.append_to_prompt" "")
+AUTOFIX_LABEL="autofix"
+if [[ "$AUTOFIX_PROMPT" == *"MAJOR and CRITICAL"* ]]; then
+    AUTOFIX_LABEL="autofix(major+critical)"
+fi
 if [[ "$AUTOFIX_ENABLED" != "true" ]]; then
-    AUTOFIX_GATE=$(fmt_gate "autofix" "$DIM" "·")
+    AUTOFIX_GATE=$(fmt_gate "$AUTOFIX_LABEL" "$DIM" "·")
 elif [[ -n "$HASH" && -f "$WORK_DIR/.reviewer/outputs/autofix/${HASH}_verified.md" ]]; then
-    AUTOFIX_GATE=$(fmt_gate "autofix" "$GREEN" "✓")
+    AUTOFIX_GATE=$(fmt_gate "$AUTOFIX_LABEL" "$GREEN" "✓")
 else
-    AUTOFIX_GATE=$(fmt_gate "autofix" "$YELLOW" "⋯")
+    AUTOFIX_GATE=$(fmt_gate "$AUTOFIX_LABEL" "$YELLOW" "⋯")
 fi
 
 # verify_conversation: per-commit completion file.
