@@ -871,11 +871,16 @@ def test_sdk_unmarked_test_that_catches_guard_error_still_fails(
     result.stdout.fnmatch_lines(["*without @pytest.mark.test_sdk*"])
 
 
+@pytest.mark.flaky
 def test_sdk_marked_test_that_never_triggers_guard_fails(
     pytester: pytest.Pytester,
     clean_guard_env: None,
 ) -> None:
-    """A test with the SDK mark that never triggers the guard fails (superfluous mark)."""
+    """A test with the SDK mark that never triggers the guard fails (superfluous mark).
+
+    Marked flaky because the inner pytester subprocess sporadically exceeds the
+    default 10s pytest-timeout under CI load (observed on PR #1485).
+    """
     pytester.makeconftest(_PYTESTER_SDK_CONFTEST)
     pytester.makepyfile("""
         import pytest
