@@ -25,7 +25,6 @@ from imbue.mngr_kanpan.data_sources.github import PrField
 from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_sources.github import UnresolvedField
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
-from imbue.mngr_kanpan.testing import TEST_NOW
 
 # === CellDisplay ===
 
@@ -41,7 +40,7 @@ def test_cell_display_defaults() -> None:
 
 
 def test_field_value_base_display() -> None:
-    fv = FieldValue(created=TEST_NOW)
+    fv = FieldValue(created=datetime(2024, 1, 1, 0, 0, 1, tzinfo=timezone.utc))
     cell = fv.display()
     assert isinstance(cell, CellDisplay)
 
@@ -66,6 +65,7 @@ def test_field_value_preserves_explicit_created() -> None:
 
 
 def test_field_value_round_trip_preserves_created() -> None:
+    created_a = datetime(2024, 1, 1, 0, 0, 2, tzinfo=timezone.utc)
     field = PrField(
         number=1,
         url="https://example.com/1",
@@ -73,12 +73,12 @@ def test_field_value_round_trip_preserves_created() -> None:
         title="x",
         state=PrState.OPEN,
         head_branch="b",
-        created=TEST_NOW,
+        created=created_a,
     )
     dumped = field.model_dump()
     restored = PrField.model_validate(dumped)
     assert restored == field
-    assert restored.created == TEST_NOW
+    assert restored.created == created_a
 
 
 # === oldest_created / now_utc ===
@@ -113,7 +113,7 @@ def test_oldest_created_raises_on_all_none() -> None:
 
 
 def test_string_field_display() -> None:
-    field = StringField(value="test-value", created=TEST_NOW)
+    field = StringField(value="test-value", created=datetime(2024, 1, 1, 0, 0, 3, tzinfo=timezone.utc))
     cell = field.display()
     assert cell.text == "test-value"
     assert cell.url is None
@@ -123,12 +123,12 @@ def test_string_field_display() -> None:
 
 
 def test_bool_field_display_true() -> None:
-    field = BoolField(value=True, created=TEST_NOW)
+    field = BoolField(value=True, created=datetime(2024, 1, 1, 0, 0, 4, tzinfo=timezone.utc))
     assert field.display().text == "yes"
 
 
 def test_bool_field_display_false() -> None:
-    field = BoolField(value=False, created=TEST_NOW)
+    field = BoolField(value=False, created=datetime(2024, 1, 1, 0, 0, 5, tzinfo=timezone.utc))
     assert field.display().text == "no"
 
 
@@ -143,7 +143,7 @@ def test_pr_field_display() -> None:
         title="Test PR",
         state=PrState.OPEN,
         head_branch="test-branch",
-        created=TEST_NOW,
+        created=datetime(2024, 1, 1, 0, 0, 6, tzinfo=timezone.utc),
     )
     cell = pr.display()
     assert cell.text == "#42"
@@ -154,25 +154,25 @@ def test_pr_field_display() -> None:
 
 
 def test_ci_field_display_passing() -> None:
-    cell = CiField(status=CiStatus.PASSING, created=TEST_NOW).display()
+    cell = CiField(status=CiStatus.PASSING, created=datetime(2024, 1, 1, 0, 0, 7, tzinfo=timezone.utc)).display()
     assert cell.text == "passing"
     assert cell.color == "light green"
 
 
 def test_ci_field_display_failing() -> None:
-    cell = CiField(status=CiStatus.FAILING, created=TEST_NOW).display()
+    cell = CiField(status=CiStatus.FAILING, created=datetime(2024, 1, 1, 0, 0, 8, tzinfo=timezone.utc)).display()
     assert cell.text == "failing"
     assert cell.color == "light red"
 
 
 def test_ci_field_display_pending() -> None:
-    cell = CiField(status=CiStatus.PENDING, created=TEST_NOW).display()
+    cell = CiField(status=CiStatus.PENDING, created=datetime(2024, 1, 1, 0, 0, 9, tzinfo=timezone.utc)).display()
     assert cell.text == "pending"
     assert cell.color == "yellow"
 
 
 def test_ci_field_display_unknown() -> None:
-    cell = CiField(status=CiStatus.UNKNOWN, created=TEST_NOW).display()
+    cell = CiField(status=CiStatus.UNKNOWN, created=datetime(2024, 1, 1, 0, 0, 10, tzinfo=timezone.utc)).display()
     assert cell.text == ""
     assert cell.color is None
 
@@ -183,7 +183,7 @@ def test_ci_field_display_unknown() -> None:
 def test_create_pr_url_field_display() -> None:
     field = CreatePrUrlField(
         url="https://github.com/org/repo/compare/branch?expand=1",
-        created=TEST_NOW,
+        created=datetime(2024, 1, 1, 0, 0, 11, tzinfo=timezone.utc),
     )
     cell = field.display()
     assert cell.text == "+PR"
@@ -194,7 +194,7 @@ def test_create_pr_url_field_display() -> None:
 
 
 def test_repo_path_field_display() -> None:
-    field = RepoPathField(path="org/repo", created=TEST_NOW)
+    field = RepoPathField(path="org/repo", created=datetime(2024, 1, 1, 0, 0, 12, tzinfo=timezone.utc))
     cell = field.display()
     assert cell.text == "org/repo"
 
@@ -203,22 +203,26 @@ def test_repo_path_field_display() -> None:
 
 
 def test_commits_ahead_field_no_work_dir() -> None:
-    field = CommitsAheadField(count=None, has_work_dir=False, created=TEST_NOW)
+    field = CommitsAheadField(
+        count=None, has_work_dir=False, created=datetime(2024, 1, 1, 0, 0, 13, tzinfo=timezone.utc)
+    )
     assert field.display().text == ""
 
 
 def test_commits_ahead_field_not_pushed() -> None:
-    field = CommitsAheadField(count=None, has_work_dir=True, created=TEST_NOW)
+    field = CommitsAheadField(
+        count=None, has_work_dir=True, created=datetime(2024, 1, 1, 0, 0, 14, tzinfo=timezone.utc)
+    )
     assert field.display().text == "[not pushed]"
 
 
 def test_commits_ahead_field_up_to_date() -> None:
-    field = CommitsAheadField(count=0, has_work_dir=True, created=TEST_NOW)
+    field = CommitsAheadField(count=0, has_work_dir=True, created=datetime(2024, 1, 1, 0, 0, 15, tzinfo=timezone.utc))
     assert field.display().text == "[up to date]"
 
 
 def test_commits_ahead_field_has_unpushed() -> None:
-    field = CommitsAheadField(count=3, has_work_dir=True, created=TEST_NOW)
+    field = CommitsAheadField(count=3, has_work_dir=True, created=datetime(2024, 1, 1, 0, 0, 16, tzinfo=timezone.utc))
     assert field.display().text == "[3 unpushed]"
 
 
@@ -226,13 +230,13 @@ def test_commits_ahead_field_has_unpushed() -> None:
 
 
 def test_conflicts_field_display_has_conflicts() -> None:
-    cell = ConflictsField(has_conflicts=True, created=TEST_NOW).display()
+    cell = ConflictsField(has_conflicts=True, created=datetime(2024, 1, 1, 0, 0, 17, tzinfo=timezone.utc)).display()
     assert cell.text == "YES"
     assert cell.color == "light red"
 
 
 def test_conflicts_field_display_no_conflicts() -> None:
-    cell = ConflictsField(has_conflicts=False, created=TEST_NOW).display()
+    cell = ConflictsField(has_conflicts=False, created=datetime(2024, 1, 1, 0, 0, 18, tzinfo=timezone.utc)).display()
     assert cell.text == "no"
     assert cell.color == "light green"
 
@@ -241,13 +245,13 @@ def test_conflicts_field_display_no_conflicts() -> None:
 
 
 def test_unresolved_field_display_has_unresolved() -> None:
-    cell = UnresolvedField(has_unresolved=True, created=TEST_NOW).display()
+    cell = UnresolvedField(has_unresolved=True, created=datetime(2024, 1, 1, 0, 0, 19, tzinfo=timezone.utc)).display()
     assert cell.text == "YES"
     assert cell.color == "light red"
 
 
 def test_unresolved_field_display_no_unresolved() -> None:
-    cell = UnresolvedField(has_unresolved=False, created=TEST_NOW).display()
+    cell = UnresolvedField(has_unresolved=False, created=datetime(2024, 1, 1, 0, 0, 20, tzinfo=timezone.utc)).display()
     assert cell.text == "no"
     assert cell.color == "light green"
 
@@ -265,9 +269,13 @@ def test_deserialize_fields_basic() -> None:
             "title": "Test",
             "state": "OPEN",
             "head_branch": "b",
-            "created": TEST_NOW.isoformat(),
+            "created": datetime(2024, 1, 1, 0, 0, 21, tzinfo=timezone.utc).isoformat(),
         },
-        "ci": {"kind": "ci", "status": "FAILING", "created": TEST_NOW.isoformat()},
+        "ci": {
+            "kind": "ci",
+            "status": "FAILING",
+            "created": datetime(2024, 1, 1, 0, 0, 22, tzinfo=timezone.utc).isoformat(),
+        },
     }
     types: dict[str, TypeAdapter[FieldValue]] = {"pr": TypeAdapter(PrField), "ci": TypeAdapter(CiField)}
     result = deserialize_fields(raw, types)
@@ -291,7 +299,7 @@ def test_deserialize_fields_round_trip() -> None:
         title="Draft",
         state=PrState.OPEN,
         head_branch="branch",
-        created=TEST_NOW,
+        created=datetime(2024, 1, 1, 0, 0, 23, tzinfo=timezone.utc),
     )
     dumped = {"pr": pr.model_dump(mode="json")}
     restored = deserialize_fields(dumped, {"pr": TypeAdapter(PrField)})
@@ -313,9 +321,11 @@ def test_deserialize_fields_polymorphic_via_discriminator() -> None:
         title="t",
         state=PrState.OPEN,
         head_branch="b",
-        created=TEST_NOW,
+        created=datetime(2024, 1, 1, 0, 0, 24, tzinfo=timezone.utc),
     ).model_dump(mode="json")
-    create_dump = CreatePrUrlField(url="https://example.com/compare", created=TEST_NOW).model_dump(mode="json")
+    create_dump = CreatePrUrlField(
+        url="https://example.com/compare", created=datetime(2024, 1, 1, 0, 0, 25, tzinfo=timezone.utc)
+    ).model_dump(mode="json")
 
     pr_result = deserialize_fields({"pr": pr_dump}, {"pr": pr_slot})
     create_result = deserialize_fields({"pr": create_dump}, {"pr": pr_slot})
@@ -333,7 +343,14 @@ def test_deserialize_fields_drops_invalid_payload_keeps_others() -> None:
     """
     types: dict[str, TypeAdapter[FieldValue]] = {"pr": TypeAdapter(PrField), "ci": TypeAdapter(CiField)}
     # PrField requires number/url/title/state/head_branch/is_draft/created -- {} fails.
-    raw = {"pr": {}, "ci": {"kind": "ci", "status": "PASSING", "created": TEST_NOW.isoformat()}}
+    raw = {
+        "pr": {},
+        "ci": {
+            "kind": "ci",
+            "status": "PASSING",
+            "created": datetime(2024, 1, 1, 0, 0, 26, tzinfo=timezone.utc).isoformat(),
+        },
+    }
     result = deserialize_fields(raw, types)
     assert "pr" not in result
     assert isinstance(result["ci"], CiField)

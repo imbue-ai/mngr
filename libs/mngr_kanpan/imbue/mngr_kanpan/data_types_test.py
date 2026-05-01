@@ -1,3 +1,6 @@
+from datetime import datetime
+from datetime import timezone
+
 import pytest
 from pydantic import ValidationError
 
@@ -12,7 +15,6 @@ from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
-from imbue.mngr_kanpan.testing import TEST_NOW
 
 
 def test_ci_status_color() -> None:
@@ -30,7 +32,7 @@ def test_pr_field_display() -> None:
         url="https://github.com/org/repo/pull/42",
         head_branch="mngr/my-agent",
         is_draft=False,
-        created=TEST_NOW,
+        created=datetime(2025, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
     )
     cell = pr.display()
     assert cell.text == "#42"
@@ -38,14 +40,14 @@ def test_pr_field_display() -> None:
 
 
 def test_ci_field_display() -> None:
-    ci = CiField(status=CiStatus.FAILING, created=TEST_NOW)
+    ci = CiField(status=CiStatus.FAILING, created=datetime(2025, 1, 1, 0, 0, 2, tzinfo=timezone.utc))
     cell = ci.display()
     assert cell.text == "failing"
     assert cell.color == "light red"
 
 
 def test_ci_field_display_unknown() -> None:
-    ci = CiField(status=CiStatus.UNKNOWN, created=TEST_NOW)
+    ci = CiField(status=CiStatus.UNKNOWN, created=datetime(2025, 1, 1, 0, 0, 3, tzinfo=timezone.utc))
     cell = ci.display()
     assert cell.text == ""
 
@@ -58,7 +60,7 @@ def test_pr_field_is_frozen() -> None:
         url="https://github.com/org/repo/pull/42",
         head_branch="mngr/my-agent",
         is_draft=False,
-        created=TEST_NOW,
+        created=datetime(2025, 1, 1, 0, 0, 4, tzinfo=timezone.utc),
     )
     with pytest.raises(ValidationError):
         pr.number = 99
@@ -86,7 +88,7 @@ def test_agent_board_entry_with_fields() -> None:
         url="https://github.com/org/repo/pull/10",
         head_branch="mngr/my-agent",
         is_draft=False,
-        created=TEST_NOW,
+        created=datetime(2025, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
     )
     entry = AgentBoardEntry(
         name=AgentName("my-agent"),

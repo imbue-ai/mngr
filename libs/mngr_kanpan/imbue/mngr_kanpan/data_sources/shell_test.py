@@ -14,7 +14,6 @@ from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_sources.shell import ShellCommandConfig
 from imbue.mngr_kanpan.data_sources.shell import ShellCommandDataSource
 from imbue.mngr_kanpan.data_sources.shell import _build_shell_env
-from imbue.mngr_kanpan.testing import TEST_NOW
 from imbue.mngr_kanpan.testing import make_agent_details
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_cg
 
@@ -39,7 +38,7 @@ def test_build_shell_env_with_pr_field() -> None:
         title="Test",
         state=PrState.OPEN,
         head_branch="b",
-        created=TEST_NOW,
+        created=datetime(2030, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
     )
     cached: dict[str, FieldValue] = {"pr": pr}
     env = _build_shell_env(agent, cached)
@@ -50,7 +49,7 @@ def test_build_shell_env_with_pr_field() -> None:
 
 def test_build_shell_env_with_ci_field() -> None:
     agent = make_agent_details(name="agent-1")
-    ci = CiField(status=CiStatus.FAILING, created=TEST_NOW)
+    ci = CiField(status=CiStatus.FAILING, created=datetime(2030, 1, 1, 0, 0, 2, tzinfo=timezone.utc))
     cached: dict[str, FieldValue] = {"ci": ci}
     env = _build_shell_env(agent, cached)
     assert env["MNGR_FIELD_CI_STATUS"] == "FAILING"
@@ -58,7 +57,9 @@ def test_build_shell_env_with_ci_field() -> None:
 
 def test_build_shell_env_with_string_field() -> None:
     agent = make_agent_details(name="agent-1")
-    cached: dict[str, FieldValue] = {"custom_val": StringField(value="hello", created=TEST_NOW)}
+    cached: dict[str, FieldValue] = {
+        "custom_val": StringField(value="hello", created=datetime(2030, 1, 1, 0, 0, 3, tzinfo=timezone.utc))
+    }
     env = _build_shell_env(agent, cached)
     assert env["MNGR_FIELD_CUSTOM_VAL"] == "hello"
 
@@ -72,7 +73,7 @@ def test_build_shell_env_no_branch() -> None:
 def test_build_shell_env_with_other_field() -> None:
     """Non-PrField, non-CiField, non-StringField falls back to display().text."""
     agent = make_agent_details(name="agent-1")
-    field = CommitsAheadField(count=3, has_work_dir=True, created=TEST_NOW)
+    field = CommitsAheadField(count=3, has_work_dir=True, created=datetime(2030, 1, 1, 0, 0, 4, tzinfo=timezone.utc))
     env = _build_shell_env(agent, {"commits_ahead": field})
     assert env["MNGR_FIELD_COMMITS_AHEAD"] == "[3 unpushed]"
 
@@ -145,8 +146,8 @@ def test_compute_propagates_oldest_declared_input(test_cg: ConcurrencyGroup) -> 
     )
     agent = make_agent_details(name="agent-1")
     ctx = make_mngr_ctx_with_cg(test_cg)
-    older = TEST_NOW - timedelta(hours=2)
-    newer = TEST_NOW - timedelta(minutes=5)
+    older = datetime(2030, 1, 1, 0, 0, 5, tzinfo=timezone.utc) - timedelta(hours=2)
+    newer = datetime(2030, 1, 1, 0, 0, 6, tzinfo=timezone.utc) - timedelta(minutes=5)
     cached: dict[AgentName, dict[str, FieldValue]] = {
         AgentName("agent-1"): {
             "older_input": StringField(value="x", created=older),
@@ -187,7 +188,7 @@ def test_compute_uses_now_when_no_inputs_declared_even_with_cached_fields(
     )
     agent = make_agent_details(name="agent-1")
     ctx = make_mngr_ctx_with_cg(test_cg)
-    very_old = TEST_NOW - timedelta(days=7)
+    very_old = datetime(2030, 1, 1, 0, 0, 7, tzinfo=timezone.utc) - timedelta(days=7)
     cached: dict[AgentName, dict[str, FieldValue]] = {
         AgentName("agent-1"): {
             "some_other_field": StringField(value="x", created=very_old),
@@ -216,8 +217,8 @@ def test_compute_ignores_undeclared_cached_keys(test_cg: ConcurrencyGroup) -> No
     )
     agent = make_agent_details(name="agent-1")
     ctx = make_mngr_ctx_with_cg(test_cg)
-    declared_age = TEST_NOW - timedelta(minutes=5)
-    undeclared_age = TEST_NOW - timedelta(days=7)
+    declared_age = datetime(2030, 1, 1, 0, 0, 8, tzinfo=timezone.utc) - timedelta(minutes=5)
+    undeclared_age = datetime(2030, 1, 1, 0, 0, 9, tzinfo=timezone.utc) - timedelta(days=7)
     cached: dict[AgentName, dict[str, FieldValue]] = {
         AgentName("agent-1"): {
             "declared_input": StringField(value="x", created=declared_age),
@@ -243,13 +244,15 @@ def test_compute_does_not_self_taint_even_when_self_is_declared(
         config=ShellCommandConfig(
             name="Custom",
             header="CUSTOM",
+            # Pathological self-declaration: the operator names the field's
+            # own key as an input.
             command="echo 'hi'",
-            inputs=("custom",),  # <- pathological self-declaration
+            inputs=("custom",),
         ),
     )
     agent = make_agent_details(name="agent-1")
     ctx = make_mngr_ctx_with_cg(test_cg)
-    very_old = TEST_NOW - timedelta(days=7)
+    very_old = datetime(2030, 1, 1, 0, 0, 10, tzinfo=timezone.utc) - timedelta(days=7)
     cached: dict[AgentName, dict[str, FieldValue]] = {
         AgentName("agent-1"): {
             "custom": StringField(value="prev", created=very_old),

@@ -20,11 +20,6 @@ from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 
-# Shared "now" timestamp for tests that build FieldValue instances. Pinned to a
-# fixed UTC instant so test cases that compare against staleness boundaries do
-# not depend on wall-clock time.
-TEST_NOW: datetime = datetime(2026, 4, 30, 12, 0, 0, tzinfo=timezone.utc)
-
 
 def make_host_details(provider_name: str = "local") -> HostDetails:
     """Create a minimal HostDetails for testing."""
@@ -82,19 +77,14 @@ def make_mngr_ctx_with_profile_dir(profile_dir: Path) -> MngrContext:
 
 
 def make_pr_field(
+    *,
+    created: datetime,
     number: int = 1,
     state: PrState = PrState.OPEN,
     is_draft: bool = False,
     head_branch: str = "test-branch",
-    created: datetime | None = None,
 ) -> PrField:
-    """Create a PrField for testing.
-
-    Defaults `created` to the shared `TEST_NOW` constant so callers that
-    don't care about the timestamp still get a deterministic value -- this
-    matches the rest of the test suite, which uses TEST_NOW everywhere a
-    fixed staleness reference is needed.
-    """
+    """Create a PrField for testing."""
     return PrField(
         number=number,
         title="Test PR",
@@ -102,7 +92,7 @@ def make_pr_field(
         url=f"https://github.com/org/repo/pull/{number}",
         head_branch=head_branch,
         is_draft=is_draft,
-        created=created if created is not None else TEST_NOW,
+        created=created,
     )
 
 
