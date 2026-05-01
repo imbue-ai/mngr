@@ -1398,7 +1398,6 @@ def _format_section_heading(section: BoardSection, count: int) -> list[str | tup
     return [(attr, prefix), f" ({count})"]
 
 
-@pure
 def _build_board_widgets(
     snapshot: BoardSnapshot | None,
     column_defs: list[_ColumnDef],
@@ -1412,7 +1411,8 @@ def _build_board_widgets(
     """Build the urwid widget list from a BoardSnapshot, grouped by section.
 
     `now` defaults to the current UTC time when None; pass an explicit value
-    in tests for determinism.
+    in tests for determinism. Reads the wall clock when `now` is None, so this
+    function is intentionally not @pure.
     """
     effective_now = now if now is not None else now_utc()
     index_to_entry: dict[int, AgentBoardEntry] = {}
