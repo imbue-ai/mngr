@@ -19,13 +19,15 @@ class SubagentProxyMode(UpperCaseStrEnum):
     while running, and the parent's tool_result is the subagent's
     end-turn body.
 
-    DENY: deny every Task call with a permissionDecisionReason that
-    contains a copy-pasteable invocation of `mngr create` / `mngr
-    transcript`. The calling agent (Claude) is expected to run those
-    commands itself via Bash to spawn a mngr-managed subagent and
-    capture its reply, then continue. Nothing is spawned automatically;
-    no PostToolUse / SessionStart hooks are installed; no Stop-hook
-    guarding or settings.json check runs.
+    DENY: deny every Task call with a short permissionDecisionReason
+    that points Claude at a per-Task wait-script (and the
+    ``mngr-subagents`` skill for context). The wait-script internally
+    runs ``mngr create`` for an mngr-managed subagent and prints its
+    reply; Claude is expected to invoke it via the Bash tool and use
+    the script's stdout as if it were the Task tool's tool_result.
+    Nothing is spawned by the deny hook itself; no PostToolUse /
+    SessionStart hooks are installed; no Stop-hook guarding or
+    settings.json check runs.
     """
 
     PROXY = auto()
