@@ -426,48 +426,34 @@ def test_deny_target_name_slug_falls_back_when_description_missing(
     assert "parent-agent--subagent-subagent-12345678" in script_body
 
 
-def test_deny_handles_failed_prompt_write_with_generic_reason(
+@pytest.mark.parametrize(
+    "blocked_subdir",
+    ["subagent_prompts", "proxy_commands"],
+    ids=["prompt_sidefile", "wait_script"],
+)
+def test_deny_handles_failed_sidefile_write_with_generic_reason(
     tmp_path: Path,
     state_dir: Path,
     hook_env: pytest.MonkeyPatch,
+    blocked_subdir: str,
 ) -> None:
-    """If the prompt sidefile can't be written, fall back to a generic deny.
+    """If a per-Task sidefile can't be written, fall back to a generic deny.
 
-    Disk full / permission denied / readonly mount on $MNGR_AGENT_STATE_DIR
-    would otherwise leave the wait-script with no prompt to feed
-    ``mngr create --message-file``. Generic deny + skill reference
+    Two failure paths share the same defensive behavior: disk full /
+    permission denied / readonly mount on ``$MNGR_AGENT_STATE_DIR``
+    that prevents either the prompt sidefile (``subagent_prompts/``)
+    or the wait-script (``proxy_commands/``) from being created.
+    Without one, the deny reason has nowhere concrete to point, so we
+    route Claude to the skill instead. Generic deny + skill reference
     keeps Claude informed without inlining the prompt.
 
-    We trigger a real OSError by pre-creating ``subagent_prompts`` as a
+    We trigger a real OSError by pre-creating the target subdir as a
     regular file -- ``mkdir(parents=True, exist_ok=True)`` then raises
     ``FileExistsError`` (an OSError subclass).
     """
-    (state_dir / "subagent_prompts").write_text("not a directory")
+    (state_dir / blocked_subdir).write_text("not a directory")
 
     response = _run_deny(_hook_input(prompt="search the repo"), cwd_for_test=tmp_path, monkeypatch=hook_env)
-
-    hook_out = response["hookSpecificOutput"]
-    assert hook_out["permissionDecision"] == "deny"
-    reason = hook_out["permissionDecisionReason"]
-    assert "deny mode" in reason
-    assert "mngr-subagents" in reason
-
-
-def test_deny_handles_failed_wait_script_write_with_generic_reason(
-    tmp_path: Path,
-    state_dir: Path,
-    hook_env: pytest.MonkeyPatch,
-) -> None:
-    """If the wait-script can't be written, fall back to a generic deny.
-
-    Same defensive behavior as the prompt-write failure path. Without
-    the wait-script the deny reason has nowhere concrete to point, so
-    we route Claude to the skill instead.
-    """
-    # Pre-create proxy_commands as a file -- mkdir(parents=True) then raises.
-    (state_dir / "proxy_commands").write_text("not a directory")
-
-    response = _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=hook_env)
 
     hook_out = response["hookSpecificOutput"]
     assert hook_out["permissionDecision"] == "deny"
