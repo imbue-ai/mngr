@@ -14,9 +14,16 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from typing import Final
 from typing import TextIO
 
 from loguru import logger
+
+# Default depth-limit for nested Task tool calls, used by both PROXY mode
+# (hooks/spawn.py) and DENY mode (hooks/deny.py). Centralized here so the
+# two hooks cannot drift on the limit, since both also share the
+# emit_depth_limit_deny helper below which formats a reason that cites it.
+DEFAULT_MAX_SUBAGENT_DEPTH: Final[int] = 3
 
 
 def parse_int_env(name: str, default: int) -> int:

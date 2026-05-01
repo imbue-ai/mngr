@@ -40,6 +40,7 @@ from typing import TextIO
 
 from loguru import logger
 
+from imbue.mngr_subagent_proxy._hook_io import DEFAULT_MAX_SUBAGENT_DEPTH
 from imbue.mngr_subagent_proxy._hook_io import emit_depth_limit_deny
 from imbue.mngr_subagent_proxy._hook_io import emit_pre_tool_deny
 from imbue.mngr_subagent_proxy._hook_io import parse_int_env
@@ -48,8 +49,6 @@ from imbue.mngr_subagent_proxy._hook_io import write_executable_file
 from imbue.mngr_subagent_proxy._hook_io import write_secure_file
 from imbue.mngr_subagent_proxy._target_name import build_subagent_target_name
 from imbue.mngr_subagent_proxy.mngr_binary import get_mngr_command_shell_form
-
-_DEFAULT_MAX_DEPTH: Final[int] = 3
 
 _GENERIC_DENY_REASON: Final[str] = (
     "mngr_subagent_proxy is in deny mode: the Task tool is disabled for this agent. "
@@ -188,7 +187,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
     os.umask(0o077)
 
     depth = parse_int_env("MNGR_SUBAGENT_DEPTH", 0)
-    max_depth = parse_int_env("MNGR_MAX_SUBAGENT_DEPTH", _DEFAULT_MAX_DEPTH)
+    max_depth = parse_int_env("MNGR_MAX_SUBAGENT_DEPTH", DEFAULT_MAX_SUBAGENT_DEPTH)
     if depth >= max_depth:
         logger.warning("deny: depth {}/{} reached; denying Task with depth-limit reason", depth, max_depth)
         emit_depth_limit_deny(stdout, depth, max_depth)
