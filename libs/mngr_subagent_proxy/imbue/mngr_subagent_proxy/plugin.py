@@ -14,6 +14,7 @@ from pydantic import Field
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.host_dir import read_default_host_dir
+from imbue.mngr.config.plugin_registry import register_plugin_config
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -31,10 +32,18 @@ from imbue.mngr_subagent_proxy._stop_hook_guard import MNGR_MANAGED_HOOK_MARKERS
 from imbue.mngr_subagent_proxy._stop_hook_guard import PROXY_CHILD_GUARD_PREFIX
 from imbue.mngr_subagent_proxy._stop_hook_guard import guard_user_stop_hooks_against_proxy_children
 from imbue.mngr_subagent_proxy._stop_hook_guard import iter_user_stop_hook_commands
+from imbue.mngr_subagent_proxy.data_types import SubagentProxyMode
+from imbue.mngr_subagent_proxy.data_types import SubagentProxyPluginConfig
 from imbue.mngr_subagent_proxy.hooks.destroy_detached import DestroyAgentDetachedCallable
 from imbue.mngr_subagent_proxy.hooks.destroy_detached import destroy_agent_detached
 
 SUBAGENT_PROXY_CHILD_AGENT_TYPE: Final[str] = "mngr-proxy-child"
+
+# Plugin name used to look up our config from MngrContext. Matches the
+# entry-point name in pyproject.toml ([project.entry-points.mngr]).
+SUBAGENT_PROXY_PLUGIN_NAME: Final[str] = "subagent_proxy"
+
+register_plugin_config(SUBAGENT_PROXY_PLUGIN_NAME, SubagentProxyPluginConfig)
 
 
 class SubagentProxyChildConfig(ClaudeAgentConfig):
@@ -85,6 +94,7 @@ _AGENT_DEFINITION: Final[str] = "mngr-proxy.agent.md"
 _SPAWN_MODULE: Final[str] = "imbue.mngr_subagent_proxy.hooks.spawn"
 _CLEANUP_MODULE: Final[str] = "imbue.mngr_subagent_proxy.hooks.cleanup"
 _REAP_MODULE: Final[str] = "imbue.mngr_subagent_proxy.hooks.reap"
+_DENY_MODULE: Final[str] = "imbue.mngr_subagent_proxy.hooks.deny"
 
 
 def _load_resource(filename: str) -> str:
@@ -149,12 +159,68 @@ def build_subagent_proxy_hooks_config() -> dict[str, Any]:
     }
 
 
+def build_subagent_proxy_deny_hooks_config() -> dict[str, Any]:
+    """Build the deny-mode hooks config: a single PreToolUse:Agent hook.
+
+    No PostToolUse, no SessionStart reaper -- the deny hook never spawns
+    a subagent, so there is nothing to clean up after a Task call and
+    nothing to reap on session start. The hook just denies the Task
+    tool with a copy-pasteable ``mngr create`` invocation in the deny
+    reason; Claude (the calling agent) is expected to run those
+    commands itself via Bash.
+    """
+    deny_cmd = _python_hook_command(_DENY_MODULE)
+    return {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Agent",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": deny_cmd,
+                            "timeout": 15,
+                        },
+                    ],
+                }
+            ],
+        }
+    }
+
+
 def _write_proxy_agent_definition(host: OnlineHostInterface, work_dir: Path) -> None:
     """Write the mngr-proxy subagent definition under the agent's .claude/agents/."""
     agents_dir = work_dir / ".claude" / "agents"
     host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(agents_dir))}", timeout_seconds=5.0)
     content = _load_resource(_AGENT_DEFINITION)
     host.write_text_file(agents_dir / "mngr-proxy.md", content)
+
+
+def _merge_subagent_proxy_deny_hooks(host: OnlineHostInterface, work_dir: Path) -> None:
+    """Merge the deny-mode hook into the agent's .claude/settings.local.json.
+
+    Deny mode installs a single PreToolUse:Agent hook that denies Task
+    calls with copy-pasteable mngr instructions. It does NOT install
+    PostToolUse / SessionStart hooks (no spawned children to clean
+    up), does NOT walk the user's plugin hooks dirs to install Stop-hook
+    guards (no proxy children to guard against), and does NOT check the
+    project ``settings.json`` for un-guarded Stop hooks (same reason).
+    The surface is deliberately much smaller than PROXY mode.
+    """
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    existing_settings: dict[str, Any] = {}
+    try:
+        content = host.read_text_file(settings_path)
+        existing_settings = json.loads(content)
+    except FileNotFoundError:
+        pass
+
+    hooks_config = build_subagent_proxy_deny_hooks_config()
+    merged = merge_hooks_config(existing_settings, hooks_config)
+    if merged is None:
+        logger.debug("Subagent-proxy deny hook already configured in {}", settings_path)
+        return
+    host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
 
 
 def _merge_subagent_proxy_hooks(host: OnlineHostInterface, work_dir: Path) -> None:
@@ -398,6 +464,20 @@ def _check_project_settings_stop_hooks_guarded(host: OnlineHostInterface, work_d
     )
 
 
+def _resolve_plugin_mode(mngr_ctx: MngrContext | None) -> SubagentProxyMode:
+    """Resolve the plugin's mode from mngr_ctx, falling back to PROXY.
+
+    ``mngr_ctx`` is None in unit tests (which pass it explicitly to keep
+    the hookimpl signature satisfied without standing up a full MngrContext).
+    Treat that case as "use defaults" -- equivalent to a user who never
+    configured the plugin.
+    """
+    if mngr_ctx is None:
+        return SubagentProxyPluginConfig().mode
+    config = mngr_ctx.get_plugin_config(SUBAGENT_PROXY_PLUGIN_NAME, SubagentProxyPluginConfig)
+    return config.mode
+
+
 @hookimpl(trylast=True)
 def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
     """Install subagent-proxy hooks on Claude agents.
@@ -407,9 +487,21 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
     as our own spawned proxy-children, refuse to proceed if they inherit
     any Stop / SubagentStop hooks whose semantics differ between top-level
     and subagent contexts -- the user has to decide how those should apply.
+
+    Behavior depends on ``SubagentProxyPluginConfig.mode``:
+    - ``PROXY`` (default): install spawn / cleanup / SessionStart hooks,
+      write the mngr-proxy agent definition, guard project Stop hooks.
+    - ``DENY``: install only the deny hook. None of the other plumbing
+      runs (no PostToolUse, no SessionStart reaper, no Stop-hook guard,
+      no project settings.json check). The deny hook never spawns a
+      subagent, so there is nothing for the heavier machinery to manage.
     """
-    del mngr_ctx  # unused
     if not isinstance(agent.agent_config, ClaudeAgentConfig):
+        return
+
+    mode = _resolve_plugin_mode(mngr_ctx)
+    if mode == SubagentProxyMode.DENY:
+        _merge_subagent_proxy_deny_hooks(host, agent.work_dir)
         return
 
     _check_project_settings_stop_hooks_guarded(host, agent.work_dir)

@@ -17,7 +17,23 @@ Task tool invocations are routed through a mngr-managed proxy subagent.
 This lets you `mngr connect` to subagents, observe their progress, and
 the parent still receives a normally-shaped `tool_result`.
 
-## Architecture
+## Modes
+
+The plugin has two modes, selected via mngr config:
+
+```toml
+[plugins.subagent_proxy]
+mode = "PROXY"   # default: route Task calls through an mngr-managed subagent
+                 # via a Haiku dispatcher (the original behavior).
+# mode = "DENY"  # alternative: deny Task calls with a copy-pasteable
+                 # `mngr create` invocation in the deny reason. Claude
+                 # is expected to run those commands itself in Bash.
+```
+
+`PROXY` mode is the default and what the rest of this README describes.
+`DENY` mode is documented in its own section below.
+
+## Architecture (PROXY mode)
 
 - **`PreToolUse:Agent` hook** rewrites the Task tool's `subagent_type`
   to a Haiku dispatcher (`mngr-proxy`) whose Bash tool runs a per-call
@@ -182,6 +198,49 @@ are currently running:
         --exclude 'labels.mngr_subagent_proxy == "child"' \
         --include 'state == "RUNNING"'
 
+## DENY mode
+
+Setting `mode = "DENY"` in `[plugins.subagent_proxy]` swaps the proxy
+machinery for a single `PreToolUse:Agent` hook that DENIES every Task
+tool invocation with a copy-pasteable `mngr create` invocation in the
+`permissionDecisionReason`. Claude (the calling agent) sees the deny
+reason and is expected to run the suggested commands itself via Bash:
+
+```bash
+uv run mngr create <slug>:<parent_cwd> \
+    --type claude --transfer=none --no-ensure-clean --no-connect \
+    --label mngr_subagent_proxy=child \
+    --message-file <prompt_file>
+uv run python -m imbue.mngr_subagent_proxy.subagent_wait <slug>
+```
+
+The wait command prints `END_TURN:<reply>`; Claude strips the prefix
+and uses the rest as if it were the Task tool's `tool_result`, then
+continues its turn. For `run_in_background=true` Task calls the deny
+reason omits the wait step.
+
+What deny mode installs:
+- `PreToolUse:Agent` hook only.
+- Per-Task-call prompt sidefile under
+  `$MNGR_AGENT_STATE_DIR/subagent_prompts/<tool_use_id>.md` so long
+  prompts don't have to be embedded in the deny message.
+
+What deny mode does NOT install or run (vs. PROXY):
+- No `PostToolUse:Agent` cleanup -- nothing to clean up since the
+  plugin never spawns a child.
+- No `SessionStart` reaper -- same reason.
+- No `mngr-proxy.md` agent definition (no Haiku dispatcher).
+- No `_check_project_settings_stop_hooks_guarded` check on
+  `.claude/settings.json`.
+- No env-conditional Stop-hook guarding of plugin `hooks.json` files.
+- No Stop/SubagentStop compatibility checks on spawned children.
+
+Children spawned by Claude in deny mode (via the suggested
+`mngr create` invocation) carry the same
+`mngr_subagent_proxy=child` label as PROXY-mode children, so they
+still hide from `mngr list --exclude 'labels.mngr_subagent_proxy ==
+"child"'`.
+
 ## Depth limit
 
 To prevent unbounded nesting, the plugin denies Task at depth
@@ -232,17 +291,6 @@ sweep them according to its retention policy. The parent's
 the actual cleanup. This requires plumbing through a "stop" action
 in `destroy_agent_detached` / `destroy_worker.py` that calls
 `mngr stop` rather than `mngr destroy`.
-
-#### Deny-Task mode that just tells claude to run mngr
-
-Right now we always intercept the parent's `Task` tool and route it
-through a Haiku relay + spawned mngr child. For users who don't want
-the proxy at all -- they'd rather just be told to run
-`uv run mngr create` themselves -- offer a deny-Task mode where the
-PreToolUse hook returns `permissionDecision: "deny"` with a
-`permissionDecisionReason` that contains a copy-pasteable
-`mngr create` invocation matching the parent's intent. Same hook
-plumbing, simpler UX, no Haiku confabulation surface.
 
 #### Transparent permission resolution (Option B)
 
