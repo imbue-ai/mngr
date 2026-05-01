@@ -3,6 +3,7 @@ from collections.abc import Sequence
 
 from loguru import logger
 from pydantic import Field
+from pydantic import TypeAdapter
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.local_process import RunningProcess
@@ -24,6 +25,9 @@ class ShellCommandConfig(FrozenModel):
     name: str = Field(description="Human-readable name")
     header: str = Field(description="Column header text")
     command: str = Field(description="Shell command to run per agent")
+
+
+_STRING_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(StringField)
 
 
 class ShellCommandDataSource(FrozenModel):
@@ -51,8 +55,8 @@ class ShellCommandDataSource(FrozenModel):
         return {self.field_key: self.config.header}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        return {self.field_key: StringField}
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
+        return {self.field_key: _STRING_ADAPTER}
 
     def compute(
         self,

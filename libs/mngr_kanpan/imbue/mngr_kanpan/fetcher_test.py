@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import TypeAdapter
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentName
@@ -18,6 +19,10 @@ from imbue.mngr_kanpan.data_source import KanpanFieldTypeError
 from imbue.mngr_kanpan.data_source import StringField
 from imbue.mngr_kanpan.data_sources.github import CiField
 from imbue.mngr_kanpan.data_sources.github import CiStatus
+from imbue.mngr_kanpan.data_sources.github import CreatePrUrlField
+from imbue.mngr_kanpan.data_sources.github import GitHubDataSource
+from imbue.mngr_kanpan.data_sources.github import GitHubDataSourceConfig
+from imbue.mngr_kanpan.data_sources.github import PrFetchFailedField
 from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_sources.repo_paths import _parse_github_repo_path
 from imbue.mngr_kanpan.data_sources.repo_paths import repo_path_from_labels
@@ -109,36 +114,25 @@ def test_compute_section_open_pr_no_ci() -> None:
     assert compute_section(fields) == BoardSection.PR_BEING_REVIEWED
 
 
-def test_compute_section_open_pr_ci_failing() -> None:
+@pytest.mark.parametrize(
+    "ci_status",
+    [CiStatus.PASSING, CiStatus.FAILING, CiStatus.PENDING, CiStatus.UNKNOWN],
+)
+def test_compute_section_open_pr_ignores_ci(ci_status: CiStatus) -> None:
+    # Regression: compute_section no longer dispatches on FIELD_CI for open PRs.
+    # An open, non-draft PR is always PR_BEING_REVIEWED regardless of CI status;
+    # PRS_FAILED is reserved for the "could not load PR data" case (see
+    # test_compute_section_pr_fetch_failed below).
     fields: dict[str, FieldValue] = {
         FIELD_PR: make_pr_field(),
-        FIELD_CI: CiField(status=CiStatus.FAILING, created=_NOW),
+        FIELD_CI: CiField(status=ci_status, created=_NOW),
     }
+    assert compute_section(fields) == BoardSection.PR_BEING_REVIEWED
+
+
+def test_compute_section_pr_fetch_failed() -> None:
+    fields: dict[str, FieldValue] = {FIELD_PR: PrFetchFailedField(repo="org/repo", created=_NOW)}
     assert compute_section(fields) == BoardSection.PRS_FAILED
-
-
-def test_compute_section_open_pr_ci_passing() -> None:
-    fields: dict[str, FieldValue] = {
-        FIELD_PR: make_pr_field(),
-        FIELD_CI: CiField(status=CiStatus.PASSING, created=_NOW),
-    }
-    assert compute_section(fields) == BoardSection.PR_BEING_REVIEWED
-
-
-def test_compute_section_open_pr_ci_pending() -> None:
-    fields: dict[str, FieldValue] = {
-        FIELD_PR: make_pr_field(),
-        FIELD_CI: CiField(status=CiStatus.PENDING, created=_NOW),
-    }
-    assert compute_section(fields) == BoardSection.PR_BEING_REVIEWED
-
-
-def test_compute_section_open_pr_ci_unknown() -> None:
-    fields: dict[str, FieldValue] = {
-        FIELD_PR: make_pr_field(),
-        FIELD_CI: CiField(status=CiStatus.UNKNOWN, created=_NOW),
-    }
-    assert compute_section(fields) == BoardSection.PR_BEING_REVIEWED
 
 
 def test_compute_section_wrong_muted_type() -> None:
@@ -150,15 +144,6 @@ def test_compute_section_wrong_muted_type() -> None:
 def test_compute_section_wrong_pr_type() -> None:
     fields: dict[str, FieldValue] = {FIELD_PR: StringField(value="oops", created=_NOW)}
     with pytest.raises(KanpanFieldTypeError, match="Expected PrField"):
-        compute_section(fields)
-
-
-def test_compute_section_wrong_ci_type() -> None:
-    fields: dict[str, FieldValue] = {
-        FIELD_PR: make_pr_field(),
-        FIELD_CI: StringField(value="oops", created=_NOW),
-    }
-    with pytest.raises(KanpanFieldTypeError, match="Expected CiField"):
         compute_section(fields)
 
 
@@ -213,7 +198,7 @@ class _MockDataSource:
         return {}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
         return {}
 
     def compute(
@@ -239,7 +224,7 @@ class _FailingDataSource:
         return {}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
         return {}
 
     def compute(
@@ -434,7 +419,7 @@ def test_plugin_kanpan_data_sources_from_loader_path() -> None:
 
 def _make_mock_data_source(field_key: str, field_type: type[FieldValue]) -> KanpanDataSource:
     return SimpleNamespace(  # ty: ignore[invalid-return-type]
-        field_types={field_key: field_type},
+        field_types={field_key: TypeAdapter(field_type)},
     )
 
 
@@ -474,6 +459,33 @@ def test_save_load_field_cache_roundtrip(tmp_path: Path) -> None:
     assert field.created == _NOW
 
 
+def test_save_load_field_cache_polymorphic_slot_roundtrip(tmp_path: Path) -> None:
+    """A slot can hold any of several FieldValue subclasses (e.g. FIELD_PR can hold
+    PrField, CreatePrUrlField, or PrFetchFailedField). All declared classes for a
+    slot must round-trip through the cache, regardless of which one was last persisted.
+    """
+    ctx = make_mngr_ctx_with_profile_dir(tmp_path)
+    a1 = AgentName("a1")
+    a2 = AgentName("a2")
+    a3 = AgentName("a3")
+    original: dict[AgentName, dict[str, FieldValue]] = {
+        a1: {FIELD_PR: make_pr_field(number=42)},
+        a2: {FIELD_PR: CreatePrUrlField(url="https://example.com/compare", created=_NOW)},
+        a3: {FIELD_PR: PrFetchFailedField(repo="org/repo", created=_NOW)},
+    }
+    save_field_cache(ctx, original)
+
+    data_sources = [GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))]
+    loaded = load_field_cache(ctx, data_sources)
+
+    assert isinstance(loaded[a1][FIELD_PR], type(original[a1][FIELD_PR]))
+    assert loaded[a1][FIELD_PR] == original[a1][FIELD_PR]
+    assert isinstance(loaded[a2][FIELD_PR], CreatePrUrlField)
+    assert loaded[a2][FIELD_PR] == original[a2][FIELD_PR]
+    assert isinstance(loaded[a3][FIELD_PR], PrFetchFailedField)
+    assert loaded[a3][FIELD_PR] == original[a3][FIELD_PR]
+
+
 def test_load_field_cache_returns_empty_on_corrupt_json(tmp_path: Path) -> None:
     """load_field_cache returns empty dict when the cache file contains invalid JSON."""
     cache_dir = tmp_path / "kanpan"
@@ -495,15 +507,54 @@ def test_load_field_cache_returns_empty_on_non_utf8_bytes(tmp_path: Path) -> Non
     assert result == {}
 
 
+def test_load_field_cache_returns_empty_on_top_level_non_dict_json(tmp_path: Path) -> None:
+    """load_field_cache returns empty dict when the cache JSON parses but isn't a dict at the top level."""
+    cache_dir = tmp_path / "kanpan"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "field_cache.json").write_text("[]")
+    ctx = make_mngr_ctx_with_profile_dir(tmp_path)
+    result = load_field_cache(ctx, [])
+    assert result == {}
+
+
+def test_load_field_cache_returns_empty_on_invalid_agent_name(tmp_path: Path) -> None:
+    """load_field_cache returns empty dict when a top-level key is not a valid AgentName.
+
+    The cache file may have been hand-edited or written by an older incompatible
+    version. AgentName construction enforces SafeName's regex and would otherwise
+    raise InvalidName; load_field_cache must swallow that and return {}.
+
+    The payload here must be non-empty and validate against the supplied
+    adapters -- otherwise deserialize_fields returns {} and the
+    ``if agent_fields:`` guard short-circuits before AgentName(...) is
+    even called, which would not exercise the swallow path.
+    """
+    cache_dir = tmp_path / "kanpan"
+    cache_dir.mkdir(parents=True)
+    pr_payload = make_pr_field().model_dump(mode="json")
+    # 'a1/x' contains '/', which violates SafeName's regex. The PR payload
+    # makes deserialize_fields return a non-empty dict so that the
+    # AgentName("a1/x") constructor is actually reached.
+    cache_data = {"a1/x": {FIELD_PR: pr_payload}}
+    (cache_dir / "field_cache.json").write_text(json.dumps(cache_data))
+    ctx = make_mngr_ctx_with_profile_dir(tmp_path)
+    data_sources = [GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))]
+    result = load_field_cache(ctx, data_sources)
+    assert result == {}
+
+
 def test_load_field_cache_skips_unknown_types(tmp_path: Path) -> None:
-    """load_field_cache skips field entries whose type is not in the type registry."""
+    """load_field_cache drops cache entries whose field key is not declared by any
+    data source's ``field_types`` adapter map. With no data sources passed in there
+    are no adapters, so every saved field key is unknown and the result is empty.
+    """
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
     agent_name = AgentName("agent-1")
     original: dict[AgentName, dict[str, FieldValue]] = {
         agent_name: {"status": StringField(value="hello", created=_NOW)},
     }
     save_field_cache(ctx, original)
-    # Load with no data sources (empty type registry) -- field should be skipped
+    # No data sources -> no field-key adapters, so every saved key is unknown and dropped.
     loaded = load_field_cache(ctx, [])
     assert loaded == {}
 
@@ -516,13 +567,16 @@ def test_load_field_cache_drops_legacy_entries_missing_created(tmp_path: Path) -
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
     cache_dir = tmp_path / "kanpan"
     cache_dir.mkdir(parents=True)
-    # Hand-craft a cache file with one legacy entry (no created) and one fresh entry.
+    # Hand-craft a cache file with one legacy entry (no created) and one fresh
+    # entry. Using the post-`kind` wire format directly: per-field deserialize
+    # via the StringField TypeAdapter, which rejects payloads missing required
+    # fields (validation error, dropped silently).
     cache_payload = {
         "agent-legacy": {
-            "status": {"type": "StringField", "data": {"value": "old"}},
+            "status": {"kind": "string", "value": "old"},
         },
         "agent-fresh": {
-            "status": {"type": "StringField", "data": {"value": "new", "created": _NOW.isoformat()}},
+            "status": {"kind": "string", "value": "new", "created": _NOW.isoformat()},
         },
     }
     (cache_dir / "field_cache.json").write_text(json.dumps(cache_payload))

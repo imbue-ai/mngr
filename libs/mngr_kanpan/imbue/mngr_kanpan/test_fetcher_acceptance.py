@@ -13,6 +13,7 @@ from datetime import timezone
 from pathlib import Path
 
 import pytest
+from pydantic import TypeAdapter
 
 from imbue.mngr.cli.testing import create_test_agent_state
 from imbue.mngr.config.data_types import MngrContext
@@ -57,8 +58,8 @@ class _FakeRemoteDataSource:
         return {FIELD_REPO_PATH: "FAKE"}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        return {FIELD_REPO_PATH: RepoPathField}
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
+        return {FIELD_REPO_PATH: TypeAdapter(RepoPathField)}
 
     def compute(
         self,

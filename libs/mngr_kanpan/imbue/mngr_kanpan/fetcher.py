@@ -9,7 +9,7 @@ from typing import Any
 
 from loguru import logger
 from pydantic import Field
-from pydantic import ValidationError
+from pydantic import TypeAdapter
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
@@ -22,16 +22,15 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr_kanpan.data_source import BoolField
-from imbue.mngr_kanpan.data_source import FIELD_CI
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_source import KanpanFieldTypeError
+from imbue.mngr_kanpan.data_source import deserialize_fields
 from imbue.mngr_kanpan.data_source import now_utc
-from imbue.mngr_kanpan.data_sources.github import CiField
-from imbue.mngr_kanpan.data_sources.github import CiStatus
 from imbue.mngr_kanpan.data_sources.github import CreatePrUrlField
+from imbue.mngr_kanpan.data_sources.github import PrFetchFailedField
 from imbue.mngr_kanpan.data_sources.github import PrField
 from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
@@ -202,6 +201,10 @@ def compute_section(fields: dict[str, FieldValue]) -> BoardSection:
     if isinstance(pr, CreatePrUrlField):
         # CreatePrUrlField in the pr slot means no real PR exists yet
         return BoardSection.STILL_COOKING
+    if isinstance(pr, PrFetchFailedField):
+        # The repo's PR fetch failed and no cached PrField was available to
+        # fall back to, so we genuinely have no PR data for this agent.
+        return BoardSection.PRS_FAILED
     if not isinstance(pr, PrField):
         raise KanpanFieldTypeError(f"Expected PrField for 'pr', got {type(pr).__name__}")
 
@@ -213,20 +216,7 @@ def compute_section(fields: dict[str, FieldValue]) -> BoardSection:
         case PrState.OPEN:
             if pr.is_draft:
                 return BoardSection.PR_DRAFT
-            ci = fields.get(FIELD_CI)
-            match ci:
-                case None:
-                    return BoardSection.PR_BEING_REVIEWED
-                case CiField():
-                    pass
-                case _:
-                    raise KanpanFieldTypeError(f"Expected CiField for 'ci', got {type(ci).__name__}")
-            match ci.status:
-                case CiStatus.FAILING:
-                    return BoardSection.PRS_FAILED
-                case CiStatus.PASSING | CiStatus.PENDING | CiStatus.UNKNOWN:
-                    return BoardSection.PR_BEING_REVIEWED
-            raise AssertionError(f"Unhandled CI status: {ci.status}")
+            return BoardSection.PR_BEING_REVIEWED
     raise AssertionError(f"Unhandled PR state: {pr.state}")
 
 
@@ -290,7 +280,9 @@ def save_field_cache(
     """Persist cached fields to a local JSON file atomically.
 
     Writes a temporary file then renames it to avoid partial reads.
-    Each field is stored as {field_key: {type: class_name, data: model_dump}}.
+    Each field is stored as ``{field_key: model_dump}`` -- the dump
+    includes the FieldValue subclass's ``kind`` discriminator, so no
+    separate type envelope is needed.
     """
     cache_path = _cache_file_path(mngr_ctx)
     tmp_path: str | None = None
@@ -299,11 +291,12 @@ def save_field_cache(
         for agent_name, agent_fields in cached_fields.items():
             agent_data: dict[str, Any] = {}
             for key, field in agent_fields.items():
-                # mode='json' emits JSON-native primitives (datetime -> ISO string).
-                agent_data[key] = {
-                    "type": type(field).__name__,
-                    "data": field.model_dump(mode="json"),
-                }
+                # mode="json" emits JSON-native primitives (datetime -> ISO
+                # string, enums -> str). The dump includes the FieldValue
+                # subclass's `kind` discriminator, so no separate type
+                # envelope is needed -- load_field_cache rehydrates via the
+                # discriminated-union TypeAdapter.
+                agent_data[key] = field.model_dump(mode="json")
             serialized[str(agent_name)] = agent_data
 
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -325,49 +318,39 @@ def load_field_cache(
 ) -> dict[AgentName, dict[str, FieldValue]]:
     """Load cached fields from the local JSON file.
 
-    Uses field_types from data sources to deserialize each field value.
-    Returns an empty dict if the cache file doesn't exist or is corrupt.
+    Each slot's TypeAdapter (from ``KanpanDataSource.field_types``) validates
+    the raw payload. For polymorphic slots the adapter wraps a discriminated
+    union and dispatches on the ``kind`` tag in the payload. Returns an empty
+    dict if the cache file doesn't exist or is corrupt; per-key validation
+    failures are logged at debug and the offending key is dropped (see
+    ``deserialize_fields``).
     """
     cache_path = _cache_file_path(mngr_ctx)
     if not cache_path.exists():
         return {}
 
-    # Build type registry from all data sources
-    type_registry: dict[str, type[FieldValue]] = {}
+    adapters: dict[str, TypeAdapter[FieldValue]] = {}
     for source in data_sources:
-        for _key, field_type in source.field_types.items():
-            type_registry[field_type.__name__] = field_type
+        adapters.update(source.field_types)
 
     try:
         raw = json.loads(cache_path.read_text())
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        result: dict[AgentName, dict[str, FieldValue]] = {}
+        for agent_name_str, agent_data in raw.items():
+            # deserialize_fields drops per-key ValidationErrors with a debug
+            # log (covers the legacy-entries-missing-`created` migration case).
+            agent_fields = deserialize_fields(agent_data, adapters)
+            if agent_fields:
+                result[AgentName(agent_name_str)] = agent_fields
+        return result
+    except Exception as e:
+        # Tolerate any read/parse/decode failure and behave as the docstring
+        # promises ("returns empty dict if the cache file doesn't exist or
+        # is corrupt"). The broad catch is intentional and covers
+        # UnicodeDecodeError from partial-write corruption alongside the
+        # narrower OSError / json.JSONDecodeError cases.
         logger.debug("Failed to load field cache: {}", e)
         return {}
-
-    # Per-field validation failures (e.g. legacy entries missing `created` after
-    # the staleness migration) are tolerated: drop the bad entry and keep the
-    # rest. The cache is best-effort and will be rebuilt on the next refresh.
-    result: dict[AgentName, dict[str, FieldValue]] = {}
-    for agent_name_str, agent_data in raw.items():
-        agent_fields: dict[str, FieldValue] = {}
-        for key, field_info in agent_data.items():
-            type_name = field_info.get("type")
-            data = field_info.get("data")
-            field_type = type_registry.get(type_name or "")
-            if field_type is None or data is None:
-                continue
-            try:
-                agent_fields[key] = field_type.model_validate(data)
-            except ValidationError as e:
-                logger.debug(
-                    "Skipping invalid cached field '{}' for agent '{}': {}",
-                    key,
-                    agent_name_str,
-                    e,
-                )
-        if agent_fields:
-            result[AgentName(agent_name_str)] = agent_fields
-    return result
 
 
 def collect_data_sources(

@@ -1,8 +1,11 @@
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from typing import Annotated
 
 import pytest
+from pydantic import Field as PydanticField
+from pydantic import TypeAdapter
 from pydantic import ValidationError
 
 from imbue.mngr_kanpan.data_source import BoolField
@@ -257,6 +260,7 @@ def test_unresolved_field_display_no_unresolved() -> None:
 def test_deserialize_fields_basic() -> None:
     raw = {
         "pr": {
+            "kind": "pr",
             "number": 42,
             "url": "https://example.com/42",
             "is_draft": False,
@@ -265,9 +269,9 @@ def test_deserialize_fields_basic() -> None:
             "head_branch": "b",
             "created": _NOW.isoformat(),
         },
-        "ci": {"status": "FAILING", "created": _NOW.isoformat()},
+        "ci": {"kind": "ci", "status": "FAILING", "created": _NOW.isoformat()},
     }
-    types: dict[str, type[FieldValue]] = {"pr": PrField, "ci": CiField}
+    types: dict[str, TypeAdapter[FieldValue]] = {"pr": TypeAdapter(PrField), "ci": TypeAdapter(CiField)}
     result = deserialize_fields(raw, types)
     assert isinstance(result["pr"], PrField)
     assert result["pr"].number == 42
@@ -277,7 +281,7 @@ def test_deserialize_fields_basic() -> None:
 
 def test_deserialize_fields_unknown_keys_skipped() -> None:
     raw = {"unknown_key": {"value": "test"}}
-    result = deserialize_fields(raw, {"pr": PrField})
+    result = deserialize_fields(raw, {"pr": TypeAdapter(PrField)})
     assert result == {}
 
 
@@ -291,6 +295,48 @@ def test_deserialize_fields_round_trip() -> None:
         head_branch="branch",
         created=_NOW,
     )
-    dumped = {"pr": pr.model_dump()}
-    restored = deserialize_fields(dumped, {"pr": PrField})
+    dumped = {"pr": pr.model_dump(mode="json")}
+    restored = deserialize_fields(dumped, {"pr": TypeAdapter(PrField)})
     assert restored["pr"] == pr
+
+
+def test_deserialize_fields_polymorphic_via_discriminator() -> None:
+    """A polymorphic slot is declared as a TypeAdapter wrapping a discriminated
+    union. Pydantic dispatches on the ``kind`` tag to pick the right class, so
+    the same slot accepts both PrField and CreatePrUrlField payloads.
+    """
+    pr_slot: TypeAdapter[FieldValue] = TypeAdapter(
+        Annotated[PrField | CreatePrUrlField, PydanticField(discriminator="kind")]
+    )
+    pr_dump = PrField(
+        number=7,
+        url="https://example.com/7",
+        is_draft=False,
+        title="t",
+        state=PrState.OPEN,
+        head_branch="b",
+        created=_NOW,
+    ).model_dump(mode="json")
+    create_dump = CreatePrUrlField(url="https://example.com/compare", created=_NOW).model_dump(mode="json")
+
+    pr_result = deserialize_fields({"pr": pr_dump}, {"pr": pr_slot})
+    create_result = deserialize_fields({"pr": create_dump}, {"pr": pr_slot})
+
+    assert isinstance(pr_result["pr"], PrField)
+    assert pr_result["pr"].number == 7
+    assert isinstance(create_result["pr"], CreatePrUrlField)
+    assert create_result["pr"].url == "https://example.com/compare"
+
+
+def test_deserialize_fields_drops_invalid_payload_keeps_others() -> None:
+    """A payload that fails pydantic validation is logged and dropped, while
+    the rest of the dict still loads. Locks in the swallow path so a future
+    change can't quietly turn a bad cache row into a full-cache wipe.
+    """
+    types: dict[str, TypeAdapter[FieldValue]] = {"pr": TypeAdapter(PrField), "ci": TypeAdapter(CiField)}
+    # PrField requires number/url/title/state/head_branch/is_draft/created -- {} fails.
+    raw = {"pr": {}, "ci": {"kind": "ci", "status": "PASSING", "created": _NOW.isoformat()}}
+    result = deserialize_fields(raw, types)
+    assert "pr" not in result
+    assert isinstance(result["ci"], CiField)
+    assert result["ci"].status == CiStatus.PASSING
