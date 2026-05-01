@@ -432,6 +432,11 @@ class GitHubDataSource(FrozenModel):
                     # if available; otherwise emit a PrFetchFailedField so the agent shows up
                     # under "PRs not loaded" instead of being misclassified as "no PR yet".
                     #
+                    # Branch match: only reuse the cache when the cached PR's head_branch
+                    # equals the agent's current branch. Otherwise the agent has moved on to
+                    # a different branch since the cache was written, and showing the old
+                    # PR would misattribute it to the wrong branch.
+                    #
                     # Staleness: there is no TTL on the cached PR. If `gh pr list` keeps failing
                     # for hours, we will keep showing the last-known PR row (number, state, CI).
                     # That is the intentional trade-off -- a stale row is more useful than a
@@ -440,7 +445,7 @@ class GitHubDataSource(FrozenModel):
                     # mislead the user (e.g. PR shown OPEN after it was merged days ago).
                     cached_agent = cached_fields.get(agent.name, {})
                     cached_pr = cached_agent.get(FIELD_PR)
-                    if isinstance(cached_pr, PrField):
+                    if isinstance(cached_pr, PrField) and cached_pr.head_branch == branch:
                         if self.config.pr:
                             agent_fields[FIELD_PR] = cached_pr
                         if self.config.ci:

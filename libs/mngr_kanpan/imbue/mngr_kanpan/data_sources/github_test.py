@@ -475,6 +475,35 @@ def test_compute_pr_fetch_failed_with_cached_pr_uses_cache() -> None:
     assert fields[agent.name].get(FIELD_CI) == cached_ci
 
 
+def test_compute_pr_fetch_failed_with_cached_pr_for_different_branch_emits_fetch_failed_field() -> None:
+    """When the repo's PR fetch fails and the cached PrField is for a different
+    branch than the agent's current one, the cache must NOT be reused -- otherwise
+    we would attribute the old branch's PR to the new branch. We should fall through
+    to PrFetchFailedField, the same as the no-cache case.
+    """
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    agent = make_agent_details(name="a1", initial_branch="branch-2", labels={"remote": "git@github.com:org/repo.git"})
+    stale_cached_pr = _make_pr(number=42, branch="branch-1")  # different branch
+    cached_ci = CiField(status=CiStatus.PASSING)
+    cached: dict[AgentName, dict[str, FieldValue]] = {
+        agent.name: {FIELD_PR: stale_cached_pr, FIELD_CI: cached_ci},
+    }
+    cg = MagicMock()
+    fail_proc = MagicMock()
+    fail_proc.read_stdout.return_value = ""
+    fail_proc.read_stderr.return_value = "HTTP 504"
+    fail_proc.returncode = 1
+    cg.run_process_in_background.side_effect = [fail_proc, fail_proc]
+    ctx = make_mngr_ctx_with_cg(cg)
+    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
+    assert agent.name in fields
+    pr_field = fields[agent.name].get(FIELD_PR)
+    assert isinstance(pr_field, PrFetchFailedField)
+    assert pr_field.repo == "org/repo"
+    # Stale CI must not leak through either.
+    assert FIELD_CI not in fields[agent.name]
+
+
 def test_compute_with_conflicts_and_unresolved() -> None:
     """Full compute with conflicts and unresolved metadata fetching."""
     ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=True, ci=True, conflicts=True, unresolved=True))
