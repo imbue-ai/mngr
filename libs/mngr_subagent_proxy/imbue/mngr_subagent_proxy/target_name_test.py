@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from imbue.mngr_subagent_proxy._target_name import build_subagent_target_name
-from imbue.mngr_subagent_proxy._target_name import slugify
+from imbue.mngr_subagent_proxy.target_name import build_subagent_target_name
+from imbue.mngr_subagent_proxy.target_name import slugify
 
 
 def test_slugify_lowercases_and_replaces_non_alphanumerics() -> None:

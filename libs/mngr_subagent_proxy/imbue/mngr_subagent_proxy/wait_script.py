@@ -10,7 +10,7 @@ Centralized here so the two hooks cannot drift on the load-bearing
 EXIT-trap pattern that protects parent secrets from leaking to disk
 on a signal between the env-file redirect and the trap installation.
 
-``_hook_io.py`` deliberately stays focused on Python-level I/O
+``hook_io.py`` deliberately stays focused on Python-level I/O
 helpers; bash templates are a separate concern and get their own
 module.
 """

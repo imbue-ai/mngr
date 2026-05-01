@@ -20,7 +20,7 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr_subagent_proxy import _stop_hook_guard
-from imbue.mngr_subagent_proxy._hook_io import parse_int_env
+from imbue.mngr_subagent_proxy.hook_io import parse_int_env
 from imbue.mngr_subagent_proxy.hooks import cleanup as cleanup_hook
 from imbue.mngr_subagent_proxy.hooks import reap as reap_hook
 from imbue.mngr_subagent_proxy.hooks import spawn as spawn_hook

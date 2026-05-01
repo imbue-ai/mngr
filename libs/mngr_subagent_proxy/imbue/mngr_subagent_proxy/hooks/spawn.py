@@ -22,17 +22,17 @@ from typing import TextIO
 
 from loguru import logger
 
-from imbue.mngr_subagent_proxy._hook_io import DEFAULT_MAX_SUBAGENT_DEPTH
-from imbue.mngr_subagent_proxy._hook_io import emit_depth_limit_deny
-from imbue.mngr_subagent_proxy._hook_io import emit_json_response
-from imbue.mngr_subagent_proxy._hook_io import parse_int_env
-from imbue.mngr_subagent_proxy._hook_io import read_hook_stdin_json
-from imbue.mngr_subagent_proxy._hook_io import write_executable_file
-from imbue.mngr_subagent_proxy._hook_io import write_secure_file
-from imbue.mngr_subagent_proxy._target_name import build_subagent_target_name
-from imbue.mngr_subagent_proxy._wait_script import WAIT_SCRIPT_HEADER
-from imbue.mngr_subagent_proxy._wait_script import WAIT_SCRIPT_SPAWN_ONLY_BRANCH
-from imbue.mngr_subagent_proxy._wait_script import build_init_block
+from imbue.mngr_subagent_proxy.hook_io import DEFAULT_MAX_SUBAGENT_DEPTH
+from imbue.mngr_subagent_proxy.hook_io import emit_depth_limit_deny
+from imbue.mngr_subagent_proxy.hook_io import emit_json_response
+from imbue.mngr_subagent_proxy.hook_io import parse_int_env
+from imbue.mngr_subagent_proxy.hook_io import read_hook_stdin_json
+from imbue.mngr_subagent_proxy.hook_io import write_executable_file
+from imbue.mngr_subagent_proxy.hook_io import write_secure_file
+from imbue.mngr_subagent_proxy.target_name import build_subagent_target_name
+from imbue.mngr_subagent_proxy.wait_script import WAIT_SCRIPT_HEADER
+from imbue.mngr_subagent_proxy.wait_script import WAIT_SCRIPT_SPAWN_ONLY_BRANCH
+from imbue.mngr_subagent_proxy.wait_script import build_init_block
 
 _PASS_THROUGH_RESPONSE: Final[dict[str, Any]] = {
     "hookSpecificOutput": {
@@ -55,7 +55,7 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
     time beyond MNGR_AGENT_STATE_DIR / MNGR_SUBAGENT_DEPTH.
 
     Shared scaffolding (header, init block, spawn-only branch) lives in
-    ``_wait_script.py`` so PROXY and DENY hooks cannot drift on the
+    ``wait_script.py`` so PROXY and DENY hooks cannot drift on the
     EXIT-trap-before-redirect invariant that protects parent secrets.
     """
     q_tid = shlex.quote(tool_use_id)

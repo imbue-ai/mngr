@@ -47,17 +47,17 @@ from typing import TextIO
 
 from loguru import logger
 
-from imbue.mngr_subagent_proxy._hook_io import DEFAULT_MAX_SUBAGENT_DEPTH
-from imbue.mngr_subagent_proxy._hook_io import emit_depth_limit_deny
-from imbue.mngr_subagent_proxy._hook_io import emit_pre_tool_deny
-from imbue.mngr_subagent_proxy._hook_io import parse_int_env
-from imbue.mngr_subagent_proxy._hook_io import read_hook_stdin_json
-from imbue.mngr_subagent_proxy._hook_io import write_executable_file
-from imbue.mngr_subagent_proxy._hook_io import write_secure_file
-from imbue.mngr_subagent_proxy._target_name import build_subagent_target_name
-from imbue.mngr_subagent_proxy._wait_script import WAIT_SCRIPT_HEADER
-from imbue.mngr_subagent_proxy._wait_script import WAIT_SCRIPT_SPAWN_ONLY_BRANCH
-from imbue.mngr_subagent_proxy._wait_script import build_init_block
+from imbue.mngr_subagent_proxy.hook_io import DEFAULT_MAX_SUBAGENT_DEPTH
+from imbue.mngr_subagent_proxy.hook_io import emit_depth_limit_deny
+from imbue.mngr_subagent_proxy.hook_io import emit_pre_tool_deny
+from imbue.mngr_subagent_proxy.hook_io import parse_int_env
+from imbue.mngr_subagent_proxy.hook_io import read_hook_stdin_json
+from imbue.mngr_subagent_proxy.hook_io import write_executable_file
+from imbue.mngr_subagent_proxy.hook_io import write_secure_file
+from imbue.mngr_subagent_proxy.target_name import build_subagent_target_name
+from imbue.mngr_subagent_proxy.wait_script import WAIT_SCRIPT_HEADER
+from imbue.mngr_subagent_proxy.wait_script import WAIT_SCRIPT_SPAWN_ONLY_BRANCH
+from imbue.mngr_subagent_proxy.wait_script import build_init_block
 
 _GENERIC_DENY_REASON: Final[str] = (
     "mngr_subagent_proxy is in deny mode: the Task tool is disabled for this agent. "
@@ -97,7 +97,7 @@ def build_deny_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) 
     ``claude`` agents labeled ``mngr_subagent_proxy=child``.
 
     Shared scaffolding (header, init block, spawn-only branch) lives
-    in ``_wait_script.py`` so PROXY and DENY hooks cannot drift on
+    in ``wait_script.py`` so PROXY and DENY hooks cannot drift on
     the EXIT-trap-before-redirect invariant that protects parent
     secrets.
 
@@ -112,7 +112,7 @@ def build_deny_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) 
        ``NEED_PERMISSION: <name>`` and exits 1 so Claude (and the user)
        see they need to ``mngr connect <name>`` to resolve.
 
-    The shared ``--spawn-only`` short-circuit from ``_wait_script.py``
+    The shared ``--spawn-only`` short-circuit from ``wait_script.py``
     is still present in the script body but is not exercised by DENY
     mode -- backgrounding goes through Claude Code's ``Bash``
     ``run_in_background`` parameter on the script itself, not via a
