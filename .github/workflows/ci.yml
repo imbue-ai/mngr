@@ -306,12 +306,6 @@ jobs:
   test-docker:
     if: github.ref != 'refs/heads/release'
     runs-on: ubuntu-latest
-    env:
-      MNGR_USE_DEPOT: "1"
-      DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
-      # depot CLI looks for depot.json in the build context dir, not repo root.
-      # Tests build from /tmp/<tempdir>, so set the project ID via env instead.
-      DEPOT_PROJECT_ID: "fsjzltqvxq"
 
     steps:
       - uses: actions/checkout@v6
@@ -330,9 +324,6 @@ jobs:
         run: |
           echo '{"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
-
-      - name: Set up Depot CLI
-        uses: depot/setup-action@v1
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -356,9 +347,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      MNGR_USE_DEPOT: "1"
-      DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
-      DEPOT_PROJECT_ID: "fsjzltqvxq"
 
     steps:
       - uses: actions/checkout@v6
@@ -377,9 +365,6 @@ jobs:
         run: |
           echo '{"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
-
-      - name: Set up Depot CLI
-        uses: depot/setup-action@v1
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7

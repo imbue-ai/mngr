@@ -1,6 +1,5 @@
 import hashlib
 import json
-import os
 from collections.abc import Generator
 from pathlib import Path
 
@@ -10,7 +9,6 @@ import docker.models.containers
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
-from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
@@ -18,19 +16,7 @@ from imbue.mngr.providers.docker.instance import create_docker_client
 from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
 from imbue.mngr.providers.docker.volume import state_volume_name
 from imbue.mngr.providers.local.volume import LocalVolume
-from imbue.mngr.utils.env_utils import parse_bool_env
 from imbue.mngr.utils.testing import get_short_random_string
-
-
-def _builder_for_tests() -> DockerBuilder:
-    """Pick the image builder for test-fixture-constructed providers.
-
-    Production code paths read `builder` from the user's settings.toml; tests
-    construct configs programmatically and need a way for CI to opt into depot
-    without threading the choice through every fixture. CI sets
-    `MNGR_USE_DEPOT=1` on the test job; everything else defaults to DOCKER.
-    """
-    return DockerBuilder.DEPOT if parse_bool_env(os.environ.get("MNGR_USE_DEPOT", "")) else DockerBuilder.DOCKER
 
 
 def write_fake_docker_context(config_dir: Path, context_name: str, host_url: str) -> None:
@@ -112,7 +98,7 @@ def remove_all_containers_by_prefix(
 
 
 def make_docker_provider(mngr_ctx: MngrContext, name: str = "test-docker") -> DockerProviderInstance:
-    config = DockerProviderConfig(builder=_builder_for_tests())
+    config = DockerProviderConfig()
     return DockerProviderInstance(
         name=ProviderInstanceName(name),
         host_dir=Path("/mngr"),
@@ -126,7 +112,7 @@ def make_offline_docker_provider(mngr_ctx: MngrContext, name: str = "test-docker
 
     Useful for testing graceful degradation when the Docker daemon is unavailable.
     """
-    config = DockerProviderConfig(host="unix:///nonexistent/docker.sock", builder=_builder_for_tests())
+    config = DockerProviderConfig(host="unix:///nonexistent/docker.sock")
     return DockerProviderInstance(
         name=ProviderInstanceName(name),
         host_dir=Path("/mngr"),
