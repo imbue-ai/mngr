@@ -204,7 +204,7 @@ Setting `mode = "DENY"` in `[plugins.subagent_proxy]` swaps the proxy
 machinery for a single `PreToolUse:Agent` hook plus a Claude skill
 that together replace the native `Task` tool with a Bash-driven
 mngr workflow. The hook denies every Task call with a short
-`permissionDecisionReason` of the form::
+`permissionDecisionReason` of the form:
 
     Use a mngr subagent instead of Task. Run: bash <wait_script_path>
     (see the `mngr-subagents` skill for context).
