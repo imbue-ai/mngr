@@ -1,21 +1,27 @@
 """PreToolUse:Agent hook for the plugin's DENY mode.
 
-Reads the hook JSON from stdin, writes a per-tool_use_id prompt sidefile
-under ``$MNGR_AGENT_STATE_DIR/subagent_prompts/`` (so a long Task prompt
-does not have to be embedded inline in the deny message), and emits a
-PreToolUse decision JSON on stdout that DENIES the Task tool with a
-``permissionDecisionReason`` that gives Claude a copy-pasteable
-``mngr create`` / ``subagent_wait`` invocation.
+Reads the hook JSON from stdin and emits a PreToolUse decision JSON on
+stdout that DENIES the Task tool with a short ``permissionDecisionReason``
+of the form::
 
-The intent is that Claude (the calling agent) reads the deny reason,
-runs the suggested commands itself via Bash, and treats the printed
-reply as if it were the Task tool's tool_result -- continuing as it
-normally would after a Task call.
+    Use a mngr subagent instead: bash <wait_script_path>
 
-No subagent is spawned automatically. No PostToolUse cleanup is
-installed. No SessionStart reaper. No Stop-hook guarding. This is
-deliberately a much smaller surface than PROXY mode -- see the plugin
-README's "Deny mode" section.
+The accompanying ``mngr-subagents`` Claude skill (provisioned in deny
+mode at ``.claude/skills/mngr-subagents/SKILL.md``) explains the full
+protocol. We deliberately keep this deny message short so it does not
+crowd the parent's transcript on every Task call -- the verbose
+context lives in the skill, loaded on demand.
+
+The wait-script (``$MNGR_AGENT_STATE_DIR/proxy_commands/wait-<tid>.sh``)
+spawns a mngr-managed subagent via ``mngr create`` and blocks on
+``subagent_wait`` until end_turn, then prints the subagent's reply to
+stdout. Claude runs that one Bash command and uses the script's stdout
+as if it were the Task tool's tool_result.
+
+No subagent is spawned automatically by this hook. No PostToolUse
+cleanup is installed. No SessionStart reaper. No Stop-hook guarding.
+This is deliberately a much smaller surface than PROXY mode -- see the
+plugin README's "DENY mode" section.
 
 On failure modes (missing env, malformed input, etc.) emits a generic
 deny so Claude is still informed; the Task tool never silently passes
@@ -27,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -35,14 +42,12 @@ from typing import TextIO
 
 from loguru import logger
 
-from imbue.mngr_subagent_proxy.hooks.spawn import slugify
+from imbue.mngr_subagent_proxy._target_name import build_subagent_target_name
+from imbue.mngr_subagent_proxy.mngr_binary import get_mngr_command_shell_form
 
 _GENERIC_DENY_REASON: Final[str] = (
     "mngr_subagent_proxy is in deny mode: the Task tool is disabled for this agent. "
-    "Use mngr instead. Run via Bash: "
-    "`uv run mngr create <name> --type claude --message <prompt>` to spawn an "
-    "mngr-managed subagent, then `uv run python -m imbue.mngr_subagent_proxy.subagent_wait <name>` "
-    "to wait for its reply (which is printed as `END_TURN:<reply>`)."
+    "Use a mngr-managed subagent instead. See the `mngr-subagents` skill for the protocol."
 )
 
 
@@ -85,75 +90,118 @@ def _read_stdin_json(stdin: TextIO) -> dict[str, Any] | None:
     return parsed
 
 
-def build_deny_reason(
-    target_name: str,
-    prompt_file: Path,
-    parent_cwd: str,
-    run_in_background: bool,
-) -> str:
-    """Build the permissionDecisionReason string addressed to the calling agent.
+def build_deny_reason(wait_script: Path, run_in_background: bool) -> str:
+    """Build the short deny reason addressed to Claude.
 
-    Mirrors the structure of the PROXY-mode Haiku prompt: states the
-    rule, gives explicit commands, and labels the expected output. The
-    instructions are addressed to Claude (the calling agent), so Claude
-    can continue acting "almost the way it normally uses subagents" --
-    spawn via Bash, capture the reply, continue.
+    Verbose context (when to use, parsing protocol, inspection commands)
+    lives in the ``mngr-subagents`` skill, not here. The deny reason is
+    a one-liner pointer + the concrete command for this Task call.
     """
-    address = shlex.quote(f"{target_name}:{parent_cwd}")
-    quoted_prompt_file = shlex.quote(str(prompt_file))
-    quoted_target = shlex.quote(target_name)
-
     if run_in_background:
         return (
-            f"mngr_subagent_proxy is in deny mode: the Task tool is disabled for this "
-            f"agent. The original Task call asked for run_in_background=true, so spawn "
-            f"the equivalent mngr-managed subagent in the background and continue your "
-            f"turn without waiting for it.\n"
-            f"\n"
-            f"Run this in Bash exactly:\n"
-            f"\n"
-            f"    uv run mngr create {address} \\\n"
-            f"        --type claude --transfer=none --no-ensure-clean --no-connect \\\n"
-            f"        --label mngr_subagent_proxy=child \\\n"
-            f"        --message-file {quoted_prompt_file}\n"
-            f"\n"
-            f"That command returns immediately once the subagent has been spawned. "
-            f"Continue your turn; the subagent runs to completion in the background.\n"
-            f"\n"
-            f"To inspect or interact with the running subagent from another terminal:\n"
-            f"    mngr connect {target_name}\n"
-            f"To follow its transcript:\n"
-            f"    mngr transcript {target_name}\n"
-            f"\n"
-            f"The full prompt for this Task has been written to: {prompt_file}\n"
+            f"Use a mngr subagent instead of Task. "
+            f"Run: bash {shlex.quote(str(wait_script))} --spawn-only "
+            f"(see the `mngr-subagents` skill for context). "
+            f"The script returns immediately; the subagent runs in the background."
         )
-
     return (
-        f"mngr_subagent_proxy is in deny mode: the Task tool is disabled for this "
-        f"agent. To run this work as a synchronous mngr subagent and use its reply "
-        f"as if it were the Task tool's tool_result, run two commands in Bash.\n"
-        f"\n"
-        f"Step 1 -- spawn the subagent (returns once it is running):\n"
-        f"\n"
-        f"    uv run mngr create {address} \\\n"
-        f"        --type claude --transfer=none --no-ensure-clean --no-connect \\\n"
-        f"        --label mngr_subagent_proxy=child \\\n"
-        f"        --message-file {quoted_prompt_file}\n"
-        f"\n"
-        f"Step 2 -- block until it ends its turn and capture its reply:\n"
-        f"\n"
-        f"    uv run python -m imbue.mngr_subagent_proxy.subagent_wait {quoted_target}\n"
-        f"\n"
-        f"The wait command prints a single line of the form `END_TURN:<reply>` when "
-        f"the subagent ends its turn. Strip the literal `END_TURN:` prefix; the rest "
-        f"is the subagent's final reply. Treat it as the result of this Task call and "
-        f"continue your own turn.\n"
-        f"\n"
-        f"While the subagent runs you can also inspect or intervene from another "
-        f"terminal: `mngr connect {target_name}`. To follow its transcript: "
-        f"`mngr transcript {target_name}`.\n"
-        f"\n"
-        f"The full prompt for this Task has been written to: {prompt_file}\n"
+        f"Use a mngr subagent instead of Task. "
+        f"Run: bash {shlex.quote(str(wait_script))} "
+        f"(see the `mngr-subagents` skill for context). "
+        f"The script's stdout is the subagent's reply -- treat it as the Task tool's tool_result."
+    )
+
+
+def build_deny_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> str:
+    """Build the per-Task-call wait-script for deny mode.
+
+    Same shape as ``hooks/spawn.build_wait_script`` but simpler: the
+    runner is Claude, not Haiku, so we drop the Haiku-specific ceremony
+    (``MNGR_PROXY_END_OF_OUTPUT`` sentinel, idempotent re-entry guard
+    keyed on PostToolUse cleanup, watermark sidefile for permission
+    redo, ``mngr-proxy-child`` agent type). Spawned children are plain
+    ``claude`` agents labeled ``mngr_subagent_proxy=child``.
+
+    The script:
+    1. Captures the parent's env to a temporary file (under EXIT trap so
+       a partial write cannot leave secrets on disk), then runs
+       ``mngr create --reuse`` with the prompt sidefile written by the
+       deny hook.
+    2. With ``--spawn-only``, exits 0 once the subagent is created.
+    3. Otherwise, blocks on ``subagent_wait`` and prints the subagent's
+       end-turn reply (with the ``END_TURN:`` prefix stripped) to stdout.
+    4. On ``PERMISSION_REQUIRED:<name>``, prints
+       ``NEED_PERMISSION: <name>`` and exits 1 so Claude (and the user)
+       see they need to ``mngr connect <name>`` to resolve.
+    """
+    q_tid = shlex.quote(tool_use_id)
+    q_target = shlex.quote(target_name)
+    q_parent_cwd = shlex.quote(parent_cwd)
+    mngr_cmd = get_mngr_command_shell_form()
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "umask 077\n"
+        "\n"
+        f"TID={q_tid}\n"
+        f"TARGET_NAME={q_target}\n"
+        f"PARENT_CWD={q_parent_cwd}\n"
+        'STATE_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR not set}"\n'
+        'ENV_FILE="$STATE_DIR/proxy_commands/env-$TID.env"\n'
+        'INIT_FLAG="$STATE_DIR/proxy_commands/initialized-$TID"\n'
+        'PROMPT_FILE="$STATE_DIR/subagent_prompts/$TID.md"\n'
+        "\n"
+        'mkdir -p "$STATE_DIR/proxy_commands"\n'
+        "\n"
+        'if [ ! -f "$INIT_FLAG" ]; then\n'
+        # Trap covers the env-file (parent secrets) for any exit path.
+        # Installed BEFORE the redirect so a signal between the redirect
+        # and the trap cannot leave secrets on disk.
+        '    trap \'shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\' EXIT\n'
+        "    env | grep -Ev "
+        "'^(MNGR_AGENT_STATE_DIR|MNGR_AGENT_NAME|MAIN_CLAUDE_SESSION_ID|MNGR_HOST_DIR)=' "
+        '> "$ENV_FILE"\n'
+        # --reuse: idempotent. If a previous run partially succeeded
+        # (host provisioned but message-delivery errored), the next run
+        # must adopt the existing same-named agent rather than fail.
+        f'    {mngr_cmd} create "$TARGET_NAME:$PARENT_CWD" \\\n'
+        "        --type claude \\\n"
+        "        --transfer=none \\\n"
+        "        --no-ensure-clean \\\n"
+        "        --no-connect \\\n"
+        "        --reuse \\\n"
+        '        --env-file "$ENV_FILE" \\\n'
+        '        --message-file "$PROMPT_FILE" \\\n'
+        "        --label mngr_subagent_proxy=child \\\n"
+        "        --env MNGR_SUBAGENT_DEPTH=$((${MNGR_SUBAGENT_DEPTH:-0}+1))\n"
+        '    shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\n'
+        "    trap - EXIT\n"
+        '    touch "$INIT_FLAG"\n'
+        "fi\n"
+        "\n"
+        # Background: spawn-only, return without waiting.
+        'if [ "${1:-}" = "--spawn-only" ]; then\n'
+        "    exit 0\n"
+        "fi\n"
+        "\n"
+        "output=$(uv run python -m imbue.mngr_subagent_proxy.subagent_wait "
+        '"$TARGET_NAME")\n'
+        'case "$output" in\n'
+        "    END_TURN:*)\n"
+        # Print the subagent's end-turn body verbatim. Claude reads
+        # stdout directly -- no sentinel needed (Claude is the runner,
+        # not Haiku).
+        "        printf '%s\\n' \"${output#END_TURN:}\"\n"
+        "        ;;\n"
+        "    PERMISSION_REQUIRED:*)\n"
+        '        echo "NEED_PERMISSION: $TARGET_NAME" >&2\n'
+        "        exit 1\n"
+        "        ;;\n"
+        "    *)\n"
+        '        echo "ERROR: unexpected subagent_wait output: $output" >&2\n'
+        "        exit 1\n"
+        "        ;;\n"
+        "esac\n"
     )
 
 
@@ -162,6 +210,13 @@ def _write_secure_file(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
     path.chmod(0o600)
+
+
+def _write_executable_file(path: Path, content: str) -> None:
+    """Write content to path with 0755 perms, creating parents as needed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
 
 
 def run(stdin: TextIO, stdout: TextIO) -> None:
@@ -193,65 +248,31 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
     state_dir_env = os.environ.get("MNGR_AGENT_STATE_DIR", "")
     parent_name = os.environ.get("MNGR_AGENT_NAME", "")
     if not state_dir_env or not parent_name:
-        # Without a state dir we can't write a prompt sidefile, and without a
-        # parent name we can't synthesize a unique target name. Embed the
-        # prompt inline so Claude still has something to copy-paste.
-        logger.warning("deny: missing MNGR_AGENT_STATE_DIR or MNGR_AGENT_NAME; emitting inline-prompt deny")
-        inline_reason = (
-            "mngr_subagent_proxy is in deny mode: the Task tool is disabled for this "
-            "agent. Spawn an mngr-managed subagent via Bash:\n"
-            "\n"
-            "    uv run mngr create <name> --type claude --transfer=none "
-            "--no-ensure-clean --no-connect --label mngr_subagent_proxy=child --message <prompt>\n"
-            "\n"
-            "Then wait for it with:\n"
-            "\n"
-            "    uv run python -m imbue.mngr_subagent_proxy.subagent_wait <name>\n"
-            "\n"
-            "The wait command prints `END_TURN:<reply>`. Strip the prefix; the rest is "
-            "the subagent's final reply. The original Task prompt was:\n"
-            "\n"
-            f"{orig_prompt}\n"
-        )
-        _emit_deny(stdout, inline_reason)
+        logger.warning("deny: missing MNGR_AGENT_STATE_DIR or MNGR_AGENT_NAME; emitting generic deny")
+        _emit_deny(stdout, _GENERIC_DENY_REASON)
         return
 
-    slug = slugify(orig_desc or "subagent") or "subagent"
-    tid_suffix = tool_use_id[-8:]
-    target_name = f"{parent_name}--subagent-{slug}-{tid_suffix}"
-
+    target_name = build_subagent_target_name(parent_name, orig_desc, tool_use_id)
     parent_cwd = str(Path.cwd())
     state_dir = Path(state_dir_env)
-    prompts_dir = state_dir / "subagent_prompts"
-    prompt_file = prompts_dir / f"{tool_use_id}.md"
+    prompt_file = state_dir / "subagent_prompts" / f"{tool_use_id}.md"
+    wait_script = state_dir / "proxy_commands" / f"wait-{tool_use_id}.sh"
 
     try:
         _write_secure_file(prompt_file, orig_prompt)
     except OSError as e:
         logger.warning("deny: failed to write prompt file {}: {}", prompt_file, e)
-        # Fall back to embedding the prompt inline.
-        inline_reason = (
-            f"mngr_subagent_proxy is in deny mode: the Task tool is disabled for this "
-            f"agent. Spawn an mngr-managed subagent via Bash:\n"
-            f"\n"
-            f"    uv run mngr create {shlex.quote(f'{target_name}:{parent_cwd}')} "
-            f"--type claude --transfer=none --no-ensure-clean --no-connect "
-            f"--label mngr_subagent_proxy=child --message <prompt>\n"
-            f"\n"
-            f"Then wait for it with:\n"
-            f"\n"
-            f"    uv run python -m imbue.mngr_subagent_proxy.subagent_wait {shlex.quote(target_name)}\n"
-            f"\n"
-            f"The wait command prints `END_TURN:<reply>`. Strip the prefix; the rest is "
-            f"the subagent's final reply. The original Task prompt was:\n"
-            f"\n"
-            f"{orig_prompt}\n"
-        )
-        _emit_deny(stdout, inline_reason)
+        _emit_deny(stdout, _GENERIC_DENY_REASON)
         return
 
-    reason = build_deny_reason(target_name, prompt_file, parent_cwd, orig_run_bg)
-    _emit_deny(stdout, reason)
+    try:
+        _write_executable_file(wait_script, build_deny_wait_script(tool_use_id, target_name, parent_cwd))
+    except OSError as e:
+        logger.warning("deny: failed to write wait script {}: {}", wait_script, e)
+        _emit_deny(stdout, _GENERIC_DENY_REASON)
+        return
+
+    _emit_deny(stdout, build_deny_reason(wait_script, orig_run_bg))
 
 
 def main() -> None:

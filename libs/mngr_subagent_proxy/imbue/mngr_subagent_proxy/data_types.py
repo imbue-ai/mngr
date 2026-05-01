@@ -13,7 +13,7 @@ from imbue.mngr.config.data_types import PluginConfig
 class SubagentProxyMode(UpperCaseStrEnum):
     """Selects how the plugin handles a parent agent's Task tool calls.
 
-    PROXY: route every Task call through an mngr-managed subagent via
+    PROXY: route every Task call through a mngr-managed subagent via
     a Haiku dispatcher (default; the original behavior). Spawned
     subagents are observable through `mngr connect` / `mngr transcript`
     while running, and the parent's tool_result is the subagent's
@@ -22,7 +22,7 @@ class SubagentProxyMode(UpperCaseStrEnum):
     DENY: deny every Task call with a permissionDecisionReason that
     contains a copy-pasteable invocation of `mngr create` / `mngr
     transcript`. The calling agent (Claude) is expected to run those
-    commands itself via Bash to spawn an mngr-managed subagent and
+    commands itself via Bash to spawn a mngr-managed subagent and
     capture its reply, then continue. Nothing is spawned automatically;
     no PostToolUse / SessionStart hooks are installed; no Stop-hook
     guarding or settings.json check runs.
@@ -37,7 +37,7 @@ class SubagentProxyPluginConfig(PluginConfig):
 
     mode: SubagentProxyMode = Field(
         default=SubagentProxyMode.PROXY,
-        description="Whether to proxy Task calls through an mngr subagent (PROXY) "
+        description="Whether to proxy Task calls through a mngr subagent (PROXY) "
         "or deny them with copy-pasteable mngr commands (DENY).",
     )
 

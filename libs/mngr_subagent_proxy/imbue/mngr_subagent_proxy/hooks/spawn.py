@@ -23,6 +23,7 @@ from typing import TextIO
 
 from loguru import logger
 
+from imbue.mngr_subagent_proxy._target_name import build_subagent_target_name
 from imbue.mngr_subagent_proxy.mngr_binary import get_mngr_command_shell_form
 
 _DEFAULT_MAX_DEPTH: Final[int] = 3
@@ -92,27 +93,6 @@ def _parse_int_env(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
-
-
-def slugify(text: str) -> str:
-    """Lowercase, replace non-alnum with '-', collapse repeats, trim, cap at 30."""
-    lowered = text.lower()
-    converted_chars = [ch if ch.isalnum() else "-" for ch in lowered]
-    converted = "".join(converted_chars)
-    # collapse runs of '-'
-    collapsed_parts: list[str] = []
-    prev_dash = False
-    for ch in converted:
-        if ch == "-":
-            if prev_dash:
-                continue
-            prev_dash = True
-        else:
-            prev_dash = False
-        collapsed_parts.append(ch)
-    collapsed = "".join(collapsed_parts).strip("-")
-    capped = collapsed[:30]
-    return capped.rstrip("-")
 
 
 def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> str:
@@ -295,9 +275,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         _emit_pass_through(stdout)
         return
 
-    slug = slugify(orig_desc or "subagent") or "subagent"
-    tid_suffix = tool_use_id[-8:]
-    target_name = f"{parent_name}--subagent-{slug}-{tid_suffix}"
+    target_name = build_subagent_target_name(parent_name, orig_desc, tool_use_id)
 
     parent_cwd = str(Path.cwd())
 

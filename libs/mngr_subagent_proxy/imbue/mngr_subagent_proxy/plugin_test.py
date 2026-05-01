@@ -439,6 +439,54 @@ def test_deny_mode_does_not_write_proxy_agent_definition(
     assert not proxy_md.exists()
 
 
+def test_deny_mode_writes_mngr_subagents_skill(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
+    """DENY mode provisions the ``mngr-subagents`` Claude skill at .claude/skills/.
+
+    The skill carries the verbose context (when to use, how to parse
+    subagent_wait output, how to inspect a running subagent, etc.) so
+    the deny hook's permissionDecisionReason can stay short.
+    """
+    ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    _provision(agent, fake_host, ctx)
+
+    skill_path = work_dir / ".claude" / "skills" / "mngr-subagents" / "SKILL.md"
+    assert skill_path.is_file()
+    body = skill_path.read_text()
+    # Frontmatter wires the skill into Claude Code's skill-discovery mechanism.
+    assert body.startswith("---\n")
+    assert "name: mngr-subagents" in body
+    assert "description:" in body
+    # Body must mention the wait-script protocol that the deny reason
+    # points to -- otherwise the skill is useless for its purpose.
+    assert "wait-script" in body or "wait_script" in body
+    # Background-mode and permission-dialog handling are the key
+    # protocol details the skill documents beyond "just run the script".
+    assert "--spawn-only" in body
+    assert "NEED_PERMISSION" in body
+
+
+def test_proxy_mode_does_not_write_mngr_subagents_skill(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
+    """PROXY mode does NOT write the deny-mode skill.
+
+    The skill explains a workflow (Claude runs Bash to spawn) that
+    only applies in DENY mode. In PROXY mode Claude calls Task as
+    usual; surfacing the skill would be confusing.
+    """
+    ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.PROXY))
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    _provision(agent, fake_host, ctx)
+
+    skill_path = work_dir / ".claude" / "skills" / "mngr-subagents" / "SKILL.md"
+    assert not skill_path.exists()
+
+
 def test_deny_mode_skips_project_stop_hook_check(
     work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -462,7 +510,7 @@ def test_deny_mode_skips_project_stop_hook_check(
 def test_deny_mode_does_not_strip_subagent_user_hooks(
     work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
 ) -> None:
-    """In DENY mode, even an mngr-proxy-child agent gets only the deny hook.
+    """In DENY mode, even a mngr-proxy-child agent gets only the deny hook.
 
     A user could conceivably set deny mode and still call `mngr create
     --type mngr-proxy-child`. The existing strip / auto-allow logic for

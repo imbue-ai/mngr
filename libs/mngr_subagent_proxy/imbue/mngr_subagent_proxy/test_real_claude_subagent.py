@@ -912,13 +912,13 @@ def test_plan_mode_propagates_to_subagent(
 
 
 # A short, unambiguous prompt that asks for a Task call. In deny mode the
-# call will be denied, but the parent still attempts it (we look for the
-# attempt + the deny in the parent's transcript).
+# call will be denied; we look for the deny reason in the parent's
+# transcript. We do NOT instruct Claude to do (or not do) anything after
+# seeing the deny -- whether Claude follows the deny instructions and
+# spawns a child via Bash is Claude's choice (and arguably the desired
+# UX), so the test must not over-specify.
 _DENY_MODE_PROMPT: Final[str] = (
-    "Use the Task tool exactly once. Set subagent_type to 'general-purpose'. "
-    "Set the prompt to: Say BANANA. "
-    "If the Task tool returns an error or denial, just acknowledge it and end your turn. "
-    "Do not retry, and do not run any other tools."
+    "Use the Task tool exactly once. Set subagent_type to 'general-purpose'. Set the prompt to: Say BANANA."
 )
 
 
@@ -942,15 +942,18 @@ def test_deny_mode_intercepts_task_with_deny_reason(
     2. ``.claude/agents/mngr-proxy.md`` is NOT written (no Haiku
        dispatcher needed in deny mode).
     3. When the parent Claude agent calls Task, the parent's transcript
-       contains both the Task tool_use AND a deny tool_result whose
-       content is the deny-mode reason text (``deny mode`` /
-       ``mngr create`` / ``--message-file``).
-    4. NO mngr child agent is spawned automatically by the plugin --
-       the only way a child would appear is if Claude ran the deny
-       instructions itself in Bash, which is non-deterministic and not
-       what we are asserting here.
-    5. The proxy machinery sidefiles are NOT created in the parent's
+       contains the deny-mode reason text (``deny mode`` /
+       ``mngr create`` / ``--message-file``) -- proving both that the
+       model attempted Task (else the PreToolUse hook would not have
+       fired) and that our deny hook returned the expected reason.
+    4. The proxy machinery sidefiles are NOT created in the parent's
        state dir (no subagent_map/, no proxy_commands/).
+
+    We deliberately do NOT assert on whether Claude followed the deny
+    instructions and spawned a mngr subagent itself via Bash. That is
+    the *desired* UX of deny mode -- whether it actually happens on a
+    given turn depends on the model's instruction-following, not on
+    plugin behavior, so it doesn't belong in a plugin regression test.
     """
     mngr = _mngr_subprocess_env_deny_mode
     parent_name = _make_parent_agent_name()
@@ -1007,68 +1010,54 @@ def test_deny_mode_intercepts_task_with_deny_reason(
                 f"{diagnostics}"
             )
 
-        # The parent's transcript should record both:
-        #   - a tool_use for Task (Claude actually attempted the call)
-        #   - the deny reason text (content from build_deny_reason)
-        transcript = _agent_transcript_text(final_parent, temp_host_dir)
-        attempted_task = '"name":"Task"' in transcript or '"name": "Task"' in transcript
-        assert attempted_task, (
-            f"Parent transcript does not contain a Task tool_use record. "
-            f"Either Claude did not attempt to call Task (model behavior change?) or "
-            f"the transcript collection failed. Transcript length: {len(transcript)} chars.\n"
-            f"Transcript tail (last 4000 chars):\n{transcript[-4000:]}"
-        )
         # The deny-reason content is the load-bearing assertion. It is what
-        # Claude sees as the tool_result for the denied Task call.
+        # Claude sees as the tool_result for the denied Task call. If these
+        # strings appear in the transcript, the model emitted Task (else no
+        # PreToolUse:Agent hook would have fired) AND our deny hook returned
+        # the expected short reason pointing at the wait-script + skill.
+        transcript = _agent_transcript_text(final_parent, temp_host_dir)
+        # Markers: literal deny phrasing, skill name (so Claude can load
+        # mngr-subagents), and the wait-script path's filename prefix
+        # (each Task call gets its own wait-<tool_use_id>.sh).
         deny_reason_markers = [
-            "mngr_subagent_proxy is in deny mode",
-            "uv run mngr create",
-            "--type claude",
-            "mngr_subagent_proxy=child",
+            "Use a mngr subagent",
+            "mngr-subagents",
+            "wait-",
         ]
         missing = [m for m in deny_reason_markers if m not in transcript]
         assert not missing, (
             f"Parent's transcript is missing deny-reason markers: {missing!r}. "
             f"This means the deny hook either did not fire or returned different "
-            f"text than expected. Transcript tail (last 4000 chars):\n"
-            f"{transcript[-4000:]}"
+            f"text than expected. Transcript length: {len(transcript)} chars.\n"
+            f"Transcript tail (last 4000 chars):\n{transcript[-4000:]}"
         )
 
-        # No mngr child should be spawned automatically by the plugin.
-        # Claude COULD have followed the instructions and run mngr create
-        # itself via Bash -- if so a child would appear. To make this
-        # assertion deterministic, the prompt instructs Claude not to
-        # retry / not to run other tools after a denial. Any child that
-        # appears would be a bug.
-        subagent_prefix = f"{parent_name}--subagent-"
-        for agent in mngr.list_agents():
-            name = agent.get("name", "")
-            assert not (isinstance(name, str) and name.startswith(subagent_prefix)), (
-                f"Deny mode should NOT have spawned an mngr subagent automatically, "
-                f"but found: {name!r}. The plugin's deny hook never spawns children -- "
-                f"if a child exists Claude must have run `mngr create` itself in Bash "
-                f"despite the prompt's 'do not run any other tools' instruction."
-            )
-
-        # Proxy machinery sidefiles must not exist (only PROXY mode writes
-        # them). The deny hook DOES write subagent_prompts/<tid>.md, so we
-        # only assert on the proxy-only sidefiles.
+        # PROXY-only machinery must not exist. Deny mode writes the
+        # prompt sidefile and the per-Task wait-script under
+        # proxy_commands/, so we only assert on the proxy-only files
+        # (subagent_map for cascade-destroy, subagent_results for the
+        # Haiku-relayed tool_result body).
         agent_id = final_parent.get("id")
         assert isinstance(agent_id, str)
         state_dir = temp_host_dir / "agents" / agent_id
         if state_dir.is_dir():
             assert not (state_dir / "subagent_map").exists(), (
                 f"Deny mode unexpectedly created subagent_map/ in {state_dir}. "
-                f"Only PROXY mode should ever write to that directory."
-            )
-            assert not (state_dir / "proxy_commands").exists(), (
-                f"Deny mode unexpectedly created proxy_commands/ in {state_dir}. "
-                f"Only PROXY mode generates per-tool_use_id wait-scripts."
+                f"Only PROXY mode writes to that directory (cascade-destroy state)."
             )
             assert not (state_dir / "subagent_results").exists(), (
                 f"Deny mode unexpectedly created subagent_results/ in {state_dir}. "
                 f"Only PROXY mode writes subagent end-turn payloads to disk."
             )
+
+        # Best-effort cleanup of any children Claude may have spawned by
+        # following the deny instructions itself in Bash. Not asserting on
+        # presence/absence -- just making sure they don't leak into other
+        # tests or the developer's mngr state.
+        for agent in mngr.list_agents():
+            name = agent.get("name", "")
+            if isinstance(name, str) and name.startswith(f"{parent_name}--subagent-"):
+                created_agents.append(name)
     finally:
         _destroy_agents_quietly(mngr, iter(created_agents))
 
@@ -1140,9 +1129,7 @@ def test_deny_mode_settings_file_is_minimal_compared_to_proxy_mode(
 # will see a deny.
 _DENY_MODE_BACKGROUND_PROMPT: Final[str] = (
     "Use the Task tool exactly once with subagent_type 'general-purpose', "
-    "run_in_background set to true, and prompt: 'Say BANANA'. "
-    "If the Task tool returns an error or denial, just acknowledge it and end your turn. "
-    "Do not retry, and do not run any other tools."
+    "run_in_background set to true, and prompt: 'Say BANANA'."
 )
 
 
@@ -1182,20 +1169,19 @@ def test_deny_mode_handles_run_in_background(
         )
 
         transcript = _agent_transcript_text(final_parent, temp_host_dir)
-        # The background-flavored deny reason mentions run_in_background and
-        # omits the subagent_wait step.
-        assert "run_in_background=true" in transcript, (
-            f"Background-mode deny reason marker not found in transcript. "
+        # Background-mode deny reason mentions --spawn-only and stays
+        # short (skill + wait-script pointer, same one-liner shape).
+        assert "--spawn-only" in transcript, (
+            f"Background-mode deny reason marker --spawn-only not found in transcript. "
             f"Either Claude did not call Task with run_in_background=true, or the "
             f"deny hook returned the synchronous reason. Transcript tail:\n"
             f"{transcript[-3000:]}"
         )
-        # No mngr children spawned automatically.
-        subagent_prefix = f"{parent_name}--subagent-"
+        # Best-effort cleanup of any children Claude may have spawned via
+        # Bash by following the deny instructions itself.
         for agent in mngr.list_agents():
             name = agent.get("name", "")
-            assert not (isinstance(name, str) and name.startswith(subagent_prefix)), (
-                f"Deny mode (background) should NOT have spawned an mngr subagent. Found: {name!r}"
-            )
+            if isinstance(name, str) and name.startswith(f"{parent_name}--subagent-"):
+                created_agents.append(name)
     finally:
         _destroy_agents_quietly(mngr, iter(created_agents))

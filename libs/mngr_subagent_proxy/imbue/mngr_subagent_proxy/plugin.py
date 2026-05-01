@@ -90,6 +90,7 @@ def register_agent_type() -> tuple[str, type[AgentInterface], type[AgentTypeConf
 
 
 _AGENT_DEFINITION: Final[str] = "mngr-proxy.agent.md"
+_MNGR_SUBAGENTS_SKILL: Final[str] = "mngr-subagents.skill.md"
 
 _SPAWN_MODULE: Final[str] = "imbue.mngr_subagent_proxy.hooks.spawn"
 _CLEANUP_MODULE: Final[str] = "imbue.mngr_subagent_proxy.hooks.cleanup"
@@ -194,6 +195,21 @@ def _write_proxy_agent_definition(host: OnlineHostInterface, work_dir: Path) -> 
     host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(agents_dir))}", timeout_seconds=5.0)
     content = _load_resource(_AGENT_DEFINITION)
     host.write_text_file(agents_dir / "mngr-proxy.md", content)
+
+
+def _write_mngr_subagents_skill(host: OnlineHostInterface, work_dir: Path) -> None:
+    """Write the ``mngr-subagents`` Claude skill under the agent's .claude/skills/.
+
+    Used in DENY mode to give Claude the full context for delegating to
+    mngr-managed subagents. The deny hook's ``permissionDecisionReason``
+    is intentionally short -- a one-liner pointing at this skill plus
+    the per-Task-call wait-script -- so the verbose protocol is loaded
+    on demand by Claude rather than crowding every Task transcript.
+    """
+    skill_dir = work_dir / ".claude" / "skills" / "mngr-subagents"
+    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(skill_dir))}", timeout_seconds=5.0)
+    content = _load_resource(_MNGR_SUBAGENTS_SKILL)
+    host.write_text_file(skill_dir / "SKILL.md", content)
 
 
 def _merge_subagent_proxy_deny_hooks(host: OnlineHostInterface, work_dir: Path) -> None:
@@ -502,6 +518,7 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
     mode = _resolve_plugin_mode(mngr_ctx)
     if mode == SubagentProxyMode.DENY:
         _merge_subagent_proxy_deny_hooks(host, agent.work_dir)
+        _write_mngr_subagents_skill(host, agent.work_dir)
         return
 
     _check_project_settings_stop_hooks_guarded(host, agent.work_dir)
