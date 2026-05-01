@@ -30,7 +30,9 @@ from imbue.mngr_subagent_proxy._hook_io import read_hook_stdin_json
 from imbue.mngr_subagent_proxy._hook_io import write_executable_file
 from imbue.mngr_subagent_proxy._hook_io import write_secure_file
 from imbue.mngr_subagent_proxy._target_name import build_subagent_target_name
-from imbue.mngr_subagent_proxy.mngr_binary import get_mngr_command_shell_form
+from imbue.mngr_subagent_proxy._wait_script import WAIT_SCRIPT_HEADER
+from imbue.mngr_subagent_proxy._wait_script import WAIT_SCRIPT_SPAWN_ONLY_BRANCH
+from imbue.mngr_subagent_proxy._wait_script import build_init_block
 
 _PASS_THROUGH_RESPONSE: Final[dict[str, Any]] = {
     "hookSpecificOutput": {
@@ -51,33 +53,32 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
     agent's Bash tool), so it remains shell. Values are baked in as literals
     via shlex.quote so the script does not depend on the hook's env at run
     time beyond MNGR_AGENT_STATE_DIR / MNGR_SUBAGENT_DEPTH.
+
+    Shared scaffolding (header, init block, spawn-only branch) lives in
+    ``_wait_script.py`` so PROXY and DENY hooks cannot drift on the
+    EXIT-trap-before-redirect invariant that protects parent secrets.
     """
     q_tid = shlex.quote(tool_use_id)
     q_target = shlex.quote(target_name)
     q_parent_cwd = shlex.quote(parent_cwd)
-    # Resolve mngr binary at template-generation time so the script and the
-    # python helpers stay in lockstep on per-agent vs. fallback resolution.
-    mngr_cmd = get_mngr_command_shell_form()
     return (
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        "umask 077\n"
-        "\n"
-        f"TID={q_tid}\n"
-        f"TARGET_NAME={q_target}\n"
-        f"PARENT_CWD={q_parent_cwd}\n"
-        'STATE_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR not set}"\n'
-        'ENV_FILE="$STATE_DIR/proxy_commands/env-$TID.env"\n'
-        'INIT_FLAG="$STATE_DIR/proxy_commands/initialized-$TID"\n'
-        'PROMPT_FILE="$STATE_DIR/subagent_prompts/$TID.md"\n'
-        'RESULT_FILE="$STATE_DIR/subagent_results/$TID.txt"\n'
-        'MAP_FILE="$STATE_DIR/subagent_map/$TID.json"\n'
+        WAIT_SCRIPT_HEADER
+        + "\n"
+        + f"TID={q_tid}\n"
+        + f"TARGET_NAME={q_target}\n"
+        + f"PARENT_CWD={q_parent_cwd}\n"
+        + 'STATE_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR not set}"\n'
+        + 'ENV_FILE="$STATE_DIR/proxy_commands/env-$TID.env"\n'
+        + 'INIT_FLAG="$STATE_DIR/proxy_commands/initialized-$TID"\n'
+        + 'PROMPT_FILE="$STATE_DIR/subagent_prompts/$TID.md"\n'
+        + 'RESULT_FILE="$STATE_DIR/subagent_results/$TID.txt"\n'
+        + 'MAP_FILE="$STATE_DIR/subagent_map/$TID.json"\n'
         # Watermark sidefile owned entirely by subagent_wait. It writes
         # the transcript byte-size on PERMISSION_REQUIRED and reads it
         # on the next invocation to suppress re-firing the same dialog.
         # Haiku never sees it -- the wait-script just passes its path.
-        'WATERMARK_FILE="$STATE_DIR/proxy_commands/watermark-$TID"\n'
-        "\n"
+        + 'WATERMARK_FILE="$STATE_DIR/proxy_commands/watermark-$TID"\n'
+        + "\n"
         # Idempotent re-entry guard. PostToolUse cleans subagent_prompts/
         # and subagent_map/, so absence of either is the signal that
         # PostToolUse has already run for this tool_use_id -- emit the
@@ -86,82 +87,54 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
         # block: if the prompt file is gone, the create call would fail
         # with "Path ... does not exist." (We deliberately do NOT check
         # RESULT_FILE here -- on the first call it doesn't exist yet.)
-        'if [ ! -f "$PROMPT_FILE" ] || [ ! -f "$MAP_FILE" ]; then\n'
-        '    echo "MNGR_PROXY_END_OF_OUTPUT"\n'
-        "    exit 0\n"
-        "fi\n"
-        "\n"
-        'if [ ! -f "$INIT_FLAG" ]; then\n'
-        # Trap removes the env-file (which contains parent secrets) on ANY
-        # exit -- success, mngr-create failure, or signal. Installed BEFORE
-        # the env capture so a signal arriving between the redirect and the
-        # trap cannot leave secrets on disk. shred / rm -f gracefully no-op
-        # if $ENV_FILE has not yet been created. The trap is scoped to this
-        # branch (cleared after touch) so it doesn't fire on the idempotent
-        # re-entry path which has no ENV_FILE to clean up.
-        '    trap \'shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\' EXIT\n'
-        "    env | grep -Ev "
-        "'^(MNGR_AGENT_STATE_DIR|MNGR_AGENT_NAME|MAIN_CLAUDE_SESSION_ID|MNGR_HOST_DIR)=' "
-        '> "$ENV_FILE"\n'
-        # --reuse: idempotent create. If `mngr create` partially succeeded
-        # last time (e.g. host provisioned but initial-message delivery
-        # failed) and `set -euo pipefail` killed the script before INIT_FLAG
-        # was touched, the next invocation must NOT fail with "agent already
-        # exists". --reuse makes the create call adopt an existing same-named
-        # agent and (re-)deliver the message. Without this flag, a
-        # SendMessageError mid-create wedges the proxy permanently because
-        # Haiku has no path to recover.
-        f'    {mngr_cmd} create "$TARGET_NAME:$PARENT_CWD" \\\n'
-        "        --type mngr-proxy-child \\\n"
-        "        --transfer=none \\\n"
-        "        --no-ensure-clean \\\n"
-        "        --no-connect \\\n"
-        "        --reuse \\\n"
-        '        --env-file "$ENV_FILE" \\\n'
-        '        --message-file "$PROMPT_FILE" \\\n'
-        "        --label mngr_subagent_proxy=child \\\n"
-        "        --env MNGR_SUBAGENT_PROXY_CHILD=1 \\\n"
-        "        --env MNGR_SUBAGENT_DEPTH=$((${MNGR_SUBAGENT_DEPTH:-0}+1))\n"
-        '    shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\n'
-        "    trap - EXIT\n"
-        '    touch "$INIT_FLAG"\n'
-        "fi\n"
-        "\n"
+        + 'if [ ! -f "$PROMPT_FILE" ] || [ ! -f "$MAP_FILE" ]; then\n'
+        + '    echo "MNGR_PROXY_END_OF_OUTPUT"\n'
+        + "    exit 0\n"
+        + "fi\n"
+        + "\n"
+        # Init block: --reuse keeps mngr-create idempotent across
+        # partial-success states; trap installed BEFORE the env-redirect
+        # so a signal between the two cannot leave secrets on disk.
+        # Spawned children are typed mngr-proxy-child and tagged with
+        # MNGR_SUBAGENT_PROXY_CHILD=1 so their Stop hooks no-op.
+        + build_init_block(
+            agent_type="mngr-proxy-child",
+            extra_create_env_kvs=("MNGR_SUBAGENT_PROXY_CHILD=1",),
+        )
+        + "\n"
         # --spawn-only: caller (Haiku in background mode) wants to
         # spawn the subagent and return immediately; do NOT block on
         # subagent_wait. The subagent runs to completion in the
         # background under mngr's normal lifecycle.
-        'if [ "${1:-}" = "--spawn-only" ]; then\n'
-        "    exit 0\n"
-        "fi\n"
-        "\n"
-        'mkdir -p "$(dirname "$RESULT_FILE")"\n'
+        + WAIT_SCRIPT_SPAWN_ONLY_BRANCH
+        + "\n"
+        + 'mkdir -p "$(dirname "$RESULT_FILE")"\n'
         # Watermark sidefile is consulted by subagent_wait on every
         # invocation. Haiku just re-runs the same Bash command on
         # NEED_PERMISSION; the script's idempotence + watermark file
         # together prevent re-firing on the same pending dialog.
-        "output=$(uv run python -m imbue.mngr_subagent_proxy.subagent_wait "
-        '"$TARGET_NAME" --watermark-file "$WATERMARK_FILE")\n'
-        'case "$output" in\n'
-        "    END_TURN:*)\n"
-        '        printf \'%s\' "${output#END_TURN:}" > "$RESULT_FILE"\n'
+        + "output=$(uv run python -m imbue.mngr_subagent_proxy.subagent_wait "
+        + '"$TARGET_NAME" --watermark-file "$WATERMARK_FILE")\n'
+        + 'case "$output" in\n'
+        + "    END_TURN:*)\n"
+        + '        printf \'%s\' "${output#END_TURN:}" > "$RESULT_FILE"\n'
         # Print the subagent end-turn text as the wait-script's stdout so
         # Haiku's Bash captures it; Haiku is instructed to echo this verbatim
         # in its own final reply, which becomes the parent's tool_result. The
         # END_OF_OUTPUT sentinel is the one stable signal Haiku uses to
         # decide it's done -- the body content is opaque text from a real
         # subagent and may contain anything (including 'DONE' literally).
-        "        printf '%s\\n' \"${output#END_TURN:}\"\n"
-        '        echo "MNGR_PROXY_END_OF_OUTPUT"\n'
-        "        ;;\n"
-        "    PERMISSION_REQUIRED:*)\n"
-        '        echo "NEED_PERMISSION: $TARGET_NAME"\n'
-        "        ;;\n"
-        "    *)\n"
-        '        echo "ERROR: unexpected subagent_wait output: $output" >&2\n'
-        "        exit 1\n"
-        "        ;;\n"
-        "esac\n"
+        + "        printf '%s\\n' \"${output#END_TURN:}\"\n"
+        + '        echo "MNGR_PROXY_END_OF_OUTPUT"\n'
+        + "        ;;\n"
+        + "    PERMISSION_REQUIRED:*)\n"
+        + '        echo "NEED_PERMISSION: $TARGET_NAME"\n'
+        + "        ;;\n"
+        + "    *)\n"
+        + '        echo "ERROR: unexpected subagent_wait output: $output" >&2\n'
+        + "        exit 1\n"
+        + "        ;;\n"
+        + "esac\n"
     )
 
 

@@ -48,7 +48,9 @@ from imbue.mngr_subagent_proxy._hook_io import read_hook_stdin_json
 from imbue.mngr_subagent_proxy._hook_io import write_executable_file
 from imbue.mngr_subagent_proxy._hook_io import write_secure_file
 from imbue.mngr_subagent_proxy._target_name import build_subagent_target_name
-from imbue.mngr_subagent_proxy.mngr_binary import get_mngr_command_shell_form
+from imbue.mngr_subagent_proxy._wait_script import WAIT_SCRIPT_HEADER
+from imbue.mngr_subagent_proxy._wait_script import WAIT_SCRIPT_SPAWN_ONLY_BRANCH
+from imbue.mngr_subagent_proxy._wait_script import build_init_block
 
 _GENERIC_DENY_REASON: Final[str] = (
     "mngr_subagent_proxy is in deny mode: the Task tool is disabled for this agent. "
@@ -88,6 +90,11 @@ def build_deny_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) 
     redo, ``mngr-proxy-child`` agent type). Spawned children are plain
     ``claude`` agents labeled ``mngr_subagent_proxy=child``.
 
+    Shared scaffolding (header, init block, spawn-only branch) lives
+    in ``_wait_script.py`` so PROXY and DENY hooks cannot drift on
+    the EXIT-trap-before-redirect invariant that protects parent
+    secrets.
+
     The script:
     1. Captures the parent's env to a temporary file (under EXIT trap so
        a partial write cannot leave secrets on disk), then runs
@@ -103,71 +110,47 @@ def build_deny_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) 
     q_tid = shlex.quote(tool_use_id)
     q_target = shlex.quote(target_name)
     q_parent_cwd = shlex.quote(parent_cwd)
-    mngr_cmd = get_mngr_command_shell_form()
     return (
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        "umask 077\n"
-        "\n"
-        f"TID={q_tid}\n"
-        f"TARGET_NAME={q_target}\n"
-        f"PARENT_CWD={q_parent_cwd}\n"
-        'STATE_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR not set}"\n'
-        'ENV_FILE="$STATE_DIR/proxy_commands/env-$TID.env"\n'
-        'INIT_FLAG="$STATE_DIR/proxy_commands/initialized-$TID"\n'
-        'PROMPT_FILE="$STATE_DIR/subagent_prompts/$TID.md"\n'
-        "\n"
-        'mkdir -p "$STATE_DIR/proxy_commands"\n'
-        "\n"
-        'if [ ! -f "$INIT_FLAG" ]; then\n'
-        # Trap covers the env-file (parent secrets) for any exit path.
-        # Installed BEFORE the redirect so a signal between the redirect
-        # and the trap cannot leave secrets on disk.
-        '    trap \'shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\' EXIT\n'
-        "    env | grep -Ev "
-        "'^(MNGR_AGENT_STATE_DIR|MNGR_AGENT_NAME|MAIN_CLAUDE_SESSION_ID|MNGR_HOST_DIR)=' "
-        '> "$ENV_FILE"\n'
-        # --reuse: idempotent. If a previous run partially succeeded
-        # (host provisioned but message-delivery errored), the next run
-        # must adopt the existing same-named agent rather than fail.
-        f'    {mngr_cmd} create "$TARGET_NAME:$PARENT_CWD" \\\n'
-        "        --type claude \\\n"
-        "        --transfer=none \\\n"
-        "        --no-ensure-clean \\\n"
-        "        --no-connect \\\n"
-        "        --reuse \\\n"
-        '        --env-file "$ENV_FILE" \\\n'
-        '        --message-file "$PROMPT_FILE" \\\n'
-        "        --label mngr_subagent_proxy=child \\\n"
-        "        --env MNGR_SUBAGENT_DEPTH=$((${MNGR_SUBAGENT_DEPTH:-0}+1))\n"
-        '    shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\n'
-        "    trap - EXIT\n"
-        '    touch "$INIT_FLAG"\n'
-        "fi\n"
-        "\n"
+        WAIT_SCRIPT_HEADER
+        + "\n"
+        + f"TID={q_tid}\n"
+        + f"TARGET_NAME={q_target}\n"
+        + f"PARENT_CWD={q_parent_cwd}\n"
+        + 'STATE_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR not set}"\n'
+        + 'ENV_FILE="$STATE_DIR/proxy_commands/env-$TID.env"\n'
+        + 'INIT_FLAG="$STATE_DIR/proxy_commands/initialized-$TID"\n'
+        + 'PROMPT_FILE="$STATE_DIR/subagent_prompts/$TID.md"\n'
+        + "\n"
+        + 'mkdir -p "$STATE_DIR/proxy_commands"\n'
+        + "\n"
+        # Init block: --reuse keeps mngr-create idempotent across
+        # partial-success states; trap installed BEFORE the env-redirect
+        # so a signal between the two cannot leave secrets on disk.
+        # Spawned children are plain claude agents (no mngr-proxy-child
+        # ceremony) labeled mngr_subagent_proxy=child.
+        + build_init_block(agent_type="claude")
+        + "\n"
         # Background: spawn-only, return without waiting.
-        'if [ "${1:-}" = "--spawn-only" ]; then\n'
-        "    exit 0\n"
-        "fi\n"
-        "\n"
-        "output=$(uv run python -m imbue.mngr_subagent_proxy.subagent_wait "
-        '"$TARGET_NAME")\n'
-        'case "$output" in\n'
-        "    END_TURN:*)\n"
+        + WAIT_SCRIPT_SPAWN_ONLY_BRANCH
+        + "\n"
+        + "output=$(uv run python -m imbue.mngr_subagent_proxy.subagent_wait "
+        + '"$TARGET_NAME")\n'
+        + 'case "$output" in\n'
+        + "    END_TURN:*)\n"
         # Print the subagent's end-turn body verbatim. Claude reads
         # stdout directly -- no sentinel needed (Claude is the runner,
         # not Haiku).
-        "        printf '%s\\n' \"${output#END_TURN:}\"\n"
-        "        ;;\n"
-        "    PERMISSION_REQUIRED:*)\n"
-        '        echo "NEED_PERMISSION: $TARGET_NAME" >&2\n'
-        "        exit 1\n"
-        "        ;;\n"
-        "    *)\n"
-        '        echo "ERROR: unexpected subagent_wait output: $output" >&2\n'
-        "        exit 1\n"
-        "        ;;\n"
-        "esac\n"
+        + "        printf '%s\\n' \"${output#END_TURN:}\"\n"
+        + "        ;;\n"
+        + "    PERMISSION_REQUIRED:*)\n"
+        + '        echo "NEED_PERMISSION: $TARGET_NAME" >&2\n'
+        + "        exit 1\n"
+        + "        ;;\n"
+        + "    *)\n"
+        + '        echo "ERROR: unexpected subagent_wait output: $output" >&2\n'
+        + "        exit 1\n"
+        + "        ;;\n"
+        + "esac\n"
     )
 
 
