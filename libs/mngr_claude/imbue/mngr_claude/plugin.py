@@ -463,8 +463,8 @@ def _build_settings_json(
     ``extra_contributions`` are merged in last: a contribution's
     ``statusline_command`` overwrites any existing ``statusLine`` (the user's
     pre-existing command should already be captured into the contribution's
-    env block via ``_extract_user_statusline_command`` in the hookimpl), and
-    its ``env`` entries merge into ``settings.json``'s env block.
+    env block by the contributing plugin's hookimpl), and its ``env`` entries
+    merge into ``settings.json``'s env block.
     """
     source_settings = _read_source_claude_settings(source_claude_dir)
 
