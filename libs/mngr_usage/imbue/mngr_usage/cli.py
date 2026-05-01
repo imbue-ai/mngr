@@ -159,9 +159,11 @@ def _build_refresh_command(plugin_config: UsagePluginConfig) -> list[str]:
 def _run_refresh(mngr_ctx: MngrContext, plugin_config: UsagePluginConfig) -> None:
     """Spawn `claude -p` to nudge a rate_limit_event into the cache.
 
-    Pipes claude's stdout through claude_rate_limits_writer.sh so the merge logic
-    stays in one place. The writer is located via $MNGR_RATE_LIMITS_WRITER if set,
-    else falls back to the most-recently-modified copy under any per-agent state dir.
+    The probe runs with --output-format=stream-json --verbose, and the
+    resulting stdout is parsed in Python by _ingest_refresh_stdout, which
+    folds any rate_limit_event lines into the cache (last-write-wins per
+    window). The shell-side merge writer (claude_rate_limits_writer.sh)
+    handles the parallel statusline path; the SDK path does not invoke it.
     """
     cmd = _build_refresh_command(plugin_config)
     logger.info("Refreshing Claude rate-limit cache (cost ~$0.005)")
