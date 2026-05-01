@@ -23,9 +23,13 @@ from imbue.mngr_subagent_proxy.mngr_binary import get_mngr_command_shell_form
 
 WAIT_SCRIPT_HEADER: Final[str] = "#!/usr/bin/env bash\nset -euo pipefail\numask 077\n"
 
-# Both modes accept ``--spawn-only`` as the first arg to skip the
-# blocking ``subagent_wait`` step (used for ``run_in_background=true``
-# Task calls). Identical text in both, so kept here as a constant.
+# Both PROXY and DENY wait-scripts emit this branch so the templates
+# stay uniform, but only PROXY actually invokes it -- Haiku in
+# background mode bash-es the script with ``--spawn-only`` to skip
+# the blocking ``subagent_wait`` step. DENY mode never passes the
+# flag: backgrounding there goes through Claude Code's Bash
+# ``run_in_background=true`` on the script-as-a-whole, not through a
+# DENY-specific flag (see ``hooks/deny.build_deny_reason``).
 WAIT_SCRIPT_SPAWN_ONLY_BRANCH: Final[str] = 'if [ "${1:-}" = "--spawn-only" ]; then\n    exit 0\nfi\n'
 
 
