@@ -51,8 +51,8 @@ class LabelsDataSource(FrozenModel):
         return {self.field_key: self.config.header}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        return {self.field_key: _ColoredStringField}
+    def field_types(self) -> dict[str, tuple[type[FieldValue], ...]]:
+        return {self.field_key: (_ColoredStringField,)}
 
     def compute(
         self,

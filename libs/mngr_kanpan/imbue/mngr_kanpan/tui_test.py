@@ -499,7 +499,7 @@ class _MockDataSource:
         return {"mock_field": "MOCK", "another_field": "ANOTHER"}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
+    def field_types(self) -> dict[str, tuple[type[FieldValue], ...]]:
         return {}
 
     def compute(

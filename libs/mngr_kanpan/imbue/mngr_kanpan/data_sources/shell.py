@@ -49,8 +49,8 @@ class ShellCommandDataSource(FrozenModel):
         return {self.field_key: self.config.header}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        return {self.field_key: StringField}
+    def field_types(self) -> dict[str, tuple[type[FieldValue], ...]]:
+        return {self.field_key: (StringField,)}
 
     def compute(
         self,

@@ -325,11 +325,15 @@ def load_field_cache(
     if not cache_path.exists():
         return {}
 
-    # Build type registry from all data sources
+    # Build type registry from all data sources. Each slot may have multiple
+    # concrete classes (e.g. FIELD_PR can hold PrField, CreatePrUrlField, or
+    # PrFetchFailedField); register every class by name so the cache can
+    # round-trip whichever class the source last persisted into the slot.
     type_registry: dict[str, type[FieldValue]] = {}
     for source in data_sources:
-        for _key, field_type in source.field_types.items():
-            type_registry[field_type.__name__] = field_type
+        for _key, field_classes in source.field_types.items():
+            for field_class in field_classes:
+                type_registry[field_class.__name__] = field_class
 
     try:
         raw = json.loads(cache_path.read_text())

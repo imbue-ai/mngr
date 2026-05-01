@@ -50,8 +50,8 @@ class GitInfoDataSource(FrozenModel):
         return {FIELD_COMMITS_AHEAD: "GIT"}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        return {FIELD_COMMITS_AHEAD: CommitsAheadField}
+    def field_types(self) -> dict[str, tuple[type[FieldValue], ...]]:
+        return {FIELD_COMMITS_AHEAD: (CommitsAheadField,)}
 
     def compute(
         self,

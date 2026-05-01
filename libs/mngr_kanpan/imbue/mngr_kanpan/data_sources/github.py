@@ -355,16 +355,22 @@ class GitHubDataSource(FrozenModel):
         return cols
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        types: dict[str, type[FieldValue]] = {}
+    def field_types(self) -> dict[str, tuple[type[FieldValue], ...]]:
+        types: dict[str, tuple[type[FieldValue], ...]] = {}
         if self.config.pr:
-            types[FIELD_PR] = PrField
+            # FIELD_PR is polymorphic: a real PR -> _PrFieldInternal (PrField
+            # subclass that carries the fetched check_status); pushed branch with
+            # no PR -> CreatePrUrlField; repo fetch failed and no cached PR ->
+            # PrFetchFailedField. All four classes (including the public PrField
+            # base) need to round-trip through the cache so a previously-saved
+            # entry is re-typed correctly on load.
+            types[FIELD_PR] = (_PrFieldInternal, PrField, CreatePrUrlField, PrFetchFailedField)
         if self.config.ci:
-            types[FIELD_CI] = CiField
+            types[FIELD_CI] = (CiField,)
         if self.config.conflicts:
-            types[FIELD_CONFLICTS] = ConflictsField
+            types[FIELD_CONFLICTS] = (ConflictsField,)
         if self.config.unresolved:
-            types[FIELD_UNRESOLVED] = UnresolvedField
+            types[FIELD_UNRESOLVED] = (UnresolvedField,)
         return types
 
     def compute(

@@ -15,8 +15,12 @@ from imbue.mngr_kanpan.data_source import KanpanFieldTypeError
 from imbue.mngr_kanpan.data_source import StringField
 from imbue.mngr_kanpan.data_sources.github import CiField
 from imbue.mngr_kanpan.data_sources.github import CiStatus
+from imbue.mngr_kanpan.data_sources.github import CreatePrUrlField
+from imbue.mngr_kanpan.data_sources.github import GitHubDataSource
+from imbue.mngr_kanpan.data_sources.github import GitHubDataSourceConfig
 from imbue.mngr_kanpan.data_sources.github import PrFetchFailedField
 from imbue.mngr_kanpan.data_sources.github import PrState
+from imbue.mngr_kanpan.data_sources.github import _PrFieldInternal
 from imbue.mngr_kanpan.data_sources.repo_paths import _parse_github_repo_path
 from imbue.mngr_kanpan.data_sources.repo_paths import repo_path_from_labels
 from imbue.mngr_kanpan.data_types import BoardSection
@@ -216,7 +220,7 @@ class _MockDataSource:
         return {}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
+    def field_types(self) -> dict[str, tuple[type[FieldValue], ...]]:
         return {}
 
     def compute(
@@ -242,7 +246,7 @@ class _FailingDataSource:
         return {}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
+    def field_types(self) -> dict[str, tuple[type[FieldValue], ...]]:
         return {}
 
     def compute(
@@ -437,7 +441,7 @@ def test_plugin_kanpan_data_sources_from_loader_path() -> None:
 
 def _make_mock_data_source(field_key: str, field_type: type[FieldValue]) -> KanpanDataSource:
     return SimpleNamespace(  # ty: ignore[invalid-return-type]
-        field_types={field_key: field_type},
+        field_types={field_key: (field_type,)},
     )
 
 
@@ -474,6 +478,46 @@ def test_save_load_field_cache_roundtrip(tmp_path: Path) -> None:
     field = loaded[agent_name]["status"]
     assert isinstance(field, StringField)
     assert field.value == "hello"
+
+
+def test_save_load_field_cache_polymorphic_slot_roundtrip(tmp_path: Path) -> None:
+    """A slot can hold any of several FieldValue subclasses (e.g. FIELD_PR can hold
+    PrField, CreatePrUrlField, or PrFetchFailedField). All declared classes for a
+    slot must round-trip through the cache, regardless of which one was last persisted.
+    """
+    ctx = make_mngr_ctx_with_profile_dir(tmp_path)
+    a1 = AgentName("a1")
+    a2 = AgentName("a2")
+    a3 = AgentName("a3")
+    a4 = AgentName("a4")
+    pr_internal = _PrFieldInternal(
+        number=99,
+        url="https://example.com/99",
+        is_draft=False,
+        title="t",
+        state=PrState.OPEN,
+        head_branch="b",
+        internal_check_status=CiStatus.PASSING,
+    )
+    original: dict[AgentName, dict[str, FieldValue]] = {
+        a1: {FIELD_PR: make_pr_field(number=42)},
+        a2: {FIELD_PR: CreatePrUrlField(url="https://example.com/compare")},
+        a3: {FIELD_PR: PrFetchFailedField(repo="org/repo")},
+        a4: {FIELD_PR: pr_internal},
+    }
+    save_field_cache(ctx, original)
+
+    data_sources = [GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))]
+    loaded = load_field_cache(ctx, data_sources)
+
+    assert isinstance(loaded[a1][FIELD_PR], type(original[a1][FIELD_PR]))
+    assert isinstance(loaded[a2][FIELD_PR], CreatePrUrlField)
+    assert isinstance(loaded[a3][FIELD_PR], PrFetchFailedField)
+    assert loaded[a3][FIELD_PR] == original[a3][FIELD_PR]
+    assert isinstance(loaded[a4][FIELD_PR], _PrFieldInternal)
+    loaded_internal = loaded[a4][FIELD_PR]
+    assert isinstance(loaded_internal, _PrFieldInternal)
+    assert loaded_internal.internal_check_status == CiStatus.PASSING
 
 
 def test_load_field_cache_returns_empty_on_corrupt_json(tmp_path: Path) -> None:

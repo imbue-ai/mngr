@@ -76,8 +76,8 @@ class RepoPathsDataSource(FrozenModel):
         return {FIELD_REPO_PATH: "REPO"}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        return {FIELD_REPO_PATH: RepoPathField}
+    def field_types(self) -> dict[str, tuple[type[FieldValue], ...]]:
+        return {FIELD_REPO_PATH: (RepoPathField,)}
 
     def compute(
         self,

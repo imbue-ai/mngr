@@ -95,8 +95,14 @@ class KanpanDataSource(Protocol):
         ...
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        """Field key -> FieldValue subclass, for deserialization via model_validate()."""
+    def field_types(self) -> dict[str, tuple[type[FieldValue], ...]]:
+        """Field key -> tuple of FieldValue subclasses that may appear in this slot.
+
+        A "slot" (e.g. FIELD_PR) can be polymorphic: it may hold a real PrField,
+        or a sentinel like CreatePrUrlField / PrFetchFailedField. List every
+        concrete class that can land in the slot so the cache loader can
+        round-trip whichever one was last persisted.
+        """
         ...
 
     def compute(
