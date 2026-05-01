@@ -46,6 +46,7 @@ from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -593,10 +594,16 @@ kill -TERM 1
         env.setdefault("BUILDKIT_PROGRESS", "plain")
         return env
 
-    def _run_docker_creation_command(self, args: list[str], timeout: float = 300) -> FinishedProcess:
-        """Run a docker CLI command and return the result."""
+    def _run_docker_creation_command(
+        self, args: list[str], timeout: float = 300, executable: DockerBuilder = DockerBuilder.DOCKER
+    ) -> FinishedProcess:
+        """Run a docker-compatible CLI command and return the result.
+
+        `executable` defaults to DOCKER; pass DEPOT to use the depot.dev remote
+        builder (only valid for build subcommands).
+        """
         return self.mngr_ctx.concurrency_group.run_process_to_completion(
-            ["docker"] + args,
+            [executable.value.lower()] + args,
             timeout=timeout,
             env=self._docker_env(),
             on_output=self._log_docker_creation_command_output,
@@ -609,10 +616,13 @@ kill -TERM 1
             logger.log(LogLevel.BUILD.value, "{}", line.rstrip(), source="docker")
 
     def _build_image(self, build_args: Sequence[str], tag: str) -> str:
-        """Build a Docker image using native docker build with passthrough args."""
-        cmd = ["build", "-t", tag] + list(build_args)
-        with log_span("Running docker build with {} args", len(build_args)):
-            self._run_docker_creation_command(cmd)
+        """Build a Docker image using the configured builder (docker or depot)."""
+        builder = self.config.builder
+        # depot requires --load to import the resulting image into the local daemon.
+        extra_args = ["--load"] if builder is DockerBuilder.DEPOT else []
+        args = ["build", *extra_args, "-t", tag, *build_args]
+        with log_span("Running {} build with {} args", builder.value.lower(), len(build_args)):
+            self._run_docker_creation_command(args, executable=builder)
         return tag
 
     def _build_default_image(self, tag: str) -> str:

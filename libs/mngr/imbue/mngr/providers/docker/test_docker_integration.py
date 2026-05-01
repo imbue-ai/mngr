@@ -198,6 +198,14 @@ def test_build_image_from_dockerfile(docker_provider: DockerProviderInstance, tm
     tag = "mngr-test-build-image"
     result = docker_provider._build_image([f"--file={dockerfile}", str(tmp_path)], tag)
     assert result == tag
+    # Verify the image was loaded into the local Docker daemon. Both
+    # `docker build` and `depot build --load` import the result into the
+    # local daemon, so this works for either configured builder and gives
+    # the test something to assert beyond the tag echo.
+    inspect = docker_provider._run_docker_creation_command(
+        ["image", "inspect", "--format", "{{.Id}}", tag], timeout=10
+    )
+    assert inspect.stdout.strip(), f"image {tag} not found in local daemon after build"
 
 
 # =========================================================================
