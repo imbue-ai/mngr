@@ -20,7 +20,9 @@ from imbue.mngr_schedule.cli.options import ScheduleListCliOptions
 from imbue.mngr_schedule.cli.provider_utils import load_schedule_provider
 from imbue.mngr_schedule.data_types import ScheduleCreationRecord
 from imbue.mngr_schedule.implementations.local.deploy import list_local_schedule_creation_records
-from imbue.mngr_schedule.implementations.modal.deploy import list_schedule_creation_records
+
+# ``list_schedule_creation_records`` is imported lazily inside the command body
+# because its module pulls the ``modal`` SDK at import time (~90ms).
 
 
 @schedule.command(name="list")
@@ -63,6 +65,8 @@ def schedule_list(ctx: click.Context, **kwargs: Any) -> None:
         with log_span("Listing local schedule creation records"):
             records: list[ScheduleCreationRecord] = list_local_schedule_creation_records(mngr_ctx)
     elif isinstance(provider, ModalProviderInstance):
+        from imbue.mngr_schedule.implementations.modal.deploy import list_schedule_creation_records  # noqa: PLC0415
+
         with log_span("Listing schedule creation records"):
             records = list(list_schedule_creation_records(provider))
     else:

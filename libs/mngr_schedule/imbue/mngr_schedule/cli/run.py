@@ -21,8 +21,8 @@ from imbue.mngr_schedule.cli.options import ScheduleRunCliOptions
 from imbue.mngr_schedule.cli.provider_utils import load_schedule_provider
 from imbue.mngr_schedule.implementations.local.deploy import get_local_schedule_creation_record
 from imbue.mngr_schedule.implementations.local.deploy import get_local_trigger_run_script
-from imbue.mngr_schedule.implementations.modal.deploy import get_modal_schedule_creation_record
-from imbue.mngr_schedule.implementations.modal.deploy import invoke_modal_trigger_function
+
+# Imported lazily inside ``run_modal_trigger`` since their module pulls modal SDK.
 
 
 @schedule.command(name="run")
@@ -176,6 +176,9 @@ def run_modal_trigger(provider: ModalProviderInstance, trigger_name: str) -> str
 
     Returns the command output captured by run_scheduled_trigger().
     """
+    from imbue.mngr_schedule.implementations.modal.deploy import get_modal_schedule_creation_record  # noqa: PLC0415
+    from imbue.mngr_schedule.implementations.modal.deploy import invoke_modal_trigger_function  # noqa: PLC0415
+
     record = get_modal_schedule_creation_record(provider, trigger_name)
     if record is None:
         raise click.ClickException(

@@ -38,14 +38,18 @@ from imbue.mngr_modal.instance import ModalProviderApp
 from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_modal.log_utils import ModalLoguruWriter
 from imbue.mngr_modal.log_utils import enable_modal_output_capture
-from imbue.modal_proxy.direct import DirectModalInterface
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ModalInterface
 from imbue.modal_proxy.interface import VolumeInterface
-from imbue.modal_proxy.testing import TestingModalInterface
+
+# ``DirectModalInterface`` and ``TestingModalInterface`` are imported lazily inside
+# ``ModalProviderBackend._build_provider_instance`` because their modules pull the
+# ``modal`` SDK at import time (~90ms). This module is loaded eagerly at CLI
+# startup as a plugin entry-point; the heavy imports only matter when a Modal
+# host is actually being created.
 
 MODAL_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("modal")
 STATE_VOLUME_SUFFIX: Final[str] = "-state"
@@ -452,7 +456,11 @@ Supported build arguments for the modal provider:
         if not isinstance(config, ModalProviderConfig):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
 
-        # Create the ModalInterface based on the configured mode
+        # Create the ModalInterface based on the configured mode. Imports are
+        # deferred so plugin loading at CLI startup does not pull the modal SDK.
+        from imbue.modal_proxy.direct import DirectModalInterface  # noqa: PLC0415
+        from imbue.modal_proxy.testing import TestingModalInterface  # noqa: PLC0415
+
         match config.mode:
             case ModalMode.DIRECT:
                 modal_interface: ModalInterface = DirectModalInterface()
