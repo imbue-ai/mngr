@@ -97,6 +97,9 @@ class CiField(FieldValue):
         return {"MNGR_FIELD_CI_STATUS": str(self.status)}
 
 
+_CI_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(CiField)
+
+
 class CreatePrUrlField(FieldValue):
     """URL to create a new PR for a branch."""
 
@@ -135,6 +138,9 @@ class ConflictsField(FieldValue):
         return CellDisplay(text="no", color="light green")
 
 
+_CONFLICTS_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(ConflictsField)
+
+
 class UnresolvedField(FieldValue):
     """Unresolved review comment status for a PR."""
 
@@ -145,6 +151,9 @@ class UnresolvedField(FieldValue):
         if self.has_unresolved:
             return CellDisplay(text="YES", color="light red")
         return CellDisplay(text="no", color="light green")
+
+
+_UNRESOLVED_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(UnresolvedField)
 
 
 class PrInfo(FrozenModel):
@@ -381,11 +390,11 @@ class GitHubDataSource(FrozenModel):
         if self.config.pr:
             types[FIELD_PR] = _PR_SLOT_ADAPTER
         if self.config.ci:
-            types[FIELD_CI] = TypeAdapter(CiField)
+            types[FIELD_CI] = _CI_ADAPTER
         if self.config.conflicts:
-            types[FIELD_CONFLICTS] = TypeAdapter(ConflictsField)
+            types[FIELD_CONFLICTS] = _CONFLICTS_ADAPTER
         if self.config.unresolved:
-            types[FIELD_UNRESOLVED] = TypeAdapter(UnresolvedField)
+            types[FIELD_UNRESOLVED] = _UNRESOLVED_ADAPTER
         return types
 
     def compute(
