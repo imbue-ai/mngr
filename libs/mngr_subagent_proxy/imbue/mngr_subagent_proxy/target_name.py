@@ -6,7 +6,7 @@ synthesize a per-Task-call mngr agent name of the shape
 with ``mngr list`` filters and so the ``mngr_subagent_proxy=child`` label
 convention is honored consistently across modes.
 
-Kept here (private module) so neither mode has to depend on the other.
+Kept here so neither mode has to depend on the other.
 """
 
 from __future__ import annotations
