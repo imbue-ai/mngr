@@ -25,7 +25,7 @@ from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.providers.registry import get_all_provider_args_help_sections
-from imbue.mngr.providers.registry import load_all_registries
+from imbue.mngr.providers.registry import set_plugin_manager as _registry_set_plugin_manager
 from imbue.mngr.utils.builtin_command_specs import BUILTIN_COMMAND_SPECS
 from imbue.mngr.utils.builtin_command_specs import BuiltinCommandSpec
 from imbue.mngr.utils.click_utils import detect_alias_to_canonical
@@ -363,12 +363,12 @@ def create_plugin_manager() -> pluggy.PluginManager:
     # Allow plugins to register their own hookspec modules (for plugin-specific hooks).
     load_plugin_hookspecs(pm)
 
-    # load all classes defined by plugins so they are available later
-    load_all_registries(pm)
+    # Register pm with the provider registry so backend lookups (``get_backend``,
+    # ``list_backends``, ``get_config_class``, ``get_all_provider_args_help_sections``)
+    # can lazily load backends on first use. Skipping the eager ``load_all_registries``
+    # here saves ~80ms wall on ``mngr --help`` (no docker/pyinfra/paramiko at startup).
+    _registry_set_plugin_manager(pm)
     load_agents_from_plugins(pm)
-
-    # Wire up the agent type resolver so hosts can resolve agent types
-    # without directly importing from the agents layer
 
     return pm
 
