@@ -51,6 +51,7 @@ from coverage.exceptions import CoverageException
 
 from imbue.imbue_common.test_profiles import ScopedProfile
 from imbue.imbue_common.test_profiles import resolve_active_profile
+from imbue.resource_guards.resource_guards import register_all_resource_guards
 from imbue.resource_guards.resource_guards import register_guarded_resource_markers
 from imbue.resource_guards.resource_guards import start_resource_guards
 from imbue.resource_guards.resource_guards import stop_resource_guards
@@ -954,6 +955,15 @@ def register_conftest_hooks(namespace: dict) -> None:
     if _registered:
         return
     _registered = True
+
+    # Discover and register every resource guard declared via the
+    # imbue_resource_guards entry point group. This is the single source of
+    # truth for the monorepo's guarded resources: any installed package can
+    # declare its guards in pyproject.toml and they become available to every
+    # conftest that calls this function -- no project-specific re-declaration
+    # required. Doing this before installing hooks ensures pytest_configure
+    # sees the full set of marks when register_guarded_resource_markers runs.
+    register_all_resource_guards()
 
     namespace["pytest_sessionstart"] = _pytest_sessionstart
     namespace["pytest_sessionfinish"] = _pytest_sessionfinish

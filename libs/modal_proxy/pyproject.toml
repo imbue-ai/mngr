@@ -12,6 +12,9 @@ dependencies = [
     "resource-guards==0.1.5",
 ]
 
+[project.entry-points.imbue_resource_guards]
+modal = "imbue.modal_proxy.register_guards:register_modal_guard"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

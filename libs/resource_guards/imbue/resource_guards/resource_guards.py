@@ -25,6 +25,7 @@ Usage:
 """
 
 import dataclasses
+import importlib.metadata
 import os
 import shutil
 import stat
@@ -40,6 +41,10 @@ from uuid import uuid4
 
 import pluggy
 import pytest
+
+# Entry point group through which packages declare their resource guard
+# registrations. See register_all_resource_guards() for usage.
+RESOURCE_GUARDS_ENTRY_POINT_GROUP = "imbue_resource_guards"
 
 
 class ResourceGuardViolation(Exception):
@@ -110,6 +115,28 @@ def register_resource_guard(name: str) -> None:
 def get_guarded_resource_names() -> tuple[str, ...]:
     """Return the guarded resource names (binary + SDK guards)."""
     return tuple(_guarded_resources)
+
+
+def register_all_resource_guards(
+    entry_points: Callable[..., Any] = importlib.metadata.entry_points,
+) -> None:
+    """Register every guard declared via the imbue_resource_guards entry point group.
+
+    Each entry point's value must be a callable that takes no arguments and
+    registers one or more guards via register_resource_guard() and/or
+    register_sdk_guard()/create_sdk_method_guard(). This is the canonical way
+    for libraries in the monorepo to advertise their guards: the set of
+    guarded resources is a global property, so projects don't need to
+    re-declare it in their conftest.py.
+
+    Safe to call multiple times: every individual registration function below
+    deduplicates by guard name. The entry_points argument is dependency-
+    injected to keep the test path free of importlib monkeypatching; callers
+    should leave the default in place.
+    """
+    for entry_point in entry_points(group=RESOURCE_GUARDS_ENTRY_POINT_GROUP):
+        register_fn = entry_point.load()
+        register_fn()
 
 
 def register_guarded_resource_markers(
