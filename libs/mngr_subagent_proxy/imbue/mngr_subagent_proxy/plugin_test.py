@@ -26,9 +26,12 @@ from imbue.mngr_subagent_proxy.plugin import on_before_agent_destroy
 from imbue.mngr_subagent_proxy.testing import FakeAgent
 from imbue.mngr_subagent_proxy.testing import FakeHost
 
-# on_after_provisioning declares its third parameter as MngrContext but
-# immediately ``del``-s it. Tests pass through an untyped wrapper so the
-# None sentinel doesn't leak argument-type noise to every call site.
+# on_after_provisioning declares its third parameter as MngrContext, but
+# ``_resolve_plugin_mode`` treats a None mngr_ctx as "use defaults" (PROXY
+# mode), so PROXY-mode tests can pass None and skip building a full
+# MngrContext. Tests that exercise DENY mode pass a real ctx instead.
+# The untyped wrapper keeps the None sentinel from leaking argument-type
+# noise to every call site.
 _provision: Any = on_after_provisioning
 _destroy: Any = on_before_agent_destroy
 
