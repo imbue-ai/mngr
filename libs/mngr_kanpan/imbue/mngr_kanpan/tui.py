@@ -38,6 +38,7 @@ from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
+from imbue.mngr_kanpan.data_source import now_utc
 from imbue.mngr_kanpan.data_types import ActionBuiltinCommand
 from imbue.mngr_kanpan.data_types import ActionBuiltinRole
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
@@ -58,6 +59,7 @@ from imbue.mngr_kanpan.fetcher import save_field_cache
 from imbue.mngr_kanpan.fetcher import toggle_agent_mute
 
 DEFAULT_REFRESH_INTERVAL_SECONDS: float = 600.0
+DEFAULT_STALENESS_THRESHOLD_SECONDS: float = 1800.0
 
 # Default column order when column_order is not explicitly configured.
 # User-configured label/shell columns are appended after these.
@@ -99,6 +101,11 @@ PALETTE = [
     ("muted", "dark gray", ""),
     ("muted_focus", "dark gray,standout", ""),
     ("section_muted", "dark gray", ""),
+    # Stale: applied per-cell when a field's `created` is older than
+    # `staleness_threshold_seconds`. Same color as muted so the visual
+    # language is "this is de-emphasized."
+    ("stale", "dark gray", ""),
+    ("stale_focus", "dark gray,standout", ""),
     ("error_text", "light red", ""),
     ("notification", "white", "dark magenta"),
 ]
@@ -176,6 +183,7 @@ _AGENT_LINE_ATTRS = (
     "check_failing",
     "check_pending",
     "muted",
+    "stale",
 )
 
 # Column layout configuration
@@ -348,6 +356,7 @@ class _KanpanState(MutableModel):
     # Cooldown durations (loaded from plugin config)
     refresh_interval_seconds: float = DEFAULT_REFRESH_INTERVAL_SECONDS
     retry_cooldown_seconds: float = 60.0
+    staleness_threshold_seconds: float = DEFAULT_STALENESS_THRESHOLD_SECONDS
     # Palette attr names for mark indicators (e.g. "mark_d", "mark_p")
     mark_attr_names: tuple[str, ...] = ()
     # Column definitions (from data sources)
@@ -741,7 +750,7 @@ def _apply_mute_to_entry(entry: AgentBoardEntry, is_muted: bool) -> AgentBoardEn
 
     Updates fields, cells, section, and is_muted so the board renders correctly.
     """
-    updated_fields = {**entry.fields, FIELD_MUTED: BoolField(value=is_muted)}
+    updated_fields = {**entry.fields, FIELD_MUTED: BoolField(value=is_muted, created=now_utc())}
     updated_cells = {key: field.display() for key, field in updated_fields.items()}
     updated_section = compute_section(updated_fields)
     ref = entry.field_ref()
@@ -1125,6 +1134,30 @@ def _flatten_markup_to_muted(
     return ("muted", plain)
 
 
+def _flatten_markup_to_stale(
+    markup: str | tuple[Hashable, str] | list[str | tuple[Hashable, str]],
+) -> tuple[Hashable, str]:
+    """Flatten rich urwid text markup to a plain string wrapped in the 'stale' attribute."""
+    if isinstance(markup, list):
+        plain = "".join(seg if isinstance(seg, str) else seg[1] for seg in markup)
+    elif isinstance(markup, tuple):
+        plain = markup[1]
+    else:
+        plain = markup
+    return ("stale", plain)
+
+
+@pure
+def _is_field_stale(
+    field: FieldValue,
+    now: datetime,
+    staleness_threshold_seconds: float,
+) -> bool:
+    """Whether a field's `created` is older than the staleness threshold."""
+    age_seconds = (now - field.created).total_seconds()
+    return age_seconds > staleness_threshold_seconds
+
+
 def _get_name_cell_markup(
     entry: AgentBoardEntry, mark_key: str | None = None
 ) -> str | tuple[Hashable, str] | list[str | tuple[Hashable, str]]:
@@ -1316,8 +1349,17 @@ def _build_agent_row(
     widths: dict[str, int],
     column_defs: list[_ColumnDef],
     mark: str | None = None,
+    *,
+    now: datetime,
+    staleness_threshold_seconds: float,
 ) -> _SelectableRow:
-    """Build a columnar urwid widget for a single agent row."""
+    """Build a columnar urwid widget for a single agent row.
+
+    Per-cell staleness flatten: when the field backing a column has a
+    `created` older than `staleness_threshold_seconds`, that cell renders
+    as ('stale', text). Whole-row muted flatten still wins over per-cell
+    stale flatten -- a muted row stays uniformly grey regardless.
+    """
     raw_markup: dict[str, str | tuple[Hashable, str] | list[str | tuple[Hashable, str]]] = {
         defn.name: defn.markup_fn(entry) for defn in column_defs
     }
@@ -1329,7 +1371,14 @@ def _build_agent_row(
             k: _flatten_markup_to_muted(v) for k, v in raw_markup.items()
         }
     else:
-        cell_markup = raw_markup
+        # Per-cell stale flatten for non-muted rows
+        cell_markup = {}
+        for k, v in raw_markup.items():
+            field = entry.fields.get(k)
+            if field is not None and _is_field_stale(field, now, staleness_threshold_seconds):
+                cell_markup[k] = _flatten_markup_to_stale(v)
+            else:
+                cell_markup[k] = v
 
     cols: list[tuple[int, Text] | Text] = []
     for defn in column_defs:
@@ -1366,8 +1415,15 @@ def _build_board_widgets(
     mark_attr_names: tuple[str, ...] = (),
     col_attr_names: tuple[str, ...] = (),
     section_order: tuple[BoardSection, ...] = BOARD_SECTION_ORDER,
+    staleness_threshold_seconds: float = DEFAULT_STALENESS_THRESHOLD_SECONDS,
+    now: datetime | None = None,
 ) -> tuple[SimpleFocusListWalker[AttrMap | Text | Divider | Columns], dict[int, AgentBoardEntry]]:
-    """Build the urwid widget list from a BoardSnapshot, grouped by section."""
+    """Build the urwid widget list from a BoardSnapshot, grouped by section.
+
+    `now` defaults to the current UTC time when None; pass an explicit value
+    in tests for determinism.
+    """
+    effective_now = now if now is not None else datetime.now(tz=timezone.utc)
     index_to_entry: dict[int, AgentBoardEntry] = {}
     walker: SimpleFocusListWalker[AttrMap | Text | Divider | Columns] = SimpleFocusListWalker([])
 
@@ -1402,7 +1458,14 @@ def _build_board_widgets(
 
         for entry in entries:
             mark = marks.get(entry.name) if marks else None
-            item = _build_agent_row(entry, col_widths, column_defs, mark)
+            item = _build_agent_row(
+                entry,
+                col_widths,
+                column_defs,
+                mark,
+                now=effective_now,
+                staleness_threshold_seconds=staleness_threshold_seconds,
+            )
             idx = len(walker)
             focus_map: dict[str | None, str] = {None: "reversed"}
             for attr in _AGENT_LINE_ATTRS + mark_attr_names + col_attr_names:
@@ -1443,6 +1506,7 @@ def _refresh_display(state: _KanpanState) -> None:
         state.mark_attr_names,
         state.col_attr_names,
         state.section_order,
+        staleness_threshold_seconds=state.staleness_threshold_seconds,
     )
     state.list_walker = walker
     state.frame.body = ListBox(walker)
@@ -1573,6 +1637,7 @@ def run_kanpan(
         commands=commands,
         refresh_interval_seconds=plugin_config.refresh_interval_seconds,
         retry_cooldown_seconds=plugin_config.retry_cooldown_seconds,
+        staleness_threshold_seconds=plugin_config.staleness_threshold_seconds,
         mark_attr_names=mark_attr_names,
         column_defs=column_defs,
         data_sources=data_sources,

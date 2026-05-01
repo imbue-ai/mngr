@@ -1,3 +1,6 @@
+from datetime import datetime
+from datetime import timezone
+
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import StringField
@@ -11,6 +14,8 @@ from imbue.mngr_kanpan.data_sources.shell import ShellCommandDataSource
 from imbue.mngr_kanpan.data_sources.shell import _build_shell_env
 from imbue.mngr_kanpan.testing import make_agent_details
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_cg
+
+_NOW = datetime(2026, 4, 30, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_build_shell_env_basic() -> None:
@@ -33,6 +38,7 @@ def test_build_shell_env_with_pr_field() -> None:
         title="Test",
         state=PrState.OPEN,
         head_branch="b",
+        created=_NOW,
     )
     cached: dict[str, FieldValue] = {"pr": pr}
     env = _build_shell_env(agent, cached)
@@ -43,7 +49,7 @@ def test_build_shell_env_with_pr_field() -> None:
 
 def test_build_shell_env_with_ci_field() -> None:
     agent = make_agent_details(name="agent-1")
-    ci = CiField(status=CiStatus.FAILING)
+    ci = CiField(status=CiStatus.FAILING, created=_NOW)
     cached: dict[str, FieldValue] = {"ci": ci}
     env = _build_shell_env(agent, cached)
     assert env["MNGR_FIELD_CI_STATUS"] == "FAILING"
@@ -51,7 +57,7 @@ def test_build_shell_env_with_ci_field() -> None:
 
 def test_build_shell_env_with_string_field() -> None:
     agent = make_agent_details(name="agent-1")
-    cached: dict[str, FieldValue] = {"custom_val": StringField(value="hello")}
+    cached: dict[str, FieldValue] = {"custom_val": StringField(value="hello", created=_NOW)}
     env = _build_shell_env(agent, cached)
     assert env["MNGR_FIELD_CUSTOM_VAL"] == "hello"
 
@@ -65,7 +71,7 @@ def test_build_shell_env_no_branch() -> None:
 def test_build_shell_env_with_other_field() -> None:
     """Non-PrField, non-CiField, non-StringField falls back to display().text."""
     agent = make_agent_details(name="agent-1")
-    field = CommitsAheadField(count=3, has_work_dir=True)
+    field = CommitsAheadField(count=3, has_work_dir=True, created=_NOW)
     env = _build_shell_env(agent, {"commits_ahead": field})
     assert env["MNGR_FIELD_COMMITS_AHEAD"] == "[3 unpushed]"
 

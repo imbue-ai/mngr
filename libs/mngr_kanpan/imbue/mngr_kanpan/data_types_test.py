@@ -1,3 +1,6 @@
+from datetime import datetime
+from datetime import timezone
+
 import pytest
 from pydantic import ValidationError
 
@@ -12,6 +15,8 @@ from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
+
+_NOW = datetime(2026, 4, 30, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_ci_status_color() -> None:
@@ -29,6 +34,7 @@ def test_pr_field_display() -> None:
         url="https://github.com/org/repo/pull/42",
         head_branch="mngr/my-agent",
         is_draft=False,
+        created=_NOW,
     )
     cell = pr.display()
     assert cell.text == "#42"
@@ -36,14 +42,14 @@ def test_pr_field_display() -> None:
 
 
 def test_ci_field_display() -> None:
-    ci = CiField(status=CiStatus.FAILING)
+    ci = CiField(status=CiStatus.FAILING, created=_NOW)
     cell = ci.display()
     assert cell.text == "failing"
     assert cell.color == "light red"
 
 
 def test_ci_field_display_unknown() -> None:
-    ci = CiField(status=CiStatus.UNKNOWN)
+    ci = CiField(status=CiStatus.UNKNOWN, created=_NOW)
     cell = ci.display()
     assert cell.text == ""
 
@@ -56,6 +62,7 @@ def test_pr_field_is_frozen() -> None:
         url="https://github.com/org/repo/pull/42",
         head_branch="mngr/my-agent",
         is_draft=False,
+        created=_NOW,
     )
     with pytest.raises(ValidationError):
         pr.number = 99
@@ -83,6 +90,7 @@ def test_agent_board_entry_with_fields() -> None:
         url="https://github.com/org/repo/pull/10",
         head_branch="mngr/my-agent",
         is_draft=False,
+        created=_NOW,
     )
     entry = AgentBoardEntry(
         name=AgentName("my-agent"),
@@ -175,3 +183,15 @@ def test_kanpan_config_merge_with_shell_commands() -> None:
     merged = base.merge_with(override)
     assert "slack" in merged.shell_commands
     assert "jira" in merged.shell_commands
+
+
+def test_kanpan_plugin_config_staleness_threshold_default() -> None:
+    config = KanpanPluginConfig()
+    assert config.staleness_threshold_seconds == 1800.0
+
+
+def test_kanpan_plugin_config_merge_with_staleness_threshold() -> None:
+    base = KanpanPluginConfig(staleness_threshold_seconds=600.0)
+    override = KanpanPluginConfig(staleness_threshold_seconds=120.0)
+    merged = base.merge_with(override)
+    assert merged.staleness_threshold_seconds == 120.0

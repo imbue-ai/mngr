@@ -4,6 +4,9 @@ import subprocess
 import threading
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -55,6 +58,7 @@ from imbue.mngr_kanpan.tui import _KanpanInputHandler
 from imbue.mngr_kanpan.tui import _KanpanState
 from imbue.mngr_kanpan.tui import _assemble_column_defs
 from imbue.mngr_kanpan.tui import _batch_item_label
+from imbue.mngr_kanpan.tui import _build_agent_row
 from imbue.mngr_kanpan.tui import _build_board_widgets
 from imbue.mngr_kanpan.tui import _build_command_map
 from imbue.mngr_kanpan.tui import _build_data_source_column_defs
@@ -70,10 +74,12 @@ from imbue.mngr_kanpan.tui import _field_cell_markup
 from imbue.mngr_kanpan.tui import _field_cell_text
 from imbue.mngr_kanpan.tui import _finish_batch_execution
 from imbue.mngr_kanpan.tui import _flatten_markup_to_muted
+from imbue.mngr_kanpan.tui import _flatten_markup_to_stale
 from imbue.mngr_kanpan.tui import _format_section_heading
 from imbue.mngr_kanpan.tui import _get_focused_entry
 from imbue.mngr_kanpan.tui import _get_name_cell_markup
 from imbue.mngr_kanpan.tui import _get_state_attr
+from imbue.mngr_kanpan.tui import _is_field_stale
 from imbue.mngr_kanpan.tui import _is_focus_on_first_selectable
 from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
@@ -90,6 +96,8 @@ from imbue.mngr_kanpan.tui import _unmark_focused
 from imbue.mngr_kanpan.tui import _update_mark_count_footer
 from imbue.mngr_kanpan.tui import _update_row_mark
 from imbue.mngr_kanpan.tui import _update_snapshot_mute
+
+_NOW = datetime(2026, 4, 30, 12, 0, 0, tzinfo=timezone.utc)
 
 # =============================================================================
 # Helpers
@@ -571,6 +579,106 @@ def test_flatten_markup_to_muted_list() -> None:
 
 
 # =============================================================================
+# Staleness flatten + freshness predicate
+# =============================================================================
+
+
+def test_flatten_markup_to_stale_string() -> None:
+    assert _flatten_markup_to_stale("hello") == ("stale", "hello")
+
+
+def test_flatten_markup_to_stale_tuple() -> None:
+    assert _flatten_markup_to_stale(("some_attr", "text")) == ("stale", "text")
+
+
+def test_flatten_markup_to_stale_list() -> None:
+    assert _flatten_markup_to_stale([("attr", "a"), "b"]) == ("stale", "ab")
+
+
+def test_is_field_stale_old_field() -> None:
+    field = CommitsAheadField(count=3, has_work_dir=True, created=_NOW - timedelta(seconds=3600))
+    assert _is_field_stale(field, _NOW, staleness_threshold_seconds=1800.0) is True
+
+
+def test_is_field_stale_fresh_field() -> None:
+    field = CommitsAheadField(count=3, has_work_dir=True, created=_NOW - timedelta(seconds=60))
+    assert _is_field_stale(field, _NOW, staleness_threshold_seconds=1800.0) is False
+
+
+def test_is_field_stale_at_threshold_boundary_is_not_stale() -> None:
+    """Exactly at the threshold is not yet stale (strict >)."""
+    field = CommitsAheadField(count=3, has_work_dir=True, created=_NOW - timedelta(seconds=1800))
+    assert _is_field_stale(field, _NOW, staleness_threshold_seconds=1800.0) is False
+
+
+# =============================================================================
+# _build_agent_row staleness rendering
+# =============================================================================
+
+
+def _make_ci_def() -> _ColumnDef:
+    """Build a column def for the CI field, mirroring runtime construction."""
+    return _ColumnDef(
+        name=FIELD_CI,
+        header="CI",
+        text_fn=_FieldCellTextFn(field_key=FIELD_CI),
+        markup_fn=_FieldCellMarkupFn(field_key=FIELD_CI),
+        flexible=False,
+    )
+
+
+def _ci_widget_attr(row: Any) -> str | None:
+    """Return the attribute name of the 'failing' CI cell in a built row, or None."""
+    for widget, _options in row.contents:
+        if not isinstance(widget, Text):
+            continue
+        text, attribs = widget.get_text()
+        if text == "failing":
+            return attribs[0][0] if attribs else None
+    return None
+
+
+def test_build_agent_row_stale_field_uses_stale_attr() -> None:
+    ci = CiField(status=CiStatus.FAILING, created=_NOW - timedelta(seconds=3600))
+    entry = _make_entry(
+        section=BoardSection.STILL_COOKING,
+        fields={FIELD_CI: ci},
+        cells={FIELD_CI: ci.display()},
+    )
+    column_defs = [*_BUILTIN_COLUMN_DEFS, _make_ci_def()]
+    widths = _compute_board_column_widths((entry,), column_defs)
+    row = _build_agent_row(entry, widths, column_defs, now=_NOW, staleness_threshold_seconds=1800.0)
+    assert _ci_widget_attr(row) == "stale"
+
+
+def test_build_agent_row_fresh_field_keeps_color_attr() -> None:
+    ci = CiField(status=CiStatus.FAILING, created=_NOW - timedelta(seconds=60))
+    entry = _make_entry(
+        section=BoardSection.STILL_COOKING,
+        fields={FIELD_CI: ci},
+        cells={FIELD_CI: ci.display()},
+    )
+    column_defs = [*_BUILTIN_COLUMN_DEFS, _make_ci_def()]
+    widths = _compute_board_column_widths((entry,), column_defs)
+    row = _build_agent_row(entry, widths, column_defs, now=_NOW, staleness_threshold_seconds=1800.0)
+    assert _ci_widget_attr(row) == "field_ci_light_red"
+
+
+def test_build_agent_row_muted_section_overrides_stale() -> None:
+    """A muted row stays uniformly muted even if its fields are stale."""
+    ci = CiField(status=CiStatus.FAILING, created=_NOW - timedelta(seconds=3600))
+    entry = _make_entry(
+        section=BoardSection.MUTED,
+        fields={FIELD_CI: ci},
+        cells={FIELD_CI: ci.display()},
+    )
+    column_defs = [*_BUILTIN_COLUMN_DEFS, _make_ci_def()]
+    widths = _compute_board_column_widths((entry,), column_defs)
+    row = _build_agent_row(entry, widths, column_defs, now=_NOW, staleness_threshold_seconds=1800.0)
+    assert _ci_widget_attr(row) == "muted"
+
+
+# =============================================================================
 # Carry forward fields
 # =============================================================================
 
@@ -578,16 +686,19 @@ def test_flatten_markup_to_muted_list() -> None:
 def test_carry_forward_fields_merges() -> None:
     old_entry = _make_entry(
         name="a",
-        fields={"pr": make_pr_field(), "commits_ahead": CommitsAheadField(count=3, has_work_dir=True)},
+        fields={
+            "pr": make_pr_field(),
+            "commits_ahead": CommitsAheadField(count=3, has_work_dir=True, created=_NOW),
+        },
         cells={
             "pr": make_pr_field().display(),
-            "commits_ahead": CommitsAheadField(count=3, has_work_dir=True).display(),
+            "commits_ahead": CommitsAheadField(count=3, has_work_dir=True, created=_NOW).display(),
         },
     )
     new_entry = _make_entry(
         name="a",
-        fields={"commits_ahead": CommitsAheadField(count=5, has_work_dir=True)},
-        cells={"commits_ahead": CommitsAheadField(count=5, has_work_dir=True).display()},
+        fields={"commits_ahead": CommitsAheadField(count=5, has_work_dir=True, created=_NOW)},
+        cells={"commits_ahead": CommitsAheadField(count=5, has_work_dir=True, created=_NOW).display()},
     )
     old_snapshot = make_board_snapshot(entries=(old_entry,))
     new_snapshot = make_board_snapshot(entries=(new_entry,))
@@ -633,7 +744,7 @@ def test_field_cell_markup_fn_call() -> None:
 
 def test_field_cell_markup_ci_failing_uses_color_attr() -> None:
     """CI FAILING cell has color='light red', so markup uses field_ci_light_red attr."""
-    ci = CiField(status=CiStatus.FAILING)
+    ci = CiField(status=CiStatus.FAILING, created=_NOW)
     cell = ci.display()
     entry = _make_entry(
         fields={FIELD_CI: ci},
@@ -647,7 +758,7 @@ def test_field_cell_markup_ci_failing_uses_color_attr() -> None:
 
 def test_field_cell_markup_ci_pending_uses_color_attr() -> None:
     """CI PENDING cell has color='yellow', so markup uses field_ci_yellow attr."""
-    ci = CiField(status=CiStatus.PENDING)
+    ci = CiField(status=CiStatus.PENDING, created=_NOW)
     cell = ci.display()
     entry = _make_entry(
         fields={FIELD_CI: ci},
@@ -661,7 +772,7 @@ def test_field_cell_markup_ci_pending_uses_color_attr() -> None:
 
 def test_field_cell_markup_ci_passing_uses_color_attr() -> None:
     """CI PASSING cell has color='light green', so markup uses field_ci_light_green attr."""
-    ci = CiField(status=CiStatus.PASSING)
+    ci = CiField(status=CiStatus.PASSING, created=_NOW)
     cell = ci.display()
     entry = _make_entry(
         fields={FIELD_CI: ci},

@@ -1,4 +1,7 @@
 import json
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from unittest.mock import MagicMock
 
 from imbue.concurrency_group.errors import ProcessError
@@ -20,7 +23,7 @@ from imbue.mngr_kanpan.data_sources.github import _build_create_pr_url
 from imbue.mngr_kanpan.data_sources.github import _build_pr_branch_index
 from imbue.mngr_kanpan.data_sources.github import _build_unresolved_query
 from imbue.mngr_kanpan.data_sources.github import _fetch_repo_prs
-from imbue.mngr_kanpan.data_sources.github import _get_cached_repo_path
+from imbue.mngr_kanpan.data_sources.github import _get_cached_repo_field
 from imbue.mngr_kanpan.data_sources.github import _lookup_pr
 from imbue.mngr_kanpan.data_sources.github import _parse_check_status
 from imbue.mngr_kanpan.data_sources.github import _parse_conflicts
@@ -34,12 +37,15 @@ from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
 from imbue.mngr_kanpan.testing import make_agent_details
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_cg
 
+_NOW = datetime(2026, 4, 30, 12, 0, 0, tzinfo=timezone.utc)
+
 
 def _make_internal_pr(
     number: int = 1,
     branch: str = "test-branch",
     state: PrState = PrState.OPEN,
     check_status: CiStatus = CiStatus.PASSING,
+    created: datetime | None = None,
 ) -> _PrFieldInternal:
     return _PrFieldInternal(
         number=number,
@@ -49,6 +55,7 @@ def _make_internal_pr(
         head_branch=branch,
         is_draft=False,
         internal_check_status=check_status,
+        created=created if created is not None else _NOW,
     )
 
 
@@ -83,22 +90,24 @@ def test_github_data_source_field_types_disabled() -> None:
 # === _get_cached_repo_path ===
 
 
-def test_get_cached_repo_path_found() -> None:
+def test_get_cached_repo_field_found() -> None:
+    repo_field = RepoPathField(path="org/repo", created=_NOW)
     cached: dict[AgentName, dict[str, FieldValue]] = {
-        AgentName("a1"): {"repo_path": RepoPathField(path="org/repo")},
+        AgentName("a1"): {"repo_path": repo_field},
     }
-    assert _get_cached_repo_path(cached, AgentName("a1")) == "org/repo"
+    result = _get_cached_repo_field(cached, AgentName("a1"))
+    assert result == repo_field
 
 
-def test_get_cached_repo_path_not_found() -> None:
-    assert _get_cached_repo_path({}, AgentName("a1")) is None
+def test_get_cached_repo_field_not_found() -> None:
+    assert _get_cached_repo_field({}, AgentName("a1")) is None
 
 
-def test_get_cached_repo_path_wrong_type() -> None:
+def test_get_cached_repo_field_wrong_type() -> None:
     cached: dict[AgentName, dict[str, FieldValue]] = {
         AgentName("a1"): {"repo_path": _make_internal_pr()},
     }
-    assert _get_cached_repo_path(cached, AgentName("a1")) is None
+    assert _get_cached_repo_field(cached, AgentName("a1")) is None
 
 
 # === _pr_priority ===
@@ -330,12 +339,13 @@ def _make_open_pr_json(number: int = 1, branch: str = "test-branch") -> str:
 
 def test_fetch_repo_prs_success() -> None:
     cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
-    repo_path, result = _fetch_repo_prs(cg, "org/repo")
+    repo_path, result = _fetch_repo_prs(cg, "org/repo", _NOW)
     assert repo_path == "org/repo"
     assert result.error is None
     assert len(result.prs) == 1
     assert result.prs[0].number == 1
     assert result.prs[0].head_branch == "branch-1"
+    assert result.prs[0].created == _NOW
 
 
 def test_fetch_repo_prs_error() -> None:
@@ -345,7 +355,7 @@ def test_fetch_repo_prs_error() -> None:
     proc_fail.read_stderr.return_value = "some error"
     proc_fail.returncode = 1
     cg.run_process_in_background.side_effect = [proc_fail, proc_fail]
-    repo_path, result = _fetch_repo_prs(cg, "org/repo")
+    repo_path, result = _fetch_repo_prs(cg, "org/repo", _NOW)
     assert repo_path == "org/repo"
     assert result.error is not None
 
@@ -460,6 +470,36 @@ def test_compute_with_conflicts_and_unresolved() -> None:
     assert FIELD_UNRESOLVED in fields[agent.name]
     assert isinstance(fields[agent.name][FIELD_CONFLICTS], ConflictsField)
     assert isinstance(fields[agent.name][FIELD_UNRESOLVED], UnresolvedField)
+
+
+def test_compute_propagates_created_from_cached_repo_path() -> None:
+    """A cached repo_path's `created` taints the `created` of derived PR/CI fields."""
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
+    ctx = make_mngr_ctx_with_cg(cg)
+    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={})
+    cached_created = _NOW - timedelta(hours=2)
+    cached_fields: dict[AgentName, dict[str, FieldValue]] = {
+        AgentName("a1"): {"repo_path": RepoPathField(path="org/repo", created=cached_created)},
+    }
+    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached_fields, mngr_ctx=ctx)
+    pr = fields[AgentName("a1")][FIELD_PR]
+    ci = fields[AgentName("a1")][FIELD_CI]
+    assert pr.created == cached_created
+    assert ci.created == cached_created
+
+
+def test_compute_uses_now_when_no_cached_repo_path() -> None:
+    """When falling back to labels, derived field `created` should be ~now."""
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
+    ctx = make_mngr_ctx_with_cg(cg)
+    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
+    fields, _errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    pr = fields[AgentName("a1")][FIELD_PR]
+    # We only assert that the timestamp is recent (within the last minute).
+    delta = datetime.now(timezone.utc) - pr.created
+    assert delta.total_seconds() < 60
 
 
 def test_compute_disabled_pr_and_ci() -> None:

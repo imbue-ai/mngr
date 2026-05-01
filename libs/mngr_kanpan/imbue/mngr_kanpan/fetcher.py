@@ -9,6 +9,7 @@ from typing import Any
 
 from loguru import logger
 from pydantic import Field
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
@@ -27,6 +28,7 @@ from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_source import KanpanFieldTypeError
+from imbue.mngr_kanpan.data_source import now_utc
 from imbue.mngr_kanpan.data_sources.github import CiField
 from imbue.mngr_kanpan.data_sources.github import CiStatus
 from imbue.mngr_kanpan.data_sources.github import CreatePrUrlField
@@ -90,12 +92,14 @@ def fetch_board_snapshot(
                 all_fields[agent_name] = {}
             all_fields[agent_name].update(agent_fields)
 
-    # Build board entries
+    # Build board entries. The muted bit is sourced from local certified data
+    # (always live), so its `created` is now.
+    now = now_utc()
     entries: list[AgentBoardEntry] = []
     for agent in agents:
         agent_fields = dict(all_fields.get(agent.name, {}))
         is_muted = agent.name in muted_agents
-        agent_fields[FIELD_MUTED] = BoolField(value=is_muted)
+        agent_fields[FIELD_MUTED] = BoolField(value=is_muted, created=now)
 
         cells = {key: field.display() for key, field in agent_fields.items()}
         section = compute_section(agent_fields)
@@ -295,9 +299,10 @@ def save_field_cache(
         for agent_name, agent_fields in cached_fields.items():
             agent_data: dict[str, Any] = {}
             for key, field in agent_fields.items():
+                # mode='json' emits JSON-native primitives (datetime -> ISO string).
                 agent_data[key] = {
                     "type": type(field).__name__,
-                    "data": field.model_dump(),
+                    "data": field.model_dump(mode="json"),
                 }
             serialized[str(agent_name)] = agent_data
 
@@ -335,21 +340,34 @@ def load_field_cache(
 
     try:
         raw = json.loads(cache_path.read_text())
-        result: dict[AgentName, dict[str, FieldValue]] = {}
-        for agent_name_str, agent_data in raw.items():
-            agent_fields: dict[str, FieldValue] = {}
-            for key, field_info in agent_data.items():
-                type_name = field_info.get("type")
-                data = field_info.get("data")
-                field_type = type_registry.get(type_name or "")
-                if field_type is not None and data is not None:
-                    agent_fields[key] = field_type.model_validate(data)
-            if agent_fields:
-                result[AgentName(agent_name_str)] = agent_fields
-        return result
-    except Exception as e:
+    except (OSError, json.JSONDecodeError) as e:
         logger.debug("Failed to load field cache: {}", e)
         return {}
+
+    # Per-field validation failures (e.g. legacy entries missing `created` after
+    # the staleness migration) are tolerated: drop the bad entry and keep the
+    # rest. The cache is best-effort and will be rebuilt on the next refresh.
+    result: dict[AgentName, dict[str, FieldValue]] = {}
+    for agent_name_str, agent_data in raw.items():
+        agent_fields: dict[str, FieldValue] = {}
+        for key, field_info in agent_data.items():
+            type_name = field_info.get("type")
+            data = field_info.get("data")
+            field_type = type_registry.get(type_name or "")
+            if field_type is None or data is None:
+                continue
+            try:
+                agent_fields[key] = field_type.model_validate(data)
+            except ValidationError as e:
+                logger.debug(
+                    "Skipping invalid cached field '{}' for agent '{}': {}",
+                    key,
+                    agent_name_str,
+                    e,
+                )
+        if agent_fields:
+            result[AgentName(agent_name_str)] = agent_fields
+    return result
 
 
 def collect_data_sources(

@@ -8,6 +8,8 @@ To run these tests locally:
     just test libs/mngr_kanpan/imbue/mngr_kanpan/test_fetcher_acceptance.py
 """
 
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pytest
@@ -64,7 +66,17 @@ class _FakeRemoteDataSource:
         cached_fields: dict[AgentName, dict[str, FieldValue]],
         mngr_ctx: MngrContext,
     ) -> tuple[dict[AgentName, dict[str, FieldValue]], list[str]]:
-        return {AgentName("git-local-agent"): {FIELD_REPO_PATH: RepoPathField(path="should/not/appear")}}, []
+        return (
+            {
+                AgentName("git-local-agent"): {
+                    FIELD_REPO_PATH: RepoPathField(
+                        path="should/not/appear",
+                        created=datetime.now(tz=timezone.utc),
+                    )
+                }
+            },
+            [],
+        )
 
 
 @pytest.fixture

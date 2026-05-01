@@ -179,6 +179,11 @@ class KanpanPluginConfig(PluginConfig):
         default=60.0,
         description="Minimum seconds before retrying after a failed full refresh",
     )
+    staleness_threshold_seconds: float = Field(
+        default=1800.0,
+        description="Field values whose `created` timestamp is older than this many seconds "
+        "are rendered greyed-out to indicate they may be out of date. Default 30 minutes.",
+    )
     data_sources: dict[str, dict[str, Any]] = Field(
         default_factory=dict,
         description="Data source configurations keyed by source name (e.g. 'github', 'repo_paths'). "
@@ -222,6 +227,11 @@ class KanpanPluginConfig(PluginConfig):
             if override.retry_cooldown_seconds is not None
             else self.retry_cooldown_seconds
         )
+        merged_staleness_threshold = (
+            override.staleness_threshold_seconds
+            if override.staleness_threshold_seconds is not None
+            else self.staleness_threshold_seconds
+        )
         merged_data_sources = {**self.data_sources, **override.data_sources}
         merged_shell_commands = {**self.shell_commands, **override.shell_commands}
         merged_columns = {**self.columns, **override.columns}
@@ -234,6 +244,7 @@ class KanpanPluginConfig(PluginConfig):
             section_order=merged_section_order,
             refresh_interval_seconds=merged_refresh_interval,
             retry_cooldown_seconds=merged_auto_cooldown,
+            staleness_threshold_seconds=merged_staleness_threshold,
             data_sources=merged_data_sources,
             shell_commands=merged_shell_commands,
             columns=merged_columns,

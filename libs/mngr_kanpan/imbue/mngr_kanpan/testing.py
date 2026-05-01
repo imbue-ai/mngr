@@ -81,6 +81,7 @@ def make_pr_field(
     state: PrState = PrState.OPEN,
     is_draft: bool = False,
     head_branch: str = "test-branch",
+    created: datetime | None = None,
 ) -> PrField:
     """Create a PrField for testing."""
     return PrField(
@@ -90,6 +91,7 @@ def make_pr_field(
         url=f"https://github.com/org/repo/pull/{number}",
         head_branch=head_branch,
         is_draft=is_draft,
+        created=created if created is not None else datetime.now(tz=timezone.utc),
     )
 
 
