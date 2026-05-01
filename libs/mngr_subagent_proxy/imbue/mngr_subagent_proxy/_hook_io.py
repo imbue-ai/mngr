@@ -98,6 +98,25 @@ def emit_json_response(stdout: TextIO, response: dict[str, Any]) -> None:
     stdout.flush()
 
 
+def emit_pre_tool_deny(stdout: TextIO, reason: str) -> None:
+    """Emit a PreToolUse permission deny with the given reason.
+
+    Single source of truth for the deny-shape JSON envelope so the
+    plugin's PROXY and DENY hooks (and any other deny path) cannot
+    drift on hook-protocol framing.
+    """
+    emit_json_response(
+        stdout,
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        },
+    )
+
+
 def emit_depth_limit_deny(stdout: TextIO, depth: int, max_depth: int) -> None:
     """Emit a PreToolUse deny decision citing the subagent-depth limit.
 
@@ -109,13 +128,4 @@ def emit_depth_limit_deny(stdout: TextIO, depth: int, max_depth: int) -> None:
         f"mngr_subagent_proxy: subagent depth limit ({depth}/{max_depth}) reached. "
         "Cannot spawn nested Task tools beyond this depth."
     )
-    emit_json_response(
-        stdout,
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
-        },
-    )
+    emit_pre_tool_deny(stdout, reason)

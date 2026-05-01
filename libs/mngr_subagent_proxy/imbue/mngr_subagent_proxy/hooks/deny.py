@@ -41,7 +41,7 @@ from typing import TextIO
 from loguru import logger
 
 from imbue.mngr_subagent_proxy._hook_io import emit_depth_limit_deny
-from imbue.mngr_subagent_proxy._hook_io import emit_json_response
+from imbue.mngr_subagent_proxy._hook_io import emit_pre_tool_deny
 from imbue.mngr_subagent_proxy._hook_io import parse_int_env
 from imbue.mngr_subagent_proxy._hook_io import read_hook_stdin_json
 from imbue.mngr_subagent_proxy._hook_io import write_executable_file
@@ -55,19 +55,6 @@ _GENERIC_DENY_REASON: Final[str] = (
     "mngr_subagent_proxy is in deny mode: the Task tool is disabled for this agent. "
     "Use a mngr-managed subagent instead. See the `mngr-subagents` skill for the protocol."
 )
-
-
-def _emit_deny(stdout: TextIO, reason: str) -> None:
-    emit_json_response(
-        stdout,
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
-        },
-    )
 
 
 def build_deny_reason(wait_script: Path, run_in_background: bool) -> str:
@@ -209,7 +196,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
 
     payload = read_hook_stdin_json(stdin, "deny")
     if payload is None:
-        _emit_deny(stdout, _GENERIC_DENY_REASON)
+        emit_pre_tool_deny(stdout, _GENERIC_DENY_REASON)
         return
 
     tool_use_id = payload.get("tool_use_id")
@@ -222,14 +209,14 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
 
     if not isinstance(tool_use_id, str) or not tool_use_id or not isinstance(orig_prompt, str) or not orig_prompt:
         logger.warning("deny: missing tool_use_id or prompt in hook input; emitting generic deny")
-        _emit_deny(stdout, _GENERIC_DENY_REASON)
+        emit_pre_tool_deny(stdout, _GENERIC_DENY_REASON)
         return
 
     state_dir_env = os.environ.get("MNGR_AGENT_STATE_DIR", "")
     parent_name = os.environ.get("MNGR_AGENT_NAME", "")
     if not state_dir_env or not parent_name:
         logger.warning("deny: missing MNGR_AGENT_STATE_DIR or MNGR_AGENT_NAME; emitting generic deny")
-        _emit_deny(stdout, _GENERIC_DENY_REASON)
+        emit_pre_tool_deny(stdout, _GENERIC_DENY_REASON)
         return
 
     target_name = build_subagent_target_name(parent_name, orig_desc, tool_use_id)
@@ -242,17 +229,17 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         write_secure_file(prompt_file, orig_prompt)
     except OSError as e:
         logger.warning("deny: failed to write prompt file {}: {}", prompt_file, e)
-        _emit_deny(stdout, _GENERIC_DENY_REASON)
+        emit_pre_tool_deny(stdout, _GENERIC_DENY_REASON)
         return
 
     try:
         write_executable_file(wait_script, build_deny_wait_script(tool_use_id, target_name, parent_cwd))
     except OSError as e:
         logger.warning("deny: failed to write wait script {}: {}", wait_script, e)
-        _emit_deny(stdout, _GENERIC_DENY_REASON)
+        emit_pre_tool_deny(stdout, _GENERIC_DENY_REASON)
         return
 
-    _emit_deny(stdout, build_deny_reason(wait_script, orig_run_bg))
+    emit_pre_tool_deny(stdout, build_deny_reason(wait_script, orig_run_bg))
 
 
 def main() -> None:
