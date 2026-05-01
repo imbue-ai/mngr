@@ -2,7 +2,7 @@
 
 This module is used by the workspace server to create agent-originated events
 (sharing requests, refresh signals, etc.) that the minds desktop client picks
-up via ``mngr events --follow``.
+up via ``mngr event --follow``.
 """
 
 import json
@@ -80,7 +80,7 @@ def write_refresh_request(service_name: str) -> None:
     """Write a refresh-service event to the agent's refresh events file.
 
     Appended to ``events/refresh/events.jsonl`` (source=``refresh``). The minds
-    desktop client tails this file via ``mngr events --follow`` and turns each
+    desktop client tails this file via ``mngr event --follow`` and turns each
     line into a WebSocket broadcast that tells the workspace frontend to reload
     any open tabs whose web-service name matches ``service_name``.
     """

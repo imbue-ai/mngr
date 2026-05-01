@@ -19,6 +19,7 @@ from imbue.mngr.providers.ssh.instance import SSHProviderInstance
 def make_ssh_provider(
     temp_mngr_ctx: MngrContext,
     hosts: dict[str, SSHHostConfig] | None = None,
+    dynamic_hosts_file: Path | None = None,
 ) -> SSHProviderInstance:
     """Create an SSHProviderInstance for testing."""
     if hosts is None:
@@ -30,6 +31,7 @@ def make_ssh_provider(
         host_dir=Path("/tmp/mngr"),
         mngr_ctx=temp_mngr_ctx,
         hosts=hosts,
+        dynamic_hosts_file=dynamic_hosts_file,
     )
 
 
@@ -233,3 +235,109 @@ def test_different_host_names_have_different_ids(temp_mngr_ctx: MngrContext) -> 
     host2 = provider.get_host(HostName("host2"))
 
     assert host1.id != host2.id
+
+
+# =========================================================================
+# Dynamic hosts tests
+# =========================================================================
+
+
+def test_discover_hosts_includes_dynamic_hosts_from_file(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """Dynamic hosts from the TOML file appear in discovery results."""
+    dynamic_file = tmp_path / "dynamic_hosts.toml"
+    dynamic_file.write_text('[dynamic-host-1]\naddress = "10.0.0.1"\nport = 2222\nuser = "root"\n')
+    provider = make_ssh_provider(
+        temp_mngr_ctx,
+        hosts={"static-host": SSHHostConfig(address="localhost", port=22)},
+        dynamic_hosts_file=dynamic_file,
+    )
+
+    discovered = provider.discover_hosts(cg=provider.mngr_ctx.concurrency_group)
+    discovered_names = {str(h.host_name) for h in discovered}
+
+    assert "static-host" in discovered_names
+    assert "dynamic-host-1" in discovered_names
+    assert len(discovered) == 2
+
+
+def test_discover_hosts_static_takes_precedence_over_dynamic(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """When a name collision occurs, the static host config is used."""
+    dynamic_file = tmp_path / "dynamic_hosts.toml"
+    dynamic_file.write_text('[shared-name]\naddress = "10.0.0.99"\nport = 9999\nuser = "dynamic-user"\n')
+    static_config = SSHHostConfig(address="192.168.1.1", port=22, user="static-user")
+    provider = make_ssh_provider(
+        temp_mngr_ctx,
+        hosts={"shared-name": static_config},
+        dynamic_hosts_file=dynamic_file,
+    )
+
+    host = provider.get_host(HostName("shared-name"))
+
+    # The host should use the static config's address, not the dynamic one
+    assert host is not None
+    # Verify the connector was created with the static config by checking the
+    # pyinfra host has the static address
+    connector = provider.get_connector(host.id)
+    assert connector.name == "192.168.1.1"
+
+
+def test_discover_hosts_ignores_missing_dynamic_file(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """No crash when the dynamic hosts file does not exist."""
+    nonexistent_file = tmp_path / "does_not_exist.toml"
+    provider = make_ssh_provider(
+        temp_mngr_ctx,
+        hosts={"static-host": SSHHostConfig(address="localhost", port=22)},
+        dynamic_hosts_file=nonexistent_file,
+    )
+
+    discovered = provider.discover_hosts(cg=provider.mngr_ctx.concurrency_group)
+
+    assert len(discovered) == 1
+    assert str(discovered[0].host_name) == "static-host"
+
+
+def test_discover_hosts_ignores_malformed_dynamic_file(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """Graceful handling of a malformed TOML file -- returns only static hosts."""
+    dynamic_file = tmp_path / "dynamic_hosts.toml"
+    dynamic_file.write_text("this is not valid toml [[[")
+    provider = make_ssh_provider(
+        temp_mngr_ctx,
+        hosts={"static-host": SSHHostConfig(address="localhost", port=22)},
+        dynamic_hosts_file=dynamic_file,
+    )
+
+    discovered = provider.discover_hosts(cg=provider.mngr_ctx.concurrency_group)
+
+    assert len(discovered) == 1
+    assert str(discovered[0].host_name) == "static-host"
+
+
+def test_get_host_finds_dynamic_host(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """get_host resolves a host defined only in the dynamic hosts file."""
+    dynamic_file = tmp_path / "dynamic_hosts.toml"
+    dynamic_file.write_text('[leased-host]\naddress = "203.0.113.10"\nport = 2222\nuser = "root"\n')
+    provider = make_ssh_provider(
+        temp_mngr_ctx,
+        hosts={},
+        dynamic_hosts_file=dynamic_file,
+    )
+
+    host = provider.get_host(HostName("leased-host"))
+
+    assert host is not None
+    assert host.id == provider._host_id_for_name("leased-host")

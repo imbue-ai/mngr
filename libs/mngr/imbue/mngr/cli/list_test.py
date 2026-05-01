@@ -33,6 +33,7 @@ from imbue.mngr.cli.list import list_command
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
@@ -185,6 +186,25 @@ def test_get_field_value_provider_name() -> None:
     agent = make_test_agent_details()
     result = _get_field_value(agent, "host.provider_name")
     assert result == "local"
+
+
+def test_get_field_value_provider_alias() -> None:
+    """host.provider should resolve via the alias to the same value as host.provider_name."""
+    agent = make_test_agent_details()
+    result = _get_field_value(agent, "host.provider")
+    assert result == "local"
+
+
+def test_get_header_label_resolves_alias() -> None:
+    """The alias host.provider should produce the same header label as host.provider_name."""
+    assert _get_header_label("host.provider") == _get_header_label("host.provider_name") == "PROVIDER"
+
+
+def test_compute_column_widths_resolves_alias_for_min_widths() -> None:
+    """Alias fields (host.provider) should pick up the same configured min width as the canonical name."""
+    aliased = _compute_column_widths(["host.provider"], 120)
+    canonical = _compute_column_widths(["host.provider_name"], 120)
+    assert aliased["host.provider"] == canonical["host.provider_name"]
 
 
 def test_get_field_value_list_index_first() -> None:
@@ -808,12 +828,12 @@ def test_streaming_renderer_tty_erases_status_on_finish() -> None:
 
 
 def test_should_use_streaming_mode_default_human() -> None:
-    """Default HUMAN format without watch/sort should use streaming mode."""
+    """Default HUMAN format without sort, with CONTINUE, should use streaming mode."""
     assert (
         _should_use_streaming_mode(
             output_format=OutputFormat.HUMAN,
-            is_watch=False,
             is_sort_explicit=False,
+            error_behavior=ErrorBehavior.CONTINUE,
         )
         is True
     )
@@ -824,8 +844,8 @@ def test_should_use_streaming_mode_json_with_explicit_sort_uses_batch() -> None:
     assert (
         _should_use_streaming_mode(
             output_format=OutputFormat.JSON,
-            is_watch=False,
             is_sort_explicit=True,
+            error_behavior=ErrorBehavior.CONTINUE,
         )
         is False
     )
@@ -836,20 +856,8 @@ def test_should_use_streaming_mode_with_explicit_sort_uses_batch() -> None:
     assert (
         _should_use_streaming_mode(
             output_format=OutputFormat.HUMAN,
-            is_watch=False,
             is_sort_explicit=True,
-        )
-        is False
-    )
-
-
-def test_should_use_streaming_mode_with_watch_uses_batch() -> None:
-    """--watch should force batch mode."""
-    assert (
-        _should_use_streaming_mode(
-            output_format=OutputFormat.HUMAN,
-            is_watch=True,
-            is_sort_explicit=False,
+            error_behavior=ErrorBehavior.CONTINUE,
         )
         is False
     )
@@ -860,8 +868,24 @@ def test_should_use_streaming_mode_json_format_uses_batch() -> None:
     assert (
         _should_use_streaming_mode(
             output_format=OutputFormat.JSON,
-            is_watch=False,
             is_sort_explicit=False,
+            error_behavior=ErrorBehavior.CONTINUE,
+        )
+        is False
+    )
+
+
+def test_should_use_streaming_mode_abort_forces_batch() -> None:
+    """ABORT mode forces batch even when other streaming conditions are met.
+
+    Streaming may flush per-provider rows to stdout before a later provider's failure
+    aborts the listing, which contradicts ABORT's all-or-nothing contract.
+    """
+    assert (
+        _should_use_streaming_mode(
+            output_format=OutputFormat.HUMAN,
+            is_sort_explicit=False,
+            error_behavior=ErrorBehavior.ABORT,
         )
         is False
     )
@@ -873,18 +897,18 @@ def test_should_use_streaming_mode_json_format_uses_batch() -> None:
 
 
 def test_is_streaming_eligible_all_conditions_met() -> None:
-    """_is_streaming_eligible should return True when no watch, no sort."""
-    assert _is_streaming_eligible(is_watch=False, is_sort_explicit=False) is True
-
-
-def test_is_streaming_eligible_watch_disables() -> None:
-    """_is_streaming_eligible should return False when watch is active."""
-    assert _is_streaming_eligible(is_watch=True, is_sort_explicit=False) is False
+    """_is_streaming_eligible should return True with no sort and CONTINUE."""
+    assert _is_streaming_eligible(is_sort_explicit=False, error_behavior=ErrorBehavior.CONTINUE) is True
 
 
 def test_is_streaming_eligible_explicit_sort_disables() -> None:
     """_is_streaming_eligible should return False when sort is explicit."""
-    assert _is_streaming_eligible(is_watch=False, is_sort_explicit=True) is False
+    assert _is_streaming_eligible(is_sort_explicit=True, error_behavior=ErrorBehavior.CONTINUE) is False
+
+
+def test_is_streaming_eligible_abort_disables() -> None:
+    """_is_streaming_eligible should return False when ABORT, even without an explicit sort."""
+    assert _is_streaming_eligible(is_sort_explicit=False, error_behavior=ErrorBehavior.ABORT) is False
 
 
 # =============================================================================

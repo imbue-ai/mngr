@@ -31,6 +31,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_INIT_IN_N
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_INLINE_FUNCTIONS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_INLINE_IMPORTS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_LITERAL_MULTIPLE_OPTIONS
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_LOGGER_EXCEPTION
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_MODEL_COPY
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_MONKEYPATCH_SETATTR
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_NAMEDTUPLE
@@ -267,6 +268,12 @@ def check_model_copy(source_dir: Path, max_count: int) -> None:
 
 def check_fstring_logging(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_FSTRING_LOGGING, source_dir, max_count)
+
+
+def check_logger_exception(source_dir: Path, max_count: int) -> None:
+    excluded = _SELF_EXCLUSION + ("common_ratchets.py",)
+    chunks = check_ratchet_rule(PREVENT_LOGGER_EXCEPTION, source_dir, excluded)
+    assert len(chunks) <= max_count, PREVENT_LOGGER_EXCEPTION.format_failure(chunks)
 
 
 def check_click_echo(source_dir: Path, max_count: int) -> None:

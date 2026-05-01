@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--user <USER>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>]
+mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>]
 ```
 
 Execute a shell command on one or more agents' hosts.
@@ -45,7 +45,6 @@ mngr exec [OPTIONS] [AGENTS]... COMMAND
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--user` | text | User to run the command as | None |
 | `--cwd` | text | Working directory for the command (default: agent's work_dir) | None |
 | `--timeout` | float | Timeout in seconds for the command | None |
 
@@ -108,12 +107,6 @@ $ mngr list --ids | mngr exec - "echo hello"
 
 ```bash
 $ mngr exec my-agent "ls -la" --cwd /tmp
-```
-
-**Run as a different user**
-
-```bash
-$ mngr exec my-agent "whoami" --user root
 ```
 
 **Run with a timeout**

@@ -501,7 +501,7 @@ class AgentManager:
                     error = f"mngr create exited with code {result.returncode}"
             except (OSError, ConcurrencyGroupError) as e:
                 error = str(e)
-                _loguru_logger.exception("Error creating agent {}", agent_id)
+                _loguru_logger.opt(exception=e).error("Error creating agent {}", agent_id)
 
             with self._lock:
                 self._proto_agents.pop(agent_id, None)
@@ -525,7 +525,7 @@ class AgentManager:
             # failure", so force success=False regardless of prior state.
             success = False
             error = f"Unexpected {type(e).__name__}: {e}"
-            _loguru_logger.exception("Unexpected error creating agent {}", agent_id)
+            _loguru_logger.opt(exception=e).error("Unexpected error creating agent {}", agent_id)
             # The proto-agent entry may still be sitting in _proto_agents if
             # the exception fired before the cleanup block. Try once more,
             # safely, before we broadcast completion.
@@ -533,8 +533,8 @@ class AgentManager:
                 with self._lock:
                     self._proto_agents.pop(agent_id, None)
                     self._log_queues.pop(agent_id, None)
-            except (OSError, RuntimeError):
-                _loguru_logger.exception("Failed to clean proto-agent entry for {}", agent_id)
+            except (OSError, RuntimeError) as cleanup_exc:
+                _loguru_logger.opt(exception=cleanup_exc).error("Failed to clean proto-agent entry for {}", agent_id)
 
         _completion_signal_put(log_queue, json.dumps({"done": True, "success": success, "error": error}))
         _completion_signal_put(log_queue, None)
@@ -561,8 +561,8 @@ class AgentManager:
             for agent_info in agents:
                 if agent_info.id == self._own_agent_id and agent_info.work_dir:
                     self._start_app_watcher(agent_info.id, Path(agent_info.work_dir))
-        except (OSError, ValueError, RuntimeError, BaseMngrError):
-            _loguru_logger.exception("Initial agent discovery failed")
+        except (OSError, ValueError, RuntimeError, BaseMngrError) as e:
+            _loguru_logger.opt(exception=e).error("Initial agent discovery failed")
 
     def _refresh_agents(self) -> None:
         """Re-discover all agents and broadcast updates."""
@@ -589,8 +589,8 @@ class AgentManager:
             for agent_id in removed:
                 self._stop_app_watcher(agent_id)
 
-        except (OSError, ValueError, RuntimeError, BaseMngrError):
-            _loguru_logger.exception("Agent refresh failed")
+        except (OSError, ValueError, RuntimeError, BaseMngrError) as e:
+            _loguru_logger.opt(exception=e).error("Agent refresh failed")
 
     def _resolve_observe_events_dir(self) -> Path:
         """Return the path to the mngr observe events directory.
@@ -688,7 +688,7 @@ class AgentManager:
         except (ProcessError, EnvironmentStoppedError) as e:
             if self._shutdown_event.is_set():
                 return
-            _loguru_logger.error("mngr observe subprocess failed: {}", e)
+            _loguru_logger.opt(exception=e).error("mngr observe subprocess failed")
             return
 
         if self._shutdown_event.is_set():
@@ -718,8 +718,8 @@ class AgentManager:
             event = parse_discovery_event_line(stripped)
             if event is not None:
                 self._handle_discovery_event(event)
-        except (json.JSONDecodeError, ValueError, KeyError):
-            _loguru_logger.exception("Error parsing observe line: {}", stripped[:200])
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            _loguru_logger.opt(exception=e).error("Error parsing observe line: {}", stripped[:200])
 
     def _handle_discovery_event(self, event: object) -> None:
         """Handle a discovery event from mngr observe."""
@@ -826,8 +826,8 @@ class AgentManager:
                     observer.stop()
                     return
                 self._app_observers[agent_id] = observer
-        except OSError:
-            _loguru_logger.exception("Failed to start application watcher for agent {}", agent_id)
+        except OSError as e:
+            _loguru_logger.opt(exception=e).error("Failed to start application watcher for agent {}", agent_id)
 
     def _stop_app_watcher(self, agent_id: str) -> None:
         """Stop watching applications.toml for an agent."""
@@ -860,8 +860,8 @@ class AgentManager:
                     url = entry.get("url", "")
                     if name and url:
                         apps.append(ApplicationEntry(name=name, url=url))
-            except (OSError, tomllib.TOMLDecodeError, KeyError, ValueError):
-                _loguru_logger.exception("Failed to parse {}", toml_path)
+            except (OSError, tomllib.TOMLDecodeError, KeyError, ValueError) as e:
+                _loguru_logger.opt(exception=e).error("Failed to parse {}", toml_path)
 
         with self._lock:
             self._applications = apps

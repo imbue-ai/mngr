@@ -9,13 +9,20 @@ import json
 import os
 import re
 import subprocess
+import tomllib
 from pathlib import Path
 
 from loguru import logger
 
+from imbue.mngr.utils.testing import generate_test_environment_name
+
 # Read the real home directory at import time, BEFORE any autouse fixture
-# overrides HOME. Subprocesses need the real HOME to find ~/.modal.toml,
-# git config, mngr profiles, etc.
+# overrides HOME. We do NOT pass real HOME to subprocesses: doing so leaves
+# them in a split-brain state where HOME points at the developer's real home
+# but MNGR_HOST_DIR / MNGR_ROOT_NAME still point at the test tmp dir, which
+# trips plugin code that assumes the host dir lives under $HOME (e.g.
+# get_files_for_deploy's relative_to(user_home) call). We only use the real
+# home to read ~/.modal.toml below and pass the tokens in as env vars.
 REAL_HOME: Path = Path.home()
 
 # Capture the repo root at import time, BEFORE the autouse fixture chdir's
@@ -46,26 +53,59 @@ def build_disable_plugin_args(enabled_plugins: frozenset[str]) -> list[str]:
     return args
 
 
-def build_subprocess_env() -> dict[str, str]:
-    """Build environment for subprocess calls that need real Modal credentials.
+def load_modal_creds_from_home() -> dict[str, str]:
+    """Return MODAL_TOKEN_{ID,SECRET} loaded from the developer's active
+    ~/.modal.toml profile, or an empty dict if the file is missing or
+    doesn't define an active profile with both tokens.
 
-    Restores the real HOME so subprocesses can find ~/.modal.toml for Modal
-    authentication. Sets MNGR_ROOT_NAME to an isolated value so mngr does
-    NOT load the user's personal profile (which may contain plugin config
-    fields incompatible with the deployed mngr version). The modal backend
-    is still discoverable without user config via default backend resolution.
+    ~/.modal.toml is TOML with one section per profile; the active one
+    has `active = true`. Modal's SDK reads this file normally, but tests
+    run subprocesses under an isolated HOME (see the REAL_HOME comment),
+    so the file becomes invisible -- we pull the tokens out here and
+    pass them through as env vars instead.
+    """
+    modal_toml = REAL_HOME / ".modal.toml"
+    if not modal_toml.is_file():
+        return {}
+    data = tomllib.loads(modal_toml.read_text())
+    for profile in data.values():
+        if not isinstance(profile, dict) or not profile.get("active"):
+            continue
+        token_id = profile.get("token_id")
+        token_secret = profile.get("token_secret")
+        if isinstance(token_id, str) and isinstance(token_secret, str):
+            return {"MODAL_TOKEN_ID": token_id, "MODAL_TOKEN_SECRET": token_secret}
+    return {}
+
+
+def build_subprocess_env() -> dict[str, str]:
+    """Build environment for subprocess calls that need Modal credentials.
+
+    Keeps the test-isolated HOME so subprocess plugin code that assumes the
+    mngr host_dir lives under $HOME (e.g. get_files_for_deploy's
+    relative_to(user_home)) stays consistent. Modal credentials come from
+    env vars in CI/offload; locally we fall back to reading them out of
+    the developer's ~/.modal.toml and passing them in as
+    MODAL_TOKEN_ID/MODAL_TOKEN_SECRET so HOME can remain isolated.
+
+    Keeps the autouse-set MNGR_HOST_DIR / MNGR_ROOT_NAME so the subprocess
+    mngr operates on an isolated tmp profile and does not load the repo's
+    .mngr/settings.toml (which would trip the is_allowed_in_pytest=false
+    guard). The Modal SSH key will be auto-generated on first use inside
+    the tmp profile.
+
+    Deliberately does NOT strip PYTEST_CURRENT_TEST: the Modal backend's
+    TEST_ENV_PATTERN guard and the config is_allowed_in_pytest check rely
+    on that marker, and evading them has leaked un-sweepable Modal envs
+    in the past.
     """
     env = os.environ.copy()
-    env["HOME"] = str(REAL_HOME)
-    # Use an isolated mngr config namespace so we don't load the user's
-    # personal settings (e.g. kanpan plugin config that the container
-    # mngr version may not understand).
-    env["MNGR_ROOT_NAME"] = "mngr-schedule-test"
-    # Remove other test isolation vars
-    env.pop("MNGR_HOST_DIR", None)
-    env.pop("MNGR_PREFIX", None)
-    # Remove pytest marker so mngr doesn't reject the call
-    env.pop("PYTEST_CURRENT_TEST", None)
+    has_modal_env_creds = "MODAL_TOKEN_ID" in env and "MODAL_TOKEN_SECRET" in env
+    if not has_modal_env_creds:
+        env.update(load_modal_creds_from_home())
+    # Ensure the prefix starts with mngr_test- so the Modal backend's guard
+    # accepts it and the cleanup script can identify these environments.
+    env["MNGR_PREFIX"] = f"{generate_test_environment_name()}-"
     return env
 
 

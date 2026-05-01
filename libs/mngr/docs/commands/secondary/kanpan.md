@@ -20,7 +20,10 @@ including PR number, state (open/closed/merged), and CI check status.
 The display auto-refreshes every 10 minutes. Press 'r' to refresh manually,
 or 'q' to quit.
 
-Supports CEL filtering via --include/--exclude and a --project convenience flag.
+Supports CEL filtering via --include/--exclude plus alias flags (--running,
+--stopped, --archived, --active, --local, --remote, --project, --label,
+--host-label). See `mngr list --help` for the full filter reference; the same
+flags work identically here.
 
 Requires the gh CLI to be installed and authenticated for GitHub PR information.
 
@@ -37,7 +40,15 @@ mngr kanpan [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--include` | text | Include agents matching CEL expression (repeatable) | None |
 | `--exclude` | text | Exclude agents matching CEL expression (repeatable) | None |
+| `--running` | boolean | Show only running agents (alias for --include 'state == "RUNNING"') | `False` |
+| `--stopped` | boolean | Show only stopped agents (alias for --include 'state == "STOPPED"') | `False` |
+| `--archived` | boolean | Show only archived agents (alias for --include 'has(labels.archived_at)') | `False` |
+| `--active` | boolean | Show only active agents (anything not archived/destroyed/crashed/failed) | `False` |
+| `--local` | boolean | Show only local agents (alias for --include 'host.provider == "local"') | `False` |
+| `--remote` | boolean | Show only remote agents (alias for --exclude 'host.provider == "local"') | `False` |
 | `--project` | text | Show only agents with this project label (repeatable) | None |
+| `--label` | text | Show only agents with this label (format: KEY=VALUE, repeatable) [experimental] | None |
+| `--host-label` | text | Show only agents on hosts with this host label (format: KEY=VALUE, repeatable) | None |
 
 ## Common
 
@@ -57,7 +68,7 @@ mngr kanpan [OPTIONS]
 
 ## See Also
 
-- [mngr list](../primary/list.md) - List agents
+- [mngr list](../primary/list.md#filtering) - List agents (see its Filtering section for the full flag reference)
 
 ## Examples
 
@@ -76,5 +87,11 @@ $ mngr kanpan --project mngr
 **Show only running agents**
 
 ```bash
-$ mngr kanpan --include 'state == "RUNNING"'
+$ mngr kanpan --running
+```
+
+**Show stopped agents with a specific label**
+
+```bash
+$ mngr kanpan --stopped --label env=prod
 ```

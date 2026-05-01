@@ -76,11 +76,11 @@ def resolve_project_config_dir(
 ) -> Path | None:
     """Resolve the project config directory.
 
-    If MNGR_PROJECT_DIR is set, returns that path directly.
+    If MNGR_PROJECT_CONFIG_DIR is set, returns that path directly.
     Otherwise, returns <git_root>/.<root_name>/ (the default behavior).
-    Returns None if no project root can be determined and MNGR_PROJECT_DIR is not set.
+    Returns None if no project root can be determined and MNGR_PROJECT_CONFIG_DIR is not set.
     """
-    env_project_dir = os.environ.get("MNGR_PROJECT_DIR")
+    env_project_dir = os.environ.get("MNGR_PROJECT_CONFIG_DIR")
     if env_project_dir:
         return Path(env_project_dir)
     root = context_dir or _find_project_root(cg=cg)

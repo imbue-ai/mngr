@@ -116,8 +116,8 @@ name = "connect"
 command = "mngr connect $MNGR_AGENT_NAME"
 
 [plugins.kanpan.commands.l]
-name = "events"
-command = "mngr events $MNGR_AGENT_NAME"
+name = "event"
+command = "mngr event $MNGR_AGENT_NAME"
 refresh_afterwards = true
 ```
 

@@ -9,7 +9,6 @@ from typing import Final
 from typing import assert_never
 
 from loguru import logger
-from modal.config import config as modal_config
 from pydantic import ConfigDict
 from pydantic import Field
 from tenacity import retry
@@ -23,7 +22,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ModalAuthError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -52,17 +50,6 @@ from imbue.modal_proxy.testing import TestingModalInterface
 MODAL_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("modal")
 STATE_VOLUME_SUFFIX: Final[str] = "-state"
 MODAL_NAME_MAX_LENGTH: Final[int] = 64
-
-
-def _has_modal_credentials() -> bool:
-    """Return True iff the Modal SDK would find a usable token.
-
-    Goes through modal_config so the lookup matches what Modal itself uses:
-    MODAL_TOKEN_ID/MODAL_TOKEN_SECRET env vars (highest priority), then the
-    .modal.toml file at MODAL_CONFIG_PATH (default ~/.modal.toml) under the
-    active MODAL_PROFILE. No network calls.
-    """
-    return bool(modal_config.get("token_id") and modal_config.get("token_secret"))
 
 
 def truncate_modal_name(name: str, max_length: int) -> str:
@@ -502,10 +489,6 @@ Supported build arguments for the modal provider:
         if len(app_name) > max_app_name_length:
             logger.warning("Truncating Modal app name to {} characters: {}", max_app_name_length, app_name)
         app_name = truncate_modal_name(app_name, max_length=max_app_name_length)
-
-        # Without credentials, raise early to avoid Modal SDK side effects.
-        if config.mode == ModalMode.DIRECT and not _has_modal_credentials():
-            raise ModalAuthError()
 
         # Create the ModalProviderApp that manages the Modal app and its resources
         try:

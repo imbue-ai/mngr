@@ -1,7 +1,9 @@
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
+from collections.abc import Iterator
 from concurrent.futures import Future
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -14,7 +16,6 @@ from pydantic import Field
 from pyinfra.api.host import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
@@ -48,6 +49,7 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.utils.name_generator import generate_host_name
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
 def _compute_idle_seconds(
@@ -227,6 +229,28 @@ def _build_agent_details_from_offline_ref(
         host=host_details,
         plugin={},
     )
+
+
+@contextmanager
+def connected_host(
+    provider: "ProviderInstanceInterface",
+    host_id: HostId,
+) -> Iterator[HostInterface]:
+    """Connect to a host and disconnect when done, releasing the connection."""
+    host = provider.get_host(host_id)
+    try:
+        yield host
+    finally:
+        host.disconnect()
+
+
+def _discover_agents_on_host(
+    provider: "ProviderInstanceInterface",
+    host_id: HostId,
+) -> list[DiscoveredAgent]:
+    """Discover agents on a host, disconnecting afterward."""
+    with connected_host(provider, host_id) as host:
+        return host.discover_agents()
 
 
 class ProviderInstanceInterface(MutableModel, ABC):
@@ -410,10 +434,12 @@ class ProviderInstanceInterface(MutableModel, ABC):
         logger.trace("Loaded {} host(s) from provider {}", len(host_refs), self.name)
 
         future_by_host_ref: dict[DiscoveredHost, Future[list[DiscoveredAgent]]] = {}
-        with ConcurrencyGroupExecutor(parent_cg=cg, name=f"load_agents_{self.name}", max_workers=32) as executor:
+        with mngr_executor(parent_cg=cg, name=f"load_agents_{self.name}", max_workers=32) as executor:
             for host_ref in host_refs:
                 future_by_host_ref[host_ref] = executor.submit(
-                    self.get_host(host_ref.host_id).discover_agents,
+                    _discover_agents_on_host,
+                    self,
+                    host_ref.host_id,
                 )
 
         return {host_ref: future.result() for host_ref, future in future_by_host_ref.items()}
@@ -442,8 +468,10 @@ class ProviderInstanceInterface(MutableModel, ABC):
         operation (e.g., one SSH command) instead of making many individual calls.
         """
         is_authentication_failure = False
+        initial_host: HostInterface | None = None
         try:
             host = self.get_host(host_ref.host_id)
+            initial_host = host
             # this is inside the try block so that, if the host appears to be online but transitions to offline, we properly fall back to offline data
             host_details, ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
 
@@ -505,6 +533,10 @@ class ProviderInstanceInterface(MutableModel, ABC):
             agent_details_list = [
                 _build_agent_details_from_offline_ref(agent_ref, host_details) for agent_ref in agent_refs
             ]
+
+        finally:
+            if initial_host is not None:
+                initial_host.disconnect()
 
         return host_details, agent_details_list
 

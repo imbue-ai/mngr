@@ -70,6 +70,17 @@ class HostAuthenticationError(HostConnectionError):
     """Raised when unable to connect to a host because authentication failed."""
 
 
+class CorruptedAgentDataError(HostError):
+    """Raised when an agent's data.json is unreadable after retries.
+
+    FIXME: this should result in a new CORRUPTED agent state so the UI can
+    surface the problem instead of silently dropping the agent from listings.
+    """
+
+    def __init__(self, agent_id: object, data_path: Path, parse_error: Exception) -> None:
+        super().__init__("Agent {} has corrupted data at {}: {}".format(agent_id, data_path, parse_error))
+
+
 class HostDataSchemaError(HostError):
     """Raised when host data.json has an incompatible schema.
 

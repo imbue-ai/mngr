@@ -268,7 +268,7 @@ Use --format to control output:
         ("Output as JSON", "mngr transcript my-agent --format json"),
     ),
     see_also=(
-        ("events", "View all events from an agent or host"),
+        ("event", "View all events from an agent or host"),
         ("message", "Send a message to an agent"),
     ),
 ).register()

@@ -15,6 +15,7 @@ from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import NewHostOptions
@@ -163,9 +164,21 @@ def create(
         with log_span("Calling on_after_provisioning hooks"):
             mngr_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
 
-        # Send initial message if one is configured
+        # Deliver the initial message (if any) and start the agent.
+        #
+        # Interactive agents do the ready-signal dance and send the message
+        # via the tmux pane after the agent is up. Headless agents cannot
+        # receive messages that way: they communicate via stdout/stdin
+        # pipes, so wait_for_ready_signal / send_message both raise. For
+        # those we stage the message on disk first (the agent's command
+        # cats the file at startup) and then just start the process.
         initial_message = agent.get_initial_message()
-        if initial_message is not None:
+        if isinstance(agent, StreamingHeadlessAgentMixin):
+            if initial_message is not None:
+                agent.stage_initial_message(initial_message)
+            logger.info("Starting agent {} ...", agent.name)
+            host.start_agents([agent.id])
+        elif initial_message is not None:
             # Start agent with signal-based readiness detection
             # Raises AgentStartError if the agent doesn't signal readiness in time
             logger.info("Starting agent {} ...", agent.name)

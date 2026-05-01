@@ -1910,6 +1910,119 @@ def test_create_work_dir_copy_with_renamed_file(
 
 
 @pytest.mark.rsync
+def test_create_work_dir_worktree_with_untracked_files(
+    host_with_temp_dir: tuple[Host, Path],
+    setup_git_config: None,
+) -> None:
+    """Worktree mode copies over untracked files when is_include_unclean is True.
+
+    `git worktree add` only checks out the committed state, so unclean files
+    must be rsynced separately for --no-ensure-clean / --include-unclean to
+    actually include them.
+    """
+    host, temp_dir = host_with_temp_dir
+
+    source_path = temp_dir / "source_wt_untracked"
+    source_path.mkdir()
+    (source_path / "tracked.txt").write_text("tracked")
+    _init_git_repo(source_path)
+    (source_path / "untracked.txt").write_text("untracked")
+    (source_path / ".gitignore").write_text("ignored.txt\n")
+    (source_path / "ignored.txt").write_text("ignored")
+
+    target_path = temp_dir / "target_wt_untracked"
+
+    options = CreateAgentOptions(
+        name=AgentName("wt-untracked"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        target_path=target_path,
+        transfer_mode=TransferMode.GIT_WORKTREE,
+        git=AgentGitOptions(
+            new_branch_name="mngr/wt-untracked",
+            is_include_unclean=True,
+        ),
+    )
+
+    work_dir = host.create_agent_work_dir(host, source_path, options).path
+
+    assert work_dir == target_path
+    assert (work_dir / "tracked.txt").read_text() == "tracked"
+    assert (work_dir / "untracked.txt").read_text() == "untracked"
+    assert not (work_dir / "ignored.txt").exists()
+
+
+def test_create_work_dir_worktree_excludes_unclean_when_disabled(
+    host_with_temp_dir: tuple[Host, Path],
+    setup_git_config: None,
+) -> None:
+    """Worktree mode does not copy untracked files when is_include_unclean is False."""
+    host, temp_dir = host_with_temp_dir
+
+    source_path = temp_dir / "source_wt_clean"
+    source_path.mkdir()
+    (source_path / "tracked.txt").write_text("tracked")
+    _init_git_repo(source_path)
+    (source_path / "untracked.txt").write_text("untracked")
+
+    target_path = temp_dir / "target_wt_clean"
+
+    options = CreateAgentOptions(
+        name=AgentName("wt-clean"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        target_path=target_path,
+        transfer_mode=TransferMode.GIT_WORKTREE,
+        git=AgentGitOptions(
+            new_branch_name="mngr/wt-clean",
+            is_include_unclean=False,
+        ),
+    )
+
+    work_dir = host.create_agent_work_dir(host, source_path, options).path
+
+    assert work_dir == target_path
+    assert (work_dir / "tracked.txt").read_text() == "tracked"
+    assert not (work_dir / "untracked.txt").exists()
+
+
+@pytest.mark.rsync
+def test_create_work_dir_worktree_with_gitignored_files(
+    host_with_temp_dir: tuple[Host, Path],
+    setup_git_config: None,
+) -> None:
+    """Worktree mode copies gitignored files when is_include_gitignored is True."""
+    host, temp_dir = host_with_temp_dir
+
+    source_path = temp_dir / "source_wt_gitignored"
+    source_path.mkdir()
+    (source_path / "tracked.txt").write_text("tracked")
+    (source_path / ".gitignore").write_text("*.log\n")
+    _init_git_repo(source_path)
+    (source_path / "debug.log").write_text("log content")
+
+    target_path = temp_dir / "target_wt_gitignored"
+
+    options = CreateAgentOptions(
+        name=AgentName("wt-gitignored"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        target_path=target_path,
+        transfer_mode=TransferMode.GIT_WORKTREE,
+        git=AgentGitOptions(
+            new_branch_name="mngr/wt-gitignored",
+            is_include_gitignored=True,
+        ),
+    )
+
+    work_dir = host.create_agent_work_dir(host, source_path, options).path
+
+    assert work_dir == target_path
+    assert (work_dir / "tracked.txt").read_text() == "tracked"
+    assert (work_dir / "debug.log").read_text() == "log content"
+
+
+@pytest.mark.rsync
 def test_create_work_dir_generates_new_branch(
     host_with_temp_dir: tuple[Host, Path],
     setup_git_config: None,

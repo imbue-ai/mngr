@@ -68,7 +68,7 @@ class TmrCliOptions(CommonCliOptions):
     agent_type: str
     integrator_type: str | None
     agent_template: tuple[str, ...]
-    integrator_template: tuple[str, ...] | None
+    integrator_template: tuple[str, ...]
     provider: str
     integrator_provider: str
     env: tuple[str, ...]
@@ -271,7 +271,7 @@ def _run_reintegrate(
     run_labels["tmr_run_name"] = run_name
     label_options = AgentLabelOptions(labels=run_labels)
     integrator_agent_type = opts.integrator_type if opts.integrator_type is not None else opts.agent_type
-    integrator_templates = opts.integrator_template if opts.integrator_template is not None else opts.agent_template
+    integrator_templates = opts.integrator_template if opts.integrator_template else opts.agent_template
     integrator_config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,
@@ -683,7 +683,7 @@ def _run_tmr_pipeline(
 
     # Step 10: Build integrator config (defaults to local provider) and integrate
     integrator_agent_type = opts.integrator_type if opts.integrator_type is not None else opts.agent_type
-    integrator_templates = opts.integrator_template if opts.integrator_template is not None else opts.agent_template
+    integrator_templates = opts.integrator_template if opts.integrator_template else opts.agent_template
     integrator_config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,

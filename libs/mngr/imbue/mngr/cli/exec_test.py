@@ -26,7 +26,6 @@ def test_exec_cli_options_fields() -> None:
         agents=("my-agent",),
         agent_list=(),
         command_arg="echo hello",
-        user=None,
         cwd=None,
         timeout=None,
         start=True,
@@ -41,7 +40,6 @@ def test_exec_cli_options_fields() -> None:
     )
     assert opts.agents == ("my-agent",)
     assert opts.command_arg == "echo hello"
-    assert opts.user is None
     assert opts.cwd is None
     assert opts.timeout is None
     assert opts.start is True

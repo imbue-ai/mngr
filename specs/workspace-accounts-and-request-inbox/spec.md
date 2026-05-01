@@ -5,7 +5,7 @@
 * The minds app currently has a single global SuperTokens session (`~/.minds/supertokens/supertokens_session.json`). Sharing (Cloudflare tunnels) uses that single account. This creates two problems: (1) there is no way to associate different workspaces with different accounts, and (2) sharing/permissions logic lives inside the `minds_workspace_server` (the wrong abstraction layer).
 * This spec introduces two tightly-related changes:
   1. **Multi-account sessions with per-workspace association** -- workspaces are associated with at most one account ("private" if none). Accounts are managed from a new "Manage account(s)" page. A `sessions.json` file replaces the old single-session store.
-  2. **Request inbox** -- agents write request events (sharing, permissions) to `requests/events.jsonl`. The desktop client watches these via `mngr events --follow`, shows them in a right-side inbox panel, and handles the actual sharing/permissions UI. The workspace server's share dialog becomes read-only; edits trigger request events.
+  2. **Request inbox** -- agents write request events (sharing, permissions) to `requests/events.jsonl`. The desktop client watches these via `mngr event --follow`, shows them in a right-side inbox panel, and handles the actual sharing/permissions UI. The workspace server's share dialog becomes read-only; edits trigger request events.
 * The two pieces are done together because sharing is intimately tied to which account owns the tunnel -- the account comes from the workspace association, not a global session.
 * No backward compatibility is needed (nothing is in production yet).
 
@@ -36,7 +36,7 @@
   - Writes a request event to `$MNGR_AGENT_STATE_DIR/events/requests/events.jsonl` (including current state as structured data for pre-populating the desktop client form, and an `is_user_requested: true` flag)
   - Closes the dialog with a brief toast ("Sharing request sent")
 * The sharing proxy (`sharing_proxy.py`) retains its GET endpoint (read-only status queries still proxy to the desktop client via reverse SSH tunnel). PUT/DELETE mutation endpoints are removed and replaced with local request event writes.
-* The desktop client watches `requests/events.jsonl` for all workspace agents by adding `requests` as a second source alongside `servers` in the existing `_start_events_stream` call (`mngr events <agent-id> servers requests --follow --quiet`).
+* The desktop client watches `requests/events.jsonl` for all workspace agents by adding `requests` as a second source alongside `servers` in the existing `_start_events_stream` call (`mngr event <agent-id> servers requests --follow --quiet`).
 * `requests/events.jsonl` is pre-created (via `touch`) alongside `servers/events.jsonl` in `host.py` during agent state directory setup, in a single touch command for lower latency.
 * When a new request event arrives:
   - A desktop notification is shown. Clicking it navigates the content view to `/requests/<request_id>`.
@@ -141,7 +141,7 @@
   - SuperTokens init remains the same (OAuth callback updates `MultiAccountSessionStore`)
 
 * **`apps/minds/imbue/minds/desktop_client/backend_resolver.py`** -- Changes:
-  - `_start_events_stream()` passes both `servers` and `requests` sources: `[self.mngr_binary, "events", aid_str, SERVERS_EVENT_SOURCE_NAME, "requests", "--follow", "--quiet"]`
+  - `_start_events_stream()` passes both `servers` and `requests` sources: `[self.mngr_binary, "event", aid_str, SERVERS_EVENT_SOURCE_NAME, "requests", "--follow", "--quiet"]`
   - `_on_events_stream_output()` differentiates between server events and request events by checking the `source` field (from `EventEnvelope`)
   - New callback: `add_on_request_callback()` to notify the app when request events arrive
   - Convert `ServerLogRecord` to inherit from `EventEnvelope`

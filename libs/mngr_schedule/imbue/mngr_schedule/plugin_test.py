@@ -84,11 +84,11 @@ def test_get_files_for_deploy_includes_mngr_config(tmp_path: Path, isolated_home
     assert result[Path("~/.mngr/config.toml")] == config_file
 
 
-def test_get_files_for_deploy_reads_config_from_deployer_host_dir(tmp_path: Path) -> None:
+def test_get_files_for_deploy_reads_config_from_deployer_host_dir(tmp_path: Path, isolated_home: Path) -> None:
     """When the deployer has a non-default MNGR_ROOT_NAME (e.g. minds, mngr-changelog-schedule),
     the config.toml lives at `~/.{root_name}/config.toml`, NOT `~/.mngr/config.toml`.
     get_files_for_deploy must read from mngr_ctx.config.default_host_dir, not hardcoded `~/.mngr`."""
-    custom_host_dir = Path.home() / ".mngr-changelog-schedule"
+    custom_host_dir = isolated_home / ".mngr-changelog-schedule"
     custom_host_dir.mkdir(parents=True, exist_ok=True)
     config_file = custom_host_dir / "config.toml"
     config_file.write_text('profile = "abc123"\n')

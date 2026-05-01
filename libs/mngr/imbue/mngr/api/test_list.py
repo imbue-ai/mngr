@@ -136,7 +136,9 @@ def test_agent_details_to_cel_context_basic_fields() -> None:
     assert context["type"] == "claude"
     assert context["name"] == "test-agent"
     assert context["host"]["name"] == "test-host"
+    # Both names are exposed so CEL filters and templates can use either.
     assert context["host"]["provider"] == "local"
+    assert context["host"]["provider_name"] == "local"
     assert "age" in context
 
 
@@ -362,6 +364,36 @@ def test_apply_cel_filters_with_host_provider_filter() -> None:
 
     include_filters, exclude_filters = compile_cel_filters(
         include_filters=('host.provider == "local"',),
+        exclude_filters=(),
+    )
+
+    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
+
+    assert result is True
+
+
+def test_apply_cel_filters_accepts_host_provider_name() -> None:
+    """host.provider_name should also work in CEL filters (alongside the short host.provider)."""
+    host_details = HostDetails(
+        id=HostId.generate(),
+        name="test-host",
+        provider_name=ProviderInstanceName("local"),
+    )
+    agent_details = AgentDetails(
+        id=AgentId.generate(),
+        name=AgentName("test-agent"),
+        type="claude",
+        command=CommandString("sleep 100"),
+        work_dir=Path("/work/dir"),
+        initial_branch="mngr/test-agent",
+        create_time=datetime.now(timezone.utc),
+        start_on_boot=False,
+        state=AgentLifecycleState.RUNNING,
+        host=host_details,
+    )
+
+    include_filters, exclude_filters = compile_cel_filters(
+        include_filters=('host.provider_name == "local"',),
         exclude_filters=(),
     )
 

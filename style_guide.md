@@ -1294,7 +1294,7 @@ Always use `loguru` for logging
 
 Always use the right log level for your statement:
 
-- `logger.exception`: use this to capture all *unexpected* exceptions. After calling this, just call "raise" to continue propagating the exception (since it is unexpected)
+- `logger.opt(exception=exc).error(msg)`: use this to capture all *unexpected* exceptions (don't use `logger.exception` -- it relies on `sys.exc_info()`, which is unreliable in threaded code). After calling this, just call "raise" to continue propagating the exception (since it is unexpected)
 - `logger.error`: use this for unexpected error situations (where there is no Exception, otherwise use)
 - `logger.warning`: use this for things that seem suspicious, but not worth crashing over (or you are in a part of the code that should not crash). These should be purged aggressively if ever seen in a log
 - `logger.info`: Use this to describe _what_ the application is doing at a high level. These messages are ideally something that would make sense to a user of the program. Info logs belong in CLI/user-facing code, not in library/API code
@@ -1360,7 +1360,7 @@ def create_todo(title: str) -> TodoItem:
 
 ## Exception logging
 
-Use `logger.exception` only for unexpected exceptions.
+Use `logger.opt(exception=e).error` only for unexpected exceptions.
 
 ```python
 from loguru import logger
@@ -1379,7 +1379,7 @@ class TodoNotificationService(MutableModel):
         try:
             self._send_notification(reminder)
         except ConnectionError as e:
-            logger.exception(e, "Failed to send notification")
+            logger.opt(exception=e).error("Failed to send notification")
             raise
 ```
 

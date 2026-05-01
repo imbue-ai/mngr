@@ -59,4 +59,64 @@
 {% endblock %}
 {% block scripts %}
   <script src="/_static/workspace_settings.js" defer></script>
+  <script>
+    (function() {
+      var destroyBtn = document.getElementById('destroy-btn');
+      var destroyDialog = document.getElementById('destroy-dialog');
+      var destroyCancelBtn = document.getElementById('destroy-cancel-btn');
+      var destroyConfirmBtn = document.getElementById('destroy-confirm-btn');
+      var destroySpinner = document.getElementById('destroy-spinner');
+      var agentId = document.getElementById('workspace-settings').dataset.agentId;
+
+      destroyBtn.addEventListener('click', function() {
+        destroyDialog.classList.remove('hidden');
+      });
+      destroyCancelBtn.addEventListener('click', function() {
+        destroyDialog.classList.add('hidden');
+      });
+      destroyDialog.addEventListener('click', function(e) {
+        if (e.target === destroyDialog) destroyDialog.classList.add('hidden');
+      });
+      function pollDestroyStatus() {
+        fetch('/api/destroy-agent/' + agentId + '/status')
+          .then(function(resp) { return resp.json(); })
+          .then(function(data) {
+            if (data.status === 'done') {
+              window.location.href = '/';
+            } else if (data.status === 'failed') {
+              destroySpinner.classList.add('hidden');
+              destroyBtn.disabled = false;
+              alert('Failed to destroy: ' + (data.error || 'unknown error'));
+            } else {
+              setTimeout(pollDestroyStatus, 1000);
+            }
+          })
+          .catch(function() { setTimeout(pollDestroyStatus, 1000); });
+      }
+
+      destroyConfirmBtn.addEventListener('click', function() {
+        destroyDialog.classList.add('hidden');
+        destroyBtn.disabled = true;
+        destroySpinner.classList.remove('hidden');
+        fetch('/api/destroy-agent/' + agentId, { method: 'POST' })
+          .then(function(resp) { return resp.json(); })
+          .then(function(data) {
+            if (data.status === 'destroying') {
+              pollDestroyStatus();
+            } else if (data.status === 'done') {
+              window.location.href = '/';
+            } else {
+              destroySpinner.classList.add('hidden');
+              destroyBtn.disabled = false;
+              alert('Failed to destroy: ' + (data.error || 'unknown error'));
+            }
+          })
+          .catch(function() {
+            destroySpinner.classList.add('hidden');
+            destroyBtn.disabled = false;
+            alert('Failed to destroy project');
+          });
+      });
+    })();
+  </script>
 {% endblock %}

@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from datetime import timezone
 from typing import Any
+from typing import assert_never
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -37,11 +38,16 @@ from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
+from imbue.mngr_kanpan.data_types import ActionBuiltinCommand
+from imbue.mngr_kanpan.data_types import ActionBuiltinRole
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import CustomCommand
+from imbue.mngr_kanpan.data_types import KanpanCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
+from imbue.mngr_kanpan.data_types import MarkableBuiltinCommand
+from imbue.mngr_kanpan.data_types import MarkableBuiltinRole
 from imbue.mngr_kanpan.fetcher import FetchResult
 from imbue.mngr_kanpan.fetcher import collect_data_sources
 from imbue.mngr_kanpan.fetcher import compute_section
@@ -148,13 +154,17 @@ _BUILTIN_COMMAND_KEY_MUTE = "m"
 _BUILTIN_COMMAND_KEY_UNMARK = "u"
 _BUILTIN_COMMAND_KEY_EXECUTE = "x"
 
-_BUILTIN_COMMANDS: dict[str, CustomCommand] = {
-    _BUILTIN_COMMAND_KEY_REFRESH: CustomCommand(name="refresh"),
-    _BUILTIN_COMMAND_KEY_PUSH: CustomCommand(name="mark push", markable="yellow"),
-    _BUILTIN_COMMAND_KEY_DELETE: CustomCommand(name="mark delete", markable="light red"),
-    _BUILTIN_COMMAND_KEY_MUTE: CustomCommand(name="mute"),
-    _BUILTIN_COMMAND_KEY_UNMARK: CustomCommand(name="unmark"),
-    _BUILTIN_COMMAND_KEY_EXECUTE: CustomCommand(name="execute"),
+_BUILTIN_COMMANDS: dict[str, ActionBuiltinCommand | MarkableBuiltinCommand] = {
+    _BUILTIN_COMMAND_KEY_REFRESH: ActionBuiltinCommand(role=ActionBuiltinRole.REFRESH, name="refresh"),
+    _BUILTIN_COMMAND_KEY_PUSH: MarkableBuiltinCommand(
+        role=MarkableBuiltinRole.PUSH, name="mark push", markable="yellow"
+    ),
+    _BUILTIN_COMMAND_KEY_DELETE: MarkableBuiltinCommand(
+        role=MarkableBuiltinRole.DELETE, name="mark delete", markable="light red"
+    ),
+    _BUILTIN_COMMAND_KEY_MUTE: ActionBuiltinCommand(role=ActionBuiltinRole.MUTE, name="mute"),
+    _BUILTIN_COMMAND_KEY_UNMARK: ActionBuiltinCommand(role=ActionBuiltinRole.UNMARK, name="unmark"),
+    _BUILTIN_COMMAND_KEY_EXECUTE: ActionBuiltinCommand(role=ActionBuiltinRole.EXECUTE, name="execute"),
 }
 
 _DEFAULT_MARK_COLOR = "light cyan"
@@ -170,6 +180,27 @@ _AGENT_LINE_ATTRS = (
 
 # Column layout configuration
 _COL_DIVIDER_CHARS = 2
+
+
+def _mark_color(cmd: KanpanCommand) -> str | None:
+    """Return the mark indicator color if ``cmd`` is markable, else ``None``.
+
+    ``ActionBuiltinCommand`` is never markable. ``MarkableBuiltinCommand``
+    always carries a color string. ``CustomCommand.markable`` is
+    ``bool | str``: ``False`` means not markable, ``True`` means markable
+    with the default color, a ``str`` means that explicit color.
+    """
+    if isinstance(cmd, ActionBuiltinCommand):
+        return None
+    if isinstance(cmd, MarkableBuiltinCommand):
+        return cmd.markable
+    match cmd.markable:
+        case str() as color:
+            return color
+        case bool() as is_markable:
+            return _DEFAULT_MARK_COLOR if is_markable else None
+        case _:
+            assert_never(cmd.markable)
 
 
 def _osc8_wrap_content(inner_content: Any, osc_open: bytes, osc_close: bytes) -> Any:
@@ -305,7 +336,7 @@ class _KanpanState(MutableModel):
     # Steady-state footer left text (restored after transient messages)
     steady_footer_text: str = "  Loading..."
     # All commands (builtins merged with user config), keyed by trigger key
-    commands: dict[str, CustomCommand] = {}
+    commands: dict[str, KanpanCommand] = {}
     # Monotonic timestamp of the last completed refresh (for cooldown logic)
     last_refresh_time: float = 0.0
     # Whether the current in-flight refresh is local-only (no GitHub API)
@@ -520,7 +551,7 @@ def _execute_marks(state: _KanpanState) -> None:
 class _BatchWorkItem(FrozenModel):
     name: AgentName
     key: str
-    cmd: CustomCommand
+    cmd: KanpanCommand
     entry: AgentBoardEntry | None
     batch_names: tuple[AgentName, ...] = ()
 
@@ -564,7 +595,10 @@ def _start_batch_execution(state: _KanpanState) -> None:
         cmd = state.commands.get(mark_key)
         if cmd is None:
             continue
-        if mark_key == _BUILTIN_COMMAND_KEY_DELETE:
+        # Only the builtin delete batches all marked agents into one `mngr
+        # destroy` call. A user-defined override of "d" (or any other key)
+        # runs per-agent via the individual-work path.
+        if isinstance(cmd, MarkableBuiltinCommand) and cmd.role == MarkableBuiltinRole.DELETE:
             delete_names.append(name)
         else:
             individual_work.append(_BatchWorkItem(name=name, key=mark_key, cmd=cmd, entry=entries_by_name.get(name)))
@@ -591,13 +625,20 @@ def _submit_batch_item(
     executor: ThreadPoolExecutor, item: _BatchWorkItem
 ) -> Future[subprocess.CompletedProcess[str]] | None:
     """Submit a single batch work item to the executor."""
-    if item.key == _BUILTIN_COMMAND_KEY_DELETE:
-        names = [str(n) for n in item.batch_names] if item.batch_names else [str(item.name)]
-        return executor.submit(_run_destroy, names)
-    if item.key == _BUILTIN_COMMAND_KEY_PUSH:
-        if item.entry is None or item.entry.work_dir is None:
-            return None
-        return executor.submit(_run_git_push, str(item.entry.work_dir))
+    if isinstance(item.cmd, MarkableBuiltinCommand):
+        match item.cmd.role:
+            case MarkableBuiltinRole.DELETE:
+                names = [str(n) for n in item.batch_names] if item.batch_names else [str(item.name)]
+                return executor.submit(_run_destroy, names)
+            case MarkableBuiltinRole.PUSH:
+                if item.entry is None or item.entry.work_dir is None:
+                    return None
+                return executor.submit(_run_git_push, str(item.entry.work_dir))
+            case _:
+                assert_never(item.cmd.role)
+    if isinstance(item.cmd, ActionBuiltinCommand):
+        # Non-markable builtins never reach batch dispatch.
+        return None
     if item.cmd.command:
         return executor.submit(_run_shell_command_sync, item.cmd.command, str(item.name))
     return None
@@ -768,27 +809,31 @@ def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[bool]
         loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_mute_persist_poll, data)
 
 
-def _dispatch_command(state: _KanpanState, key: str, cmd: CustomCommand) -> None:
+def _dispatch_command(state: _KanpanState, key: str, cmd: KanpanCommand) -> None:
     """Dispatch a command by key."""
-    if key == _BUILTIN_COMMAND_KEY_REFRESH and not cmd.command:
-        if state.loop is not None and state.refresh_future is None:
-            _start_refresh(state.loop, state)
-        return
-    if key == _BUILTIN_COMMAND_KEY_MUTE and not cmd.command:
-        _mute_focused_agent(state)
-        return
-    if key == _BUILTIN_COMMAND_KEY_UNMARK and not cmd.command:
-        _unmark_focused(state)
-        return
-    if key == _BUILTIN_COMMAND_KEY_EXECUTE and not cmd.command:
-        _execute_marks(state)
-        return
-    if cmd.markable:
+    if isinstance(cmd, MarkableBuiltinCommand):
         _toggle_mark(state, key)
         return
-    # Immediate shell command
-    if cmd.command:
-        _run_shell_command(state, cmd)
+    if isinstance(cmd, CustomCommand):
+        if _mark_color(cmd) is not None:
+            _toggle_mark(state, key)
+            return
+        if cmd.command:
+            _run_shell_command(state, cmd)
+        return
+    # cmd is ActionBuiltinCommand; match on role for exhaustive dispatch.
+    match cmd.role:
+        case ActionBuiltinRole.REFRESH:
+            if state.loop is not None and state.refresh_future is None:
+                _start_refresh(state.loop, state)
+        case ActionBuiltinRole.MUTE:
+            _mute_focused_agent(state)
+        case ActionBuiltinRole.UNMARK:
+            _unmark_focused(state)
+        case ActionBuiltinRole.EXECUTE:
+            _execute_marks(state)
+        case _:
+            assert_never(cmd.role)
 
 
 def _run_shell_command(state: _KanpanState, cmd: CustomCommand) -> None:
@@ -1422,7 +1467,13 @@ def _on_auto_refresh_alarm(loop: MainLoop, state: _KanpanState) -> None:
 
 
 def _load_user_commands(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
-    """Load user-defined commands from plugin config."""
+    """Load user-defined commands from plugin config.
+
+    Values may arrive as either `CustomCommand` instances (when the caller
+    constructed the config directly) or raw dicts (when the TOML loader used
+    `model_construct`, which bypasses Pydantic's recursive validation and
+    leaves nested dict-typed fields in their raw form).
+    """
     config = mngr_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
     result: dict[str, CustomCommand] = {}
     for key, value in config.commands.items():
@@ -1433,9 +1484,9 @@ def _load_user_commands(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
     return result
 
 
-def _build_command_map(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
+def _build_command_map(mngr_ctx: MngrContext) -> dict[str, KanpanCommand]:
     """Build the unified command map: builtins merged with user config."""
-    commands = dict(_BUILTIN_COMMANDS)
+    commands: dict[str, KanpanCommand] = dict(_BUILTIN_COMMANDS)
     user_commands = _load_user_commands(mngr_ctx)
     commands.update(user_commands)
     return {key: cmd for key, cmd in commands.items() if cmd.enabled}
@@ -1443,15 +1494,15 @@ def _build_command_map(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
 
 @pure
 def _build_mark_palette(
-    commands: dict[str, CustomCommand],
+    commands: dict[str, KanpanCommand],
 ) -> tuple[list[tuple[str, str, str]], tuple[str, ...]]:
     """Build palette entries and attr names for markable commands."""
     entries: list[tuple[str, str, str]] = []
     attr_names: list[str] = []
     for key, cmd in commands.items():
-        if not cmd.markable:
+        color = _mark_color(cmd)
+        if color is None:
             continue
-        color = cmd.markable if isinstance(cmd.markable, str) else _DEFAULT_MARK_COLOR
         attr = f"mark_{key}"
         entries.append((attr, color, ""))
         entries.append((f"{attr}_focus", f"{color},standout", ""))
@@ -1474,9 +1525,13 @@ def run_kanpan(
 
     # Build footer keybindings
     mark_keys = {_BUILTIN_COMMAND_KEY_UNMARK}
-    mark_parts = [f"{key}: {cmd.name}" for key, cmd in commands.items() if cmd.markable or key in mark_keys]
+    mark_parts = [
+        f"{key}: {cmd.name}" for key, cmd in commands.items() if _mark_color(cmd) is not None or key in mark_keys
+    ]
     mark_parts.append("U: unmark all")
-    action_parts = [f"{key}: {cmd.name}" for key, cmd in commands.items() if not cmd.markable and key not in mark_keys]
+    action_parts = [
+        f"{key}: {cmd.name}" for key, cmd in commands.items() if _mark_color(cmd) is None and key not in mark_keys
+    ]
     action_parts.append("q: quit")
     keybindings = "  ".join(mark_parts + ["|"] + action_parts) + "  "
 

@@ -516,7 +516,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                         {
                             "type": "command",
                             "command": _SESSION_GUARD
-                            + 'echo "The base branch for this work is: ${GIT_BASE_BRANCH:-main}"',
+                            + 'echo "The base branch for this work is: ${MNGR_GIT_BASE_BRANCH:-main}"',
                         },
                         {
                             "type": "command",

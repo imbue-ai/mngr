@@ -1,15 +1,24 @@
 import json
 import tempfile
+import threading
 from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler
+from http.server import HTTPServer
 from pathlib import Path
+from typing import Final
 
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import ServiceLogRecord
 from imbue.minds.desktop_client.backend_resolver import parse_agents_from_json
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_records
+from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
+from imbue.minds.desktop_client.host_pool_client import HostPoolClient
+from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyClient
+from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -18,6 +27,33 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 
 DEFAULT_SERVICE_NAME: ServiceName = ServiceName("web")
+
+
+@pytest.fixture
+def root_concurrency_group() -> Iterator[ConcurrencyGroup]:
+    """Root ``ConcurrencyGroup`` for tests that construct an ``AgentCreator``.
+
+    ``AgentCreator.root_concurrency_group`` is required (in production it is
+    owned by ``start_desktop_client`` and brackets the FastAPI lifespan); this
+    fixture enters an equivalent group for the test's duration and exits it
+    cleanly afterwards so any strand tracking / shutdown semantics match.
+    """
+    cg = ConcurrencyGroup(name="test-root")
+    with cg:
+        yield cg
+
+
+@pytest.fixture
+def notification_dispatcher() -> NotificationDispatcher:
+    """``NotificationDispatcher`` wired to the tkinter channel in tests.
+
+    Tests generally do not exercise the dispatch path; this fixture just
+    satisfies the required ``AgentCreator.notification_dispatcher`` field.
+    Pass ``is_electron=False`` so no ``emit_event`` JSONL lines leak into the
+    test's stdout. ``NotificationDispatcher.create`` skips tkinter setup when
+    ``tkinter_module`` is ``None``, which is what we want for unit tests.
+    """
+    return NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False)
 
 
 @pytest.fixture
@@ -30,6 +66,128 @@ def short_tmp_path() -> Iterator[Path]:
     """
     with tempfile.TemporaryDirectory(prefix="ssh") as d:
         yield Path(d)
+
+
+_FAKE_LEASE_RESPONSE: Final[dict[str, object]] = {
+    "host_db_id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+    "vps_ip": "203.0.113.10",
+    "ssh_port": 22,
+    "ssh_user": "root",
+    "container_ssh_port": 2222,
+    "agent_id": "agent-abc12300000000000000000000000000",
+    "host_id": "host-def45600000000000000000000000000",
+    "version": "v0.1.0",
+}
+
+
+class _FakePoolHandler(BaseHTTPRequestHandler):
+    """Minimal HTTP handler that returns canned responses for pool endpoints."""
+
+    def do_POST(self) -> None:
+        if self.path == "/hosts/lease":
+            self._respond(200, _FAKE_LEASE_RESPONSE)
+        elif self.path.endswith("/release"):
+            self._respond(200, {"status": "released"})
+        else:
+            self._respond(404, {"error": "not found"})
+
+    def do_GET(self) -> None:
+        if self.path == "/hosts":
+            self._respond(200, [dict(_FAKE_LEASE_RESPONSE, leased_at="2026-01-01T00:00:00Z")])
+        else:
+            self._respond(404, {"error": "not found"})
+
+    def _respond(self, status: int, body: object) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+@pytest.fixture()
+def fake_pool_server() -> Iterator[HostPoolClient]:
+    """Start a local HTTP server and return a HostPoolClient pointing to it."""
+    server = HTTPServer(("127.0.0.1", 0), _FakePoolHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    client = HostPoolClient(
+        connector_url=RemoteServiceConnectorUrl("http://127.0.0.1:{}".format(port)),
+    )
+    yield client
+    server.shutdown()
+
+
+_FAKE_CREATE_KEY_RESPONSE: Final[dict[str, object]] = {
+    "key": "sk-litellm-test-virtual-key-0123456789abcdef",
+    "base_url": "https://litellm-proxy.modal.run/anthropic",
+}
+
+_FAKE_KEY_INFO: Final[dict[str, object]] = {
+    "token": "hashed-token-abc123",
+    "key_alias": "agent-test",
+    "key_name": None,
+    "spend": 12.50,
+    "max_budget": 100.0,
+    "budget_duration": "1d",
+    "user_id": "user-abc123",
+}
+
+
+class _FakeKeyHandler(BaseHTTPRequestHandler):
+    """Minimal HTTP handler returning canned responses for /keys/* endpoints."""
+
+    def do_POST(self) -> None:
+        if self.path == "/keys/create":
+            self._respond(200, _FAKE_CREATE_KEY_RESPONSE)
+        else:
+            self._respond(404, {"error": "not found"})
+
+    def do_GET(self) -> None:
+        if self.path == "/keys":
+            self._respond(200, [_FAKE_KEY_INFO])
+        elif self.path.startswith("/keys/"):
+            self._respond(200, _FAKE_KEY_INFO)
+        else:
+            self._respond(404, {"error": "not found"})
+
+    def do_PUT(self) -> None:
+        if "/budget" in self.path:
+            self._respond(200, {"status": "updated"})
+        else:
+            self._respond(404, {"error": "not found"})
+
+    def do_DELETE(self) -> None:
+        if self.path.startswith("/keys/"):
+            self._respond(200, {"status": "deleted"})
+        else:
+            self._respond(404, {"error": "not found"})
+
+    def _respond(self, status: int, body: object) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+@pytest.fixture()
+def fake_key_server() -> Iterator[LiteLLMKeyClient]:
+    """Start a local HTTP server and return a LiteLLMKeyClient pointing to it."""
+    server = HTTPServer(("127.0.0.1", 0), _FakeKeyHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    client = LiteLLMKeyClient(
+        connector_url=RemoteServiceConnectorUrl("http://127.0.0.1:{}".format(port)),
+    )
+    yield client
+    server.shutdown()
 
 
 def make_agents_json(*agent_ids: AgentId, labels: dict[str, str] | None = None) -> str:
