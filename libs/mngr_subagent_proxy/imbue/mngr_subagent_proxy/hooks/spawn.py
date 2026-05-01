@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -23,6 +22,11 @@ from typing import TextIO
 
 from loguru import logger
 
+from imbue.mngr_subagent_proxy._hook_io import emit_depth_limit_deny
+from imbue.mngr_subagent_proxy._hook_io import emit_json_response
+from imbue.mngr_subagent_proxy._hook_io import parse_int_env
+from imbue.mngr_subagent_proxy._hook_io import write_executable_file
+from imbue.mngr_subagent_proxy._hook_io import write_secure_file
 from imbue.mngr_subagent_proxy._target_name import build_subagent_target_name
 from imbue.mngr_subagent_proxy.mngr_binary import get_mngr_command_shell_form
 
@@ -35,32 +39,8 @@ _PASS_THROUGH_RESPONSE: Final[dict[str, Any]] = {
 }
 
 
-def _emit(stdout: TextIO, response: dict[str, Any]) -> None:
-    """Write a JSON response to stdout and flush."""
-    stdout.write(json.dumps(response) + "\n")
-    stdout.flush()
-
-
 def _emit_pass_through(stdout: TextIO) -> None:
-    _emit(stdout, _PASS_THROUGH_RESPONSE)
-
-
-def _emit_depth_limit_deny(stdout: TextIO, depth: int, max_depth: int) -> None:
-    """Emit a deny decision with an explanatory reason (depth limit reached)."""
-    reason = (
-        f"mngr_subagent_proxy: subagent depth limit ({depth}/{max_depth}) reached. "
-        "Cannot spawn nested Task tools beyond this depth."
-    )
-    _emit(
-        stdout,
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
-        },
-    )
+    emit_json_response(stdout, _PASS_THROUGH_RESPONSE)
 
 
 def _read_stdin_json(stdin: TextIO) -> dict[str, Any] | None:
@@ -82,17 +62,6 @@ def _read_stdin_json(stdin: TextIO) -> dict[str, Any] | None:
         logger.warning("spawn: stdin JSON is not an object")
         return None
     return parsed
-
-
-def _parse_int_env(name: str, default: int) -> int:
-    """Parse an int-valued env var; return default on missing/invalid."""
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
 
 
 def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> str:
@@ -216,20 +185,6 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
     )
 
 
-def _write_secure_file(path: Path, content: str) -> None:
-    """Write content to path with 0600 perms, creating parents as needed."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
-    path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-
-
-def _write_executable_file(path: Path, content: str) -> None:
-    """Write content to path with 0755 perms, creating parents as needed."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
-    path.chmod(0o755)
-
-
 def run(stdin: TextIO, stdout: TextIO) -> None:
     """PreToolUse:Agent hook core.
 
@@ -249,11 +204,11 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         _emit_pass_through(stdout)
         return
 
-    depth = _parse_int_env("MNGR_SUBAGENT_DEPTH", 0)
-    max_depth = _parse_int_env("MNGR_MAX_SUBAGENT_DEPTH", _DEFAULT_MAX_DEPTH)
+    depth = parse_int_env("MNGR_SUBAGENT_DEPTH", 0)
+    max_depth = parse_int_env("MNGR_MAX_SUBAGENT_DEPTH", _DEFAULT_MAX_DEPTH)
     if depth >= max_depth:
         logger.warning("spawn: depth {}/{} reached; denying Task", depth, max_depth)
-        _emit_depth_limit_deny(stdout, depth, max_depth)
+        emit_depth_limit_deny(stdout, depth, max_depth)
         return
 
     payload = _read_stdin_json(stdin)
@@ -298,7 +253,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
     script_file = cmd_dir / f"wait-{tool_use_id}.sh"
 
     try:
-        _write_secure_file(prompt_file, orig_prompt)
+        write_secure_file(prompt_file, orig_prompt)
     except OSError as e:
         logger.warning("spawn: failed to write prompt file {}: {}", prompt_file, e)
         _emit_pass_through(stdout)
@@ -311,7 +266,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         "run_in_background": orig_run_bg,
     }
     try:
-        _write_secure_file(map_file, json.dumps(map_payload))
+        write_secure_file(map_file, json.dumps(map_payload))
     except OSError as e:
         logger.warning("spawn: failed to write map file {}: {}", map_file, e)
         _emit_pass_through(stdout)
@@ -319,7 +274,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
 
     wait_script_content = build_wait_script(tool_use_id, target_name, parent_cwd)
     try:
-        _write_executable_file(script_file, wait_script_content)
+        write_executable_file(script_file, wait_script_content)
     except OSError as e:
         logger.warning("spawn: failed to write wait-script {}: {}", script_file, e)
         _emit_pass_through(stdout)
@@ -409,7 +364,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
             },
         }
     }
-    _emit(stdout, response)
+    emit_json_response(stdout, response)
 
 
 def main() -> None:

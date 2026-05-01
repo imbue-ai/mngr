@@ -33,7 +33,6 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -42,8 +41,15 @@ from typing import TextIO
 
 from loguru import logger
 
+from imbue.mngr_subagent_proxy._hook_io import emit_depth_limit_deny
+from imbue.mngr_subagent_proxy._hook_io import emit_json_response
+from imbue.mngr_subagent_proxy._hook_io import parse_int_env
+from imbue.mngr_subagent_proxy._hook_io import write_executable_file
+from imbue.mngr_subagent_proxy._hook_io import write_secure_file
 from imbue.mngr_subagent_proxy._target_name import build_subagent_target_name
 from imbue.mngr_subagent_proxy.mngr_binary import get_mngr_command_shell_form
+
+_DEFAULT_MAX_DEPTH: Final[int] = 3
 
 _GENERIC_DENY_REASON: Final[str] = (
     "mngr_subagent_proxy is in deny mode: the Task tool is disabled for this agent. "
@@ -51,14 +57,8 @@ _GENERIC_DENY_REASON: Final[str] = (
 )
 
 
-def _emit(stdout: TextIO, response: dict[str, Any]) -> None:
-    """Write a JSON response to stdout and flush."""
-    stdout.write(json.dumps(response) + "\n")
-    stdout.flush()
-
-
 def _emit_deny(stdout: TextIO, reason: str) -> None:
-    _emit(
+    emit_json_response(
         stdout,
         {
             "hookSpecificOutput": {
@@ -205,27 +205,27 @@ def build_deny_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) 
     )
 
 
-def _write_secure_file(path: Path, content: str) -> None:
-    """Write content to path with 0600 perms, creating parents as needed."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
-    path.chmod(0o600)
-
-
-def _write_executable_file(path: Path, content: str) -> None:
-    """Write content to path with 0755 perms, creating parents as needed."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
-    path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
-
-
 def run(stdin: TextIO, stdout: TextIO) -> None:
     """PreToolUse:Agent deny hook core.
 
     Pure function in terms of its dependencies: takes stdin/stdout streams
     explicitly. Reads env vars and filesystem state directly.
+
+    The depth-limit check matches PROXY mode's: at or beyond
+    ``MNGR_MAX_SUBAGENT_DEPTH`` (default 3) the hook emits a deny
+    citing the depth, NOT the usual "use mngr instead" deny. This
+    keeps Claude (or any reader of the parent transcript) from being
+    pointed at a wait-script that would happily spawn another nested
+    subagent and grow the chain unbounded.
     """
     os.umask(0o077)
+
+    depth = parse_int_env("MNGR_SUBAGENT_DEPTH", 0)
+    max_depth = parse_int_env("MNGR_MAX_SUBAGENT_DEPTH", _DEFAULT_MAX_DEPTH)
+    if depth >= max_depth:
+        logger.warning("deny: depth {}/{} reached; denying Task with depth-limit reason", depth, max_depth)
+        emit_depth_limit_deny(stdout, depth, max_depth)
+        return
 
     payload = _read_stdin_json(stdin)
     if payload is None:
@@ -259,14 +259,14 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
     wait_script = state_dir / "proxy_commands" / f"wait-{tool_use_id}.sh"
 
     try:
-        _write_secure_file(prompt_file, orig_prompt)
+        write_secure_file(prompt_file, orig_prompt)
     except OSError as e:
         logger.warning("deny: failed to write prompt file {}: {}", prompt_file, e)
         _emit_deny(stdout, _GENERIC_DENY_REASON)
         return
 
     try:
-        _write_executable_file(wait_script, build_deny_wait_script(tool_use_id, target_name, parent_cwd))
+        write_executable_file(wait_script, build_deny_wait_script(tool_use_id, target_name, parent_cwd))
     except OSError as e:
         logger.warning("deny: failed to write wait script {}: {}", wait_script, e)
         _emit_deny(stdout, _GENERIC_DENY_REASON)

@@ -19,6 +19,8 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     for name in (
         "MNGR_AGENT_STATE_DIR",
         "MNGR_AGENT_NAME",
+        "MNGR_SUBAGENT_DEPTH",
+        "MNGR_MAX_SUBAGENT_DEPTH",
     ):
         monkeypatch.delenv(name, raising=False)
     return monkeypatch
@@ -539,6 +541,61 @@ def test_deny_handles_failed_wait_script_write_with_generic_reason(
     reason = hook_out["permissionDecisionReason"]
     assert "deny mode" in reason
     assert "mngr-subagents" in reason
+
+
+def test_deny_at_max_depth_emits_depth_limit_deny(
+    tmp_path: Path,
+    clean_env: pytest.MonkeyPatch,
+) -> None:
+    """At/above ``MNGR_MAX_SUBAGENT_DEPTH``, deny mode emits a depth-limit reason.
+
+    Without this, a depth-N child would still be told to spawn another
+    mngr subagent via the wait-script -- nothing would stop the chain
+    from growing unbounded except whichever resource exhausts first.
+    The README's "Depth limit" section advertises this guard plugin-wide,
+    so it must hold in DENY mode too.
+    """
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    _set_hook_env(clean_env, state_dir)
+    clean_env.setenv("MNGR_SUBAGENT_DEPTH", "3")
+    clean_env.setenv("MNGR_MAX_SUBAGENT_DEPTH", "3")
+
+    response = _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=clean_env)
+
+    hook_out = response["hookSpecificOutput"]
+    assert hook_out["permissionDecision"] == "deny"
+    reason = hook_out["permissionDecisionReason"]
+    assert "depth limit" in reason
+    assert "3/3" in reason
+    assert "Cannot spawn nested Task tools" in reason
+    # No sidefiles created when the depth-limit branch fires before any IO.
+    assert not (state_dir / "subagent_prompts").exists()
+    assert not (state_dir / "proxy_commands").exists()
+
+
+def test_deny_below_max_depth_emits_normal_reason(
+    tmp_path: Path,
+    clean_env: pytest.MonkeyPatch,
+) -> None:
+    """Below the depth limit, deny mode emits its normal short reason.
+
+    Pin the boundary: depth 2/3 still produces the "Use a mngr subagent"
+    reason and writes the wait-script. Only depth >= max_depth flips to
+    the depth-limit reason.
+    """
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    _set_hook_env(clean_env, state_dir)
+    clean_env.setenv("MNGR_SUBAGENT_DEPTH", "2")
+    clean_env.setenv("MNGR_MAX_SUBAGENT_DEPTH", "3")
+
+    response = _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=clean_env)
+
+    reason = response["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "Use a mngr subagent" in reason
+    assert "depth limit" not in reason
+    assert (state_dir / "proxy_commands" / "wait-toolu_abc12345678.sh").is_file()
 
 
 def test_build_deny_reason_quotes_special_characters_in_paths() -> None:

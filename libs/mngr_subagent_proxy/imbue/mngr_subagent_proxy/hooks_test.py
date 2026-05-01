@@ -20,6 +20,7 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr_subagent_proxy import _stop_hook_guard
+from imbue.mngr_subagent_proxy._hook_io import parse_int_env
 from imbue.mngr_subagent_proxy._target_name import slugify
 from imbue.mngr_subagent_proxy.hooks import cleanup as cleanup_hook
 from imbue.mngr_subagent_proxy.hooks import reap as reap_hook
@@ -643,9 +644,9 @@ def test_slugify_caps_length_and_collapses_runs() -> None:
 def test_spawn_env_vars_from_real_os_env(clean_env: pytest.MonkeyPatch) -> None:
     """Sanity: helpers read from the actual os.environ (not a closure)."""
     # This ensures we don't accidentally snapshot at import time.
-    assert spawn_hook._parse_int_env("__DOES_NOT_EXIST__", 42) == 42
+    assert parse_int_env("__DOES_NOT_EXIST__", 42) == 42
     clean_env.setenv("__SPAWN_TEST_INT__", "7")
-    assert spawn_hook._parse_int_env("__SPAWN_TEST_INT__", 0) == 7
+    assert parse_int_env("__SPAWN_TEST_INT__", 0) == 7
 
 
 # guard_per_agent_plugin_cache wraps every Stop / SubagentStop command in
