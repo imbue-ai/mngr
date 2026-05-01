@@ -2,10 +2,12 @@
 
 Reads the hook JSON from stdin and emits a PreToolUse decision JSON on
 stdout that DENIES the Task tool with a short ``permissionDecisionReason``
-of the form::
+of the form (synchronous variant; ``run_in_background=true`` adds
+``--spawn-only`` and a one-line note instead of the closing sentence)::
 
     Use a mngr subagent instead of Task. Run: bash <wait_script_path>
-    (see the `mngr-subagents` skill for context).
+    (see the `mngr-subagents` skill for context). The script's stdout
+    is the subagent's reply -- treat it as the Task tool's tool_result.
 
 The accompanying ``mngr-subagents`` Claude skill (provisioned in deny
 mode at ``.claude/skills/mngr-subagents/SKILL.md``) explains the full
