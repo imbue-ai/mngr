@@ -207,7 +207,8 @@ mngr workflow. The hook denies every Task call with a short
 `permissionDecisionReason` of the form:
 
     Use a mngr subagent instead of Task. Run: bash <wait_script_path>
-    (see the `mngr-subagents` skill for context).
+    (see the `mngr-subagents` skill for context). The script's stdout is
+    the subagent's reply -- treat it as the Task tool's tool_result.
 
 Claude (the calling agent) sees the deny reason, loads the
 `mngr-subagents` skill from the agent's `.claude/skills/`, runs the
