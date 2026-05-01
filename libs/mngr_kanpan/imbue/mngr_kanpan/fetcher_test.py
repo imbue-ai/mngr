@@ -1,6 +1,4 @@
 import json
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,13 +35,12 @@ from imbue.mngr_kanpan.fetcher import load_field_cache
 from imbue.mngr_kanpan.fetcher import save_field_cache
 from imbue.mngr_kanpan.plugin import _is_source_enabled
 from imbue.mngr_kanpan.plugin import kanpan_data_sources
+from imbue.mngr_kanpan.testing import TEST_NOW
 from imbue.mngr_kanpan.testing import make_agent_details
 from imbue.mngr_kanpan.testing import make_mngr_ctx
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_config
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_profile_dir
 from imbue.mngr_kanpan.testing import make_pr_field
-
-_NOW = datetime(2026, 4, 30, 12, 0, 0, tzinfo=timezone.utc)
 
 # === repo path parsing ===
 
@@ -80,12 +77,12 @@ def test_repo_path_from_labels_without_remote() -> None:
 
 
 def test_compute_section_muted() -> None:
-    fields: dict[str, FieldValue] = {FIELD_MUTED: BoolField(value=True, created=_NOW)}
+    fields: dict[str, FieldValue] = {FIELD_MUTED: BoolField(value=True, created=TEST_NOW)}
     assert compute_section(fields) == BoardSection.MUTED
 
 
 def test_compute_section_muted_false() -> None:
-    fields: dict[str, FieldValue] = {FIELD_MUTED: BoolField(value=False, created=_NOW)}
+    fields: dict[str, FieldValue] = {FIELD_MUTED: BoolField(value=False, created=TEST_NOW)}
     assert compute_section(fields) == BoardSection.STILL_COOKING
 
 
@@ -125,24 +122,24 @@ def test_compute_section_open_pr_ignores_ci(ci_status: CiStatus) -> None:
     # test_compute_section_pr_fetch_failed below).
     fields: dict[str, FieldValue] = {
         FIELD_PR: make_pr_field(),
-        FIELD_CI: CiField(status=ci_status, created=_NOW),
+        FIELD_CI: CiField(status=ci_status, created=TEST_NOW),
     }
     assert compute_section(fields) == BoardSection.PR_BEING_REVIEWED
 
 
 def test_compute_section_pr_fetch_failed() -> None:
-    fields: dict[str, FieldValue] = {FIELD_PR: PrFetchFailedField(repo="org/repo", created=_NOW)}
+    fields: dict[str, FieldValue] = {FIELD_PR: PrFetchFailedField(repo="org/repo", created=TEST_NOW)}
     assert compute_section(fields) == BoardSection.PRS_FAILED
 
 
 def test_compute_section_wrong_muted_type() -> None:
-    fields: dict[str, FieldValue] = {FIELD_MUTED: StringField(value="yes", created=_NOW)}
+    fields: dict[str, FieldValue] = {FIELD_MUTED: StringField(value="yes", created=TEST_NOW)}
     with pytest.raises(KanpanFieldTypeError, match="Expected BoolField"):
         compute_section(fields)
 
 
 def test_compute_section_wrong_pr_type() -> None:
-    fields: dict[str, FieldValue] = {FIELD_PR: StringField(value="oops", created=_NOW)}
+    fields: dict[str, FieldValue] = {FIELD_PR: StringField(value="oops", created=TEST_NOW)}
     with pytest.raises(KanpanFieldTypeError, match="Expected PrField"):
         compute_section(fields)
 
@@ -267,7 +264,7 @@ def test_run_data_sources_parallel_source_raises_exception() -> None:
 def test_run_data_sources_parallel_multiple_sources() -> None:
     a1 = AgentName("a1")
     pr = make_pr_field()
-    ci = CiField(status=CiStatus.PASSING, created=_NOW)
+    ci = CiField(status=CiStatus.PASSING, created=TEST_NOW)
     s1 = _MockDataSource("github", {a1: {"pr": pr}})
     s2 = _MockDataSource("git_info", {a1: {"ci": ci}})
     results, errors = _run_data_sources_parallel([s1, s2], (), {}, make_mngr_ctx())
@@ -428,7 +425,7 @@ def test_save_field_cache_writes_json(tmp_path: Path) -> None:
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
     agent_name = AgentName("agent-1")
     cached: dict[AgentName, dict[str, FieldValue]] = {
-        agent_name: {"pr_count": StringField(value="3", created=_NOW)},
+        agent_name: {"pr_count": StringField(value="3", created=TEST_NOW)},
     }
     save_field_cache(ctx, cached)
     cache_file = tmp_path / "kanpan" / "field_cache.json"
@@ -447,7 +444,7 @@ def test_save_load_field_cache_roundtrip(tmp_path: Path) -> None:
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
     agent_name = AgentName("agent-1")
     original: dict[AgentName, dict[str, FieldValue]] = {
-        agent_name: {"status": StringField(value="hello", created=_NOW)},
+        agent_name: {"status": StringField(value="hello", created=TEST_NOW)},
     }
     data_sources = [_make_mock_data_source("status", StringField)]
     save_field_cache(ctx, original)
@@ -456,7 +453,7 @@ def test_save_load_field_cache_roundtrip(tmp_path: Path) -> None:
     field = loaded[agent_name]["status"]
     assert isinstance(field, StringField)
     assert field.value == "hello"
-    assert field.created == _NOW
+    assert field.created == TEST_NOW
 
 
 def test_save_load_field_cache_polymorphic_slot_roundtrip(tmp_path: Path) -> None:
@@ -470,8 +467,8 @@ def test_save_load_field_cache_polymorphic_slot_roundtrip(tmp_path: Path) -> Non
     a3 = AgentName("a3")
     original: dict[AgentName, dict[str, FieldValue]] = {
         a1: {FIELD_PR: make_pr_field(number=42)},
-        a2: {FIELD_PR: CreatePrUrlField(url="https://example.com/compare", created=_NOW)},
-        a3: {FIELD_PR: PrFetchFailedField(repo="org/repo", created=_NOW)},
+        a2: {FIELD_PR: CreatePrUrlField(url="https://example.com/compare", created=TEST_NOW)},
+        a3: {FIELD_PR: PrFetchFailedField(repo="org/repo", created=TEST_NOW)},
     }
     save_field_cache(ctx, original)
 
@@ -551,7 +548,7 @@ def test_load_field_cache_skips_unknown_types(tmp_path: Path) -> None:
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
     agent_name = AgentName("agent-1")
     original: dict[AgentName, dict[str, FieldValue]] = {
-        agent_name: {"status": StringField(value="hello", created=_NOW)},
+        agent_name: {"status": StringField(value="hello", created=TEST_NOW)},
     }
     save_field_cache(ctx, original)
     # No data sources -> no field-key adapters, so every saved key is unknown and dropped.
@@ -576,7 +573,7 @@ def test_load_field_cache_drops_legacy_entries_missing_created(tmp_path: Path) -
             "status": {"kind": "string", "value": "old"},
         },
         "agent-fresh": {
-            "status": {"kind": "string", "value": "new", "created": _NOW.isoformat()},
+            "status": {"kind": "string", "value": "new", "created": TEST_NOW.isoformat()},
         },
     }
     (cache_dir / "field_cache.json").write_text(json.dumps(cache_payload))

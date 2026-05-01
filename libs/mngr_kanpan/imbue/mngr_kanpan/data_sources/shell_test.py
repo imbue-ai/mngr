@@ -14,10 +14,9 @@ from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_sources.shell import ShellCommandConfig
 from imbue.mngr_kanpan.data_sources.shell import ShellCommandDataSource
 from imbue.mngr_kanpan.data_sources.shell import _build_shell_env
+from imbue.mngr_kanpan.testing import TEST_NOW
 from imbue.mngr_kanpan.testing import make_agent_details
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_cg
-
-_NOW = datetime(2026, 4, 30, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_build_shell_env_basic() -> None:
@@ -40,7 +39,7 @@ def test_build_shell_env_with_pr_field() -> None:
         title="Test",
         state=PrState.OPEN,
         head_branch="b",
-        created=_NOW,
+        created=TEST_NOW,
     )
     cached: dict[str, FieldValue] = {"pr": pr}
     env = _build_shell_env(agent, cached)
@@ -51,7 +50,7 @@ def test_build_shell_env_with_pr_field() -> None:
 
 def test_build_shell_env_with_ci_field() -> None:
     agent = make_agent_details(name="agent-1")
-    ci = CiField(status=CiStatus.FAILING, created=_NOW)
+    ci = CiField(status=CiStatus.FAILING, created=TEST_NOW)
     cached: dict[str, FieldValue] = {"ci": ci}
     env = _build_shell_env(agent, cached)
     assert env["MNGR_FIELD_CI_STATUS"] == "FAILING"
@@ -59,7 +58,7 @@ def test_build_shell_env_with_ci_field() -> None:
 
 def test_build_shell_env_with_string_field() -> None:
     agent = make_agent_details(name="agent-1")
-    cached: dict[str, FieldValue] = {"custom_val": StringField(value="hello", created=_NOW)}
+    cached: dict[str, FieldValue] = {"custom_val": StringField(value="hello", created=TEST_NOW)}
     env = _build_shell_env(agent, cached)
     assert env["MNGR_FIELD_CUSTOM_VAL"] == "hello"
 
@@ -73,7 +72,7 @@ def test_build_shell_env_no_branch() -> None:
 def test_build_shell_env_with_other_field() -> None:
     """Non-PrField, non-CiField, non-StringField falls back to display().text."""
     agent = make_agent_details(name="agent-1")
-    field = CommitsAheadField(count=3, has_work_dir=True, created=_NOW)
+    field = CommitsAheadField(count=3, has_work_dir=True, created=TEST_NOW)
     env = _build_shell_env(agent, {"commits_ahead": field})
     assert env["MNGR_FIELD_COMMITS_AHEAD"] == "[3 unpushed]"
 
@@ -141,8 +140,8 @@ def test_compute_propagates_oldest_cached_created(test_cg: ConcurrencyGroup) -> 
     )
     agent = make_agent_details(name="agent-1")
     ctx = make_mngr_ctx_with_cg(test_cg)
-    older = _NOW - timedelta(hours=2)
-    newer = _NOW - timedelta(minutes=5)
+    older = TEST_NOW - timedelta(hours=2)
+    newer = TEST_NOW - timedelta(minutes=5)
     cached: dict[AgentName, dict[str, FieldValue]] = {
         AgentName("agent-1"): {
             "older_input": StringField(value="x", created=older),
@@ -181,7 +180,7 @@ def test_compute_excludes_self_from_staleness_inputs(test_cg: ConcurrencyGroup) 
     )
     agent = make_agent_details(name="agent-1")
     ctx = make_mngr_ctx_with_cg(test_cg)
-    very_old = _NOW - timedelta(days=7)
+    very_old = TEST_NOW - timedelta(days=7)
     cached: dict[AgentName, dict[str, FieldValue]] = {
         AgentName("agent-1"): {
             # Only a previous version of the shell field itself in cache.

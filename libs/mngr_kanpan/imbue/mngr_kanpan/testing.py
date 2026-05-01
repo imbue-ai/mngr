@@ -20,6 +20,11 @@ from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 
+# Shared "now" timestamp for tests that build FieldValue instances. Pinned to a
+# fixed UTC instant so test cases that compare against staleness boundaries do
+# not depend on wall-clock time.
+TEST_NOW: datetime = datetime(2026, 4, 30, 12, 0, 0, tzinfo=timezone.utc)
+
 
 def make_host_details(provider_name: str = "local") -> HostDetails:
     """Create a minimal HostDetails for testing."""

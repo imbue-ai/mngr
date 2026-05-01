@@ -36,11 +36,10 @@ from imbue.mngr_kanpan.data_sources.github import _parse_unresolved
 from imbue.mngr_kanpan.data_sources.github import _pr_priority
 from imbue.mngr_kanpan.data_sources.github import fetch_all_prs
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
+from imbue.mngr_kanpan.testing import TEST_NOW
 from imbue.mngr_kanpan.testing import make_agent_details
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_cg
 from imbue.mngr_kanpan.testing import make_pr_field
-
-_NOW = datetime(2026, 4, 30, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def _make_pr_lookup(
@@ -88,7 +87,7 @@ def test_github_data_source_field_types_disabled() -> None:
 
 
 def test_get_cached_repo_field_found() -> None:
-    repo_field = RepoPathField(path="org/repo", created=_NOW)
+    repo_field = RepoPathField(path="org/repo", created=TEST_NOW)
     cached: dict[AgentName, dict[str, FieldValue]] = {
         AgentName("a1"): {"repo_path": repo_field},
     }
@@ -352,13 +351,13 @@ def _make_open_pr_json(number: int = 1, branch: str = "test-branch") -> str:
 
 def test_fetch_repo_prs_success() -> None:
     cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
-    repo_path, result = _fetch_repo_prs(cg, "org/repo", _NOW)
+    repo_path, result = _fetch_repo_prs(cg, "org/repo", TEST_NOW)
     assert repo_path == "org/repo"
     assert result.error is None
     assert len(result.prs) == 1
     assert result.prs[0].pr.number == 1
     assert result.prs[0].pr.head_branch == "branch-1"
-    assert result.prs[0].pr.created == _NOW
+    assert result.prs[0].pr.created == TEST_NOW
 
 
 def test_fetch_repo_prs_error() -> None:
@@ -368,7 +367,7 @@ def test_fetch_repo_prs_error() -> None:
     proc_fail.read_stderr.return_value = "some error"
     proc_fail.returncode = 1
     cg.run_process_in_background.side_effect = [proc_fail, proc_fail]
-    repo_path, result = _fetch_repo_prs(cg, "org/repo", _NOW)
+    repo_path, result = _fetch_repo_prs(cg, "org/repo", TEST_NOW)
     assert repo_path == "org/repo"
     assert result.error is not None
 
@@ -475,7 +474,7 @@ def test_compute_pr_fetch_failed_with_cached_pr_uses_cache() -> None:
     ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
     cached_pr = make_pr_field(number=42, head_branch="branch-1")
-    cached_ci = CiField(status=CiStatus.PASSING, created=_NOW)
+    cached_ci = CiField(status=CiStatus.PASSING, created=TEST_NOW)
     cached: dict[AgentName, dict[str, FieldValue]] = {
         agent.name: {FIELD_PR: cached_pr, FIELD_CI: cached_ci},
     }
@@ -498,7 +497,7 @@ def test_compute_pr_fetch_failed_with_cached_pr_for_different_branch_emits_fetch
     agent = make_agent_details(name="a1", initial_branch="branch-2", labels={"remote": "git@github.com:org/repo.git"})
     # The cached PR's head_branch ("branch-1") differs from the agent's current branch.
     stale_cached_pr = make_pr_field(number=42, head_branch="branch-1")
-    cached_ci = CiField(status=CiStatus.PASSING, created=_NOW)
+    cached_ci = CiField(status=CiStatus.PASSING, created=TEST_NOW)
     cached: dict[AgentName, dict[str, FieldValue]] = {
         agent.name: {FIELD_PR: stale_cached_pr, FIELD_CI: cached_ci},
     }
@@ -563,7 +562,7 @@ def test_compute_falls_back_to_cached_repo_path_when_labels_lack_remote() -> Non
     cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
     ctx = make_mngr_ctx_with_cg(cg)
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={})
-    cached_created = _NOW - timedelta(hours=2)
+    cached_created = TEST_NOW - timedelta(hours=2)
     cached_fields: dict[AgentName, dict[str, FieldValue]] = {
         AgentName("a1"): {"repo_path": RepoPathField(path="org/repo", created=cached_created)},
     }
@@ -584,7 +583,7 @@ def test_compute_uses_now_when_labels_carry_remote() -> None:
     ctx = make_mngr_ctx_with_cg(cg)
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
     # Even with a stale cache present, labels should win.
-    stale_cached = _NOW - timedelta(hours=2)
+    stale_cached = TEST_NOW - timedelta(hours=2)
     cached_fields: dict[AgentName, dict[str, FieldValue]] = {
         AgentName("a1"): {"repo_path": RepoPathField(path="org/repo", created=stale_cached)},
     }

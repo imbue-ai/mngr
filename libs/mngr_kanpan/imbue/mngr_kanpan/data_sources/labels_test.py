@@ -1,14 +1,10 @@
-from datetime import datetime
-from datetime import timezone
-
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_sources.labels import LabelColumnConfig
 from imbue.mngr_kanpan.data_sources.labels import LabelsDataSource
 from imbue.mngr_kanpan.data_sources.labels import _ColoredStringField
+from imbue.mngr_kanpan.testing import TEST_NOW
 from imbue.mngr_kanpan.testing import make_agent_details
 from imbue.mngr_kanpan.testing import make_mngr_ctx
-
-_NOW = datetime(2026, 4, 30, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_labels_data_source_is_not_remote() -> None:
@@ -114,7 +110,7 @@ def test_labels_compute_label_key_differs_from_field_key() -> None:
 
 
 def test_colored_string_field_display() -> None:
-    field = _ColoredStringField(value="urgent", color="light red", created=_NOW)
+    field = _ColoredStringField(value="urgent", color="light red", created=TEST_NOW)
     result = field.display()
     assert isinstance(result, CellDisplay)
     assert result.text == "urgent"
@@ -122,7 +118,7 @@ def test_colored_string_field_display() -> None:
 
 
 def test_colored_string_field_display_no_color() -> None:
-    field = _ColoredStringField(value="normal", created=_NOW)
+    field = _ColoredStringField(value="normal", created=TEST_NOW)
     result = field.display()
     assert result.text == "normal"
     assert result.color is None
