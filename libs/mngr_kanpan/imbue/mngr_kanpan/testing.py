@@ -88,7 +88,13 @@ def make_pr_field(
     head_branch: str = "test-branch",
     created: datetime | None = None,
 ) -> PrField:
-    """Create a PrField for testing."""
+    """Create a PrField for testing.
+
+    Defaults `created` to the shared `TEST_NOW` constant so callers that
+    don't care about the timestamp still get a deterministic value -- this
+    matches the rest of the test suite, which uses TEST_NOW everywhere a
+    fixed staleness reference is needed.
+    """
     return PrField(
         number=number,
         title="Test PR",
@@ -96,7 +102,7 @@ def make_pr_field(
         url=f"https://github.com/org/repo/pull/{number}",
         head_branch=head_branch,
         is_draft=is_draft,
-        created=created if created is not None else datetime.now(tz=timezone.utc),
+        created=created if created is not None else TEST_NOW,
     )
 
 
