@@ -13,6 +13,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import StringField
 from imbue.mngr_kanpan.data_source import now_utc
+from imbue.mngr_kanpan.data_source import oldest_created
 
 _SHELL_TIMEOUT_SECONDS = 30.0
 
@@ -83,17 +84,19 @@ class ShellCommandDataSource(FrozenModel):
             errors.append(f"Shell '{self.config.name}': {n_failed} process(es) timed out or failed")
             logger.debug("Shell '{}' concurrency group error: {}", self.config.name, exc)
 
-        # Shell output is treated as fresh (created=now), regardless of which
-        # cached env vars the script consumed. We do not statically know which
-        # MNGR_FIELD_<KEY> env vars a shell command actually reads, so we
-        # cannot propagate staleness from cached inputs here.
+        # Shell output's `created` is the oldest of (now, every cached field
+        # exposed to the script as MNGR_FIELD_<KEY>). We can't statically tell
+        # which env vars a shell command actually reads, so we conservatively
+        # propagate staleness from any cached input the agent had access to.
         now = now_utc()
         for agent_name, proc in processes:
             rc = proc.returncode
             if rc == 0:
                 stdout = proc.read_stdout().strip()
                 if stdout:
-                    fields[agent_name] = {self.field_key: StringField(value=stdout, created=now)}
+                    agent_cached = cached_fields.get(agent_name, {})
+                    created = oldest_created(*agent_cached.values()) if agent_cached else now
+                    fields[agent_name] = {self.field_key: StringField(value=stdout, created=created)}
             else:
                 stderr = proc.read_stderr().strip()
                 msg = f"Shell '{self.config.name}' failed for {agent_name} (exit {rc})"

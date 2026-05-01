@@ -173,3 +173,17 @@ refresh_interval_seconds = 600.0
 # Seconds before retrying after a failed full refresh
 retry_cooldown_seconds = 60.0
 ```
+
+## Staleness
+
+Each cached field tracks a `created` timestamp. Cells whose `created` is older than `staleness_threshold_seconds` are rendered in dark grey to signal that the value may be out of date.
+
+When a value is computed from cached inputs (rather than directly from the world), `created` is the oldest `created` of the inputs it consumed -- staleness propagates through the dependency chain. For example, a PR cell whose lookup depended on a stale `repo_path` is itself rendered as stale, even though the PR data was just fetched from GitHub.
+
+```toml
+[plugins.kanpan]
+# Cells older than this are rendered greyed-out (default 30 minutes)
+staleness_threshold_seconds = 1800.0
+```
+
+Note that stale cells share their colour with muted-agent rows; they're both "de-emphasized." A muted row flattens its entire row to grey, while staleness applies per-cell on non-muted rows.

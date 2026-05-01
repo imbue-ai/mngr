@@ -1,7 +1,9 @@
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import StringField
 from imbue.mngr_kanpan.data_sources.git_info import CommitsAheadField
@@ -129,3 +131,38 @@ def test_compute_timeout_produces_error(test_cg: ConcurrencyGroup) -> None:
     ctx = make_mngr_ctx_with_cg(test_cg)
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert any("Custom" in e for e in errors)
+
+
+def test_compute_propagates_oldest_cached_created(test_cg: ConcurrencyGroup) -> None:
+    """Shell output's `created` is the min over the cached fields offered as env vars."""
+    ds = ShellCommandDataSource(
+        field_key="custom",
+        config=ShellCommandConfig(name="Custom", header="CUSTOM", command="echo 'hi'"),
+    )
+    agent = make_agent_details(name="agent-1")
+    ctx = make_mngr_ctx_with_cg(test_cg)
+    older = _NOW - timedelta(hours=2)
+    newer = _NOW - timedelta(minutes=5)
+    cached: dict[AgentName, dict[str, FieldValue]] = {
+        AgentName("agent-1"): {
+            "older_input": StringField(value="x", created=older),
+            "newer_input": StringField(value="y", created=newer),
+        },
+    }
+    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
+    field = fields[AgentName("agent-1")]["custom"]
+    assert field.created == older
+
+
+def test_compute_uses_now_when_no_cached_inputs(test_cg: ConcurrencyGroup) -> None:
+    """With no cached inputs to taint from, `created` is the wall-clock now."""
+    ds = ShellCommandDataSource(
+        field_key="custom",
+        config=ShellCommandConfig(name="Custom", header="CUSTOM", command="echo 'hi'"),
+    )
+    agent = make_agent_details(name="agent-1")
+    ctx = make_mngr_ctx_with_cg(test_cg)
+    fields, _errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    field = fields[AgentName("agent-1")]["custom"]
+    delta = datetime.now(timezone.utc) - field.created
+    assert delta.total_seconds() < 60

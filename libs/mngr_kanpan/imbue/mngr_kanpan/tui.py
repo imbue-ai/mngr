@@ -1423,7 +1423,7 @@ def _build_board_widgets(
     `now` defaults to the current UTC time when None; pass an explicit value
     in tests for determinism.
     """
-    effective_now = now if now is not None else datetime.now(tz=timezone.utc)
+    effective_now = now if now is not None else now_utc()
     index_to_entry: dict[int, AgentBoardEntry] = {}
     walker: SimpleFocusListWalker[AttrMap | Text | Divider | Columns] = SimpleFocusListWalker([])
 
