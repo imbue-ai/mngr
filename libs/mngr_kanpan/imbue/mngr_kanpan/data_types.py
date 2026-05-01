@@ -17,10 +17,19 @@ from imbue.mngr_kanpan.data_source import FieldValue
 
 
 class BoardSection(UpperCaseStrEnum):
-    """Sections for grouping agents on the board, based on PR state."""
+    """Sections for grouping agents on the board, based on PR state.
+
+    ``PRS_FAILED`` historically meant "open PR with failing CI"; it now means
+    "PR data could not be loaded (gh fetch failed and there is no usable cached
+    fallback)" -- the displayed label is "PRs not loaded". The enum value name
+    is preserved so users' existing ``section_order`` TOML configs keep working.
+    """
 
     STILL_COOKING = auto()
     PR_DRAFT = auto()
+    # "PR data not loaded" -- emitted when the gh PR fetch fails and no cached
+    # PrField is available to fall back to. Not "open PR with failing CI"; that
+    # case lives under PR_BEING_REVIEWED.
     PRS_FAILED = auto()
     PR_BEING_REVIEWED = auto()
     PR_MERGED = auto()
