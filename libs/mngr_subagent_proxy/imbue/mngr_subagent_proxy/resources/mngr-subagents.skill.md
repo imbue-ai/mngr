@@ -17,6 +17,7 @@ Two Bash commands. First, spawn:
     uv run mngr create '<slug>:<parent_cwd>' \
         --type claude --transfer=none --no-ensure-clean --no-connect --reuse \
         --label mngr_subagent_proxy=child \
+        --env MNGR_SUBAGENT_DEPTH=$((${MNGR_SUBAGENT_DEPTH:-0}+1)) \
         --message-file <prompt_file>
 
 - `<slug>` is a short, agent-name-friendly identifier for what the
@@ -31,6 +32,12 @@ Two Bash commands. First, spawn:
   shell-escaping every newline / backtick / quote in the prompt body.
 - `--label mngr_subagent_proxy=child` tags it so it hides from
   `mngr list` and gets reaped on parent destroy.
+- `--env MNGR_SUBAGENT_DEPTH=...` propagates the parent's nesting
+  depth (incremented by one) to the child so the plugin's depth-limit
+  guard fires after `MNGR_MAX_SUBAGENT_DEPTH` levels of nesting.
+  Leave the literal `$((${MNGR_SUBAGENT_DEPTH:-0}+1))` arithmetic in
+  the command -- the shell evaluates it; do not pre-substitute a
+  numeric value yourself.
 - `--reuse` makes the create idempotent if a previous attempt
   partially succeeded; safe to retry the same command.
 
