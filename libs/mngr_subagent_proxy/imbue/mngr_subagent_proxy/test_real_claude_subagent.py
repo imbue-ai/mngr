@@ -997,19 +997,26 @@ def test_deny_mode_intercepts_task_with_deny_reason(
         )
 
         # Wait for the parent to finish its turn. We don't care how many
-        # tool calls it made, only that it eventually settles.
+        # tool calls it made, only that it eventually settles. DENY-mode
+        # parents legitimately take longer than the default wait window
+        # because the skill teaches a multi-step workflow (write prompt
+        # file -> mngr create -> subagent_wait, possibly via
+        # Bash run_in_background + TaskOutput polling), so we use a
+        # longer per-test timeout here.
+        deny_mode_wait_timeout = 600.0
         final_parent = _poll_for_agent_state(
             mngr,
             parent_name,
             _is_waiting_end_of_turn,
-            timeout=_DEFAULT_WAIT_TIMEOUT_SECONDS,
+            timeout=deny_mode_wait_timeout,
         )
         if final_parent is None or not _is_waiting_end_of_turn(final_parent):
             diagnostics = _diagnose_subagent_proxy_failure(mngr, parent_name, _source_repo, temp_host_dir)
             pytest.fail(
                 f"Parent {parent_name!r} never reached WAITING/END_OF_TURN within "
-                f"{_DEFAULT_WAIT_TIMEOUT_SECONDS}s in deny mode. The deny hook should "
-                f"emit a quick deny decision and not block the parent."
+                f"{deny_mode_wait_timeout}s in deny mode. The deny hook itself emits a "
+                f"quick deny, but Claude then runs the skill's spawn-and-wait protocol "
+                f"which can take a few minutes for a real subagent."
                 f"{diagnostics}"
             )
 
