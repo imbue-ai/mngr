@@ -166,3 +166,31 @@ def test_compute_uses_now_when_no_cached_inputs(test_cg: ConcurrencyGroup) -> No
     field = fields[AgentName("agent-1")]["custom"]
     delta = datetime.now(timezone.utc) - field.created
     assert delta.total_seconds() < 60
+
+
+def test_compute_excludes_self_from_staleness_inputs(test_cg: ConcurrencyGroup) -> None:
+    """The shell field's own previous value is not an input to its new `created`.
+
+    Otherwise the field's `created` would feed back into itself each cycle and
+    stay pinned to its first-ever value forever, eventually appearing stale
+    even though it gets recomputed every refresh.
+    """
+    ds = ShellCommandDataSource(
+        field_key="custom",
+        config=ShellCommandConfig(name="Custom", header="CUSTOM", command="echo 'hi'"),
+    )
+    agent = make_agent_details(name="agent-1")
+    ctx = make_mngr_ctx_with_cg(test_cg)
+    very_old = _NOW - timedelta(days=7)
+    cached: dict[AgentName, dict[str, FieldValue]] = {
+        AgentName("agent-1"): {
+            # Only a previous version of the shell field itself in cache.
+            "custom": StringField(value="prev", created=very_old),
+        },
+    }
+    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
+    field = fields[AgentName("agent-1")]["custom"]
+    # With self excluded and no other inputs, `created` falls back to now.
+    assert field.created != very_old
+    delta = datetime.now(timezone.utc) - field.created
+    assert delta.total_seconds() < 60

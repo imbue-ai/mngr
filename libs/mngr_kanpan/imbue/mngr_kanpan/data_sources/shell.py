@@ -93,6 +93,10 @@ class ShellCommandDataSource(FrozenModel):
         # `now` when no cached inputs exist. We can't statically tell which
         # env vars a shell command actually reads, so we conservatively
         # propagate staleness from any cached input the agent had access to.
+        # The shell field's own previous value is excluded -- otherwise its
+        # `created` would feed back into itself each cycle, pinning it to
+        # the oldest historical value forever and reporting fresh output
+        # as stale once enough wall-clock time has passed.
         now = now_utc()
         for agent_name, proc in processes:
             rc = proc.returncode
@@ -100,7 +104,8 @@ class ShellCommandDataSource(FrozenModel):
                 stdout = proc.read_stdout().strip()
                 if stdout:
                     agent_cached = cached_fields.get(agent_name, {})
-                    created = oldest_created(*agent_cached.values()) if agent_cached else now
+                    input_fields = [v for k, v in agent_cached.items() if k != self.field_key]
+                    created = oldest_created(*input_fields) if input_fields else now
                     fields[agent_name] = {self.field_key: StringField(value=stdout, created=created)}
             else:
                 stderr = proc.read_stderr().strip()
