@@ -9,6 +9,7 @@ from typing import Any
 import click
 from loguru import logger
 
+from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.common_opts import add_common_options
@@ -170,8 +171,8 @@ def _run_refresh(mngr_ctx: MngrContext, plugin_config: UsagePluginConfig) -> Non
             timeout=_REFRESH_TIMEOUT_SECONDS,
             is_checked_after=False,
         )
-    except FileNotFoundError:
-        logger.warning("`claude` binary not found on PATH; cannot refresh rate-limit cache")
+    except ProcessSetupError as e:
+        logger.warning("Failed to spawn claude refresh probe (binary missing or unable to start): {}", e)
         return
     if result.returncode != 0:
         logger.warning("claude refresh probe exited {}; stderr: {}", result.returncode, result.stderr.strip())
