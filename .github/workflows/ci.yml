@@ -441,4 +441,5 @@ jobs:
         with:
           name: test-durations-release-${{ matrix.os }}-${{ matrix.group }}
           path: .test_output/test_durations_*.json
+          include-hidden-files: true
           retention-days: 30
