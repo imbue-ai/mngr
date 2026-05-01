@@ -1,10 +1,11 @@
 """Shared I/O helpers for the plugin's PreToolUse:Agent hooks.
 
 Both ``hooks/spawn.py`` (PROXY mode) and ``hooks/deny.py`` (DENY mode)
-need the same handful of side-effecting helpers: read an int env var,
-write a secure 0600 sidefile, write an executable 0755 wait-script,
-and emit a hook-protocol JSON response on stdout. Centralized here so
-the two hooks cannot drift on file modes or response framing.
+need the same handful of side-effecting helpers: read hook JSON from
+stdin, read an int env var, write a secure 0600 sidefile, write an
+executable 0755 wait-script, and emit a hook-protocol JSON response on
+stdout. Centralized here so the two hooks cannot drift on file modes
+or response framing.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ import os
 from pathlib import Path
 from typing import Any
 from typing import TextIO
+
+from loguru import logger
 
 
 def parse_int_env(name: str, default: int) -> int:
@@ -25,6 +28,41 @@ def parse_int_env(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def read_hook_stdin_json(stdin: TextIO, log_prefix: str) -> dict[str, Any] | None:
+    """Read Claude Code hook JSON from stdin; return None on empty or malformed input.
+
+    ``log_prefix`` distinguishes call sites in log output (e.g. ``"spawn"`` /
+    ``"deny"``) so a single concatenated log can still attribute warnings to
+    the right hook.
+
+    Returns ``None`` (and logs a warning) on:
+    - read errors (OSError),
+    - empty input,
+    - JSON that doesn't decode,
+    - JSON that decodes to anything other than a dict.
+
+    Centralized here so PROXY and DENY hooks cannot drift on input
+    validation; both must treat malformed hook input identically.
+    """
+    try:
+        raw = stdin.read()
+    except OSError as e:
+        logger.warning("{}: failed to read stdin: {}", log_prefix, e)
+        return None
+    if not raw:
+        logger.warning("{}: empty stdin", log_prefix)
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.warning("{}: malformed stdin JSON: {}", log_prefix, e)
+        return None
+    if not isinstance(parsed, dict):
+        logger.warning("{}: stdin JSON is not an object", log_prefix)
+        return None
+    return parsed
 
 
 def write_secure_file(path: Path, content: str) -> None:

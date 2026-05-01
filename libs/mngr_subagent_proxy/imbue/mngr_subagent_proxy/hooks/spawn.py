@@ -25,6 +25,7 @@ from loguru import logger
 from imbue.mngr_subagent_proxy._hook_io import emit_depth_limit_deny
 from imbue.mngr_subagent_proxy._hook_io import emit_json_response
 from imbue.mngr_subagent_proxy._hook_io import parse_int_env
+from imbue.mngr_subagent_proxy._hook_io import read_hook_stdin_json
 from imbue.mngr_subagent_proxy._hook_io import write_executable_file
 from imbue.mngr_subagent_proxy._hook_io import write_secure_file
 from imbue.mngr_subagent_proxy._target_name import build_subagent_target_name
@@ -41,27 +42,6 @@ _PASS_THROUGH_RESPONSE: Final[dict[str, Any]] = {
 
 def _emit_pass_through(stdout: TextIO) -> None:
     emit_json_response(stdout, _PASS_THROUGH_RESPONSE)
-
-
-def _read_stdin_json(stdin: TextIO) -> dict[str, Any] | None:
-    """Read hook JSON from stdin; return None on empty or malformed input."""
-    try:
-        raw = stdin.read()
-    except OSError as e:
-        logger.warning("spawn: failed to read stdin: {}", e)
-        return None
-    if not raw:
-        logger.warning("spawn: empty stdin")
-        return None
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        logger.warning("spawn: malformed stdin JSON: {}", e)
-        return None
-    if not isinstance(parsed, dict):
-        logger.warning("spawn: stdin JSON is not an object")
-        return None
-    return parsed
 
 
 def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> str:
@@ -211,7 +191,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         emit_depth_limit_deny(stdout, depth, max_depth)
         return
 
-    payload = _read_stdin_json(stdin)
+    payload = read_hook_stdin_json(stdin, "spawn")
     if payload is None:
         _emit_pass_through(stdout)
         return

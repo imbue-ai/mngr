@@ -31,12 +31,10 @@ through in deny mode.
 
 from __future__ import annotations
 
-import json
 import os
 import shlex
 import sys
 from pathlib import Path
-from typing import Any
 from typing import Final
 from typing import TextIO
 
@@ -45,6 +43,7 @@ from loguru import logger
 from imbue.mngr_subagent_proxy._hook_io import emit_depth_limit_deny
 from imbue.mngr_subagent_proxy._hook_io import emit_json_response
 from imbue.mngr_subagent_proxy._hook_io import parse_int_env
+from imbue.mngr_subagent_proxy._hook_io import read_hook_stdin_json
 from imbue.mngr_subagent_proxy._hook_io import write_executable_file
 from imbue.mngr_subagent_proxy._hook_io import write_secure_file
 from imbue.mngr_subagent_proxy._target_name import build_subagent_target_name
@@ -69,26 +68,6 @@ def _emit_deny(stdout: TextIO, reason: str) -> None:
             }
         },
     )
-
-
-def _read_stdin_json(stdin: TextIO) -> dict[str, Any] | None:
-    try:
-        raw = stdin.read()
-    except OSError as e:
-        logger.warning("deny: failed to read stdin: {}", e)
-        return None
-    if not raw:
-        logger.warning("deny: empty stdin")
-        return None
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        logger.warning("deny: malformed stdin JSON: {}", e)
-        return None
-    if not isinstance(parsed, dict):
-        logger.warning("deny: stdin JSON is not an object")
-        return None
-    return parsed
 
 
 def build_deny_reason(wait_script: Path, run_in_background: bool) -> str:
@@ -228,7 +207,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         emit_depth_limit_deny(stdout, depth, max_depth)
         return
 
-    payload = _read_stdin_json(stdin)
+    payload = read_hook_stdin_json(stdin, "deny")
     if payload is None:
         _emit_deny(stdout, _GENERIC_DENY_REASON)
         return
