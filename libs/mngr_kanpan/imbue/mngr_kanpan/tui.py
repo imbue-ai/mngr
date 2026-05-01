@@ -459,7 +459,7 @@ def _update_row_mark(state: _KanpanState, walker_idx: int, mark_key: str | None)
         return
     name_markup: str | tuple[Hashable, str] | list[str | tuple[Hashable, str]] = _get_name_cell_markup(entry, mark_key)
     if entry.section == BoardSection.MUTED:
-        name_markup = _flatten_markup_to_muted(name_markup)
+        name_markup = _flatten_markup_to_attr(name_markup, "muted")
     attr_map_widget = state.list_walker[walker_idx]
     row: _SelectableRow = attr_map_widget.original_widget
     name_text: Text = row.contents[0][0]
@@ -1121,30 +1121,18 @@ def _get_state_cell_markup(entry: AgentBoardEntry) -> str | tuple[Hashable, str]
     return (attr, text) if attr else text
 
 
-def _flatten_markup_to_muted(
+def _flatten_markup_to_attr(
     markup: str | tuple[Hashable, str] | list[str | tuple[Hashable, str]],
+    attr: str,
 ) -> tuple[Hashable, str]:
-    """Flatten rich urwid text markup to a plain string wrapped in the 'muted' attribute."""
+    """Flatten rich urwid text markup to a plain string wrapped in the given attribute."""
     if isinstance(markup, list):
         plain = "".join(seg if isinstance(seg, str) else seg[1] for seg in markup)
     elif isinstance(markup, tuple):
         plain = markup[1]
     else:
         plain = markup
-    return ("muted", plain)
-
-
-def _flatten_markup_to_stale(
-    markup: str | tuple[Hashable, str] | list[str | tuple[Hashable, str]],
-) -> tuple[Hashable, str]:
-    """Flatten rich urwid text markup to a plain string wrapped in the 'stale' attribute."""
-    if isinstance(markup, list):
-        plain = "".join(seg if isinstance(seg, str) else seg[1] for seg in markup)
-    elif isinstance(markup, tuple):
-        plain = markup[1]
-    else:
-        plain = markup
-    return ("stale", plain)
+    return (attr, plain)
 
 
 @pure
@@ -1368,7 +1356,7 @@ def _build_agent_row(
     # Muted agents: flatten all markup to gray
     if entry.section == BoardSection.MUTED:
         cell_markup: dict[str, str | tuple[Hashable, str] | list[str | tuple[Hashable, str]]] = {
-            k: _flatten_markup_to_muted(v) for k, v in raw_markup.items()
+            k: _flatten_markup_to_attr(v, "muted") for k, v in raw_markup.items()
         }
     else:
         # Per-cell stale flatten for non-muted rows
@@ -1376,7 +1364,7 @@ def _build_agent_row(
         for k, v in raw_markup.items():
             field = entry.fields.get(k)
             if field is not None and _is_field_stale(field, now, staleness_threshold_seconds):
-                cell_markup[k] = _flatten_markup_to_stale(v)
+                cell_markup[k] = _flatten_markup_to_attr(v, "stale")
             else:
                 cell_markup[k] = v
 

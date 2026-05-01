@@ -73,8 +73,7 @@ from imbue.mngr_kanpan.tui import _execute_next_in_batch
 from imbue.mngr_kanpan.tui import _field_cell_markup
 from imbue.mngr_kanpan.tui import _field_cell_text
 from imbue.mngr_kanpan.tui import _finish_batch_execution
-from imbue.mngr_kanpan.tui import _flatten_markup_to_muted
-from imbue.mngr_kanpan.tui import _flatten_markup_to_stale
+from imbue.mngr_kanpan.tui import _flatten_markup_to_attr
 from imbue.mngr_kanpan.tui import _format_section_heading
 from imbue.mngr_kanpan.tui import _get_focused_entry
 from imbue.mngr_kanpan.tui import _get_name_cell_markup
@@ -563,18 +562,18 @@ def test_build_field_color_palette_no_colors() -> None:
 # =============================================================================
 
 
-def test_flatten_markup_to_muted_string() -> None:
-    result = _flatten_markup_to_muted("hello")
+def test_flatten_markup_to_attr_muted_string() -> None:
+    result = _flatten_markup_to_attr("hello", "muted")
     assert result == ("muted", "hello")
 
 
-def test_flatten_markup_to_muted_tuple() -> None:
-    result = _flatten_markup_to_muted(("some_attr", "text"))
+def test_flatten_markup_to_attr_muted_tuple() -> None:
+    result = _flatten_markup_to_attr(("some_attr", "text"), "muted")
     assert result == ("muted", "text")
 
 
-def test_flatten_markup_to_muted_list() -> None:
-    result = _flatten_markup_to_muted([("attr", "a"), "b"])
+def test_flatten_markup_to_attr_muted_list() -> None:
+    result = _flatten_markup_to_attr([("attr", "a"), "b"], "muted")
     assert result == ("muted", "ab")
 
 
@@ -583,16 +582,16 @@ def test_flatten_markup_to_muted_list() -> None:
 # =============================================================================
 
 
-def test_flatten_markup_to_stale_string() -> None:
-    assert _flatten_markup_to_stale("hello") == ("stale", "hello")
+def test_flatten_markup_to_attr_stale_string() -> None:
+    assert _flatten_markup_to_attr("hello", "stale") == ("stale", "hello")
 
 
-def test_flatten_markup_to_stale_tuple() -> None:
-    assert _flatten_markup_to_stale(("some_attr", "text")) == ("stale", "text")
+def test_flatten_markup_to_attr_stale_tuple() -> None:
+    assert _flatten_markup_to_attr(("some_attr", "text"), "stale") == ("stale", "text")
 
 
-def test_flatten_markup_to_stale_list() -> None:
-    assert _flatten_markup_to_stale([("attr", "a"), "b"]) == ("stale", "ab")
+def test_flatten_markup_to_attr_stale_list() -> None:
+    assert _flatten_markup_to_attr([("attr", "a"), "b"], "stale") == ("stale", "ab")
 
 
 def test_is_field_stale_old_field() -> None:
