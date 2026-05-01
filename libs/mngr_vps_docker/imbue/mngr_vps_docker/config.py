@@ -4,6 +4,7 @@ from pydantic import Field
 
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.primitives import ActivitySource
+from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
 
 
@@ -61,4 +62,13 @@ class VpsDockerProviderConfig(ProviderInstanceConfig):
     default_start_args: tuple[str, ...] = Field(
         default=(),
         description="Default docker run arguments applied to all containers",
+    )
+    builder: DockerBuilder = Field(
+        default=DockerBuilder.DOCKER,
+        description=(
+            "Image builder used on the VPS. DOCKER (default) runs native `docker build` over SSH. "
+            "DEPOT runs `depot build --load` over SSH, auto-installs the depot CLI on the VPS the "
+            "first time, and requires DEPOT_TOKEN in the agent's environment (DEPOT_PROJECT_ID "
+            "optional, only forwarded when set)."
+        ),
     )

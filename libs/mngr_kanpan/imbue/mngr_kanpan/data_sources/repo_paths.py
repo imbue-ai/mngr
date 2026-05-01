@@ -1,7 +1,9 @@
 from collections.abc import Sequence
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import Field
+from pydantic import TypeAdapter
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
@@ -16,6 +18,7 @@ from imbue.mngr_kanpan.data_source import FieldValue
 class RepoPathField(FieldValue):
     """GitHub repository path (owner/repo) for an agent."""
 
+    kind: Literal["repo_path"] = Field(default="repo_path", description="Discriminator tag")
     path: str = Field(description="GitHub owner/repo path")
 
     def display(self) -> CellDisplay:
@@ -56,6 +59,9 @@ def repo_path_from_labels(labels: dict[str, str]) -> str | None:
     return _parse_github_repo_path(remote_url)
 
 
+_REPO_PATH_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(RepoPathField)
+
+
 class RepoPathsDataSource(FrozenModel):
     """Computes repo_path field from agent remote labels.
 
@@ -76,8 +82,8 @@ class RepoPathsDataSource(FrozenModel):
         return {FIELD_REPO_PATH: "REPO"}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        return {FIELD_REPO_PATH: RepoPathField}
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
+        return {FIELD_REPO_PATH: _REPO_PATH_ADAPTER}
 
     def compute(
         self,

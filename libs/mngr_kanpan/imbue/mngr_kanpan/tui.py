@@ -131,7 +131,7 @@ _SECTION_SUFFIX: dict[BoardSection, str] = {
     BoardSection.PR_BEING_REVIEWED: "PR pending",
     BoardSection.PR_DRAFT: "draft PR",
     BoardSection.STILL_COOKING: "no PR yet",
-    BoardSection.PRS_FAILED: "PRs failed",
+    BoardSection.PRS_FAILED: "PRs not loaded",
     BoardSection.MUTED: "",
 }
 

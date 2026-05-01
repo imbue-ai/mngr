@@ -75,6 +75,11 @@ jobs:
       - name: Fetch offload image-cache git notes
         run: git fetch origin 'refs/notes/*:refs/notes/*' || true
 
+      - name: Configure git identity for image-cache note writes
+        run: |
+          git config user.email "dev@imbue.com"
+          git config user.name "imbue-dev"
+
       - name: Run tests via offload
         id: tests
         run: just test-offload
@@ -262,6 +267,11 @@ jobs:
 
       - name: Fetch offload image-cache git notes
         run: git fetch origin 'refs/notes/*:refs/notes/*' || true
+
+      - name: Configure git identity for image-cache note writes
+        run: |
+          git config user.email "dev@imbue.com"
+          git config user.name "imbue-dev"
 
       - name: Run acceptance tests via offload
         id: tests
