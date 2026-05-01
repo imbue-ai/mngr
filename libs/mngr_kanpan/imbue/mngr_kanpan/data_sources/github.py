@@ -365,20 +365,26 @@ class GitHubDataSource(FrozenModel):
         errors: list[str] = []
         now = now_utc()
 
-        # Resolve repo paths and per-agent staleness: prefer cached repo_path
-        # (taint propagates from its created), fall back to labels (created=now).
+        # Resolve repo paths and per-agent staleness. Labels are world data
+        # (refreshed every list_agents call) so they are always at least as
+        # fresh as the cached RepoPathField (which is itself just
+        # repo_path_from_labels at some earlier T). Prefer labels for both
+        # value and freshness; fall back to the cache only when labels no
+        # longer carry a remote, in which case the cached value is the only
+        # information we have and its `created` correctly tags the result
+        # as stale.
         agent_repos: dict[AgentName, str] = {}
         agent_created: dict[AgentName, datetime] = {}
         for agent in agents:
+            label_repo = repo_path_from_labels(agent.labels)
+            if label_repo is not None:
+                agent_repos[agent.name] = label_repo
+                agent_created[agent.name] = now
+                continue
             cached_repo_field = _get_cached_repo_field(cached_fields, agent.name)
             if cached_repo_field is not None:
-                repo_path: str | None = cached_repo_field.path
+                agent_repos[agent.name] = cached_repo_field.path
                 agent_created[agent.name] = cached_repo_field.created
-            else:
-                repo_path = repo_path_from_labels(agent.labels)
-                agent_created[agent.name] = now
-            if repo_path is not None:
-                agent_repos[agent.name] = repo_path
 
         # Collect unique repos
         all_repos: set[str] = set(agent_repos.values())

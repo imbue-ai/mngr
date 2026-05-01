@@ -472,8 +472,10 @@ def test_compute_with_conflicts_and_unresolved() -> None:
     assert isinstance(fields[agent.name][FIELD_UNRESOLVED], UnresolvedField)
 
 
-def test_compute_propagates_created_from_cached_repo_path() -> None:
-    """A cached repo_path's `created` taints the `created` of derived PR/CI fields."""
+def test_compute_falls_back_to_cached_repo_path_when_labels_lack_remote() -> None:
+    """If labels don't carry a remote, we fall back to the cached repo_path
+    and the derived PR/CI fields inherit the cached field's `created`.
+    """
     ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
     cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
     ctx = make_mngr_ctx_with_cg(cg)
@@ -489,15 +491,22 @@ def test_compute_propagates_created_from_cached_repo_path() -> None:
     assert ci.created == cached_created
 
 
-def test_compute_uses_now_when_no_cached_repo_path() -> None:
-    """When falling back to labels, derived field `created` should be ~now."""
+def test_compute_uses_now_when_labels_carry_remote() -> None:
+    """Labels are world data and always at least as fresh as the cache, so
+    when they carry a remote we use them and stamp `created=now` -- even if
+    a (potentially stale) cached repo_path is also available.
+    """
     ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
     cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
     ctx = make_mngr_ctx_with_cg(cg)
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
-    fields, _errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    # Even with a stale cache present, labels should win.
+    stale_cached = _NOW - timedelta(hours=2)
+    cached_fields: dict[AgentName, dict[str, FieldValue]] = {
+        AgentName("a1"): {"repo_path": RepoPathField(path="org/repo", created=stale_cached)},
+    }
+    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached_fields, mngr_ctx=ctx)
     pr = fields[AgentName("a1")][FIELD_PR]
-    # We only assert that the timestamp is recent (within the last minute).
     delta = datetime.now(timezone.utc) - pr.created
     assert delta.total_seconds() < 60
 
