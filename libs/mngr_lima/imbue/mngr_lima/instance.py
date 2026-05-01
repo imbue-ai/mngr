@@ -11,10 +11,8 @@ from typing import Sequence
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from pyinfra.api import Host as PyinfraHost
 
-# ``pyinfra.api`` is imported lazily inside ``get_connector`` because it pulls
-# pyinfra + paramiko + gevent (~150ms cumul) at import time and is only needed
-# when callers actually want a pyinfra connector.
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
@@ -953,15 +951,8 @@ sudo poweroff
     # Connector Method
     # =========================================================================
 
-    def get_connector(self, host: HostInterface | HostId) -> "PyinfraHost":  # noqa: F821
-        """Get the pyinfra connector for a host.
-
-        The return type is a string so that ``pyinfra.api`` (which pulls
-        paramiko + gevent) does not have to be imported at module load. The
-        runtime value is whatever ``host_obj.connector.host`` returns;
-        callers that care about the static type can import ``PyinfraHost``
-        from ``pyinfra.api`` themselves.
-        """
+    def get_connector(self, host: HostInterface | HostId) -> PyinfraHost:
+        """Get the pyinfra connector for a host."""
         host_id = host.id if isinstance(host, HostInterface) else host
         host_obj = self.get_host(host_id)
         if isinstance(host_obj, Host):

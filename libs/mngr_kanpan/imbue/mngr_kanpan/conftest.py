@@ -45,5 +45,8 @@ def _fake_run_kanpan(
 def patched_run_kanpan(monkeypatch: pytest.MonkeyPatch) -> Generator[list[dict[str, Any]], None, None]:
     """Monkeypatch run_kanpan and yield the list of captured call dicts."""
     called_with: list[dict[str, Any]] = []
-    monkeypatch.setattr("imbue.mngr_kanpan.cli.run_kanpan", _fake_run_kanpan(called_with))
+    # ``run_kanpan`` is imported inside the ``kanpan`` callback (lazy load) rather
+    # than at module top, so we patch it on its source module instead of on
+    # ``imbue.mngr_kanpan.cli``.
+    monkeypatch.setattr("imbue.mngr_kanpan.tui.run_kanpan", _fake_run_kanpan(called_with))
     yield called_with

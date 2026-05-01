@@ -83,7 +83,7 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "clone",
         "imbue.mngr.cli.clone",
         "clone",
-        "Create a new agent by cloning an existing one [experimental]",
+        "Create a new agent by cloning an existing agent or git URL [experimental]",
         apply_plugin_options=False,
     ),
     _spec("config", "imbue.mngr.cli.config", "config", "Manage mngr configuration", aliases=("cfg",)),
@@ -96,7 +96,7 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
     ),
     _spec("create", "imbue.mngr.cli.create", "create", "Create and run an agent", aliases=("c",)),
     _spec("destroy", "imbue.mngr.cli.destroy", "destroy", "Destroy agent(s) and clean up resources", aliases=("rm",)),
-    _spec("events", "imbue.mngr.cli.events", "events", "View events from an agent or host"),
+    _spec("event", "imbue.mngr.cli.events", "events", "View events from an agent or host"),
     _spec(
         "exec",
         "imbue.mngr.cli.exec",

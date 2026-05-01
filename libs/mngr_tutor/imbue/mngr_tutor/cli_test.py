@@ -27,8 +27,10 @@ def test_tutor_command_calls_lesson_selector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The tutor command should call run_lesson_selector."""
+    # ``run_lesson_selector`` is imported inside the ``tutor`` callback
+    # (lazy load), so we patch it on its source module.
     monkeypatch.setattr(
-        "imbue.mngr_tutor.cli.run_lesson_selector",
+        "imbue.mngr_tutor.tui.run_lesson_selector",
         lambda lessons: None,  # Return None to exit the selector loop
     )
     result = cli_runner.invoke(tutor, [], obj=plugin_manager, catch_exceptions=False)
