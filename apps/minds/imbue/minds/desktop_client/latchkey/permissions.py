@@ -21,6 +21,7 @@ the latchkey-specific work lives here.
 import asyncio
 import html as html_module
 import json
+import shlex
 from collections.abc import Mapping
 from collections.abc import Sequence
 from enum import auto
@@ -158,15 +159,25 @@ def _format_auth_failed_message(service_display_name: str, detail: str) -> str:
 
 
 def _format_manual_credentials_message(service_display_name: str) -> str:
-    return (
-        f"{service_display_name} does not support browser sign-in. Run the suggested "
-        f"``latchkey auth set`` command in a terminal, then click Approve again."
-    )
+    return f"{service_display_name} does not support browser sign-in; manual credentials are required."
 
 
 def _fallback_set_credentials_example(service_name: str) -> str:
     """Return a generic ``latchkey auth set`` invocation when latchkey didn't supply one."""
     return f'latchkey auth set {service_name} -H "Authorization: Bearer <token>"'
+
+
+def _prepend_latchkey_directory(command: str, latchkey_directory: Path | None) -> str:
+    """Prefix ``command`` with ``LATCHKEY_DIRECTORY=<dir>`` so the credential
+    written by the user lands in the same store the desktop client uses.
+
+    No-op when the desktop client doesn't pin a custom directory (then the
+    user's terminal will inherit latchkey's own default, matching what the
+    desktop client also does).
+    """
+    if latchkey_directory is None:
+        return command
+    return f"LATCHKEY_DIRECTORY={shlex.quote(str(latchkey_directory))} {command}"
 
 
 def _json_error(message: str, status_code: int) -> Response:
@@ -302,9 +313,10 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                     outcome=GrantOutcome.NEEDS_MANUAL_CREDENTIALS,
                     message=_format_manual_credentials_message(service_info.display_name),
                     response_event=None,
-                    set_credentials_example=(
+                    set_credentials_example=_prepend_latchkey_directory(
                         latchkey_service_info.set_credentials_example
-                        or _fallback_set_credentials_example(service_info.name)
+                        or _fallback_set_credentials_example(service_info.name),
+                        self.latchkey.latchkey_directory,
                     ),
                 )
             logger.info(

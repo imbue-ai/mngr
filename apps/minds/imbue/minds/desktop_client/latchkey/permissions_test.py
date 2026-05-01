@@ -1,4 +1,5 @@
 import json
+import shlex
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,7 @@ def _make_latchkey_with_status(
     auth_browser_stderr: str = "",
     auth_options_json: str = _DEFAULT_AUTH_OPTIONS_JSON,
     set_credentials_example: str = _DEFAULT_SET_EXAMPLE,
+    latchkey_directory: Path | None = None,
 ) -> Latchkey:
     """Build a ``Latchkey`` that uses two fake binaries.
 
@@ -117,7 +119,7 @@ def _make_latchkey_with_status(
         "    sys.exit(99)\n"
     )
     binary.chmod(0o755)
-    return Latchkey(latchkey_binary=str(binary))
+    return Latchkey(latchkey_binary=str(binary), latchkey_directory=latchkey_directory)
 
 
 def _build_handler(
@@ -128,6 +130,7 @@ def _build_handler(
     auth_browser_stderr: str = "",
     auth_options_json: str = _DEFAULT_AUTH_OPTIONS_JSON,
     set_credentials_example: str = _DEFAULT_SET_EXAMPLE,
+    latchkey_directory: Path | None = None,
 ) -> LatchkeyPermissionGrantHandler:
     latchkey = _make_latchkey_with_status(
         tmp_path,
@@ -136,6 +139,7 @@ def _build_handler(
         auth_browser_stderr=auth_browser_stderr,
         auth_options_json=auth_options_json,
         set_credentials_example=set_credentials_example,
+        latchkey_directory=latchkey_directory,
     )
     mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
     return LatchkeyPermissionGrantHandler(
@@ -407,6 +411,68 @@ def test_grant_falls_back_to_generic_example_when_latchkey_omits_one(tmp_path: P
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
     assert result.set_credentials_example is not None
     assert "latchkey auth set slack" in result.set_credentials_example
+
+
+def test_grant_prefixes_set_example_with_latchkey_directory_when_pinned(tmp_path: Path) -> None:
+    """User-facing command must write into the same store the desktop client uses.
+
+    The desktop client passes ``LATCHKEY_DIRECTORY`` to all its own latchkey
+    invocations; if we don't tell the user to do the same, ``latchkey auth
+    set`` writes credentials into ``~/.latchkey`` while the desktop client
+    keeps reading from the pinned directory and the second Approve click
+    still reports ``MISSING``.
+    """
+    pinned = tmp_path / "pinned latchkey dir"
+    pinned.mkdir()
+    base_example = 'latchkey auth set slack -H "Authorization: Bearer <token>"'
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(["set"]),
+        set_credentials_example=base_example,
+        latchkey_directory=pinned,
+    )
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
+    assert result.set_credentials_example is not None
+    # The directory contains a space, so the path must be shell-quoted to
+    # survive a copy-paste into a terminal.
+    expected_prefix = f"LATCHKEY_DIRECTORY={shlex.quote(str(pinned))} "
+    assert result.set_credentials_example.startswith(expected_prefix)
+    assert result.set_credentials_example.endswith(base_example)
+
+
+def test_grant_does_not_prefix_set_example_when_no_latchkey_directory(tmp_path: Path) -> None:
+    """Without a pinned directory the command must not carry an env override.
+
+    Otherwise we'd be inventing an empty ``LATCHKEY_DIRECTORY=`` prefix
+    that doesn't reflect what the desktop client actually does.
+    """
+    base_example = 'latchkey auth set slack -H "Authorization: Bearer <token>"'
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(["set"]),
+        set_credentials_example=base_example,
+        latchkey_directory=None,
+    )
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
+    assert result.set_credentials_example == base_example
 
 
 def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path: Path) -> None:
