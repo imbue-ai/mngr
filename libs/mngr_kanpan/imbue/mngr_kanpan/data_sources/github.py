@@ -409,14 +409,17 @@ class GitHubDataSource(FrozenModel):
         # Build agent fields. The per-agent `created` reflects the staleness of
         # the cached repo_path used to map the agent to its PR -- if that
         # mapping is stale, the derived PR/CI/etc. fields are also stale.
+        # Agents missing from agent_repos (no label, no cache) are skipped:
+        # there is no PR data to build for them, and looking them up in
+        # agent_created would KeyError.
         fields: dict[AgentName, dict[str, FieldValue]] = {}
         for agent in agents:
             agent_repo = agent_repos.get(agent.name)
             branch = agent.initial_branch
             agent_fields: dict[str, FieldValue] = {}
-            this_created = agent_created[agent.name]
 
             if agent_repo is not None and branch is not None:
+                this_created = agent_created[agent.name]
                 pr = _lookup_pr(pr_by_repo_branch, agent_repo, branch)
                 agent_prs_loaded = repo_pr_loaded.get(agent_repo) is True
 

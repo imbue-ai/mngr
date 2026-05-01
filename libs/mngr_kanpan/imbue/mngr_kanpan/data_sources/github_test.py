@@ -382,6 +382,24 @@ def test_compute_agents_without_repo() -> None:
     assert errors == []
 
 
+def test_compute_mixed_agents_with_and_without_repo() -> None:
+    """Agents lacking a repo (no labels, no cache) must not crash compute()
+    even when other agents in the same call have a repo. Regression test for
+    a KeyError on agent_created[agent.name] when the per-agent staleness map
+    was not populated for unlabeled agents.
+    """
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
+    ctx = make_mngr_ctx_with_cg(cg)
+    agent_with = make_agent_details(
+        name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"}
+    )
+    agent_without = make_agent_details(name="a2", initial_branch="branch-2", labels={})
+    fields, _errors = ds.compute(agents=(agent_with, agent_without), cached_fields={}, mngr_ctx=ctx)
+    assert agent_with.name in fields
+    assert agent_without.name not in fields
+
+
 def test_compute_agents_with_cached_repo_path() -> None:
     """Uses cached repo_path field from previous cycle if available."""
     ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
