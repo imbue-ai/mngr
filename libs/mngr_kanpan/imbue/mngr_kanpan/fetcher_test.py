@@ -518,7 +518,7 @@ def test_load_field_cache_returns_empty_on_invalid_agent_name(tmp_path: Path) ->
     pr_payload = make_pr_field().model_dump(mode="json")
     # 'a1/x' contains '/', which violates SafeName's regex. The PR payload
     # makes deserialize_fields return a non-empty dict so that the
-    # AgentName(\"a1/x\") constructor is actually reached.
+    # AgentName("a1/x") constructor is actually reached.
     cache_data = {"a1/x": {FIELD_PR: pr_payload}}
     (cache_dir / "field_cache.json").write_text(json.dumps(cache_data))
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
