@@ -119,9 +119,7 @@ merge_sdk() {
           }
         )
       ')
-  done <<EOF
-$input
-EOF
+  done < <(printf '%s' "$input")
   printf '%s' "$result"
 }
 
