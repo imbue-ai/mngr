@@ -29,7 +29,6 @@ from imbue.mngr_usage.data_types import UsagePluginConfig
 from imbue.mngr_usage.data_types import WINDOW_KEYS
 from imbue.mngr_usage.data_types import WindowSnapshot
 
-_RATE_LIMITS_WRITER_SCRIPT = "claude_rate_limits_writer.sh"
 _REFRESH_PROBE_PROMPT = "ok"
 _REFRESH_PROBE_SYSTEM_PROMPT = "Respond with one word."
 _REFRESH_TIMEOUT_SECONDS = 60.0
