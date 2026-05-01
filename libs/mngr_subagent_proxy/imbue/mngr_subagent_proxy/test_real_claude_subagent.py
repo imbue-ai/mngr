@@ -942,12 +942,15 @@ def test_deny_mode_intercepts_task_with_deny_reason(
     2. ``.claude/agents/mngr-proxy.md`` is NOT written (no Haiku
        dispatcher needed in deny mode).
     3. When the parent Claude agent calls Task, the parent's transcript
-       contains the deny-mode reason text (``deny mode`` /
-       ``mngr create`` / ``--message-file``) -- proving both that the
-       model attempted Task (else the PreToolUse hook would not have
-       fired) and that our deny hook returned the expected reason.
-    4. The proxy machinery sidefiles are NOT created in the parent's
-       state dir (no subagent_map/, no proxy_commands/).
+       contains the deny-reason text (``Use a mngr subagent`` /
+       ``mngr-subagents`` / ``wait-``) -- proving both that the model
+       attempted Task (else the PreToolUse hook would not have fired)
+       and that our deny hook returned the expected short reason
+       pointing at the wait-script + skill.
+    4. The PROXY-only sidefiles are NOT created in the parent's state
+       dir (no subagent_map/, no subagent_results/). Note: deny mode
+       DOES write to proxy_commands/ (that is where the wait-script
+       lives) and to subagent_prompts/, so those are not asserted absent.
 
     We deliberately do NOT assert on whether Claude followed the deny
     instructions and spawned a mngr subagent itself via Bash. That is
