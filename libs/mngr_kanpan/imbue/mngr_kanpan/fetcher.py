@@ -340,7 +340,7 @@ def load_field_cache(
 
     try:
         raw = json.loads(cache_path.read_text())
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         logger.debug("Failed to load field cache: {}", e)
         return {}
 

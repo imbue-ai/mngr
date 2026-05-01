@@ -484,6 +484,17 @@ def test_load_field_cache_returns_empty_on_corrupt_json(tmp_path: Path) -> None:
     assert result == {}
 
 
+def test_load_field_cache_returns_empty_on_non_utf8_bytes(tmp_path: Path) -> None:
+    """A cache file with non-utf8 bytes (e.g. partial write) must not crash the TUI."""
+    cache_dir = tmp_path / "kanpan"
+    cache_dir.mkdir(parents=True)
+    # 0xFF is not a valid utf-8 start byte
+    (cache_dir / "field_cache.json").write_bytes(b"\xff\xfe\x00bad")
+    ctx = make_mngr_ctx_with_profile_dir(tmp_path)
+    result = load_field_cache(ctx, [])
+    assert result == {}
+
+
 def test_load_field_cache_skips_unknown_types(tmp_path: Path) -> None:
     """load_field_cache skips field entries whose type is not in the type registry."""
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
