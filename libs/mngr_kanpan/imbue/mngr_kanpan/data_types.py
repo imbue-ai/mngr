@@ -218,7 +218,9 @@ class KanpanPluginConfig(PluginConfig):
     )
 
     def effective_staleness_threshold_seconds(self) -> float:
-        """Resolved staleness threshold: explicit value, or 90% of refresh interval."""
+        """Resolved staleness threshold: explicit value, or
+        ``STALENESS_FRACTION_OF_REFRESH_INTERVAL * refresh_interval_seconds``.
+        """
         if self.staleness_threshold_seconds is not None:
             return self.staleness_threshold_seconds
         return STALENESS_FRACTION_OF_REFRESH_INTERVAL * self.refresh_interval_seconds
