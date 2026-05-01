@@ -37,6 +37,7 @@ from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr.utils.testing import setup_claude_trust_config_for_subprocess
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 
@@ -78,12 +79,8 @@ def _make_git_work_dir(parent: Path, name: str) -> Path:
     work_dir = parent / name
     init_git_repo(work_dir, initial_commit=True)
     (work_dir / ".gitignore").write_text(".claude/settings.local.json\n")
-    subprocess.run(["git", "-C", str(work_dir), "add", ".gitignore"], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-C", str(work_dir), "commit", "-m", "add gitignore"],
-        check=True,
-        capture_output=True,
-    )
+    run_git_command(work_dir, "add", ".gitignore")
+    run_git_command(work_dir, "commit", "-m", "add gitignore")
     return work_dir
 
 
