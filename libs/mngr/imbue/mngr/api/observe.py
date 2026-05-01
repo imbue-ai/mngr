@@ -404,6 +404,7 @@ class AgentObserver(MutableModel):
         self._discovery_stream_process = self._concurrency_group.run_process_in_background(
             command=[self.mngr_binary, "observe", "--discovery-only", "--quiet", "--on-error", "continue"],
             on_output=self._on_discovery_stream_output,
+            is_checked_by_group=False,
         )
 
     def _on_discovery_stream_output(self, line: str, is_stdout: bool) -> None:
@@ -481,6 +482,7 @@ class AgentObserver(MutableModel):
                     "--quiet",
                 ],
                 on_output=lambda line, is_stdout: self._on_activity_event(line, is_stdout, host_id_str),
+                is_checked_by_group=False,
             )
             with self._lock:
                 self._events_processes[host_id_str] = process

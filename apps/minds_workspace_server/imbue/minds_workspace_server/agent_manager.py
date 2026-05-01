@@ -659,6 +659,7 @@ class AgentManager:
                 cwd=self._resolve_observe_cwd(),
                 on_output=self._handle_observe_output_line,
                 shutdown_event=self._shutdown_event,
+                is_checked_by_group=False,
             )
         except (OSError, InvalidConcurrencyGroupStateError):
             _loguru_logger.warning(

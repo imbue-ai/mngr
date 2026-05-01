@@ -197,6 +197,19 @@ def test_unchecked_failed_processes_do_not_raise(tmp_path: Path) -> None:
     assert i == 1
 
 
+def test_failed_background_processes_raise_by_default(tmp_path: Path) -> None:
+    """Pins down that is_checked_by_group defaults to True so silent process failures don't slip through."""
+    i = 0
+    with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
+        with ConcurrencyGroup(name="outer") as cg:
+            process = cg.run_process_in_background(["bash", "-c", "exit 1"])
+            process.wait()
+            i += 1
+        assert process.poll() == 1
+    assert exception_info.value.only_exception_is_instance_of(ProcessError)
+    assert i == 0
+
+
 def test_unchecked_failed_foreground_process_setup_does_not_raise(tmp_path: Path) -> None:
     with ConcurrencyGroup(name="group") as cg:
         with contextlib.suppress(ProcessError):
@@ -446,10 +459,12 @@ def _create_nested_concurrency_group_and_run_process(
     closure: dict,
     tmp_path: Path,
     process_started_event: Event,
+    process_holder: list[RunningProcess],
 ) -> None:
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with concurrency_group.make_concurrency_group(name="inner") as cg:
             process = cg.run_process_in_background(LONG_RUNNING_COMMAND, is_checked_by_group=True)
+            process_holder.append(process)
             process_started_event.set()
             process.wait()
             closure["i"] += 1
@@ -460,14 +475,21 @@ def _create_nested_concurrency_group_and_run_process(
 def test_shutdown_propagates_to_children_and_kills_processes(tmp_path: Path) -> None:
     closure = {"i": 0}
     process_started_event = Event()
+    process_holder: list[RunningProcess] = []
     with ConcurrencyGroup(name="outer") as cg:
         cg.start_new_thread(
             target=_create_nested_concurrency_group_and_run_process,
-            args=(cg, closure, tmp_path, process_started_event),
+            args=(cg, closure, tmp_path, process_started_event, process_holder),
         )
         process_started_event.wait(timeout=5.0)
         cg.shutdown()
     assert closure["i"] == 10
+    # CG's timeout path is fire-and-forget (`terminate(force_kill_seconds=0.0)`
+    # signals the supervisor thread but does not wait for it to reap the
+    # subprocess). Wait explicitly so pytest's session-level leak detector
+    # cannot scan before SIGTERM+reap completes.
+    assert len(process_holder) == 1
+    assert poll_until(process_holder[0].is_finished, timeout=10.0)
 
 
 def _create_nested_concurrency_group_and_run_process_while_shutting_down(
@@ -488,6 +510,9 @@ def _create_nested_concurrency_group_and_run_process_while_shutting_down(
 
 
 def test_new_resources_cannot_be_created_when_shutting_down(tmp_path: Path) -> None:
+    # No process-reap wait needed here: `run_process_in_background` raises
+    # ConcurrentShutdownError before any subprocess is spawned, so there is
+    # nothing for the leak detector to see.
     closure = {"i": 0}
     process_started_event = Event()
     with ConcurrencyGroup(name="outer") as cg:
