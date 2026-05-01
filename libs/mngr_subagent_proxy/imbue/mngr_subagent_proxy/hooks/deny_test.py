@@ -266,15 +266,26 @@ def test_deny_handles_missing_state_dir_with_generic_reason(
     assert "mngr-subagents" in reason
 
 
-def test_deny_handles_empty_stdin_with_generic_deny(
+@pytest.mark.parametrize(
+    "stdin_text",
+    ["", "{not json", "[1, 2, 3]"],
+    ids=["empty", "malformed_json", "non_object_json"],
+)
+def test_deny_handles_unparseable_stdin_with_generic_deny(
     tmp_path: Path,
     state_dir: Path,
     hook_env: pytest.MonkeyPatch,
+    stdin_text: str,
 ) -> None:
-    """Empty stdin still emits a deny (never an allow pass-through)."""
+    """Unparseable stdin (empty, malformed JSON, or non-object JSON) emits a generic deny.
 
+    The hook must NEVER pass through to allow on any malformed input
+    -- a pass-through would let the native Task tool run, defeating the
+    point of deny mode. The generic-deny phrasing (``deny mode``) is
+    the load-bearing signal that this is the fallback path.
+    """
     hook_env.chdir(tmp_path)
-    stdin_buffer = io.StringIO("")
+    stdin_buffer = io.StringIO(stdin_text)
     stdout_buffer = io.StringIO()
     deny_hook.run(stdin_buffer, stdout_buffer)
 
@@ -282,40 +293,6 @@ def test_deny_handles_empty_stdin_with_generic_deny(
     hook_out = response["hookSpecificOutput"]
     assert hook_out["permissionDecision"] == "deny"
     assert "deny mode" in hook_out["permissionDecisionReason"]
-
-
-def test_deny_handles_malformed_json_with_generic_deny(
-    tmp_path: Path,
-    state_dir: Path,
-    hook_env: pytest.MonkeyPatch,
-) -> None:
-    """Malformed stdin JSON falls back to a generic deny."""
-
-    hook_env.chdir(tmp_path)
-    stdin_buffer = io.StringIO("{not json")
-    stdout_buffer = io.StringIO()
-    deny_hook.run(stdin_buffer, stdout_buffer)
-
-    response = json.loads(stdout_buffer.getvalue())
-    hook_out = response["hookSpecificOutput"]
-    assert hook_out["permissionDecision"] == "deny"
-
-
-def test_deny_handles_non_object_json_with_generic_deny(
-    tmp_path: Path,
-    state_dir: Path,
-    hook_env: pytest.MonkeyPatch,
-) -> None:
-    """JSON that decodes to a non-dict (e.g. a list) falls back to generic deny."""
-
-    hook_env.chdir(tmp_path)
-    stdin_buffer = io.StringIO("[1, 2, 3]")
-    stdout_buffer = io.StringIO()
-    deny_hook.run(stdin_buffer, stdout_buffer)
-
-    response = json.loads(stdout_buffer.getvalue())
-    hook_out = response["hookSpecificOutput"]
-    assert hook_out["permissionDecision"] == "deny"
 
 
 def test_deny_handles_missing_prompt_with_generic_deny(
