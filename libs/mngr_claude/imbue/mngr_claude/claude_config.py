@@ -458,9 +458,13 @@ def encode_claude_project_dir_name(path: Path) -> str:
     """Encode a filesystem path into Claude Code's project directory name.
 
     Claude Code stores per-project data in ~/.claude/projects/<encoded-path>/.
-    The encoding replaces '/' and '.' with '-'.
+    The encoding replaces '/', '.', and '_' with '-'. The underscore mapping
+    is empirically required: paths like ``/private/var/.../my_dir`` get stored
+    by Claude Code under ``my-dir`` not ``my_dir``, so an adoption that uses
+    a name with underscores would write the JSONL to a location Claude Code
+    never looks at on resume.
     """
-    return str(path).replace("/", "-").replace(".", "-")
+    return str(path).replace("/", "-").replace(".", "-").replace("_", "-")
 
 
 # =============================================================================
