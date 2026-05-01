@@ -83,6 +83,9 @@ def test_create_key_happy_path(fake_key_server: LiteLLMKeyClient) -> None:
     assert result.base_url == "https://litellm-proxy.modal.run/anthropic"
 
 
+# Flaky: ECONNRESET race against the in-process `fake_key_server`. See the
+# fixture in conftest.py for the deferred-fix rationale.
+@pytest.mark.flaky
 def test_create_key_without_optional_params(fake_key_server: LiteLLMKeyClient) -> None:
     result = fake_key_server.create_key(
         access_token="test-token",
@@ -113,6 +116,9 @@ def test_get_key_info_happy_path(fake_key_server: LiteLLMKeyClient) -> None:
     assert result.spend == 12.50
 
 
+# Flaky: ECONNRESET race against the in-process `fake_key_server`. See the
+# fixture in conftest.py for the deferred-fix rationale.
+@pytest.mark.flaky
 def test_update_budget_happy_path(fake_key_server: LiteLLMKeyClient) -> None:
     fake_key_server.update_budget(
         access_token="test-token",

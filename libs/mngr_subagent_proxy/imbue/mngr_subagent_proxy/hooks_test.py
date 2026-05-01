@@ -20,6 +20,7 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr_subagent_proxy import _stop_hook_guard
+from imbue.mngr_subagent_proxy.hook_io import parse_int_env
 from imbue.mngr_subagent_proxy.hooks import cleanup as cleanup_hook
 from imbue.mngr_subagent_proxy.hooks import reap as reap_hook
 from imbue.mngr_subagent_proxy.hooks import spawn as spawn_hook
@@ -39,34 +40,16 @@ def _list_returns(agents: dict[str, AgentDetails] | None):
     return _stub
 
 
-@pytest.fixture
-def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
-    """Clear subagent-proxy env vars so individual tests set only what they need."""
-    for name in (
-        "MNGR_AGENT_STATE_DIR",
-        "MNGR_AGENT_NAME",
-        "MNGR_SUBAGENT_DEPTH",
-        "MNGR_MAX_SUBAGENT_DEPTH",
-        "MNGR_SUBAGENT_REAP_BACKGROUND",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    return monkeypatch
-
-
 def _mode_bits(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
-def _set_spawn_env(monkeypatch: pytest.MonkeyPatch, state_dir: Path) -> None:
-    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
-    monkeypatch.setenv("MNGR_AGENT_NAME", "parent-agent")
-
-
-def test_spawn_rewrites_input(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> None:
+def test_spawn_rewrites_input(
+    tmp_path: Path,
+    hook_env: pytest.MonkeyPatch,
+    state_dir: Path,
+) -> None:
     """PreToolUse hook rewrites the Agent invocation to the mngr proxy."""
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    _set_spawn_env(clean_env, state_dir)
 
     hook_input: dict[str, object] = {
         "tool_use_id": "toolu_abc12345678",
@@ -223,13 +206,14 @@ def test_wait_script_traps_env_file_cleanup_on_failure() -> None:
     )
 
 
-def test_spawn_depth_limit_denies_with_reason(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> None:
+def test_spawn_depth_limit_denies_with_reason(
+    tmp_path: Path,
+    hook_env: pytest.MonkeyPatch,
+    state_dir: Path,
+) -> None:
     """At max depth, the hook denies the Task tool with an explanatory reason."""
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    _set_spawn_env(clean_env, state_dir)
-    clean_env.setenv("MNGR_SUBAGENT_DEPTH", "3")
-    clean_env.setenv("MNGR_MAX_SUBAGENT_DEPTH", "3")
+    hook_env.setenv("MNGR_SUBAGENT_DEPTH", "3")
+    hook_env.setenv("MNGR_MAX_SUBAGENT_DEPTH", "3")
 
     hook_input: dict[str, object] = {
         "tool_use_id": "toolu_depth1234567",
@@ -275,6 +259,7 @@ def test_spawn_passes_through_without_env(tmp_path: Path, clean_env: pytest.Monk
 def test_rewrite_substitutes_output_and_cleans_up(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
+    state_dir: Path,
 ) -> None:
     """PostToolUse hook destroys the child and cleans up per-tool_use_id state files.
 
@@ -284,7 +269,6 @@ def test_rewrite_substitutes_output_and_cleans_up(
     this hook -- Claude Code's PostToolUse ``updatedToolOutput`` is
     MCP-only and does not apply to built-in tools.
     """
-    state_dir = tmp_path / "state"
     for sub in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
         (state_dir / sub).mkdir(parents=True)
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
@@ -347,6 +331,7 @@ def test_rewrite_substitutes_output_and_cleans_up(
 def test_rewrite_missing_result_preserves_subagent(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
+    state_dir: Path,
 ) -> None:
     """When result_file is missing, subagent_wait never observed END_TURN
     (Haiku gave up early -- timeout, hallucinated permission dialog,
@@ -358,7 +343,6 @@ def test_rewrite_missing_result_preserves_subagent(
     case so on_before_agent_destroy / SessionStart-reaper can still
     pick the child up later.
     """
-    state_dir = tmp_path / "state"
     for sub in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
         (state_dir / sub).mkdir(parents=True)
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
@@ -411,6 +395,7 @@ def test_rewrite_live_lifecycle_preserves_subagent(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
     live_state: AgentLifecycleState,
+    state_dir: Path,
 ) -> None:
     """Even when result_file IS present, a child still in RUNNING /
     WAITING must be preserved -- catches edge cases where subagent_wait
@@ -418,7 +403,6 @@ def test_rewrite_live_lifecycle_preserves_subagent(
     waiting for a permission prompt resolution that will produce more
     work).
     """
-    state_dir = tmp_path / "state"
     for sub in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
         (state_dir / sub).mkdir(parents=True)
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
@@ -461,6 +445,7 @@ def test_rewrite_live_lifecycle_preserves_subagent(
 def test_rewrite_preserves_subagent_when_mngr_list_errors(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
+    state_dir: Path,
 ) -> None:
     """A transient mngr-list failure must not destroy an in-flight child.
 
@@ -470,7 +455,6 @@ def test_rewrite_preserves_subagent_when_mngr_list_errors(
     as 'safely dead' would let a flaky listing call destroy a still-running
     subagent. Conservative behavior is to preserve.
     """
-    state_dir = tmp_path / "state"
     for sub in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
         (state_dir / sub).mkdir(parents=True)
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
@@ -511,9 +495,9 @@ def test_rewrite_preserves_subagent_when_mngr_list_errors(
 def test_rewrite_ignores_unmapped_tool_use_id(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
+    state_dir: Path,
 ) -> None:
     """If no map file exists for the tool_use_id, the hook is a no-op."""
-    state_dir = tmp_path / "state"
     (state_dir / "subagent_map").mkdir(parents=True)
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
 
@@ -558,9 +542,9 @@ def test_reap_fast_path_empty_state(
 def test_reap_with_work_spawns_background_child(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
+    state_dir: Path,
 ) -> None:
     """When map entries exist, the reaper dispatches a detached background child."""
-    state_dir = tmp_path / "state"
     (state_dir / "subagent_map").mkdir(parents=True)
     (state_dir / "subagent_map" / "toolu_tid1234.json").write_text(
         json.dumps(
@@ -588,10 +572,10 @@ def test_reap_with_work_spawns_background_child(
 def test_reap_background_worker_cleans_up_missing_agent(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
+    state_dir: Path,
 ) -> None:
     """Background reaper drops side files for map entries whose target agent is gone."""
     clean_env.setenv("MNGR_SUBAGENT_REAP_BACKGROUND", "1")
-    state_dir = tmp_path / "state"
     for sub in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
         (state_dir / sub).mkdir(parents=True)
     tid = "toolu_missing1234"
@@ -631,20 +615,12 @@ def test_reap_background_worker_cleans_up_missing_agent(
     assert destroy_calls == []
 
 
-def test_slugify_caps_length_and_collapses_runs() -> None:
-    """slugify lowercases, collapses non-alphanumeric runs to single dashes, and caps at 30 chars."""
-    assert spawn_hook.slugify("Hello, World!") == "hello-world"
-    assert spawn_hook.slugify("----") == ""
-    assert spawn_hook.slugify("a" * 50) == "a" * 30
-    assert spawn_hook.slugify("A B  C") == "a-b-c"
-
-
 def test_spawn_env_vars_from_real_os_env(clean_env: pytest.MonkeyPatch) -> None:
     """Sanity: helpers read from the actual os.environ (not a closure)."""
     # This ensures we don't accidentally snapshot at import time.
-    assert spawn_hook._parse_int_env("__DOES_NOT_EXIST__", 42) == 42
+    assert parse_int_env("__DOES_NOT_EXIST__", 42) == 42
     clean_env.setenv("__SPAWN_TEST_INT__", "7")
-    assert spawn_hook._parse_int_env("__SPAWN_TEST_INT__", 0) == 7
+    assert parse_int_env("__SPAWN_TEST_INT__", 0) == 7
 
 
 # guard_per_agent_plugin_cache wraps every Stop / SubagentStop command in
@@ -736,14 +712,13 @@ def test_guard_per_agent_plugin_cache_noop_when_cache_missing(tmp_path: Path) ->
 def test_reap_run_invokes_per_agent_plugin_cache_guard(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
+    state_dir: Path,
 ) -> None:
     """The SessionStart reap hook calls guard_per_agent_plugin_cache for
     the agent's own state dir BEFORE the orphan-reap fast path. This
     closes the bug where a fresh-from-GitHub per-agent cache contained
     an unguarded orchestrator that fired inside spawned subagents.
     """
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
     cache_hooks = (
         state_dir
         / "plugin"

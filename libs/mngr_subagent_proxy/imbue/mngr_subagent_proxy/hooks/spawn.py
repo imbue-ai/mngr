@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -23,9 +22,18 @@ from typing import TextIO
 
 from loguru import logger
 
-from imbue.mngr_subagent_proxy.mngr_binary import get_mngr_command_shell_form
+from imbue.mngr_subagent_proxy.hook_io import DEFAULT_MAX_SUBAGENT_DEPTH
+from imbue.mngr_subagent_proxy.hook_io import emit_depth_limit_deny
+from imbue.mngr_subagent_proxy.hook_io import emit_json_response
+from imbue.mngr_subagent_proxy.hook_io import parse_int_env
+from imbue.mngr_subagent_proxy.hook_io import read_hook_stdin_json
+from imbue.mngr_subagent_proxy.hook_io import write_executable_file
+from imbue.mngr_subagent_proxy.hook_io import write_secure_file
+from imbue.mngr_subagent_proxy.target_name import build_subagent_target_name
+from imbue.mngr_subagent_proxy.wait_script import WAIT_SCRIPT_HEADER
+from imbue.mngr_subagent_proxy.wait_script import WAIT_SCRIPT_SPAWN_ONLY_BRANCH
+from imbue.mngr_subagent_proxy.wait_script import build_init_block
 
-_DEFAULT_MAX_DEPTH: Final[int] = 3
 _PASS_THROUGH_RESPONSE: Final[dict[str, Any]] = {
     "hookSpecificOutput": {
         "hookEventName": "PreToolUse",
@@ -34,85 +42,8 @@ _PASS_THROUGH_RESPONSE: Final[dict[str, Any]] = {
 }
 
 
-def _emit(stdout: TextIO, response: dict[str, Any]) -> None:
-    """Write a JSON response to stdout and flush."""
-    stdout.write(json.dumps(response) + "\n")
-    stdout.flush()
-
-
 def _emit_pass_through(stdout: TextIO) -> None:
-    _emit(stdout, _PASS_THROUGH_RESPONSE)
-
-
-def _emit_depth_limit_deny(stdout: TextIO, depth: int, max_depth: int) -> None:
-    """Emit a deny decision with an explanatory reason (depth limit reached)."""
-    reason = (
-        f"mngr_subagent_proxy: subagent depth limit ({depth}/{max_depth}) reached. "
-        "Cannot spawn nested Task tools beyond this depth."
-    )
-    _emit(
-        stdout,
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
-        },
-    )
-
-
-def _read_stdin_json(stdin: TextIO) -> dict[str, Any] | None:
-    """Read hook JSON from stdin; return None on empty or malformed input."""
-    try:
-        raw = stdin.read()
-    except OSError as e:
-        logger.warning("spawn: failed to read stdin: {}", e)
-        return None
-    if not raw:
-        logger.warning("spawn: empty stdin")
-        return None
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        logger.warning("spawn: malformed stdin JSON: {}", e)
-        return None
-    if not isinstance(parsed, dict):
-        logger.warning("spawn: stdin JSON is not an object")
-        return None
-    return parsed
-
-
-def _parse_int_env(name: str, default: int) -> int:
-    """Parse an int-valued env var; return default on missing/invalid."""
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-def slugify(text: str) -> str:
-    """Lowercase, replace non-alnum with '-', collapse repeats, trim, cap at 30."""
-    lowered = text.lower()
-    converted_chars = [ch if ch.isalnum() else "-" for ch in lowered]
-    converted = "".join(converted_chars)
-    # collapse runs of '-'
-    collapsed_parts: list[str] = []
-    prev_dash = False
-    for ch in converted:
-        if ch == "-":
-            if prev_dash:
-                continue
-            prev_dash = True
-        else:
-            prev_dash = False
-        collapsed_parts.append(ch)
-    collapsed = "".join(collapsed_parts).strip("-")
-    capped = collapsed[:30]
-    return capped.rstrip("-")
+    emit_json_response(stdout, _PASS_THROUGH_RESPONSE)
 
 
 def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> str:
@@ -122,33 +53,32 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
     agent's Bash tool), so it remains shell. Values are baked in as literals
     via shlex.quote so the script does not depend on the hook's env at run
     time beyond MNGR_AGENT_STATE_DIR / MNGR_SUBAGENT_DEPTH.
+
+    Shared scaffolding (header, init block, spawn-only branch) lives in
+    ``wait_script.py`` so PROXY and DENY hooks cannot drift on the
+    EXIT-trap-before-redirect invariant that protects parent secrets.
     """
     q_tid = shlex.quote(tool_use_id)
     q_target = shlex.quote(target_name)
     q_parent_cwd = shlex.quote(parent_cwd)
-    # Resolve mngr binary at template-generation time so the script and the
-    # python helpers stay in lockstep on per-agent vs. fallback resolution.
-    mngr_cmd = get_mngr_command_shell_form()
     return (
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        "umask 077\n"
-        "\n"
-        f"TID={q_tid}\n"
-        f"TARGET_NAME={q_target}\n"
-        f"PARENT_CWD={q_parent_cwd}\n"
-        'STATE_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR not set}"\n'
-        'ENV_FILE="$STATE_DIR/proxy_commands/env-$TID.env"\n'
-        'INIT_FLAG="$STATE_DIR/proxy_commands/initialized-$TID"\n'
-        'PROMPT_FILE="$STATE_DIR/subagent_prompts/$TID.md"\n'
-        'RESULT_FILE="$STATE_DIR/subagent_results/$TID.txt"\n'
-        'MAP_FILE="$STATE_DIR/subagent_map/$TID.json"\n'
+        WAIT_SCRIPT_HEADER
+        + "\n"
+        + f"TID={q_tid}\n"
+        + f"TARGET_NAME={q_target}\n"
+        + f"PARENT_CWD={q_parent_cwd}\n"
+        + 'STATE_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR not set}"\n'
+        + 'ENV_FILE="$STATE_DIR/proxy_commands/env-$TID.env"\n'
+        + 'INIT_FLAG="$STATE_DIR/proxy_commands/initialized-$TID"\n'
+        + 'PROMPT_FILE="$STATE_DIR/subagent_prompts/$TID.md"\n'
+        + 'RESULT_FILE="$STATE_DIR/subagent_results/$TID.txt"\n'
+        + 'MAP_FILE="$STATE_DIR/subagent_map/$TID.json"\n'
         # Watermark sidefile owned entirely by subagent_wait. It writes
         # the transcript byte-size on PERMISSION_REQUIRED and reads it
         # on the next invocation to suppress re-firing the same dialog.
         # Haiku never sees it -- the wait-script just passes its path.
-        'WATERMARK_FILE="$STATE_DIR/proxy_commands/watermark-$TID"\n'
-        "\n"
+        + 'WATERMARK_FILE="$STATE_DIR/proxy_commands/watermark-$TID"\n'
+        + "\n"
         # Idempotent re-entry guard. PostToolUse cleans subagent_prompts/
         # and subagent_map/, so absence of either is the signal that
         # PostToolUse has already run for this tool_use_id -- emit the
@@ -157,97 +87,55 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
         # block: if the prompt file is gone, the create call would fail
         # with "Path ... does not exist." (We deliberately do NOT check
         # RESULT_FILE here -- on the first call it doesn't exist yet.)
-        'if [ ! -f "$PROMPT_FILE" ] || [ ! -f "$MAP_FILE" ]; then\n'
-        '    echo "MNGR_PROXY_END_OF_OUTPUT"\n'
-        "    exit 0\n"
-        "fi\n"
-        "\n"
-        'if [ ! -f "$INIT_FLAG" ]; then\n'
-        # Trap removes the env-file (which contains parent secrets) on ANY
-        # exit -- success, mngr-create failure, or signal. Installed BEFORE
-        # the env capture so a signal arriving between the redirect and the
-        # trap cannot leave secrets on disk. shred / rm -f gracefully no-op
-        # if $ENV_FILE has not yet been created. The trap is scoped to this
-        # branch (cleared after touch) so it doesn't fire on the idempotent
-        # re-entry path which has no ENV_FILE to clean up.
-        '    trap \'shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\' EXIT\n'
-        "    env | grep -Ev "
-        "'^(MNGR_AGENT_STATE_DIR|MNGR_AGENT_NAME|MAIN_CLAUDE_SESSION_ID|MNGR_HOST_DIR)=' "
-        '> "$ENV_FILE"\n'
-        # --reuse: idempotent create. If `mngr create` partially succeeded
-        # last time (e.g. host provisioned but initial-message delivery
-        # failed) and `set -euo pipefail` killed the script before INIT_FLAG
-        # was touched, the next invocation must NOT fail with "agent already
-        # exists". --reuse makes the create call adopt an existing same-named
-        # agent and (re-)deliver the message. Without this flag, a
-        # SendMessageError mid-create wedges the proxy permanently because
-        # Haiku has no path to recover.
-        f'    {mngr_cmd} create "$TARGET_NAME:$PARENT_CWD" \\\n'
-        "        --type mngr-proxy-child \\\n"
-        "        --transfer=none \\\n"
-        "        --no-ensure-clean \\\n"
-        "        --no-connect \\\n"
-        "        --reuse \\\n"
-        '        --env-file "$ENV_FILE" \\\n'
-        '        --message-file "$PROMPT_FILE" \\\n'
-        "        --label mngr_subagent_proxy=child \\\n"
-        "        --env MNGR_SUBAGENT_PROXY_CHILD=1 \\\n"
-        "        --env MNGR_SUBAGENT_DEPTH=$((${MNGR_SUBAGENT_DEPTH:-0}+1))\n"
-        '    shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\n'
-        "    trap - EXIT\n"
-        '    touch "$INIT_FLAG"\n'
-        "fi\n"
-        "\n"
+        + 'if [ ! -f "$PROMPT_FILE" ] || [ ! -f "$MAP_FILE" ]; then\n'
+        + '    echo "MNGR_PROXY_END_OF_OUTPUT"\n'
+        + "    exit 0\n"
+        + "fi\n"
+        + "\n"
+        # Init block: --reuse keeps mngr-create idempotent across
+        # partial-success states; trap installed BEFORE the env-redirect
+        # so a signal between the two cannot leave secrets on disk.
+        # Spawned children are typed mngr-proxy-child and tagged with
+        # MNGR_SUBAGENT_PROXY_CHILD=1 so their Stop hooks no-op.
+        + build_init_block(
+            agent_type="mngr-proxy-child",
+            extra_create_env_kvs=("MNGR_SUBAGENT_PROXY_CHILD=1",),
+        )
+        + "\n"
         # --spawn-only: caller (Haiku in background mode) wants to
         # spawn the subagent and return immediately; do NOT block on
         # subagent_wait. The subagent runs to completion in the
         # background under mngr's normal lifecycle.
-        'if [ "${1:-}" = "--spawn-only" ]; then\n'
-        "    exit 0\n"
-        "fi\n"
-        "\n"
-        'mkdir -p "$(dirname "$RESULT_FILE")"\n'
+        + WAIT_SCRIPT_SPAWN_ONLY_BRANCH
+        + "\n"
+        + 'mkdir -p "$(dirname "$RESULT_FILE")"\n'
         # Watermark sidefile is consulted by subagent_wait on every
         # invocation. Haiku just re-runs the same Bash command on
         # NEED_PERMISSION; the script's idempotence + watermark file
         # together prevent re-firing on the same pending dialog.
-        "output=$(uv run python -m imbue.mngr_subagent_proxy.subagent_wait "
-        '"$TARGET_NAME" --watermark-file "$WATERMARK_FILE")\n'
-        'case "$output" in\n'
-        "    END_TURN:*)\n"
-        '        printf \'%s\' "${output#END_TURN:}" > "$RESULT_FILE"\n'
+        + "output=$(uv run python -m imbue.mngr_subagent_proxy.subagent_wait "
+        + '"$TARGET_NAME" --watermark-file "$WATERMARK_FILE")\n'
+        + 'case "$output" in\n'
+        + "    END_TURN:*)\n"
+        + '        printf \'%s\' "${output#END_TURN:}" > "$RESULT_FILE"\n'
         # Print the subagent end-turn text as the wait-script's stdout so
         # Haiku's Bash captures it; Haiku is instructed to echo this verbatim
         # in its own final reply, which becomes the parent's tool_result. The
         # END_OF_OUTPUT sentinel is the one stable signal Haiku uses to
         # decide it's done -- the body content is opaque text from a real
         # subagent and may contain anything (including 'DONE' literally).
-        "        printf '%s\\n' \"${output#END_TURN:}\"\n"
-        '        echo "MNGR_PROXY_END_OF_OUTPUT"\n'
-        "        ;;\n"
-        "    PERMISSION_REQUIRED:*)\n"
-        '        echo "NEED_PERMISSION: $TARGET_NAME"\n'
-        "        ;;\n"
-        "    *)\n"
-        '        echo "ERROR: unexpected subagent_wait output: $output" >&2\n'
-        "        exit 1\n"
-        "        ;;\n"
-        "esac\n"
+        + "        printf '%s\\n' \"${output#END_TURN:}\"\n"
+        + '        echo "MNGR_PROXY_END_OF_OUTPUT"\n'
+        + "        ;;\n"
+        + "    PERMISSION_REQUIRED:*)\n"
+        + '        echo "NEED_PERMISSION: $TARGET_NAME"\n'
+        + "        ;;\n"
+        + "    *)\n"
+        + '        echo "ERROR: unexpected subagent_wait output: $output" >&2\n'
+        + "        exit 1\n"
+        + "        ;;\n"
+        + "esac\n"
     )
-
-
-def _write_secure_file(path: Path, content: str) -> None:
-    """Write content to path with 0600 perms, creating parents as needed."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
-    path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-
-
-def _write_executable_file(path: Path, content: str) -> None:
-    """Write content to path with 0755 perms, creating parents as needed."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
-    path.chmod(0o755)
 
 
 def run(stdin: TextIO, stdout: TextIO) -> None:
@@ -269,14 +157,14 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         _emit_pass_through(stdout)
         return
 
-    depth = _parse_int_env("MNGR_SUBAGENT_DEPTH", 0)
-    max_depth = _parse_int_env("MNGR_MAX_SUBAGENT_DEPTH", _DEFAULT_MAX_DEPTH)
+    depth = parse_int_env("MNGR_SUBAGENT_DEPTH", 0)
+    max_depth = parse_int_env("MNGR_MAX_SUBAGENT_DEPTH", DEFAULT_MAX_SUBAGENT_DEPTH)
     if depth >= max_depth:
         logger.warning("spawn: depth {}/{} reached; denying Task", depth, max_depth)
-        _emit_depth_limit_deny(stdout, depth, max_depth)
+        emit_depth_limit_deny(stdout, depth, max_depth)
         return
 
-    payload = _read_stdin_json(stdin)
+    payload = read_hook_stdin_json(stdin, "spawn")
     if payload is None:
         _emit_pass_through(stdout)
         return
@@ -295,9 +183,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         _emit_pass_through(stdout)
         return
 
-    slug = slugify(orig_desc or "subagent") or "subagent"
-    tid_suffix = tool_use_id[-8:]
-    target_name = f"{parent_name}--subagent-{slug}-{tid_suffix}"
+    target_name = build_subagent_target_name(parent_name, orig_desc, tool_use_id)
 
     parent_cwd = str(Path.cwd())
 
@@ -320,7 +206,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
     script_file = cmd_dir / f"wait-{tool_use_id}.sh"
 
     try:
-        _write_secure_file(prompt_file, orig_prompt)
+        write_secure_file(prompt_file, orig_prompt)
     except OSError as e:
         logger.warning("spawn: failed to write prompt file {}: {}", prompt_file, e)
         _emit_pass_through(stdout)
@@ -333,7 +219,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         "run_in_background": orig_run_bg,
     }
     try:
-        _write_secure_file(map_file, json.dumps(map_payload))
+        write_secure_file(map_file, json.dumps(map_payload))
     except OSError as e:
         logger.warning("spawn: failed to write map file {}: {}", map_file, e)
         _emit_pass_through(stdout)
@@ -341,7 +227,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
 
     wait_script_content = build_wait_script(tool_use_id, target_name, parent_cwd)
     try:
-        _write_executable_file(script_file, wait_script_content)
+        write_executable_file(script_file, wait_script_content)
     except OSError as e:
         logger.warning("spawn: failed to write wait-script {}: {}", script_file, e)
         _emit_pass_through(stdout)
@@ -431,7 +317,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
             },
         }
     }
-    _emit(stdout, response)
+    emit_json_response(stdout, response)
 
 
 def main() -> None:

@@ -8,9 +8,15 @@ from typing import Any
 
 import pytest
 
+from imbue.imbue_common.model_update import to_update
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import PluginName
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
+from imbue.mngr_subagent_proxy.data_types import SubagentProxyMode
+from imbue.mngr_subagent_proxy.data_types import SubagentProxyPluginConfig
+from imbue.mngr_subagent_proxy.plugin import SUBAGENT_PROXY_PLUGIN_NAME
 from imbue.mngr_subagent_proxy.plugin import SubagentProxyChildConfig
 from imbue.mngr_subagent_proxy.plugin import UnguardedProjectStopHookError
 from imbue.mngr_subagent_proxy.plugin import UnsupportedSubagentHookError
@@ -20,9 +26,12 @@ from imbue.mngr_subagent_proxy.plugin import on_before_agent_destroy
 from imbue.mngr_subagent_proxy.testing import FakeAgent
 from imbue.mngr_subagent_proxy.testing import FakeHost
 
-# on_after_provisioning declares its third parameter as MngrContext but
-# immediately ``del``-s it. Tests pass through an untyped wrapper so the
-# None sentinel doesn't leak argument-type noise to every call site.
+# on_after_provisioning declares its third parameter as MngrContext, but
+# ``_resolve_plugin_mode`` treats a None mngr_ctx as "use defaults" (PROXY
+# mode), so PROXY-mode tests can pass None and skip building a full
+# MngrContext. Tests that exercise DENY mode pass a real ctx instead.
+# The untyped wrapper keeps the None sentinel from leaking argument-type
+# noise to every call site.
 _provision: Any = on_after_provisioning
 _destroy: Any = on_before_agent_destroy
 
@@ -377,6 +386,256 @@ def test_cascade_destroy_recorded_children_no_op_without_map_dir(tmp_path: Path)
 
     assert calls == []
     assert not (state_dir / "subagent_cascade_destroy.log").exists()
+
+
+def _ctx_with_plugin_config(base_ctx: MngrContext, config: SubagentProxyPluginConfig) -> MngrContext:
+    """Return a copy of ``base_ctx`` with the given subagent_proxy config injected."""
+    updated_config = base_ctx.config.model_copy_update(
+        to_update(base_ctx.config.field_ref().plugins, {PluginName(SUBAGENT_PROXY_PLUGIN_NAME): config}),
+    )
+    return base_ctx.model_copy_update(to_update(base_ctx.field_ref().config, updated_config))
+
+
+def test_deny_mode_installs_only_pretooluse_deny_hook(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
+    """In DENY mode, on_after_provisioning installs only the deny hook -- nothing else.
+
+    Specifically, no PostToolUse hook (no spawned children to clean up),
+    no SessionStart reaper, no mngr-proxy.md agent definition, no plugin
+    cache hooks.json walk.
+    """
+    ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    _provision(agent, fake_host, ctx)
+
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    assert settings_path.exists()
+    settings = json.loads(settings_path.read_text())
+    hooks = settings["hooks"]
+    # Only PreToolUse:Agent is installed.
+    assert "PreToolUse" in hooks
+    assert any(entry.get("matcher") == "Agent" for entry in hooks["PreToolUse"])
+    pre_cmd = hooks["PreToolUse"][0]["hooks"][0]["command"]
+    assert "imbue.mngr_subagent_proxy.hooks.deny" in pre_cmd
+    # No PostToolUse, no SessionStart -- nothing to clean up because no
+    # subagent is ever spawned automatically.
+    assert "PostToolUse" not in hooks
+    assert "SessionStart" not in hooks
+
+
+def test_deny_mode_does_not_write_proxy_agent_definition(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
+    """In DENY mode, the mngr-proxy.md agent definition is NOT written.
+
+    The Haiku dispatcher is part of PROXY mode only. Writing it in deny
+    mode would dirty the worktree with a file the user never invokes.
+    """
+    ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    _provision(agent, fake_host, ctx)
+
+    proxy_md = work_dir / ".claude" / "agents" / "mngr-proxy.md"
+    assert not proxy_md.exists()
+
+
+def test_deny_mode_writes_mngr_subagents_skill(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
+    """DENY mode provisions the ``mngr-subagents`` Claude skill at .claude/skills/.
+
+    The skill carries the verbose context (when to use, how to parse
+    subagent_wait output, how to inspect a running subagent, etc.) so
+    the deny hook's permissionDecisionReason can stay short.
+    """
+    ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    _provision(agent, fake_host, ctx)
+
+    skill_path = work_dir / ".claude" / "skills" / "mngr-subagents" / "SKILL.md"
+    assert skill_path.is_file()
+    body = skill_path.read_text()
+    # Frontmatter wires the skill into Claude Code's skill-discovery mechanism.
+    assert body.startswith("---\n")
+    assert "name: mngr-subagents" in body
+    assert "description:" in body
+    # Body must teach the explicit two-command spawn-and-wait protocol --
+    # this is the single source of truth for how Claude delegates work
+    # in DENY mode (the deny hook just points back at this skill).
+    assert "uv run mngr create" in body
+    assert "subagent_wait" in body
+    assert "END_TURN:" in body
+    # Depth-env propagation is load-bearing: without it, a chain of
+    # subagents spawned through the skill protocol would bypass the
+    # depth-limit guard.
+    assert "MNGR_SUBAGENT_DEPTH" in body
+    # Permission dialogs and backgrounding are documented secondary
+    # concerns; pin them so the skill keeps that coverage.
+    assert "NEED_PERMISSION" in body
+    assert "run_in_background" in body
+
+
+def test_proxy_mode_does_not_write_mngr_subagents_skill(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
+    """PROXY mode does NOT write the deny-mode skill.
+
+    The skill explains a workflow (Claude runs Bash to spawn) that
+    only applies in DENY mode. In PROXY mode Claude calls Task as
+    usual; surfacing the skill would be confusing.
+    """
+    ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.PROXY))
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    _provision(agent, fake_host, ctx)
+
+    skill_path = work_dir / ".claude" / "skills" / "mngr-subagents" / "SKILL.md"
+    assert not skill_path.exists()
+
+
+def test_deny_mode_skips_project_stop_hook_check(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In DENY mode, un-guarded project-level Stop hooks do NOT block provisioning.
+
+    The project-stop-hook check exists to prevent runaway loops in
+    spawned proxy children. Deny mode never spawns proxy children, so
+    the check is irrelevant -- and refusing to provision over it would
+    be a regression vs. PROXY mode users who simply opt out of the
+    proxy feature entirely.
+    """
+    monkeypatch.delenv("MNGR_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS", raising=False)
+    _seed_project_settings_with_unguarded_stop(work_dir)
+    ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    # Must NOT raise -- the project-stop-hook check is gated behind PROXY mode.
+    _provision(agent, fake_host, ctx)
+
+
+def test_deny_mode_does_not_strip_subagent_user_hooks(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
+    """In DENY mode, even a mngr-proxy-child agent gets only the deny hook.
+
+    A user could conceivably set deny mode and still call `mngr create
+    --type mngr-proxy-child`. The existing strip / auto-allow logic for
+    proxy children is gated behind PROXY mode -- in deny mode it must
+    not run, otherwise we'd be doing PROXY-mode work in DENY mode.
+    """
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.local.json").write_text(
+        json.dumps(
+            {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo user-stop"}]}]}},
+            indent=2,
+        )
+        + "\n"
+    )
+    ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
+    agent = FakeAgent(
+        AgentId.generate(),
+        work_dir,
+        SubagentProxyChildConfig(),
+        name=AgentName("reviewer--subagent-foo-deadbeef"),
+    )
+
+    # PROXY mode would raise UnsupportedSubagentHookError here; DENY mode
+    # leaves the user's Stop hook alone and proceeds.
+    _provision(agent, fake_host, ctx)
+
+    settings = json.loads((claude_dir / "settings.local.json").read_text())
+    # The user's Stop hook is still present, untouched.
+    assert any(
+        h.get("command") == "echo user-stop"
+        for entry in settings["hooks"].get("Stop", [])
+        for h in entry.get("hooks", [])
+    )
+
+
+def test_proxy_mode_default_when_config_absent(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
+    """A context with no plugin config defaults to PROXY mode (the original behavior).
+
+    Plugin loading must not flip behavior for users who haven't opted
+    in to deny mode.
+    """
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    # temp_mngr_ctx has no subagent_proxy plugin config -- defaults apply.
+    _provision(agent, fake_host, temp_mngr_ctx)
+
+    settings = json.loads((work_dir / ".claude" / "settings.local.json").read_text())
+    hooks = settings["hooks"]
+    # PROXY mode installs all three hook events.
+    assert "PreToolUse" in hooks
+    assert "PostToolUse" in hooks
+    assert "SessionStart" in hooks
+
+
+def test_explicit_proxy_mode_installs_full_proxy_hooks(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
+    """An explicit ``mode = PROXY`` config behaves the same as the absent-config default."""
+    ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.PROXY))
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    _provision(agent, fake_host, ctx)
+
+    settings = json.loads((work_dir / ".claude" / "settings.local.json").read_text())
+    hooks = settings["hooks"]
+    pre_cmd = hooks["PreToolUse"][0]["hooks"][0]["command"]
+    assert "imbue.mngr_subagent_proxy.hooks.spawn" in pre_cmd
+    assert "PostToolUse" in hooks
+    assert "SessionStart" in hooks
+
+
+def test_deny_mode_merges_into_existing_settings_local_json(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
+    """Deny mode preserves pre-existing entries in settings.local.json.
+
+    mngr_claude provisioning writes its readiness / user-prompt hooks
+    before this plugin runs (we are ``trylast``). Deny mode must merge
+    its single PreToolUse:Agent entry without clobbering those.
+    """
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.local.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "UserPromptSubmit": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": '[ -z "$MAIN_CLAUDE_SESSION_ID" ] && exit 0; '
+                                    "touch $MNGR_AGENT_STATE_DIR/active",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    _provision(agent, fake_host, ctx)
+
+    settings = json.loads((claude_dir / "settings.local.json").read_text())
+    hooks = settings["hooks"]
+    assert "UserPromptSubmit" in hooks
+    assert "PreToolUse" in hooks
 
 
 def test_plugin_strip_hooks_is_safe_when_settings_missing(work_dir: Path, fake_host: FakeHost) -> None:
