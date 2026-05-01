@@ -942,15 +942,15 @@ def test_deny_mode_intercepts_task_with_deny_reason(
     2. ``.claude/agents/mngr-proxy.md`` is NOT written (no Haiku
        dispatcher needed in deny mode).
     3. When the parent Claude agent calls Task, the parent's transcript
-       contains the deny-reason text (``Use a mngr subagent`` /
-       ``mngr-subagents`` / ``wait-``) -- proving both that the model
-       attempted Task (else the PreToolUse hook would not have fired)
-       and that our deny hook returned the expected short reason
-       pointing at the wait-script + skill.
-    4. The PROXY-only sidefiles are NOT created in the parent's state
-       dir (no subagent_map/, no subagent_results/). Note: deny mode
-       DOES write to proxy_commands/ (that is where the wait-script
-       lives) and to subagent_prompts/, so those are not asserted absent.
+       contains the deny-reason text (``deny mode`` /
+       ``mngr-subagents``) -- proving both that the model attempted
+       Task (else the PreToolUse hook would not have fired) and that
+       our deny hook returned the expected short skill-pointer reason.
+    4. The deny hook does NOT write any sidefiles (no subagent_map,
+       subagent_prompts, subagent_results, or proxy_commands). The
+       skill teaches Claude to write its own prompt file before
+       running ``mngr create --message-file``; the plugin's deny hook
+       has no business pre-staging anything.
 
     We deliberately do NOT assert on whether Claude followed the deny
     instructions and spawned a mngr subagent itself via Bash. That is
@@ -1017,15 +1017,11 @@ def test_deny_mode_intercepts_task_with_deny_reason(
         # Claude sees as the tool_result for the denied Task call. If these
         # strings appear in the transcript, the model emitted Task (else no
         # PreToolUse:Agent hook would have fired) AND our deny hook returned
-        # the expected short reason pointing at the wait-script + skill.
+        # the expected short skill-pointer reason.
         transcript = _agent_transcript_text(final_parent, temp_host_dir)
-        # Markers: literal deny phrasing, skill name (so Claude can load
-        # mngr-subagents), and the wait-script path's filename prefix
-        # (each Task call gets its own wait-<tool_use_id>.sh).
         deny_reason_markers = [
-            "Use a mngr subagent",
+            "deny mode",
             "mngr-subagents",
-            "wait-",
         ]
         missing = [m for m in deny_reason_markers if m not in transcript]
         assert not missing, (
@@ -1035,23 +1031,20 @@ def test_deny_mode_intercepts_task_with_deny_reason(
             f"Transcript tail (last 4000 chars):\n{transcript[-4000:]}"
         )
 
-        # PROXY-only machinery must not exist. Deny mode writes the
-        # prompt sidefile and the per-Task wait-script under
-        # proxy_commands/, so we only assert on the proxy-only files
-        # (subagent_map for cascade-destroy, subagent_results for the
-        # Haiku-relayed tool_result body).
+        # The deny hook does NOT write any sidefiles. The skill teaches
+        # Claude to stage its own prompt file before running mngr
+        # create --message-file; the plugin's deny hook has no
+        # business pre-staging anything.
         agent_id = final_parent.get("id")
         assert isinstance(agent_id, str)
         state_dir = temp_host_dir / "agents" / agent_id
         if state_dir.is_dir():
-            assert not (state_dir / "subagent_map").exists(), (
-                f"Deny mode unexpectedly created subagent_map/ in {state_dir}. "
-                f"Only PROXY mode writes to that directory (cascade-destroy state)."
-            )
-            assert not (state_dir / "subagent_results").exists(), (
-                f"Deny mode unexpectedly created subagent_results/ in {state_dir}. "
-                f"Only PROXY mode writes subagent end-turn payloads to disk."
-            )
+            for sidefile_dir in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
+                assert not (state_dir / sidefile_dir).exists(), (
+                    f"Deny mode unexpectedly created {sidefile_dir}/ in {state_dir}. "
+                    f"The deny hook should write nothing to the parent's state dir; "
+                    f"the skill teaches Claude to stage anything it needs itself."
+                )
 
         # Best-effort cleanup of any children Claude may have spawned by
         # following the deny instructions itself in Bash. Not asserting on

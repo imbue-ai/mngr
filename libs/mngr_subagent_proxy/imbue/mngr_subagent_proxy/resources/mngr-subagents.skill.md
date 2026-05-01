@@ -56,21 +56,9 @@ the `Bash` tool's own `run_in_background=true` parameter and
 DENY-specific background flag -- Claude Code's existing Bash
 backgrounding handles this.
 
-## Convenience: per-Task wait-script (if you do call Task)
-
-You may still call `Task` if you forget or it's the most natural shape
-for your turn. The plugin will deny it with a `permissionDecisionReason`
-that points at a per-Task-call wait-script:
-
-    bash <wait_script_path>
-
-That script does the same `mngr create` + `subagent_wait` sequence
-described above with all the boilerplate (env capture, target name,
-`--message-file` setup) baked in. Its stdout is the subagent's reply,
-already-stripped of `END_TURN:`. Use it just like the protocol above.
-This is purely a convenience -- the explicit two-command form is the
-canonical interface and is preferred when you already know what you
-want to delegate.
+If you do call `Task`, the plugin denies it with a reminder pointing
+back at this skill -- there is no separate wait-script convenience
+path. The two-command form above is the canonical and only interface.
 
 ## Permission dialogs
 

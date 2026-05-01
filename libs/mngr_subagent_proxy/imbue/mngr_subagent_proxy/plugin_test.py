@@ -463,13 +463,18 @@ def test_deny_mode_writes_mngr_subagents_skill(
     assert body.startswith("---\n")
     assert "name: mngr-subagents" in body
     assert "description:" in body
-    # Body must mention the wait-script protocol that the deny reason
-    # points to -- otherwise the skill is useless for its purpose.
-    assert "wait-script" in body or "wait_script" in body
-    # Permission-dialog handling is the load-bearing protocol detail
-    # the skill documents beyond "just run the script". Backgrounding
-    # is delegated to Claude Code's Bash run_in_background, so the
-    # skill points at that rather than introducing a DENY-specific flag.
+    # Body must teach the explicit two-command spawn-and-wait protocol --
+    # this is the single source of truth for how Claude delegates work
+    # in DENY mode (the deny hook just points back at this skill).
+    assert "uv run mngr create" in body
+    assert "subagent_wait" in body
+    assert "END_TURN:" in body
+    # Depth-env propagation is load-bearing: without it, a chain of
+    # subagents spawned through the skill protocol would bypass the
+    # depth-limit guard.
+    assert "MNGR_SUBAGENT_DEPTH" in body
+    # Permission dialogs and backgrounding are documented secondary
+    # concerns; pin them so the skill keeps that coverage.
     assert "NEED_PERMISSION" in body
     assert "run_in_background" in body
 

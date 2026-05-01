@@ -1,47 +1,32 @@
 """PreToolUse:Agent hook for the plugin's DENY mode.
 
-Reads the hook JSON from stdin and emits a PreToolUse decision JSON on
-stdout that DENIES the Task tool with a short ``permissionDecisionReason``
-of the form:
+Emits a PreToolUse decision JSON on stdout that DENIES the Task tool
+with a short ``permissionDecisionReason`` pointing Claude at the
+``mngr-subagents`` Claude skill (provisioned at
+``.claude/skills/mngr-subagents/SKILL.md`` by ``plugin.py``). The
+skill explains the explicit two-command spawn-and-wait protocol
+Claude should use instead of Task.
 
-    Use a mngr subagent instead of Task. Run: bash <wait_script_path>
-    (see the `mngr-subagents` skill for context). The script's stdout
-    is the subagent's reply -- treat it as the Task tool's tool_result.
-
-We do not branch on ``run_in_background`` here -- Claude Code's ``Bash``
-tool already accepts ``run_in_background=true``, so a Task call that
-wanted backgrounding can just bash the wait-script that way. Surfacing
-a separate DENY-specific background flag would create two redundant
+We deliberately do NOT generate per-Task-call wait-scripts or write
+prompt sidefiles. The skill is the single source of truth for the
+protocol; uniform invocation is cleaner than offering two redundant
 ways to do the same thing.
 
-The accompanying ``mngr-subagents`` Claude skill (provisioned in deny
-mode at ``.claude/skills/mngr-subagents/SKILL.md``) explains the full
-protocol. We deliberately keep this deny message short so it does not
-crowd the parent's transcript on every Task call -- the verbose
-context lives in the skill, loaded on demand.
-
-The wait-script (``$MNGR_AGENT_STATE_DIR/proxy_commands/wait-<tid>.sh``)
-spawns a mngr-managed subagent via ``mngr create`` and blocks on
-``subagent_wait`` until end_turn, then prints the subagent's reply to
-stdout. Claude runs that one Bash command and uses the script's stdout
-as if it were the Task tool's tool_result.
+Depth-limit enforcement is still done here: at or beyond
+``MNGR_MAX_SUBAGENT_DEPTH`` (default 3) the hook emits a depth-limit
+deny instead of the usual skill-pointer deny, so a chain of
+subagents that follow the skill's protocol cannot grow unbounded.
 
 No subagent is spawned automatically by this hook. No PostToolUse
-cleanup is installed. No SessionStart reaper. No Stop-hook guarding.
-This is deliberately a much smaller surface than PROXY mode -- see the
+cleanup. No SessionStart reaper. No Stop-hook guarding. This is
+deliberately a much smaller surface than PROXY mode -- see the
 plugin README's "DENY mode" section.
-
-On failure modes (missing env, malformed input, etc.) emits a generic
-deny so Claude is still informed; the Task tool never silently passes
-through in deny mode.
 """
 
 from __future__ import annotations
 
 import os
-import shlex
 import sys
-from pathlib import Path
 from typing import Final
 from typing import TextIO
 
@@ -52,136 +37,23 @@ from imbue.mngr_subagent_proxy.hook_io import emit_depth_limit_deny
 from imbue.mngr_subagent_proxy.hook_io import emit_pre_tool_deny
 from imbue.mngr_subagent_proxy.hook_io import parse_int_env
 from imbue.mngr_subagent_proxy.hook_io import read_hook_stdin_json
-from imbue.mngr_subagent_proxy.hook_io import write_executable_file
-from imbue.mngr_subagent_proxy.hook_io import write_secure_file
-from imbue.mngr_subagent_proxy.target_name import build_subagent_target_name
-from imbue.mngr_subagent_proxy.wait_script import WAIT_SCRIPT_HEADER
-from imbue.mngr_subagent_proxy.wait_script import WAIT_SCRIPT_SPAWN_ONLY_BRANCH
-from imbue.mngr_subagent_proxy.wait_script import build_init_block
 
-_GENERIC_DENY_REASON: Final[str] = (
+DENY_REASON: Final[str] = (
     "mngr_subagent_proxy is in deny mode: the Task tool is disabled for this agent. "
-    "Use a mngr-managed subagent instead. See the `mngr-subagents` skill for the protocol."
+    "Use a mngr-managed subagent instead -- see the `mngr-subagents` skill for the "
+    "two-command spawn-and-wait protocol."
 )
-
-
-def build_deny_reason(wait_script: Path) -> str:
-    """Build the short deny reason addressed to Claude.
-
-    Verbose context (when to use, parsing protocol, inspection commands)
-    lives in the ``mngr-subagents`` skill, not here. The deny reason is
-    a one-liner pointer + the concrete command for this Task call.
-
-    There is no separate "background" branch: Claude Code's ``Bash``
-    tool already accepts ``run_in_background=true``, so a Task call
-    that wanted backgrounding can just bash the wait-script that way
-    and ``BashOutput`` it later. Surfacing a second --spawn-only flag
-    here only created two redundant ways to do the same thing.
-    """
-    return (
-        f"Use a mngr subagent instead of Task. "
-        f"Run: bash {shlex.quote(str(wait_script))} "
-        f"(see the `mngr-subagents` skill for context). "
-        f"The script's stdout is the subagent's reply -- treat it as the Task tool's tool_result."
-    )
-
-
-def build_deny_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> str:
-    """Build the per-Task-call wait-script for deny mode.
-
-    Same shape as ``hooks/spawn.build_wait_script`` but simpler: the
-    runner is Claude, not Haiku, so we drop the Haiku-specific ceremony
-    (``MNGR_PROXY_END_OF_OUTPUT`` sentinel, idempotent re-entry guard
-    keyed on PostToolUse cleanup, watermark sidefile for permission
-    redo, ``mngr-proxy-child`` agent type). Spawned children are plain
-    ``claude`` agents labeled ``mngr_subagent_proxy=child``.
-
-    Shared scaffolding (header, init block, spawn-only branch) lives
-    in ``wait_script.py`` so PROXY and DENY hooks cannot drift on
-    the EXIT-trap-before-redirect invariant that protects parent
-    secrets.
-
-    The script:
-    1. Captures the parent's env to a temporary file (under EXIT trap so
-       a partial write cannot leave secrets on disk), then runs
-       ``mngr create --reuse`` with the prompt sidefile written by the
-       deny hook.
-    2. Blocks on ``subagent_wait`` and prints the subagent's end-turn
-       reply (with the ``END_TURN:`` prefix stripped) to stdout.
-    3. On ``PERMISSION_REQUIRED:<name>``, prints
-       ``NEED_PERMISSION: <name>`` and exits 1 so Claude (and the user)
-       see they need to ``mngr connect <name>`` to resolve.
-
-    The shared ``--spawn-only`` short-circuit from ``wait_script.py``
-    is still present in the script body but is not exercised by DENY
-    mode -- backgrounding goes through Claude Code's ``Bash``
-    ``run_in_background`` parameter on the script itself, not via a
-    DENY-specific flag.
-    """
-    q_tid = shlex.quote(tool_use_id)
-    q_target = shlex.quote(target_name)
-    q_parent_cwd = shlex.quote(parent_cwd)
-    return (
-        WAIT_SCRIPT_HEADER
-        + "\n"
-        + f"TID={q_tid}\n"
-        + f"TARGET_NAME={q_target}\n"
-        + f"PARENT_CWD={q_parent_cwd}\n"
-        + 'STATE_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR not set}"\n'
-        + 'ENV_FILE="$STATE_DIR/proxy_commands/env-$TID.env"\n'
-        + 'INIT_FLAG="$STATE_DIR/proxy_commands/initialized-$TID"\n'
-        + 'PROMPT_FILE="$STATE_DIR/subagent_prompts/$TID.md"\n'
-        + "\n"
-        + 'mkdir -p "$STATE_DIR/proxy_commands"\n'
-        + "\n"
-        # Init block: --reuse keeps mngr-create idempotent across
-        # partial-success states; trap installed BEFORE the env-redirect
-        # so a signal between the two cannot leave secrets on disk.
-        # Spawned children are plain claude agents (no mngr-proxy-child
-        # ceremony) labeled mngr_subagent_proxy=child.
-        + build_init_block(agent_type="claude")
-        + "\n"
-        # Shared scaffolding still includes this branch so PROXY and
-        # DENY wait-scripts share a single template. DENY mode does
-        # not surface ``--spawn-only`` in its deny reason and never
-        # invokes the branch -- backgrounding here goes through
-        # Claude Code's Bash ``run_in_background`` on the
-        # script-as-a-whole instead.
-        + WAIT_SCRIPT_SPAWN_ONLY_BRANCH
-        + "\n"
-        + "output=$(uv run python -m imbue.mngr_subagent_proxy.subagent_wait "
-        + '"$TARGET_NAME")\n'
-        + 'case "$output" in\n'
-        + "    END_TURN:*)\n"
-        # Print the subagent's end-turn body verbatim. Claude reads
-        # stdout directly -- no sentinel needed (Claude is the runner,
-        # not Haiku).
-        + "        printf '%s\\n' \"${output#END_TURN:}\"\n"
-        + "        ;;\n"
-        + "    PERMISSION_REQUIRED:*)\n"
-        + '        echo "NEED_PERMISSION: $TARGET_NAME" >&2\n'
-        + "        exit 1\n"
-        + "        ;;\n"
-        + "    *)\n"
-        + '        echo "ERROR: unexpected subagent_wait output: $output" >&2\n'
-        + "        exit 1\n"
-        + "        ;;\n"
-        + "esac\n"
-    )
 
 
 def run(stdin: TextIO, stdout: TextIO) -> None:
     """PreToolUse:Agent deny hook core.
 
-    Pure function in terms of its dependencies: takes stdin/stdout streams
-    explicitly. Reads env vars and filesystem state directly.
+    Pure function in terms of dependencies: takes stdin/stdout streams
+    explicitly, reads env vars directly.
 
     The depth-limit check matches PROXY mode's: at or beyond
     ``MNGR_MAX_SUBAGENT_DEPTH`` (default 3) the hook emits a deny
-    citing the depth, NOT the usual "use mngr instead" deny. This
-    keeps Claude (or any reader of the parent transcript) from being
-    pointed at a wait-script that would happily spawn another nested
-    subagent and grow the chain unbounded.
+    citing the depth, NOT the usual "use a mngr subagent" deny.
     """
     os.umask(0o077)
 
@@ -192,51 +64,11 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         emit_depth_limit_deny(stdout, depth, max_depth)
         return
 
-    payload = read_hook_stdin_json(stdin, "deny")
-    if payload is None:
-        emit_pre_tool_deny(stdout, _GENERIC_DENY_REASON)
-        return
-
-    tool_use_id = payload.get("tool_use_id")
-    tool_input = payload.get("tool_input") or {}
-    if not isinstance(tool_input, dict):
-        tool_input = {}
-    orig_prompt = tool_input.get("prompt") or ""
-    orig_desc = tool_input.get("description") or ""
-
-    if not isinstance(tool_use_id, str) or not tool_use_id or not isinstance(orig_prompt, str) or not orig_prompt:
-        logger.warning("deny: missing tool_use_id or prompt in hook input; emitting generic deny")
-        emit_pre_tool_deny(stdout, _GENERIC_DENY_REASON)
-        return
-
-    state_dir_env = os.environ.get("MNGR_AGENT_STATE_DIR", "")
-    parent_name = os.environ.get("MNGR_AGENT_NAME", "")
-    if not state_dir_env or not parent_name:
-        logger.warning("deny: missing MNGR_AGENT_STATE_DIR or MNGR_AGENT_NAME; emitting generic deny")
-        emit_pre_tool_deny(stdout, _GENERIC_DENY_REASON)
-        return
-
-    target_name = build_subagent_target_name(parent_name, orig_desc, tool_use_id)
-    parent_cwd = str(Path.cwd())
-    state_dir = Path(state_dir_env)
-    prompt_file = state_dir / "subagent_prompts" / f"{tool_use_id}.md"
-    wait_script = state_dir / "proxy_commands" / f"wait-{tool_use_id}.sh"
-
-    try:
-        write_secure_file(prompt_file, orig_prompt)
-    except OSError as e:
-        logger.warning("deny: failed to write prompt file {}: {}", prompt_file, e)
-        emit_pre_tool_deny(stdout, _GENERIC_DENY_REASON)
-        return
-
-    try:
-        write_executable_file(wait_script, build_deny_wait_script(tool_use_id, target_name, parent_cwd))
-    except OSError as e:
-        logger.warning("deny: failed to write wait script {}: {}", wait_script, e)
-        emit_pre_tool_deny(stdout, _GENERIC_DENY_REASON)
-        return
-
-    emit_pre_tool_deny(stdout, build_deny_reason(wait_script))
+    # Drain stdin so the parent runner sees clean closure. We don't use
+    # any of the content -- the deny is uniform regardless of what
+    # Claude was trying to delegate.
+    read_hook_stdin_json(stdin, "deny")
+    emit_pre_tool_deny(stdout, DENY_REASON)
 
 
 def main() -> None:
