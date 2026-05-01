@@ -46,7 +46,7 @@ from imbue.modal_proxy.interface import ModalInterface
 from imbue.modal_proxy.interface import VolumeInterface
 
 # ``DirectModalInterface`` and ``TestingModalInterface`` are imported lazily inside
-# ``ModalProviderBackend._build_provider_instance`` because their modules pull the
+# ``ModalProviderBackend.build_provider_instance`` because their modules pull the
 # ``modal`` SDK at import time (~90ms). This module is loaded eagerly at CLI
 # startup as a plugin entry-point; the heavy imports only matter when a Modal
 # host is actually being created.
