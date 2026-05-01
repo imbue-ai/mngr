@@ -40,20 +40,6 @@ def _list_returns(agents: dict[str, AgentDetails] | None):
     return _stub
 
 
-@pytest.fixture
-def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
-    """Clear subagent-proxy env vars so individual tests set only what they need."""
-    for name in (
-        "MNGR_AGENT_STATE_DIR",
-        "MNGR_AGENT_NAME",
-        "MNGR_SUBAGENT_DEPTH",
-        "MNGR_MAX_SUBAGENT_DEPTH",
-        "MNGR_SUBAGENT_REAP_BACKGROUND",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    return monkeypatch
-
-
 def _mode_bits(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 

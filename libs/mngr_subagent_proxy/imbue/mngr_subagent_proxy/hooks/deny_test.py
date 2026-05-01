@@ -13,19 +13,6 @@ import pytest
 from imbue.mngr_subagent_proxy.hooks import deny as deny_hook
 
 
-@pytest.fixture
-def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
-    """Clear hook env vars so individual tests set only what they need."""
-    for name in (
-        "MNGR_AGENT_STATE_DIR",
-        "MNGR_AGENT_NAME",
-        "MNGR_SUBAGENT_DEPTH",
-        "MNGR_MAX_SUBAGENT_DEPTH",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    return monkeypatch
-
-
 def _set_hook_env(monkeypatch: pytest.MonkeyPatch, state_dir: Path) -> None:
     monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
     monkeypatch.setenv("MNGR_AGENT_NAME", "parent-agent")
