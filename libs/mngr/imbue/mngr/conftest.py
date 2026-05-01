@@ -28,6 +28,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.main import load_plugin_hookspecs
 from imbue.mngr.plugin_catalog import get_independent_entry_point_names
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import HostName
@@ -508,6 +509,9 @@ def plugin_manager(
     for name in to_block:
         pm.set_blocked(name)
     pm.load_setuptools_entrypoints("mngr")
+
+    # Register plugin-defined hookspecs (e.g. mngr_claude's claude_extra_per_agent_settings).
+    load_plugin_hookspecs(pm)
 
     # Only register the local backend, not modal or docker.
     # This prevents tests from depending on Modal credentials or Docker daemon.

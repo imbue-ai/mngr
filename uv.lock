@@ -28,6 +28,7 @@ members = [
     "imbue-mngr-tmr",
     "imbue-mngr-ttyd",
     "imbue-mngr-tutor",
+    "imbue-mngr-usage",
     "imbue-mngr-vps-docker",
     "imbue-mngr-vultr",
     "imbue-mngr-wait",
@@ -1946,6 +1947,27 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "imbue-mngr", editable = "libs/mngr" },
+]
+
+[[package]]
+name = "imbue-mngr-usage"
+version = "0.2.6"
+source = { editable = "libs/mngr_usage" }
+dependencies = [
+    { name = "click" },
+    { name = "click-option-group" },
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-claude" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.0" },
+    { name = "click-option-group", specifier = ">=0.5.6" },
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-claude", editable = "libs/mngr_claude" },
+    { name = "pydantic", specifier = ">=2.0" },
 ]
 
 [[package]]
