@@ -101,7 +101,7 @@ class KanpanDataSource(Protocol):
         ...
 
     @property
-    def field_types(self) -> dict[str, "TypeAdapter[FieldValue]"]:
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
         """Field key -> TypeAdapter that validates raw payloads for this slot.
 
         A "slot" (e.g. FIELD_PR) can be polymorphic: it may hold a real PrField,
