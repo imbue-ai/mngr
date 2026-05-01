@@ -6,7 +6,7 @@ conftest.py calls register_conftest_hooks(globals()) to inject them. The shared
 module ensures hooks are only registered once even when multiple conftest.py files
 are discovered (e.g., when running from the monorepo root).
 
-Resource guards are discovered via the imbue_resource_guards entry point group;
+Resource guards are discovered via the resource_guards entry point group;
 no manual guard registration is needed here. See the docstring of
 libs/mngr/imbue/mngr/register_guards.py for how guards are wired up in this
 monorepo and how to add new ones.

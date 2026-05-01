@@ -55,11 +55,11 @@ def test_agent_creates_tmux_session():
 
 ## Discovering guards from installed packages
 
-Multi-package projects can advertise their guards through the `imbue_resource_guards` entry point group instead of having every consumer's `conftest.py` re-list them. Each entry point's value is a callable that takes no arguments and registers one or more guards via `register_resource_guard()` and/or `register_sdk_guard()`/`create_sdk_method_guard()`. Call `register_all_resource_guards()` once before installing the pytest hooks to invoke every callable in the group.
+Multi-package projects can advertise their guards through the `resource_guards` entry point group instead of having every consumer's `conftest.py` re-list them. Each entry point's value is a callable that takes no arguments and registers one or more guards via `register_resource_guard()` and/or `register_sdk_guard()`/`create_sdk_method_guard()`. Call `register_all_resource_guards()` once before installing the pytest hooks to invoke every callable in the group.
 
 ```toml
 # library's pyproject.toml
-[project.entry-points.imbue_resource_guards]
+[project.entry-points.resource_guards]
 my_lib = "imbue.my_lib.register_guards:register_my_guard"
 ```
 

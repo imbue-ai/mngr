@@ -1,6 +1,6 @@
 """Resource guard registration for the lima CLI.
 
-Discovered via the imbue_resource_guards entry point group declared in
+Discovered via the resource_guards entry point group declared in
 mngr_lima's pyproject.toml.
 """
 

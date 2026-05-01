@@ -12,7 +12,7 @@ import pytest
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 
-# The tmux mark is registered globally via the imbue_resource_guards entry
+# The tmux mark is registered globally via the resource_guards entry
 # point group; no per-project mark registration is needed.
 register_plugin_test_fixtures(globals())
 

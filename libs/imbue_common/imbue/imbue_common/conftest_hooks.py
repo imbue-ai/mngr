@@ -957,7 +957,7 @@ def register_conftest_hooks(namespace: dict) -> None:
     _registered = True
 
     # Discover and register every resource guard declared via the
-    # imbue_resource_guards entry point group. This is the single source of
+    # resource_guards entry point group. This is the single source of
     # truth for the monorepo's guarded resources: any installed package can
     # declare its guards in pyproject.toml and they become available to every
     # conftest that calls this function -- no project-specific re-declaration

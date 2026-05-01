@@ -5,7 +5,7 @@ fixtures (setup_test_mngr_env, modal_subprocess_env, session cleanup, etc.) live
 in imbue.mngr_modal.conftest so consuming packages can import them via
 pytest_plugins.
 
-Resource guards are discovered automatically from the imbue_resource_guards
+Resource guards are discovered automatically from the resource_guards
 entry point group, so no manual registration is needed here.
 """
 

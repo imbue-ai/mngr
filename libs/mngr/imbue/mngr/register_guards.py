@@ -5,7 +5,7 @@ How resource guards are wired up across this monorepo
 
 The `resource-guards` library is generic: it doesn't know which tools the
 monorepo cares about. Each library that owns an external tool declares its
-guards through the `imbue_resource_guards` entry point group in its own
+guards through the `resource_guards` entry point group in its own
 `pyproject.toml`, and the shared `register_conftest_hooks()` in
 `imbue.imbue_common.conftest_hooks` walks that group at conftest import time
 to register every guard once. Project conftests therefore never call
@@ -26,7 +26,7 @@ To add a new guard from a new library:
    `create_sdk_method_guard(...)` / `register_sdk_guard(...)` for SDK guards.
 2. Add an entry point to that library's `pyproject.toml`:
 
-       [project.entry-points.imbue_resource_guards]
+       [project.entry-points.resource_guards]
        <lib> = "imbue.<lib>.register_guards:register_<name>_guards"
 
 3. Run `uv sync --all-packages` so the editable install picks up the entry point.

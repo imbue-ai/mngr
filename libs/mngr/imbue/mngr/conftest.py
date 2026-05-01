@@ -48,7 +48,7 @@ from imbue.mngr.utils.testing import setup_mngr_test_environment
 from imbue.mngr.utils.testing import worker_test_ids
 
 # Resource guards (tmux, rsync, unison, modal, docker_cli, docker_sdk) are
-# registered automatically via the imbue_resource_guards entry point group.
+# registered automatically via the resource_guards entry point group.
 
 # The urwid import above triggers creation of deprecated module aliases.
 # These are the deprecated module aliases that urwid 3.x creates for backwards

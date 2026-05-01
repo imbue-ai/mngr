@@ -45,7 +45,7 @@ import pytest
 
 # Entry point group through which packages declare their resource guard
 # registrations. See register_all_resource_guards() for usage.
-RESOURCE_GUARDS_ENTRY_POINT_GROUP = "imbue_resource_guards"
+RESOURCE_GUARDS_ENTRY_POINT_GROUP = "resource_guards"
 
 
 class ResourceGuardViolation(Exception):
@@ -121,7 +121,7 @@ def get_guarded_resource_names() -> tuple[str, ...]:
 def register_all_resource_guards(
     entry_points: Callable[..., Iterable[Any]] = importlib.metadata.entry_points,
 ) -> None:
-    """Register every guard declared via the imbue_resource_guards entry point group.
+    """Register every guard declared via the resource_guards entry point group.
 
     Each entry point's value must be a callable that takes no arguments and
     registers one or more guards via register_resource_guard() and/or
