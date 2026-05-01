@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import TypeAdapter
 from pydantic import ValidationError
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.widget.attr_map import AttrMap
@@ -499,7 +500,7 @@ class _MockDataSource:
         return {"mock_field": "MOCK", "another_field": "ANOTHER"}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
         return {}
 
     def compute(
