@@ -28,7 +28,7 @@ class ClaudeExtraSettingsContribution(FrozenModel):
     statusline_command: str | None = Field(
         default=None,
         description="Command string to install at settings.json's statusLine.command. "
-        "If multiple plugins contribute one, the first non-None wins.",
+        "If multiple plugins contribute one, later contributions overwrite earlier ones.",
     )
     env: dict[str, str] = Field(
         default_factory=dict,
