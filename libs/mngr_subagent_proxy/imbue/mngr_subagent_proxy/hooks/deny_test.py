@@ -134,16 +134,13 @@ def test_deny_writes_wait_script_with_executable_perms(
     assert '"${1:-}" = "--spawn-only"' in body
 
 
-def test_deny_wait_script_traps_env_file_cleanup(tmp_path: Path) -> None:
+def test_deny_wait_script_traps_env_file_cleanup() -> None:
     """The wait script installs an EXIT trap before the env-file capture.
 
     Same pattern as the proxy-mode wait-script: a signal arriving
     between the env redirect and the trap cannot leave parent secrets
     on disk, because the trap is in place before the redirect runs.
     """
-    # tmp_path fixture is unused but keeps the test signature consistent.
-    del tmp_path
-
     body = deny_hook.build_deny_wait_script(
         tool_use_id="toolu_test_trap",
         target_name="parent--subagent-foo-trap",
