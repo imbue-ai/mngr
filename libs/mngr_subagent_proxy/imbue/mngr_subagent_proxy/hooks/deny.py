@@ -106,12 +106,17 @@ def build_deny_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) 
        a partial write cannot leave secrets on disk), then runs
        ``mngr create --reuse`` with the prompt sidefile written by the
        deny hook.
-    2. With ``--spawn-only``, exits 0 once the subagent is created.
-    3. Otherwise, blocks on ``subagent_wait`` and prints the subagent's
-       end-turn reply (with the ``END_TURN:`` prefix stripped) to stdout.
-    4. On ``PERMISSION_REQUIRED:<name>``, prints
+    2. Blocks on ``subagent_wait`` and prints the subagent's end-turn
+       reply (with the ``END_TURN:`` prefix stripped) to stdout.
+    3. On ``PERMISSION_REQUIRED:<name>``, prints
        ``NEED_PERMISSION: <name>`` and exits 1 so Claude (and the user)
        see they need to ``mngr connect <name>`` to resolve.
+
+    The shared ``--spawn-only`` short-circuit from ``_wait_script.py``
+    is still present in the script body but is not exercised by DENY
+    mode -- backgrounding goes through Claude Code's ``Bash``
+    ``run_in_background`` parameter on the script itself, not via a
+    DENY-specific flag.
     """
     q_tid = shlex.quote(tool_use_id)
     q_target = shlex.quote(target_name)
