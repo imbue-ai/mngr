@@ -795,8 +795,8 @@ def test_find_user_claude_config_ignores_claude_config_dir(tmp_path: Path, monke
         ("/a.b.c", "-a-b-c"),
         # Underscores become '-' (newly added by this branch).
         ("/foo_bar/baz_qux", "-foo-bar-baz-qux"),
-        # Spaces become '-' (newly added).
-        ("/with space/and tab", "-with-space-and-tab"),
+        # Spaces and tabs become '-' (newly added).
+        ("/with space/and\ttab", "-with-space-and-tab"),
         # '@' and '+' become '-' (newly added).
         ("/user@host/foo+bar", "-user-host-foo-bar"),
         # Non-ASCII letters become '-' (newly added). Each non-ASCII char is one
