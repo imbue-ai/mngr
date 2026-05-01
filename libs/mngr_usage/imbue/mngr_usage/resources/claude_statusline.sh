@@ -16,10 +16,14 @@ set -euo pipefail
 
 payload=$(cat)
 
+# Writer is best-effort: a failure here (jq missing, malformed payload, flock
+# contention, etc.) must not break the user's pre-existing statusline.
 if [ -n "${MNGR_RATE_LIMITS_WRITER:-}" ] && [ -x "$MNGR_RATE_LIMITS_WRITER" ]; then
-  printf '%s' "$payload" | "$MNGR_RATE_LIMITS_WRITER" statusline
+  printf '%s' "$payload" | "$MNGR_RATE_LIMITS_WRITER" statusline || true
 fi
 
+# User command is best-effort: keep the shim's exit clean even if the user's
+# command itself misbehaves, so Claude Code's statusline rendering is unaffected.
 if [ -n "${MNGR_USER_STATUSLINE_CMD:-}" ]; then
-  printf '%s' "$payload" | sh -c "$MNGR_USER_STATUSLINE_CMD"
+  printf '%s' "$payload" | sh -c "$MNGR_USER_STATUSLINE_CMD" || true
 fi
