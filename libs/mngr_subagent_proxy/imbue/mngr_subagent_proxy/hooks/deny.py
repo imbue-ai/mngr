@@ -141,7 +141,12 @@ def build_deny_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) 
         # ceremony) labeled mngr_subagent_proxy=child.
         + build_init_block(agent_type="claude")
         + "\n"
-        # Background: spawn-only, return without waiting.
+        # Shared scaffolding still includes this branch so PROXY and
+        # DENY wait-scripts share a single template. DENY mode does
+        # not surface ``--spawn-only`` in its deny reason and never
+        # invokes the branch -- backgrounding here goes through
+        # Claude Code's Bash ``run_in_background`` on the
+        # script-as-a-whole instead.
         + WAIT_SCRIPT_SPAWN_ONLY_BRANCH
         + "\n"
         + "output=$(uv run python -m imbue.mngr_subagent_proxy.subagent_wait "
