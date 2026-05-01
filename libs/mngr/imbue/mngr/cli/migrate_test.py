@@ -1,5 +1,6 @@
 """Unit tests for the migrate CLI command."""
 
+import click
 import pluggy
 from click.testing import CliRunner
 
@@ -9,17 +10,20 @@ from imbue.mngr.main import cli
 
 def test_migrate_command_exists() -> None:
     """The 'migrate' command should be registered on the CLI group."""
-    assert "migrate" in cli.commands
+    ctx = click.Context(cli)
+    assert cli.get_command(ctx, "migrate") is not None
 
 
 def test_migrate_is_not_clone() -> None:
     """Migrate should be a distinct command object from clone."""
-    assert cli.commands["migrate"] is not cli.commands["clone"]
+    ctx = click.Context(cli)
+    assert cli.get_command(ctx, "migrate") is not cli.get_command(ctx, "clone")
 
 
 def test_migrate_is_not_create() -> None:
     """Migrate should be a distinct command object from create."""
-    assert cli.commands["migrate"] is not cli.commands["create"]
+    ctx = click.Context(cli)
+    assert cli.get_command(ctx, "migrate") is not cli.get_command(ctx, "create")
 
 
 def test_migrate_requires_source_agent(

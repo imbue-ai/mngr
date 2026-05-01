@@ -22,10 +22,20 @@ def test_all_cli_commands_are_single_word() -> None:
     """
     assert isinstance(cli, click.Group), "cli should be a click.Group"
 
-    invalid_commands = []
-    for command_name in cli.commands.keys():
-        if " " in command_name or "-" in command_name or "_" in command_name:
-            invalid_commands.append(command_name)
+    ctx = click.Context(cli)
+    names_to_check: set[str] = set(cli.list_commands(ctx))
+    # Resolve each command so its canonical name (which may differ from the registered
+    # name for aliases) is also validated.
+    for name in list(names_to_check):
+        cmd = cli.get_command(ctx, name)
+        if cmd is not None and cmd.name is not None:
+            names_to_check.add(cmd.name)
+
+    invalid_commands = sorted(
+        command_name
+        for command_name in names_to_check
+        if " " in command_name or "-" in command_name or "_" in command_name
+    )
 
     assert not invalid_commands, (
         f"CLI command names must be single words (no spaces, hyphens, or underscores) "

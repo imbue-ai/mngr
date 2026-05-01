@@ -28,8 +28,12 @@ from imbue.mngr_schedule.data_types import VerifyMode
 from imbue.mngr_schedule.errors import ScheduleDeployError
 from imbue.mngr_schedule.git import resolve_current_branch_name
 from imbue.mngr_schedule.implementations.local.deploy import deploy_local_schedule
-from imbue.mngr_schedule.implementations.modal.deploy import deploy_schedule
-from imbue.mngr_schedule.implementations.modal.deploy import parse_upload_spec
+
+# ``deploy_schedule`` and ``parse_upload_spec`` are imported lazily inside
+# ``_deploy_modal`` because their module pulls the ``modal`` SDK at import
+# time (~90ms). This file is loaded eagerly when the schedule plugin
+# registers its CLI commands at startup; the heavy imports only matter
+# when a Modal-backed schedule is actually being deployed.
 
 # =============================================================================
 # Auto-fix and safety check logic
@@ -310,6 +314,11 @@ def _deploy_modal(
     provider: ModalProviderInstance,
 ) -> None:
     """Deploy a schedule to a Modal provider."""
+    # Imports are deferred so the modal SDK is only loaded when a Modal-backed
+    # schedule is actually being deployed.
+    from imbue.mngr_schedule.implementations.modal.deploy import deploy_schedule  # noqa: PLC0415
+    from imbue.mngr_schedule.implementations.modal.deploy import parse_upload_spec  # noqa: PLC0415
+
     # Resolve verification mode from CLI option.
     # Only apply verification for create commands (other commands don't produce agents).
     verify_mode = VerifyMode(opts.verify.upper())

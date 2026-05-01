@@ -16,8 +16,10 @@ from imbue.mngr_schedule.cli.options import ScheduleRemoveCliOptions
 from imbue.mngr_schedule.cli.provider_utils import load_schedule_provider
 from imbue.mngr_schedule.implementations.local.deploy import get_local_schedule_creation_record
 from imbue.mngr_schedule.implementations.local.deploy import remove_local_schedule
-from imbue.mngr_schedule.implementations.modal.deploy import get_modal_schedule_creation_record
-from imbue.mngr_schedule.implementations.modal.deploy import remove_modal_schedule
+
+# ``get_modal_schedule_creation_record`` and ``remove_modal_schedule`` are
+# imported lazily inside the Modal-provider branches below because their
+# module pulls the ``modal`` SDK at import time (~90ms).
 
 
 @schedule.command(name="remove")
@@ -84,6 +86,8 @@ def schedule_remove(ctx: click.Context, **kwargs: Any) -> None:
         if isinstance(provider, LocalProviderInstance):
             remove_local_schedule(name, mngr_ctx)
         elif isinstance(provider, ModalProviderInstance):
+            from imbue.mngr_schedule.implementations.modal.deploy import remove_modal_schedule  # noqa: PLC0415
+
             remove_modal_schedule(provider, name)
         else:
             assert_never(provider)
@@ -105,6 +109,10 @@ def _check_triggers_exist(
         if isinstance(provider, LocalProviderInstance):
             record = get_local_schedule_creation_record(mngr_ctx, name)
         elif isinstance(provider, ModalProviderInstance):
+            from imbue.mngr_schedule.implementations.modal.deploy import (
+                get_modal_schedule_creation_record,  # noqa: PLC0415
+            )
+
             record = get_modal_schedule_creation_record(provider, name)
         else:
             assert_never(provider)

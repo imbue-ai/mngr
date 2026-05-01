@@ -10,7 +10,10 @@ from imbue.mngr.cli.filter_opts import build_agent_filter_cel
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
-from imbue.mngr_kanpan.tui import run_kanpan
+
+# ``run_kanpan`` is imported lazily inside the command body because
+# ``imbue.mngr_kanpan.tui`` pulls heavy TUI deps (urwid + transitive ~25ms)
+# at import time. The kanpan plugin is loaded eagerly at CLI startup.
 
 
 class KanpanCliOptions(AgentFilterCliOptions, CommonCliOptions):
@@ -22,6 +25,8 @@ class KanpanCliOptions(AgentFilterCliOptions, CommonCliOptions):
 @add_common_options
 @click.pass_context
 def kanpan(ctx: click.Context, **kwargs: Any) -> None:
+    from imbue.mngr_kanpan.tui import run_kanpan  # noqa: PLC0415
+
     mngr_ctx, _output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="kanpan",

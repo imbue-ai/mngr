@@ -30,12 +30,15 @@ def _assert_option_exists_on_cli(dotted_key: str, label: str) -> None:
     option_name = parts[-1]
     assert option_name.startswith("--"), f"Unexpected key format in {label}: {dotted_key}"
 
-    cmd = cli
+    cmd: click.Command = cli
+    ctx = click.Context(cli)
     for part in parts[:-1]:
-        assert isinstance(cmd, click.Group) and part in cmd.commands, (
+        assert isinstance(cmd, click.Group), (
             f"{label} key {dotted_key!r} references command {part!r} which does not exist"
         )
-        cmd = cmd.commands[part]
+        sub_cmd = cmd.get_command(ctx, part)
+        assert sub_cmd is not None, f"{label} key {dotted_key!r} references command {part!r} which does not exist"
+        cmd = sub_cmd
 
     option_names = set()
     for param in cmd.params:
@@ -46,6 +49,39 @@ def _assert_option_exists_on_cli(dotted_key: str, label: str) -> None:
         f"{label} key {dotted_key!r} references {option_name!r} "
         f"which does not exist. Available: {sorted(option_names)}"
     )
+
+
+def test_builtin_aliases_appear_in_completion_cache(completion_cache_dir: Path) -> None:
+    """Every built-in command alias must round-trip through the completion cache.
+
+    Built-in aliases (e.g. ``ls`` -> ``list``, ``rm`` -> ``destroy``) live in
+    the lazy-load registry; the completion writer must surface them via
+    ``cli.list_commands`` / ``cli.get_command`` so shell tab completion keeps
+    recognizing the aliases.
+    """
+    write_cli_completions_cache(cli_group=cli)
+    cache = _read_cache(completion_cache_dir)
+
+    expected_subset = {
+        "ls": "list",
+        "rm": "destroy",
+        "c": "create",
+        "x": "exec",
+        "msg": "message",
+        "cfg": "config",
+        "conn": "connect",
+        "plug": "plugin",
+        "prov": "provision",
+        "lim": "limit",
+        "mv": "rename",
+        "snap": "snapshot",
+        "clean": "cleanup",
+    }
+    for alias, canonical in expected_subset.items():
+        assert cache.aliases.get(alias) == canonical, (
+            f"alias {alias!r} should map to {canonical!r} in completion cache; got {cache.aliases.get(alias)!r}"
+        )
+        assert alias in cache.commands, f"alias {alias!r} should appear in completion cache commands list"
 
 
 def test_option_choices_reference_real_options(
@@ -97,10 +133,21 @@ def _collect_all_options_from_cli() -> dict[str, set[str]]:
     """
     result: dict[str, set[str]] = {}
     assert isinstance(cli, click.Group)
-    for name, cmd in cli.commands.items():
+    ctx = click.Context(cli)
+    seen_canonical: set[str] = set()
+    for name in cli.list_commands(ctx):
+        cmd = cli.get_command(ctx, name)
+        if cmd is None:
+            continue
+        canonical = cmd.name or name
+        # Skip alias entries -- only process each canonical command once.
+        if canonical in seen_canonical:
+            continue
+        seen_canonical.add(canonical)
+
         if isinstance(cmd, click.Group) and cmd.commands:
             for sub_name, sub_cmd in cmd.commands.items():
-                key = f"{cmd.name or name}.{sub_name}"
+                key = f"{canonical}.{sub_name}"
                 opts: set[str] = set()
                 for param in sub_cmd.params:
                     if isinstance(param, click.Option):
@@ -117,9 +164,8 @@ def _collect_all_options_from_cli() -> dict[str, set[str]]:
                         if opt.startswith("--"):
                             group_opts.add(opt)
             if group_opts:
-                result[cmd.name or name] = group_opts
+                result[canonical] = group_opts
         else:
-            key = cmd.name or name
             opts = set()
             for param in cmd.params:
                 if isinstance(param, click.Option):
@@ -127,7 +173,7 @@ def _collect_all_options_from_cli() -> dict[str, set[str]]:
                         if opt.startswith("--"):
                             opts.add(opt)
             if opts:
-                result[key] = opts
+                result[canonical] = opts
     return result
 
 

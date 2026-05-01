@@ -1,6 +1,8 @@
 import bdb
+import importlib
 import os
 import sys
+from collections.abc import Sequence
 from typing import Any
 
 import click
@@ -9,52 +11,23 @@ import setproctitle
 from click_option_group import OptionGroup
 
 from imbue.imbue_common.model_update import to_update
-from imbue.mngr.agents.agent_registry import load_agents_from_plugins
-from imbue.mngr.cli.archive import archive
-from imbue.mngr.cli.ask import ask
-from imbue.mngr.cli.capture import capture
-from imbue.mngr.cli.check_deps import check_deps
-from imbue.mngr.cli.cleanup import cleanup
-from imbue.mngr.cli.clone import clone
 from imbue.mngr.cli.common_opts import TCommand
 from imbue.mngr.cli.common_opts import create_group_title_option
 from imbue.mngr.cli.common_opts import find_last_option_index_in_group
 from imbue.mngr.cli.common_opts import find_option_group
-from imbue.mngr.cli.config import config
-from imbue.mngr.cli.connect import connect
-from imbue.mngr.cli.create import create
 from imbue.mngr.cli.default_command_group import DefaultCommandGroup
-from imbue.mngr.cli.destroy import destroy
-from imbue.mngr.cli.events import events
-from imbue.mngr.cli.exec import exec_command
-from imbue.mngr.cli.extras import extras
-from imbue.mngr.cli.gc import gc
-from imbue.mngr.cli.help import help_command
 from imbue.mngr.cli.help_formatter import get_help_metadata
 from imbue.mngr.cli.issue_reporting import handle_not_implemented_error
 from imbue.mngr.cli.issue_reporting import handle_unexpected_error
-from imbue.mngr.cli.label import label
-from imbue.mngr.cli.limit import limit
-from imbue.mngr.cli.list import list_command
-from imbue.mngr.cli.message import message
-from imbue.mngr.cli.migrate import migrate
-from imbue.mngr.cli.observe import observe
-from imbue.mngr.cli.plugin import plugin as plugin_command
-from imbue.mngr.cli.provision import provision
-from imbue.mngr.cli.pull import pull
-from imbue.mngr.cli.push import push
-from imbue.mngr.cli.rename import rename
-from imbue.mngr.cli.snapshot import snapshot
-from imbue.mngr.cli.start import start
-from imbue.mngr.cli.stop import stop
-from imbue.mngr.cli.transcript import transcript
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.pre_readers import read_disabled_plugins
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.providers.registry import get_all_provider_args_help_sections
-from imbue.mngr.providers.registry import load_all_registries
+from imbue.mngr.providers.registry import set_plugin_manager as _registry_set_plugin_manager
+from imbue.mngr.utils.builtin_command_specs import BUILTIN_COMMAND_SPECS
+from imbue.mngr.utils.builtin_command_specs import BuiltinCommandSpec
 from imbue.mngr.utils.click_utils import detect_alias_to_canonical
 from imbue.mngr.utils.click_utils import detect_aliases_by_command
 from imbue.mngr.utils.env_utils import parse_bool_env
@@ -80,8 +53,54 @@ def _call_on_error_hook(ctx: click.Context, error: BaseException) -> None:
         )
 
 
+# Lazy command registry state.
+# `_BUILTINS_BY_NAME` keys are both canonical names and alias names (mapping to the
+# same spec). `_BUILTIN_ALIASES_BY_CANONICAL` maps canonical name -> tuple of aliases.
+# `_BUILTINS_LOADED` caches resolved click.Command objects keyed by canonical name
+# so repeat lookups are cheap. The cache is intentionally NOT cleared by
+# reset_plugin_manager: the click.Command lives on the (cached) command module,
+# and re-applying plugin options would duplicate them.
+_BUILTINS_BY_NAME: dict[str, BuiltinCommandSpec] = {}
+_BUILTIN_ALIASES_BY_CANONICAL: dict[str, tuple[str, ...]] = {}
+_BUILTINS_LOADED: dict[str, click.Command] = {}
+
+
+def _register_builtin_spec(spec: BuiltinCommandSpec) -> None:
+    _BUILTINS_BY_NAME[spec.name] = spec
+    for alias in spec.aliases:
+        _BUILTINS_BY_NAME[alias] = spec
+    _BUILTIN_ALIASES_BY_CANONICAL[spec.name] = spec.aliases
+
+
+def _resolve_builtin(cmd_name: str) -> click.Command | None:
+    """Import the module backing `cmd_name` (or its alias) and return the click.Command."""
+    spec = _BUILTINS_BY_NAME.get(cmd_name)
+    if spec is None:
+        return None
+    if spec.name not in _BUILTINS_LOADED:
+        module = importlib.import_module(spec.module_path)
+        real_cmd = getattr(module, spec.attr_name)
+        if spec.apply_plugin_options:
+            apply_plugin_cli_options(real_cmd, command_name=spec.name)
+        if spec.name == "create":
+            _update_create_help_with_provider_args()
+        _BUILTINS_LOADED[spec.name] = real_cmd
+    return _BUILTINS_LOADED[spec.name]
+
+
+def _format_command_display_name(name: str, aliases: Sequence[str]) -> str:
+    """Return the "name, alias1, alias2" cell rendered next to a command in --help."""
+    if not aliases:
+        return name
+    return ", ".join([name, *aliases])
+
+
 class AliasAwareGroup(DefaultCommandGroup):
     """Custom click.Group that shows aliases inline with commands in --help.
+
+    Built-in commands are loaded lazily on first access via the module-level
+    `_BUILTINS_*` registry; plugin-registered commands continue to live in
+    `self.commands`.
 
     When no subcommand is given, shows help. Users can configure a default
     subcommand via ``[commands.mngr] default_subcommand`` in config files
@@ -119,40 +138,90 @@ class AliasAwareGroup(DefaultCommandGroup):
                 handle_unexpected_error(e, is_interactive=ctx.meta.get("is_interactive"))
             raise
 
-    def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
-        """Write the command list with aliases shown inline."""
-        alias_to_canonical = detect_alias_to_canonical(self)
-        aliases_by_cmd = detect_aliases_by_command(self)
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        """Return every command name visible at the root, canonical and alias.
 
-        commands: list[tuple[str, click.Command]] = []
-        for subcommand in self.list_commands(ctx):
-            cmd = self.get_command(ctx, subcommand)
+        Built-ins live in the lazy registry, so the click parent class has no
+        knowledge of them; we have to add their canonical names and their
+        aliases here. Plugin-registered commands and aliases live in
+        ``self.commands`` and reach the result through ``super().list_commands``.
+
+        ``format_commands`` does NOT walk this list -- it renders built-in
+        rows directly from ``_BUILTIN_ALIASES_BY_CANONICAL`` (so aliases show
+        up inline next to the canonical name) and plugin rows from
+        ``super().list_commands(ctx)``. The consumers of this method are
+        tools that walk the full CLI tree (e.g., the completion-cache writer
+        in ``completion_writer.py`` and the doc generator in
+        ``scripts/make_cli_docs.py``); those callers dedupe by calling
+        ``get_command`` and comparing ``cmd.name`` to the iteration key.
+        """
+        names: set[str] = set(_BUILTINS_BY_NAME.keys())
+        for name in super().list_commands(ctx):
+            names.add(name)
+        return sorted(names)
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        """Return the click.Command for `cmd_name`, importing the built-in module if needed."""
+        cmd = super().get_command(ctx, cmd_name)
+        if cmd is not None:
+            return cmd
+        return _resolve_builtin(cmd_name)
+
+    def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        """Write the command list with aliases shown inline.
+
+        Built-in command rows are rendered from the lazy registry's `short_help`
+        without importing the command module. Plugin-registered commands fall
+        back to the standard click metadata + lookup.
+        """
+        rows: list[tuple[str, str]] = []
+
+        for canonical, aliases in _BUILTIN_ALIASES_BY_CANONICAL.items():
+            spec = _BUILTINS_BY_NAME[canonical]
+            if spec.hidden:
+                continue
+            rows.append((_format_command_display_name(canonical, aliases), spec.short_help))
+
+        plugin_alias_to_canonical = detect_alias_to_canonical(self)
+        plugin_aliases_by_cmd = detect_aliases_by_command(self)
+
+        # Each plugin entry carries the alias-joined display name alongside the
+        # click.Command, so width measurement and short-help truncation see the
+        # same rendered string.
+        plugin_entries: list[tuple[str, str, click.Command]] = []
+        for subcommand in super().list_commands(ctx):
+            if subcommand in plugin_alias_to_canonical:
+                continue
+            cmd = super().get_command(ctx, subcommand)
             if cmd is None or cmd.hidden:
                 continue
-            # Skip alias entries - we'll show them with the main command
-            if subcommand in alias_to_canonical:
-                continue
-            commands.append((subcommand, cmd))
+            aliases = plugin_aliases_by_cmd.get(subcommand, [])
+            display_name = _format_command_display_name(subcommand, aliases)
+            plugin_entries.append((subcommand, display_name, cmd))
 
-        if not commands:
+        if not rows and not plugin_entries:
             return
 
-        # Calculate max width for alignment
-        limit = formatter.width - 6 - max(len(cmd[0]) for cmd in commands)
+        # Safe: the early return above guarantees at least one of the lists is non-empty.
+        builtin_widths = [len(r[0]) for r in rows]
+        plugin_widths = [len(display_name) for _, display_name, _ in plugin_entries]
+        max_width = max(builtin_widths + plugin_widths)
+        limit = formatter.width - 6 - max_width
 
-        rows: list[tuple[str, str]] = []
-        for subcommand, cmd in commands:
+        for subcommand, display_name, cmd in plugin_entries:
             meta = get_help_metadata(subcommand)
             help_text = meta.one_line_description if meta is not None else cmd.get_short_help_str(limit=limit)
-            # Add aliases if this command has them
-            aliases = aliases_by_cmd.get(subcommand, [])
-            if aliases:
-                subcommand = ", ".join([subcommand] + aliases)
-            rows.append((subcommand, help_text))
+            rows.append((display_name, help_text))
 
-        if rows:
-            with formatter.section("Commands"):
-                formatter.write_dl(rows)
+        # Safe: the early return above guarantees rows is non-empty here -- it either
+        # already contained built-ins, or just got plugin entries appended above.
+        rows.sort(key=lambda r: r[0])
+        with formatter.section("Commands"):
+            formatter.write_dl(rows)
+
+
+for _builtin in BUILTIN_COMMAND_SPECS:
+    _register_builtin_spec(_builtin)
 
 
 @click.command(cls=AliasAwareGroup)
@@ -271,6 +340,11 @@ def create_plugin_manager() -> pluggy.PluginManager:
 
     This should only really be called once from the main command (or during testing).
     """
+    # Imported here to keep `imbue.mngr.main` import lightweight; `agent_registry`
+    # transitively pulls heavy modules (modal, rich) that aren't needed before the
+    # plugin manager is actually constructed.
+    from imbue.mngr.agents.agent_registry import load_agents_from_plugins
+
     # Create plugin manager and load registries first (needed for config parsing)
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
@@ -289,12 +363,12 @@ def create_plugin_manager() -> pluggy.PluginManager:
     # Allow plugins to register their own hookspec modules (for plugin-specific hooks).
     load_plugin_hookspecs(pm)
 
-    # load all classes defined by plugins so they are available later
-    load_all_registries(pm)
+    # Register pm with the provider registry so backend lookups (``get_backend``,
+    # ``list_backends``, ``get_config_class``, ``get_all_provider_args_help_sections``)
+    # can lazily load backends on first use. Skipping the eager ``load_all_registries``
+    # here saves ~80ms wall on ``mngr --help`` (no docker/pyinfra/paramiko at startup).
+    _registry_set_plugin_manager(pm)
     load_agents_from_plugins(pm)
-
-    # Wire up the agent type resolver so hosts can resolve agent types
-    # without directly importing from the agents layer
 
     return pm
 
@@ -320,76 +394,27 @@ def reset_plugin_manager() -> None:
     is created for each test.
     """
     _plugin_manager_container["pm"] = None
+    # Note: `_BUILTINS_LOADED` is intentionally NOT cleared. Once a built-in
+    # command module has been imported and had its plugin options applied, the
+    # click.Command object lives on (modules are cached by Python). Re-applying
+    # plugin options would duplicate them.
 
 
-# Add built-in commands to the CLI group
-BUILTIN_COMMANDS: list[click.Command] = [
-    ask,
-    capture,
-    check_deps,
-    create,
-    cleanup,
-    destroy,
-    exec_command,
-    extras,
-    list_command,
-    events,
-    connect,
-    message,
-    provision,
-    pull,
-    push,
-    rename,
-    start,
-    stop,
-    limit,
-    snapshot,
-    config,
-    gc,
-    help_command,
-    label,
-    plugin_command,
-    observe,
-    transcript,
-]
-
-for cmd in BUILTIN_COMMANDS:
-    cli.add_command(cmd)
-
-# Add command aliases
-cli.add_command(create, name="c")
-cli.add_command(cleanup, name="clean")
-cli.add_command(config, name="cfg")
-cli.add_command(destroy, name="rm")
-cli.add_command(exec_command, name="x")
-cli.add_command(message, name="msg")
-cli.add_command(list_command, name="ls")
-cli.add_command(connect, name="conn")
-cli.add_command(plugin_command, name="plug")
-cli.add_command(provision, name="prov")
-cli.add_command(limit, name="lim")
-cli.add_command(rename, name="mv")
-cli.add_command(snapshot, name="snap")
-
-
-# Add commands that use UNPROCESSED args and delegate to other commands.
-# Not in BUILTIN_COMMANDS since plugin options are applied to the delegate target.
-cli.add_command(archive)
-cli.add_command(clone)
-cli.add_command(migrate)
-
-# Register plugin commands after built-in commands but before applying CLI options.
-# This ordering allows plugins to add CLI options to other plugin commands.
+# Register plugin commands. This eagerly creates the plugin manager and triggers
+# setuptools entry-point loading so plugin-registered commands appear in --help.
 # Wrapped in try/except because this runs at module import time, before Click's
 # exception handling is active, so ConfigParseError would produce a stack trace.
 try:
-    PLUGIN_COMMANDS = _register_plugin_commands()
+    PLUGIN_COMMANDS: list[click.Command] = _register_plugin_commands()
 except ConfigParseError as e:
     e.show()
     sys.exit(1)
 
-for cmd in BUILTIN_COMMANDS + PLUGIN_COMMANDS:
-    apply_plugin_cli_options(cmd)
+# Plugin CLI options for built-in commands are applied lazily inside
+# `_resolve_builtin` -- only the plugin commands need eager option wiring here,
+# since they're already in `cli.commands`.
+for _plugin_cmd in PLUGIN_COMMANDS:
+    apply_plugin_cli_options(_plugin_cmd)
 
 
 def _update_create_help_with_provider_args() -> None:
@@ -409,6 +434,3 @@ def _update_create_help_with_provider_args() -> None:
         ),
     )
     updated_metadata.register()
-
-
-_update_create_help_with_provider_args()

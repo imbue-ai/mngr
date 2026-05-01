@@ -17,7 +17,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import ProviderBackendName
-from imbue.mngr.utils.click_utils import detect_alias_to_canonical
 from imbue.mngr.utils.file_utils import atomic_write
 
 # Per-position positional completion spec for top-level commands.
@@ -362,8 +361,19 @@ def write_cli_completions_cache(
     CLI commands. Other exceptions are allowed to propagate.
     """
     try:
-        all_command_names = sorted(cli_group.commands.keys())
-        alias_to_canonical = detect_alias_to_canonical(cli_group)
+        # Walk the CLI tree via the standard click API. AliasAwareGroup.list_commands
+        # returns canonical names, built-in aliases, and plugin aliases all in
+        # one shot; ``get_command`` triggers the lazy import on first access.
+        ctx = click.Context(cli_group)
+        all_commands: dict[str, click.Command] = {}
+        for name in cli_group.list_commands(ctx):
+            cmd = cli_group.get_command(ctx, name)
+            if cmd is not None:
+                all_commands[name] = cmd
+        all_command_names = sorted(all_commands.keys())
+        alias_to_canonical = {
+            name: cmd.name for name, cmd in all_commands.items() if cmd.name is not None and name != cmd.name
+        }
 
         subcommand_by_command: dict[str, list[str]] = {}
         options_by_command: dict[str, list[str]] = {}
@@ -373,7 +383,7 @@ def write_cli_completions_cache(
         positional_nargs_by_command: dict[str, int | None] = {}
 
         canonical_names: set[str] = set()
-        for name, cmd in cli_group.commands.items():
+        for name, cmd in all_commands.items():
             # Skip alias entries -- only process canonical command names
             if name in alias_to_canonical:
                 continue

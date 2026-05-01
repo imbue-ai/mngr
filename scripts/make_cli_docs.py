@@ -32,8 +32,6 @@ from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
 from imbue.mngr.cli.help import get_topic
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import get_help_metadata
-from imbue.mngr.main import BUILTIN_COMMANDS
-from imbue.mngr.main import PLUGIN_COMMANDS
 from imbue.mngr.main import cli
 
 # Commands categorized by their documentation location
@@ -490,7 +488,10 @@ def generate_subcommand_docs(command: click.Group, prog_name: str, parent_key: s
 
 def generate_command_doc(command_name: str, base_dir: Path) -> None:
     """Generate markdown documentation for a single command."""
-    cmd = cli.commands.get(command_name)
+    # Use cli.get_command so AliasAwareGroup's lazy built-in resolution kicks
+    # in -- built-in commands are not stored in cli.commands until imported.
+    ctx = click.Context(cli)
+    cmd = cli.get_command(ctx, command_name)
     if cmd is None:
         print(f"Warning: Command '{command_name}' not found")
         return
@@ -686,9 +687,26 @@ def main() -> None:
     # Generate CLI command docs
     base_dir = repo_root / "libs" / "mngr" / "docs" / "commands"
 
-    for cmd in BUILTIN_COMMANDS + PLUGIN_COMMANDS:
-        if cmd.name is not None:
-            generate_command_doc(cmd.name, base_dir)
+    # ``cli.list_commands`` returns canonical names AND aliases for both
+    # built-in commands (via AliasAwareGroup's lazy registry) and plugin-
+    # registered commands (which live in ``cli.commands``). We resolve each
+    # name to its click.Command and dedupe on ``cmd.name`` so each canonical
+    # command's doc is generated exactly once. ``ALIAS_COMMANDS`` (archive,
+    # clone, migrate) are handled separately by ``generate_alias_doc`` below;
+    # skipping them here keeps the script idempotent (otherwise both
+    # functions write conflicting content).
+    ctx = click.Context(cli)
+    seen_canonical: set[str] = set()
+    for name in cli.list_commands(ctx):
+        cmd = cli.get_command(ctx, name)
+        if cmd is None or cmd.name is None:
+            continue
+        if cmd.name in seen_canonical:
+            continue
+        seen_canonical.add(cmd.name)
+        if cmd.name in ALIAS_COMMANDS:
+            continue
+        generate_command_doc(cmd.name, base_dir)
 
     # Generate docs for alias commands
     for command_name in sorted(ALIAS_COMMANDS):

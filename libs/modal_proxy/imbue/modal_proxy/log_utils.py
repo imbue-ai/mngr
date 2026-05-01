@@ -4,13 +4,20 @@ from typing import Any
 from typing import Generator
 from typing import Sequence
 
-import modal
 from loguru import logger
-from modal._output import OutputManager
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.utils.logging import register_build_level
+
+# ``modal`` and ``modal._output`` are intentionally NOT imported at module top.
+# This module is pulled in by ``mngr_modal/log_utils.py`` (re-exporter) and from
+# there by every consumer that wants ``ModalLoguruWriter``, including
+# ``mngr_modal/backend.py`` (a plugin entry-point loaded eagerly at CLI startup).
+# Importing ``modal`` at module top adds ~90ms to ``mngr --help``. The heavy
+# imports + the ``_QuietOutputManager`` subclass (which subclasses
+# ``modal._output.OutputManager``) live inside ``enable_modal_output_capture``
+# so they fire only when modal output capture is actually requested.
 
 # Ensure BUILD level is registered (in case this module is imported before logging.py)
 register_build_level()
@@ -126,57 +133,10 @@ def Pointless():
     yield None
 
 
-class _QuietOutputManager(OutputManager):
-    """Modal OutputManager that suppresses interactive spinners, status updates, and duplicate logs.
-
-    Modal's default OutputManager displays spinners and progress bars which don't
-    work well when capturing output programmatically. This subclass disables those
-    features while preserving the ability to capture log output via _stdout.
-
-    We use the timestamp of each log entry to deduplicate logs, as Modal sometimes
-    emits the same log line multiple times during image builds.
-    """
-
-    _timestamps: set[float]
-
-    @contextlib.contextmanager
-    def show_status_spinner(self) -> Generator[None, None, None]:
-        """Suppress the status spinner."""
-        yield
-
-    @staticmethod
-    def step_progress(text: str = ""):
-        return ""
-
-    def make_live(self, renderable):
-        return Pointless()
-
-    # this captures the normal log lines from modal
-    # If you want to get the modal URL for the app, it is logged here in one of the earlier messages
-    def print(self, renderable) -> None:
-        pass
-
-    # this is where the build logs end up
-    async def put_log_content(self, log):
-        if log.timestamp not in self._timestamps:
-            self._timestamps.add(log.timestamp)
-            # print(log)
-            self._stdout.write(log.data)
-
-    def update_app_page_url(self, app_page_url: str) -> None:
-        """Log the app page URL instead of displaying it."""
-        logger.debug("Modal app page: {}", app_page_url)
-        self._app_page_url = app_page_url
-
-    def update_task_state(self, task_id: str, state: int) -> None:
-        """Suppress task state updates."""
-        pass
-
-
 @contextlib.contextmanager
 def enable_modal_output_capture(
     is_logging_to_loguru: bool = True,
-) -> Generator[tuple[StringIO, ModalLoguruWriter | None], None, None]:
+) -> Generator[tuple[StringIO, "ModalLoguruWriter | None"], None, None]:
     """Context manager for capturing Modal app output.
 
     Intercepts Modal's output system and routes it to a StringIO buffer for
@@ -190,10 +150,48 @@ def enable_modal_output_capture(
     app_id and app_name fields that can be set for structured logging, or is
     None if is_logging_to_loguru is False.
     """
+    # ``modal`` and ``modal._output`` are imported inside the function body so
+    # that this module can be imported (e.g., to get ``ModalLoguruWriter``)
+    # without pulling the modal SDK. ``_QuietOutputManager`` subclasses
+    # ``OutputManager`` so its definition lives here too. The class object is
+    # cheap to recreate per call (microseconds).
+    import modal  # noqa: PLC0415
+    from modal._output import OutputManager  # noqa: PLC0415
+
+    class _QuietOutputManager(OutputManager):
+        """Modal OutputManager that suppresses interactive spinners and dedupes logs."""
+
+        _timestamps: set[float]
+
+        @contextlib.contextmanager
+        def show_status_spinner(self) -> Generator[None, None, None]:
+            yield
+
+        @staticmethod
+        def step_progress(text: str = ""):
+            return ""
+
+        def make_live(self, renderable):
+            return Pointless()
+
+        def print(self, renderable) -> None:
+            pass
+
+        async def put_log_content(self, log):
+            if log.timestamp not in self._timestamps:
+                self._timestamps.add(log.timestamp)
+                self._stdout.write(log.data)
+
+        def update_app_page_url(self, app_page_url: str) -> None:
+            logger.debug("Modal app page: {}", app_page_url)
+            self._app_page_url = app_page_url
+
+        def update_task_state(self, task_id: str, state: int) -> None:
+            pass
+
     output_buffer = StringIO()
     loguru_writer: ModalLoguruWriter | None = _create_modal_loguru_writer() if is_logging_to_loguru else None
 
-    # Build list of writers to tee output to
     writers: list[Any] = [output_buffer]
     if loguru_writer is not None:
         writers.append(loguru_writer)
@@ -203,8 +201,6 @@ def enable_modal_output_capture(
     with modal.enable_output(show_progress=True):
         with log_span("enabling Modal output capture"):
             output_manager = _QuietOutputManager()
-            # Set _stdout to capture Modal's output (build logs, status messages, etc.)
-            # This only captures what Modal writes to its OutputManager, not all stdout/stderr
             output_manager._stdout = multi_writer
             output_manager._timestamps = set()
             OutputManager._instance = output_manager

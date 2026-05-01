@@ -5,8 +5,12 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.cli.agent_utils import find_agent_for_command
-from imbue.mngr.cli.agent_utils import parse_agent_spec
+# ``find_agent_for_command`` and ``parse_agent_spec`` are imported lazily
+# inside ``pair`` because ``cli.agent_utils`` transitively pulls
+# ``api.find`` -> ``providers.local.instance`` -> ``pyinfra`` (~40ms cumul)
+# at import time. mngr_pair is a plugin entry-point loaded eagerly at
+# ``mngr`` startup; the heavy imports only matter when the pair command
+# actually runs.
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -129,6 +133,9 @@ def _emit_pair_stopped(output_opts: OutputOptions) -> None:
 @add_common_options
 @click.pass_context
 def pair(ctx: click.Context, **kwargs) -> None:
+    from imbue.mngr.cli.agent_utils import find_agent_for_command  # noqa: PLC0415
+    from imbue.mngr.cli.agent_utils import parse_agent_spec  # noqa: PLC0415
+
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="pair",

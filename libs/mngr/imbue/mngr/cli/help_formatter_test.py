@@ -20,9 +20,34 @@ from imbue.mngr.cli.help_formatter import is_interactive_terminal
 from imbue.mngr.cli.help_formatter import run_pager
 from imbue.mngr.cli.help_formatter import show_help_with_pager
 from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.main import BUILTIN_COMMANDS
 from imbue.mngr.main import PLUGIN_COMMANDS
 from imbue.mngr.main import cli
+
+
+def _all_builtin_commands() -> list[click.Command]:
+    """Force-load every built-in command and return the canonical click.Commands.
+
+    Built-ins are loaded lazily by the AliasAwareGroup; this helper triggers
+    the imports so tests can iterate the full set. Aliases resolve to the
+    same click.Command as their canonical name, so we dedupe by ``cmd.name``.
+    Plugin-registered commands are excluded so the result reflects only the
+    in-tree commands declared in ``BUILTIN_COMMAND_SPECS``.
+    """
+    ctx = click.Context(cli)
+    plugin_canonical_names = {cmd.name for cmd in cli.commands.values() if cmd.name is not None}
+    seen: set[str] = set()
+    commands: list[click.Command] = []
+    for name in cli.list_commands(ctx):
+        cmd = cli.get_command(ctx, name)
+        if cmd is None or cmd.name is None:
+            continue
+        if cmd.name in plugin_canonical_names:
+            continue
+        if cmd.name in seen:
+            continue
+        seen.add(cmd.name)
+        commands.append(cmd)
+    return commands
 
 
 def test_is_interactive_terminal_returns_bool() -> None:
@@ -529,7 +554,7 @@ def test_commands_with_aliases_have_aliases_in_synopsis() -> None:
     This ensures users see the alias directly in the synopsis rather than
     needing to look elsewhere in the help output.
     """
-    for cmd in BUILTIN_COMMANDS:
+    for cmd in _all_builtin_commands():
         if cmd.name is None:
             continue
         metadata = get_help_metadata(cmd.name)
@@ -555,7 +580,7 @@ def test_all_subcommands_have_git_style_help() -> None:
     Tests that invoke subgroups directly will get wrong help output.
     """
     runner = CliRunner()
-    for cmd in BUILTIN_COMMANDS:
+    for cmd in _all_builtin_commands():
         if not isinstance(cmd, click.Group) or not cmd.commands:
             continue
         for subcmd_name in cmd.commands:
@@ -670,7 +695,7 @@ def test_all_non_hidden_commands_have_generated_docs() -> None:
     all_doc_files = {p.stem for p in docs_dir.rglob("*.md")}
 
     missing = []
-    for cmd in BUILTIN_COMMANDS + PLUGIN_COMMANDS:
+    for cmd in _all_builtin_commands() + list(PLUGIN_COMMANDS):
         if cmd.name is None or cmd.hidden:
             continue
         if cmd.name not in all_doc_files:

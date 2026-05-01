@@ -7,9 +7,10 @@ from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
-from imbue.mngr_tutor.lessons import ALL_LESSONS
-from imbue.mngr_tutor.tui import run_lesson_runner
-from imbue.mngr_tutor.tui import run_lesson_selector
+
+# Lesson + TUI imports are deferred inside the command body since
+# ``imbue.mngr_tutor.tui`` and ``imbue.mngr_tutor.lessons`` pull TUI deps and
+# lesson definitions (~25ms) at import time.
 
 
 class TutorCliOptions(CommonCliOptions):
@@ -20,6 +21,10 @@ class TutorCliOptions(CommonCliOptions):
 @add_common_options
 @click.pass_context
 def tutor(ctx: click.Context, **kwargs: Any) -> None:
+    from imbue.mngr_tutor.lessons import ALL_LESSONS  # noqa: PLC0415
+    from imbue.mngr_tutor.tui import run_lesson_runner  # noqa: PLC0415
+    from imbue.mngr_tutor.tui import run_lesson_selector  # noqa: PLC0415
+
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="tutor",

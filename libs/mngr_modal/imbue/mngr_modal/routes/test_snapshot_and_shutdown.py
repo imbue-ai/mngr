@@ -216,6 +216,17 @@ def test_snapshot_and_shutdown_success(
             pass
 
 
+# Flaky on offload acceptance: this test only does ``httpx.post`` and never
+# invokes modal in-process. The module-level ``pytestmark = [pytest.mark.modal]``
+# at the top of this file means the resource guard expects an in-process modal
+# call. Whether it sees one depends on whether this test happens to be the first
+# in the module to use the module-scoped ``deployed_snapshot_function`` fixture
+# (which DOES make modal calls during its setup) -- collection order varies, so
+# the test passes for some orderings and fails ``never invoked modal`` for
+# others. The proper fix is to either remove ``pytest.mark.modal`` from tests
+# that only hit the deployed function over HTTP, or attribute fixture-setup
+# modal calls to every test that uses the fixture.
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_missing_sandbox_id(
