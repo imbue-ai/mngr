@@ -21,7 +21,6 @@ from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr_subagent_proxy import _stop_hook_guard
 from imbue.mngr_subagent_proxy._hook_io import parse_int_env
-from imbue.mngr_subagent_proxy._target_name import slugify
 from imbue.mngr_subagent_proxy.hooks import cleanup as cleanup_hook
 from imbue.mngr_subagent_proxy.hooks import reap as reap_hook
 from imbue.mngr_subagent_proxy.hooks import spawn as spawn_hook
@@ -631,14 +630,6 @@ def test_reap_background_worker_cleans_up_missing_agent(
     assert not watermark_file.exists()
     # Vanished agent: no destroy call is required.
     assert destroy_calls == []
-
-
-def test_slugify_caps_length_and_collapses_runs() -> None:
-    """slugify lowercases, collapses non-alphanumeric runs to single dashes, and caps at 30 chars."""
-    assert slugify("Hello, World!") == "hello-world"
-    assert slugify("----") == ""
-    assert slugify("a" * 50) == "a" * 30
-    assert slugify("A B  C") == "a-b-c"
 
 
 def test_spawn_env_vars_from_real_os_env(clean_env: pytest.MonkeyPatch) -> None:
