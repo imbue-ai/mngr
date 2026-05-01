@@ -13,11 +13,11 @@ to register every guard once. Project conftests therefore never call
 global property of the monorepo, so a project can never silently lose
 enforcement of a mark just because its conftest forgot to list it.
 
-Currently registered:
+Currently registered (see each module for the exact guards):
 
-- mngr (this module): tmux, rsync, unison, docker CLI, docker SDK
-- modal_proxy (`imbue.modal_proxy.register_guards`): modal CLI + SDK
-- mngr_lima (`imbue.mngr_lima.register_guards`): lima CLI
+- mngr (this module)
+- modal_proxy (`imbue.modal_proxy.register_guards`)
+- mngr_lima (`imbue.mngr_lima.register_guards`)
 
 To add a new guard from a new library:
 
