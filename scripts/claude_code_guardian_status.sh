@@ -22,12 +22,23 @@ if [[ ! -f "$BASE_SETTINGS" && ! -f "$LOCAL_SETTINGS" ]]; then
 fi
 
 # Mirrors the precedence used by the imbue-code-guardian plugin's
-# config_utils.sh: settings.local.json overrides settings.json.
+# config_utils.sh: env var override (CODE_GUARDIAN_<KEY uppercased, dots
+# -> __>) > settings.local.json > settings.json > default.
 read_setting() {
     local key="$1"
     local default="$2"
     local jq_path=".$key"
     local val
+
+    # Env-var override: matches read_json_config in the upstream plugin so
+    # users who configure gates via env vars see consistent state here.
+    local env_var
+    env_var="CODE_GUARDIAN_$(echo "$key" | tr '[:lower:]' '[:upper:]' | sed 's/\./__/g')"
+    if [[ -n "${!env_var:-}" ]]; then
+        echo "${!env_var}"
+        return
+    fi
+
     if [[ -f "$LOCAL_SETTINGS" ]]; then
         val=$(jq -r "if $jq_path == null then empty else $jq_path end" "$LOCAL_SETTINGS" 2>/dev/null || true)
         if [[ -n "$val" ]]; then
