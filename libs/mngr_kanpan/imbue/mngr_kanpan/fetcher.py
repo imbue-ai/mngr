@@ -10,7 +10,6 @@ from typing import Any
 from loguru import logger
 from pydantic import Field
 from pydantic import TypeAdapter
-from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
@@ -28,6 +27,7 @@ from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_source import KanpanFieldTypeError
+from imbue.mngr_kanpan.data_source import deserialize_fields
 from imbue.mngr_kanpan.data_sources.github import CreatePrUrlField
 from imbue.mngr_kanpan.data_sources.github import PrFetchFailedField
 from imbue.mngr_kanpan.data_sources.github import PrField
@@ -316,7 +316,8 @@ def load_field_cache(
     the raw payload. For polymorphic slots the adapter wraps a discriminated
     union and dispatches on the ``kind`` tag in the payload. Returns an empty
     dict if the cache file doesn't exist or is corrupt; per-key validation
-    failures are logged at debug and the offending key is dropped.
+    failures are logged at debug and the offending key is dropped (see
+    ``deserialize_fields``).
     """
     cache_path = _cache_file_path(mngr_ctx)
     if not cache_path.exists():
@@ -334,25 +335,7 @@ def load_field_cache(
 
     result: dict[AgentName, dict[str, FieldValue]] = {}
     for agent_name_str, agent_data in raw.items():
-        agent_fields: dict[str, FieldValue] = {}
-        for key, payload in agent_data.items():
-            adapter = adapters.get(key)
-            if adapter is None:
-                logger.debug(
-                    "load_field_cache: no adapter registered for agent {} key {!r}; dropping",
-                    agent_name_str,
-                    key,
-                )
-                continue
-            try:
-                agent_fields[key] = adapter.validate_python(payload)
-            except ValidationError as e:
-                logger.debug(
-                    "load_field_cache: validation failed for agent {} key {!r}: {}",
-                    agent_name_str,
-                    key,
-                    e,
-                )
+        agent_fields = deserialize_fields(agent_data, adapters)
         if agent_fields:
             result[AgentName(agent_name_str)] = agent_fields
     return result
