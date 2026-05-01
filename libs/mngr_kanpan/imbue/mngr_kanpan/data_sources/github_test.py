@@ -481,7 +481,8 @@ def test_compute_pr_fetch_failed_with_cached_pr_for_different_branch_emits_fetch
     """
     ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
     agent = make_agent_details(name="a1", initial_branch="branch-2", labels={"remote": "git@github.com:org/repo.git"})
-    stale_cached_pr = _make_pr(number=42, branch="branch-1")  # different branch
+    # The cached PR's head_branch ("branch-1") differs from the agent's current branch.
+    stale_cached_pr = _make_pr(number=42, branch="branch-1")
     cached_ci = CiField(status=CiStatus.PASSING)
     cached: dict[AgentName, dict[str, FieldValue]] = {
         agent.name: {FIELD_PR: stale_cached_pr, FIELD_CI: cached_ci},
