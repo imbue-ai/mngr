@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -524,13 +525,23 @@ def test_load_field_cache_returns_empty_on_invalid_agent_name(tmp_path: Path) ->
     The cache file may have been hand-edited or written by an older incompatible
     version. AgentName construction enforces SafeName's regex and would otherwise
     raise InvalidName; load_field_cache must swallow that and return {}.
+
+    The payload here must be non-empty and validate against the supplied
+    adapters -- otherwise deserialize_fields returns {} and the
+    ``if agent_fields:`` guard short-circuits before AgentName(...) is
+    even called, which would not exercise the swallow path.
     """
     cache_dir = tmp_path / "kanpan"
     cache_dir.mkdir(parents=True)
-    # 'a1/x' contains '/', which violates SafeName's regex.
-    (cache_dir / "field_cache.json").write_text('{"a1/x": {}}')
+    pr_payload = make_pr_field().model_dump(mode="json")
+    # 'a1/x' contains '/', which violates SafeName's regex. The PR payload
+    # makes deserialize_fields return a non-empty dict so that the
+    # AgentName(\"a1/x\") constructor is actually reached.
+    cache_data = {"a1/x": {FIELD_PR: pr_payload}}
+    (cache_dir / "field_cache.json").write_text(json.dumps(cache_data))
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
-    result = load_field_cache(ctx, [])
+    data_sources = [GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))]
+    result = load_field_cache(ctx, data_sources)
     assert result == {}
 
 
