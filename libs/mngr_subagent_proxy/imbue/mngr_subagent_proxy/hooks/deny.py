@@ -4,7 +4,8 @@ Reads the hook JSON from stdin and emits a PreToolUse decision JSON on
 stdout that DENIES the Task tool with a short ``permissionDecisionReason``
 of the form::
 
-    Use a mngr subagent instead: bash <wait_script_path>
+    Use a mngr subagent instead of Task. Run: bash <wait_script_path>
+    (see the `mngr-subagents` skill for context).
 
 The accompanying ``mngr-subagents`` Claude skill (provisioned in deny
 mode at ``.claude/skills/mngr-subagents/SKILL.md``) explains the full
