@@ -540,7 +540,9 @@ def _render_dialog_html(handler: LatchkeyPermissionGrantHandler) -> str:
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     response = handler.render_request_page(req_event=request, backend_resolver=backend_resolver)
     assert isinstance(response, HTMLResponse)
-    return response.body.decode("utf-8")
+    # ``Response.body`` is typed ``bytes | memoryview[int]``; ``bytes()``
+    # round-trips both into a plain ``bytes`` we can decode.
+    return bytes(response.body).decode("utf-8")
 
 
 def test_render_request_page_omits_browser_notice_when_credentials_valid(tmp_path: Path) -> None:
