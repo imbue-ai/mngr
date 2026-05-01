@@ -25,6 +25,15 @@ class ShellCommandConfig(FrozenModel):
     name: str = Field(description="Human-readable name")
     header: str = Field(description="Column header text")
     command: str = Field(description="Shell command to run per agent")
+    inputs: tuple[str, ...] = Field(
+        default=(),
+        description="Field keys whose cached values this command actually consumes via "
+        "MNGR_FIELD_<KEY> env vars. Used for staleness propagation: the produced field's "
+        "`created` is the min of these inputs' `created` (taint propagation). When empty "
+        "(default), the produced field is stamped with the current time. Note that the "
+        "shell still receives MNGR_FIELD_<KEY> for every cached field regardless of this "
+        "list -- `inputs` only governs which keys feed into the staleness calculation.",
+    )
 
 
 _STRING_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(StringField)
@@ -89,22 +98,21 @@ class ShellCommandDataSource(FrozenModel):
             logger.debug("Shell '{}' concurrency group error: {}", self.config.name, exc)
 
         # Shell output's `created` is the oldest `created` among the cached
-        # fields exposed to the script as MNGR_FIELD_<KEY>, falling back to
-        # `now` when no cached inputs exist. We can't statically tell which
-        # env vars a shell command actually reads, so we conservatively
-        # propagate staleness from any cached input the agent had access to.
-        # The shell field's own previous value is excluded -- otherwise its
-        # `created` would feed back into itself each cycle, pinning it to
-        # the oldest historical value forever and reporting fresh output
-        # as stale once enough wall-clock time has passed.
+        # fields the operator declared as inputs (config.inputs). When inputs
+        # is empty, no cached field feeds into the result and `created=now`.
+        # The shell still sees every cached field as MNGR_FIELD_<KEY>, but
+        # only the declared inputs taint the staleness of the produced cell.
+        # This matches the rule that derived values inherit the oldest
+        # `created` of the inputs they actually use.
         now = now_utc()
+        declared_inputs = self.config.inputs
         for agent_name, proc in processes:
             rc = proc.returncode
             if rc == 0:
                 stdout = proc.read_stdout().strip()
                 if stdout:
                     agent_cached = cached_fields.get(agent_name, {})
-                    input_fields = [v for k, v in agent_cached.items() if k != self.field_key]
+                    input_fields = [agent_cached[key] for key in declared_inputs if key in agent_cached]
                     created = oldest_created(*input_fields) if input_fields else now
                     fields[agent_name] = {self.field_key: StringField(value=stdout, created=created)}
             else:

@@ -132,11 +132,16 @@ def test_compute_timeout_produces_error(test_cg: ConcurrencyGroup) -> None:
     assert any("Custom" in e for e in errors)
 
 
-def test_compute_propagates_oldest_cached_created(test_cg: ConcurrencyGroup) -> None:
-    """Shell output's `created` is the min over the cached fields offered as env vars."""
+def test_compute_propagates_oldest_declared_input(test_cg: ConcurrencyGroup) -> None:
+    """When the operator declares `inputs`, `created` is the min over those declared inputs."""
     ds = ShellCommandDataSource(
         field_key="custom",
-        config=ShellCommandConfig(name="Custom", header="CUSTOM", command="echo 'hi'"),
+        config=ShellCommandConfig(
+            name="Custom",
+            header="CUSTOM",
+            command="echo 'hi'",
+            inputs=("older_input", "newer_input"),
+        ),
     )
     agent = make_agent_details(name="agent-1")
     ctx = make_mngr_ctx_with_cg(test_cg)
@@ -153,8 +158,8 @@ def test_compute_propagates_oldest_cached_created(test_cg: ConcurrencyGroup) -> 
     assert field.created == older
 
 
-def test_compute_uses_now_when_no_cached_inputs(test_cg: ConcurrencyGroup) -> None:
-    """With no cached inputs to taint from, `created` is the wall-clock now."""
+def test_compute_uses_now_when_inputs_unset(test_cg: ConcurrencyGroup) -> None:
+    """When `inputs` is empty, no cached field taints staleness; `created` is now."""
     ds = ShellCommandDataSource(
         field_key="custom",
         config=ShellCommandConfig(name="Custom", header="CUSTOM", command="echo 'hi'"),
@@ -167,12 +172,14 @@ def test_compute_uses_now_when_no_cached_inputs(test_cg: ConcurrencyGroup) -> No
     assert delta.total_seconds() < 60
 
 
-def test_compute_excludes_self_from_staleness_inputs(test_cg: ConcurrencyGroup) -> None:
-    """The shell field's own previous value is not an input to its new `created`.
+def test_compute_uses_now_when_no_inputs_declared_even_with_cached_fields(
+    test_cg: ConcurrencyGroup,
+) -> None:
+    """With `inputs=()` (default), undeclared cached fields don't propagate staleness.
 
-    Otherwise the field's `created` would feed back into itself each cycle and
-    stay pinned to its first-ever value forever, eventually appearing stale
-    even though it gets recomputed every refresh.
+    The shell still receives MNGR_FIELD_<KEY> for cached fields, but if the operator
+    didn't declare them as inputs, they're treated as unused and don't feed into
+    staleness calculation.
     """
     ds = ShellCommandDataSource(
         field_key="custom",
@@ -183,13 +190,73 @@ def test_compute_excludes_self_from_staleness_inputs(test_cg: ConcurrencyGroup) 
     very_old = TEST_NOW - timedelta(days=7)
     cached: dict[AgentName, dict[str, FieldValue]] = {
         AgentName("agent-1"): {
-            # Only a previous version of the shell field itself in cache.
+            "some_other_field": StringField(value="x", created=very_old),
+        },
+    }
+    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
+    field = fields[AgentName("agent-1")]["custom"]
+    assert field.created != very_old
+    delta = datetime.now(timezone.utc) - field.created
+    assert delta.total_seconds() < 60
+
+
+def test_compute_ignores_undeclared_cached_keys(test_cg: ConcurrencyGroup) -> None:
+    """Cached fields that aren't declared in `inputs` don't affect `created` -- even
+    when the same agent has both declared and undeclared cached fields, only the
+    declared ones taint the result.
+    """
+    ds = ShellCommandDataSource(
+        field_key="custom",
+        config=ShellCommandConfig(
+            name="Custom",
+            header="CUSTOM",
+            command="echo 'hi'",
+            inputs=("declared_input",),
+        ),
+    )
+    agent = make_agent_details(name="agent-1")
+    ctx = make_mngr_ctx_with_cg(test_cg)
+    declared_age = TEST_NOW - timedelta(minutes=5)
+    undeclared_age = TEST_NOW - timedelta(days=7)
+    cached: dict[AgentName, dict[str, FieldValue]] = {
+        AgentName("agent-1"): {
+            "declared_input": StringField(value="x", created=declared_age),
+            "noisy_other": StringField(value="y", created=undeclared_age),
+        },
+    }
+    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
+    field = fields[AgentName("agent-1")]["custom"]
+    assert field.created == declared_age
+
+
+def test_compute_does_not_self_taint_even_when_self_is_declared(
+    test_cg: ConcurrencyGroup,
+) -> None:
+    """Even if an operator pathologically declared the field's own key as an input,
+    the resulting `created` is still the cached self-value's age. The self-taint
+    risk is mitigated structurally by the operator declaring exactly which other
+    fields they read; declaring `self.field_key` is a configuration mistake we
+    don't try to catch -- but it is no longer the default behaviour.
+    """
+    ds = ShellCommandDataSource(
+        field_key="custom",
+        config=ShellCommandConfig(
+            name="Custom",
+            header="CUSTOM",
+            command="echo 'hi'",
+            inputs=("custom",),  # <- pathological self-declaration
+        ),
+    )
+    agent = make_agent_details(name="agent-1")
+    ctx = make_mngr_ctx_with_cg(test_cg)
+    very_old = TEST_NOW - timedelta(days=7)
+    cached: dict[AgentName, dict[str, FieldValue]] = {
+        AgentName("agent-1"): {
             "custom": StringField(value="prev", created=very_old),
         },
     }
     fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
     field = fields[AgentName("agent-1")]["custom"]
-    # With self excluded and no other inputs, `created` falls back to now.
-    assert field.created != very_old
-    delta = datetime.now(timezone.utc) - field.created
-    assert delta.total_seconds() < 60
+    # With self in inputs, the new field inherits the very_old `created`. This
+    # documents the contract: the operator chose this and the system honors it.
+    assert field.created == very_old

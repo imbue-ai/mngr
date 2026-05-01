@@ -79,6 +79,20 @@ Shell commands run once per agent in parallel. The stdout (trimmed) becomes the 
 | `MNGR_FIELD_CI_STATUS` | CI status (from cached fields) |
 | `MNGR_FIELD_<KEY>` | Display text for any other cached field, uppercased key (e.g. `MNGR_FIELD_COMMITS_AHEAD`) |
 
+If your script consumes any of the `MNGR_FIELD_<KEY>` env vars, declare those keys in `inputs` so staleness propagates correctly: the produced cell's `created` is the oldest `created` of the declared inputs (taint propagation). When `inputs` is unset (default), the produced cell is stamped with the current time.
+
+```toml
+[plugins.kanpan.shell_commands.pr_age]
+name = "PR age"
+header = "PR_AGE"
+command = '''
+if [ -n "$MNGR_FIELD_PR_NUMBER" ]; then
+  echo "PR #$MNGR_FIELD_PR_NUMBER"
+fi
+'''
+inputs = ["pr"]  # tainted by the cached `pr` field's `created`
+```
+
 ### Label-backed columns
 
 Add extra columns that read from agent labels:
