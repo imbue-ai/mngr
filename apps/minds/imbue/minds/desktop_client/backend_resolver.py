@@ -22,6 +22,7 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
+from imbue.minds.errors import UnrecognizedDiscoveryEventError
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
@@ -585,7 +586,7 @@ class MngrStreamManager(MutableModel):
         elif isinstance(event, DiscoveryErrorEvent):
             self._handle_discovery_error(event)
         elif event is None:
-            raise Exception("Unrecognized discovery event line: {}", line[:200])
+            raise UnrecognizedDiscoveryEventError(f"Unrecognized discovery event line: {line[:200]!r}")
         # FIXME: make the match exhaustive so that we have to think about what to do when there are new types
         else:
             logger.trace("Ignoring discovery event: {}", type(event).__name__)

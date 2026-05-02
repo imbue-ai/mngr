@@ -615,13 +615,15 @@ def test_delete_git_branch_removes_branch(temp_git_repo: Path, cg: ConcurrencyGr
     assert branch_name not in list_result.stdout.splitlines()
 
 
+@pytest.mark.allow_warnings(match=r"Failed to delete branch does-not-exist")
 def test_delete_git_branch_returns_false_for_missing_branch(temp_git_repo: Path, cg: ConcurrencyGroup) -> None:
-    """delete_git_branch returns False (and does not raise) when the branch does not exist."""
+    """delete_git_branch returns False (and does not raise) when the branch does not exist; a warning is emitted at the call site so the failure is visible."""
     assert delete_git_branch("does-not-exist", temp_git_repo, cg) is False
 
 
+@pytest.mark.allow_warnings(match=r"Failed to delete branch any-branch")
 def test_delete_git_branch_returns_false_for_non_git_dir(tmp_path: Path, cg: ConcurrencyGroup) -> None:
-    """delete_git_branch returns False (and does not raise) when the path is not a git repo."""
+    """delete_git_branch returns False (and does not raise) when the path is not a git repo; a warning is emitted so the failure is visible."""
     plain_dir = tmp_path / "plain"
     plain_dir.mkdir()
     assert delete_git_branch("any-branch", plain_dir, cg) is False

@@ -36,6 +36,23 @@ class MngrCommandError(MindError):
     ...
 
 
+class MalformedMngrOutputError(MindError, ValueError):
+    """Raised when ``mngr list --format json`` produces output we can't parse.
+
+    The right fix is to track down whichever process is leaking non-JSON to
+    stdout (stdout is reserved for JSON data; logs belong on stderr) -- silently
+    skipping the bad line would just hide the underlying problem.
+    """
+
+    ...
+
+
+class UnrecognizedDiscoveryEventError(MindError, ValueError):
+    """Raised when a discovery event line cannot be matched to a known event type."""
+
+    ...
+
+
 class MindsConfigError(MindError):
     """Raised when minds config cannot be parsed or validated."""
 

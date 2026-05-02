@@ -34,6 +34,7 @@ from imbue.mngr.api.events import resolve_events_target
 from imbue.mngr.api.events import sort_events_by_timestamp
 from imbue.mngr.api.events import stream_all_events
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -288,25 +289,29 @@ def test_parse_event_line_missing_source_uses_hint() -> None:
     assert record.source == "my_source"
 
 
-def test_parse_event_line_missing_timestamp_returns_none() -> None:
+def test_parse_event_line_missing_timestamp_raises() -> None:
+    """Event JSON without a timestamp envelope field is treated as upstream corruption."""
     line = '{"type":"test","event_id":"evt-abc","source":"messages"}'
-    record = parse_event_line(line, source_hint="fallback")
-    assert record is None
+    with pytest.raises(MalformedJsonlLineError, match="timestamp"):
+        parse_event_line(line, source_hint="fallback")
 
 
-def test_parse_event_line_malformed_json_returns_none() -> None:
-    record = parse_event_line("not json at all", source_hint="fallback")
-    assert record is None
+def test_parse_event_line_malformed_json_raises() -> None:
+    """Malformed JSON surfaces as JSONDecodeError; callers that need partial-write tolerance use MalformedJsonLineWarner."""
+    with pytest.raises(json.JSONDecodeError):
+        parse_event_line("not json at all", source_hint="fallback")
 
 
-def test_parse_event_line_empty_string_returns_none() -> None:
-    record = parse_event_line("", source_hint="fallback")
-    assert record is None
+def test_parse_event_line_empty_string_raises() -> None:
+    """parse_event_line is for individual non-empty lines; the watcher pre-strips empties before calling."""
+    with pytest.raises(json.JSONDecodeError):
+        parse_event_line("", source_hint="fallback")
 
 
-def test_parse_event_line_whitespace_only_returns_none() -> None:
-    record = parse_event_line("   \n  ", source_hint="fallback")
-    assert record is None
+def test_parse_event_line_whitespace_only_raises() -> None:
+    """Whitespace-only input is treated identically to empty: not a valid event line."""
+    with pytest.raises(json.JSONDecodeError):
+        parse_event_line("   \n  ", source_hint="fallback")
 
 
 # =============================================================================
@@ -1428,10 +1433,10 @@ def test_events_target_rejects_online_host_without_events_path(
 # =============================================================================
 
 
-def test_parse_event_line_non_dict_json_returns_none() -> None:
-    """JSON arrays should be rejected (only dicts are valid events)."""
-    result = parse_event_line("[1, 2, 3]", "test")
-    assert result is None
+def test_parse_event_line_non_dict_json_raises() -> None:
+    """JSON arrays cannot be valid events; parse_event_line raises rather than returning None."""
+    with pytest.raises(MalformedJsonlLineError, match="Expected JSON object"):
+        parse_event_line("[1, 2, 3]", "test")
 
 
 def test_parse_event_line_backfills_source_into_data() -> None:

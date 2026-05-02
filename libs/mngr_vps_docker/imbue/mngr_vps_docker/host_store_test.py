@@ -5,6 +5,8 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
+import pytest
+
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr_vps_docker.docker_over_ssh import DockerOverSsh
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
@@ -182,15 +184,15 @@ def test_parse_batched_json_files() -> None:
     assert result[1]["id"] == "agent-2"
 
 
-def test_parse_batched_json_files_skips_invalid() -> None:
+def test_parse_batched_json_files_raises_on_invalid() -> None:
+    """A corrupt file in batched output raises so the corruption is visible rather than silently dropped."""
     store = _make_store()
     output = (
         f"{_FILE_SEP}/mngr-state/host_state/host-x/agent-1.json\n{{invalid json\n"
         f"{_FILE_SEP}/mngr-state/host_state/host-x/agent-2.json\n{json.dumps({'id': 'agent-2'})}"
     )
-    result = store._parse_batched_json_files(output)
-    assert len(result) == 1
-    assert result[0]["id"] == "agent-2"
+    with pytest.raises(json.JSONDecodeError):
+        store._parse_batched_json_files(output)
 
 
 def test_parse_batched_host_records() -> None:

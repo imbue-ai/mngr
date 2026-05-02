@@ -438,3 +438,14 @@ class DiscoverySchemaChangedError(BaseMngrError, ValueError):
         self.event_type = event_type
         self.validation_error = validation_error
         super().__init__(f"Discovery event of type {event_type!r} does not match current schema: {validation_error}")
+
+
+class MalformedJsonlLineError(BaseMngrError, ValueError):
+    """Raised when a JSONL line is structurally invalid (e.g. not a JSON object, missing required envelope fields).
+
+    The right fix is to track down whichever process is producing the bad line and stop it
+    from doing so -- silently skipping corrupt input would just hide the underlying problem.
+    Callers that need to tolerate end-of-file partial writes should use
+    ``MalformedJsonLineWarner`` (which buffers a malformed line until the next non-empty
+    line proves it wasn't a partial write).
+    """

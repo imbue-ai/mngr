@@ -5,6 +5,7 @@ from typing import Final
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.errors import MalformedMngrOutputError
 from imbue.mngr.primitives import AgentId
 
 DEFAULT_DESKTOP_CLIENT_HOST: Final[str] = "127.0.0.1"
@@ -35,13 +36,18 @@ class WorkspacePaths(FrozenModel):
 
 
 def parse_agents_from_mngr_output(stdout: str) -> list[dict[str, object]]:
-    """Extract agent records from ``mngr list --format json`` stdout."""
+    """Extract agent records from the first JSON object line of ``mngr list --format json`` stdout.
+
+    Raises ``MalformedMngrOutputError`` when the first non-empty line is not a
+    JSON object. stdout is reserved for JSON data; if log lines or SSH errors
+    are leaking onto it, fix the underlying process rather than papering over
+    it here.
+    """
     for line in stdout.splitlines():
         stripped = line.strip()
         if not stripped.startswith("{"):
-            raise Exception(
-                "Malformed mngr output line. Fix by preventing the underlying process from outputting non-JSON. Expected JSON object: {}",
-                stripped[:200],
+            raise MalformedMngrOutputError(
+                f"Expected JSON object on first non-empty mngr output line, got: {stripped[:200]!r}"
             )
         data = json.loads(stripped)
         return data["agents"]

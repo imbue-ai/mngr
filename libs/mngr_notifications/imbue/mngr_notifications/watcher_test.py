@@ -113,10 +113,12 @@ def test_process_events_non_state_change_ignored(notification_cg: ConcurrencyGro
     assert len(notifier.calls) == 0
 
 
-def test_process_events_malformed_json_ignored(notification_cg: ConcurrencyGroup) -> None:
+def test_process_events_malformed_json_raises(notification_cg: ConcurrencyGroup) -> None:
+    """Malformed lines in the agent-states event file surface as JSONDecodeError so the upstream corruption is visible."""
     notifier = RecordingNotifier()
 
-    _process_events("not valid json\n", NotificationsPluginConfig(), notifier, notification_cg)
+    with pytest.raises(json.JSONDecodeError):
+        _process_events("not valid json\n", NotificationsPluginConfig(), notifier, notification_cg)
 
     assert len(notifier.calls) == 0
 

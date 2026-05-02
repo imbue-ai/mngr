@@ -9,6 +9,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.errors import MalformedJsonlLineError
 
 _MALFORMED_LINE_LOG_TRUNCATION: Final[int] = 200
 
@@ -20,10 +21,15 @@ class MalformedJsonLineWarner(MutableModel):
     that session spans multiple phases or threads (e.g. an initial bulk read
     plus a tail loop). Call parse() for every line that the session yields.
 
-    A malformed line is silently buffered. The next non-empty line proves the
+    A malformed-JSON line is silently buffered. The next non-empty line proves the
     buffered line was not a partial write at end-of-file, so a warning is
     emitted at that point. Any malformed line still buffered when the session
     ends is silently dropped (treated as a partial write at EOF).
+
+    Lines that parse as valid JSON but are not JSON objects (arrays, strings,
+    numbers) are unambiguously corrupt data and raise ``MalformedJsonlLineError``
+    rather than being buffered -- they cannot be "completed" by appending more
+    bytes, so the partial-write hypothesis does not apply.
 
     parse() is safe to call from multiple threads concurrently.
     """
@@ -45,9 +51,9 @@ class MalformedJsonLineWarner(MutableModel):
                 self._pending_malformed_line = stripped
                 return None
         if not isinstance(data, dict):
-            raise Exception(
-                "Malformed JSONL line is not a JSON object. Fix by preventing the underlying process from outputting non-JSON or non-object lines. Line content: {}",
-                stripped[:_MALFORMED_LINE_LOG_TRUNCATION],
+            raise MalformedJsonlLineError(
+                f"Malformed JSONL line in {self.source_description} is not a JSON object: "
+                f"{stripped[:_MALFORMED_LINE_LOG_TRUNCATION]!r}"
             )
         return data, stripped
 
