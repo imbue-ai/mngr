@@ -253,7 +253,11 @@ def test_connect_no_start_raises_error_for_stopped_agent(
         cleanup_tmux_session(session_name)
 
 
+# Flaky under heavy CI load: same family as test_destroy_multiple_agents -- the
+# CLI invocation drives tmux subprocesses that can exceed the 10s pytest-timeout
+# when sandboxes are contended. Offload retries flaky tests automatically.
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_connect_cli_non_interactive_selects_most_recent_agent(
     cli_runner: CliRunner,
     create_test_agent,

@@ -415,6 +415,19 @@ PREVENT_CAST_USAGE = RatchetRuleInfo(
     ),
 )
 
+PREVENT_SILENT_DECODE_ERROR_CATCH = RatchetRuleInfo(
+    rule_name="silent catches of TOMLDecodeError / JSONDecodeError",
+    rule_description=(
+        "Never silently swallow a TOMLDecodeError or JSONDecodeError. For user-authored config / "
+        "settings files: re-raise (optionally wrapping) so the user knows to fix the file. For "
+        "internal state, JSONL streams, and external input (subprocess / API output, CLI flag "
+        "values): at minimum log at warning+ level so the corruption is visible. Handlers that "
+        "re-raise or call any `.warning(...)` / `.error(...)` / `.exception(...)` logger method "
+        "(including chained forms like `logger.opt(...).error(...)`) do not count. See style "
+        "guide section 'Try/except'."
+    ),
+)
+
 PREVENT_ASSERT_ISINSTANCE = RatchetRuleInfo(
     rule_name="assert isinstance() usages",
     rule_description=(

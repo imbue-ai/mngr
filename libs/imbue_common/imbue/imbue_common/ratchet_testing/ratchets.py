@@ -16,8 +16,8 @@ from imbue.imbue_common.pure import pure
 from imbue.imbue_common.ratchet_testing.core import FileExtension
 from imbue.imbue_common.ratchet_testing.core import LineNumber
 from imbue.imbue_common.ratchet_testing.core import RatchetMatchChunk
-from imbue.imbue_common.ratchet_testing.core import _get_ast_nodes_by_type
 from imbue.imbue_common.ratchet_testing.core import _get_non_ignored_files_with_extension
+from imbue.imbue_common.ratchet_testing.core import get_ast_nodes_of_type
 
 TEST_FILE_PATTERNS: Final[tuple[str, ...]] = ("*_test.py", "test_*.py")
 
@@ -31,13 +31,11 @@ def find_if_elif_without_else(
     chunks: list[RatchetMatchChunk] = []
 
     for file_path in file_paths:
-        nodes_by_type = _get_ast_nodes_by_type(file_path)
-        if_nodes = nodes_by_type.get(ast.If, [])
+        if_nodes = get_ast_nodes_of_type(file_path, ast.If)
 
         visited_if_nodes: set[int] = set()
 
         for node in if_nodes:
-            assert isinstance(node, ast.If)
             if id(node) not in visited_if_nodes and _has_elif_without_else(node):
                 _mark_if_chain_as_visited(node, visited_if_nodes)
 
@@ -158,15 +156,13 @@ def find_init_methods_in_non_exception_classes(
     chunks: list[RatchetMatchChunk] = []
 
     for file_path in file_paths:
-        nodes_by_type = _get_ast_nodes_by_type(file_path)
-        class_def_nodes = nodes_by_type.get(ast.ClassDef, [])
+        class_def_nodes = get_ast_nodes_of_type(file_path, ast.ClassDef)
 
         # Build a map of class names to their base classes
         class_bases: dict[str, list[str]] = {}
         class_nodes: dict[str, ast.ClassDef] = {}
 
         for node in class_def_nodes:
-            assert isinstance(node, ast.ClassDef)
             bases = []
             for base in node.bases:
                 if isinstance(base, ast.Name):
@@ -237,11 +233,9 @@ def find_inline_functions(
     chunks: list[RatchetMatchChunk] = []
 
     for file_path in file_paths:
-        nodes_by_type = _get_ast_nodes_by_type(file_path)
-        func_def_nodes = nodes_by_type.get(ast.FunctionDef, [])
+        func_def_nodes = get_ast_nodes_of_type(file_path, ast.FunctionDef)
 
         for node in func_def_nodes:
-            assert isinstance(node, ast.FunctionDef)
             # Walk within each FunctionDef to find nested functions
             for inner_node in ast.walk(node):
                 if inner_node is not node and isinstance(inner_node, ast.FunctionDef):
@@ -275,12 +269,10 @@ def find_underscore_imports(
     chunks: list[RatchetMatchChunk] = []
 
     for file_path in file_paths:
-        nodes_by_type = _get_ast_nodes_by_type(file_path)
-        import_from_nodes = nodes_by_type.get(ast.ImportFrom, [])
-        import_nodes = nodes_by_type.get(ast.Import, [])
+        import_from_nodes = get_ast_nodes_of_type(file_path, ast.ImportFrom)
+        import_nodes = get_ast_nodes_of_type(file_path, ast.Import)
 
         for node in import_from_nodes:
-            assert isinstance(node, ast.ImportFrom)
             underscore_names: list[str] = []
             if node.names:
                 for alias in node.names:
@@ -300,7 +292,6 @@ def find_underscore_imports(
                 chunks.append(chunk)
 
         for node in import_nodes:
-            assert isinstance(node, ast.Import)
             underscore_names_import: list[str] = []
             for alias in node.names:
                 if alias.name.startswith("_"):
@@ -338,14 +329,12 @@ def find_cast_usages(
     chunks: list[RatchetMatchChunk] = []
 
     for file_path in file_paths:
-        nodes_by_type = _get_ast_nodes_by_type(file_path)
-        import_from_nodes = nodes_by_type.get(ast.ImportFrom, [])
+        import_from_nodes = get_ast_nodes_of_type(file_path, ast.ImportFrom)
 
         # Check if 'cast' is imported from typing
         has_cast_import = False
         cast_alias = "cast"
         for node in import_from_nodes:
-            assert isinstance(node, ast.ImportFrom)
             if node.module == "typing":
                 for alias in node.names:
                     if alias.name == "cast":
@@ -357,9 +346,8 @@ def find_cast_usages(
             continue
 
         # Find all calls to cast()
-        call_nodes = nodes_by_type.get(ast.Call, [])
+        call_nodes = get_ast_nodes_of_type(file_path, ast.Call)
         for node in call_nodes:
-            assert isinstance(node, ast.Call)
             if isinstance(node.func, ast.Name) and node.func.id == cast_alias:
                 start_line = LineNumber(node.lineno)
                 end_line = LineNumber(node.end_lineno if node.end_lineno else node.lineno)
@@ -393,12 +381,10 @@ def find_assert_isinstance_usages(
     chunks: list[RatchetMatchChunk] = []
 
     for file_path in file_paths:
-        nodes_by_type = _get_ast_nodes_by_type(file_path)
-        assert_nodes = nodes_by_type.get(ast.Assert, [])
+        assert_nodes = get_ast_nodes_of_type(file_path, ast.Assert)
 
         # Find all 'assert isinstance(...)' statements
         for node in assert_nodes:
-            assert isinstance(node, ast.Assert)
             # Check if the test is an isinstance() call
             if isinstance(node.test, ast.Call):
                 if isinstance(node.test.func, ast.Name) and node.test.func.id == "isinstance":
@@ -594,6 +580,107 @@ def find_bash_scripts_without_strict_mode(cwd: Path) -> list[str]:
             violations.append(str(sh_file))
 
     return violations
+
+
+_DECODE_ERROR_NAMES: Final[frozenset[str]] = frozenset({"TOMLDecodeError", "JSONDecodeError"})
+_NON_SILENT_LOG_LEVELS: Final[frozenset[str]] = frozenset({"warning", "error", "exception"})
+
+
+@pure
+def _exception_name(node: ast.expr) -> str | None:
+    """Return the final identifier of an exception reference (e.g. 'JSONDecodeError' for json.JSONDecodeError)."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+@pure
+def _handler_catches_decode_error(handler: ast.ExceptHandler) -> bool:
+    """Return True if the except clause catches TOMLDecodeError or JSONDecodeError."""
+    exc_type = handler.type
+    if exc_type is None:
+        return False
+    candidates: list[ast.expr] = list(exc_type.elts) if isinstance(exc_type, ast.Tuple) else [exc_type]
+    return any(_exception_name(cand) in _DECODE_ERROR_NAMES for cand in candidates)
+
+
+@pure
+def _is_non_silent_log_call(node: ast.AST) -> bool:
+    """Return True if `node` is a `<x>.warning(...)` / `.error(...)` / `.exception(...)` call.
+
+    Matches loguru / stdlib logging conventions; the receiver is intentionally not
+    pinned (e.g. `logger.warning(...)` and `logger.opt(...).error(...)` both count).
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if not isinstance(func, ast.Attribute):
+        return False
+    return func.attr in _NON_SILENT_LOG_LEVELS
+
+
+@pure
+def _handler_is_non_silent(handler: ast.ExceptHandler) -> bool:
+    """Return True if the handler body re-raises OR logs at warning+ level.
+
+    Buffering the line and logging later is fine (e.g. MalformedJsonLineWarner does
+    this) but is invisible to the AST -- those sites have to live with the ratchet
+    count. The common cases are `raise SomeError(...) from e` (drops the count) and
+    `logger.warning("...", e)` (also drops the count).
+    """
+    for stmt in handler.body:
+        for inner in ast.walk(stmt):
+            if isinstance(inner, ast.Raise):
+                return True
+            if _is_non_silent_log_call(inner):
+                return True
+    return False
+
+
+def find_silent_decode_error_catches(
+    source_dir: Path,
+    excluded_path_patterns: tuple[str, ...] = (),
+) -> tuple[RatchetMatchChunk, ...]:
+    """Find except blocks catching TOMLDecodeError / JSONDecodeError that neither re-raise nor log.
+
+    A corrupt config/settings file should crash the process so the user knows to fix it.
+    For other decode-error sources (internal state, JSONL streams, subprocess / API output,
+    CLI flag values), the parser may fall back, but it must at least surface the problem at
+    warning level -- silently swallowing a decode error turns a loud problem into a silent
+    misconfiguration. Handlers that re-raise (`raise ...` / `raise ... from e`) or that call
+    a `.warning(...)` / `.error(...)` / `.exception(...)` method on any receiver (loguru's
+    `logger.warning`, stdlib `logging.exception`, or chained forms like
+    `logger.opt(...).error(...)`) do not count. Test files are excluded so tests can simulate
+    bad input without tripping the ratchet.
+    """
+    file_paths = _get_non_ignored_files_with_extension(
+        source_dir, FileExtension(".py"), TEST_FILE_PATTERNS + excluded_path_patterns
+    )
+    chunks: list[RatchetMatchChunk] = []
+
+    for file_path in file_paths:
+        handler_nodes = get_ast_nodes_of_type(file_path, ast.ExceptHandler)
+
+        for node in handler_nodes:
+            if not _handler_catches_decode_error(node):
+                continue
+            if _handler_is_non_silent(node):
+                continue
+
+            start_line = LineNumber(node.lineno)
+            end_line = LineNumber(node.end_lineno if node.end_lineno else node.lineno)
+            chunk = RatchetMatchChunk(
+                file_path=file_path,
+                matched_content=f"silent decode-error catch at line {start_line}",
+                start_line=start_line,
+                end_line=end_line,
+            )
+            chunks.append(chunk)
+
+    sorted_chunks = sorted(chunks, key=lambda c: (str(c.file_path), c.start_line))
+    return tuple(sorted_chunks)
 
 
 def find_code_in_init_files(

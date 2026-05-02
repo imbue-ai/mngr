@@ -265,7 +265,7 @@ class VpsDockerHostStore:
                     agent_data = json.loads(content)
                     agent_data_by_host_id.setdefault(host_id, []).append(agent_data)
                 except json.JSONDecodeError as e:
-                    logger.trace("Skipped invalid agent record {}: {}", file_path, e)
+                    logger.warning("Skipped invalid agent record {}: {}", file_path, e)
 
         return host_records, agent_data_by_host_id
 
@@ -315,7 +315,7 @@ class VpsDockerHostStore:
             try:
                 results.append(json.loads(content))
             except json.JSONDecodeError as e:
-                logger.trace("Skipped invalid JSON file {}: {}", file_path, e)
+                logger.warning("Skipped invalid JSON file {}: {}", file_path, e)
         return results
 
     def clear_cache(self) -> None:

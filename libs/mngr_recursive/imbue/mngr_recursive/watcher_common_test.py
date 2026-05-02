@@ -15,6 +15,7 @@ from watchdog.events import FileModifiedEvent
 from watchdog.events import FileMovedEvent
 from watchdog.events import FileOpenedEvent
 
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr_recursive.watcher_common import ChangeHandler
 from imbue.mngr_recursive.watcher_common import load_watchers_section
 from imbue.mngr_recursive.watcher_common import mtime_poll_directories
@@ -111,9 +112,10 @@ def test_load_watchers_section_reads_watchers_table(tmp_path: Path) -> None:
     assert result["conversation_poll_interval_seconds"] == 15
 
 
-def test_load_watchers_section_handles_corrupt_file(tmp_path: Path) -> None:
+def test_load_watchers_section_raises_on_corrupt_file(tmp_path: Path) -> None:
     _write_minds_settings_toml(tmp_path, "this is not valid toml {{{")
-    assert load_watchers_section(tmp_path) == {}
+    with pytest.raises(ConfigParseError):
+        load_watchers_section(tmp_path)
 
 
 def test_load_watchers_section_returns_empty_for_missing_section(tmp_path: Path) -> None:
@@ -138,6 +140,12 @@ def test_read_event_ids_from_jsonl_handles_malformed_lines(tmp_path: Path) -> No
     jsonl_file = tmp_path / "events.jsonl"
     jsonl_file.write_text("bad json\n" + json.dumps({"event_id": "evt-ok"}) + "\n")
     assert read_event_ids_from_jsonl(jsonl_file) == {"evt-ok"}
+
+
+def test_read_event_ids_from_jsonl_skips_blank_lines(tmp_path: Path) -> None:
+    jsonl_file = tmp_path / "events.jsonl"
+    jsonl_file.write_text("\n" + json.dumps({"event_id": "evt-a"}) + "\n\n" + json.dumps({"event_id": "evt-b"}) + "\n")
+    assert read_event_ids_from_jsonl(jsonl_file) == {"evt-a", "evt-b"}
 
 
 # -- require_env tests --
@@ -220,6 +228,19 @@ def test_mtime_poll_files_tracks_multiple_files(tmp_path: Path) -> None:
     file_a.write_text("a modified")
     os.utime(file_a, (0, 999999999))
     assert mtime_poll_files([file_a, file_b], cache)
+
+
+def test_mtime_poll_files_drops_paths_no_longer_watched(tmp_path: Path) -> None:
+    """Stale entries in mtime_cache for paths no longer in watch_paths are dropped."""
+    cache: dict[str, tuple[float, int]] = {}
+    test_file = tmp_path / "data.txt"
+    test_file.write_text("content")
+
+    assert mtime_poll_files([test_file], cache)
+    assert str(test_file) in cache
+
+    assert mtime_poll_files([], cache)
+    assert str(test_file) not in cache
 
 
 # -- mtime_poll_directories tests --

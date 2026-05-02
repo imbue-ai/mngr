@@ -173,7 +173,7 @@ class LimaHostStore(MutableModel):
                 agent_data = json.loads(content)
                 agent_records.append(agent_data)
             except (json.JSONDecodeError, FileNotFoundError, OSError) as e:
-                logger.trace("Skipped invalid agent record {}: {}", entry.path, e)
+                logger.warning("Skipped invalid agent record {}: {}", entry.path, e)
                 continue
 
         return agent_records

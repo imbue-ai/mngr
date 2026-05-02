@@ -701,7 +701,8 @@ def _claude_json_has_primary_api_key() -> bool:
     try:
         config_data = json.loads(claude_json_path.read_text())
         return bool(config_data.get("primaryApiKey"))
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Could not read claude config at {}: {}", claude_json_path, e)
         return False
 
 

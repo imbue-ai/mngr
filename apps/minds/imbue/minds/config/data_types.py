@@ -49,6 +49,6 @@ def parse_agents_from_mngr_output(stdout: str) -> list[dict[str, object]]:
                 data = json.loads(stripped)
                 return list(data.get("agents", []))
             except json.JSONDecodeError:
-                logger.trace("Failed to parse JSON from mngr list output line: {}", stripped[:200])
+                logger.warning("Failed to parse JSON from mngr list output line: {}", stripped[:200])
                 continue
     return []

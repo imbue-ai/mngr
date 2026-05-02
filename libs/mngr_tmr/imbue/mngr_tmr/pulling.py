@@ -70,7 +70,8 @@ def try_read_agent_result(
     try:
         raw = host.read_text_file(result_path)
         return _parse_result_json(raw)
-    except (HostError, FileNotFoundError, OSError, json.JSONDecodeError, KeyError, ValueError):
+    except (HostError, FileNotFoundError, OSError, json.JSONDecodeError, KeyError, ValueError) as e:
+        logger.warning("Could not read remote outcome file {}: {}", result_path, e)
         return None
 
 

@@ -102,7 +102,7 @@ def _has_api_credentials_available(
             if auth_data:
                 return True
         except (json.JSONDecodeError, OSError) as e:
-            logger.debug("Could not read auth.json: {}", e)
+            logger.warning("Could not read auth.json: {}", e)
 
     return False
 

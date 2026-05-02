@@ -19,6 +19,7 @@ from imbue.mngr.api.discovery_events import _DISCOVERY_MAX_FILE_SIZE_BYTES
 from imbue.mngr.api.discovery_events import _build_ssh_info_from_host
 from imbue.mngr.api.discovery_events import _discovery_stream_emit_line
 from imbue.mngr.api.discovery_events import _discovery_stream_tail_events_file
+from imbue.mngr.api.discovery_events import _emit_lines_from_offset
 from imbue.mngr.api.discovery_events import _make_envelope_fields
 from imbue.mngr.api.discovery_events import _rotate_discovery_events_if_needed
 from imbue.mngr.api.discovery_events import append_discovery_event
@@ -49,7 +50,9 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import make_test_discovered_agent
 from imbue.mngr.utils.testing import make_test_discovered_host
@@ -306,6 +309,37 @@ def test_find_latest_full_snapshot_offset_returns_zero_when_no_full_events(temp_
 
     events_path = get_discovery_events_path(temp_config)
     assert find_latest_full_snapshot_offset(events_path) == 0
+
+
+def test_find_latest_full_snapshot_offset_warns_on_mid_file_corruption(tmp_path: Path) -> None:
+    events_path = tmp_path / "events.jsonl"
+    # A leading agent event, then a valid full snapshot, then a corrupt line,
+    # then a trailing agent event. The corrupt line is followed by more data,
+    # so a warning should be emitted. The leading event ensures the snapshot
+    # offset is non-zero, so the assertion distinguishes "snapshot located"
+    # from "no snapshot found, fallback to 0".
+    leading_agent = (
+        '{"timestamp":"2026-01-01T00:00:00Z","type":"AGENT_DISCOVERED","event_id":"evt-w",'
+        '"source":"mngr/discovery","agent":{}}'
+    )
+    valid_full = (
+        '{"timestamp":"2026-01-02T00:00:00Z","type":"DISCOVERY_FULL","event_id":"evt-x",'
+        '"source":"mngr/discovery","agents":[],"hosts":[]}'
+    )
+    valid_agent = (
+        '{"timestamp":"2026-01-03T00:00:00Z","type":"AGENT_DISCOVERED","event_id":"evt-y",'
+        '"source":"mngr/discovery","agent":{}}'
+    )
+    leading_line = f"{leading_agent}\n"
+    events_path.write_text(f"{leading_line}{valid_full}\nthis is not json {{{{\n{valid_agent}\n")
+
+    with capture_loguru(level="WARNING") as log_output:
+        offset = find_latest_full_snapshot_offset(events_path)
+
+    # The snapshot starts immediately after the leading line, so its byte offset
+    # equals the byte length of the leading line.
+    assert offset == len(leading_line.encode("utf-8"))
+    assert "Skipped corrupt JSONL line" in log_output.getvalue()
 
 
 def test_find_latest_full_snapshot_offset_finds_last_full_event(temp_config: MngrConfig) -> None:
@@ -675,10 +709,11 @@ def test_resolve_provider_names_with_no_snapshot_only_incremental(temp_config: M
 def test_discovery_stream_emit_line_emits_valid_json_to_stdout(capsys: pytest.CaptureFixture[str]) -> None:
     emitted_ids: set[str] = set()
     lock = Lock()
+    warner = MalformedJsonLineWarner(source_description="test")
     event = make_agent_discovery_event(make_test_discovered_agent())
     line = json.dumps(event.model_dump(mode="json"))
 
-    _discovery_stream_emit_line(line, emitted_ids, lock, None)
+    _discovery_stream_emit_line(line, warner, emitted_ids, lock, None)
 
     captured = capsys.readouterr()
     assert captured.out.strip()
@@ -689,12 +724,13 @@ def test_discovery_stream_emit_line_emits_valid_json_to_stdout(capsys: pytest.Ca
 def test_discovery_stream_emit_line_deduplicates_by_event_id(capsys: pytest.CaptureFixture[str]) -> None:
     emitted_ids: set[str] = set()
     lock = Lock()
+    warner = MalformedJsonLineWarner(source_description="test")
     event = make_agent_discovery_event(make_test_discovered_agent())
     line = json.dumps(event.model_dump(mode="json"))
 
     # Emit the same event twice
-    _discovery_stream_emit_line(line, emitted_ids, lock, None)
-    _discovery_stream_emit_line(line, emitted_ids, lock, None)
+    _discovery_stream_emit_line(line, warner, emitted_ids, lock, None)
+    _discovery_stream_emit_line(line, warner, emitted_ids, lock, None)
 
     captured = capsys.readouterr()
     # Only one line should be emitted
@@ -705,9 +741,10 @@ def test_discovery_stream_emit_line_deduplicates_by_event_id(capsys: pytest.Capt
 def test_discovery_stream_emit_line_skips_empty_lines(capsys: pytest.CaptureFixture[str]) -> None:
     emitted_ids: set[str] = set()
     lock = Lock()
+    warner = MalformedJsonLineWarner(source_description="test")
 
-    _discovery_stream_emit_line("", emitted_ids, lock, None)
-    _discovery_stream_emit_line("   ", emitted_ids, lock, None)
+    _discovery_stream_emit_line("", warner, emitted_ids, lock, None)
+    _discovery_stream_emit_line("   ", warner, emitted_ids, lock, None)
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -716,21 +753,38 @@ def test_discovery_stream_emit_line_skips_empty_lines(capsys: pytest.CaptureFixt
 def test_discovery_stream_emit_line_skips_invalid_json(capsys: pytest.CaptureFixture[str]) -> None:
     emitted_ids: set[str] = set()
     lock = Lock()
+    warner = MalformedJsonLineWarner(source_description="test")
 
-    _discovery_stream_emit_line("{invalid json}", emitted_ids, lock, None)
+    _discovery_stream_emit_line("{invalid json}", warner, emitted_ids, lock, None)
 
     captured = capsys.readouterr()
     assert captured.out == ""
 
 
+def test_discovery_stream_emit_line_warns_on_mid_stream_corruption() -> None:
+    emitted_ids: set[str] = set()
+    lock = Lock()
+    warner = MalformedJsonLineWarner(source_description="test stream")
+    event = make_agent_discovery_event(make_test_discovered_agent())
+    valid_line = json.dumps(event.model_dump(mode="json"))
+
+    with capture_loguru(level="WARNING") as log_output:
+        # Buffered: not yet flushed
+        _discovery_stream_emit_line("garbage{", warner, emitted_ids, lock, lambda _: None)
+        # Subsequent valid line proves the malformed line was not at EOF
+        _discovery_stream_emit_line(valid_line, warner, emitted_ids, lock, lambda _: None)
+    assert "Skipped corrupt JSONL line in test stream" in log_output.getvalue()
+
+
 def test_discovery_stream_emit_line_uses_callback_when_provided() -> None:
     emitted_ids: set[str] = set()
     lock = Lock()
+    warner = MalformedJsonLineWarner(source_description="test")
     event = make_agent_discovery_event(make_test_discovered_agent())
     line = json.dumps(event.model_dump(mode="json"))
     received_lines: list[str] = []
 
-    _discovery_stream_emit_line(line, emitted_ids, lock, received_lines.append)
+    _discovery_stream_emit_line(line, warner, emitted_ids, lock, received_lines.append)
 
     assert len(received_lines) == 1
     parsed = json.loads(received_lines[0])
@@ -748,11 +802,12 @@ def test_discovery_stream_tail_detects_new_content(temp_config: MngrConfig) -> N
     lock = Lock()
     stop_event = threading.Event()
     captured_lines: list[str] = []
+    warner = MalformedJsonLineWarner(source_description="test")
 
     # Start tail thread with on_line callback instead of manipulating sys.stdout
     tail = threading.Thread(
         target=_discovery_stream_tail_events_file,
-        args=(events_path, initial_offset, stop_event, emitted_ids, lock, captured_lines.append),
+        args=(events_path, initial_offset, stop_event, emitted_ids, lock, warner, captured_lines.append),
         daemon=True,
     )
     tail.start()
@@ -768,6 +823,151 @@ def test_discovery_stream_tail_detects_new_content(temp_config: MngrConfig) -> N
 
     # The tail should have picked up the new event
     assert len(captured_lines) == 1
+
+
+def test_discovery_stream_tail_preserves_partial_writes(tmp_path: Path) -> None:
+    """Regression test: the tail loop must not advance past a partial-write line.
+
+    Before the fix, a poll that ended in a mid-flush partial line would parse
+    the partial as malformed JSON and advance byte_offset past it; the rest of
+    that line, written later, was never re-read and was silently lost.
+    """
+    events_path = tmp_path / "events.jsonl"
+    events_path.touch()
+
+    captured_lines: list[str] = []
+    stop_event = threading.Event()
+    emitted_ids: set[str] = set()
+    lock = Lock()
+    warner = MalformedJsonLineWarner(source_description="test partial")
+
+    tail = threading.Thread(
+        target=_discovery_stream_tail_events_file,
+        args=(events_path, 0, stop_event, emitted_ids, lock, warner, captured_lines.append),
+        daemon=True,
+    )
+    tail.start()
+
+    event_1 = make_agent_discovery_event(make_test_discovered_agent())
+    event_2 = make_agent_discovery_event(make_test_discovered_agent())
+    line_1 = json.dumps(event_1.model_dump(mode="json")) + "\n"
+    line_2 = json.dumps(event_2.model_dump(mode="json")) + "\n"
+    split_at = len(line_2) // 2
+    partial_2 = line_2[:split_at]
+    rest_2 = line_2[split_at:]
+
+    try:
+        # First write: a complete line followed by half of the second line (no trailing newline).
+        with open(events_path, "w") as f:
+            f.write(line_1 + partial_2)
+
+        poll_until(lambda: len(captured_lines) >= 1, timeout=5.0)
+
+        # Now flush the rest of the second line.
+        with open(events_path, "a") as f:
+            f.write(rest_2)
+
+        poll_until(lambda: len(captured_lines) >= 2, timeout=5.0)
+    finally:
+        stop_event.set()
+        tail.join(timeout=5.0)
+
+    assert len(captured_lines) == 2
+    parsed_ids = {json.loads(line)["event_id"] for line in captured_lines}
+    assert parsed_ids == {str(event_1.event_id), str(event_2.event_id)}
+
+
+def test_emit_lines_from_offset_warns_on_corruption_across_calls(tmp_path: Path) -> None:
+    """Regression test: a single shared warner across phase reads must surface
+    mid-file corruption that straddles phase boundaries.
+
+    Before the fix, run_discovery_stream used a fresh MalformedJsonLineWarner
+    for each synchronous phase, so a malformed line at the end of phase 1's
+    read window was buffered, then silently discarded when phase 1 ended -- no
+    warning fired even when phase 3 (or the tail) later read valid data after it.
+    """
+    events_path = tmp_path / "events.jsonl"
+    valid_full = (
+        '{"timestamp":"2026-01-01T00:00:00Z","type":"DISCOVERY_FULL","event_id":"evt-x",'
+        '"source":"mngr/discovery","agents":[],"hosts":[]}'
+    )
+    valid_agent = (
+        '{"timestamp":"2026-01-02T00:00:00Z","type":"AGENT_DISCOVERED","event_id":"evt-y",'
+        '"source":"mngr/discovery","agent":{}}'
+    )
+    # Phase 1 input: valid snapshot then a malformed line at the end of the read window.
+    events_path.write_text(f"{valid_full}\nthis is not json {{{{\n")
+
+    warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
+    emitted_ids: set[str] = set()
+    lock = Lock()
+    captured: list[str] = []
+
+    with capture_loguru(level="WARNING") as log_output:
+        # Phase 1: read from start to current EOF.
+        _emit_lines_from_offset(events_path, 0, warner, emitted_ids, lock, captured.append)
+        # The malformed line is buffered; nothing has flushed it yet.
+        assert "Skipped corrupt JSONL line" not in log_output.getvalue()
+
+        # Simulate data appended between phases (e.g. by the background sync).
+        with open(events_path, "a") as f:
+            f.write(f"{valid_agent}\n")
+
+        # Phase 3 re-reads from the same offset after the sync. With a shared
+        # warner, the buffered malformed line gets flushed when this read sees
+        # the new valid line.
+        _emit_lines_from_offset(events_path, 0, warner, emitted_ids, lock, captured.append)
+
+    assert "Skipped corrupt JSONL line" in log_output.getvalue()
+
+
+def test_emit_lines_from_offset_holds_back_partial_last_line(tmp_path: Path) -> None:
+    """Regression test: a partial trailing line at the time of phase-1 read must be
+    held back so the tail thread can re-read it in one piece once the writer flushes.
+
+    Before the fix, _emit_lines_from_offset used Python's text-mode line iterator,
+    which yields a trailing partial line. The partial got buffered in the warner
+    as malformed, the returned offset advanced past it, the tail thread started at
+    the post-partial position, and when the writer flushed the rest the tail saw
+    only the suffix -- losing the event and producing two misleading mid-file-
+    corruption warnings about its two halves.
+    """
+    events_path = tmp_path / "events.jsonl"
+    event_1 = make_agent_discovery_event(make_test_discovered_agent())
+    event_2 = make_agent_discovery_event(make_test_discovered_agent())
+    line_1 = json.dumps(event_1.model_dump(mode="json")) + "\n"
+    line_2 = json.dumps(event_2.model_dump(mode="json")) + "\n"
+    split_at = len(line_2) // 2
+    partial_2 = line_2[:split_at]
+    rest_2 = line_2[split_at:]
+    events_path.write_text(line_1 + partial_2)
+
+    warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
+    emitted_ids: set[str] = set()
+    lock = Lock()
+    captured: list[str] = []
+
+    with capture_loguru(level="WARNING") as log_output:
+        # Phase 1: should consume only line_1 and hold back the partial.
+        consumed_offset = _emit_lines_from_offset(events_path, 0, warner, emitted_ids, lock, captured.append)
+
+        # Writer flushes the rest of line_2.
+        with open(events_path, "a") as f:
+            f.write(rest_2)
+
+        # Tail-equivalent read from the consumed_offset must reconstruct line_2.
+        with open(events_path, "rb") as f:
+            f.seek(consumed_offset)
+            new_content = f.read().decode("utf-8")
+        # The remainder must contain the full reconstructed line_2 (partial + rest)
+        # exactly once -- not just the rest_2 suffix.
+        assert new_content == partial_2 + rest_2
+
+    # No false mid-file-corruption warnings about the partial line should fire.
+    assert "Skipped corrupt JSONL line" not in log_output.getvalue()
+    # Phase 1 emitted exactly one event (line_1).
+    assert len(captured) == 1
+    assert json.loads(captured[0])["event_id"] == str(event_1.event_id)
 
 
 # === Discovery Event Rotation Tests ===

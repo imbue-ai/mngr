@@ -71,7 +71,8 @@ class VultrVpsClient(VpsClientInterface):
             try:
                 error_data = response.json()
                 error_msg = error_data.get("error", response.text)
-            except requests.JSONDecodeError:
+            except requests.JSONDecodeError as e:
+                logger.warning("Vultr API returned non-JSON error response: {}", e)
                 error_msg = response.text
             raise VpsApiError(response.status_code, str(error_msg))
 
