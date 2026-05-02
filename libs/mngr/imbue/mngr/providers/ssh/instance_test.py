@@ -305,6 +305,7 @@ def test_discover_hosts_ignores_missing_dynamic_file(
     assert str(discovered[0].host_name) == "static-host"
 
 
+@pytest.mark.allow_warnings(match=r"Failed to parse dynamic hosts file")
 def test_discover_hosts_ignores_malformed_dynamic_file(
     temp_mngr_ctx: MngrContext,
     tmp_path: Path,

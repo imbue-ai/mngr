@@ -482,6 +482,7 @@ def test_emit_key_not_found_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     assert data["key"] == "nonexistent.key"
 
 
+@pytest.mark.allow_warnings(match=r"Key not found: nonexistent\.key")
 def test_emit_key_not_found_human(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_key_not_found in HUMAN format should not write to stdout (uses logger)."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)

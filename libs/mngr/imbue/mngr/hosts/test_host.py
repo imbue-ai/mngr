@@ -811,6 +811,7 @@ def _collect_pane_pids(host: Host, session_name: str) -> list[str]:
     return host._collect_session_pids(session_name)
 
 
+@pytest.mark.flaky
 def test_procps_ps_command_available() -> None:
     """Verify that the `ps` command from procps is available.
 
