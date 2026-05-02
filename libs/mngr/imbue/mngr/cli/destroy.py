@@ -10,7 +10,6 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.data_types import GcResourceTypes
@@ -49,6 +48,7 @@ from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.utils.git_utils import delete_git_branch
 from imbue.mngr.utils.git_utils import find_source_repo_of_worktree
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
@@ -546,7 +546,7 @@ def _remove_created_branch(
     cg: ConcurrencyGroup,
     output_opts: OutputOptions,
 ) -> None:
-    """Delete a git branch from the source repository.
+    """Delete a git branch from the source repository, with human-facing output.
 
     Called after the post-destroy GC pass, which is what removes the agent's
     worktree (when GC and work-dir cleanup are both enabled). If the worktree
@@ -555,17 +555,8 @@ def _remove_created_branch(
     such failures are logged as warnings and do not fail the destroy
     operation.
     """
-    try:
-        result = cg.run_process_to_completion(
-            ["git", "-C", str(source_repo_path), "branch", "-D", branch_name],
-            is_checked_after=False,
-        )
-        if result.returncode == 0:
-            _output(f"Deleted branch: {branch_name}", output_opts)
-        else:
-            logger.warning("Failed to delete branch {}: {}", branch_name, result.stderr.strip())
-    except ProcessError as e:
-        logger.warning("Failed to delete branch {}: {}", branch_name, e)
+    if delete_git_branch(branch_name, source_repo_path, cg):
+        _output(f"Deleted branch: {branch_name}", output_opts)
 
 
 def _run_post_destroy_gc(

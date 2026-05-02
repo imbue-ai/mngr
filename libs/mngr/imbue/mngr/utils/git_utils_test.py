@@ -10,6 +10,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 from imbue.mngr.utils.git_utils import clone_git_url_to_managed_dir
+from imbue.mngr.utils.git_utils import delete_git_branch
 from imbue.mngr.utils.git_utils import derive_project_name_from_path
 from imbue.mngr.utils.git_utils import find_git_common_dir
 from imbue.mngr.utils.git_utils import find_git_worktree_root
@@ -458,6 +459,44 @@ def test_get_head_commit_returns_none_for_non_git_dir(tmp_path: Path, cg: Concur
     plain_dir.mkdir()
     result = get_head_commit(plain_dir, cg)
     assert result is None
+
+
+# =============================================================================
+# delete_git_branch Tests
+# =============================================================================
+
+
+def test_delete_git_branch_removes_branch(temp_git_repo: Path, cg: ConcurrencyGroup) -> None:
+    """delete_git_branch returns True and removes a branch that exists."""
+    branch_name = "feature/to-delete"
+    subprocess.run(
+        ["git", "-C", str(temp_git_repo), "branch", branch_name],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert delete_git_branch(branch_name, temp_git_repo, cg) is True
+
+    list_result = subprocess.run(
+        ["git", "-C", str(temp_git_repo), "for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert branch_name not in list_result.stdout.splitlines()
+
+
+def test_delete_git_branch_returns_false_for_missing_branch(temp_git_repo: Path, cg: ConcurrencyGroup) -> None:
+    """delete_git_branch returns False (and does not raise) when the branch does not exist."""
+    assert delete_git_branch("does-not-exist", temp_git_repo, cg) is False
+
+
+def test_delete_git_branch_returns_false_for_non_git_dir(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """delete_git_branch returns False (and does not raise) when the path is not a git repo."""
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+    assert delete_git_branch("any-branch", plain_dir, cg) is False
 
 
 # =============================================================================
