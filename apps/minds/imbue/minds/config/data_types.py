@@ -45,6 +45,8 @@ def parse_agents_from_mngr_output(stdout: str) -> list[dict[str, object]]:
     """
     for line in stdout.splitlines():
         stripped = line.strip()
+        if not stripped:
+            continue
         if not stripped.startswith("{"):
             raise MalformedMngrOutputError(
                 f"Expected JSON object on first non-empty mngr output line, got: {stripped[:200]!r}"

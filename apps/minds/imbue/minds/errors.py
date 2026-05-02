@@ -47,12 +47,6 @@ class MalformedMngrOutputError(MindError, ValueError):
     ...
 
 
-class UnrecognizedDiscoveryEventError(MindError, ValueError):
-    """Raised when a discovery event line cannot be matched to a known event type."""
-
-    ...
-
-
 class MindsConfigError(MindError):
     """Raised when minds config cannot be parsed or validated."""
 

@@ -1,6 +1,6 @@
 - JSONL parsers now surface upstream corruption rather than silently dropping bad lines
   - `MalformedJsonLineWarner.parse` raises `MalformedJsonlLineError` on lines that parse but aren't JSON objects (e.g. `[1,2,3]`); valid-but-incomplete JSON is still buffered as a possible end-of-file partial write
   - `parse_event_line`, `parse_discovery_event_line`, `parse_agents_from_mngr_output`, and `_parse_batched_json_files` (vps_docker) all raise on malformed input instead of returning `None`; rationale: stdout is for JSON data, stderr is for logs, and silently skipping garbage hides real upstream bugs
-  - New `MalformedJsonlLineError` exception in `imbue.mngr.errors`; new `MalformedMngrOutputError` and `UnrecognizedDiscoveryEventError` in `imbue.minds.errors`
+  - New `MalformedJsonlLineError` exception in `imbue.mngr.errors`; new `MalformedMngrOutputError` in `imbue.minds.errors`
 - Fixed: `resolve_provider_names_for_identifiers` no longer silently returns partial results when an identifier is unknown; it returns `None` to signal a full discovery scan is needed (regression introduced in the merge that combined the two parsing-fix branches)
 - Fixed: `mngr connect` no longer fails type-checking; the two `build_agent_filter_cel` call sites now pass the required `cg` and `project_root` arguments to match `mngr list` and `mngr kanpan`
