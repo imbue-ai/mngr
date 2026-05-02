@@ -1,3 +1,6 @@
+from datetime import datetime
+from datetime import timezone
+
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_sources.labels import LabelColumnConfig
 from imbue.mngr_kanpan.data_sources.labels import LabelsDataSource
@@ -109,7 +112,9 @@ def test_labels_compute_label_key_differs_from_field_key() -> None:
 
 
 def test_colored_string_field_display() -> None:
-    field = _ColoredStringField(value="urgent", color="light red")
+    field = _ColoredStringField(
+        value="urgent", color="light red", created=datetime(2029, 1, 1, 0, 0, 1, tzinfo=timezone.utc)
+    )
     result = field.display()
     assert isinstance(result, CellDisplay)
     assert result.text == "urgent"
@@ -117,7 +122,7 @@ def test_colored_string_field_display() -> None:
 
 
 def test_colored_string_field_display_no_color() -> None:
-    field = _ColoredStringField(value="normal")
+    field = _ColoredStringField(value="normal", created=datetime(2029, 1, 1, 0, 0, 2, tzinfo=timezone.utc))
     result = field.display()
     assert result.text == "normal"
     assert result.color is None

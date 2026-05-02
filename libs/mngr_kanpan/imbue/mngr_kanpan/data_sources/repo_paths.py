@@ -13,6 +13,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import FIELD_REPO_PATH
 from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_source import now_utc
 
 
 class RepoPathField(FieldValue):
@@ -91,9 +92,10 @@ class RepoPathsDataSource(FrozenModel):
         cached_fields: dict[AgentName, dict[str, FieldValue]],
         mngr_ctx: MngrContext,
     ) -> tuple[dict[AgentName, dict[str, FieldValue]], Sequence[str]]:
+        now = now_utc()
         fields: dict[AgentName, dict[str, FieldValue]] = {}
         for agent in agents:
             repo_path = repo_path_from_labels(agent.labels)
             if repo_path is not None:
-                fields[agent.name] = {FIELD_REPO_PATH: RepoPathField(path=repo_path)}
+                fields[agent.name] = {FIELD_REPO_PATH: RepoPathField(path=repo_path, created=now)}
         return fields, []

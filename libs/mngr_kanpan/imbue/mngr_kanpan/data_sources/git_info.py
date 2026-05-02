@@ -18,6 +18,7 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import FIELD_COMMITS_AHEAD
 from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_source import now_utc
 
 
 class CommitsAheadField(FieldValue):
@@ -76,17 +77,18 @@ class GitInfoDataSource(FrozenModel):
         # Get commits-ahead counts for all unique dirs in parallel
         commits_ahead_map = _get_all_commits_ahead(list(set(agent_work_dirs.values())), cg)
 
+        now = now_utc()
         fields: dict[AgentName, dict[str, FieldValue]] = {}
         for agent in agents:
             work_dir = agent_work_dirs.get(agent.name)
             if work_dir is not None:
                 count = commits_ahead_map.get(work_dir)
                 fields[agent.name] = {
-                    FIELD_COMMITS_AHEAD: CommitsAheadField(count=count, has_work_dir=True),
+                    FIELD_COMMITS_AHEAD: CommitsAheadField(count=count, has_work_dir=True, created=now),
                 }
             else:
                 fields[agent.name] = {
-                    FIELD_COMMITS_AHEAD: CommitsAheadField(count=None, has_work_dir=False),
+                    FIELD_COMMITS_AHEAD: CommitsAheadField(count=None, has_work_dir=False, created=now),
                 }
 
         return fields, []

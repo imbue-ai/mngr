@@ -1,3 +1,6 @@
+from datetime import datetime
+from datetime import timezone
+
 import pytest
 from pydantic import ValidationError
 
@@ -29,6 +32,7 @@ def test_pr_field_display() -> None:
         url="https://github.com/org/repo/pull/42",
         head_branch="mngr/my-agent",
         is_draft=False,
+        created=datetime(2025, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
     )
     cell = pr.display()
     assert cell.text == "#42"
@@ -36,14 +40,14 @@ def test_pr_field_display() -> None:
 
 
 def test_ci_field_display() -> None:
-    ci = CiField(status=CiStatus.FAILING)
+    ci = CiField(status=CiStatus.FAILING, created=datetime(2025, 1, 1, 0, 0, 2, tzinfo=timezone.utc))
     cell = ci.display()
     assert cell.text == "failing"
     assert cell.color == "light red"
 
 
 def test_ci_field_display_unknown() -> None:
-    ci = CiField(status=CiStatus.UNKNOWN)
+    ci = CiField(status=CiStatus.UNKNOWN, created=datetime(2025, 1, 1, 0, 0, 3, tzinfo=timezone.utc))
     cell = ci.display()
     assert cell.text == ""
 
@@ -56,6 +60,7 @@ def test_pr_field_is_frozen() -> None:
         url="https://github.com/org/repo/pull/42",
         head_branch="mngr/my-agent",
         is_draft=False,
+        created=datetime(2025, 1, 1, 0, 0, 4, tzinfo=timezone.utc),
     )
     with pytest.raises(ValidationError):
         pr.number = 99
@@ -83,6 +88,7 @@ def test_agent_board_entry_with_fields() -> None:
         url="https://github.com/org/repo/pull/10",
         head_branch="mngr/my-agent",
         is_draft=False,
+        created=datetime(2025, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
     )
     entry = AgentBoardEntry(
         name=AgentName("my-agent"),
@@ -175,3 +181,30 @@ def test_kanpan_config_merge_with_shell_commands() -> None:
     merged = base.merge_with(override)
     assert "slack" in merged.shell_commands
     assert "jira" in merged.shell_commands
+
+
+def test_kanpan_plugin_config_staleness_threshold_default_unset() -> None:
+    config = KanpanPluginConfig()
+    assert config.staleness_threshold_seconds is None
+
+
+def test_effective_staleness_threshold_defaults_to_90_percent_of_refresh_interval() -> None:
+    config = KanpanPluginConfig(refresh_interval_seconds=600.0)
+    assert config.effective_staleness_threshold_seconds() == 540.0
+
+
+def test_effective_staleness_threshold_tracks_custom_refresh_interval() -> None:
+    config = KanpanPluginConfig(refresh_interval_seconds=120.0)
+    assert config.effective_staleness_threshold_seconds() == 108.0
+
+
+def test_effective_staleness_threshold_uses_explicit_value_when_set() -> None:
+    config = KanpanPluginConfig(refresh_interval_seconds=600.0, staleness_threshold_seconds=42.0)
+    assert config.effective_staleness_threshold_seconds() == 42.0
+
+
+def test_kanpan_plugin_config_merge_with_staleness_threshold() -> None:
+    base = KanpanPluginConfig(staleness_threshold_seconds=600.0)
+    override = KanpanPluginConfig(staleness_threshold_seconds=120.0)
+    merged = base.merge_with(override)
+    assert merged.staleness_threshold_seconds == 120.0
