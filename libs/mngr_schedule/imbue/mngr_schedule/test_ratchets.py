@@ -41,7 +41,13 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(10))
+    # cron_runner.py is deployed standalone into Modal and cannot import
+    # loguru (or anything from imbue.*) at module scope, so all of its
+    # diagnostics + the structured-result sentinel must go via bare
+    # print() / sys.stdout.write(). Exempt the whole file rather than
+    # bumping the count for each new diagnostic.
+    excluded = TEST_FILE_PATTERNS + ("cron_runner.py",)
+    rc.check_bare_print(_DIR, snapshot(2), excluded_patterns=excluded)
 
 
 # --- Exception handling ---
@@ -60,14 +66,14 @@ def test_prevent_base_exception_catch() -> None:
 
 
 def test_prevent_builtin_exception_raises() -> None:
-    rc.check_builtin_exception_raises(_DIR, snapshot(7))
+    rc.check_builtin_exception_raises(_DIR, snapshot(6))
 
 
 # --- Import style ---
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(1))
+    rc.check_inline_imports(_DIR, snapshot(2))
 
 
 def test_prevent_relative_imports() -> None:
@@ -234,14 +240,14 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 def test_prevent_direct_subprocess() -> None:
     # testing.py files are test infrastructure and excluded alongside test files
     excluded = TEST_FILE_PATTERNS + ("testing.py",)
-    rc.check_direct_subprocess(_DIR, snapshot(5), excluded_patterns=excluded)
+    rc.check_direct_subprocess(_DIR, snapshot(7), excluded_patterns=excluded)
 
 
 # --- AST-based ratchets ---
 
 
 def test_prevent_if_elif_without_else() -> None:
-    rc.check_if_elif_without_else(_DIR, snapshot(2))
+    rc.check_if_elif_without_else(_DIR, snapshot(1))
 
 
 def test_prevent_inline_functions() -> None:
