@@ -24,6 +24,9 @@ from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.filter_opts import AgentFilterCliOptions
+from imbue.mngr.cli.filter_opts import add_agent_filter_options
+from imbue.mngr.cli.filter_opts import build_agent_filter_cel
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
@@ -36,10 +39,13 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentLifecycleState
 
 
-class ConnectCliOptions(CommonCliOptions):
+class ConnectCliOptions(AgentFilterCliOptions, CommonCliOptions):
     """Options passed from the CLI to the connect command.
 
-    Inherits common options (output_format, quiet, verbose, etc.) from CommonCliOptions.
+    Inherits common options from CommonCliOptions and the shared agent filter
+    flags from AgentFilterCliOptions. Filter flags only narrow the candidate
+    pool when no explicit agent is given (interactive selector and the
+    non-interactive most-recent fallback); they are ignored otherwise.
     """
 
     agent: str | None
@@ -352,6 +358,7 @@ def _build_connection_options(opts: ConnectCliOptions, mngr_ctx: MngrContext) ->
     show_default=True,
     help="Allow connecting to hosts without a known_hosts file (disables SSH host key verification)",
 )
+@add_agent_filter_options
 @add_common_options
 @click.pass_context
 def connect(ctx: click.Context, **kwargs: Any) -> None:
@@ -385,7 +392,13 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         )
     elif not mngr_ctx.is_interactive:
         # Default to most recently created agent when running non-interactively
-        list_result = list_agents(mngr_ctx, is_streaming=False)
+        include_filters, exclude_filters = build_agent_filter_cel(opts)
+        list_result = list_agents(
+            mngr_ctx,
+            is_streaming=False,
+            include_filters=include_filters,
+            exclude_filters=exclude_filters,
+        )
         if not list_result.agents:
             raise UserInputError("No agents found")
 
@@ -400,7 +413,13 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
             is_start_desired=opts.start,
         )
     else:
-        list_result = list_agents(mngr_ctx, is_streaming=False)
+        include_filters, exclude_filters = build_agent_filter_cel(opts)
+        list_result = list_agents(
+            mngr_ctx,
+            is_streaming=False,
+            include_filters=include_filters,
+            exclude_filters=exclude_filters,
+        )
         if not list_result.agents:
             raise UserInputError("No agents found")
 
@@ -437,16 +456,23 @@ by name.
 
 The agent can be specified as a positional argument or via --agent:
   mngr connect my-agent
-  mngr connect --agent my-agent""",
+  mngr connect --agent my-agent
+
+Filter flags (--include/--exclude plus aliases like --running, --project,
+--label, ...) narrow the candidate pool used by the interactive selector
+and the non-interactive most-recent fallback. They are ignored when an
+explicit agent is given. See `mngr list --help` for the full filter
+reference; the same flags work identically here.""",
     aliases=("conn",),
     examples=(
         ("Connect to an agent by name", "mngr connect my-agent"),
         ("Connect without auto-starting if stopped", "mngr connect my-agent --no-start"),
         ("Show interactive agent selector", "mngr connect"),
+        ("Selector limited to running agents on a project", "mngr connect --running --project my-project"),
     ),
     see_also=(
         ("create", "Create and connect to a new agent"),
-        ("list", "List available agents"),
+        ("list", "List agents (full filter flag reference lives here)"),
     ),
 ).register()
 
