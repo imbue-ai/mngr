@@ -28,7 +28,9 @@ def kanpan(ctx: click.Context, **kwargs: Any) -> None:
         command_class=KanpanCliOptions,
     )
 
-    include_tuple, exclude_tuple = build_agent_filter_cel(opts)
+    include_tuple, exclude_tuple = build_agent_filter_cel(
+        opts, mngr_ctx.concurrency_group, project_root=mngr_ctx.project_root
+    )
 
     run_kanpan(mngr_ctx, include_filters=include_tuple, exclude_filters=exclude_tuple)
 

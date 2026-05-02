@@ -109,6 +109,83 @@ def get_current_git_branch(path: Path | None, cg: ConcurrencyGroup) -> str | Non
         return None
 
 
+def resolve_project_filter_values(
+    values: tuple[str, ...],
+    cg: ConcurrencyGroup,
+    *,
+    project_root: Path | None = None,
+) -> tuple[str, ...]:
+    """Resolve --project filter values, expanding "." to the current project name.
+
+    The current project is derived from ``project_root`` when provided (typically
+    ``MngrContext.project_root``, the git worktree root), falling back to the
+    current working directory when not. This is important because running from a
+    subdirectory would otherwise miss the git remote and yield the subdirectory's
+    name. Other values are returned unchanged. The current project is derived at
+    most once. Duplicate values (after expansion) are collapsed while preserving
+    insertion order so the resulting CEL clause stays minimal.
+    """
+    current_project: str | None = None
+    resolved: dict[str, None] = {}
+    for value in values:
+        if value == ".":
+            if current_project is None:
+                current_project = derive_project_name_from_path(project_root or Path.cwd(), cg)
+            resolved[current_project] = None
+        else:
+            resolved[value] = None
+    return tuple(resolved)
+
+
+def build_project_filter_clause(
+    values: tuple[str, ...],
+    cg: ConcurrencyGroup,
+    *,
+    project_root: Path | None = None,
+) -> str | None:
+    """Build a CEL include clause for filtering agents by project label.
+
+    Returns ``None`` when ``values`` is empty, so callers can simply skip the
+    filter append. Otherwise expands "." sentinels via
+    ``resolve_project_filter_values`` and returns an OR-joined CEL clause like
+    ``labels.project == "foo" || labels.project == "bar"``. ``project_root``
+    is forwarded to ``resolve_project_filter_values`` (see its docstring).
+    """
+    if not values:
+        return None
+    project_names = resolve_project_filter_values(values, cg, project_root=project_root)
+    return " || ".join(f'labels.project == "{p}"' for p in project_names)
+
+
+def derive_project_name_for_source(
+    path: Path,
+    *,
+    remote_url: str | None = None,
+    source_project_label: str | None = None,
+) -> str:
+    """Derive a project name for a source location.
+
+    Priority:
+    1. ``source_project_label`` -- e.g. inherited from a source agent's label.
+    2. ``remote_url`` -- useful when the URL has already been fetched (which works
+       for remote sources where shelling to a local git binary would not).
+    3. Fall back to ``path``'s directory name (resolved to normalize symlinks /
+       ``..`` components).
+
+    The path fallback intentionally does *not* shell out to git: callers are
+    expected to have already fetched the remote URL via the source's own host
+    (which works for both local and remote sources). Re-running git locally
+    against a remote-source path would be either redundant or incorrect.
+    """
+    if source_project_label is not None:
+        return source_project_label
+    if remote_url is not None:
+        from_url = parse_project_name_from_url(remote_url)
+        if from_url is not None:
+            return from_url
+    return path.resolve().name
+
+
 def derive_project_name_from_path(path: Path, cg: ConcurrencyGroup) -> str:
     """Derive a project name from a path.
 

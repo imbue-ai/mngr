@@ -83,7 +83,7 @@ def default_create_cli_opts() -> CreateCliOptions:
         host_name_style="coolname",
         host_label=(),
         label=(),
-        project=None,
+        project=".",
         host_env=(),
         host_env_file=(),
         pass_host_env=(),

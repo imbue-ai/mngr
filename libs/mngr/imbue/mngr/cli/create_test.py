@@ -576,6 +576,25 @@ def test_parse_project_name_returns_explicit_project(
     assert result == "explicit-project"
 
 
+def test_parse_project_name_treats_dot_as_default_derivation(
+    default_create_cli_opts: CreateCliOptions,
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """`--project .` (the default) triggers the source-based derivation chain, not a literal '.'."""
+    some_dir = tmp_path / "some-source"
+    some_dir.mkdir()
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
+    resolved = ResolvedSource(location=HostLocation(host=local_host, path=some_dir))
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().project, "."),
+    )
+
+    result = _parse_project_name(resolved, opts, remote_url=None)
+
+    assert result == "some-source"
+
+
 def test_parse_project_name_inherits_from_source_agent(
     default_create_cli_opts: CreateCliOptions,
     local_provider: LocalProviderInstance,

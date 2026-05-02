@@ -223,7 +223,10 @@ PREVENT_NUM_PREFIX = RegexRatchetRule(
 
 PREVENT_TRAILING_COMMENTS = RegexRatchetRule(
     rule_name="trailing comments",
-    rule_description="Comments should be on their own line, not trailing after code. Trailing comments make code harder to read",
+    rule_description=(
+        "Comments should be on their own line, not trailing after code. Trailing comments make code harder to read. "
+        "`# ty: ignore[code]` is exempt."
+    ),
     pattern_string=r"[^\s#].*[ \t]#(?![0-9a-fA-F]{3,6}[;\s])(?!\s*ty:\s*ignore\[)",
 )
 

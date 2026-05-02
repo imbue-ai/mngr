@@ -19,16 +19,19 @@ glue.
 """
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from typing import TypeVar
 
 import click
 from click_option_group import optgroup
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import HostState
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr.utils.git_utils import build_project_filter_clause
 
 TDecorated = TypeVar("TDecorated", bound=Callable[..., Any])
 
@@ -71,7 +74,7 @@ def add_agent_filter_options(command: TDecorated) -> TDecorated:
     command = optgroup.option(
         "--project",
         multiple=True,
-        help="Show only agents with this project label (repeatable)",
+        help="Show only agents with this project label (repeatable; '.' expands to the current project)",
     )(command)
     command = optgroup.option(
         "--remote",
@@ -130,12 +133,20 @@ def _key_value_filter(specs: tuple[str, ...], cel_prefix: str, flag_name: str, e
 
 def build_agent_filter_cel(
     opts: AgentFilterCliOptions,
+    cg: ConcurrencyGroup,
+    *,
+    project_root: Path | None = None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Translate parsed filter flags into ``(include_filters, exclude_filters)`` CEL tuples.
 
     Compiles the result with ``compile_cel_filters`` to fail fast on syntactically
     invalid ``--include``/``--exclude`` expressions before any consumer (list,
     kanpan, ...) starts work.
+
+    ``cg`` and ``project_root`` are used to resolve ``--project .`` to the current
+    project name (derived from ``project_root``'s git remote, falling back to its
+    worktree-source-repo dir name or folder name; when ``project_root`` is
+    ``None``, falls back to ``Path.cwd()``).
     """
     include: list[str] = list(opts.include)
     exclude: list[str] = list(opts.exclude)
@@ -155,8 +166,9 @@ def build_agent_filter_cel(
         include.append(f'host.state != "{HostState.CRASHED.value}"')
         include.append(f'host.state != "{HostState.FAILED.value}"')
         include.append(f'host.state != "{HostState.DESTROYED.value}"')
-    if opts.project:
-        include.append(" || ".join(f'labels.project == "{p}"' for p in opts.project))
+    project_clause = build_project_filter_clause(opts.project, cg, project_root=project_root)
+    if project_clause is not None:
+        include.append(project_clause)
     if opts.label:
         include.append(_key_value_filter(opts.label, "labels", "--label", "Label"))
     if opts.host_label:
