@@ -15,6 +15,7 @@ from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import check_effort_callout_dismissed
 from imbue.mngr_claude.claude_config import check_source_directory_trusted
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
+from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import find_project_config
 from imbue.mngr_claude.claude_config import find_user_claude_config
 from imbue.mngr_claude.claude_config import get_claude_config_dir
@@ -783,6 +784,45 @@ def test_find_user_claude_config_ignores_claude_config_dir(tmp_path: Path, monke
     # Should return the default user path, not the per-agent path
     result = find_user_claude_config()
     assert result == Path.home() / ".claude.json"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # Slashes and leading slash become '-' (the original behavior, preserved).
+        ("/Users/foo/bar", "-Users-foo-bar"),
+        # Dots become '-' (the original behavior, preserved).
+        ("/a.b.c", "-a-b-c"),
+        # Underscores become '-' (newly added by this branch).
+        ("/foo_bar/baz_qux", "-foo-bar-baz-qux"),
+        # Spaces and tabs become '-' (newly added).
+        ("/with space/and\ttab", "-with-space-and-tab"),
+        # '@' and '+' become '-' (newly added).
+        ("/user@host/foo+bar", "-user-host-foo-bar"),
+        # Non-ASCII letters become '-' (newly added). Each non-ASCII char is one
+        # codepoint in str(path), so each maps to exactly one '-'. The leading
+        # slash and the slash between segments each contribute one '-' as well.
+        ("/café/naïve", "-caf--na-ve"),
+        ("/中文/path", "----path"),
+        # Hyphens and ASCII alphanumerics are preserved.
+        ("/already-dashed/Mixed123", "-already-dashed-Mixed123"),
+        # Consecutive special chars are NOT collapsed (we mirror Claude Code's
+        # 1:1 mapping; collapsing would create dir-name collisions).
+        ("/a..b", "-a--b"),
+        ("/a__b", "-a--b"),
+    ],
+)
+def test_encode_claude_project_dir_name(raw: str, expected: str) -> None:
+    """encode_claude_project_dir_name maps every non-[A-Za-z0-9-] char to '-'.
+
+    Pins the behavior introduced when the encoder was broadened to match
+    Claude Code's actual algorithm (anthropics/claude-code#19972). If this
+    encoder ever regresses to ``replace("/", "-").replace(".", "-")`` or to a
+    pattern that treats ``_`` as a word char (e.g. ``\\W``), several of these
+    cases will fail -- which is the point: a divergence here silently breaks
+    ``mngr create --adopt-session``.
+    """
+    assert encode_claude_project_dir_name(Path(raw)) == expected
 
 
 def test_build_permission_auto_allow_hooks_config_has_permission_request_hook() -> None:

@@ -1445,6 +1445,7 @@ def test_list_agents_batch_abort_mode_raises_for_mismatched_provider_name(
 # =============================================================================
 
 
+@pytest.mark.allow_warnings(match=r"Error discovering agents for provider")
 def test_discover_and_emit_details_for_provider_continue_mode_records_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -1877,6 +1878,7 @@ def test_collect_and_emit_details_for_host_no_filter_adds_all_agents(
 # =============================================================================
 
 
+@pytest.mark.allow_warnings(match=r"Error processing host")
 def test_process_host_with_error_handling_continue_mode_records_host_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:

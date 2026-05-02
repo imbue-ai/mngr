@@ -1,4 +1,5 @@
 import json
+import os
 import shlex
 import subprocess
 from contextlib import contextmanager
@@ -333,7 +334,7 @@ def test_claude_agent_assemble_command_with_no_args(
     sid_export = _sid_export_for(uuid)
     # Local hosts should NOT have IS_SANDBOX set
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
+        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
     )
 
 
@@ -351,7 +352,7 @@ def test_claude_agent_assemble_command_with_agent_args(
     background_cmd = agent._build_background_tasks_command(session_name)
     sid_export = _sid_export_for(uuid)
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || claude --session-id {uuid} --model opus'
+        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || claude --session-id {uuid} --model opus'
     )
 
 
@@ -374,7 +375,7 @@ def test_claude_agent_assemble_command_with_cli_args_and_agent_args(
     background_cmd = agent._build_background_tasks_command(session_name)
     sid_export = _sid_export_for(uuid)
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" --verbose --model opus ) || claude --session-id {uuid} --verbose --model opus'
+        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" --verbose --model opus ) || claude --session-id {uuid} --verbose --model opus'
     )
 
 
@@ -396,7 +397,7 @@ def test_claude_agent_assemble_command_with_command_override(
     background_cmd = agent._build_background_tasks_command(session_name)
     sid_export = _sid_export_for(uuid)
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && custom-claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || custom-claude --session-id {uuid} --model opus'
+        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && custom-claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || custom-claude --session-id {uuid} --model opus'
     )
 
 
@@ -436,7 +437,7 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     sid_export = _sid_export_for(uuid)
     # Remote hosts SHOULD have IS_SANDBOX set
     assert command == CommandString(
-        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
+        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
     )
 
 
@@ -454,6 +455,90 @@ def test_claude_agent_assemble_command_quotes_agent_args_with_shell_metacharacte
     create_cmd_segment = str(command).rsplit("||", 1)[1]
     tokens = shlex.split(create_cmd_segment)
     assert prompt in tokens, f"prompt should be a single token after shell parsing, got tokens={tokens!r}"
+
+
+def test_claude_agent_assemble_command_resume_branch_runs_when_session_jsonl_exists(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Regression: the resume guard must actually find an adopted session JSONL on disk.
+
+    The original bug was a ``find`` invocation without the ``.jsonl`` suffix
+    (``-name "$MAIN_CLAUDE_SESSION_ID"`` instead of ``-name "$MAIN_CLAUDE_SESSION_ID.jsonl"``).
+    Files on disk are named ``<session_id>.jsonl``, so the guard returned no
+    matches, the ``&&`` short-circuited, and the silent ``||`` fallback ran
+    ``claude --session-id <fresh agent uuid>`` instead of ``claude --resume <adopted_id>``.
+    The end-user symptom was that ``--adopt-session`` appeared to do nothing
+    and a brand-new session opened with no error.
+
+    This test executes the assembled shell pipeline against a stub ``claude``
+    binary that records its argv, with a real session ``.jsonl`` planted at
+    the location the resume path expects to find it. The argv recorded by
+    the stub must contain ``--resume <session_id>`` -- if it contains
+    ``--session-id <agent_uuid>`` instead, the regression is back.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    # Plant a real session file at the location the resume guard inspects.
+    config_dir = tmp_path / "claude-config"
+    project_dir = config_dir / "projects" / "some-encoded-project"
+    project_dir.mkdir(parents=True)
+    target_session_id = "adopted-sid-deadbeef"
+    (project_dir / f"{target_session_id}.jsonl").write_text('{"type":"message"}\n')
+
+    # Provide the session-id tracking file so $MAIN_CLAUDE_SESSION_ID resolves
+    # to the adopted id rather than the agent's UUID fallback.
+    state_dir = tmp_path / "agent-state"
+    (state_dir / "commands").mkdir(parents=True)
+    (state_dir / "claude_session_id").write_text(target_session_id)
+
+    # Stub the background-tasks script (the assembled command runs it
+    # backgrounded with &; we just need the path to exist and exit cleanly).
+    bg_script = state_dir / "commands" / "claude_background_tasks.sh"
+    bg_script.write_text("#!/bin/bash\nexit 0\n")
+    bg_script.chmod(0o755)
+
+    # Stub claude: write argv to a log and exit 0. Putting the stub on PATH
+    # ahead of the real claude (if any) ensures the assembled command's
+    # bare `claude` invocation hits our stub.
+    stub_dir = tmp_path / "stub_bin"
+    stub_dir.mkdir()
+    invocation_log = tmp_path / "claude_invocation.log"
+    stub_claude = stub_dir / "claude"
+    stub_claude.write_text(f"#!/bin/bash\nprintf '%s\\n' \"$@\" > {shlex.quote(str(invocation_log))}\nexit 0\n")
+    stub_claude.chmod(0o755)
+
+    command = agent.assemble_command(host=host, agent_args=("--print", "hi"), command_override=None)
+
+    env = {
+        "PATH": f"{stub_dir}:{os.environ.get('PATH', '')}",
+        "CLAUDE_CONFIG_DIR": str(config_dir),
+        "MNGR_AGENT_STATE_DIR": str(state_dir),
+        "HOME": str(tmp_path),
+    }
+    result = subprocess.run(
+        ["bash", "-c", str(command)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"Assembled pipeline failed with exit {result.returncode}.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+    assert invocation_log.exists(), (
+        f"Stub claude was never invoked. Pipeline output:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    invocation_args = invocation_log.read_text().splitlines()
+    assert "--resume" in invocation_args, (
+        "Resume branch did not fire. Stub claude was invoked with "
+        f"{invocation_args!r}, indicating the resume guard's `find` returned no "
+        "matches and the silent `||` fallback ran `claude --session-id <agent_uuid>` "
+        "instead. The adopted session is effectively lost."
+    )
+    assert target_session_id in invocation_args, (
+        f"Expected adopted session id {target_session_id!r} in claude argv, got {invocation_args!r}."
+    )
 
 
 # =============================================================================
@@ -3849,3 +3934,28 @@ def test_write_generated_files_breaks_symlink_before_writing(tmp_path: Path, tem
     assert symlink.read_text() == rewritten_content
     # The original source file must NOT be modified
     assert json.loads(source_file.read_text()) == {"original": True}
+
+
+# =============================================================================
+# modify_env_vars Tests
+# =============================================================================
+
+
+def test_modify_env_vars_sets_claude_config_dirs(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """modify_env_vars always writes CLAUDE_CONFIG_DIR and ORIGINAL_CLAUDE_CONFIG_DIR."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert env_vars["CLAUDE_CONFIG_DIR"] == str(agent.get_claude_config_dir())
+    # ORIGINAL_CLAUDE_CONFIG_DIR points at the user's real ~/.claude dir -- we
+    # only assert it is set to a non-empty string; the exact path depends on
+    # the running user's $HOME and is not load-bearing for this test.
+    assert env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"]

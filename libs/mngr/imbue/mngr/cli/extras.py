@@ -237,7 +237,9 @@ def extras(ctx: click.Context, **kwargs: Any) -> None:
         write_human_line("")
         _run_plugin_wizard()
     except AbortError as e:
-        logger.warning("Plugin wizard: {}", e.message)
+        # The wizard already surfaced the abort to the user via its own output;
+        # log at debug so a record exists for diagnostics without redundant noise.
+        logger.debug("Plugin wizard aborted: {}", e.message)
 
     write_human_line("")
     write_human_line("--- Shell Completion ---")

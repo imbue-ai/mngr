@@ -174,15 +174,13 @@ def test_discover_destroyed_host_excluded_by_default_included_with_flag(
 ) -> None:
     """After destroy_host, host is excluded from default discovery but included with include_destroyed.
 
-    Docker's destroy_host calls stop_host first (setting stop_reason=STOPPED),
-    then removes the container. With delete_snapshots=False the host record is
-    kept. In discovery with include_destroyed=True, the host appears with
-    host_state=STOPPED (not DESTROYED, because Docker supports shutdown so
-    derive_offline_host_state returns HostState(stop_reason)).
+    destroy_host removes the container and marks the host record as DESTROYED
+    via stop_reason. discover_hosts filters DESTROYED hosts by default and
+    includes them when include_destroyed=True.
     """
     host = docker_provider.create_host(HostName("test-state-destroyed"))
     host_id = host.id
-    docker_provider.destroy_host(host, delete_snapshots=False)
+    docker_provider.destroy_host(host)
 
     # Default discovery should exclude the host
     hosts_default = docker_provider.discover_hosts(temp_mngr_ctx.concurrency_group)
@@ -191,7 +189,7 @@ def test_discover_destroyed_host_excluded_by_default_included_with_flag(
     # include_destroyed=True should include it
     hosts_all = docker_provider.discover_hosts(temp_mngr_ctx.concurrency_group, include_destroyed=True)
     state = _find_host_state(hosts_all, host_id)
-    assert state == HostState.STOPPED
+    assert state == HostState.DESTROYED
 
 
 @pytest.mark.release
@@ -226,5 +224,5 @@ def test_full_lifecycle_state_transitions(
     assert _find_host_state(docker_provider.discover_hosts(cg), host_id) == HostState.RUNNING
 
     # 6. Destroy -> absent from default discovery
-    docker_provider.destroy_host(host_id, delete_snapshots=True)
+    docker_provider.destroy_host(host_id)
     assert _find_host_state(docker_provider.discover_hosts(cg), host_id) is None

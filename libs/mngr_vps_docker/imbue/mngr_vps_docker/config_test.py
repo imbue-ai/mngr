@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from imbue.mngr.primitives import ActivitySource
+from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
@@ -22,6 +23,7 @@ def test_default_config_values() -> None:
     assert config.default_plan == "vc2-1c-1gb"
     assert config.default_os_id == 2136
     assert config.default_start_args == ()
+    assert config.builder is DockerBuilder.DOCKER
 
 
 def test_default_activity_sources_includes_all() -> None:
@@ -39,9 +41,11 @@ def test_custom_config_values() -> None:
         default_idle_timeout=600,
         container_ssh_port=3333,
         default_start_args=("--cpus=2", "--memory=4g"),
+        builder=DockerBuilder.DEPOT,
     )
     assert config.host_dir == Path("/custom/dir")
     assert config.default_image == "ubuntu:22.04"
     assert config.default_idle_timeout == 600
     assert config.container_ssh_port == 3333
     assert config.default_start_args == ("--cpus=2", "--memory=4g")
+    assert config.builder is DockerBuilder.DEPOT

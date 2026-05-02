@@ -10,6 +10,7 @@ from imbue.mngr.utils.polling import wait_for
 from imbue.skitwright.expect import expect
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_env(e2e: E2eSession) -> None:
@@ -47,6 +48,7 @@ def test_create_with_env(e2e: E2eSession) -> None:
     wait_for(_env_var_visible, timeout=10.0, error_message=f"Expected {env_value} in tmux pane")
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
@@ -238,6 +240,7 @@ def test_config_set_default_provider(e2e: E2eSession) -> None:
     expect(get_result.stdout).to_contain("modal")
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal

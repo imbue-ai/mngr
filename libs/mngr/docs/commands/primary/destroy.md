@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch]
+mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal]
 ```
 
 Destroy agent(s) and clean up resources.

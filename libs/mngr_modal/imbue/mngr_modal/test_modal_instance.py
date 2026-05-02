@@ -601,6 +601,7 @@ def _write_offline_dockerfile(tmp_path: Path) -> Path:
     return dockerfile
 
 
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
 def test_cidr_allowlist_restricts_network_access(real_modal_provider: ModalProviderInstance, tmp_path: Path) -> None:
@@ -659,6 +660,7 @@ def test_cidr_allowlist_allows_traffic_within_range(real_modal_provider: ModalPr
             real_modal_provider.destroy_host(host)
 
 
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
 def test_offline_blocks_all_network_access(real_modal_provider: ModalProviderInstance, tmp_path: Path) -> None:

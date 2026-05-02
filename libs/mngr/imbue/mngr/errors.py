@@ -2,6 +2,7 @@ from pathlib import Path
 
 from click import ClickException
 
+from imbue.mngr.plugin_catalog import get_plugin_install_hint
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
@@ -380,8 +381,25 @@ class ConfigStructureError(ConfigError, TypeError):
     """Invalid configuration structure."""
 
 
+class UnknownAgentTypeError(ConfigError):
+    """Unknown agent type."""
+
+    def __init__(self, agent_type: str) -> None:
+        self.agent_type = agent_type
+        super().__init__(f"Unknown agent type '{agent_type}' and no default agent class set.")
+        self.user_help_text = get_plugin_install_hint(agent_type)
+
+
 class UnknownBackendError(ConfigError):
     """Unknown provider backend."""
+
+    def __init__(self, backend_name: str, registered: list[str]) -> None:
+        self.backend_name = backend_name
+        self.registered = list(registered)
+        registered_str = ", ".join(self.registered) or "(none)"
+        message = f"Unknown provider backend: {backend_name}. Registered backends: {registered_str}"
+        super().__init__(message)
+        self.user_help_text = get_plugin_install_hint(backend_name)
 
 
 class NestedTmuxError(MngrError):

@@ -4,6 +4,7 @@ from pathlib import Path
 import click
 import pytest
 from click.testing import CliRunner
+from click_option_group import GroupedOption
 from click_option_group import optgroup
 
 from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
@@ -13,6 +14,7 @@ from imbue.mngr.cli.help_formatter import _wrap_text
 from imbue.mngr.cli.help_formatter import _write_to_stdout
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.help_formatter import format_git_style_help
+from imbue.mngr.cli.help_formatter import get_all_help_metadata
 from imbue.mngr.cli.help_formatter import get_help_metadata
 from imbue.mngr.cli.help_formatter import get_pager_command
 from imbue.mngr.cli.help_formatter import help_option_callback
@@ -23,6 +25,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.main import BUILTIN_COMMANDS
 from imbue.mngr.main import PLUGIN_COMMANDS
 from imbue.mngr.main import cli
+from imbue.mngr.main import get_or_create_plugin_manager
 
 
 def test_is_interactive_terminal_returns_bool() -> None:
@@ -545,6 +548,248 @@ def test_commands_with_aliases_have_aliases_in_synopsis() -> None:
             f"Command '{cmd.name}' has aliases {metadata.aliases} but synopsis "
             f"doesn't contain '{expected_pattern}'. Synopsis: {metadata.synopsis}"
         )
+
+
+# Per-command, long-form flags that are intentionally omitted from the synopsis
+# (niche flags, alternative spellings of things already represented, or flags
+# whose meaning is conveyed by a positional). If you add a new flag and decide
+# it doesn't belong in the synopsis, add it here; otherwise extend the synopsis.
+# The dict key is the help-registry key (e.g. "create", "snapshot.create").
+#
+# Most entries below were the baseline at the time the ratchet landed -- they
+# capture existing omissions so the test can run green while still catching
+# *new* drift. Promoting them to the synopsis (and removing them here) is a
+# fine follow-up.
+_SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
+    "create": frozenset(
+        {
+            "--name",
+            "--id",
+            "--name-style",
+            "--type",
+            "--provider",
+            "--host-name-style",
+            "--update",
+            "--foreground",
+            "--target-path",
+            "--include-unclean",
+            "--include-gitignored",
+            "--worktree-base-folder",
+            "--host-env",
+            "--host-env-file",
+            "--pass-host-env",
+            "--activity-sources",
+            "--reconnect",
+            "--attach-command",
+            "--connect-command",
+        }
+    ),
+    "start": frozenset({"--connect-command"}),
+    "stop": frozenset({"--graceful-timeout"}),
+    "destroy": frozenset(),
+    "message": frozenset({"--provider"}),
+    "exec": frozenset(),
+    "provision": frozenset({"--bootstrap", "--destroy-on-fail", "--host", "--pass-env"}),
+    "cleanup": frozenset({"--action", "--snapshot-before"}),
+    "limit": frozenset(
+        {
+            "--activity-sources",
+            "--add-activity-source",
+            "--add-ssh-key",
+            "--refresh-ssh-keys",
+            "--remove-activity-source",
+            "--remove-ssh-key",
+        }
+    ),
+    "pull": frozenset(
+        {
+            "--all-branches",
+            "--branch",
+            "--delete",
+            "--destination",
+            "--exclude",
+            "--exclude-file",
+            "--force-git",
+            "--include-file",
+            "--include-gitignored",
+            "--merge",
+            "--rebase",
+            "--rsync-arg",
+            "--rsync-args",
+            "--source-host",
+            "--source-path",
+            "--stdin",
+            "--tags",
+            "--target",
+            "--target-agent",
+            "--target-branch",
+            "--target-host",
+            "--target-path",
+            "--uncommitted-changes",
+            "--uncommitted-source",
+        }
+    ),
+    "push": frozenset(
+        {
+            "--delete",
+            "--exclude",
+            "--rsync-only",
+            "--source-branch",
+            "--target-host",
+            "--target-path",
+            "--uncommitted-changes",
+        }
+    ),
+    "pair": frozenset(
+        {
+            "--require-git",
+            "--source-agent",
+            "--source-host",
+            "--source-path",
+            "--uncommitted-changes",
+        }
+    ),
+}
+
+
+def _flags_in_synopsis(synopsis: str) -> set[str]:
+    """Extract every flag form a reader would see in a synopsis line.
+
+    Handles plain `--foo`, alternation `--foo|--no-foo`, and the shorthand
+    `--[no-]foo` (which expands to both `--foo` and `--no-foo`).
+    """
+    flags: set[str] = set()
+    for match in re.finditer(r"--(\[no-\])?([a-zA-Z][\w-]*)", synopsis):
+        name = match.group(2)
+        flags.add(f"--{name}")
+        if match.group(1):
+            flags.add(f"--no-{name}")
+    for match in re.finditer(r"(?<![-\w])(-[a-zA-Z])(?![-\w])", synopsis):
+        flags.add(match.group(1))
+    return flags
+
+
+def _plugin_injected_flags(command_name: str) -> set[str]:
+    """All flag forms registered by plugins for the named top-level command.
+
+    Plugin-injected options live in the same option groups as built-ins, so
+    the ratchet has to ask the plugin manager directly to tell them apart.
+
+    Plugins only register options on top-level commands (see
+    ``apply_plugin_cli_options`` in ``main.py``), so callers must only invoke
+    this for top-level command names; passing a subcommand's last name
+    segment would query an unrelated top-level command and produce a
+    misleading exemption set.
+    """
+    pm = get_or_create_plugin_manager()
+    flags: set[str] = set()
+    for mapping in pm.hook.register_cli_options(command_name=command_name):
+        if mapping is None:
+            continue
+        for option_specs in mapping.values():
+            for spec in option_specs:
+                flags.update(spec.param_decls)
+    return flags
+
+
+def _resolve_help_key_to_command(key: str) -> click.Command | None:
+    """Resolve a dot-separated help-registry key to its click command.
+
+    e.g. "create" -> the create command; "snapshot.create" -> the create
+    subcommand of the snapshot group. Returns None if any segment is not
+    found (e.g. plugin-only commands not registered on the root cli in this
+    test environment).
+    """
+    current: click.Command = cli
+    for segment in key.split("."):
+        if not isinstance(current, click.Group):
+            return None
+        next_cmd = current.get_command(click.Context(current), segment)
+        if next_cmd is None:
+            return None
+        current = next_cmd
+    return current
+
+
+def _commands_with_flag_enumerating_synopsis() -> list[tuple[str, CommandHelpMetadata, click.Command]]:
+    """Find every command whose synopsis enumerates at least one flag.
+
+    Synopses like `mngr foo [OPTIONS] [ARGS]` aren't worth ratcheting -- they
+    don't make a per-flag commitment. We only ratchet commands whose authors
+    chose to enumerate specific flags in the synopsis line.
+    """
+    result: list[tuple[str, CommandHelpMetadata, click.Command]] = []
+    for key, metadata in get_all_help_metadata().items():
+        if not _flags_in_synopsis(metadata.synopsis):
+            continue
+        command = _resolve_help_key_to_command(key)
+        if command is None:
+            continue
+        result.append((key, metadata, command))
+    return result
+
+
+_RATCHETED_COMMANDS = _commands_with_flag_enumerating_synopsis()
+
+
+@pytest.mark.parametrize(
+    ("key", "metadata", "command"),
+    _RATCHETED_COMMANDS,
+    ids=[entry[0] for entry in _RATCHETED_COMMANDS],
+)
+def test_synopsis_lists_all_non_optout_flags(key: str, metadata: CommandHelpMetadata, command: click.Command) -> None:
+    """Every non-Common flag on a flag-enumerating synopsis must appear or be opted out.
+
+    Catches both forgotten additions (new flag added without updating the
+    synopsis) and silent renames (synopsis still showing the old name -- the
+    old form is no longer a click param so the new name shows up as missing).
+
+    Only runs against commands whose synopsis enumerates specific flags.
+    Generic synopses like `[OPTIONS]` are skipped, since they don't make a
+    per-flag commitment to ratchet against.
+    """
+    synopsis_flags = _flags_in_synopsis(metadata.synopsis)
+    # Plugins only inject options into top-level commands (see
+    # apply_plugin_cli_options in main.py), so we must not consult
+    # plugin-injected flags for nested keys -- that would query an
+    # unrelated top-level command sharing the last name segment.
+    plugin_flags = _plugin_injected_flags(key) if "." not in key else set()
+    opt_outs = _SYNOPSIS_OPTOUT_FLAGS.get(key, frozenset())
+
+    missing: list[str] = []
+    for param in command.params:
+        if not isinstance(param, GroupedOption):
+            continue
+        if param.group.name == COMMON_OPTIONS_GROUP_NAME:
+            continue
+        all_forms = tuple(param.opts) + tuple(param.secondary_opts)
+        long_forms = [opt for opt in all_forms if opt.startswith("--")]
+        if not long_forms:
+            continue
+        if any(form in plugin_flags for form in all_forms):
+            continue
+        if any(form in synopsis_flags for form in all_forms):
+            continue
+        if any(form in opt_outs for form in long_forms):
+            continue
+        missing.append(long_forms[0])
+
+    assert not missing, (
+        f"Flags on `{metadata.name}` not present in the synopsis: "
+        f"{sorted(missing)}. Either add them to the synopsis, or, if intentionally "
+        f"omitted, add them to _SYNOPSIS_OPTOUT_FLAGS[{key!r}] in this file."
+    )
+
+    all_command_forms: set[str] = set()
+    for param in command.params:
+        if isinstance(param, GroupedOption):
+            all_command_forms.update(param.opts)
+            all_command_forms.update(param.secondary_opts)
+    stale_optouts = sorted(flag for flag in opt_outs if flag not in all_command_forms)
+    assert not stale_optouts, (
+        f"_SYNOPSIS_OPTOUT_FLAGS[{key!r}] contains flags that no longer exist on the command: "
+        f"{stale_optouts}. Remove them (likely renamed or deleted)."
+    )
 
 
 def test_all_subcommands_have_git_style_help() -> None:

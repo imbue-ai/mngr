@@ -76,6 +76,26 @@ def test_unrecognized_command_errors_by_default() -> None:
     assert "No such command" in result.output
 
 
+def test_unrecognized_command_for_known_plugin_includes_install_hint() -> None:
+    """Unknown command names that match a cataloged plugin should suggest installing it."""
+    record: dict[str, str | None] = {}
+    group = _make_test_group(record)
+    runner = CliRunner()
+    result = runner.invoke(group, ["wait"])
+    assert result.exit_code != 0
+    assert "imbue-mngr-wait" in result.output
+
+
+def test_unrecognized_command_for_aliased_plugin_includes_install_hint() -> None:
+    """Plugins whose CLI command name differs from the entry-point name should still match."""
+    record: dict[str, str | None] = {}
+    group = _make_test_group(record)
+    runner = CliRunner()
+    result = runner.invoke(group, ["notify"])
+    assert result.exit_code != 0
+    assert "imbue-mngr-notifications" in result.output
+
+
 def test_unrecognized_command_forwards_when_configured() -> None:
     """Running the group with an unrecognized command should forward to the configured default."""
     record: dict[str, str | None] = {}

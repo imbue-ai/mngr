@@ -1,0 +1,184 @@
+{#
+  Generic permission request dialog base template.
+
+  Provides the page chrome, header, rationale, form scaffolding, action
+  buttons, error display, and the form-submission JS that every
+  permission backend can reuse. Backend-specific child templates fill in
+  the empty blocks below to render their own form body, in-progress
+  indicator, and (optionally) any extra setup script.
+
+  Required template variables:
+    agent_id           Workspace AgentId.
+    request_id         The originating request event id.
+    ws_name            Friendly workspace name (or empty).
+    rationale          Free-form text the agent provided.
+    display_name       Human-readable name of the thing being approved.
+    accent             Per-workspace accent color (OKLCH string).
+
+  Backend-specific blocks:
+    permissions_form_body   Fills the inside of the <form> with whatever
+                            inputs represent the user's choices. The
+                            generic submit handler enables Approve when
+                            any input named ``permissions`` is checked.
+    permissions_progress    Slot for an in-progress notice shown while
+                            the grant is being applied (e.g. while a
+                            sign-in flow is happening). Should contain
+                            an element with id="permissions-progress"
+                            if it wants to be hidden/shown automatically.
+    permissions_extra_scripts   Optional extra <script> tag for backend-specific
+                            client-side wiring (e.g. additional change handlers).
+#}
+{% extends 'base.html' %}
+{% import '_macros.html' as ui %}
+{% block title %}Permission request: {{ display_name }}{% endblock %}
+{% block body_class %}bg-zinc-50 text-zinc-900 font-sans antialiased page-workspace{% endblock %}
+{% block body_style %}--workspace-accent: {{ accent }};{% endblock %}
+{% block content %}
+  {% call ui.page_container() %}
+    <h1 class="text-2xl font-semibold text-zinc-900 leading-tight">
+      Permission request:
+      <code class="bg-zinc-100 rounded px-1.5 py-0.5 font-mono text-[0.95em]">{{ display_name }}</code>
+    </h1>
+    <p class="text-sm text-zinc-600 mt-1">
+      Workspace:
+      <a href="/goto/{{ agent_id }}/" class="text-blue-600 hover:underline">{{ ws_name or agent_id }}</a>
+    </p>
+
+    {% call ui.card(extra='mt-6') %}
+      <div>
+        <p class="text-xs font-medium uppercase tracking-wide text-zinc-500 mb-1">
+          Reason given by the agent
+        </p>
+        <p class="text-sm whitespace-pre-wrap">{{ rationale }}</p>
+      </div>
+    {% endcall %}
+
+    <form id="permissions-form" method="POST"
+          action="/requests/{{ request_id }}/grant"
+          class="mt-6">
+      {% block permissions_form_body %}{% endblock %}
+
+      <div class="flex gap-2 mt-5 justify-end">
+        <button type="button"
+                onclick="submitPermissionDeny()"
+                class="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md font-medium text-sm leading-tight transition-colors cursor-pointer no-underline whitespace-nowrap bg-red-50 text-red-600 border border-red-200 hover:bg-red-100">
+          Deny
+        </button>
+        <button type="submit"
+                id="permissions-approve-btn"
+                disabled
+                class="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md font-medium text-sm leading-tight transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap bg-emerald-800 text-emerald-50 border border-transparent hover:bg-emerald-900">
+          Approve
+        </button>
+      </div>
+    </form>
+
+    {% block permissions_progress %}{% endblock %}
+
+    <div id="permissions-manual-credentials" class="hidden mt-4">
+      {% call ui.notice(variant='info') %}
+        <p class="font-medium">Manual credential setup required</p>
+        <p id="permissions-manual-credentials-message" class="mt-1"></p>
+        <p class="mt-2 text-sm">Obtain credentials from the provider, replace any <code>&lt;placeholders&gt;</code> below with them, run the command in a terminal, then click Approve again:</p>
+        <pre class="mt-2 bg-zinc-900 text-zinc-100 rounded-md p-3 text-xs overflow-x-auto"><code id="permissions-manual-credentials-command"></code></pre>
+      {% endcall %}
+    </div>
+
+    <div id="permissions-error" class="hidden mt-4">
+      {% call ui.notice(variant='error') %}
+        <p class="font-medium">Authorization failed</p>
+        <p id="permissions-error-message"></p>
+      {% endcall %}
+    </div>
+  {% endcall %}
+{% endblock %}
+{% block scripts %}
+<script>
+  (function () {
+    const form = document.getElementById("permissions-form");
+    const approveBtn = document.getElementById("permissions-approve-btn");
+    const errorBox = document.getElementById("permissions-error");
+    const errorMsg = document.getElementById("permissions-error-message");
+
+    // Backend-agnostic Approve enabling: Approve becomes available as
+    // soon as any ``name="permissions"`` input is checked. Backends that
+    // want different validation can override updateApproveState in the
+    // permissions_extra_scripts block.
+    window.updateApproveState = function () {
+      const anyChecked = form.querySelector('input[name="permissions"]:checked') !== null;
+      approveBtn.disabled = !anyChecked;
+    };
+    form.querySelectorAll('input[name="permissions"]').forEach(function (cb) {
+      cb.addEventListener("change", window.updateApproveState);
+    });
+    window.updateApproveState();
+
+    form.addEventListener("submit", async function (e) {
+      e.preventDefault();
+      approveBtn.disabled = true;
+      errorBox.classList.add("hidden");
+      const manualBox = document.getElementById("permissions-manual-credentials");
+      if (manualBox) manualBox.classList.add("hidden");
+      const progress = document.getElementById("permissions-progress");
+      if (progress) progress.classList.remove("hidden");
+
+      const formData = new FormData(form);
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          body: formData,
+          credentials: "same-origin",
+        });
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(text || ("HTTP " + response.status));
+        }
+        const data = await response.json();
+        if (data.outcome === "GRANTED") {
+          window.location.href = "/";
+          return;
+        }
+        if (progress) progress.classList.add("hidden");
+        if (data.outcome === "NEEDS_MANUAL_CREDENTIALS") {
+          // The request stays pending: show the suggested command,
+          // re-enable Approve, and let the user retry after running it.
+          const cmdEl = document.getElementById("permissions-manual-credentials-command");
+          const msgEl = document.getElementById("permissions-manual-credentials-message");
+          if (cmdEl) cmdEl.textContent = data.set_credentials_example || "";
+          if (msgEl) msgEl.textContent = data.message || "";
+          if (manualBox) manualBox.classList.remove("hidden");
+          window.updateApproveState();
+          return;
+        }
+        errorMsg.textContent = data.message || "Authorization failed.";
+        errorBox.classList.remove("hidden");
+        approveBtn.disabled = false;
+      } catch (err) {
+        if (progress) progress.classList.add("hidden");
+        errorMsg.textContent = err && err.message ? err.message : String(err);
+        errorBox.classList.remove("hidden");
+        approveBtn.disabled = false;
+      }
+    });
+
+    window.submitPermissionDeny = function () {
+      approveBtn.disabled = true;
+      // Fire-and-forget: don't make the user wait for the server to
+      // notify the agent (``mngr message`` spawns a subprocess and can
+      // take a few seconds). ``keepalive: true`` lets the request
+      // outlive the navigation below so the response event still gets
+      // written and the agent still gets notified; the home page picks
+      // up the resolved state via SSE once the server is done. If the
+      // request fails entirely the dialog still closes so the user is
+      // unblocked.
+      fetch("/requests/{{ request_id }}/deny", {
+        method: "POST",
+        credentials: "same-origin",
+        keepalive: true,
+      }).catch(function () {});
+      window.location.href = "/";
+    };
+  })();
+</script>
+{% block permissions_extra_scripts %}{% endblock %}
+{% endblock %}

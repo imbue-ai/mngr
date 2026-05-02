@@ -659,7 +659,7 @@ CommandHelpMetadata(
     key="cleanup",
     one_line_description="Destroy or stop agents and hosts to free up resources [experimental]",
     synopsis="mngr [cleanup|clean] [--destroy|--stop] [--older-than DURATION] [--idle-for DURATION] "
-    "[--provider PROVIDER] [--type TYPE] [--host-label KEY=VALUE] [-f|--force|--yes] [--dry-run]",
+    "[--include PATTERN] [--exclude PATTERN] [--provider PROVIDER] [--type TYPE] [--host-label KEY=VALUE] [-f|--force|--yes] [--dry-run]",
     description="""When running in a pty, defaults to providing an interactive interface for
 reviewing running agents and hosts and selecting which ones to destroy or stop.
 

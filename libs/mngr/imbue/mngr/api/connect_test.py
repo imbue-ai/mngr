@@ -478,6 +478,7 @@ def test_connect_to_agent_remote_unknown_exit_code_no_action(
 # =========================================================================
 
 
+@pytest.mark.allow_warnings(match=r"^SSH connection failed")
 def test_connect_to_agent_retries_on_ssh_failure(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
@@ -533,6 +534,7 @@ def test_connect_to_agent_no_retry_on_signal_exit(
     assert len(result.execvp_calls) == 1
 
 
+@pytest.mark.allow_warnings(match=r"^SSH connection failed")
 def test_connect_to_agent_retries_then_succeeds(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,

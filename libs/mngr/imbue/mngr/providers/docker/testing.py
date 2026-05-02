@@ -8,6 +8,7 @@ import docker.errors
 import docker.models.containers
 
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.config import DockerProviderConfig
@@ -148,8 +149,12 @@ def make_docker_provider_with_cleanup(
         discovered = provider.discover_hosts(cg, include_destroyed=True)
         for host in discovered:
             try:
-                provider.destroy_host(host.host_id, delete_snapshots=True)
+                provider.destroy_host(host.host_id)
             except (MngrError, docker.errors.DockerException, OSError):
+                pass
+            try:
+                provider.delete_host(provider.get_host(host.host_id))
+            except (HostNotFoundError, MngrError, docker.errors.DockerException, OSError):
                 pass
     except (MngrError, docker.errors.DockerException, OSError):
         pass

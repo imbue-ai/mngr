@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [-m <MESSAGE>] [--message-file <FILE>]
+mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [-m <MESSAGE>] [--message-file <FILE>] [--[no-]start] [--on-error <MODE>]
 ```
 
 Send a message to one or more agents.

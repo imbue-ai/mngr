@@ -1,0 +1,60 @@
+{#
+  Latchkey-specific permission request dialog.
+
+  Extends the generic ``permissions.html`` base, filling in:
+
+  * the form body with a checkbox per detent permission schema (with
+    existing grants pre-checked, so the dialog doubles as a revoke UI);
+  * an in-progress notice that surfaces while ``latchkey auth browser``
+    is running -- shown automatically by the generic submit handler
+    via the ``permissions-progress`` id.
+
+  Required template variables (in addition to the generic ones):
+    permission_schemas    Tuple of schema names to render as checkboxes
+                          (``any`` is always first; the catalog also
+                          carries it deduplicated).
+    checked_permissions   Set of schema names that should be ticked
+                          on first render.
+#}
+{% extends 'permissions.html' %}
+{% import '_macros.html' as ui %}
+
+{% block permissions_form_body %}
+  <h2 class="text-sm font-medium text-zinc-700 mb-2">Permissions to grant</h2>
+  <p class="text-xs text-zinc-500 mb-3">
+    Select which permissions the agent may use for {{ display_name }}.
+    Existing grants for this service are checked; uncheck to revoke them.
+  </p>
+  <div class="bg-white border border-zinc-200 rounded-xl p-4 space-y-2">
+    {% for permission in permission_schemas %}
+      <label class="flex items-start gap-2 cursor-pointer">
+        <input type="checkbox" name="permissions" value="{{ permission }}"
+               class="mt-0.5"
+               {% if permission in checked_permissions %}checked{% endif %}>
+        <code class="text-sm font-mono text-zinc-900">{{ permission }}</code>
+      </label>
+    {% endfor %}
+  </div>
+{% endblock %}
+
+{% block permissions_progress %}
+  {#
+    The notice copy depends on whether ``latchkey auth browser`` will
+    actually run when the user clicks Approve. ``will_open_browser`` is
+    computed server-side from a fresh ``latchkey services info`` call, so
+    when credentials are already valid (or the service requires manual
+    credentials) we show a generic ``Granting permission...`` notice
+    instead of falsely promising a browser pop-up.
+  #}
+  <div id="permissions-progress" class="hidden mt-4">
+    {% call ui.notice(variant='info') %}
+      {% if will_open_browser %}
+        <span class="font-medium">Authenticating...</span>
+        Latchkey is opening a browser window for you to sign in to {{ display_name }}.
+        This dialog will close automatically when the flow completes.
+      {% else %}
+        <span class="font-medium">Granting permission...</span>
+      {% endif %}
+    {% endcall %}
+  </div>
+{% endblock %}

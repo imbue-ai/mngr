@@ -3,6 +3,7 @@ from typing import Any
 import click
 
 from imbue.mngr.config.pre_readers import read_default_command
+from imbue.mngr.plugin_catalog import get_install_hint_for_cli_command
 
 
 class DefaultCommandGroup(click.Group):
@@ -50,4 +51,8 @@ class DefaultCommandGroup(click.Group):
             cmd = self.get_command(ctx, args[0])
             if cmd is None and self._default_command:
                 return super().resolve_command(ctx, [self._default_command] + args)
+            if cmd is None:
+                hint = get_install_hint_for_cli_command(args[0])
+                if hint is not None:
+                    raise click.UsageError(f"No such command '{args[0]}'. {hint}", ctx)
         return super().resolve_command(ctx, args)

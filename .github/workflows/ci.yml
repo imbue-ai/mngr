@@ -27,7 +27,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # Full history needed for git diff in patch generation
+          # Full history needed for offload's git-notes-backed image-cache
+          # lookup and thin-diff against the checkpoint commit.
           fetch-depth: 0
 
       - name: Set up Python
@@ -56,12 +57,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/offload
-          key: cargo-offload-0.6.2-${{ runner.os }}
+          key: cargo-offload-0.8.1-${{ runner.os }}
 
       - name: Install offload
         run: |
           if ! command -v offload &> /dev/null; then
-            cargo install offload@0.6.2
+            cargo install offload@0.8.1
           fi
 
       - name: Restore offload test durations from previous run
@@ -70,6 +71,14 @@ jobs:
           path: test-results/junit.xml
           key: offload-durations-${{ github.ref }}-${{ github.run_id }}
           restore-keys: offload-durations-${{ github.ref }}-
+
+      - name: Fetch offload image-cache git notes
+        run: git fetch origin 'refs/notes/*:refs/notes/*' || true
+
+      - name: Configure git identity for image-cache note writes
+        run: |
+          git config user.email "dev@imbue.com"
+          git config user.name "imbue-dev"
 
       - name: Run tests via offload
         id: tests
@@ -162,6 +171,11 @@ jobs:
         with:
           name: test-results-offload
           path: test-results/
+          # Offload pulls per-sandbox files into test-results/<sb>/.test_output/,
+          # which holds the flaky_tests_*.txt manifests used by the summary check.
+          # Default upload-artifact behavior strips hidden paths, making post-hoc
+          # debugging of the @flaky column impossible.
+          include-hidden-files: true
           retention-days: 30
 
   # Clean up old Modal test environments - runs on all branches including release,
@@ -211,7 +225,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # Full history needed for git diff in patch generation
+          # Full history needed for offload's git-notes-backed image-cache
+          # lookup and thin-diff against the checkpoint commit.
           fetch-depth: 0
 
       - name: Set up Python
@@ -240,12 +255,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/offload
-          key: cargo-offload-0.6.2-${{ runner.os }}
+          key: cargo-offload-0.8.1-${{ runner.os }}
 
       - name: Install offload
         run: |
           if ! command -v offload &> /dev/null; then
-            cargo install offload@0.6.2
+            cargo install offload@0.8.1
           fi
 
       - name: Restore offload test durations from previous run
@@ -254,6 +269,14 @@ jobs:
           path: test-results/junit.xml
           key: offload-acceptance-durations-${{ github.ref }}-${{ github.run_id }}
           restore-keys: offload-acceptance-durations-${{ github.ref }}-
+
+      - name: Fetch offload image-cache git notes
+        run: git fetch origin 'refs/notes/*:refs/notes/*' || true
+
+      - name: Configure git identity for image-cache note writes
+        run: |
+          git config user.email "dev@imbue.com"
+          git config user.name "imbue-dev"
 
       - name: Run acceptance tests via offload
         id: tests
@@ -281,6 +304,10 @@ jobs:
         with:
           name: test-results-offload-acceptance
           path: test-results/
+          # Same rationale as the test-offload upload step above: offload's
+          # per-sandbox flaky_tests_*.txt manifests live under hidden
+          # test-results/<sb>/.test_output/ subdirs.
+          include-hidden-files: true
           retention-days: 30
 
   # Docker acceptance tests - runs on a GitHub runner with a real Docker daemon.
@@ -318,6 +345,50 @@ jobs:
       - name: Run Docker acceptance tests
         run: PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -n 0 --timeout 300 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and not release'
 
+  # Docker release tests - runs on a GitHub runner with a real Docker daemon,
+  # since Docker-in-Docker under gVisor (offload-modal-release) is too flaky.
+  # Mirrors the `test-docker` job above but filters for release-marked tests.
+  # Gated to release-branch push only, matching test-release below -- these
+  # tests are slow (real docker + release path) and should only run when
+  # cutting a release, not on every PR.
+  test-docker-release:
+    if: github.ref == 'refs/heads/release' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux git openssh-server unison
+
+      - name: Configure Docker Hub mirror
+        run: |
+          echo '{"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code@2.1.116
+
+      - name: Run Docker release tests
+        run: PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 600 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and release'
+
   # Release tests - runs only on release branch pushes
   test-release:
     if: github.ref == 'refs/heads/release' && github.event_name == 'push'
@@ -351,7 +422,7 @@ jobs:
         run: brew install tmux unison
 
       - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code@2.1.75
+        run: npm install -g @anthropic-ai/claude-code@2.1.116
 
       - name: Configure Docker Hub mirror
         if: runner.os == 'Linux'
@@ -383,4 +454,7 @@ jobs:
         with:
           name: test-durations-release-${{ matrix.os }}-${{ matrix.group }}
           path: .test_output/test_durations_*.json
+          # The .test_output/ parent is hidden, so upload-artifact's default
+          # of stripping hidden paths would drop the entire glob match.
+          include-hidden-files: true
           retention-days: 30

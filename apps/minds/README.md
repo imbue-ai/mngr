@@ -46,3 +46,4 @@ minds forward
 - [Desktop client internals](./imbue/minds/desktop_client/README.md)
 - [Glossary of key concepts](./docs/workspace/glossary.md)
 - [Desktop app](./docs/desktop-app.md)
+- [Latchkey permissions](./docs/latchkey-permissions.md)

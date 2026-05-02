@@ -1,4 +1,4 @@
-from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.primitives import AgentTypeName
 
 # =============================================================================
@@ -31,14 +31,14 @@ def get_agent_class(agent_type: str) -> type:
     """Get the agent class for an agent type.
 
     Returns the default agent class if no specific type is registered.
-    Raises MngrError if no default has been set.
+    Raises UnknownAgentTypeError if no default has been set.
     """
     key = AgentTypeName(agent_type)
     if key in _agent_class_registry:
         return _agent_class_registry[key]
     if _default_agent_class is not None:
         return _default_agent_class
-    raise MngrError(f"Unknown agent type '{agent_type}' and no default agent class set.")
+    raise UnknownAgentTypeError(agent_type)
 
 
 def is_agent_class_registered(agent_type: str) -> bool:

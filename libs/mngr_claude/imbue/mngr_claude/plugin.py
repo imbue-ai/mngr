@@ -1498,8 +1498,13 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         # Build both command variants using the dynamic session ID.
         # Use $CLAUDE_CONFIG_DIR (set in the agent's env file) to find session files
-        # in the per-agent config dir rather than ~/.claude/.
-        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && {base} --resume "$MAIN_CLAUDE_SESSION_ID"'
+        # in the per-agent config dir rather than ~/.claude/. Session files on disk
+        # are named "<session_id>.jsonl"; matching without the extension would
+        # always miss, the && would short-circuit, and the silent || fallback at
+        # the end of assemble_command would spawn a fresh `claude --session-id
+        # <agent_uuid>` without surfacing any error -- so an adopted session
+        # would appear to do nothing.
+        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {base} --resume "$MAIN_CLAUDE_SESSION_ID"'
         create_cmd = f"{base} --session-id {agent_uuid}"
 
         # Append additional args to both commands if present

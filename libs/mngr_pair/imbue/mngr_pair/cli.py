@@ -219,7 +219,7 @@ def pair(ctx: click.Context, **kwargs) -> None:
 CommandHelpMetadata(
     key="pair",
     one_line_description="Continuously sync files between an agent and local directory [experimental]",
-    synopsis="mngr pair [SOURCE] [--target <DIR>] [--sync-direction <DIR>] [--conflict <MODE>]",
+    synopsis="mngr pair [SOURCE] [--source <SOURCE>] [--target <DIR>] [--sync-direction <DIR>] [--conflict <MODE>] [--include PATTERN] [--exclude PATTERN]",
     description="""This command establishes a bidirectional file sync between an agent's working
 directory and a local directory. Changes are watched and synced in real-time.
 

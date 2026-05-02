@@ -8,14 +8,16 @@ from imbue.mngr_kanpan.data_source import FIELD_CONFLICTS
 from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FIELD_UNRESOLVED
 from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_sources.github import CiField
 from imbue.mngr_kanpan.data_sources.github import CiStatus
 from imbue.mngr_kanpan.data_sources.github import ConflictsField
 from imbue.mngr_kanpan.data_sources.github import CreatePrUrlField
 from imbue.mngr_kanpan.data_sources.github import GitHubDataSource
 from imbue.mngr_kanpan.data_sources.github import GitHubDataSourceConfig
+from imbue.mngr_kanpan.data_sources.github import PrFetchFailedField
 from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_sources.github import UnresolvedField
-from imbue.mngr_kanpan.data_sources.github import _PrFieldInternal
+from imbue.mngr_kanpan.data_sources.github import _PrLookup
 from imbue.mngr_kanpan.data_sources.github import _build_create_pr_url
 from imbue.mngr_kanpan.data_sources.github import _build_pr_branch_index
 from imbue.mngr_kanpan.data_sources.github import _build_unresolved_query
@@ -33,22 +35,18 @@ from imbue.mngr_kanpan.data_sources.github import fetch_all_prs
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
 from imbue.mngr_kanpan.testing import make_agent_details
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_cg
+from imbue.mngr_kanpan.testing import make_pr_field
 
 
-def _make_internal_pr(
+def _make_pr_lookup(
     number: int = 1,
     branch: str = "test-branch",
     state: PrState = PrState.OPEN,
     check_status: CiStatus = CiStatus.PASSING,
-) -> _PrFieldInternal:
-    return _PrFieldInternal(
-        number=number,
-        title=f"PR {number}",
-        state=state,
-        url=f"https://github.com/org/repo/pull/{number}",
-        head_branch=branch,
-        is_draft=False,
-        internal_check_status=check_status,
+) -> _PrLookup:
+    return _PrLookup(
+        pr=make_pr_field(number=number, head_branch=branch, state=state),
+        check_status=check_status,
     )
 
 
@@ -96,7 +94,7 @@ def test_get_cached_repo_path_not_found() -> None:
 
 def test_get_cached_repo_path_wrong_type() -> None:
     cached: dict[AgentName, dict[str, FieldValue]] = {
-        AgentName("a1"): {"repo_path": _make_internal_pr()},
+        AgentName("a1"): {"repo_path": make_pr_field()},
     }
     assert _get_cached_repo_path(cached, AgentName("a1")) is None
 
@@ -105,15 +103,15 @@ def test_get_cached_repo_path_wrong_type() -> None:
 
 
 def test_pr_priority_open() -> None:
-    assert _pr_priority(_make_internal_pr(state=PrState.OPEN)) == 2
+    assert _pr_priority(make_pr_field(state=PrState.OPEN)) == 2
 
 
 def test_pr_priority_merged() -> None:
-    assert _pr_priority(_make_internal_pr(state=PrState.MERGED)) == 1
+    assert _pr_priority(make_pr_field(state=PrState.MERGED)) == 1
 
 
 def test_pr_priority_closed() -> None:
-    assert _pr_priority(_make_internal_pr(state=PrState.CLOSED)) == 0
+    assert _pr_priority(make_pr_field(state=PrState.CLOSED)) == 0
 
 
 # === _build_pr_branch_index ===
@@ -124,26 +122,26 @@ def test_build_pr_branch_index_empty() -> None:
 
 
 def test_build_pr_branch_index_single() -> None:
-    pr = _make_internal_pr(branch="branch-1")
-    result = _build_pr_branch_index((pr,))
+    lookup = _make_pr_lookup(branch="branch-1")
+    result = _build_pr_branch_index((lookup,))
     assert "branch-1" in result
-    assert result["branch-1"].number == 1
+    assert result["branch-1"].pr.number == 1
 
 
 def test_build_pr_branch_index_prefers_open() -> None:
-    closed = _make_internal_pr(number=1, branch="b", state=PrState.CLOSED)
-    open_pr = _make_internal_pr(number=2, branch="b", state=PrState.OPEN)
+    closed = _make_pr_lookup(number=1, branch="b", state=PrState.CLOSED)
+    open_pr = _make_pr_lookup(number=2, branch="b", state=PrState.OPEN)
     result = _build_pr_branch_index((closed, open_pr))
-    assert result["b"].number == 2
+    assert result["b"].pr.number == 2
 
 
 # === _lookup_pr ===
 
 
 def test_lookup_pr_found() -> None:
-    pr = _make_internal_pr(branch="b")
-    index = {"repo": {"b": pr}}
-    assert _lookup_pr(index, "repo", "b") == pr
+    lookup = _make_pr_lookup(branch="b")
+    index = {"repo": {"b": lookup}}
+    assert _lookup_pr(index, "repo", "b") == lookup
 
 
 def test_lookup_pr_not_found() -> None:
@@ -151,8 +149,8 @@ def test_lookup_pr_not_found() -> None:
 
 
 def test_lookup_pr_no_repo() -> None:
-    pr = _make_internal_pr(branch="b")
-    assert _lookup_pr({"other": {"b": pr}}, "repo", "b") is None
+    lookup = _make_pr_lookup(branch="b")
+    assert _lookup_pr({"other": {"b": lookup}}, "repo", "b") is None
 
 
 # === _build_create_pr_url ===
@@ -312,6 +310,22 @@ def _make_fetch_cg(open_json: str, all_json: str) -> MagicMock:
     return cg
 
 
+def _make_failing_fetch_cg(stderr: str = "HTTP 504") -> MagicMock:
+    """Build a mock ConcurrencyGroup whose two PR fetches both fail with the given stderr.
+
+    Mirrors the failure shape used by tests that exercise the PR-fetch-failed code
+    paths (returncode=1, empty stdout). The two-process side_effect matches
+    fetch_all_prs's open + all queries.
+    """
+    fail_proc = MagicMock()
+    fail_proc.read_stdout.return_value = ""
+    fail_proc.read_stderr.return_value = stderr
+    fail_proc.returncode = 1
+    cg = MagicMock()
+    cg.run_process_in_background.side_effect = [fail_proc, fail_proc]
+    return cg
+
+
 def _make_open_pr_json(number: int = 1, branch: str = "test-branch") -> str:
     return json.dumps(
         [
@@ -334,8 +348,8 @@ def test_fetch_repo_prs_success() -> None:
     assert repo_path == "org/repo"
     assert result.error is None
     assert len(result.prs) == 1
-    assert result.prs[0].number == 1
-    assert result.prs[0].head_branch == "branch-1"
+    assert result.prs[0].pr.number == 1
+    assert result.prs[0].pr.head_branch == "branch-1"
 
 
 def test_fetch_repo_prs_error() -> None:
@@ -408,15 +422,67 @@ def test_compute_no_pr_for_branch_generates_create_url_in_pr_slot() -> None:
 def test_compute_pr_fetch_error_adds_error() -> None:
     ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
-    cg = MagicMock()
-    fail_proc = MagicMock()
-    fail_proc.read_stdout.return_value = ""
-    fail_proc.read_stderr.return_value = "HTTP 504"
-    fail_proc.returncode = 1
-    cg.run_process_in_background.side_effect = [fail_proc, fail_proc]
-    ctx = make_mngr_ctx_with_cg(cg)
+    ctx = make_mngr_ctx_with_cg(_make_failing_fetch_cg())
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert len(errors) > 0
+
+
+def test_compute_pr_fetch_failed_no_cache_emits_fetch_failed_field() -> None:
+    """When the repo's PR fetch fails and no cached PrField exists, the agent
+    gets a PrFetchFailedField in the FIELD_PR slot so it routes into PRS_FAILED.
+    """
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
+    ctx = make_mngr_ctx_with_cg(_make_failing_fetch_cg())
+    fields, _errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    assert agent.name in fields
+    pr_field = fields[agent.name].get(FIELD_PR)
+    assert isinstance(pr_field, PrFetchFailedField)
+    assert pr_field.repo == "org/repo"
+
+
+def test_compute_pr_fetch_failed_with_cached_pr_uses_cache() -> None:
+    """When the repo's PR fetch fails but a cached PrField exists, fall back to
+    the cached field silently (no PrFetchFailedField, no agent flagged in PRS_FAILED).
+    """
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
+    cached_pr = make_pr_field(number=42, head_branch="branch-1")
+    cached_ci = CiField(status=CiStatus.PASSING)
+    cached: dict[AgentName, dict[str, FieldValue]] = {
+        agent.name: {FIELD_PR: cached_pr, FIELD_CI: cached_ci},
+    }
+    ctx = make_mngr_ctx_with_cg(_make_failing_fetch_cg())
+    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
+    assert agent.name in fields
+    pr_field = fields[agent.name].get(FIELD_PR)
+    assert not isinstance(pr_field, PrFetchFailedField)
+    assert pr_field == cached_pr
+    assert fields[agent.name].get(FIELD_CI) == cached_ci
+
+
+def test_compute_pr_fetch_failed_with_cached_pr_for_different_branch_emits_fetch_failed_field() -> None:
+    """When the repo's PR fetch fails and the cached PrField is for a different
+    branch than the agent's current one, the cache must NOT be reused -- otherwise
+    we would attribute the old branch's PR to the new branch. We should fall through
+    to PrFetchFailedField, the same as the no-cache case.
+    """
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    agent = make_agent_details(name="a1", initial_branch="branch-2", labels={"remote": "git@github.com:org/repo.git"})
+    # The cached PR's head_branch ("branch-1") differs from the agent's current branch.
+    stale_cached_pr = make_pr_field(number=42, head_branch="branch-1")
+    cached_ci = CiField(status=CiStatus.PASSING)
+    cached: dict[AgentName, dict[str, FieldValue]] = {
+        agent.name: {FIELD_PR: stale_cached_pr, FIELD_CI: cached_ci},
+    }
+    ctx = make_mngr_ctx_with_cg(_make_failing_fetch_cg())
+    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
+    assert agent.name in fields
+    pr_field = fields[agent.name].get(FIELD_PR)
+    assert isinstance(pr_field, PrFetchFailedField)
+    assert pr_field.repo == "org/repo"
+    # Stale CI must not leak through either.
+    assert FIELD_CI not in fields[agent.name]
 
 
 def test_compute_with_conflicts_and_unresolved() -> None:

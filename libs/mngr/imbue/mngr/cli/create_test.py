@@ -843,10 +843,10 @@ def test_create_headless_streams_output(
     """Creating a headless_command agent with --foreground should stream output.
 
     Registers a custom headless_command-based agent type with a specific command
-    via settings.toml (since --command is not a CLI flag). Uses an explicit
-    --source + --transfer=none to avoid depending on being inside a git repo
-    and to skip transfer (the shared path would otherwise try to rsync the
-    source dir, which is slow and unnecessary for a one-line ``echo`` agent).
+    via settings.toml. Uses an explicit --source + --transfer=none to avoid
+    depending on being inside a git repo and to skip transfer (the shared path
+    would otherwise try to rsync the source dir, which is slow and unnecessary
+    for a one-line ``echo`` agent).
     """
     profile_dir = get_or_create_profile_dir(temp_host_dir)
     _write_agent_type_command_to_settings(
