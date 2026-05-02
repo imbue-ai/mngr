@@ -3,9 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from imbue.imbue_common.event_envelope import EventType
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
-from imbue.mngr.api.discovery_events import DiscoveryEventType
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import _make_envelope_fields
 from imbue.mngr.api.discovery_events import make_full_discovery_snapshot_event
@@ -722,7 +720,6 @@ def test_agent_observer_handle_host_destroyed_removes_host(temp_mngr_ctx: MngrCo
         timestamp, event_id = _make_envelope_fields()
         destroyed_event = HostDestroyedEvent(
             timestamp=timestamp,
-            type=EventType(DiscoveryEventType.HOST_DESTROYED),
             event_id=event_id,
             source=DISCOVERY_EVENT_SOURCE,
             host_id=host.host_id,
@@ -749,7 +746,6 @@ def test_agent_observer_on_discovery_stream_output_handles_host_destroyed(
         timestamp, event_id = _make_envelope_fields()
         destroyed_event = HostDestroyedEvent(
             timestamp=timestamp,
-            type=EventType(DiscoveryEventType.HOST_DESTROYED),
             event_id=event_id,
             source=DISCOVERY_EVENT_SOURCE,
             host_id=host.host_id,

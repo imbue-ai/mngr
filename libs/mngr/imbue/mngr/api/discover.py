@@ -158,7 +158,7 @@ def discover_hosts_and_agents(
             return _run_discovery(mngr_ctx, provider_names, include_destroyed, reset_caches)
 
         # Try to resolve identifiers to provider names from the event stream
-        resolved_providers = resolve_provider_names_for_identifiers(mngr_ctx.config, agent_identifiers)
+        resolved_providers = resolve_provider_names_for_identifiers(mngr_ctx, agent_identifiers)
         if resolved_providers is None:
             logger.trace("Could not resolve agent identifiers from event stream, doing full scan")
             return _run_discovery(mngr_ctx, None, include_destroyed, reset_caches)

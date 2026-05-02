@@ -30,6 +30,7 @@ from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.errors import DiscoverySchemaChangedError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 
@@ -572,8 +573,8 @@ class MngrStreamManager(MutableModel):
         """
         try:
             event = parse_discovery_event_line(line)
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.opt(exception=e).error("Failed to parse discovery event line (line: {})", line[:200])
+        except DiscoverySchemaChangedError as e:
+            logger.warning("Skipping discovery event with stale schema: {} (line: {})", e, line[:200])
             return
 
         if isinstance(event, FullDiscoverySnapshotEvent):

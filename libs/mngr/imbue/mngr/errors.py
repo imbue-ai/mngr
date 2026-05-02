@@ -422,3 +422,19 @@ class BinaryNotInstalledError(MngrError):
     def __init__(self, binary: str, purpose: str, install_hint: str) -> None:
         self.user_help_text = install_hint
         super().__init__(f"{binary} is required for {purpose} but was not found on PATH")
+
+
+class DiscoverySchemaChangedError(BaseMngrError, ValueError):
+    """Raised when a discovery event line cannot be validated against the current schema.
+
+    This typically means a field was added, removed, or renamed in a discovery event
+    model since the line was written. Callers should treat the on-disk events as stale,
+    regenerate via a full discovery (which appends new events in the current schema),
+    and retry. If validation fails again after regeneration, the error is real and
+    should be surfaced rather than silently dropped.
+    """
+
+    def __init__(self, event_type: str, validation_error: str) -> None:
+        self.event_type = event_type
+        self.validation_error = validation_error
+        super().__init__(f"Discovery event of type {event_type!r} does not match current schema: {validation_error}")

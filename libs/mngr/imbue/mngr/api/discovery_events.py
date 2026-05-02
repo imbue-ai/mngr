@@ -8,17 +8,20 @@ from datetime import timezone
 from enum import auto
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Annotated
 from typing import Final
+from typing import Literal
 
 from loguru import logger
+from pydantic import Discriminator
 from pydantic import Field
+from pydantic import TypeAdapter
+from pydantic import ValidationError
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.event_envelope import EventEnvelope
 from imbue.imbue_common.event_envelope import EventId
 from imbue.imbue_common.event_envelope import EventSource
-from imbue.imbue_common.event_envelope import EventType
 from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.imbue_common.logging import cleanup_old_rotated_files
 from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
@@ -29,6 +32,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
+from imbue.mngr.errors import DiscoverySchemaChangedError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
@@ -64,18 +68,21 @@ class DiscoveryEventType(UpperCaseStrEnum):
 class AgentDiscoveryEvent(EventEnvelope):
     """A discovery event recording a single agent state change."""
 
+    type: Literal[DiscoveryEventType.AGENT_DISCOVERED] = DiscoveryEventType.AGENT_DISCOVERED
     agent: DiscoveredAgent = Field(description="The discovered agent data")
 
 
 class HostDiscoveryEvent(EventEnvelope):
     """A discovery event recording a single host state change."""
 
+    type: Literal[DiscoveryEventType.HOST_DISCOVERED] = DiscoveryEventType.HOST_DISCOVERED
     host: DiscoveredHost = Field(description="The discovered host data")
 
 
 class AgentDestroyedEvent(EventEnvelope):
     """A discovery event recording that an agent was destroyed."""
 
+    type: Literal[DiscoveryEventType.AGENT_DESTROYED] = DiscoveryEventType.AGENT_DESTROYED
     agent_id: AgentId = Field(description="ID of the destroyed agent")
     host_id: HostId = Field(description="ID of the host the agent was on")
 
@@ -83,6 +90,7 @@ class AgentDestroyedEvent(EventEnvelope):
 class HostDestroyedEvent(EventEnvelope):
     """A discovery event recording that a host was destroyed."""
 
+    type: Literal[DiscoveryEventType.HOST_DESTROYED] = DiscoveryEventType.HOST_DESTROYED
     host_id: HostId = Field(description="ID of the destroyed host")
     agent_ids: tuple[AgentId, ...] = Field(description="IDs of agents that were on the host")
 
@@ -90,6 +98,7 @@ class HostDestroyedEvent(EventEnvelope):
 class FullDiscoverySnapshotEvent(EventEnvelope):
     """A full snapshot of all agents and hosts from a complete discovery scan."""
 
+    type: Literal[DiscoveryEventType.DISCOVERY_FULL] = DiscoveryEventType.DISCOVERY_FULL
     agents: tuple[DiscoveredAgent, ...] = Field(description="All discovered agents")
     hosts: tuple[DiscoveredHost, ...] = Field(description="All discovered hosts")
 
@@ -97,6 +106,7 @@ class FullDiscoverySnapshotEvent(EventEnvelope):
 class HostSSHInfoEvent(EventEnvelope):
     """Records SSH connection info for a host."""
 
+    type: Literal[DiscoveryEventType.HOST_SSH_INFO] = DiscoveryEventType.HOST_SSH_INFO
     host_id: HostId = Field(description="ID of the host")
     ssh: SSHInfo = Field(description="SSH connection info for the host")
 
@@ -104,9 +114,24 @@ class HostSSHInfoEvent(EventEnvelope):
 class DiscoveryErrorEvent(EventEnvelope):
     """Records an error encountered during discovery."""
 
+    type: Literal[DiscoveryEventType.DISCOVERY_ERROR] = DiscoveryEventType.DISCOVERY_ERROR
     error_type: str = Field(description="The type name of the exception (e.g. 'RuntimeError')")
     error_message: str = Field(description="The error message")
     source_name: str = Field(description="Provider, host, or agent that caused the error")
+
+
+DiscoveryEvent = Annotated[
+    AgentDiscoveryEvent
+    | HostDiscoveryEvent
+    | AgentDestroyedEvent
+    | HostDestroyedEvent
+    | FullDiscoverySnapshotEvent
+    | HostSSHInfoEvent
+    | DiscoveryErrorEvent,
+    Discriminator("type"),
+]
+
+_DISCOVERY_EVENT_ADAPTER: Final[TypeAdapter[DiscoveryEvent]] = TypeAdapter(DiscoveryEvent)
 
 
 # === Path Helpers ===
@@ -203,7 +228,6 @@ def make_agent_discovery_event(agent: DiscoveredAgent) -> AgentDiscoveryEvent:
     timestamp, event_id = _make_envelope_fields()
     return AgentDiscoveryEvent(
         timestamp=timestamp,
-        type=EventType(DiscoveryEventType.AGENT_DISCOVERED),
         event_id=event_id,
         source=DISCOVERY_EVENT_SOURCE,
         agent=agent,
@@ -215,7 +239,6 @@ def make_host_discovery_event(host: DiscoveredHost) -> HostDiscoveryEvent:
     timestamp, event_id = _make_envelope_fields()
     return HostDiscoveryEvent(
         timestamp=timestamp,
-        type=EventType(DiscoveryEventType.HOST_DISCOVERED),
         event_id=event_id,
         source=DISCOVERY_EVENT_SOURCE,
         host=host,
@@ -230,7 +253,6 @@ def make_full_discovery_snapshot_event(
     timestamp, event_id = _make_envelope_fields()
     return FullDiscoverySnapshotEvent(
         timestamp=timestamp,
-        type=EventType(DiscoveryEventType.DISCOVERY_FULL),
         event_id=event_id,
         source=DISCOVERY_EVENT_SOURCE,
         agents=tuple(agents),
@@ -305,7 +327,6 @@ def emit_agent_destroyed(config: MngrConfig, agent_id: AgentId, host_id: HostId)
     timestamp, event_id = _make_envelope_fields()
     event = AgentDestroyedEvent(
         timestamp=timestamp,
-        type=EventType(DiscoveryEventType.AGENT_DESTROYED),
         event_id=event_id,
         source=DISCOVERY_EVENT_SOURCE,
         agent_id=agent_id,
@@ -324,7 +345,6 @@ def emit_host_destroyed(
     timestamp, event_id = _make_envelope_fields()
     event = HostDestroyedEvent(
         timestamp=timestamp,
-        type=EventType(DiscoveryEventType.HOST_DESTROYED),
         event_id=event_id,
         source=DISCOVERY_EVENT_SOURCE,
         host_id=host_id,
@@ -339,7 +359,6 @@ def emit_host_ssh_info(config: MngrConfig, host_id: HostId, ssh: SSHInfo) -> Non
     timestamp, event_id = _make_envelope_fields()
     event = HostSSHInfoEvent(
         timestamp=timestamp,
-        type=EventType(DiscoveryEventType.HOST_SSH_INFO),
         event_id=event_id,
         source=DISCOVERY_EVENT_SOURCE,
         host_id=host_id,
@@ -354,7 +373,6 @@ def emit_discovery_error_event(config: MngrConfig, error_type: str, error_messag
     timestamp, event_id = _make_envelope_fields()
     event = DiscoveryErrorEvent(
         timestamp=timestamp,
-        type=EventType(DiscoveryEventType.DISCOVERY_ERROR),
         event_id=event_id,
         source=DISCOVERY_EVENT_SOURCE,
         error_type=error_type,
@@ -374,7 +392,6 @@ def emit_discovery_error_to_stdout(error_type: str, error_message: str, source_n
     timestamp, event_id = _make_envelope_fields()
     event = DiscoveryErrorEvent(
         timestamp=timestamp,
-        type=EventType(DiscoveryEventType.DISCOVERY_ERROR),
         event_id=event_id,
         source=DISCOVERY_EVENT_SOURCE,
         error_type=error_type,
@@ -449,58 +466,27 @@ def write_full_discovery_snapshot(
 # === Event Parsing ===
 
 
-DiscoveryEvent = (
-    AgentDiscoveryEvent
-    | HostDiscoveryEvent
-    | AgentDestroyedEvent
-    | HostDestroyedEvent
-    | FullDiscoverySnapshotEvent
-    | HostSSHInfoEvent
-    | DiscoveryErrorEvent
-)
-
-
-@pure
-def _discovery_event_from_data(data: dict[str, Any]) -> DiscoveryEvent | None:
-    """Build the appropriate DiscoveryEvent from already-parsed JSON data."""
-    event_type = data.get("type")
-    match event_type:
-        case DiscoveryEventType.AGENT_DISCOVERED:
-            return AgentDiscoveryEvent.model_validate(data)
-        case DiscoveryEventType.HOST_DISCOVERED:
-            return HostDiscoveryEvent.model_validate(data)
-        case DiscoveryEventType.AGENT_DESTROYED:
-            return AgentDestroyedEvent.model_validate(data)
-        case DiscoveryEventType.HOST_DESTROYED:
-            return HostDestroyedEvent.model_validate(data)
-        case DiscoveryEventType.DISCOVERY_FULL:
-            return FullDiscoverySnapshotEvent.model_validate(data)
-        case DiscoveryEventType.HOST_SSH_INFO:
-            return HostSSHInfoEvent.model_validate(data)
-        case DiscoveryEventType.DISCOVERY_ERROR:
-            return DiscoveryErrorEvent.model_validate(data)
-        case _:
-            return None
-
-
-@pure
 def parse_discovery_event_line(line: str) -> DiscoveryEvent | None:
     """Parse a single JSONL line into the appropriate discovery event type.
 
-    Returns None if the line cannot be parsed or is not a recognized discovery event.
-    Stateless and silent on malformed JSON; use MalformedJsonLineWarner alongside
-    _discovery_event_from_data when reading multiple lines so corruption is surfaced.
+    Returns None for empty lines, malformed JSON, or unrecognized event types
+    (the latter to support forward-compat with new event types).
+
+    Raises DiscoverySchemaChangedError when the line is a recognized event type but
+    fails schema validation -- this typically means the model fields evolved
+    since the line was written.
     """
     stripped = line.strip()
     if not stripped:
         return None
+
+    data = json.loads(stripped)
+
+    event_type = data.get("type")
     try:
-        data = json.loads(stripped)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    return _discovery_event_from_data(data)
+        return _DISCOVERY_EVENT_ADAPTER.validate_python(data)
+    except ValidationError as e:
+        raise DiscoverySchemaChangedError(str(event_type), str(e)) from e
 
 
 def find_latest_full_snapshot_offset(events_path: Path) -> int:
@@ -530,8 +516,56 @@ def find_latest_full_snapshot_offset(events_path: Path) -> int:
     return last_full_offset
 
 
+def _replay_discovery_events_for_resolution(
+    events_path: Path,
+) -> tuple[dict[str, str], dict[str, str], set[str]]:
+    """Replay events from the latest full snapshot into resolution maps.
+
+    Returns ``(provider_by_agent_id, name_by_agent_id, destroyed_agent_ids)``.
+    Raises DiscoverySchemaChangedError if any event line in the file fails
+    schema validation (the caller is responsible for regenerating and retrying).
+    Raises OSError on file I/O failure.
+    """
+    offset = find_latest_full_snapshot_offset(events_path)
+    provider_by_agent_id: dict[str, str] = {}
+    name_by_agent_id: dict[str, str] = {}
+    destroyed_agent_ids: set[str] = set()
+
+    warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
+    with open(events_path) as f:
+        f.seek(offset)
+        for line in f:
+            parsed = warner.parse(line)
+            if parsed is None:
+                continue
+            data, stripped_line = parsed
+            event = parse_discovery_event_line(stripped_line)
+            if isinstance(event, FullDiscoverySnapshotEvent):
+                # Reset maps -- this snapshot supersedes everything before it
+                provider_by_agent_id.clear()
+                name_by_agent_id.clear()
+                destroyed_agent_ids.clear()
+                for agent in event.agents:
+                    id_str = str(agent.agent_id)
+                    provider_by_agent_id[id_str] = str(agent.provider_name)
+                    name_by_agent_id[id_str] = str(agent.agent_name)
+            elif isinstance(event, AgentDiscoveryEvent):
+                agent = event.agent
+                id_str = str(agent.agent_id)
+                provider_by_agent_id[id_str] = str(agent.provider_name)
+                name_by_agent_id[id_str] = str(agent.agent_name)
+                destroyed_agent_ids.discard(id_str)
+            elif isinstance(event, AgentDestroyedEvent):
+                destroyed_agent_ids.add(str(event.agent_id))
+            else:
+                # Host events and other types are not relevant for provider resolution
+                pass
+
+    return provider_by_agent_id, name_by_agent_id, destroyed_agent_ids
+
+
 def resolve_provider_names_for_identifiers(
-    config: MngrConfig,
+    mngr_ctx: MngrContext,
     identifiers: Sequence[str],
 ) -> tuple[str, ...] | None:
     """Resolve agent identifiers to the provider names that own them using the event stream.
@@ -541,54 +575,29 @@ def resolve_provider_names_for_identifiers(
 
     Returns the deduplicated union of provider names for all identifiers, or None if
     any identifier cannot be resolved (meaning a full scan is needed).
+
+    If the on-disk events are stale relative to the current model schema, this triggers
+    a full discovery scan (which appends fresh events in the current schema), then
+    retries parsing once. If parsing still fails, the schema mismatch reflects a real
+    bug rather than stale data, so DiscoverySchemaChangedError is re-raised.
     """
-    events_path = get_discovery_events_path(config)
+    events_path = get_discovery_events_path(mngr_ctx.config)
     if not events_path.exists():
         return None
 
-    # Find the latest full snapshot and replay from there
-    offset = find_latest_full_snapshot_offset(events_path)
-
-    # Maps for resolution: track per-agent-id data so destroyed agents can be fully removed
-    provider_by_agent_id: dict[str, str] = {}
-    name_by_agent_id: dict[str, str] = {}
-    destroyed_agent_ids: set[str] = set()
-
-    warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     try:
-        with open(events_path) as f:
-            f.seek(offset)
-            for line in f:
-                parsed = warner.parse(line)
-                if parsed is None:
-                    continue
-                data, _ = parsed
-                event = _discovery_event_from_data(data)
-                if event is None:
-                    continue
-                if isinstance(event, FullDiscoverySnapshotEvent):
-                    # Reset maps -- this snapshot supersedes everything before it
-                    provider_by_agent_id.clear()
-                    name_by_agent_id.clear()
-                    destroyed_agent_ids.clear()
-                    for agent in event.agents:
-                        id_str = str(agent.agent_id)
-                        provider_by_agent_id[id_str] = str(agent.provider_name)
-                        name_by_agent_id[id_str] = str(agent.agent_name)
-                elif isinstance(event, AgentDiscoveryEvent):
-                    agent = event.agent
-                    id_str = str(agent.agent_id)
-                    provider_by_agent_id[id_str] = str(agent.provider_name)
-                    name_by_agent_id[id_str] = str(agent.agent_name)
-                    destroyed_agent_ids.discard(id_str)
-                elif isinstance(event, AgentDestroyedEvent):
-                    destroyed_agent_ids.add(str(event.agent_id))
-                else:
-                    # Host events and other types are not relevant for provider resolution
-                    pass
-    except (OSError, ValueError) as e:
-        logger.trace("Failed to read discovery events for provider resolution: {}", e)
-        return None
+        provider_by_agent_id, name_by_agent_id, destroyed_agent_ids = _replay_discovery_events_for_resolution(
+            events_path
+        )
+    except DiscoverySchemaChangedError as e:
+        logger.warning("Discovery event schema mismatch; regenerating snapshot and retrying ({})", e)
+        # FIXME: might want to retry a few times here if ther are transient errors
+        #  otherwise you'd get a pretty rare failure (during upgrade, if the schema shifted, and then you got a transient error, this would fail)
+        _write_unfiltered_full_snapshot(mngr_ctx, ErrorBehavior.ABORT)
+        # after we've regenerated the list, we should no longer get the DiscoverySchemaChangedError anymore
+        provider_by_agent_id, name_by_agent_id, destroyed_agent_ids = _replay_discovery_events_for_resolution(
+            events_path
+        )
 
     # Remove destroyed agents from both maps
     for destroyed_id in destroyed_agent_ids:
