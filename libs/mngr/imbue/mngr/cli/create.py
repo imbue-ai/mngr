@@ -1027,8 +1027,7 @@ def _rescue_editor_content(
     """Save editor content to a recovery file so the user does not lose their work.
 
     Reads the content from the editor's temp file (which still exists before cleanup)
-    and writes it to ~/.mngr/recovered-message.txt. Uses logger.warning which will be
-    buffered if logging is suppressed and replayed when suppression is disabled.
+    and writes it to ~/.mngr/recovered-message.txt.
     """
     if not editor_session.temp_file_path.exists():
         return
@@ -1053,7 +1052,7 @@ def _rescue_editor_content(
         logger.trace("Failed to write recovery file {}: {}", recovery_path, e)
         return
 
-    logger.warning("Your editor message has been saved to: {}", recovery_path)
+    logger.info("Your editor message has been saved to: {}", recovery_path)
 
 
 def _handle_editor_message(
@@ -1188,7 +1187,7 @@ def _try_reuse_existing_agent(
     if agent is None:
         # Agent not found on online host - this could happen if the host came online
         # but the agent data is stale. Return None to create a new agent.
-        logger.warning("Agent {} not found on host after starting, will create new agent", agent_name)
+        logger.info("Agent {} not found on host after starting, will create new agent", agent_name)
         return None
 
     # Ensure the agent is started (reusing shared logic from find.py)

@@ -37,8 +37,8 @@ from imbue.minds.desktop_client.agent_creator import make_log_callback
 from imbue.minds.desktop_client.agent_creator import run_mngr_create
 from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
 from imbue.minds.desktop_client.host_pool_client import HostPoolClient
-from imbue.minds.desktop_client.latchkey.gateway import AGENT_SIDE_LATCHKEY_PORT
-from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
+from imbue.minds.desktop_client.latchkey.core import AGENT_SIDE_LATCHKEY_PORT
+from imbue.minds.desktop_client.latchkey.core import Latchkey
 from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
 from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyClient
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -1092,33 +1092,30 @@ def test_agent_creator_cleans_up_pre_spawned_latchkey_gateway_on_failure(
     )
     fake_binary.chmod(0o755)
 
-    gateway_manager = LatchkeyGatewayManager(latchkey_binary=str(fake_binary))
-    gateway_manager.start(data_dir=tmp_path / "gateway-data")
-    try:
-        creator = AgentCreator(
-            paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-            latchkey_gateway_manager=gateway_manager,
-            root_concurrency_group=root_concurrency_group,
-            notification_dispatcher=notification_dispatcher,
-        )
-        # "Local path" that does not exist -- mngr create will not even get
-        # the chance to fail; _create_agent_background aborts with MngrCommandError.
-        agent_id = creator.start_creation("/definitely/not/here", launch_mode=LaunchMode.DEV)
+    latchkey = Latchkey(latchkey_binary=str(fake_binary))
+    latchkey.initialize(data_dir=tmp_path / "gateway-data")
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        latchkey=latchkey,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
+    # "Local path" that does not exist -- mngr create will not even get
+    # the chance to fail; _create_agent_background aborts with MngrCommandError.
+    agent_id = creator.start_creation("/definitely/not/here", launch_mode=LaunchMode.DEV)
 
-        for _ in range(100):
-            info = creator.get_creation_info(agent_id)
-            if info is not None and info.status == AgentCreationStatus.FAILED:
-                break
-            threading.Event().wait(0.05)
+    for _ in range(100):
         info = creator.get_creation_info(agent_id)
-        assert info is not None
-        assert info.status == AgentCreationStatus.FAILED
-        creator.wait_for_all()
+        if info is not None and info.status == AgentCreationStatus.FAILED:
+            break
+        threading.Event().wait(0.05)
+    info = creator.get_creation_info(agent_id)
+    assert info is not None
+    assert info.status == AgentCreationStatus.FAILED
+    creator.wait_for_all()
 
-        # No lingering gateway or record for this agent.
-        assert gateway_manager.get_gateway_info(agent_id) is None
-    finally:
-        gateway_manager.stop()
+    # No lingering gateway or record for this agent.
+    assert latchkey.get_gateway_info(agent_id) is None
 
 
 def test_is_git_worktree_returns_false_for_normal_repo(tmp_path: Path) -> None:

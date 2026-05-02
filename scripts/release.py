@@ -141,6 +141,30 @@ def _confirm_new_packages(new_packages: set[str], current_versions: dict[str, st
     return confirmed
 
 
+def _print_trusted_publisher_warning(confirmed_new: set[str]) -> None:
+    """Print a reminder to register pending Trusted Publishers for each new package.
+
+    No-op when `confirmed_new` is empty.
+    """
+    if not confirmed_new:
+        return
+    print()
+    print("=" * 72)
+    print("ACTION REQUIRED: register a pending Trusted Publisher on PyPI for each")
+    print("new package before the publish workflow runs:")
+    for name in sorted(confirmed_new):
+        print(f"  - {name}")
+    print()
+    print("  https://pypi.org/manage/account/publishing/")
+    print()
+    print("WARNING: PyPI only allows ONE pending publisher per account at a time.")
+    print("If multiple new packages are released in the same tag, the publish")
+    print("workflow will fail on each unregistered package in turn. You will need")
+    print("to register the next pending publisher and re-run the failed workflow")
+    print("ONCE PER NEW PACKAGE until all are published.")
+    print("=" * 72)
+
+
 def _cascade_reverse_deps(
     seeds: deque[str],
     reverse_deps: dict[str, list[str]],
@@ -542,6 +566,7 @@ def main() -> None:
         confirmed_new = new_packages
     else:
         confirmed_new = set()
+    _print_trusted_publisher_warning(confirmed_new)
 
     # Remove new packages (confirmed or not) from the changed set before computing bumps.
     # Confirmed new packages are published at their current version, not bumped.

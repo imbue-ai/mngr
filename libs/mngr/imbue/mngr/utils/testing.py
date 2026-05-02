@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import selectors
 import shlex
 import shutil
@@ -794,6 +795,36 @@ def get_short_random_string() -> str:
     return uuid4().hex[:8]
 
 
+# Stack of opt-out frames for the autouse "no unexpected loguru warnings"
+# check. Each frame is either None (allow any warning) or a compiled regex
+# (allow only warnings whose message matches it; non-matching ones still fail
+# the test). The top frame governs. capture_loguru and allow_warnings push
+# frames; the autouse fixture in conftest.py pushes a frame when the test
+# carries ``@pytest.mark.allow_warnings``. This name is public because the
+# project conftest reads/mutates it as well as this module.
+WARNINGS_ALLOWED_STACK: list[re.Pattern[str] | None] = []
+
+
+@contextmanager
+def allow_warnings(match: str | None = None) -> Generator[None, None, None]:
+    """Suppress the autouse "no unexpected loguru warnings" check inside this scope.
+
+    The autouse fixture in libs/mngr/conftest.py fails any test that emits a
+    loguru WARNING-level (or higher) record. Wrap code that intentionally emits
+    such records in this context manager. For whole-test opt-out use
+    ``@pytest.mark.allow_warnings`` (optionally ``@pytest.mark.allow_warnings(match=...)``).
+
+    If ``match`` is given, only warning messages whose text matches the regex
+    (via ``re.search``) are allowed; non-matching warnings still fail the test.
+    """
+    pattern = re.compile(match) if match is not None else None
+    WARNINGS_ALLOWED_STACK.append(pattern)
+    try:
+        yield
+    finally:
+        WARNINGS_ALLOWED_STACK.pop()
+
+
 @contextmanager
 def capture_loguru(level: str = "WARNING") -> Generator[StringIO, None, None]:
     """Capture loguru output at the given level into a StringIO buffer.
@@ -801,11 +832,16 @@ def capture_loguru(level: str = "WARNING") -> Generator[StringIO, None, None]:
     Loguru's handlers don't follow CliRunner's sys.stderr replacement, so
     tests that need to verify logged messages should use this context manager
     instead of checking result.output.
+
+    Implicitly opts out of the autouse "no unexpected loguru warnings" check
+    while the context is active, since tests using ``capture_loguru`` are
+    inspecting warnings on purpose.
     """
     log_output = StringIO()
     sink_id = logger.add(log_output, level=level, format="{message}")
     try:
-        yield log_output
+        with allow_warnings():
+            yield log_output
     finally:
         logger.remove(sink_id)
 

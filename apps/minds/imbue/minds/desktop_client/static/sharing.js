@@ -169,7 +169,15 @@
     setSubmitting(true);
     var form = new FormData();
     form.append('emails', JSON.stringify(getFinalEmails()));
-    fetch('/sharing/' + agentId + '/' + serviceName + '/enable', { method: 'POST', body: form })
+    // Request-approval and direct-edit submissions go to different
+    // endpoints: the request flow needs a GRANTED response event
+    // appended (handled by /requests/{id}/grant -> SharingRequestHandler),
+    // while direct edits just change the Cloudflare config. Both end up
+    // calling the same enable_sharing_via_cloudflare helper server-side.
+    var url = isRequest
+      ? '/requests/' + requestId + '/grant'
+      : '/sharing/' + agentId + '/' + serviceName + '/enable';
+    fetch(url, { method: 'POST', body: form })
       .then(function () { window.location.href = '/sharing/' + agentId + '/' + serviceName; })
       .catch(function (err) { alert('Failed: ' + err.message); setSubmitting(false); });
   };

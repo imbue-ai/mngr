@@ -363,6 +363,7 @@ def test_validate_plugin_name_is_known_no_warning_for_known() -> None:
     assert not any("not currently registered" in w for w in warnings)
 
 
+@pytest.mark.allow_warnings(match=r"Plugin '.*' is not currently registered")
 def test_validate_plugin_name_is_known_warns_for_unknown() -> None:
     """_validate_plugin_name_is_known should warn for an unknown plugin."""
     pm = pluggy.PluginManager("mngr")

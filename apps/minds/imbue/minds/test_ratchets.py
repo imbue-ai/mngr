@@ -94,7 +94,10 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    rc.check_asyncio_import(_DIR, snapshot(1))
+    # Two: app.py uses ``asyncio.get_running_loop()`` and ``asyncio.run_coroutine_threadsafe``
+    # for HTTP route handlers; latchkey/permissions.py uses ``run_in_executor`` to run the
+    # blocking grant/deny path off the event loop. Both are intrinsic to FastAPI integration.
+    rc.check_asyncio_import(_DIR, snapshot(2))
 
 
 def test_prevent_pandas_import() -> None:
