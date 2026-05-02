@@ -1501,15 +1501,20 @@ def test_auto_dismiss_dialogs_defaults_to_false() -> None:
     assert config.auto_dismiss_dialogs is False
 
 
-def test_on_before_provisioning_raises_for_worktree_on_remote_host(
+def test_on_before_provisioning_allows_worktree_on_remote_host(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """on_before_provisioning should raise PluginMngrError for worktree mode on remote hosts."""
+    """on_before_provisioning should accept worktree mode on remote hosts.
+
+    Remote claude trust comes from the work_dir entry in the synced .claude.json
+    (added by _build_claude_json when should_trust_work_dir is true), not from a
+    local trust check. The dialog-dismissed precheck below this branch is
+    already gated on host.is_local.
+    """
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
     # Use SimpleNamespace to simulate a non-local host. Creating a real remote host
-    # requires SSH infrastructure not available in unit tests. The method only reads
-    # host.is_local before raising.
+    # requires SSH infrastructure not available in unit tests.
     non_local_host = cast(OnlineHostInterface, SimpleNamespace(is_local=False))
 
     options = CreateAgentOptions(
@@ -1517,8 +1522,7 @@ def test_on_before_provisioning_raises_for_worktree_on_remote_host(
         transfer_mode=TransferMode.GIT_WORKTREE,
     )
 
-    with pytest.raises(PluginMngrError, match="Git worktree transfer mode is not supported on remote hosts"):
-        agent.on_before_provisioning(host=non_local_host, options=options, mngr_ctx=temp_mngr_ctx)
+    agent.on_before_provisioning(host=non_local_host, options=options, mngr_ctx=temp_mngr_ctx)
 
 
 def test_on_before_provisioning_validates_trust_for_worktree(

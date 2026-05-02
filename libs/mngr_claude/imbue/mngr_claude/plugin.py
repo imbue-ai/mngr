@@ -1536,14 +1536,6 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         Interactive and auto-approve runs skip these checks because
         provision() will handle them.
         """
-        if options.transfer_mode == TransferMode.GIT_WORKTREE:
-            if not host.is_local:
-                raise PluginMngrError(
-                    "Git worktree transfer mode is not supported on remote hosts.\n"
-                    "Claude trust extension requires local filesystem access. "
-                    "Use --transfer=git-mirror instead."
-                )
-
         config = self.agent_config
 
         # Validate dialogs for non-interactive local runs so we fail early with

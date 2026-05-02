@@ -28,9 +28,10 @@ from imbue.mngr_tmr.data_types import TestAgentInfo
 from imbue.mngr_tmr.data_types import TestMapReduceResult
 from imbue.mngr_tmr.data_types import TestResult
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
-from imbue.mngr_tmr.launching import launch_agents_up_to_limit
 
 # Re-export public API used by cli.py and tests
+from imbue.mngr_tmr.launching import ensure_snapshot as ensure_snapshot
+from imbue.mngr_tmr.launching import launch_agents_up_to_limit
 from imbue.mngr_tmr.launching import launch_all_test_agents as launch_all_test_agents
 from imbue.mngr_tmr.launching import launch_integrator_agent as launch_integrator_agent
 from imbue.mngr_tmr.launching import launch_test_agent as launch_test_agent
