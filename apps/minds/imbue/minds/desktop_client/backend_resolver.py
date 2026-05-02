@@ -584,8 +584,6 @@ class MngrStreamManager(MutableModel):
             self._handle_host_destroyed(event)
         elif isinstance(event, DiscoveryErrorEvent):
             self._handle_discovery_error(event)
-        elif event is None:
-            raise Exception("Unrecognized discovery event line: {}", line[:200])
         # FIXME: make the match exhaustive so that we have to think about what to do when there are new types
         else:
             logger.trace("Ignoring discovery event: {}", type(event).__name__)

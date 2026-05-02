@@ -716,7 +716,10 @@ class AgentManager:
             return
         event = parse_discovery_event_line(stripped)
         if event is None:
-            raise Exception("This should never happen")
+            # parse_discovery_event_line only returns None for empty/whitespace lines,
+            # which we filtered out above; reaching here indicates an internal contract
+            # violation in the parser.
+            raise BaseMngrError(f"parse_discovery_event_line returned None for non-empty line: {stripped[:200]!r}")
         self._handle_discovery_event(event)
 
     def _handle_discovery_event(self, event: object) -> None:

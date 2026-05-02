@@ -392,7 +392,9 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         )
     elif not mngr_ctx.is_interactive:
         # Default to most recently created agent when running non-interactively
-        include_filters, exclude_filters = build_agent_filter_cel(opts)
+        include_filters, exclude_filters = build_agent_filter_cel(
+            opts, mngr_ctx.concurrency_group, project_root=mngr_ctx.project_root
+        )
         list_result = list_agents(
             mngr_ctx,
             is_streaming=False,
@@ -413,7 +415,9 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
             is_start_desired=opts.start,
         )
     else:
-        include_filters, exclude_filters = build_agent_filter_cel(opts)
+        include_filters, exclude_filters = build_agent_filter_cel(
+            opts, mngr_ctx.concurrency_group, project_root=mngr_ctx.project_root
+        )
         list_result = list_agents(
             mngr_ctx,
             is_streaming=False,

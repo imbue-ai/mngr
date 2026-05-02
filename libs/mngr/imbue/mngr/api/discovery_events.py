@@ -469,12 +469,15 @@ def write_full_discovery_snapshot(
 def parse_discovery_event_line(line: str) -> DiscoveryEvent | None:
     """Parse a single JSONL line into the appropriate discovery event type.
 
-    Returns None for empty lines, malformed JSON, or unrecognized event types
-    (the latter to support forward-compat with new event types).
+    Returns None only for fully empty / whitespace-only lines (these are a
+    routine artifact of trailing newlines and EOF; not an error).
 
-    Raises DiscoverySchemaChangedError when the line is a recognized event type but
-    fails schema validation -- this typically means the model fields evolved
-    since the line was written.
+    Raises ``json.JSONDecodeError`` for malformed JSON and
+    ``DiscoverySchemaChangedError`` for any structurally-valid JSON line that
+    does not match a known discovery event type or whose fields have evolved
+    out of sync with the current schema. Both conditions represent something
+    upstream that has gone wrong and need to surface; silently dropping such
+    lines would just mask the underlying problem.
     """
     stripped = line.strip()
     if not stripped:
@@ -625,6 +628,7 @@ def resolve_provider_names_for_identifiers(
             logger.debug(
                 f"Could not resolve provider for identifier '{identifier}' from discovery events; full scan needed"
             )
+            return None
 
     return tuple(sorted(resolved_providers))
 

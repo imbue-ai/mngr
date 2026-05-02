@@ -288,12 +288,16 @@ def test_parse_empty_line_returns_none() -> None:
     assert parse_discovery_event_line("   ") is None
 
 
-def test_parse_invalid_json_returns_none() -> None:
-    assert parse_discovery_event_line("{invalid json}") is None
+def test_parse_invalid_json_raises() -> None:
+    """Malformed JSON is treated as an upstream bug; the parser surfaces the JSONDecodeError."""
+    with pytest.raises(json.JSONDecodeError):
+        parse_discovery_event_line("{invalid json}")
 
 
-def test_parse_unknown_event_type_returns_none() -> None:
-    assert parse_discovery_event_line('{"type": "unknown_event"}') is None
+def test_parse_unknown_event_type_raises_schema_changed() -> None:
+    """A discovery line with a type that isn't in the discriminated union raises DiscoverySchemaChangedError."""
+    with pytest.raises(DiscoverySchemaChangedError):
+        parse_discovery_event_line('{"type": "unknown_event"}')
 
 
 def test_parse_recognized_event_with_missing_field_raises_schema_changed() -> None:
@@ -322,6 +326,7 @@ def test_parse_recognized_event_with_extra_field_raises_schema_changed() -> None
         parse_discovery_event_line(json.dumps(data))
 
 
+@pytest.mark.allow_warnings(match=r"Discovery event schema mismatch")
 def test_resolve_provider_names_recovers_after_schema_mismatch(temp_mngr_ctx: MngrContext) -> None:
     """A stale-schema event must trigger a regenerate (full scan) and a parse retry.
 

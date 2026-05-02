@@ -556,12 +556,13 @@ def test_agent_observer_on_discovery_stream_output_ignores_non_stdout(
     assert len(observer._known_hosts) == 0
 
 
-def test_agent_observer_on_discovery_stream_output_ignores_invalid_json(
+def test_agent_observer_on_discovery_stream_output_raises_on_invalid_json(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
-    """Verify that invalid JSON lines from the discovery stream are gracefully ignored."""
+    """Invalid JSON on the discovery stream surfaces as a JSONDecodeError so the upstream bug is visible."""
     observer = _make_observer(temp_mngr_ctx, noop_binary)
-    observer._on_discovery_stream_output("not valid json at all", is_stdout=True)
+    with pytest.raises(json.JSONDecodeError):
+        observer._on_discovery_stream_output("not valid json at all", is_stdout=True)
     assert len(observer._known_hosts) == 0
 
 

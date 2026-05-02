@@ -1,5 +1,8 @@
 """Unit tests for the jsonl_warn module."""
 
+import pytest
+
+from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.jsonl_warn import split_complete_lines
 from imbue.mngr.utils.testing import capture_loguru
@@ -29,11 +32,15 @@ def test_parse_returns_none_for_empty_line() -> None:
     assert warner.parse("\n") is None
 
 
-def test_parse_returns_none_for_non_dict_json() -> None:
+def test_parse_raises_for_non_dict_json() -> None:
+    """Lines that parse but aren't JSON objects can't be partial-write artifacts; they're real corruption and raise."""
     warner = MalformedJsonLineWarner(source_description="test source")
-    assert warner.parse("[1, 2, 3]") is None
-    assert warner.parse('"just a string"') is None
-    assert warner.parse("42") is None
+    with pytest.raises(MalformedJsonlLineError, match="not a JSON object"):
+        warner.parse("[1, 2, 3]")
+    with pytest.raises(MalformedJsonlLineError, match="not a JSON object"):
+        warner.parse('"just a string"')
+    with pytest.raises(MalformedJsonlLineError, match="not a JSON object"):
+        warner.parse("42")
 
 
 def test_malformed_line_followed_by_valid_emits_warning() -> None:

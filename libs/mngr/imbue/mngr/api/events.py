@@ -30,6 +30,7 @@ from imbue.mngr.api.find import resolve_agent_reference
 from imbue.mngr.api.find import resolve_host_reference
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import VolumeFileType
@@ -334,10 +335,14 @@ def _record_from_event_data(data: Mapping[str, Any], stripped_line: str, source_
     The input is a Mapping rather than a dict so the type system enforces that
     this function never mutates caller-owned state: the returned EventRecord's
     `data` field is always a fresh dict.
+
+    Raises ``MalformedJsonlLineError`` when the event JSON is missing required
+    envelope fields. Whichever process is producing the bad event needs to be
+    fixed -- silently dropping it would just hide the underlying problem.
     """
     timestamp = data.get("timestamp", "")
     if not timestamp:
-        raise Exception("Missing required 'timestamp' field in event JSON")
+        raise MalformedJsonlLineError(f"Missing required 'timestamp' field in event JSON: {stripped_line[:200]!r}")
 
     event_id = data.get("event_id", "")
     if not event_id:
@@ -379,11 +384,21 @@ def _record_from_event_data(data: Mapping[str, Any], stripped_line: str, source_
 
 @pure
 def parse_event_line(line: str, source_hint: str) -> EventRecord:
-    """Parse a single JSONL line into an EventRecord."""
+    """Parse a single JSONL line into an EventRecord.
+
+    Raises ``json.JSONDecodeError`` on malformed JSON and
+    ``MalformedJsonlLineError`` when the line is valid JSON but is not a JSON
+    object or is missing required envelope fields. Garbage input is treated as
+    a real failure, not a soft skip: callers reading a multi-line stream where
+    end-of-file partial writes are expected should use ``MalformedJsonLineWarner``
+    instead of calling this directly.
+    """
     stripped = line.strip()
     data = json.loads(stripped)
     if not isinstance(data, dict):
-        raise Exception(f"Expected JSON object but got {type(data).__name__}")
+        raise MalformedJsonlLineError(
+            f"Expected JSON object on event line but got {type(data).__name__}: {stripped[:200]!r}"
+        )
     return _record_from_event_data(data, stripped, source_hint)
 
 
@@ -636,9 +651,7 @@ def _read_events_from_file(
         if parsed is None:
             continue
         data, stripped = parsed
-        record = _record_from_event_data(data, stripped, source_hint)
-        if record is not None:
-            events.append(record)
+        events.append(_record_from_event_data(data, stripped, source_hint))
 
     return events, len(content.encode("utf-8"))
 
@@ -996,8 +1009,6 @@ def _tail_source_thread_local(
                     continue
                 data, stripped = parsed
                 record = _record_from_event_data(data, stripped, source_path)
-                if record is None:
-                    continue
                 if not _event_passes_cel_filters(record, cel_include_filters, cel_exclude_filters):
                     continue
                 event_queue.put(record)
@@ -1056,8 +1067,6 @@ def _tail_source_thread_remote(
                     continue
                 data, stripped = parsed
                 record = _record_from_event_data(data, stripped, source_path)
-                if record is None:
-                    continue
                 if not _event_passes_cel_filters(record, cel_include_filters, cel_exclude_filters):
                     continue
                 event_queue.put(record)
