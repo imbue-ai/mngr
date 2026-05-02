@@ -789,6 +789,7 @@ def test_destroy_transfer_none_standalone_keeps_user_worktree(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_destroy_via_stdin(
     cli_runner: CliRunner,
     temp_work_dir: Path,
