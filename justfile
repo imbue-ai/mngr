@@ -200,3 +200,77 @@ sync-vendor-mngr fct="$HOME/project/forever-claude-template":
     fi
     git commit -m "Sync vendor/mngr to ${branch} (${short})" -m "Tracks ${full} in mngr."
     echo "Synced vendor/mngr to ${branch} (${short}). To publish: (cd $fct && git push origin ${branch})"
+
+
+# === Modal deploy / minds iteration helpers ===
+#
+# All of these read per-env config from .minds/<env>/ (gitignored). The
+# `<env>` name is whatever directory you have under .minds/ -- e.g.
+# `production`, `staging`. The matching templates live in .minds/template/.
+
+# Validate that .minds/<env>/*.sh files declare every key the templates
+# declare, and print the modal-secret commands that `push-secrets` would
+# run. Does NOT touch Modal. Run this first when you change a template
+# or add a new per-env file.
+push-secrets-dry-run env="production":
+    uv run scripts/push_modal_secrets.py {{env}} --dry-run
+
+# Upsert every per-env Modal secret declared in .minds/template/ for the
+# given env. Reads .minds/<env>/<service>.sh and writes <service>-<env>
+# secrets to Modal. Idempotent (uses --force).
+push-secrets env="production":
+    uv run scripts/push_modal_secrets.py {{env}}
+
+# Deploy the remote_service_connector Modal app for the given env.
+# Does NOT push secrets first -- run `just push-secrets <env>` if any
+# .minds/<env>/*.sh files have changed since the last deploy.
+deploy-connector env="production":
+    bash scripts/deploy_remote_service_connector.sh {{env}}
+
+# Deploy the modal_litellm proxy Modal app for the given env.
+# Does NOT push secrets first -- run `just push-secrets <env>` if
+# .minds/<env>/litellm.sh has changed since the last deploy.
+deploy-litellm env="production":
+    bash scripts/deploy_litellm.sh {{env}}
+
+# Push every per-env secret then deploy every Modal app for the given
+# env. Equivalent to push-secrets + deploy-connector + deploy-litellm.
+deploy-all env="production": (push-secrets env) (deploy-connector env) (deploy-litellm env)
+
+# Start the minds desktop client (electron) in dev mode.
+# Run `pnpm install` inside apps/minds/ once before first use.
+minds-start:
+    cd apps/minds && pnpm start
+
+# Build the minds desktop client distributable (slow; uses todesktop).
+minds-build:
+    cd apps/minds && pnpm build
+
+# Provision N Vultr-backed pool hosts and register them in the pool DB
+# at the given version tag (matched by /hosts/lease). Sources
+# .minds/<env>/.env and .minds/<env>/neon.sh so DATABASE_URL,
+# VULTR_API_KEY, etc. are available to the python script. Override
+# `template_repo` if your forever-claude-template clone lives outside
+# the default path.
+create-pool-hosts count="1" env="production" version="v0.1.0" template_repo="$HOME/project/forever-claude-template":
+    #!/bin/bash
+    set -ueo pipefail
+    set -a
+    . .minds/{{env}}/.env
+    . .minds/{{env}}/neon.sh
+    set +a
+    uv run python apps/remote_service_connector/scripts/create_pool_hosts.py \
+        --count {{count}} --version {{version}} \
+        --management-public-key-file .minds/{{env}}/pool_management_key/id_ed25519.pub \
+        --template-dir {{template_repo}}
+
+# Destroy and remove every host in the pool with status='released'.
+# Sources .minds/<env>/neon.sh for DATABASE_URL.
+cleanup-pool-hosts env="production":
+    #!/bin/bash
+    set -ueo pipefail
+    set -a
+    . .minds/{{env}}/neon.sh
+    set +a
+    uv run python apps/remote_service_connector/scripts/cleanup_released_hosts.py \
+        --database-url "$DATABASE_URL"

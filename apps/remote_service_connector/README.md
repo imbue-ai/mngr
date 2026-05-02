@@ -58,6 +58,10 @@ This creates/updates Modal secrets named `<service>-<env>`, e.g. `cloudflare-pro
 - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (optional): override Google OAuth client credentials. Leave blank to inherit from the SuperTokens core's dashboard.
 - `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` (optional): override GitHub OAuth client credentials. Leave blank to inherit from the SuperTokens core's dashboard.
 
+**paid-accounts.sh** holds the paid-feature email allowlist (kept as its own Modal secret so the allowlist can be rotated without touching SuperTokens / OAuth credentials):
+
+- `PAID_ACCOUNT_SUFFIXES` (optional): comma-separated list of email-suffix matches that gate the "paid" routes -- pool host leases (`/hosts/*`) and LiteLLM virtual keys (`/keys/*`). When set, only accounts whose verified SuperTokens email ends with one of these suffixes can use those routes; everyone else gets 403. Cloudflare forwarding (`/tunnels/*`) is intentionally NOT gated by this -- any email-verified account can still create tunnels and forward services. When unset (or empty), the paid routes are disabled for everyone. Match is case-insensitive and uses `endswith`, so include the leading `@` when you want to require an exact domain (e.g. `@imbue.com,@example.org,bob@gmail.com`).
+
 ### 2. Deploy the Modal app
 
 ```bash
@@ -74,6 +78,10 @@ All non-`/auth/*` endpoints require a Bearer token:
 - **User (SuperTokens JWT)**: `Authorization: Bearer <access_token>` — the signed-in user's SuperTokens session. Treated as an "admin" auth whose username is the first 16 hex chars of the user's SuperTokens user ID (used to namespace tunnels per user).
 
 The `/auth/*` endpoints are themselves the authentication flow, so they do not require a token.
+
+### Paid-account gate
+
+`/hosts/*` and `/keys/*` enforce an additional allowlist on top of admin auth: the user's verified SuperTokens email must match one of the suffixes in `PAID_ACCOUNT_SUFFIXES` (see above), or the request returns 403. Cloudflare forwarding (`/tunnels/*`) is not affected -- any email-verified account can use tunnels.
 
 ## Identity providers for Access Applications
 
