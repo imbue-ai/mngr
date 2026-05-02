@@ -810,6 +810,151 @@ class MngrContext(FrozenModel):
         return get_or_create_user_id(self.profile_dir)
 
 
+# Fields on MngrConfig that are intentionally NOT exposed on BootstrapMngrConfig.
+# These are populated by parsing the [agent_types]/[providers]/[plugins] sections
+# of the user's config files; the bootstrap load path skips that parsing because
+# `mngr plugin add` may legitimately reference plugins not yet installed. Removing
+# the fields from the bootstrap-side type forces a compile-time error rather than
+# a silent empty dict if a future caller of the bootstrap path tries to read them.
+# `disabled_plugins` is included because in bootstrap mode it only reflects CLI
+# `--disable-plugin` flags, not the [plugins.<name>] enabled=false config-file
+# entries -- another silent-incompleteness footgun.
+BOOTSTRAP_EXCLUDED_CONFIG_FIELDS: frozenset[str] = frozenset(
+    {"providers", "agent_types", "plugins", "disabled_plugins"}
+)
+
+
+class BootstrapMngrConfig(FrozenModel):
+    """Subset of MngrConfig safe to expose during ``mngr plugin add``.
+
+    See ``load_bootstrap_context`` for context. The fields here are exactly
+    the top-level fields of MngrConfig that are still loaded when the
+    plugin-defined sections ([agent_types], [providers], [plugins]) are
+    skipped. The plugin-defined fields, plus ``disabled_plugins`` (which is
+    incomplete in bootstrap mode), are deliberately omitted to give callers
+    a type error if they reach for them.
+
+    A ratchet test (``test_bootstrap_config_field_sync``) asserts that the
+    set of fields here equals MngrConfig's fields minus
+    ``BOOTSTRAP_EXCLUDED_CONFIG_FIELDS``, so adding a new top-level field
+    to MngrConfig forces a deliberate decision about whether to surface it
+    here.
+    """
+
+    prefix: str = Field(default="mngr-")
+    default_host_dir: Path = Field(default=Path("~/.mngr"))
+    unset_vars: list[str] = Field(default_factory=lambda: list(("HISTFILE", "PROFILE", "VIRTUAL_ENV")))
+    work_dir_extra_paths: dict[str, WorkDirExtraPathMode] = Field(default_factory=dict)
+    pager: str | None = Field(default=None)
+    enabled_backends: list[ProviderBackendName] = Field(default_factory=list)
+    commands: dict[str, CommandDefaults] = Field(default_factory=dict)
+    create_templates: dict[CreateTemplateName, CreateTemplate] = Field(default_factory=dict)
+    pre_command_scripts: dict[str, list[str]] = Field(default_factory=dict)
+    retry: RetryConfig = Field(default_factory=RetryConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    is_remote_agent_installation_allowed: bool = Field(default=True)
+    connect_command: str | None = Field(default=None)
+    is_nested_tmux_allowed: bool = Field(default=False)
+    headless: bool = Field(default=False)
+    is_error_reporting_enabled: bool = Field(default=True)
+    is_allowed_in_pytest: bool = Field(default=True)
+    default_destroyed_host_persisted_seconds: float = Field(default=_DEFAULT_DESTROYED_HOST_PERSISTED_SECONDS)
+    default_min_online_host_age_seconds: float = Field(default=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS)
+
+
+def to_bootstrap_config(config: MngrConfig) -> BootstrapMngrConfig:
+    """Project a full MngrConfig down to the fields safe for the bootstrap path.
+
+    Every named field is forwarded explicitly. ``test_to_bootstrap_config_sets_every_bootstrap_field``
+    verifies that this helper sets every field on ``BootstrapMngrConfig`` (rather
+    than letting ``model_construct`` silently leave any of them at the model
+    default), so adding a field to ``BootstrapMngrConfig`` without also wiring
+    it up here will fail that test.
+    """
+    return BootstrapMngrConfig.model_construct(
+        prefix=config.prefix,
+        default_host_dir=config.default_host_dir,
+        unset_vars=config.unset_vars,
+        work_dir_extra_paths=config.work_dir_extra_paths,
+        pager=config.pager,
+        enabled_backends=config.enabled_backends,
+        commands=config.commands,
+        create_templates=config.create_templates,
+        pre_command_scripts=config.pre_command_scripts,
+        retry=config.retry,
+        logging=config.logging,
+        is_remote_agent_installation_allowed=config.is_remote_agent_installation_allowed,
+        connect_command=config.connect_command,
+        is_nested_tmux_allowed=config.is_nested_tmux_allowed,
+        headless=config.headless,
+        is_error_reporting_enabled=config.is_error_reporting_enabled,
+        is_allowed_in_pytest=config.is_allowed_in_pytest,
+        default_destroyed_host_persisted_seconds=config.default_destroyed_host_persisted_seconds,
+        default_min_online_host_age_seconds=config.default_min_online_host_age_seconds,
+    )
+
+
+class BootstrapMngrContext(FrozenModel):
+    """Context returned by ``load_bootstrap_context`` / ``setup_bootstrap_command_context``.
+
+    Mirrors MngrContext for everything except ``config``, which is a
+    BootstrapMngrConfig (no providers/agent_types/plugins/disabled_plugins).
+    The omission is the whole point: ``mngr plugin add`` runs against a
+    config that may reference not-yet-installed plugins, so those fields
+    were never parsed and would silently be empty dicts on a regular
+    MngrContext. This type makes that silently-empty case a type error
+    instead.
+
+    A ratchet test (``test_bootstrap_context_field_sync``) asserts that the
+    field set here equals MngrContext's, so adding a new field to MngrContext
+    forces a deliberate decision about whether to surface it here (and
+    ``to_bootstrap_context`` to copy it). If a future field on MngrContext
+    should be intentionally excluded from the bootstrap shape, mirror the
+    BOOTSTRAP_EXCLUDED_CONFIG_FIELDS pattern: add a constant here and
+    subtract it in the sync test.
+    """
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    config: BootstrapMngrConfig = Field(
+        description="Subset of MngrConfig; see BootstrapMngrConfig for what's omitted",
+    )
+    pm: pluggy.PluginManager = Field(
+        description="Plugin manager for hooks and backends",
+    )
+    is_interactive: bool = Field(default=False)
+    is_auto_approve: bool = Field(default=False)
+    profile_dir: Path = Field(description="Profile-specific directory for user data")
+    concurrency_group: ConcurrencyGroup = Field(
+        default_factory=lambda: ConcurrencyGroup(name="default"),
+    )
+    is_full_discovery: bool = Field(default=False)
+    project_root: Path | None = Field(default=None)
+
+    def get_profile_user_id(self) -> UserId:
+        return get_or_create_user_id(self.profile_dir)
+
+
+def to_bootstrap_context(mngr_ctx: MngrContext) -> BootstrapMngrContext:
+    """Project a full MngrContext down to the fields safe for the bootstrap path.
+
+    Every named field is forwarded explicitly. ``test_to_bootstrap_context_sets_every_bootstrap_field``
+    verifies that this helper sets every field on ``BootstrapMngrContext``, so a
+    new field added to ``BootstrapMngrContext`` without wiring it up here fails
+    that test rather than silently keeping its model default on the projection.
+    """
+    return BootstrapMngrContext.model_construct(
+        config=to_bootstrap_config(mngr_ctx.config),
+        pm=mngr_ctx.pm,
+        is_interactive=mngr_ctx.is_interactive,
+        is_auto_approve=mngr_ctx.is_auto_approve,
+        profile_dir=mngr_ctx.profile_dir,
+        concurrency_group=mngr_ctx.concurrency_group,
+        is_full_discovery=mngr_ctx.is_full_discovery,
+        project_root=mngr_ctx.project_root,
+    )
+
+
 class OutputOptions(FrozenModel):
     """Options for command output formatting."""
 

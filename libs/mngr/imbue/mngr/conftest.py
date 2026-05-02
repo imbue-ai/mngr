@@ -114,6 +114,26 @@ def cg() -> Generator[ConcurrencyGroup, None, None]:
 
 
 @pytest.fixture
+def log_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru warning messages for assertion in tests.
+
+    Tolerates the handler having been wiped by setup_logging (which calls
+    logger.remove() with no args to clear all handlers) so tests that exercise
+    the full command setup path can still use this fixture.
+    """
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
+    try:
+        yield messages
+    finally:
+        try:
+            logger.remove(handler_id)
+        except ValueError:
+            # setup_logging() already removed our handler; nothing to clean up.
+            pass
+
+
+@pytest.fixture
 def mngr_test_id() -> str:
     """Generate a unique test ID for isolation.
 
@@ -308,25 +328,6 @@ def per_host_dir(temp_host_dir: Path) -> Path:
 def cli_runner() -> CliRunner:
     """Create a Click CLI runner for testing CLI commands."""
     return CliRunner()
-
-
-@pytest.fixture()
-def log_warnings() -> Generator[list[str], None, None]:
-    """Capture loguru warning messages for assertion in tests.
-
-    Tolerates handler removal during the test (e.g. setup_logging() calls
-    logger.remove() which clears all handlers, so the handler we added may
-    no longer exist by the time teardown runs).
-    """
-    messages: list[str] = []
-    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
-    try:
-        yield messages
-    finally:
-        try:
-            logger.remove(handler_id)
-        except ValueError:
-            pass
 
 
 # =============================================================================

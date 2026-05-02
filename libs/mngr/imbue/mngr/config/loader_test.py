@@ -11,11 +11,17 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import BOOTSTRAP_EXCLUDED_CONFIG_FIELDS
+from imbue.mngr.config.data_types import BootstrapMngrConfig
+from imbue.mngr.config.data_types import BootstrapMngrContext
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import get_or_create_user_id
+from imbue.mngr.config.data_types import to_bootstrap_config
+from imbue.mngr.config.data_types import to_bootstrap_context
 from imbue.mngr.config.loader import _apply_plugin_overrides
 from imbue.mngr.config.loader import _merge_command_defaults
 from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
@@ -28,6 +34,7 @@ from imbue.mngr.config.loader import _parse_plugins
 from imbue.mngr.config.loader import _parse_providers
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import get_or_create_profile_dir
+from imbue.mngr.config.loader import load_bootstrap_context
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.config.plugin_registry import _plugin_config_registry
@@ -1574,6 +1581,199 @@ def test_load_config_mngr_headless_env_overrides_config_file(
     mngr_ctx = load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
 
     assert mngr_ctx.config.headless is False
+
+
+# =============================================================================
+# Tests for load_bootstrap_context
+# =============================================================================
+
+
+def test_load_bootstrap_context_skips_plugin_section_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+    log_warnings: list[str],
+) -> None:
+    """Bootstrap context must not warn for unknown fields/backends in plugin-defined sections.
+
+    Regression test for the issue where ``mngr plugin add`` was emitting
+    ``Unknown fields in agent_types.*`` and ``Provider ... references unknown
+    backend`` warnings when the config referenced plugins not yet installed.
+
+    Includes a negative-control assertion: the same config loaded via
+    the regular non-strict ``load_config`` path *does* emit those warnings,
+    proving that the bootstrap-path suppression is what prevents them
+    (rather than the warning machinery silently being inert).
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNGR_PREFIX", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
+    monkeypatch.delenv("MNGR_ALLOW_UNKNOWN_CONFIG", raising=False)
+
+    mngr_dir = tmp_path / ".mngr"
+    mngr_dir.mkdir(parents=True, exist_ok=True)
+    (mngr_dir / "settings.toml").write_text(
+        '[providers.totally_fake]\nbackend = "totally_fake_backend"\n\n'
+        '[agent_types.worker]\nparent_type = "claude"\nnonexistent_field = true\n'
+    )
+
+    bootstrap_ctx = load_bootstrap_context(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+    # The plugin-defined fields aren't on BootstrapMngrConfig at all, so reading
+    # them raises AttributeError -- that's the type-system enforcement and the
+    # whole point of the bootstrap context type. Just make sure the field set
+    # really excludes them.
+    bootstrap_field_names = set(BootstrapMngrConfig.model_fields)
+    assert "providers" not in bootstrap_field_names
+    assert "agent_types" not in bootstrap_field_names
+    assert "plugins" not in bootstrap_field_names
+    assert isinstance(bootstrap_ctx.config, BootstrapMngrConfig)
+    assert not any("Unknown fields" in msg for msg in log_warnings), log_warnings
+    assert not any("references unknown backend" in msg for msg in log_warnings), log_warnings
+
+    # Negative control: loading the same config via the regular non-strict
+    # path *does* emit both warnings. This proves the bootstrap-path
+    # suppression above is doing real work, rather than passing because
+    # the warning machinery is inert.
+    log_warnings.clear()
+    load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path, strict=False)
+    assert any("Unknown fields" in msg and "agent_types.worker" in msg for msg in log_warnings), log_warnings
+    assert any("references unknown backend" in msg for msg in log_warnings), log_warnings
+
+
+def test_load_bootstrap_context_still_loads_top_level_fields(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """Bootstrap context should populate top-level config fields like prefix and headless."""
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNGR_PREFIX", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
+    monkeypatch.delenv("MNGR_HEADLESS", raising=False)
+
+    mngr_dir = tmp_path / ".mngr"
+    mngr_dir.mkdir(parents=True, exist_ok=True)
+    (mngr_dir / "settings.toml").write_text('prefix = "custom-"\nheadless = true\n')
+
+    mngr_ctx = load_bootstrap_context(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+    assert mngr_ctx.config.prefix == "custom-"
+    assert mngr_ctx.config.headless is True
+
+
+def test_bootstrap_config_field_sync() -> None:
+    """BootstrapMngrConfig must mirror MngrConfig minus the documented exclusions.
+
+    Catches drift: if someone adds a top-level field to MngrConfig and forgets
+    to add it to BootstrapMngrConfig (or to the exclusion set), this test fails
+    so they have to make a deliberate decision about whether bootstrap callers
+    should see the new field.
+    """
+    expected = set(MngrConfig.model_fields) - BOOTSTRAP_EXCLUDED_CONFIG_FIELDS
+    actual = set(BootstrapMngrConfig.model_fields)
+    assert actual == expected, (
+        f"BootstrapMngrConfig fields drifted from MngrConfig. "
+        f"In MngrConfig but missing here: {expected - actual}. "
+        f"In here but not in MngrConfig: {actual - expected}. "
+        f"Either add the field to BootstrapMngrConfig (if bootstrap callers should see it) "
+        f"or add it to BOOTSTRAP_EXCLUDED_CONFIG_FIELDS (if not)."
+    )
+
+
+def test_bootstrap_config_field_defaults_sync() -> None:
+    """BootstrapMngrConfig field defaults must match MngrConfig field defaults.
+
+    Catches default-value drift: test_bootstrap_config_field_sync only checks
+    field NAMES, so a future change that updates a default on MngrConfig
+    (e.g. flipping ``headless`` from False to True) would silently leave the
+    duplicated default on BootstrapMngrConfig stale. ``to_bootstrap_config``
+    always sets every field via model_construct so the defaults are unused
+    in practice today, but anyone who instantiates ``BootstrapMngrConfig()``
+    directly would see the stale default.
+    """
+    mismatches: list[str] = []
+    for name in BootstrapMngrConfig.model_fields:
+        mngr_default = MngrConfig.model_fields[name].get_default(call_default_factory=True)
+        bootstrap_default = BootstrapMngrConfig.model_fields[name].get_default(call_default_factory=True)
+        if mngr_default != bootstrap_default:
+            mismatches.append(f"{name}: MngrConfig={mngr_default!r}, BootstrapMngrConfig={bootstrap_default!r}")
+    assert not mismatches, "BootstrapMngrConfig default values drifted from MngrConfig:\n  " + "\n  ".join(mismatches)
+
+
+def test_to_bootstrap_config_sets_every_bootstrap_field() -> None:
+    """to_bootstrap_config must explicitly assign every BootstrapMngrConfig field.
+
+    pydantic's model_construct silently leaves omitted fields at their model
+    default, so a missing kwarg in the projection helper would not raise --
+    the result would just hold default values for the dropped field. This test
+    constructs a source MngrConfig with arbitrary non-default values, projects
+    it, and asserts that every BootstrapMngrConfig field appears in the result's
+    model_fields_set. Together with test_bootstrap_config_field_sync this means
+    a field added to BootstrapMngrConfig must be wired into to_bootstrap_config
+    or this test fails.
+    """
+    source = MngrConfig.model_construct(prefix="proj-test")
+    projected = to_bootstrap_config(source)
+    missing = set(BootstrapMngrConfig.model_fields) - projected.model_fields_set
+    assert not missing, (
+        f"to_bootstrap_config did not set these BootstrapMngrConfig fields: {sorted(missing)}. "
+        f"Add a kwarg for each missing field in to_bootstrap_config()."
+    )
+
+
+def test_to_bootstrap_context_sets_every_bootstrap_field(cg: ConcurrencyGroup, tmp_path: Path) -> None:
+    """to_bootstrap_context must explicitly assign every BootstrapMngrContext field.
+
+    Parallel of test_to_bootstrap_config_sets_every_bootstrap_field for the
+    Context pair, with the same model_construct caveat: an omitted kwarg would
+    silently leave the field at its model default rather than failing.
+    """
+    pm = pluggy.PluginManager("mngr")
+    source = MngrContext(
+        config=MngrConfig.model_construct(),
+        pm=pm,
+        profile_dir=tmp_path,
+        concurrency_group=cg,
+    )
+    projected = to_bootstrap_context(source)
+    missing = set(BootstrapMngrContext.model_fields) - projected.model_fields_set
+    assert not missing, (
+        f"to_bootstrap_context did not set these BootstrapMngrContext fields: {sorted(missing)}. "
+        f"Add a kwarg for each missing field in to_bootstrap_context()."
+    )
+
+
+def test_bootstrap_context_field_sync() -> None:
+    """BootstrapMngrContext must mirror MngrContext's field set.
+
+    Parallel of test_bootstrap_config_field_sync, but for the Context pair: a new
+    field added to MngrContext must either be surfaced on BootstrapMngrContext
+    (and copied through ``to_bootstrap_context``) or intentionally excluded.
+    Without this guard, MngrContext could grow a new field without
+    BootstrapMngrContext gaining it, recreating the silent-incompleteness
+    footgun the bootstrap types were designed to eliminate. If a future field
+    on MngrContext should be intentionally excluded, mirror the
+    BOOTSTRAP_EXCLUDED_CONFIG_FIELDS pattern: introduce an exclusion set
+    constant in data_types.py and subtract it from `expected` here.
+    """
+    expected = set(MngrContext.model_fields)
+    actual = set(BootstrapMngrContext.model_fields)
+    assert actual == expected, (
+        f"BootstrapMngrContext fields drifted from MngrContext. "
+        f"In MngrContext but missing here: {expected - actual}. "
+        f"In here but not in MngrContext: {actual - expected}. "
+        f"Either add the field to BootstrapMngrContext (if bootstrap callers should see it) "
+        f"or introduce a BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS constant to declare it intentionally excluded."
+    )
 
 
 # =============================================================================

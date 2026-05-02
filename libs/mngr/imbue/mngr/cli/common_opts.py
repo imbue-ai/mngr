@@ -22,13 +22,16 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
+from imbue.mngr.config.data_types import BootstrapMngrContext
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.config.data_types import to_bootstrap_context
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import load_config
+from imbue.mngr.config.loader import load_context
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.config.loader import resolve_strict_from_env
 from imbue.mngr.errors import ConfigParseError
@@ -139,9 +142,132 @@ def setup_command_context(
 
     Plugin-registered CLI option values are stored in ctx.meta["plugin_cli_params"]
     as a dict, accessible by plugins via their hooks.
+
+    For ``mngr plugin add`` (which supports running against a config that
+    references a not-yet-installed plugin), use
+    ``setup_bootstrap_command_context`` instead.
+    """
+    initial_opts, cg, pm = _acquire_command_resources(ctx, command_name, command_class)
+    # Resolve strict here so the same policy applies to both load_config (which
+    # validates section field names) and apply_config_defaults below (which
+    # validates command parameter names).
+    if strict is None:
+        strict = resolve_strict_from_env()
+    mngr_ctx = load_config(
+        pm,
+        cg,
+        enabled_plugins=initial_opts.plugin,
+        disabled_plugins=initial_opts.disable_plugin,
+        is_interactive=False,
+        strict=strict,
+    )
+    return _finalize_command_setup(
+        ctx,
+        command_name,
+        command_class,
+        is_format_template_supported,
+        cg=cg,
+        pm=pm,
+        initial_opts=initial_opts,
+        mngr_ctx=mngr_ctx,
+        strict=strict,
+    )
+
+
+def setup_bootstrap_command_context(
+    ctx: click.Context,
+    command_name: str,
+    command_class: type[TCommandOptions],
+    is_format_template_supported: bool = False,
+) -> tuple[BootstrapMngrContext, OutputOptions, TCommandOptions]:
+    """Set up config and logging for ``mngr plugin add``.
+
+    Sibling of ``setup_command_context`` used by ``mngr plugin add``: ``add``
+    is the one command where it is expected and supported for the config to
+    reference a plugin that is not yet installed (e.g. a user pre-declares
+    ``[providers.modal]`` and then runs ``mngr plugin add imbue-mngr-modal``
+    to install it). The plugin-defined config sections ([agent_types],
+    [providers], [plugins]) are skipped to avoid spurious unknown-field and
+    unknown-backend warnings in that workflow. The reverse ordering --
+    install first, then edit the config -- is also fine, since these
+    sections are skipped either way.
+
+    Other ``mngr plugin`` subcommands (``remove``/``enable``/``disable``)
+    deliberately do *not* use this path: they don't structurally support
+    the "config references not-yet-installed plugin" condition the way
+    ``add`` does, so they validate the config normally to catch real typos.
+
+    Behaves identically to ``setup_command_context`` in every other respect,
+    with three exceptions:
+
+    1. The return type is ``BootstrapMngrContext`` (not ``MngrContext``), and
+       its ``config`` is a ``BootstrapMngrConfig`` that omits the plugin-defined
+       fields (``providers``, ``agent_types``, ``plugins``) and ``disabled_plugins``
+       entirely. Reading any of those attributes raises ``AttributeError``
+       rather than returning a silently-empty dict -- this is the whole
+       point of the narrower type. CLI ``--plugin`` / ``--enable-plugin`` /
+       ``--disable-plugin`` flags are still threaded through ``load_context``
+       internally so plugin-manager blocking still happens; they are simply
+       not surfaced on the returned ``BootstrapMngrConfig``.
+    2. Top-level fields are parsed in non-strict mode (unknown fields warn
+       instead of raising), to match ``load_bootstrap_context``. There is
+       therefore no ``strict`` parameter on this function.
+    3. ``-S`` / ``--setting`` overrides applied later in the shared finalize
+       step still go through full *strict* parsing of plugin-defined
+       sections (via ``apply_settings_to_config`` -> ``parse_config`` with
+       ``parse_plugin_sections=True, strict=True``). So ``mngr plugin add
+       foo -S providers.bar.baz=qux`` can raise ``ConfigParseError`` if
+       ``baz`` is unknown to ``bar``'s config class. This is intentional,
+       not a limitation: ``mngr plugin add`` reads only
+       ``mngr_ctx.concurrency_group`` from the loaded context and does not
+       consume any plugin-defined config, so no ``-S`` setting on a
+       plugin-defined section could meaningfully take effect during a
+       single ``add`` invocation. ``-S`` is also non-persistent; users who
+       want to seed config for the plugin they are about to install should
+       run ``mngr config set`` after the install completes.
+    """
+    initial_opts, cg, pm = _acquire_command_resources(ctx, command_name, command_class)
+    # Use the internal load_context (returns full MngrContext) so the shared
+    # _finalize_command_setup can operate on the same shape both paths use.
+    # The conversion to BootstrapMngrContext happens at the very end -- only
+    # at the public boundary -- so internal pipeline code stays uniform.
+    mngr_ctx = load_context(
+        pm=pm,
+        concurrency_group=cg,
+        context_dir=None,
+        enabled_plugins=initial_opts.plugin,
+        disabled_plugins=initial_opts.disable_plugin,
+        is_interactive=False,
+        strict=False,
+        parse_plugin_sections=False,
+    )
+    full_ctx, output_opts, opts = _finalize_command_setup(
+        ctx,
+        command_name,
+        command_class,
+        is_format_template_supported,
+        cg=cg,
+        pm=pm,
+        initial_opts=initial_opts,
+        mngr_ctx=mngr_ctx,
+        strict=False,
+    )
+    return to_bootstrap_context(full_ctx), output_opts, opts
+
+
+def _acquire_command_resources(
+    ctx: click.Context,
+    command_name: str,
+    command_class: type[TCommandOptions],
+) -> tuple[TCommandOptions, ConcurrencyGroup, pluggy.PluginManager]:
+    """Set up shared resources used by every command-context setup function.
+
+    Returns the initial parsed options, the entered ConcurrencyGroup (which is
+    registered to be exited on click context close), and the plugin manager
+    stashed on ``ctx.obj``.
     """
     # Separate plugin-registered params from known command class fields
-    known_params, plugin_params = _split_known_and_plugin_params(ctx.params, command_class)
+    known_params, _plugin_params = _split_known_and_plugin_params(ctx.params, command_class)
 
     # First parse options from CLI args to extract common parameters
     initial_opts = command_class(**known_params)
@@ -153,23 +279,28 @@ def setup_command_context(
     # wrapped in ConcurrencyExceptionGroup, which would break Click's error handling.
     ctx.call_on_close(lambda: cg.__exit__(None, None, None))
 
-    # Resolve strict here so the same policy applies to both load_config (which
-    # validates section field names) and apply_config_defaults below (which
-    # validates command parameter names).
-    if strict is None:
-        strict = resolve_strict_from_env()
-
-    # Load config (is_interactive will be resolved below)
     pm = ctx.obj
-    mngr_ctx = load_config(
-        pm,
-        cg,
-        enabled_plugins=initial_opts.plugin,
-        disabled_plugins=initial_opts.disable_plugin,
-        is_interactive=False,
-        strict=strict,
-    )
+    return initial_opts, cg, pm
 
+
+def _finalize_command_setup(
+    ctx: click.Context,
+    command_name: str,
+    command_class: type[TCommandOptions],
+    is_format_template_supported: bool,
+    *,
+    cg: ConcurrencyGroup,
+    pm: pluggy.PluginManager,
+    initial_opts: TCommandOptions,
+    mngr_ctx: MngrContext,
+    strict: bool,
+) -> tuple[MngrContext, OutputOptions, TCommandOptions]:
+    """Run the post-load setup steps shared by full and bootstrap command contexts.
+
+    Resolves interactivity, applies overrides and config defaults, sets up
+    logging, runs pre-command scripts, and fires the ``on_before_command``
+    hook. Returns the final (mngr_ctx, output_opts, opts) tuple.
+    """
     # Resolve is_interactive from all sources.
     # Precedence: --headless CLI flag > config/env headless > TTY auto-detect
     if initial_opts.headless or mngr_ctx.config.headless:
@@ -206,9 +337,19 @@ def setup_command_context(
         updated_params = apply_create_template(ctx, updated_params, mngr_ctx.config)
 
     # Block plugins that were disabled via command defaults or create templates
-    # (e.g. disable_plugin from [commands.create] in settings.toml). load_config
-    # only blocks plugins from CLI args and [plugins] config sections; command
-    # defaults are applied later and need a second blocking pass.
+    # (e.g. disable_plugin from [commands.create] in settings.toml). CLI
+    # --disable-plugin flags are already blocked inside load_context (via
+    # _apply_plugin_overrides feeding block_disabled_plugins) for both load
+    # paths. [plugins.<name>] enabled=false in config files is also already
+    # blocked, but via different paths: on the full path, _parse_plugins
+    # preserves entries verbatim, _apply_plugin_overrides then filters them
+    # and emits a disabled-name set, and block_disabled_plugins (called at
+    # the end of load_context) actually blocks them. On the bootstrap path,
+    # _parse_plugins is skipped entirely, so config-file-disabled plugins are
+    # detected via the lightweight read_disabled_plugins() pre-reader and
+    # blocked at plugin-manager creation time (see create_plugin_manager in
+    # main.py). Command defaults are applied after the initial load and need
+    # this second blocking pass.
     updated_disable_plugin = updated_params.get("disable_plugin", ())
     if updated_disable_plugin:
         block_disabled_plugins(pm, frozenset(updated_disable_plugin))

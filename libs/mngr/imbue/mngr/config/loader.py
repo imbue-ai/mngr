@@ -17,6 +17,7 @@ from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import AGENT_TYPE_CONCAT_TUPLE_FIELDS
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import BootstrapMngrContext
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import CreateTemplate
@@ -27,6 +28,7 @@ from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import split_cli_args_string
+from imbue.mngr.config.data_types import to_bootstrap_context
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
 from imbue.mngr.config.pre_readers import get_user_config_path
@@ -92,6 +94,85 @@ def load_config(
 
     Returns MngrContext containing both the final MngrConfig and a reference to the plugin manager.
     """
+    return load_context(
+        pm=pm,
+        concurrency_group=concurrency_group,
+        context_dir=context_dir,
+        enabled_plugins=enabled_plugins,
+        disabled_plugins=disabled_plugins,
+        is_interactive=is_interactive,
+        strict=strict,
+        parse_plugin_sections=True,
+    )
+
+
+def load_bootstrap_context(
+    pm: pluggy.PluginManager,
+    concurrency_group: ConcurrencyGroup,
+    context_dir: Path | None = None,
+    enabled_plugins: Sequence[str] | None = None,
+    disabled_plugins: Sequence[str] | None = None,
+    is_interactive: bool = False,
+) -> BootstrapMngrContext:
+    """Load a lightweight context for ``mngr plugin add``.
+
+    Identical to ``load_config`` except that the [agent_types], [providers], and
+    [plugins] config sections are not parsed. ``mngr plugin add`` is the one
+    command where it is expected and supported for these sections to reference
+    a plugin that is not yet installed (e.g. a user pre-declares
+    ``[providers.modal]`` and then runs ``mngr plugin add imbue-mngr-modal``);
+    skipping the parse avoids confusing unknown-field and unknown-backend
+    warnings in that workflow. The more common ordering -- install the plugin
+    first, then edit the config -- is also supported, since the parse is
+    skipped either way.
+
+    Top-level config fields (logging, retry, headless, etc.) are still validated
+    in non-strict mode.
+
+    Returns a ``BootstrapMngrContext`` rather than a ``MngrContext``: the
+    plugin-defined fields (``providers``, ``agent_types``, ``plugins``) and
+    ``disabled_plugins`` are not exposed at all, so any future caller of
+    this function gets a type error instead of silently reading empty dicts.
+    Callers that need those fields must use ``load_config`` instead.
+    """
+    mngr_ctx = load_context(
+        pm=pm,
+        concurrency_group=concurrency_group,
+        context_dir=context_dir,
+        enabled_plugins=enabled_plugins,
+        disabled_plugins=disabled_plugins,
+        is_interactive=is_interactive,
+        strict=False,
+        parse_plugin_sections=False,
+    )
+    return to_bootstrap_context(mngr_ctx)
+
+
+def load_context(
+    pm: pluggy.PluginManager,
+    concurrency_group: ConcurrencyGroup,
+    context_dir: Path | None,
+    *,
+    enabled_plugins: Sequence[str] | None,
+    disabled_plugins: Sequence[str] | None,
+    is_interactive: bool,
+    strict: bool | None,
+    parse_plugin_sections: bool,
+) -> MngrContext:
+    """Shared implementation underlying ``load_config`` and ``load_bootstrap_context``.
+
+    Returns the full ``MngrContext`` regardless of ``parse_plugin_sections``;
+    public wrappers convert to a narrower type when appropriate (e.g.
+    ``load_bootstrap_context`` projects the result through ``to_bootstrap_context``).
+    Most callers should use one of those wrappers; the only reason to call
+    ``load_context`` directly is to share the full ``MngrContext`` shape with
+    code paths that need to call ``_finalize_command_setup`` -- see
+    ``setup_bootstrap_command_context`` in ``cli/common_opts.py`` for the one
+    such caller today.
+
+    The ``parse_plugin_sections`` flag toggles whether the plugin-defined config
+    sections are parsed and validated; everything else is identical.
+    """
 
     # Read MNGR_ROOT_NAME early to use for config file discovery
     root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
@@ -102,8 +183,11 @@ def load_config(
     # Get/create profile directory first (needed for user config
     profile_dir = get_or_create_profile_dir(base_dir)
 
-    # Pre-compute disabled plugins so _parse_providers can skip them.
-    # This uses the same lightweight pre-reader that create_plugin_manager() uses.
+    # Pre-compute disabled plugins so _parse_providers/_parse_agent_types can skip
+    # them on the full load path. This uses the same lightweight pre-reader that
+    # create_plugin_manager() uses. On the bootstrap path (parse_plugin_sections=
+    # False) this value is passed to parse_config() but unused, since the
+    # plugin-defined sections are skipped entirely there.
     config_disabled_plugins = read_disabled_plugins()
 
     # Start with base config that has defaults based on root_name
@@ -128,7 +212,14 @@ def load_config(
         load_local_config(context_dir, root_name, concurrency_group),
     ):
         if raw is not None:
-            config = config.merge_with(parse_config(raw, disabled_plugins=config_disabled_plugins, strict=strict))
+            config = config.merge_with(
+                parse_config(
+                    raw,
+                    disabled_plugins=config_disabled_plugins,
+                    strict=strict,
+                    parse_plugin_sections=parse_plugin_sections,
+                )
+            )
 
     # Apply environment variable overrides
     prefix = os.environ.get("MNGR_PREFIX")
@@ -676,14 +767,29 @@ def parse_config(
     disabled_plugins: frozenset[str],
     *,
     strict: bool = True,
+    parse_plugin_sections: bool = True,
 ) -> MngrConfig:
     """Parse a raw config dict into MngrConfig.
 
     Uses model_construct to bypass defaults and explicitly set None for unset fields.
 
     When strict=True (default), raises ConfigParseError for unknown fields.
-    When strict=False, logs a warning and ignores unknown fields (used when
-    MNGR_ALLOW_UNKNOWN_CONFIG is set to allow forward-compatible config files).
+    When strict=False, logs a warning and ignores unknown fields. ``strict=False``
+    is used in two situations: by ``load_config`` when ``MNGR_ALLOW_UNKNOWN_CONFIG``
+    is set (to allow forward-compatible config files), and unconditionally by
+    ``load_bootstrap_context`` (used during ``mngr plugin add``, where the config
+    may reference plugins not yet installed).
+
+    When parse_plugin_sections=False, the [agent_types], [providers], and [plugins]
+    sections are dropped from the parsed config. Note this loses both the
+    validation (unknown-field/backend checks that would otherwise fire) AND the
+    actual parsed values -- ``config.providers`` / ``config.agent_types`` /
+    ``config.plugins`` will be empty dicts regardless of what is in the config
+    files, so any caller that reads from those fields will silently see nothing.
+    Use this only when the caller is known not to consume plugin-defined config
+    (e.g. ``mngr plugin add``, which only reads ``mngr_ctx.concurrency_group``).
+    Callers that need the raw content (e.g. to detect disabled plugins) must
+    consult the lightweight pre-readers in ``pre_readers.py`` instead.
     """
     raw = _normalize_field_keys(raw, "top-level config")
     # Build kwargs with None for unset scalar fields
@@ -695,17 +801,33 @@ def parse_config(
     kwargs["enabled_backends"] = raw.pop("enabled_backends", None)
     kwargs["connect_command"] = raw.pop("connect_command", None)
     kwargs["is_remote_agent_installation_allowed"] = raw.pop("is_remote_agent_installation_allowed", None)
-    kwargs["agent_types"] = (
-        _parse_agent_types(raw.pop("agent_types", {}), disabled_plugins=disabled_plugins, strict=strict)
-        if "agent_types" in raw
-        else {}
-    )
-    kwargs["providers"] = (
-        _parse_providers(raw.pop("providers", {}), disabled_plugins=disabled_plugins, strict=strict)
-        if "providers" in raw
-        else {}
-    )
-    kwargs["plugins"] = _parse_plugins(raw.pop("plugins", {}), strict=strict) if "plugins" in raw else {}
+    if parse_plugin_sections:
+        kwargs["agent_types"] = (
+            _parse_agent_types(raw.pop("agent_types", {}), disabled_plugins=disabled_plugins, strict=strict)
+            if "agent_types" in raw
+            else {}
+        )
+        kwargs["providers"] = (
+            _parse_providers(raw.pop("providers", {}), disabled_plugins=disabled_plugins, strict=strict)
+            if "providers" in raw
+            else {}
+        )
+        kwargs["plugins"] = _parse_plugins(raw.pop("plugins", {}), strict=strict) if "plugins" in raw else {}
+    else:
+        # Drop plugin-defined sections entirely. Parsing these sections normally
+        # produces both validation (unknown-field/backend errors) AND the
+        # structured values that other code reads from config.providers /
+        # config.agent_types / config.plugins at runtime. The bootstrap path
+        # discards both -- the returned MngrContext will report empty dicts for
+        # these fields regardless of what the user wrote in settings.toml.
+        # Safe only when the caller is known not to read them (currently just
+        # `mngr plugin add`, which uses only mngr_ctx.concurrency_group).
+        raw.pop("agent_types", None)
+        raw.pop("providers", None)
+        raw.pop("plugins", None)
+        kwargs["agent_types"] = {}
+        kwargs["providers"] = {}
+        kwargs["plugins"] = {}
     kwargs["commands"] = _parse_commands(raw.pop("commands", {})) if "commands" in raw else {}
     kwargs["create_templates"] = (
         _parse_create_templates(raw.pop("create_templates", {})) if "create_templates" in raw else {}
