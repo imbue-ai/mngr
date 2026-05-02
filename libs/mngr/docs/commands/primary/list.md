@@ -106,6 +106,11 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `has(url)` - Agents that have a URL set
 - `has(host.ssh)` - Agents on remote hosts with SSH access
 
+Note: `has()` always returns true for keys under the schemaless fields `labels`,
+`plugin`, `host.tags`, and `host.plugin` (so `has(labels.foo)` is not useful).
+To check whether a key is set on those fields, use `labels.foo != null` or a
+direct comparison such as `labels.foo == "x"`.
+
 
 
 ## Available Fields

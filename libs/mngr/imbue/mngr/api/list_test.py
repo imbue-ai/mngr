@@ -63,6 +63,9 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
 from imbue.mngr.providers.registry import _backend_registry
+from imbue.mngr.utils.cel_utils import TolerantMapType
+from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
+from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.testing import capture_loguru
 
@@ -511,6 +514,56 @@ def test_agent_details_to_cel_context_idle_uses_most_recent_activity() -> None:
     # SSH activity (10 min ago) is the most recent, so idle should be ~600s.
     assert "idle" in context
     assert 580 < context["idle"] < 620
+
+
+@pytest.mark.parametrize(
+    "field_path,exclude_expr",
+    [
+        ("labels", 'labels.mngr_subagent_proxy == "child"'),
+        ("plugin", 'plugin.some_plugin_field == "x"'),
+        ("host.tags", 'host.tags.foo == "x"'),
+        ("host.plugin", 'host.plugin.some_plugin_field == "x"'),
+    ],
+)
+def test_agent_details_to_cel_context_wraps_schemaless_fields_tolerantly(field_path: str, exclude_expr: str) -> None:
+    """Schemaless fields must filter cleanly without per-agent warnings.
+
+    Reproduces the bug where `--exclude 'labels.X == "Y"'` warned for every
+    agent without that label. `labels`, `plugin`, `host.tags`, and `host.plugin`
+    are all schemaless dicts and must each be wrapped to tolerate missing keys.
+    """
+    host_details = _make_host_details()
+    agent = _make_agent_details("test-agent", host_details)
+
+    # Verify the relevant raw field defaults to an empty dict (so the missing
+    # key in the filter is genuinely missing).
+    assert agent.labels == {}
+    assert agent.plugin == {}
+    assert agent.host.tags == {}
+    assert agent.host.plugin == {}
+
+    # Sanity check the wrapper: build_cel_context must produce a TolerantMapType
+    # at the wrapped level for each schemaless field.
+    cel_context = build_cel_context(agent_details_to_cel_context(agent))
+    if "." in field_path:
+        outer, inner = field_path.split(".", 1)
+        assert isinstance(cel_context[outer][inner], TolerantMapType)
+    else:
+        assert isinstance(cel_context[field_path], TolerantMapType)
+
+    include_filters, exclude_filters = compile_cel_filters(
+        include_filters=(),
+        exclude_filters=(exclude_expr,),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result = apply_cel_filters_to_context(
+            context=agent_details_to_cel_context(agent),
+            include_filters=include_filters,
+            exclude_filters=exclude_filters,
+            error_context_description=f"agent {agent.name}",
+        )
+    assert result is True
+    assert "Error evaluating" not in log_output.getvalue()
 
 
 def test_agent_details_to_cel_context_exposes_host_provider_under_both_names() -> None:

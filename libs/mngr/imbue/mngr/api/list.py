@@ -39,6 +39,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr.utils.cel_utils import tolerant_dict
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
@@ -480,6 +481,17 @@ def _process_host_with_error_handling(
             params.on_error(error_info)
 
 
+def _wrap_dict_field_tolerantly(target: dict[str, Any], key: str) -> None:
+    """If target[key] is a dict, replace it in target with a tolerant_dict wrapper.
+
+    Mutates `target` in place. Used to mark schemaless dict fields so missing-key
+    CEL lookups against them evaluate cleanly instead of warning per agent.
+    """
+    value = target.get(key)
+    if isinstance(value, dict):
+        target[key] = tolerant_dict(value)
+
+
 @pure
 def agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
     """Convert an AgentDetails object to a CEL-friendly dict.
@@ -525,6 +537,13 @@ def agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
     # (host.provider is the documented short form; host.provider_name matches the data type)
     if host_dict is not None and "provider_name" in host_dict:
         host_dict["provider"] = host_dict["provider_name"]
+
+    # Schemaless fields: missing keys must not produce per-agent warnings.
+    _wrap_dict_field_tolerantly(result, "labels")
+    _wrap_dict_field_tolerantly(result, "plugin")
+    if host_dict is not None:
+        _wrap_dict_field_tolerantly(host_dict, "tags")
+        _wrap_dict_field_tolerantly(host_dict, "plugin")
 
     return result
 
