@@ -5,11 +5,8 @@ Provides test infrastructure by inheriting from mngr's conftest.
 
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
 from imbue.mngr.utils.logging import suppress_warnings
-from imbue.resource_guards.resource_guards import register_resource_guard
 
 suppress_warnings()
-
-register_resource_guard("lima")
 
 register_conftest_hooks(globals())
 

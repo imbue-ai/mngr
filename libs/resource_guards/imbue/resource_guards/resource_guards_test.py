@@ -20,6 +20,7 @@ from imbue.resource_guards.resource_guards import enforce_sdk_guard
 from imbue.resource_guards.resource_guards import generate_stub_wrapper_script
 from imbue.resource_guards.resource_guards import generate_wrapper_script
 from imbue.resource_guards.resource_guards import get_guarded_resource_names
+from imbue.resource_guards.resource_guards import register_all_resource_guards
 from imbue.resource_guards.resource_guards import register_guarded_resource_markers
 from imbue.resource_guards.resource_guards import register_resource_guard
 from imbue.resource_guards.resource_guards import register_sdk_guard
@@ -428,6 +429,51 @@ def test_register_guarded_resource_markers(
     marker_names = {m.split(":")[0] for m in pytestconfig.getini("markers")}
     assert "test_res_b" in marker_names
     assert "test_res_a" not in marker_names
+
+
+def test_register_all_resource_guards_runs_entry_point_callables(
+    isolated_guard_state: None,
+) -> None:
+    """register_all_resource_guards() invokes every callable returned by entry_points()."""
+
+    class _FakeEntryPoint:
+        def __init__(self, name: str, callable_: Callable[[], None]) -> None:
+            self.name = name
+            self._callable = callable_
+
+        def load(self) -> Callable[[], None]:
+            return self._callable
+
+    calls: list[str] = []
+
+    def _register_alpha() -> None:
+        calls.append("alpha")
+        register_resource_guard("alpha")
+
+    def _register_beta() -> None:
+        calls.append("beta")
+        register_sdk_guard("beta", lambda: None, lambda: None)
+
+    fake_entry_points = [
+        _FakeEntryPoint("alpha", _register_alpha),
+        _FakeEntryPoint("beta", _register_beta),
+    ]
+
+    def _fake_entry_points_fn(*, group: str) -> list[_FakeEntryPoint]:
+        assert group == resource_guards.RESOURCE_GUARDS_ENTRY_POINT_GROUP
+        return fake_entry_points
+
+    register_all_resource_guards(entry_points=_fake_entry_points_fn)
+
+    assert calls == ["alpha", "beta"]
+    names = get_guarded_resource_names()
+    assert "alpha" in names
+    assert "beta" in names
+
+    # Calling again must be safe -- per-name dedup keeps the registry stable.
+    register_all_resource_guards(entry_points=_fake_entry_points_fn)
+    names_after = get_guarded_resource_names()
+    assert names_after == names
 
 
 def test_register_guarded_resource_markers_no_skip(

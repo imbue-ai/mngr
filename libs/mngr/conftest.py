@@ -6,6 +6,9 @@ when pytest runs from a subdirectory).
 
 When running from the monorepo root, the root conftest.py registers the hooks first,
 and this file's register_conftest_hooks() call is a no-op (guarded by a module-level flag).
+
+Resource guards are discovered automatically from the resource_guards entry
+point group, so no manual registration is needed here.
 """
 
 import re

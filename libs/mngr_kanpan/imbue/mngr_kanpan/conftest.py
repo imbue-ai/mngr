@@ -10,10 +10,10 @@ from typing import Any
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.imbue_common.conftest_hooks import register_marker
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 
-register_marker("tmux: marks tests that invoke tmux via agent discovery")
+# The tmux mark is registered globally via the resource_guards entry
+# point group; no per-project mark registration is needed.
 register_plugin_test_fixtures(globals())
 
 

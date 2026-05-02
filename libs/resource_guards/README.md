@@ -17,11 +17,7 @@ There are two guard mechanisms, covering CLI binaries and Python SDKs respective
 
 Both mechanisms use per-test tracking files so the `makereport` hook can detect violations even when the test swallows errors or handles non-zero exit codes.
 
-## Built-in guards
-
-mngr provides Docker guards out of the box (in `imbue.mngr.register_guards_docker`), and the mngr_modal plugin provides Modal guards (in `imbue.mngr_modal.register_guards`). These are registered automatically in each project's conftest.py.
-
-## Setup
+## Basic usage
 
 In your `conftest.py`, register each resource you want to guard with `register_resource_guard()`, then add `pytest_configure`, `pytest_sessionstart`, and `pytest_sessionfinish` hooks as shown below. `register_guarded_resource_markers` registers the pytest marks for all guarded resources in one call.
 
@@ -56,6 +52,51 @@ import pytest
 def test_agent_creates_tmux_session():
     ...
 ```
+
+## Usage for multi-package projects
+
+When a project is split across multiple packages, listing every guard in every consumer's `conftest.py` becomes a maintenance hazard: each package has to know which guards every other package's tools need, and a forgotten line silently downgrades a guarded mark back to "unknown". Resource guards solve this by letting the package that owns a tool declare its guards through a `resource_guards` entry point group, and letting consumers pick them up automatically with one call.
+
+Each entry point's value is a callable that takes no arguments and registers one or more guards via `register_resource_guard()` and/or `register_sdk_guard()`/`create_sdk_method_guard()`:
+
+```toml
+# library's pyproject.toml
+[project.entry-points.resource_guards]
+my_lib = "imbue.my_lib.register_guards:register_my_guard"
+```
+
+```python
+# library's register_guards.py
+from imbue.resource_guards.resource_guards import register_resource_guard
+
+def register_my_guard():
+    register_resource_guard("my_tool")
+```
+
+The consumer's `conftest.py` then replaces explicit `register_resource_guard(...)` calls with a single `register_all_resource_guards()`, which imports and invokes every entry point in the group:
+
+```python
+# consumer's conftest.py
+from imbue.resource_guards.resource_guards import (
+    register_all_resource_guards,
+    register_guarded_resource_markers,
+    start_resource_guards,
+    stop_resource_guards,
+)
+
+register_all_resource_guards()
+
+def pytest_configure(config):
+    register_guarded_resource_markers(config)
+
+def pytest_sessionstart(session):
+    start_resource_guards(session)
+
+def pytest_sessionfinish(session, exitstatus):
+    stop_resource_guards()
+```
+
+The library that owns a tool is the natural place to declare its guard, and consumers don't need to know which guards exist in advance.
 
 ## Writing a custom SDK guard
 
