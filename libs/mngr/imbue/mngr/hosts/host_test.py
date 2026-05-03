@@ -186,6 +186,7 @@ def test_discover_agents_skips_missing_data_json(
     assert refs == []
 
 
+@pytest.mark.allow_warnings(match=r"^Could not load agent reference from")
 def test_discover_agents_skips_invalid_json(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -203,6 +204,7 @@ def test_discover_agents_skips_invalid_json(
     assert refs == []
 
 
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
 def test_discover_agents_skips_missing_id(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -221,6 +223,7 @@ def test_discover_agents_skips_missing_id(
     assert refs == []
 
 
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
 def test_discover_agents_skips_missing_name(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -239,6 +242,7 @@ def test_discover_agents_skips_missing_name(
     assert refs == []
 
 
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
 def test_discover_agents_skips_invalid_id(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -257,6 +261,7 @@ def test_discover_agents_skips_invalid_id(
     assert refs == []
 
 
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
 def test_discover_agents_skips_invalid_name(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -296,6 +301,7 @@ def test_discover_agents_loads_multiple_agents(
     assert ref_ids == set(agent_ids)
 
 
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
 def test_discover_agents_skips_bad_records_but_loads_good_ones(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -2708,6 +2714,7 @@ def test_apply_work_dir_extra_paths_share_same_host_creates_symlink(
     assert target.resolve() == (source_dir / ".venv").resolve()
 
 
+@pytest.mark.allow_warnings(match=r"^work_dir_extra_paths: source path does not exist, skipping")
 def test_apply_work_dir_extra_paths_share_same_host_source_missing_warns(
     local_host: Host,
     source_and_work_dirs: tuple[Path, Path],

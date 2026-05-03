@@ -12,6 +12,9 @@ dependencies = [
 [project.entry-points.mngr]
 lima = "imbue.mngr_lima.backend"
 
+[project.entry-points.resource_guards]
+lima = "imbue.mngr_lima.register_guards:register_lima_guard"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

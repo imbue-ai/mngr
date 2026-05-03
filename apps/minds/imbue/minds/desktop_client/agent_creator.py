@@ -46,9 +46,9 @@ from imbue.minds.desktop_client.api_key_store import save_api_key_hash
 from imbue.minds.desktop_client.host_pool_client import HostPoolClient
 from imbue.minds.desktop_client.host_pool_client import HostPoolError
 from imbue.minds.desktop_client.host_pool_client import LeaseHostResult
-from imbue.minds.desktop_client.latchkey.gateway import AGENT_SIDE_LATCHKEY_PORT
-from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayError
-from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
+from imbue.minds.desktop_client.latchkey.core import AGENT_SIDE_LATCHKEY_PORT
+from imbue.minds.desktop_client.latchkey.core import Latchkey
+from imbue.minds.desktop_client.latchkey.core import LatchkeyError
 from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
 from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyClient
 from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyError
@@ -792,7 +792,7 @@ class AgentCreator(MutableModel):
         frozen=True,
         description="Client for creating LiteLLM virtual keys via the remote connector",
     )
-    latchkey_gateway_manager: LatchkeyGatewayManager | None = Field(
+    latchkey: Latchkey | None = Field(
         default=None,
         frozen=True,
         description=(
@@ -1285,8 +1285,8 @@ class AgentCreator(MutableModel):
             # A gateway we pre-spawned for this agent is now orphaned (the
             # agent never came into existence), so tear it down to avoid a
             # leaked subprocess + record.
-            if self.latchkey_gateway_manager is not None:
-                self.latchkey_gateway_manager.stop_gateway_for_agent(agent_id)
+            if self.latchkey is not None:
+                self.latchkey.stop_gateway_for_agent(agent_id)
         finally:
             log_queue.put(LOG_SENTINEL)
 
@@ -1307,11 +1307,11 @@ class AgentCreator(MutableModel):
         Returns ``None`` (and logs a warning) when gateway spawning fails so
         agent creation can still proceed without a gateway URL.
         """
-        if self.latchkey_gateway_manager is None:
+        if self.latchkey is None:
             return None
         try:
-            info = self.latchkey_gateway_manager.ensure_gateway_started(agent_id)
-        except LatchkeyGatewayError as e:
+            info = self.latchkey.ensure_gateway_started(agent_id)
+        except LatchkeyError as e:
             logger.warning("Pre-spawning Latchkey gateway for agent {} failed: {}", agent_id, e)
             log_queue.put(f"[minds] Warning: Latchkey gateway could not be started for this agent: {e}")
             return None

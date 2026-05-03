@@ -55,19 +55,19 @@ from imbue.minds.desktop_client.cookie_manager import create_subdomain_auth_toke
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_subdomain_auth_token
 from imbue.minds.desktop_client.deps import BackendResolverDep
-from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
+from imbue.minds.desktop_client.latchkey.core import Latchkey
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.request_events import RequestInbox
-from imbue.minds.desktop_client.request_events import RequestStatus
-from imbue.minds.desktop_client.request_events import SharingRequestEvent
-from imbue.minds.desktop_client.request_events import append_response_event
-from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_events import parse_request_event
+from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.request_handler import find_handler_for_event
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.session_store import derive_user_id_prefix
+from imbue.minds.desktop_client.sharing_handler import enable_sharing_via_cloudflare
+from imbue.minds.desktop_client.sharing_handler import parse_emails_form_value
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.desktop_client.ssh_tunnel import parse_url_host_port
@@ -85,7 +85,6 @@ from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import workspace_accent
-from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token as _load_tunnel_token
 from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token as _save_tunnel_token
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -96,6 +95,15 @@ from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
+
+
+def _json_error(message: str, status_code: int) -> Response:
+    """Return a small ``{"error": ...}`` JSON response."""
+    return Response(
+        content=json.dumps({"error": message}),
+        media_type="application/json",
+        status_code=status_code,
+    )
 
 
 _EXCLUDED_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset(
@@ -235,11 +243,9 @@ async def _managed_lifespan(
             logger.info("Stopping stream manager subprocesses...")
             stream_manager.stop()
             logger.info("Stream manager stopped.")
-        latchkey_gateway_manager: LatchkeyGatewayManager | None = inner_app.state.latchkey_gateway_manager
-        if latchkey_gateway_manager is not None:
-            logger.info("Stopping latchkey gateway manager...")
-            latchkey_gateway_manager.stop()
-            logger.info("Latchkey gateway manager stopped.")
+        # Latchkey has no shutdown step: spawned ``latchkey gateway``
+        # subprocesses are detached and intentionally outlive the desktop
+        # client so in-flight container/VM agents keep working.
         tunnel_manager: SSHTunnelManager | None = inner_app.state.tunnel_manager
         if tunnel_manager is not None:
             tunnel_manager.cleanup()
@@ -1422,7 +1428,14 @@ async def _handle_chrome_events(
             )
             inbox: RequestInbox | None = request.app.state.request_inbox
             last_request_count = inbox.get_pending_count() if inbox else 0
-            yield "data: {}\n\n".format(json.dumps({"type": "request_count", "count": last_request_count}))
+            # ``auto_open`` is bundled with ``request_count`` (rather than its
+            # own SSE event) so the Electron shell sees both atomically when
+            # deciding whether to auto-open the panel on count increases.
+            minds_config: MindsConfig | None = request.app.state.minds_config
+            auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
+            yield "data: {}\n\n".format(
+                json.dumps({"type": "request_count", "count": last_request_count, "auto_open": auto_open})
+            )
 
             # Wait for changes and push updates until client disconnects
             connected = not await request.is_disconnected()
@@ -1447,7 +1460,10 @@ async def _handle_chrome_events(
                 current_request_count = inbox.get_pending_count() if inbox else 0
                 if current_request_count != last_request_count:
                     last_request_count = current_request_count
-                    yield "data: {}\n\n".format(json.dumps({"type": "request_count", "count": current_request_count}))
+                    auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
+                    yield "data: {}\n\n".format(
+                        json.dumps({"type": "request_count", "count": current_request_count, "auto_open": auto_open})
+                    )
         finally:
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.remove_on_change_callback(_on_change)
@@ -1633,8 +1649,19 @@ def _handle_requests_panel(
 
     cards = []
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
     for req in pending:
-        service_name = req.service_name if isinstance(req, SharingRequestEvent) else ""
+        handler = find_handler_for_event(handlers, req)
+        if handler is not None:
+            kind_label = handler.kind_label()
+            service_name = handler.display_name_for_event(req)
+        else:
+            # Fall through: unknown request type. Should never happen in
+            # practice -- a request without a registered handler can't be
+            # rendered or resolved -- but we still surface it in the
+            # panel so the user sees something is wrong.
+            kind_label = "request"
+            service_name = ""
         parsed_id = AgentId(req.agent_id)
         ws_name = backend_resolver.get_workspace_name(parsed_id) or ""
         if not ws_name:
@@ -1651,7 +1678,7 @@ def _handle_requests_panel(
         agent_id_attr = html.escape(json.dumps(req.agent_id), quote=True)
         cards.append(
             f'<div class="req-card" onclick="navigateToRequest({event_id_attr}, {agent_id_attr})">'
-            f'<div style="font-size:13px;color:#e2e8f0;font-weight:500;">sharing: {ws_name}</div>'
+            f'<div style="font-size:13px;color:#e2e8f0;font-weight:500;">{kind_label}: {ws_name}</div>'
             f'<div style="font-size:12px;color:#64748b;margin-top:2px;">{service_name}</div></div>'
         )
 
@@ -1732,7 +1759,13 @@ def _handle_request_page(
     auth_store: AuthStoreDep,
     backend_resolver: BackendResolverDep,
 ) -> Response:
-    """Render the request editing page using the shared sharing editor."""
+    """Render the request editing page.
+
+    Dispatches by request type to the registered
+    :class:`RequestEventHandler`. The route layer is intentionally
+    agnostic about what each request kind looks like: it authenticates,
+    looks up the event, and forwards to the handler.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
     inbox: RequestInbox | None = request.app.state.request_inbox
@@ -1742,33 +1775,14 @@ def _handle_request_page(
     if req_event is None:
         return HTMLResponse(content="<p>Request not found</p>", status_code=404)
 
-    is_sharing = isinstance(req_event, SharingRequestEvent)
-    service_name = req_event.service_name if is_sharing else ""
-    emails: list[str] = []
-    if is_sharing:
-        emails.extend(req_event.suggested_emails)
-    emails = list(dict.fromkeys(emails))
-
-    ws_name, account_email, has_account, accounts = _resolve_ws_name_and_account(
-        req_event.agent_id,
-        request,
-        backend_resolver,
-    )
-
-    html = render_sharing_editor(
-        agent_id=req_event.agent_id,
-        service_name=service_name,
-        title=f"Sharing Request: {service_name}",
-        initial_emails=emails,
-        is_request=True,
-        request_id=request_id,
-        has_account=has_account,
-        accounts=accounts,
-        redirect_url=f"/requests/{request_id}",
-        ws_name=ws_name,
-        account_email=account_email,
-    )
-    return HTMLResponse(content=html)
+    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    handler = find_handler_for_event(handlers, req_event)
+    if handler is None:
+        return HTMLResponse(
+            content=f"<p>No handler registered for request type {req_event.request_type!r}</p>",
+            status_code=500,
+        )
+    return handler.render_request_page(req_event=req_event, backend_resolver=backend_resolver)
 
 
 def _handle_sharing_page(
@@ -1809,57 +1823,26 @@ async def _handle_sharing_enable(
     auth_store: AuthStoreDep,
     backend_resolver: BackendResolverDep,
 ) -> Response:
-    """Enable or update sharing for a server. Handles both request approval and direct editing."""
+    """Enable or update sharing for a service via direct editing.
+
+    Approving a *pending* sharing request goes through the unified
+    ``POST /requests/{id}/grant`` dispatcher (which calls into
+    :class:`SharingRequestHandler`); this route only services the
+    workspace-settings sharing editor. Both paths funnel through
+    :func:`enable_sharing_via_cloudflare` so they cannot drift.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
 
     form = await request.form()
-    emails_json = str(form.get("emails", "[]"))
-    try:
-        emails = json.loads(emails_json)
-    except json.JSONDecodeError:
-        emails = []
-
-    sharing_succeeded = False
-    cf_client, error_response = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
-    if cf_client is not None:
-        parsed_id = AgentId(agent_id)
-        parsed_service = ServiceName(service_name)
-        backend_url = backend_resolver.get_backend_url(parsed_id, parsed_service)
-        if backend_url:
-            paths: WorkspacePaths = request.app.state.api_v1_paths
-            stored_token = _load_tunnel_token(paths.data_dir, parsed_id)
-            if stored_token is None:
-                token, _ = cf_client.create_tunnel(parsed_id)
-                if token:
-                    _save_tunnel_token(paths.data_dir, parsed_id, token)
-                    inject_tunnel_token_into_agent(parsed_id, token)
-            cf_client.add_service(parsed_id, parsed_service, backend_url)
-            sharing_succeeded = True
-            # Apply auth rules if emails were provided
-            if emails:
-                rules: list[dict[str, object]] = [
-                    {"action": "allow", "include": [{"email": {"email": e}} for e in emails]},
-                ]
-                cf_client.set_service_auth(parsed_id, str(parsed_service), rules)
-
-    # If there's a pending request for this agent/server, mark it as granted only if sharing succeeded
-    inbox: RequestInbox | None = request.app.state.request_inbox
-    if inbox is not None and sharing_succeeded:
-        for req in inbox.get_pending_requests():
-            if isinstance(req, SharingRequestEvent) and req.agent_id == agent_id and req.service_name == service_name:
-                paths = request.app.state.api_v1_paths
-                response_event = create_request_response_event(
-                    request_event_id=str(req.event_id),
-                    status=RequestStatus.GRANTED,
-                    agent_id=agent_id,
-                    request_type=req.request_type,
-                    service_name=service_name,
-                )
-                append_response_event(paths.data_dir, response_event)
-                request.app.state.request_inbox = inbox.add_response(response_event)
-                break
-
+    emails = parse_emails_form_value(str(form.get("emails", "[]")))
+    enable_sharing_via_cloudflare(
+        request=request,
+        agent_id=AgentId(agent_id),
+        service_name=ServiceName(service_name),
+        emails=emails,
+        backend_resolver=backend_resolver,
+    )
     return Response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
 
 
@@ -1932,24 +1915,21 @@ async def _handle_request_grant(
     request_id: str,
     request: Request,
     auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
 ) -> Response:
-    """Grant a request by redirecting to the sharing enable handler."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
-    inbox: RequestInbox | None = request.app.state.request_inbox
-    if inbox is None:
-        return HTMLResponse(content="Request inbox not available", status_code=500)
-    req_event = inbox.get_request_by_id(request_id)
-    if req_event is None:
-        return HTMLResponse(content="Request not found", status_code=404)
+    """Dispatch a grant to the handler that claims the event's request type.
 
-    if isinstance(req_event, SharingRequestEvent):
-        return await _handle_sharing_enable(
-            req_event.agent_id, req_event.service_name, request, auth_store, backend_resolver
-        )
-
-    return Response(status_code=303, headers={"Location": "/"})
+    The route layer is intentionally agnostic: it authenticates, looks
+    up the request event, finds the registered
+    :class:`RequestEventHandler` whose ``handles_request_type`` matches,
+    and forwards the rest. Per-handler differences (form parsing,
+    response shape, side effects) live in the handler.
+    """
+    return await _dispatch_request_action(
+        request_id=request_id,
+        request=request,
+        auth_store=auth_store,
+        action="grant",
+    )
 
 
 async def _handle_request_deny(
@@ -1957,28 +1937,47 @@ async def _handle_request_deny(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Deny a request and write a response event."""
+    """Dispatch a deny to the handler that claims the event's request type."""
+    return await _dispatch_request_action(
+        request_id=request_id,
+        request=request,
+        auth_store=auth_store,
+        action="deny",
+    )
+
+
+async def _dispatch_request_action(
+    request_id: str,
+    request: Request,
+    auth_store: AuthStoreInterface,
+    action: str,
+) -> Response:
+    """Shared body of grant/deny dispatchers.
+
+    Authenticates, looks up the request event, picks the right handler,
+    and forwards. ``action`` must be ``"grant"`` or ``"deny"``.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
+        return _json_error("Not authenticated", status_code=403)
     inbox: RequestInbox | None = request.app.state.request_inbox
     if inbox is None:
-        return HTMLResponse(content="Request inbox not available", status_code=500)
+        return _json_error("Request inbox not available", status_code=500)
     req_event = inbox.get_request_by_id(request_id)
     if req_event is None:
-        return HTMLResponse(content="Request not found", status_code=404)
+        return _json_error("Request not found", status_code=404)
 
-    paths: WorkspacePaths = request.app.state.api_v1_paths
-    response_event = create_request_response_event(
-        request_event_id=request_id,
-        status=RequestStatus.DENIED,
-        agent_id=req_event.agent_id,
-        request_type=req_event.request_type,
-        service_name=req_event.service_name if isinstance(req_event, SharingRequestEvent) else None,
-    )
-    append_response_event(paths.data_dir, response_event)
-    request.app.state.request_inbox = inbox.add_response(response_event)
-
-    return Response(status_code=303, headers={"Location": "/"})
+    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    handler = find_handler_for_event(handlers, req_event)
+    if handler is None:
+        return _json_error(
+            f"No handler registered for request type '{req_event.request_type}'",
+            status_code=400,
+        )
+    if action == "grant":
+        return await handler.apply_grant_request(request, req_event)
+    if action == "deny":
+        return await handler.apply_deny_request(request, req_event)
+    return _json_error(f"Unsupported action '{action}'", status_code=500)
 
 
 _request_event_apps: dict[int, FastAPI] = {}
@@ -1986,7 +1985,13 @@ _refresh_event_apps: dict[int, FastAPI] = {}
 
 
 def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
-    """Process an incoming request event and add it to the app's inbox."""
+    """Process an incoming request event and add it to the app's inbox.
+
+    After mutating the inbox, fires the resolver's change notification so
+    the chrome SSE wakes up and pushes the new ``request_count`` immediately
+    (otherwise it would lag up to 30s for the next poll tick, breaking the
+    requests panel auto-open and badge UX).
+    """
     event = parse_request_event(raw_line)
     if event is None:
         return
@@ -1995,6 +2000,9 @@ def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
         if current_inbox is not None:
             app.state.request_inbox = current_inbox.add_request(event)
             logger.info("Request event from agent {}: {}", agent_id_str, event.request_type)
+            backend_resolver: BackendResolverInterface = app.state.backend_resolver
+            if isinstance(backend_resolver, MngrCliBackendResolver):
+                backend_resolver.notify_change()
 
 
 def _parse_refresh_service_name(raw_line: str) -> str | None:
@@ -2111,7 +2119,7 @@ def create_desktop_client(
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
     tunnel_manager: SSHTunnelManager | None = None,
-    latchkey_gateway_manager: LatchkeyGatewayManager | None = None,
+    latchkey: Latchkey | None = None,
     agent_creator: AgentCreator | None = None,
     cloudflare_client: CloudflareClient | None = None,
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
@@ -2122,6 +2130,7 @@ def create_desktop_client(
     session_store: MultiAccountSessionStore | None = None,
     auth_backend_client: AuthBackendClient | None = None,
     request_inbox: RequestInbox | None = None,
+    request_event_handlers: tuple[RequestEventHandler, ...] = (),
     server_port: int = 0,
     output_format: OutputFormat | None = None,
     root_concurrency_group: ConcurrencyGroup | None = None,
@@ -2175,7 +2184,7 @@ def create_desktop_client(
     app.state.auth_store = auth_store
     app.state.backend_resolver = backend_resolver
     app.state.tunnel_manager = tunnel_manager
-    app.state.latchkey_gateway_manager = latchkey_gateway_manager
+    app.state.latchkey = latchkey
     app.state.stream_manager = stream_manager
     app.state.agent_creator = agent_creator
     app.state.cloudflare_client = cloudflare_client
@@ -2185,6 +2194,7 @@ def create_desktop_client(
     app.state.auth_backend_client = auth_backend_client
     app.state.minds_config = minds_config
     app.state.request_inbox = request_inbox
+    app.state.request_event_handlers = request_event_handlers
     app.state.auth_server_port = server_port
     app.state.auth_output_format = output_format or OutputFormat.JSONL
     app.state.root_concurrency_group = root_concurrency_group

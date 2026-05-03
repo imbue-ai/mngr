@@ -26,6 +26,7 @@ def spawn_detached_latchkey_gateway(
     listen_port: int,
     log_path: Path,
     latchkey_directory: Path | None = None,
+    permissions_config_path: Path | None = None,
 ) -> int:
     """Start a detached ``latchkey gateway`` and return its PID.
 
@@ -40,6 +41,14 @@ def spawn_detached_latchkey_gateway(
     credential / config directory instead of falling back to ``~/.latchkey``.
     The parent directory is created if needed.
 
+    When ``permissions_config_path`` is supplied, ``LATCHKEY_PERMISSIONS_CONFIG``
+    is set in the child's environment so this gateway enforces a
+    per-agent permission ruleset. Latchkey treats a missing file as
+    ``allow all``, so callers are responsible for ensuring the file
+    exists (with empty rules at minimum) before this function is
+    invoked -- otherwise the gateway would start in an unsafe
+    permit-all state until the desktop client wrote its first grant.
+
     The returned ``Popen`` object is intentionally allowed to go out of
     scope. Python's ``subprocess`` module parks finished children on an
     internal ``_active`` list for zombie reaping, but never kills a
@@ -53,6 +62,8 @@ def spawn_detached_latchkey_gateway(
     if latchkey_directory is not None:
         latchkey_directory.mkdir(parents=True, exist_ok=True)
         env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    if permissions_config_path is not None:
+        env["LATCHKEY_PERMISSIONS_CONFIG"] = str(permissions_config_path)
 
     log_file = log_path.open("ab")
     try:
