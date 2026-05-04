@@ -994,10 +994,7 @@ def test_permissions_marker_overrides_thinking(
         (state_dir / PERMISSIONS_WAITING_MARKER_FILENAME).touch()
         agent_manager._on_markers_changed("agent-1")
         with agent_manager._lock:
-            assert (
-                agent_manager._activity_state_by_agent["agent-1"]
-                == ActivityState.WAITING_ON_PERMISSION
-            )
+            assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.WAITING_ON_PERMISSION
     finally:
         agent_manager.stop()
 
@@ -1051,9 +1048,7 @@ def test_update_session_events_no_op_when_no_watcher(agent_manager: AgentManager
         assert "ghost" not in agent_manager._activity_state_by_agent
 
 
-def test_stop_marker_watcher_clears_caches(
-    agent_manager: AgentManager, tmp_path: Path
-) -> None:
+def test_stop_marker_watcher_clears_caches(agent_manager: AgentManager, tmp_path: Path) -> None:
     state_dir = tmp_path / "agents" / "agent-1"
     state_dir.mkdir(parents=True)
     _seed_agent(agent_manager, "agent-1")
@@ -1079,9 +1074,7 @@ def test_stop_marker_watcher_clears_caches(
         assert "agent-1" not in agent_manager._last_event_type_by_agent
 
 
-def test_handle_agent_destroyed_stops_marker_watcher(
-    agent_manager: AgentManager, tmp_path: Path
-) -> None:
+def test_handle_agent_destroyed_stops_marker_watcher(agent_manager: AgentManager, tmp_path: Path) -> None:
     """An AGENT_DESTROYED event should clear the marker watcher and caches."""
     test_agent_id = MngrAgentId()
     host_id = HostId()
