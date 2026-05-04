@@ -196,7 +196,8 @@ body {
 .message-input-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
+  gap: 8px;
   padding: 6px 16px 14px;
 }
 
