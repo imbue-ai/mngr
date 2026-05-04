@@ -427,7 +427,7 @@ def _get_tunnel_socket_path(
     agent's container interface, not the host's.
     """
     ssh_info = backend_resolver.get_ssh_info(agent_id) if tunnel_manager is not None else None
-    if ssh_info is None:
+    if tunnel_manager is None or ssh_info is None:
         if is_loopback_url(backend_url):
             raise LoopbackWithoutTunnelError(agent_id=str(agent_id), backend_url=backend_url)
         return None
