@@ -450,6 +450,11 @@ def _get_tunnel_http_client(
 
     Creates a fresh client each time to avoid stale connections when SSH
     tunnels are recreated after a broken pipe.
+
+    Propagates ``LoopbackWithoutTunnelError`` from ``_get_tunnel_socket_path``
+    when the registered backend URL is loopback and no tunnel can be set up
+    -- callers must handle that case rather than dialing the host's loopback
+    interface.
     """
     tunnel_manager: SSHTunnelManager | None = app.state.tunnel_manager
     socket_path = _get_tunnel_socket_path(tunnel_manager, agent_id, backend_url, backend_resolver)
