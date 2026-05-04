@@ -1,5 +1,0 @@
-- Fixed: the desktop client's workspace proxy no longer silently dials the host's loopback interface when a registered backend URL is loopback (`localhost`, `127.0.0.0/8`, `::1`) but no SSH tunnel is available. Previously this could expose an unrelated process bound to that port as the agent's UI.
-  - HTTP requests in this state now return `502` with a clear `refusing to dial host loopback` message.
-  - WebSocket upgrades close with code `1013` (Try Again Later).
-  - Refresh broadcasts are dropped instead of being POSTed to the host.
-  - Non-loopback registered URLs (real hostnames, container DNS names, public IPs) are unaffected.

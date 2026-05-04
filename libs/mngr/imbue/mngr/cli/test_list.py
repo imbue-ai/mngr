@@ -810,7 +810,6 @@ def test_list_command_with_remote_filter_alias(
 
 
 @pytest.mark.tmux
-@pytest.mark.flaky
 def test_list_command_with_limit(
     cli_runner: CliRunner,
     temp_work_dir: Path,

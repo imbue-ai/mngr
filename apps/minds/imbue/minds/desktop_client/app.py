@@ -39,7 +39,6 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
-from imbue.minds.desktop_client.agent_creator import WORKSPACE_SERVER_SERVICE_NAME
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.api_v1 import get_cf_client_with_auth
@@ -69,10 +68,8 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.session_store import derive_user_id_prefix
 from imbue.minds.desktop_client.sharing_handler import enable_sharing_via_cloudflare
 from imbue.minds.desktop_client.sharing_handler import parse_emails_form_value
-from imbue.minds.desktop_client.ssh_tunnel import LoopbackWithoutTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
-from imbue.minds.desktop_client.ssh_tunnel import is_loopback_url
 from imbue.minds.desktop_client.ssh_tunnel import parse_url_host_port
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
 from imbue.minds.desktop_client.templates import render_accounts_page
@@ -416,21 +413,12 @@ def _get_tunnel_socket_path(
     backend_url: str,
     backend_resolver: BackendResolverInterface,
 ) -> Path | None:
-    """Get the Unix socket path for tunneling to a remote backend.
+    """Get the Unix socket path for tunneling to a remote backend, or None for local."""
+    if tunnel_manager is None:
+        return None
 
-    Returns the path to a Unix socket if the agent has SSH info registered,
-    or ``None`` if the backend URL is reachable directly (a real network
-    address with no tunnel needed).
-
-    Raises ``LoopbackWithoutTunnelError`` if the backend URL is loopback and
-    no SSH tunnel can be established. The proxy must NOT fall through to a
-    direct host dial in that case -- the registered URL points at the
-    agent's container interface, not the host's.
-    """
-    ssh_info = backend_resolver.get_ssh_info(agent_id) if tunnel_manager is not None else None
-    if tunnel_manager is None or ssh_info is None:
-        if is_loopback_url(backend_url):
-            raise LoopbackWithoutTunnelError(agent_id=str(agent_id), backend_url=backend_url)
+    ssh_info = backend_resolver.get_ssh_info(agent_id)
+    if ssh_info is None:
         return None
 
     remote_host, remote_port = parse_url_host_port(backend_url)
@@ -451,11 +439,6 @@ def _get_tunnel_http_client(
 
     Creates a fresh client each time to avoid stale connections when SSH
     tunnels are recreated after a broken pipe.
-
-    Propagates ``LoopbackWithoutTunnelError`` from ``_get_tunnel_socket_path``
-    when the registered backend URL is loopback and no tunnel can be set up
-    -- callers must handle that case rather than dialing the host's loopback
-    interface.
     """
     tunnel_manager: SSHTunnelManager | None = app.state.tunnel_manager
     socket_path = _get_tunnel_socket_path(tunnel_manager, agent_id, backend_url, backend_resolver)
@@ -523,6 +506,7 @@ _WORKSPACE_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^(agent-[a-f0-9]+)\.(?:localhost|127\.0\.0\.1)(?::\d+)?$",
     re.IGNORECASE,
 )
+_WORKSPACE_SERVER_SERVICE_NAME: Final[ServiceName] = ServiceName("system_interface")
 
 
 def _parse_workspace_subdomain(host_header: str) -> AgentId | None:
@@ -704,17 +688,24 @@ async def _handle_workspace_forward_http(request: Request) -> Response:
     if agent_id not in backend_resolver.list_known_workspace_ids():
         return Response(status_code=404, content=f"Unknown workspace: {agent_id}")
 
-    workspace_url = backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME)
+    workspace_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
     if workspace_url is None:
+        if "text/html" in request.headers.get("accept", ""):
+            return HTMLResponse(
+                content=(
+                    "<!doctype html><html><head>"
+                    '<meta http-equiv="refresh" content="1">'
+                    "</head><body>"
+                    "<p>Workspace server not yet available. Retrying...</p>"
+                    "</body></html>"
+                )
+            )
         return Response(status_code=503, content="Workspace server not yet available")
 
     try:
         tunnel_client = await asyncio.get_running_loop().run_in_executor(
             None, _get_tunnel_http_client, request.app, agent_id, workspace_url, backend_resolver
         )
-    except LoopbackWithoutTunnelError as e:
-        logger.warning("Refusing loopback dial for workspace {}: {}", agent_id, e)
-        return Response(status_code=502, content=f"workspace server unreachable: {e}")
     except (SSHTunnelError, paramiko.SSHException, OSError) as e:
         logger.warning("SSH tunnel setup failed for workspace {}: {}", agent_id, e)
         return Response(status_code=502, content=f"SSH tunnel to remote workspace failed: {e}")
@@ -745,7 +736,7 @@ async def _handle_workspace_forward_websocket(websocket: WebSocket) -> None:
         await websocket.close(code=4004, reason=f"Unknown workspace: {agent_id}")
         return
 
-    workspace_url = backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME)
+    workspace_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
     if workspace_url is None:
         await websocket.close(code=1013, reason="Workspace server not yet available")
         return
@@ -759,15 +750,6 @@ async def _handle_workspace_forward_websocket(websocket: WebSocket) -> None:
             workspace_url,
             backend_resolver,
         )
-    except LoopbackWithoutTunnelError as e:
-        # WebSocket close reasons are capped at 123 bytes by the protocol,
-        # so the full detail goes to the log and the wire reason is short.
-        logger.warning("Refusing loopback WS dial for workspace {}: {}", agent_id, e)
-        try:
-            await websocket.close(code=1013, reason="no SSH tunnel; refusing loopback dial")
-        except RuntimeError:
-            pass
-        return
     except (SSHTunnelError, paramiko.SSHException, OSError) as e:
         logger.debug("SSH tunnel setup failed for workspace WS {}: {}", agent_id, e)
         try:
@@ -2044,7 +2026,7 @@ async def _dispatch_refresh_broadcast(app: FastAPI, agent_id: AgentId, service_n
     swallowed -- a missed refresh is never worth crashing on.
     """
     backend_resolver: BackendResolverInterface = app.state.backend_resolver
-    backend_url = backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME)
+    backend_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
     if backend_url is None:
         logger.debug(
             "No system_interface backend for agent {}; dropping refresh for service {}",
@@ -2061,9 +2043,6 @@ async def _dispatch_refresh_broadcast(app: FastAPI, agent_id: AgentId, service_n
         tunnel_client = await asyncio.get_running_loop().run_in_executor(
             None, _get_tunnel_http_client, app, agent_id, backend_url, backend_resolver
         )
-    except LoopbackWithoutTunnelError as e:
-        logger.warning("Dropping refresh broadcast for agent {}: {}", agent_id, e)
-        return
     except (SSHTunnelError, paramiko.SSHException, OSError) as e:
         logger.warning("Refresh broadcast tunnel setup for {} failed: {}", url, e)
         return

@@ -2,13 +2,11 @@ import json
 from pathlib import Path
 
 import httpx
-import pytest
 from fastapi import FastAPI
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
 from starlette.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
@@ -89,14 +87,8 @@ def _create_test_desktop_client(
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
     agent_creator: AgentCreator | None = None,
-    base_url: str = "http://localhost",
 ) -> tuple[TestClient, FileAuthStore]:
-    """Create a desktop client with the given backend resolver.
-
-    ``base_url`` controls the TestClient's default origin and is overridable
-    for tests that need to exercise the workspace-subdomain handler (e.g.
-    ``http://<agent-id>.localhost``).
-    """
+    """Create a desktop client with the given backend resolver."""
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
 
@@ -106,7 +98,7 @@ def _create_test_desktop_client(
         http_client=http_client,
         agent_creator=agent_creator,
     )
-    client = TestClient(app, base_url=base_url)
+    client = TestClient(app, base_url="http://localhost")
 
     return client, auth_store
 
@@ -582,7 +574,6 @@ def _create_test_server_with_agent_creator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_cg,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
-        backend_resolver=backend_resolver,
     )
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
@@ -1249,34 +1240,6 @@ def test_refresh_event_without_system_interface_backend_is_noop(tmp_path: Path) 
     assert received == []
 
 
-def test_refresh_event_with_loopback_url_and_no_tunnel_is_dropped(tmp_path: Path) -> None:
-    """A refresh event for an agent whose system_interface URL is loopback and
-    which has no SSH tunnel must NOT POST to the host's loopback. The broadcast
-    is dropped silently (errors are non-fatal here)."""
-    agent_id = AgentId()
-
-    # Resolver knows about the agent and registers a loopback system_interface
-    # URL, but provides no SSH info -- this is the same shape a stopped Docker
-    # agent has when it's still listed by `mngr list`.
-    resolver = make_resolver_with_data(
-        agents_json=make_agents_json(agent_id),
-        service_logs={str(agent_id): make_service_log("system_interface", "http://localhost:8000")},
-    )
-    app, received = _build_refresh_test_app(tmp_path, resolver)
-
-    with TestClient(app):
-        raw_line = json.dumps({"source": "refresh", "type": "refresh_service", "service_name": "web"})
-        resolver._fire_on_refresh(str(agent_id), raw_line)
-        # Allow time for any (incorrect) POST to land. The gate must drop the
-        # broadcast rather than dialing host loopback.
-        poll_until(lambda: len(received) > 0, timeout=0.3, poll_interval=0.02)
-
-    assert received == [], (
-        f"refresh broadcast must not fall through to host loopback when no SSH "
-        f"tunnel exists, but received: {[str(r.url) for r in received]}"
-    )
-
-
 def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path) -> None:
     """A refresh event that fires before the app's lifespan has run does not crash.
 
@@ -1444,174 +1407,3 @@ def test_subdomain_forward_preserves_non_session_cookies(tmp_path: Path) -> None
     assert received_cookie is not None
     assert "app_preference=dark-mode-92741" in received_cookie
     assert SESSION_COOKIE_NAME not in received_cookie
-
-
-# -- Loopback fallback gate tests --
-#
-# A registered workspace_server URL pointing at localhost is only safely
-# reachable through an SSH tunnel into the agent's container. If no tunnel
-# exists, the proxy used to silently fall back to dialing the host's
-# loopback interface, which can serve an unrelated process bound to that
-# port as the agent's UI. The gate must refuse those requests instead.
-
-
-def _create_loopback_subdomain_client(
-    tmp_path: Path,
-    agent_id: AgentId,
-    workspace_url: str,
-) -> tuple[TestClient, FileAuthStore]:
-    """Build a desktop client whose resolver returns a loopback workspace URL
-    and which has no SSH tunnel manager available (so ``get_ssh_info`` is None).
-    """
-    resolver = make_resolver_with_data(
-        agents_json=make_agents_json(agent_id),
-        service_logs={str(agent_id): make_service_log("system_interface", workspace_url)},
-    )
-    return _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=resolver,
-        http_client=None,
-        base_url=f"http://{agent_id}.localhost",
-    )
-
-
-@pytest.mark.parametrize(
-    "workspace_url",
-    [
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-        "http://[::1]:8000",
-    ],
-    ids=["localhost", "ipv4-loopback", "ipv6-loopback"],
-)
-def test_subdomain_forward_loopback_url_without_tunnel_returns_502(tmp_path: Path, workspace_url: str) -> None:
-    """Loopback registered URL + no SSH tunnel must NOT fall back to the host's
-    loopback interface; it must 502 with a clear message instead. Covers the
-    hostname literal (``localhost``) and both IP literals (``127.0.0.1``, ``::1``)."""
-    agent_id = AgentId()
-    client, auth_store = _create_loopback_subdomain_client(tmp_path, agent_id, workspace_url)
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.get("/")
-    assert response.status_code == 502
-    body = response.text
-    assert "refusing to dial host loopback" in body
-    assert str(agent_id) in body
-
-
-def test_subdomain_forward_websocket_loopback_url_without_tunnel_closes_with_1013(tmp_path: Path) -> None:
-    """Loopback registered URL + no SSH tunnel must close the WebSocket with 1013
-    (Try Again Later) instead of dialing the host's loopback interface."""
-    agent_id = AgentId()
-    workspace_url = "http://localhost:8000"
-    client, auth_store = _create_loopback_subdomain_client(tmp_path, agent_id, workspace_url)
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    # Starlette's TestClient ignores base_url for the WebSocket Host header, so
-    # set it explicitly to route through the workspace subdomain handler.
-    host_header = f"{agent_id}.localhost:8420"
-    with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect("/", headers={"host": host_header}) as ws:
-            ws.receive_text()
-
-    assert exc_info.value.code == 1013
-    assert "loopback" in (exc_info.value.reason or "")
-def _create_pending_subdomain_test_client(tmp_path: Path, agent_id: AgentId) -> tuple[TestClient, FileAuthStore]:
-    """Build a desktop client where the given agent is a known workspace whose
-    workspace_server URL has not yet been registered (service_logs is empty).
-
-    This exercises the ``workspace_url is None`` branch in the subdomain
-    forwarder.
-    """
-    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
-    resolver = make_resolver_with_data(
-        agents_json=make_agents_json(agent_id),
-        service_logs=None,
-    )
-    app = create_desktop_client(
-        auth_store=auth_store,
-        backend_resolver=resolver,
-        http_client=httpx.AsyncClient(),
-    )
-    client = TestClient(app, base_url=f"http://{agent_id}.localhost")
-    return client, auth_store
-
-
-def test_subdomain_forward_pending_workspace_returns_503(tmp_path: Path) -> None:
-    # Agent is a known workspace but its system_interface URL hasn't been
-    # registered yet (the workspace server is still booting). All clients get
-    # a plain 503 -- the desktop client gates the user-facing redirect on a
-    # readiness probe so this state shouldn't be reached during creation.
-    agent_id = AgentId()
-    client, auth_store = _create_pending_subdomain_test_client(tmp_path, agent_id)
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    html_response = client.get("/", headers={"accept": "text/html"})
-    api_response = client.get("/api/layout", headers={"accept": "application/json"})
-
-    assert html_response.status_code == 503
-    assert api_response.status_code == 503
-
-
-def _create_subdomain_test_client_with_failing_backend(
-    tmp_path: Path, agent_id: AgentId, backend_error: Exception
-) -> tuple[TestClient, FileAuthStore]:
-    """Build a desktop client where the workspace backend URL is registered but
-    every forwarded request raises *backend_error*.
-
-    Simulates the window where the agent has written its service URL to
-    events.jsonl but the workspace server itself hasn't finished coming up --
-    either because nothing is listening on the port yet (``httpx.ConnectError``)
-    or because the TCP layer is up but the ASGI app isn't serving HTTP yet
-    (``httpx.RemoteProtocolError``).
-    """
-
-    class _FailingTransport(httpx.AsyncBaseTransport):
-        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-            raise backend_error
-
-    routing_client = httpx.AsyncClient(transport=_FailingTransport(), follow_redirects=False, timeout=5.0)
-
-    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
-    resolver = make_resolver_with_data(
-        agents_json=make_agents_json(agent_id),
-        service_logs={str(agent_id): make_service_log("system_interface", "http://workspace-backend")},
-    )
-    app = create_desktop_client(
-        auth_store=auth_store,
-        backend_resolver=resolver,
-        http_client=routing_client,
-    )
-    client = TestClient(app, base_url=f"http://{agent_id}.localhost")
-    return client, auth_store
-
-
-@pytest.mark.parametrize(
-    "backend_error",
-    [
-        # Nothing is listening on the workspace port yet.
-        pytest.param(httpx.ConnectError("connection refused"), id="connect_error"),
-        # The TCP socket accepted the connection but the server closed it
-        # before sending an HTTP response (uvicorn's window between bind
-        # and lifespan completing).
-        pytest.param(
-            httpx.RemoteProtocolError("Server disconnected without sending a response."),
-            id="remote_protocol_error",
-        ),
-    ],
-)
-def test_subdomain_forward_failing_backend_returns_502(tmp_path: Path, backend_error: Exception) -> None:
-    # Workspace URL is registered but the backend isn't fully serving HTTP
-    # yet. The forwarder surfaces a 502 to all clients (HTML and non-HTML
-    # alike); the creating-page readiness probe is what gates the
-    # user-facing redirect so this state shouldn't be reached via the
-    # normal creation flow.
-    agent_id = AgentId()
-    client, auth_store = _create_subdomain_test_client_with_failing_backend(tmp_path, agent_id, backend_error)
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    html_response = client.get("/", headers={"accept": "text/html"})
-    api_response = client.get("/api/layout", headers={"accept": "application/json"})
-
-    assert html_response.status_code == 502
-    assert api_response.status_code == 502

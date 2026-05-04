@@ -548,7 +548,6 @@ def test_destroy_remove_created_branch_deletes_branch(
         )
 
 
-@pytest.mark.flaky
 @pytest.mark.tmux
 def test_destroy_without_remove_created_branch_leaves_branch(
     cli_runner: CliRunner,
