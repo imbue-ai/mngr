@@ -121,7 +121,8 @@ def probe_workspace_ready(
     probe_url = url.rstrip("/") + "/"
     try:
         response = http_client.get(probe_url, timeout=timeout_seconds)
-    except httpx.TransportError:
+    except httpx.TransportError as e:
+        logger.trace("probe_workspace_ready transport error for {}: {}", probe_url, e)
         return False
     return response.status_code == 200
 
