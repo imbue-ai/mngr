@@ -1047,7 +1047,8 @@ class AgentCreator(MutableModel):
         False otherwise.
         """
         log_queue.put("[minds] Waiting for workspace server to come online...")
-        deadline = time.monotonic() + self.workspace_ready_timeout_seconds
+        start_monotonic = time.monotonic()
+        deadline = start_monotonic + self.workspace_ready_timeout_seconds
         poll = self.workspace_ready_poll_interval_seconds
         timeout_seconds = self.workspace_ready_timeout_seconds
 
@@ -1057,7 +1058,8 @@ class AgentCreator(MutableModel):
             poll_interval=poll,
         )
         if url is None:
-            log_queue.put("[minds] Workspace server did not register within {:.0f}s.".format(timeout_seconds))
+            elapsed = time.monotonic() - start_monotonic
+            log_queue.put("[minds] Workspace server did not register within {:.0f}s.".format(elapsed))
             log_queue.put("[minds] Loading the workspace anyway.")
             return False
 
@@ -1074,7 +1076,8 @@ class AgentCreator(MutableModel):
         ):
             log_queue.put("[minds] Workspace server is ready.")
             return True
-        log_queue.put("[minds] Workspace server did not become ready within {:.0f}s.".format(timeout_seconds))
+        elapsed = time.monotonic() - start_monotonic
+        log_queue.put("[minds] Workspace server did not become ready within {:.0f}s.".format(elapsed))
         log_queue.put("[minds] Loading the workspace anyway.")
         return False
 
