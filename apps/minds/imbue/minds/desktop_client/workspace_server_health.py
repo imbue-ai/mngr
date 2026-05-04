@@ -24,6 +24,7 @@ import threading
 from collections.abc import Callable
 from enum import auto
 
+from loguru import logger
 from pydantic import PrivateAttr
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
@@ -96,5 +97,13 @@ class WorkspaceServerHealthTracker(MutableModel):
             self._states[agent_id] = new_state
             callbacks_to_run = list(self._callbacks)
 
+        # Each callback is isolated so that one raising callback (e.g. an SSE
+        # generator whose loop closed before remove_on_change_callback ran,
+        # which makes loop.call_soon_threadsafe raise RuntimeError) does not
+        # prevent the remaining subscribers from being notified. Mirrors the
+        # pattern in MngrCliBackendResolver._fire_on_change.
         for callback in callbacks_to_run:
-            callback()
+            try:
+                callback()
+            except (OSError, RuntimeError) as e:
+                logger.warning("Workspace server health callback failed: {}", e)

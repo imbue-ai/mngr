@@ -108,3 +108,25 @@ def test_snapshot_is_a_copy() -> None:
     snapshot = tracker.snapshot_all()
     snapshot["agent-1"] = AgentHealth.HEALTHY
     assert tracker.get_health("agent-1") == AgentHealth.STUCK
+
+
+def test_one_raising_callback_does_not_block_others() -> None:
+    """A callback raising RuntimeError (e.g. a stale SSE generator's
+    loop.call_soon_threadsafe on a closed loop) must not prevent the other
+    subscribers from being notified. Otherwise a single dead window would
+    silently freeze health updates for every other open window."""
+    tracker = WorkspaceServerHealthTracker()
+    second_calls = [0]
+
+    def raising_callback() -> None:
+        raise RuntimeError("simulated closed loop")
+
+    def normal_callback() -> None:
+        second_calls[0] += 1
+
+    tracker.add_on_change_callback(raising_callback)
+    tracker.add_on_change_callback(normal_callback)
+
+    tracker.record_failure("agent-1")
+
+    assert second_calls[0] == 1
