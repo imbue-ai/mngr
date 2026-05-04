@@ -1690,27 +1690,36 @@ async def _handle_agent_health_probe(
 
     active_client = tunnel_client or request.app.state.http_client
     probe_url = workspace_url.rstrip("/") + "/"
+    # _get_tunnel_http_client creates a fresh AsyncClient on every call (one
+    # transport per unix-domain socket). The landing page polls this endpoint
+    # every 2s per agent, so leaking the client per probe accumulates FDs and
+    # connection pools. Mirror the close-in-finally pattern used by
+    # _dispatch_refresh_broadcast.
     try:
-        probe_response = await active_client.get(probe_url, timeout=_PROBE_TIMEOUT_SECONDS)
-    except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException):
-        if not is_restarting:
-            tracker.record_failure(str(parsed_id))
-        return _probe_response(parsed_id, failure_level)
+        try:
+            probe_response = await active_client.get(probe_url, timeout=_PROBE_TIMEOUT_SECONDS)
+        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException):
+            if not is_restarting:
+                tracker.record_failure(str(parsed_id))
+            return _probe_response(parsed_id, failure_level)
 
-    if probe_response.status_code < 400:
-        # A successful probe during RESTARTING means the restart completed;
-        # flipping to HEALTHY clears the overlay via the SSE push.
-        tracker.record_success(str(parsed_id))
-        return _probe_response(parsed_id, AgentHealth.HEALTHY)
+        if probe_response.status_code < 400:
+            # A successful probe during RESTARTING means the restart completed;
+            # flipping to HEALTHY clears the overlay via the SSE push.
+            tracker.record_success(str(parsed_id))
+            return _probe_response(parsed_id, AgentHealth.HEALTHY)
 
-    # 4xx/5xx from the upstream workspace_server -- the backend is reachable
-    # but returning app-level errors. We don't flip the tracker on these:
-    # neither the proxy path nor this probe treats them as healthy/stuck
-    # transitions. Honor whatever the tracker already knows; if there's no
-    # prior observation, default to STUCK rather than HEALTHY -- a workspace
-    # server whose root URL returns an error is not somewhere we want the
-    # landing page to send a click without the recovery affordance.
-    return _probe_response(parsed_id, tracker.get_health(str(parsed_id)) or AgentHealth.STUCK)
+        # 4xx/5xx from the upstream workspace_server -- the backend is reachable
+        # but returning app-level errors. We don't flip the tracker on these:
+        # neither the proxy path nor this probe treats them as healthy/stuck
+        # transitions. Honor whatever the tracker already knows; if there's no
+        # prior observation, default to STUCK rather than HEALTHY -- a workspace
+        # server whose root URL returns an error is not somewhere we want the
+        # landing page to send a click without the recovery affordance.
+        return _probe_response(parsed_id, tracker.get_health(str(parsed_id)) or AgentHealth.STUCK)
+    finally:
+        if tunnel_client is not None:
+            await tunnel_client.aclose()
 
 
 # -- Chrome (persistent shell) route handlers --
