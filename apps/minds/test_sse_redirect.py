@@ -61,7 +61,6 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
         paths=paths,
         root_concurrency_group=root_cg,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
-        backend_resolver=resolver,
     )
 
     # Manually set up a fake agent creation that completes immediately

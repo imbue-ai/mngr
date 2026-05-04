@@ -16,7 +16,6 @@ import re
 import shutil
 import tempfile
 import threading
-import time
 from collections.abc import Callable
 from enum import auto
 from pathlib import Path
@@ -26,10 +25,8 @@ from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
 from uuid import UUID
 
-import httpx
 import tomlkit
 from loguru import logger
-from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -46,7 +43,6 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.api_key_store import hash_api_key
 from imbue.minds.desktop_client.api_key_store import save_api_key_hash
-from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.host_pool_client import HostPoolClient
 from imbue.minds.desktop_client.host_pool_client import HostPoolError
 from imbue.minds.desktop_client.host_pool_client import LeaseHostResult
@@ -64,10 +60,7 @@ from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
-from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.utils.polling import poll_for_value
-from imbue.mngr.utils.polling import poll_until
 
 
 def _make_child_cg(name: str, parent: ConcurrencyGroup | None) -> ConcurrencyGroup:
@@ -99,32 +92,6 @@ def _leased_agent_address(agent_id: AgentId) -> str:
 OutputCallback = Callable[[str, bool], None]
 
 LOG_SENTINEL: Final[str] = "__DONE__"
-
-# Name of the agent-side service that serves the per-workspace UI. Shared with
-# app.py (subdomain forwarder) so that one place owns the contract.
-WORKSPACE_SERVER_SERVICE_NAME: Final[ServiceName] = ServiceName("system_interface")
-
-
-def probe_workspace_ready(
-    http_client: httpx.Client,
-    url: str,
-    timeout_seconds: float,
-) -> bool:
-    """Return True if the workspace server at ``url`` is serving its UI page.
-
-    Issues ``GET <url>/`` and returns True only on a 200. A 200 proves
-    uvicorn's lifespan completed and the frontend bundle is being served --
-    i.e. the page the user is about to land on actually renders. Anything
-    else (5xx during startup, transport errors before bind, etc.) means
-    the server isn't ready yet.
-    """
-    probe_url = url.rstrip("/") + "/"
-    try:
-        response = http_client.get(probe_url, timeout=timeout_seconds)
-    except httpx.TransportError:
-        return False
-    return response.status_code == 200
-
 
 # Placeholder ANTHROPIC_API_KEY set on pre-created pool hosts. Must look like
 # a real Anthropic key (correct prefix, correct length ~108 chars) so that
@@ -804,20 +771,15 @@ class AgentCreator(MutableModel):
     Thread-safe: all status reads/writes are guarded by an internal lock.
     """
 
-    # ``probe_http_client`` is an ``httpx.Client``, which is not a pydantic
-    # model. ``MutableModel`` defaults to ``arbitrary_types_allowed=False``
-    # so we re-enable it here just for this class.
-    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
-
     paths: WorkspacePaths = Field(frozen=True, description="Filesystem paths for minds data")
-    backend_resolver: BackendResolverInterface = Field(
+    server_port: int = Field(
+        default=0,
         frozen=True,
         description=(
-            "Resolver used to poll for workspace-server readiness after ``mngr create`` "
-            "returns. Creation blocks on URL registration plus an HTTP 200 probe of the "
-            "workspace UI so the creating-progress page stays on its log-streaming view "
-            "until the workspace server is actually reachable, rather than redirecting "
-            "the user into a 502/503 from the subdomain forwarder."
+            "Port the desktop client is listening on. Used to build the absolute "
+            "http://<agent-id>.localhost:<port>/ redirect URL after agent creation. "
+            "The default of 0 is only appropriate for tests that never exercise the "
+            "happy-path redirect."
         ),
     )
     host_pool_client: HostPoolClient | None = Field(
@@ -856,42 +818,6 @@ class AgentCreator(MutableModel):
         description=(
             "Dispatcher for surfacing failures from background tasks (e.g. the detached "
             "Cloudflare tunnel setup task) to the user as OS notifications."
-        ),
-    )
-    workspace_ready_timeout_seconds: float = Field(
-        default=60.0,
-        frozen=True,
-        description=(
-            "Total budget for both stages of the workspace-readiness wait (URL registration "
-            "plus HTTP 200 probe) after ``mngr create`` returns. On timeout, creation still "
-            "completes and the user is redirected -- they'll see whatever error the subdomain "
-            "forwarder produces if the server still isn't up. Configurable so tests can lower it."
-        ),
-    )
-    workspace_ready_poll_interval_seconds: float = Field(
-        default=0.2,
-        frozen=True,
-        description=(
-            "Sleep between polls for both the URL-resolution stage and the HTTP-probe stage of "
-            "``_wait_for_workspace_ready``."
-        ),
-    )
-    workspace_ready_probe_timeout_seconds: float = Field(
-        default=2.0,
-        frozen=True,
-        description=(
-            "Per-attempt HTTP timeout passed to ``probe_workspace_ready`` so a single probe "
-            "can't stall the overall poll loop."
-        ),
-    )
-    probe_http_client: httpx.Client = Field(
-        default_factory=httpx.Client,
-        frozen=True,
-        description=(
-            "HTTP client used to probe workspace-server readiness. Reused across polls so we "
-            "don't pay the connection-pool setup cost on every tick. Exposed as a constructor "
-            "field so tests can inject an ``httpx.MockTransport``-backed client without "
-            "reaching into private state."
         ),
     )
 
@@ -1030,53 +956,6 @@ class AgentCreator(MutableModel):
         """Get the log queue for an agent creation, or None if not tracked."""
         with self._lock:
             return self._log_queues.get(str(agent_id))
-
-    def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> bool:
-        """Block until the agent's workspace server is serving its UI page.
-
-        Two stages share a single deadline:
-
-        1. Wait for the resolver to register a backend URL for the workspace
-           service. The agent writes the URL once its container is up.
-        2. Probe ``GET <url>/`` until it returns 200, which means uvicorn's
-           lifespan completed and the frontend bundle is being served.
-
-        Emits the surrounding "waiting" / "ready" / "loading anyway" log
-        lines itself so callers in both creation paths just need a single
-        invocation. Returns True if both stages pass before the timeout,
-        False otherwise.
-        """
-        log_queue.put("[minds] Waiting for workspace server to come online...")
-        deadline = time.monotonic() + self.workspace_ready_timeout_seconds
-        poll = self.workspace_ready_poll_interval_seconds
-        timeout_seconds = self.workspace_ready_timeout_seconds
-
-        url, _, _ = poll_for_value(
-            lambda: self.backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME),
-            timeout=timeout_seconds,
-            poll_interval=poll,
-        )
-        if url is None:
-            log_queue.put("[minds] Workspace server did not register within {:.0f}s.".format(timeout_seconds))
-            log_queue.put("[minds] Loading the workspace anyway.")
-            return False
-
-        log_queue.put("[minds] Workspace server online; waiting for it to be ready...")
-        remaining = max(deadline - time.monotonic(), 0.0)
-        if poll_until(
-            lambda: probe_workspace_ready(
-                self.probe_http_client,
-                url,
-                self.workspace_ready_probe_timeout_seconds,
-            ),
-            timeout=remaining,
-            poll_interval=poll,
-        ):
-            log_queue.put("[minds] Workspace server is ready.")
-            return True
-        log_queue.put("[minds] Workspace server did not become ready within {:.0f}s.".format(timeout_seconds))
-        log_queue.put("[minds] Loading the workspace anyway.")
-        return False
 
     def release_leased_host(self, agent_id: AgentId, access_token: str) -> None:
         """Release a leased host and clean up local state.
@@ -1382,13 +1261,6 @@ class AgentCreator(MutableModel):
                 save_api_key_hash(self.paths.data_dir, agent_id, key_hash)
                 log_queue.put("[minds] API key generated and hash stored.")
 
-                # mngr create returning doesn't mean the in-agent workspace
-                # server is answering yet (container still booting, services
-                # still registering). Wait synchronously so the user stays on
-                # the log-streaming progress page until the workspace is
-                # actually reachable.
-                self._wait_for_workspace_ready(agent_id, log_queue)
-
                 log_queue.put("[minds] Agent created successfully.")
 
                 redirect_url = "/goto/{}/".format(agent_id)
@@ -1672,12 +1544,6 @@ class AgentCreator(MutableModel):
         save_api_key_hash(self.paths.data_dir, agent_id, key_hash)
         log_queue.put("[minds] API key hash stored.")
         log_queue.put("[minds] Leased agent started successfully.")
-
-        # mngr create returning doesn't mean the in-agent workspace server is
-        # answering yet (the container/SSH host is still bringing it up).
-        # Wait synchronously so the user stays on the log-streaming progress
-        # page until the workspace is actually reachable.
-        self._wait_for_workspace_ready(agent_id, log_queue)
 
         redirect_url = "/goto/{}/".format(agent_id)
 

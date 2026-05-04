@@ -346,7 +346,6 @@ def test_create_worktree_raises_for_unknown_agent(agent_manager: AgentManager) -
         agent_manager.create_worktree_agent("test", "nonexistent")
 
 
-@pytest.mark.flaky
 def test_start_app_watcher(agent_manager: AgentManager, tmp_path: Path) -> None:
     """Starting an app watcher for an agent creates the runtime directory."""
     runtime_dir = tmp_path / "runtime"
