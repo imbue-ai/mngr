@@ -36,16 +36,11 @@ class _MarkerFileHandler(FileSystemEventHandler):
     def on_any_event(self, event: FileSystemEvent) -> None:
         if event.is_directory:
             return
-        paths: list[str | bytes] = [event.src_path]
+        paths = [event.src_path]
         if isinstance(event, FileMovedEvent):
             paths.append(event.dest_path)
-        for raw_path in paths:
-            if not raw_path:
-                continue
-            decoded = raw_path.decode("utf-8", errors="replace") if isinstance(raw_path, bytes) else raw_path
-            if Path(decoded).name == PERMISSIONS_WAITING_MARKER_FILENAME:
-                self.on_change()
-                return
+        if any(Path(p).name == PERMISSIONS_WAITING_MARKER_FILENAME for p in paths):
+            self.on_change()
 
 
 def _make_marker_file_handler(on_change: Callable[[], None]) -> _MarkerFileHandler:
