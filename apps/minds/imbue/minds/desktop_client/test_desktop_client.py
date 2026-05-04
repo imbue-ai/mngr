@@ -1483,9 +1483,7 @@ def _create_loopback_subdomain_client(
     ],
     ids=["localhost", "ipv4-loopback", "ipv6-loopback"],
 )
-def test_subdomain_forward_loopback_url_without_tunnel_returns_502(
-    tmp_path: Path, workspace_url: str
-) -> None:
+def test_subdomain_forward_loopback_url_without_tunnel_returns_502(tmp_path: Path, workspace_url: str) -> None:
     """Loopback registered URL + no SSH tunnel must NOT fall back to the host's
     loopback interface; it must 502 with a clear message instead. Covers the
     hostname literal (``localhost``) and both IP literals (``127.0.0.1``, ``::1``)."""
