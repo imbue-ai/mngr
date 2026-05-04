@@ -40,7 +40,7 @@ from imbue.mngr.utils.polling import poll_until
 pytestmark = pytest.mark.flaky
 
 
-def _seed_agent(manager: AgentManager, agent_id: str, work_dir: str | None = None) -> None:
+def _seed_agent(manager: AgentManager, agent_id: str) -> None:
     """Insert a placeholder ``AgentStateItem`` directly into the tracked map."""
     with manager._lock:
         manager._agents[agent_id] = AgentStateItem(
@@ -48,7 +48,7 @@ def _seed_agent(manager: AgentManager, agent_id: str, work_dir: str | None = Non
             name=f"agent-{agent_id}",
             state="RUNNING",
             labels={},
-            work_dir=work_dir,
+            work_dir=None,
         )
 
 
