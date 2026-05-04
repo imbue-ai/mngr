@@ -168,11 +168,9 @@
     var agentId = row.getAttribute('data-agent-id');
     if (!agentId) return;
     e.preventDefault();
-    // Always defer to main.js to decide which items to show. Pre-PR there was
-    // only "Open in new window", which is meaningless for the current row, so
-    // this used to early-return. Now main.js also offers "Restart workspace
-    // server", which makes sense for the current row too -- so we always
-    // dispatch and let main.js omit per-item.
+    // main.js is the source of truth for which items to show in the workspace
+    // context menu (some items only make sense for non-current rows). Always
+    // dispatch for any agent row and let main.js omit items per-row.
     if (isElectron && window.minds.showWorkspaceContextMenu) {
       window.minds.showWorkspaceContextMenu(agentId, e.clientX, e.clientY);
     }
