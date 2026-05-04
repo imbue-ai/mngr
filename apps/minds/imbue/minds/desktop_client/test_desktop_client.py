@@ -1474,11 +1474,22 @@ def _create_loopback_subdomain_client(
     return client, auth_store
 
 
-def test_subdomain_forward_loopback_url_without_tunnel_returns_502(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "workspace_url",
+    [
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://[::1]:8000",
+    ],
+    ids=["localhost", "ipv4-loopback", "ipv6-loopback"],
+)
+def test_subdomain_forward_loopback_url_without_tunnel_returns_502(
+    tmp_path: Path, workspace_url: str
+) -> None:
     """Loopback registered URL + no SSH tunnel must NOT fall back to the host's
-    loopback interface; it must 502 with a clear message instead."""
+    loopback interface; it must 502 with a clear message instead. Covers the
+    hostname literal (``localhost``) and both IP literals (``127.0.0.1``, ``::1``)."""
     agent_id = AgentId()
-    workspace_url = "http://localhost:8000"
     client, auth_store = _create_loopback_subdomain_client(tmp_path, agent_id, workspace_url)
     _authenticate_client(client=client, auth_store=auth_store)
 
@@ -1487,30 +1498,6 @@ def test_subdomain_forward_loopback_url_without_tunnel_returns_502(tmp_path: Pat
     body = response.text
     assert "refusing to dial host loopback" in body
     assert str(agent_id) in body
-
-
-def test_subdomain_forward_loopback_127_url_without_tunnel_returns_502(tmp_path: Path) -> None:
-    """Same gate must apply to the IPv4 loopback literal."""
-    agent_id = AgentId()
-    workspace_url = "http://127.0.0.1:8000"
-    client, auth_store = _create_loopback_subdomain_client(tmp_path, agent_id, workspace_url)
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.get("/")
-    assert response.status_code == 502
-    assert "refusing to dial host loopback" in response.text
-
-
-def test_subdomain_forward_loopback_ipv6_url_without_tunnel_returns_502(tmp_path: Path) -> None:
-    """Same gate must apply to the IPv6 loopback literal."""
-    agent_id = AgentId()
-    workspace_url = "http://[::1]:8000"
-    client, auth_store = _create_loopback_subdomain_client(tmp_path, agent_id, workspace_url)
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.get("/")
-    assert response.status_code == 502
-    assert "refusing to dial host loopback" in response.text
 
 
 def test_subdomain_forward_websocket_loopback_url_without_tunnel_closes_with_1013(tmp_path: Path) -> None:
