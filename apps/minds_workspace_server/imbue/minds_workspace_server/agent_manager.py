@@ -949,8 +949,11 @@ class AgentManager:
         an ``agents_updated`` event is broadcast.
 
         Called from the marker-file watcher callback and from
-        :meth:`update_session_events`. A no-op for agents not in ``_agents``
-        (e.g. the watcher fired moments after the agent was destroyed).
+        :meth:`update_session_events`. Quietly does nothing in two cases:
+        - no marker watcher is registered for the agent (e.g. a remote agent,
+          or a callback firing after :meth:`_stop_marker_watcher` ran);
+        - the agent is no longer in ``_agents`` (the watcher fired moments
+          after the agent was destroyed).
         """
         with self._lock:
             watcher = self._marker_watchers.get(agent_id)
