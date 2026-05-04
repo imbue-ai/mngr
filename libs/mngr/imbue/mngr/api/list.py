@@ -15,7 +15,6 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
-from imbue.mngr.api.discovery_events import emit_discovery_error_to_stdout
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
 from imbue.mngr.api.discovery_events import extract_agents_and_hosts_from_full_listing
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
@@ -256,20 +255,13 @@ def _construct_and_discover_for_provider(
         provider = get_provider_instance(provider_name, mngr_ctx)
         if reset_caches:
             provider.reset_caches()
-        provider_results = provider.discover_hosts_and_agents(
-            cg=mngr_ctx.concurrency_group, include_destroyed=True
-        )
+        provider_results = provider.discover_hosts_and_agents(cg=mngr_ctx.concurrency_group, include_destroyed=True)
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
             if isinstance(e, MngrError):
                 raise
             raise MngrError(str(e)) from e
         logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
-        emit_discovery_error_to_stdout(
-            error_type=type(e).__name__,
-            error_message=str(e),
-            source_name=str(provider_name),
-        )
         error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
         with results_lock:
             result.errors.append(error_info)
@@ -482,11 +474,6 @@ def _construct_discover_and_emit_for_provider(
                 raise
             raise MngrError(str(e)) from e
         logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
-        emit_discovery_error_to_stdout(
-            error_type=type(e).__name__,
-            error_message=str(e),
-            source_name=str(provider_name),
-        )
         error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
         with results_lock:
             result.errors.append(error_info)
@@ -568,11 +555,6 @@ def _process_host_with_error_handling(
                 raise
             raise MngrError(str(e)) from e
         logger.opt(exception=e).error("Error processing host {}", host_ref.host_id)
-        emit_discovery_error_to_stdout(
-            error_type=type(e).__name__,
-            error_message=str(e),
-            source_name=str(host_ref.host_id),
-        )
         error_info = HostErrorInfo.build_for_host(e, host_ref.host_id)
         with results_lock:
             result.errors.append(error_info)

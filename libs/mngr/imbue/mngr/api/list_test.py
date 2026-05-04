@@ -1291,6 +1291,7 @@ def _make_broken_provider_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
     )
 
 
+@pytest.mark.allow_warnings(match=r"Error discovering agents for provider")
 def test_list_agents_streaming_continue_mode_records_failing_provider_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -1315,6 +1316,7 @@ def test_list_agents_streaming_continue_mode_records_failing_provider_error(
     assert "nonexistent-backend-xyz" in provider_errors[0].message
 
 
+@pytest.mark.allow_warnings(match=r"Error discovering agents for provider")
 def test_list_agents_batch_continue_mode_records_failing_provider_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:

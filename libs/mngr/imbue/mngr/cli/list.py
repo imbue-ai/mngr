@@ -84,33 +84,20 @@ def _resolve_field_alias(field: str) -> str:
 
 
 @pure
-def _is_streaming_eligible(
-    is_sort_explicit: bool,
-    error_behavior: ErrorBehavior,
-) -> bool:
+def _is_streaming_eligible(is_sort_explicit: bool) -> bool:
     """Whether the general conditions for streaming mode are met.
 
     Streaming requires no explicit sort (needs all results before sorting). A limit is
     compatible with streaming -- it simply caps output at the first N agents to arrive,
     which is non-deterministic.
-
-    ABORT mode forces batch: streaming may flush per-provider rows to stdout before a
-    later provider's failure aborts the listing, which contradicts ABORT's all-or-nothing
-    contract.
     """
-    return not is_sort_explicit and error_behavior != ErrorBehavior.ABORT
+    return not is_sort_explicit
 
 
 @pure
-def _should_use_streaming_mode(
-    output_format: OutputFormat,
-    is_sort_explicit: bool,
-    error_behavior: ErrorBehavior,
-) -> bool:
+def _should_use_streaming_mode(output_format: OutputFormat, is_sort_explicit: bool) -> bool:
     """Determine whether to use streaming mode for human list output."""
-    return output_format == OutputFormat.HUMAN and _is_streaming_eligible(
-        is_sort_explicit=is_sort_explicit, error_behavior=error_behavior
-    )
+    return output_format == OutputFormat.HUMAN and _is_streaming_eligible(is_sort_explicit=is_sort_explicit)
 
 
 class ListCliOptions(AgentFilterCliOptions, CommonCliOptions):
@@ -314,9 +301,7 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
 
     # Template output path: if --format is a template string, use streaming when possible, batch otherwise
     if format_template is not None:
-        is_streaming_template = _is_streaming_eligible(
-            is_sort_explicit=is_sort_explicit, error_behavior=error_behavior
-        )
+        is_streaming_template = _is_streaming_eligible(is_sort_explicit=is_sort_explicit)
         if is_streaming_template:
             _list_streaming_template(
                 ctx,
@@ -336,7 +321,7 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     # output can pass --sort explicitly, which falls back to batch mode. When --limit is set,
     # streaming still works but produces non-deterministic results (whichever agents arrive first).
     if format_template is None and _should_use_streaming_mode(
-        output_opts.output_format, is_sort_explicit=is_sort_explicit, error_behavior=error_behavior
+        output_opts.output_format, is_sort_explicit=is_sort_explicit
     ):
         display_fields = fields if fields is not None else list(_DEFAULT_HUMAN_DISPLAY_FIELDS)
         _list_streaming_human(
