@@ -61,6 +61,12 @@
       delete navigateOnRecovery[agentId];
       window.location = '/goto/' + encodeURIComponent(agentId) + '/';
     }
+    // Any row landing in RESTARTING -- whether from the initial probe or from
+    // a probe issued by the polling tick itself -- needs the polling loop so
+    // it eventually flips to HEALTHY. ensurePolling() is idempotent.
+    if (body.status === 'RESTARTING') {
+      ensurePolling();
+    }
   }
 
   function ensurePolling() {
