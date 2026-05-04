@@ -78,7 +78,7 @@ def test_derive_permissions_waiting_takes_priority_over_pending_tool() -> None:
     state = derive_activity_state(
         permissions_waiting=True,
         has_pending_tool_use=True,
-        last_event_type="user_message",
+        tail_event_type="user_message",
     )
     assert state == ActivityState.WAITING_ON_PERMISSION
 
@@ -87,7 +87,7 @@ def test_derive_permissions_waiting_takes_priority_when_idle_signals() -> None:
     state = derive_activity_state(
         permissions_waiting=True,
         has_pending_tool_use=False,
-        last_event_type="assistant_message",
+        tail_event_type="assistant_message",
     )
     assert state == ActivityState.WAITING_ON_PERMISSION
 
@@ -96,7 +96,7 @@ def test_derive_tool_running_when_unmatched_tool_use() -> None:
     state = derive_activity_state(
         permissions_waiting=False,
         has_pending_tool_use=True,
-        last_event_type="assistant_message",
+        tail_event_type="assistant_message",
     )
     assert state == ActivityState.TOOL_RUNNING
 
@@ -105,7 +105,7 @@ def test_derive_thinking_when_last_event_is_user_message() -> None:
     state = derive_activity_state(
         permissions_waiting=False,
         has_pending_tool_use=False,
-        last_event_type="user_message",
+        tail_event_type="user_message",
     )
     assert state == ActivityState.THINKING
 
@@ -114,7 +114,7 @@ def test_derive_thinking_when_last_event_is_tool_result() -> None:
     state = derive_activity_state(
         permissions_waiting=False,
         has_pending_tool_use=False,
-        last_event_type="tool_result",
+        tail_event_type="tool_result",
     )
     assert state == ActivityState.THINKING
 
@@ -123,7 +123,7 @@ def test_derive_idle_when_last_event_is_assistant_message() -> None:
     state = derive_activity_state(
         permissions_waiting=False,
         has_pending_tool_use=False,
-        last_event_type="assistant_message",
+        tail_event_type="assistant_message",
     )
     assert state == ActivityState.IDLE
 
@@ -132,6 +132,6 @@ def test_derive_idle_when_no_events() -> None:
     state = derive_activity_state(
         permissions_waiting=False,
         has_pending_tool_use=False,
-        last_event_type=None,
+        tail_event_type=None,
     )
     assert state == ActivityState.IDLE

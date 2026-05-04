@@ -982,7 +982,7 @@ class AgentManager:
             new_state = derive_activity_state(
                 permissions_waiting=permissions_waiting,
                 has_pending_tool_use=has_pending_tool,
-                last_event_type=cached_last_event_type,
+                tail_event_type=cached_last_event_type,
             )
             old_state = self._activity_state_by_agent.get(agent_id)
             if old_state == new_state and agent_state.activity_state == new_state.value:

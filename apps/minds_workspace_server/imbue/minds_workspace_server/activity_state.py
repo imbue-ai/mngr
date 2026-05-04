@@ -72,9 +72,13 @@ def derive_activity_state(
     *,
     permissions_waiting: bool,
     has_pending_tool_use: bool,
-    last_event_type: str | None,
+    tail_event_type: str | None,
 ) -> ActivityState:
     """Derive an ``ActivityState`` from the permissions marker plus transcript signals.
+
+    ``tail_event_type`` is the cached result of :func:`last_event_type` for the
+    agent's current transcript (named distinctly from the helper to avoid
+    shadowing it in this scope).
 
     Priority:
       1. ``permissions_waiting`` -> WAITING_ON_PERMISSION (not represented in transcript).
@@ -88,6 +92,6 @@ def derive_activity_state(
         return ActivityState.WAITING_ON_PERMISSION
     if has_pending_tool_use:
         return ActivityState.TOOL_RUNNING
-    if last_event_type in ("user_message", "tool_result"):
+    if tail_event_type in ("user_message", "tool_result"):
         return ActivityState.THINKING
     return ActivityState.IDLE
