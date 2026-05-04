@@ -99,6 +99,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr.utils.editor import EditorSession
 from imbue.mngr.utils.git_utils import clone_git_url_to_managed_dir
+from imbue.mngr.utils.git_utils import derive_project_name_for_source
 from imbue.mngr.utils.git_utils import find_git_worktree_root
 from imbue.mngr.utils.git_utils import get_current_git_branch
 from imbue.mngr.utils.git_utils import is_git_url
@@ -347,7 +348,8 @@ class _CreateCommand(click.Command):
 @optgroup.option("--label", multiple=True, help="Agent label KEY=VALUE [repeatable] [experimental]")
 @optgroup.option(
     "--project",
-    help="Project name for the agent (sets the 'project' label) [default: derived from git remote origin or folder name]",
+    default=".",
+    help="Project name for the agent (sets the 'project' label; '.' inherits from source agent's project label when --from references an agent, else uses the source's git remote origin, else the source's folder name) [default: .]",
 )
 @optgroup.group("Host Options")
 @optgroup.option(
@@ -1027,8 +1029,7 @@ def _rescue_editor_content(
     """Save editor content to a recovery file so the user does not lose their work.
 
     Reads the content from the editor's temp file (which still exists before cleanup)
-    and writes it to ~/.mngr/recovered-message.txt. Uses logger.warning which will be
-    buffered if logging is suppressed and replayed when suppression is disabled.
+    and writes it to ~/.mngr/recovered-message.txt.
     """
     if not editor_session.temp_file_path.exists():
         return
@@ -1053,7 +1054,7 @@ def _rescue_editor_content(
         logger.trace("Failed to write recovery file {}: {}", recovery_path, e)
         return
 
-    logger.warning("Your editor message has been saved to: {}", recovery_path)
+    logger.info("Your editor message has been saved to: {}", recovery_path)
 
 
 def _handle_editor_message(
@@ -1108,25 +1109,18 @@ def _parse_project_name(
 ) -> str:
     """Determine the project name for a new agent.
 
-    Priority: explicit --project flag > source agent's project label > git remote > folder name.
+    Priority: --project flag (when not the literal "." sentinel) > source agent's
+    project label > git remote > folder name. "." is the click default and triggers
+    the derivation chain (it is not used as a literal project name).
     """
-    if opts.project:
+    if opts.project and opts.project != ".":
         return opts.project
-
-    # If creating from an existing agent, inherit its project label
-    if resolved_source.agent is not None:
-        source_project = resolved_source.agent.labels.get("project")
-        if source_project is not None:
-            return source_project
-
-    # Derive from the already-fetched remote URL (works for both local and remote hosts)
-    if remote_url is not None:
-        project_name = parse_project_name_from_url(remote_url)
-        if project_name is not None:
-            return project_name
-
-    # Fall back to the source directory name (resolve to normalize symlinks / '..' components)
-    return resolved_source.location.path.resolve().name
+    source_project_label = resolved_source.agent.labels.get("project") if resolved_source.agent is not None else None
+    return derive_project_name_for_source(
+        resolved_source.location.path,
+        remote_url=remote_url,
+        source_project_label=source_project_label,
+    )
 
 
 def _try_reuse_existing_agent(
@@ -1188,7 +1182,7 @@ def _try_reuse_existing_agent(
     if agent is None:
         # Agent not found on online host - this could happen if the host came online
         # but the agent data is stale. Return None to create a new agent.
-        logger.warning("Agent {} not found on host after starting, will create new agent", agent_name)
+        logger.info("Agent {} not found on host after starting, will create new agent", agent_name)
         return None
 
     # Ensure the agent is started (reusing shared logic from find.py)
@@ -1751,9 +1745,10 @@ _CREATE_HELP_METADATA = CommandHelpMetadata(
     [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>]
-    [--env <KEY=VALUE>] [--env-file <FILE>] [--grant <PERMISSION>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
+    [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--grant <PERMISSION>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
-    [--[no-]connect] [--[no-]auto-start] [--] [<AGENT_ARGS>...]""",
+    [--message <TEXT>] [--message-file <FILE>] [--edit-message]
+    [--[no-]connect] [--[no-]auto-start] [-y|--yes] [--] [<AGENT_ARGS>...]""",
     aliases=("c",),
     arguments_description="""- `ADDRESS`: Agent address in `[NAME][@[HOST][.PROVIDER]][:PATH]` format (all parts optional):
   - `NAME` -- agent name only, creates on local host (default)

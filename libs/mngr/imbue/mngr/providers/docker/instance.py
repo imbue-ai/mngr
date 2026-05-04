@@ -46,6 +46,7 @@ from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -552,6 +553,27 @@ kill -TERM 1
             )
             self._host_store.write_host_record(updated_host_record)
 
+    def _mark_host_destroyed(self, host_id: HostId) -> None:
+        """Set stop_reason to DESTROYED on the host record.
+
+        Marks the host as DESTROYED for state derivation while preserving
+        snapshot records so gc_snapshots can age-gate their deletion.
+        """
+        host_record = self._host_store.read_host_record(host_id, use_cache=False)
+        if host_record is None:
+            return
+
+        updated_certified_data = host_record.certified_host_data.model_copy_update(
+            to_update(host_record.certified_host_data.field_ref().stop_reason, HostState.DESTROYED.value),
+            to_update(host_record.certified_host_data.field_ref().updated_at, datetime.now(timezone.utc)),
+        )
+        self._host_store.write_host_record(
+            host_record.model_copy_update(
+                to_update(host_record.field_ref().certified_host_data, updated_certified_data),
+            )
+        )
+        logger.debug("Marked host as DESTROYED: {}", host_id)
+
     def _save_failed_host_record(
         self,
         host_id: HostId,
@@ -593,10 +615,16 @@ kill -TERM 1
         env.setdefault("BUILDKIT_PROGRESS", "plain")
         return env
 
-    def _run_docker_creation_command(self, args: list[str], timeout: float = 300) -> FinishedProcess:
-        """Run a docker CLI command and return the result."""
+    def _run_docker_creation_command(
+        self, args: list[str], timeout: float = 300, executable: DockerBuilder = DockerBuilder.DOCKER
+    ) -> FinishedProcess:
+        """Run a docker-compatible CLI command and return the result.
+
+        `executable` defaults to DOCKER; pass DEPOT to use the depot.dev remote
+        builder (only valid for build subcommands).
+        """
         return self.mngr_ctx.concurrency_group.run_process_to_completion(
-            ["docker"] + args,
+            [executable.value.lower()] + args,
             timeout=timeout,
             env=self._docker_env(),
             on_output=self._log_docker_creation_command_output,
@@ -609,10 +637,13 @@ kill -TERM 1
             logger.log(LogLevel.BUILD.value, "{}", line.rstrip(), source="docker")
 
     def _build_image(self, build_args: Sequence[str], tag: str) -> str:
-        """Build a Docker image using native docker build with passthrough args."""
-        cmd = ["build", "-t", tag] + list(build_args)
-        with log_span("Running docker build with {} args", len(build_args)):
-            self._run_docker_creation_command(cmd)
+        """Build a Docker image using the configured builder (docker or depot)."""
+        builder = self.config.builder
+        # depot requires --load to import the resulting image into the local daemon.
+        extra_args = ["--load"] if builder is DockerBuilder.DEPOT else []
+        args = ["build", *extra_args, "-t", tag, *build_args]
+        with log_span("Running {} build with {} args", builder.value.lower(), len(build_args)):
+            self._run_docker_creation_command(args, executable=builder)
         return tag
 
     def _build_default_image(self, tag: str) -> str:
@@ -1187,12 +1218,16 @@ kill -TERM 1
         self._evict_cached_host(host_id, replacement=restored_host)
         return restored_host
 
-    def destroy_host(
-        self,
-        host: HostInterface | HostId,
-        delete_snapshots: bool = True,
-    ) -> None:
-        """Destroy a Docker container permanently."""
+    def destroy_host(self, host: HostInterface | HostId) -> None:
+        """Destroy a Docker container permanently.
+
+        Stops and removes the container, then marks the host record as
+        DESTROYED via stop_reason. Snapshot records, snapshot images, and
+        the host volume directory are preserved so gc_snapshots can
+        age-gate their deletion (and so users can recover via
+        ``mngr create --snapshot``). Use ``delete_host`` to permanently
+        purge all records.
+        """
         host_id = host.id if isinstance(host, HostInterface) else host
 
         # Stop the host first (without creating a snapshot since we're destroying)
@@ -1206,19 +1241,28 @@ kill -TERM 1
             except docker.errors.DockerException as e:
                 logger.warning("Error removing container: {}", e)
 
-        if delete_snapshots:
-            # Delete snapshot images
-            host_record = self._host_store.read_host_record(host_id)
-            if host_record is not None:
-                for snap in host_record.certified_host_data.snapshots:
-                    try:
-                        self._docker_client.images.remove(snap.id)
-                    except docker.errors.DockerException as e:
-                        logger.warning("Error removing snapshot image {}: {}", snap.id, e)
+        self._mark_host_destroyed(host_id)
 
-            self._host_store.delete_host_record(host_id)
+        self._container_cache_by_id.pop(host_id, None)
+        self._evict_cached_host(host_id)
 
-        # Clean up the host volume directory
+    def delete_host(self, host: HostInterface) -> None:
+        """Permanently delete all records associated with a (destroyed) host.
+
+        Removes snapshot images, the host volume directory, and the host
+        record. Called by gc_machines once a destroyed host has aged past
+        ``destroyed_host_persisted_seconds``.
+        """
+        host_id = host.id
+
+        host_record = self._host_store.read_host_record(host_id, use_cache=False)
+        if host_record is not None:
+            for snap in host_record.certified_host_data.snapshots:
+                try:
+                    self._docker_client.images.remove(snap.id)
+                except docker.errors.DockerException as e:
+                    logger.warning("Error removing snapshot image {}: {}", snap.id, e)
+
         if self.config.is_host_volume_created:
             volume_id = self._volume_id_for_host(host_id)
             try:
@@ -1226,14 +1270,9 @@ kill -TERM 1
             except (FileNotFoundError, OSError, MngrError) as e:
                 logger.trace("No host volume to clean up for {}: {}", host_id, e)
 
+        self._host_store.delete_host_record(host_id)
         self._container_cache_by_id.pop(host_id, None)
         self._evict_cached_host(host_id)
-
-    def delete_host(self, host: HostInterface) -> None:
-        """Permanently delete all records associated with a (destroyed) host."""
-        self._host_store.delete_host_record(host.id)
-        self._container_cache_by_id.pop(host.id, None)
-        self._evict_cached_host(host.id)
 
     def on_connection_error(self, host_id: HostId) -> None:
         """Clear all caches for a host on connection error."""
@@ -1354,7 +1393,10 @@ kill -TERM 1
                     host_obj = self._create_host_from_host_record(host_record)
                     # OfflineHost.get_state() uses certified data only (no SSH),
                     # so it's safe to call here unlike Host.get_state().
-                    hosts_with_state.append((host_obj, host_obj.get_state()))
+                    state = host_obj.get_state()
+                    if state == HostState.DESTROYED and not include_destroyed:
+                        continue
+                    hosts_with_state.append((host_obj, state))
                 except (OSError, ValueError, KeyError) as e:
                     logger.warning("Failed to create host from record {}: {}", host_id, e)
 

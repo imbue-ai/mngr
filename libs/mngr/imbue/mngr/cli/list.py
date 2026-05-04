@@ -259,7 +259,9 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
             custom_headers[field_name.strip()] = label.strip()
 
     # Translate filter aliases (--running, --project, etc.) into CEL strings.
-    include_filters_tuple, exclude_filters_tuple = build_agent_filter_cel(opts)
+    include_filters_tuple, exclude_filters_tuple = build_agent_filter_cel(
+        opts, mngr_ctx.concurrency_group, project_root=mngr_ctx.project_root
+    )
 
     # --stdin: read agent/host refs from stdin and add as an OR'd include filter.
     # List-specific because kanpan and other commands don't take stdin input.

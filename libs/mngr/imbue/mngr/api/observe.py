@@ -42,6 +42,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 
 # === Constants ===
 
@@ -239,16 +240,13 @@ def load_base_state_from_history(
         return {}
 
     latest_agents_data: tuple[dict, ...] | None = None
+    warner = MalformedJsonLineWarner(source_description=f"observe events file '{events_path}'")
     with open(events_path) as f:
         for line in f:
-            stripped = line.strip()
-            if not stripped:
+            parsed = warner.parse(line)
+            if parsed is None:
                 continue
-            try:
-                data = json.loads(stripped)
-            except json.JSONDecodeError as e:
-                logger.trace("Skipping malformed line in event history: {}", e)
-                continue
+            data, _ = parsed
             if data.get("type") == ObserveEventType.AGENTS_FULL_STATE:
                 latest_agents_data = tuple(data.get("agents", ()))
 
@@ -413,11 +411,8 @@ class AgentObserver(MutableModel):
         stripped = line.strip()
         if not stripped:
             return
-        try:
-            event = parse_discovery_event_line(stripped)
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.trace("Failed to parse discovery event: {}", e)
-            return
+
+        event = parse_discovery_event_line(stripped)
 
         if isinstance(event, FullDiscoverySnapshotEvent):
             self._handle_full_snapshot(event)

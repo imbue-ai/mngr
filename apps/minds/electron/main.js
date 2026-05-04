@@ -849,12 +849,28 @@ function handleChromeSSEEvent(evt) {
   } else if (evt.type === 'auth_status') {
     latestChromeState.authStatus = evt;
   } else if (evt.type === 'request_count') {
-    latestChromeState.requestCount = evt.count || 0;
-    // Requests panel HTML is static at load time. Refresh any visible panels
-    // so their cards reflect the new pending list. Debounced per-bundle so
-    // a burst of count changes coalesces into one reload per panel.
+    const prevCount = latestChromeState.requestCount;
+    const newCount = evt.count || 0;
+    // Backend defaults the setting to true, but treat a missing field the
+    // same way so older backends do not regress to no-auto-open.
+    const autoOpen = evt.auto_open !== false;
+    latestChromeState.requestCount = newCount;
+    // Auto-open only when the count actually went UP. Going down (e.g.
+    // user just approved/denied) should never reopen a panel the user
+    // closed, and equal counts mean nothing inbox-relevant changed.
+    const shouldAutoOpen = autoOpen && newCount > prevCount;
+    // Requests panel HTML is static at load time. Refresh visible panels
+    // so their cards reflect the new pending list, OR open hidden ones
+    // when shouldAutoOpen is set. ``openRequestsPanel`` reloads the panel
+    // itself for the visible-bundle case, so we never need to schedule a
+    // reload on top of an open call. Debounced per-bundle so a burst of
+    // count changes coalesces into one reload per panel.
     for (const b of bundles) {
-      scheduleRequestsPanelReload(b);
+      if (shouldAutoOpen && !b.requestsPanelVisible) {
+        openRequestsPanel(b);
+      } else {
+        scheduleRequestsPanelReload(b);
+      }
     }
   }
   broadcastChromeEvent(evt);

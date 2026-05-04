@@ -10,9 +10,10 @@ mngr [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WIND
     [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>]
-    [--env <KEY=VALUE>] [--env-file <FILE>] [--grant <PERMISSION>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
+    [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--grant <PERMISSION>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
-    [--[no-]connect] [--[no-]auto-start] [--] [<AGENT_ARGS>...]
+    [--message <TEXT>] [--message-file <FILE>] [--edit-message]
+    [--[no-]connect] [--[no-]auto-start] [-y|--yes] [--] [<AGENT_ARGS>...]
 ```
 
 Create and run an agent.
@@ -73,7 +74,7 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | `--type` | text | Which type of agent to run [default: claude] | None |
 | `-w`, `--extra-window` | text | Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names | None |
 | `--label` | text | Agent label KEY=VALUE [repeatable] [experimental] | None |
-| `--project` | text | Project name for the agent (sets the 'project' label) [default: derived from git remote origin or folder name] | None |
+| `--project` | text | Project name for the agent (sets the 'project' label; '.' inherits from source agent's project label when --from references an agent, else uses the source's git remote origin, else the source's folder name) [default: .] | `.` |
 
 ## Host Options
 

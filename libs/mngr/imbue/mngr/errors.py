@@ -2,6 +2,7 @@ from pathlib import Path
 
 from click import ClickException
 
+from imbue.mngr.plugin_catalog import get_plugin_install_hint
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
@@ -380,8 +381,25 @@ class ConfigStructureError(ConfigError, TypeError):
     """Invalid configuration structure."""
 
 
+class UnknownAgentTypeError(ConfigError):
+    """Unknown agent type."""
+
+    def __init__(self, agent_type: str) -> None:
+        self.agent_type = agent_type
+        super().__init__(f"Unknown agent type '{agent_type}' and no default agent class set.")
+        self.user_help_text = get_plugin_install_hint(agent_type)
+
+
 class UnknownBackendError(ConfigError):
     """Unknown provider backend."""
+
+    def __init__(self, backend_name: str, registered: list[str]) -> None:
+        self.backend_name = backend_name
+        self.registered = list(registered)
+        registered_str = ", ".join(self.registered) or "(none)"
+        message = f"Unknown provider backend: {backend_name}. Registered backends: {registered_str}"
+        super().__init__(message)
+        self.user_help_text = get_plugin_install_hint(backend_name)
 
 
 class NestedTmuxError(MngrError):
@@ -404,3 +422,30 @@ class BinaryNotInstalledError(MngrError):
     def __init__(self, binary: str, purpose: str, install_hint: str) -> None:
         self.user_help_text = install_hint
         super().__init__(f"{binary} is required for {purpose} but was not found on PATH")
+
+
+class DiscoverySchemaChangedError(BaseMngrError, ValueError):
+    """Raised when a discovery event line cannot be validated against the current schema.
+
+    This typically means a field was added, removed, or renamed in a discovery event
+    model since the line was written. Callers should treat the on-disk events as stale,
+    regenerate via a full discovery (which appends new events in the current schema),
+    and retry. If validation fails again after regeneration, the error is real and
+    should be surfaced rather than silently dropped.
+    """
+
+    def __init__(self, event_type: str, validation_error: str) -> None:
+        self.event_type = event_type
+        self.validation_error = validation_error
+        super().__init__(f"Discovery event of type {event_type!r} does not match current schema: {validation_error}")
+
+
+class MalformedJsonlLineError(BaseMngrError, ValueError):
+    """Raised when a JSONL line is structurally invalid (e.g. not a JSON object, missing required envelope fields).
+
+    The right fix is to track down whichever process is producing the bad line and stop it
+    from doing so -- silently skipping corrupt input would just hide the underlying problem.
+    Callers that need to tolerate end-of-file partial writes should use
+    ``MalformedJsonLineWarner`` (which buffers a malformed line until the next non-empty
+    line proves it wasn't a partial write).
+    """
