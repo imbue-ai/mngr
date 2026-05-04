@@ -1,10 +1,15 @@
 """Per-agent activity state surfaced on the chat panel.
 
 The state is derived from two inputs:
-- the marker files written by the Claude readiness hooks
-  (``$MNGR_AGENT_STATE_DIR/active`` and ``permissions_waiting``)
+- the ``permissions_waiting`` marker file written by the Claude readiness hooks
+  (``$MNGR_AGENT_STATE_DIR/permissions_waiting``), which is the only state
+  signal not represented in the session transcript
 - the parsed transcript events from the agent's session JSONL files
-  (used only to distinguish ``THINKING`` from ``TOOL_RUNNING``)
+
+We deliberately do *not* consult the legacy ``active`` marker file: it can
+become stale (e.g. when Claude exits abnormally and the ``Stop`` hook never
+runs to clear it), which would falsely show "Thinking..." indefinitely. The
+transcript itself is authoritative for IDLE / THINKING / TOOL_RUNNING.
 
 Marker semantics live in ``mngr_claude.claude_config.build_readiness_hooks_config``.
 """
@@ -55,20 +60,34 @@ def has_unmatched_tool_use(events: Sequence[dict[str, Any]]) -> bool:
 
 
 @pure
+def last_event_type(events: Sequence[dict[str, Any]]) -> str | None:
+    """Return the ``type`` of the final transcript event, or ``None`` if empty."""
+    if not events:
+        return None
+    return events[-1].get("type")
+
+
+@pure
 def derive_activity_state(
     *,
-    active_marker_present: bool,
-    permissions_waiting_marker_present: bool,
+    permissions_waiting: bool,
     has_pending_tool_use: bool,
+    last_event_type: str | None,
 ) -> ActivityState:
-    """Combine marker-file presence and pending-tool state into an ``ActivityState``.
+    """Derive an ``ActivityState`` from the permissions marker plus transcript signals.
 
-    Priority: ``permissions_waiting`` > ``active`` > tool-pending.
+    Priority:
+      1. ``permissions_waiting`` -> WAITING_ON_PERMISSION (not represented in transcript).
+      2. unmatched ``tool_use`` -> TOOL_RUNNING.
+      3. last transcript event is ``user_message`` or ``tool_result`` -> THINKING
+         (Claude has been handed input but hasn't replied yet).
+      4. otherwise (last event is ``assistant_message`` or transcript is empty)
+         -> IDLE.
     """
-    if permissions_waiting_marker_present:
+    if permissions_waiting:
         return ActivityState.WAITING_ON_PERMISSION
-    if not active_marker_present:
-        return ActivityState.IDLE
     if has_pending_tool_use:
         return ActivityState.TOOL_RUNNING
-    return ActivityState.THINKING
+    if last_event_type in ("user_message", "tool_result"):
+        return ActivityState.THINKING
+    return ActivityState.IDLE

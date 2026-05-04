@@ -10,7 +10,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from imbue.minds_workspace_server.activity_state import ActivityState
-from imbue.minds_workspace_server.activity_watcher import ACTIVE_MARKER_FILENAME
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
@@ -340,8 +339,8 @@ def test_refresh_service_broadcast_rejects_non_loopback(app: FastAPI) -> None:
 
 def test_get_events_seeds_pending_tool_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Hitting /api/agents/{id}/events for a Claude session with an unmatched tool_use
-    seeds ``AgentManager._pending_tool_by_agent`` so the activity indicator reads
-    ``TOOL_RUNNING`` once the active marker is set.
+    seeds the AgentManager's transcript-derived signals so the activity indicator
+    reads ``TOOL_RUNNING`` immediately.
     """
     agent_id = "agent-pending-tool"
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
@@ -350,7 +349,6 @@ def test_get_events_seeds_pending_tool_state(tmp_path: Path, monkeypatch: pytest
 
     state_dir = tmp_path / "agents" / agent_id
     state_dir.mkdir(parents=True)
-    (state_dir / ACTIVE_MARKER_FILENAME).touch()
 
     claude_config_dir = tmp_path / "claude_config"
     projects_dir = claude_config_dir / "projects" / "hash123"
@@ -409,9 +407,9 @@ def test_get_events_seeds_pending_tool_state(tmp_path: Path, monkeypatch: pytest
     finally:
         manager.stop()
 
-    # The watcher creation path seeds pending-tool state synchronously.
+    # The watcher creation path seeds transcript-derived state synchronously.
     with manager._lock:
-        assert manager._pending_tool_by_agent[agent_id] is True
+        assert manager._has_unmatched_tool_use_by_agent[agent_id] is True
         assert manager._activity_state_by_agent[agent_id] == ActivityState.TOOL_RUNNING
 
 

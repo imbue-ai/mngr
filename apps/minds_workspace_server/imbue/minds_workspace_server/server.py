@@ -157,10 +157,10 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
             event_queues.broadcast(agent_id, event)
         # Recompute the per-agent activity state from the full transcript.
         # The session watcher's incremental ``events`` argument only contains
-        # the newest lines, but the activity tracker needs an answer to
-        # "is there *any* outstanding tool_use right now?", which requires
-        # the full transcript that the watcher has already cached.
-        agent_manager.update_pending_tool_state(agent_id, watchers[agent_id].get_all_events())
+        # the newest lines, but the activity tracker needs the full transcript
+        # to detect unmatched tool_uses across turns and to read the last
+        # event's type.
+        agent_manager.update_session_events(agent_id, watchers[agent_id].get_all_events())
 
     watcher = AgentSessionWatcher(
         agent_id=agent_info.id,
@@ -170,9 +170,9 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
     )
     watchers[agent_info.id] = watcher
     watcher.start()
-    # Seed pending-tool state once at watcher creation so the indicator does
-    # not lag a turn behind on first connect.
-    agent_manager.update_pending_tool_state(agent_info.id, watcher.get_all_events())
+    # Seed transcript-derived activity signals once at watcher creation so the
+    # indicator does not lag a turn behind on first connect.
+    agent_manager.update_session_events(agent_info.id, watcher.get_all_events())
     return watcher
 
 

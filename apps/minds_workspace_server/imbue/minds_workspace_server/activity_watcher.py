@@ -1,9 +1,14 @@
-"""Watch the per-agent ``active`` and ``permissions_waiting`` marker files.
+"""Watch the per-agent ``permissions_waiting`` marker file.
 
 The Claude readiness hooks (``mngr_claude.claude_config.build_readiness_hooks_config``)
-touch and remove these files inside ``$MNGR_AGENT_STATE_DIR/`` to signal where
-the agent is in its turn lifecycle. We use ``watchdog`` for sub-second
-reaction, mirroring the pattern from ``agent_manager._ApplicationsFileHandler``.
+touch and remove this file inside ``$MNGR_AGENT_STATE_DIR/`` to signal that Claude
+is blocked on a permission prompt. We use ``watchdog`` for sub-second reaction,
+mirroring the pattern from ``agent_manager._ApplicationsFileHandler``.
+
+The legacy ``active`` marker is intentionally not watched here: it can be left
+behind on abnormal Claude exit, leading to a stale "Thinking..." indicator. The
+session transcript is the authoritative source for the IDLE / THINKING /
+TOOL_RUNNING states.
 """
 
 from collections.abc import Callable
@@ -16,14 +21,11 @@ from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer as _Observer
 
-ACTIVE_MARKER_FILENAME = "active"
 PERMISSIONS_WAITING_MARKER_FILENAME = "permissions_waiting"
-
-_WATCHED_BASENAMES = frozenset({ACTIVE_MARKER_FILENAME, PERMISSIONS_WAITING_MARKER_FILENAME})
 
 
 class _MarkerFileHandler(FileSystemEventHandler):
-    """Fires the on_change callback whenever an ``active`` or ``permissions_waiting`` event arrives.
+    """Fires the on_change callback whenever a ``permissions_waiting`` event arrives.
 
     Filters by basename so unrelated files in the agent state directory (e.g.
     ``claude_session_id``, ``session_started``) don't trigger broadcasts.
@@ -41,7 +43,7 @@ class _MarkerFileHandler(FileSystemEventHandler):
             if not raw_path:
                 continue
             decoded = raw_path.decode("utf-8", errors="replace") if isinstance(raw_path, bytes) else raw_path
-            if Path(decoded).name in _WATCHED_BASENAMES:
+            if Path(decoded).name == PERMISSIONS_WAITING_MARKER_FILENAME:
                 self.on_change()
                 return
 
@@ -54,7 +56,7 @@ def _make_marker_file_handler(on_change: Callable[[], None]) -> _MarkerFileHandl
 
 
 class AgentMarkerWatcher:
-    """Watches the marker-file pair for a single agent.
+    """Watches the ``permissions_waiting`` marker file for a single agent.
 
     The agent state directory is created on start so the watchdog has a real
     directory to attach to even before the agent's hooks have fired for the
@@ -84,8 +86,8 @@ class AgentMarkerWatcher:
     def start(self) -> None:
         try:
             self._agent_state_dir.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            _loguru_logger.exception(
+        except OSError as exc:
+            _loguru_logger.opt(exception=exc).error(
                 "Failed to ensure marker directory for agent {} at {}",
                 self._agent_id,
                 self._agent_state_dir,
@@ -94,17 +96,9 @@ class AgentMarkerWatcher:
 
         observer = _Observer()
         handler = _make_marker_file_handler(lambda: self._on_change(self._agent_id))
-        try:
-            observer.schedule(handler, str(self._agent_state_dir), recursive=False)
-            observer.daemon = True
-            observer.start()
-        except OSError:
-            _loguru_logger.exception(
-                "Failed to start marker watcher for agent {} at {}",
-                self._agent_id,
-                self._agent_state_dir,
-            )
-            return
+        observer.schedule(handler, str(self._agent_state_dir), recursive=False)
+        observer.daemon = True
+        observer.start()
         self._observer = observer
 
     def stop(self) -> None:
@@ -113,8 +107,6 @@ class AgentMarkerWatcher:
             self._observer.join(timeout=5.0)
             self._observer = None
 
-    def read_markers(self) -> tuple[bool, bool]:
-        """Return ``(active_present, permissions_waiting_present)``."""
-        active = (self._agent_state_dir / ACTIVE_MARKER_FILENAME).exists()
-        permissions_waiting = (self._agent_state_dir / PERMISSIONS_WAITING_MARKER_FILENAME).exists()
-        return active, permissions_waiting
+    def read_permissions_waiting(self) -> bool:
+        """Return True iff the ``permissions_waiting`` marker file exists."""
+        return (self._agent_state_dir / PERMISSIONS_WAITING_MARKER_FILENAME).exists()

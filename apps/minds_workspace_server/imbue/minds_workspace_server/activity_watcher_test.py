@@ -4,14 +4,13 @@ from watchdog.events import FileCreatedEvent
 from watchdog.events import FileDeletedEvent
 from watchdog.events import FileModifiedEvent
 
-from imbue.minds_workspace_server.activity_watcher import ACTIVE_MARKER_FILENAME
 from imbue.minds_workspace_server.activity_watcher import AgentMarkerWatcher
 from imbue.minds_workspace_server.activity_watcher import PERMISSIONS_WAITING_MARKER_FILENAME
 from imbue.minds_workspace_server.activity_watcher import _make_marker_file_handler
 
 
-def test_handler_fires_on_active_marker_create(tmp_path: Path) -> None:
-    """Creating ``active`` should trigger the on_change callback.
+def test_handler_fires_on_permissions_waiting_marker_create(tmp_path: Path) -> None:
+    """Creating ``permissions_waiting`` should trigger the on_change callback.
 
     Uses ``handler.dispatch`` directly to avoid relying on the watchdog
     observer's filesystem-event timing -- watchdog's macOS FSEvents backend
@@ -21,21 +20,14 @@ def test_handler_fires_on_active_marker_create(tmp_path: Path) -> None:
     """
     fired: list[bool] = []
     handler = _make_marker_file_handler(lambda: fired.append(True))
-    handler.dispatch(FileCreatedEvent(src_path=str(tmp_path / ACTIVE_MARKER_FILENAME)))
-    assert fired == [True]
-
-
-def test_handler_fires_on_active_marker_delete(tmp_path: Path) -> None:
-    fired: list[bool] = []
-    handler = _make_marker_file_handler(lambda: fired.append(True))
-    handler.dispatch(FileDeletedEvent(src_path=str(tmp_path / ACTIVE_MARKER_FILENAME)))
-    assert fired == [True]
-
-
-def test_handler_fires_on_permissions_waiting_marker(tmp_path: Path) -> None:
-    fired: list[bool] = []
-    handler = _make_marker_file_handler(lambda: fired.append(True))
     handler.dispatch(FileCreatedEvent(src_path=str(tmp_path / PERMISSIONS_WAITING_MARKER_FILENAME)))
+    assert fired == [True]
+
+
+def test_handler_fires_on_permissions_waiting_marker_delete(tmp_path: Path) -> None:
+    fired: list[bool] = []
+    handler = _make_marker_file_handler(lambda: fired.append(True))
+    handler.dispatch(FileDeletedEvent(src_path=str(tmp_path / PERMISSIONS_WAITING_MARKER_FILENAME)))
     assert fired == [True]
 
 
@@ -44,25 +36,23 @@ def test_handler_ignores_unrelated_files(tmp_path: Path) -> None:
     handler = _make_marker_file_handler(lambda: fired.append(True))
     handler.dispatch(FileModifiedEvent(src_path=str(tmp_path / "session_started")))
     handler.dispatch(FileModifiedEvent(src_path=str(tmp_path / "claude_session_id")))
+    handler.dispatch(FileModifiedEvent(src_path=str(tmp_path / "active")))
     assert fired == []
 
 
-def test_read_markers_reflects_filesystem(tmp_path: Path) -> None:
-    """``read_markers`` is a pure filesystem read; it does not need the
-    watchdog observer to be running, so don't bother starting it -- watchdog's
-    macOS FSEvents shutdown can stall under parallel xdist."""
+def test_read_permissions_waiting_reflects_filesystem(tmp_path: Path) -> None:
+    """``read_permissions_waiting`` is a pure filesystem read; it does not need
+    the watchdog observer to be running, so don't bother starting it --
+    watchdog's macOS FSEvents shutdown can stall under parallel xdist."""
     watcher = AgentMarkerWatcher.build("agent-1", tmp_path, lambda _aid: None)
 
-    assert watcher.read_markers() == (False, False)
-
-    (tmp_path / ACTIVE_MARKER_FILENAME).touch()
-    assert watcher.read_markers() == (True, False)
+    assert watcher.read_permissions_waiting() is False
 
     (tmp_path / PERMISSIONS_WAITING_MARKER_FILENAME).touch()
-    assert watcher.read_markers() == (True, True)
+    assert watcher.read_permissions_waiting() is True
 
-    (tmp_path / ACTIVE_MARKER_FILENAME).unlink()
-    assert watcher.read_markers() == (False, True)
+    (tmp_path / PERMISSIONS_WAITING_MARKER_FILENAME).unlink()
+    assert watcher.read_permissions_waiting() is False
 
 
 def test_stop_is_safe_when_never_started(tmp_path: Path) -> None:

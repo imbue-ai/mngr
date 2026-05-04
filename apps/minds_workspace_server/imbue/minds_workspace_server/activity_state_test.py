@@ -3,6 +3,7 @@ from typing import Any
 from imbue.minds_workspace_server.activity_state import ActivityState
 from imbue.minds_workspace_server.activity_state import derive_activity_state
 from imbue.minds_workspace_server.activity_state import has_unmatched_tool_use
+from imbue.minds_workspace_server.activity_state import last_event_type
 
 
 def _assistant_with_tool_calls(*tool_call_ids: str) -> dict[str, Any]:
@@ -56,46 +57,81 @@ def test_has_unmatched_tool_use_skips_blocks_without_id() -> None:
     assert has_unmatched_tool_use(events) is False
 
 
-def test_derive_permissions_waiting_takes_priority() -> None:
+def test_last_event_type_empty() -> None:
+    assert last_event_type([]) is None
+
+
+def test_last_event_type_returns_final() -> None:
+    events: list[dict[str, Any]] = [
+        {"type": "user_message"},
+        {"type": "assistant_message", "tool_calls": []},
+    ]
+    assert last_event_type(events) == "assistant_message"
+
+
+def test_last_event_type_missing_type_key() -> None:
+    events: list[dict[str, Any]] = [{"foo": "bar"}]
+    assert last_event_type(events) is None
+
+
+def test_derive_permissions_waiting_takes_priority_over_pending_tool() -> None:
     state = derive_activity_state(
-        active_marker_present=True,
-        permissions_waiting_marker_present=True,
+        permissions_waiting=True,
         has_pending_tool_use=True,
+        last_event_type="user_message",
     )
     assert state == ActivityState.WAITING_ON_PERMISSION
 
 
-def test_derive_permissions_waiting_takes_priority_even_when_inactive() -> None:
+def test_derive_permissions_waiting_takes_priority_when_idle_signals() -> None:
     state = derive_activity_state(
-        active_marker_present=False,
-        permissions_waiting_marker_present=True,
+        permissions_waiting=True,
         has_pending_tool_use=False,
+        last_event_type="assistant_message",
     )
     assert state == ActivityState.WAITING_ON_PERMISSION
 
 
-def test_derive_idle_when_no_active_marker() -> None:
+def test_derive_tool_running_when_unmatched_tool_use() -> None:
     state = derive_activity_state(
-        active_marker_present=False,
-        permissions_waiting_marker_present=False,
-        has_pending_tool_use=False,
+        permissions_waiting=False,
+        has_pending_tool_use=True,
+        last_event_type="assistant_message",
     )
-    assert state == ActivityState.IDLE
+    assert state == ActivityState.TOOL_RUNNING
 
 
-def test_derive_thinking_when_active_no_pending_tool() -> None:
+def test_derive_thinking_when_last_event_is_user_message() -> None:
     state = derive_activity_state(
-        active_marker_present=True,
-        permissions_waiting_marker_present=False,
+        permissions_waiting=False,
         has_pending_tool_use=False,
+        last_event_type="user_message",
     )
     assert state == ActivityState.THINKING
 
 
-def test_derive_tool_running_when_active_and_pending_tool() -> None:
+def test_derive_thinking_when_last_event_is_tool_result() -> None:
     state = derive_activity_state(
-        active_marker_present=True,
-        permissions_waiting_marker_present=False,
-        has_pending_tool_use=True,
+        permissions_waiting=False,
+        has_pending_tool_use=False,
+        last_event_type="tool_result",
     )
-    assert state == ActivityState.TOOL_RUNNING
+    assert state == ActivityState.THINKING
+
+
+def test_derive_idle_when_last_event_is_assistant_message() -> None:
+    state = derive_activity_state(
+        permissions_waiting=False,
+        has_pending_tool_use=False,
+        last_event_type="assistant_message",
+    )
+    assert state == ActivityState.IDLE
+
+
+def test_derive_idle_when_no_events() -> None:
+    state = derive_activity_state(
+        permissions_waiting=False,
+        has_pending_tool_use=False,
+        last_event_type=None,
+    )
+    assert state == ActivityState.IDLE

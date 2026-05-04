@@ -26,6 +26,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds_workspace_server.activity_state import ActivityState
 from imbue.minds_workspace_server.activity_state import derive_activity_state
 from imbue.minds_workspace_server.activity_state import has_unmatched_tool_use
+from imbue.minds_workspace_server.activity_state import last_event_type
 from imbue.minds_workspace_server.activity_watcher import AgentMarkerWatcher
 from imbue.minds_workspace_server.agent_discovery import discover_agents
 from imbue.minds_workspace_server.models import AgentCreationError
@@ -166,7 +167,8 @@ class AgentManager:
     _mngr_binary: str
     _host_dir: Path
     _marker_watchers: dict[str, AgentMarkerWatcher]
-    _pending_tool_by_agent: dict[str, bool]
+    _has_unmatched_tool_use_by_agent: dict[str, bool]
+    _last_event_type_by_agent: dict[str, str | None]
     _activity_state_by_agent: dict[str, ActivityState]
 
     @classmethod
@@ -194,7 +196,8 @@ class AgentManager:
         manager._mngr_binary = mngr_binary
         manager._host_dir = Path(os.environ.get("MNGR_HOST_DIR", str(Path.home() / ".mngr")))
         manager._marker_watchers = {}
-        manager._pending_tool_by_agent = {}
+        manager._has_unmatched_tool_use_by_agent = {}
+        manager._last_event_type_by_agent = {}
         manager._activity_state_by_agent = {}
         return manager
 
@@ -928,7 +931,8 @@ class AgentManager:
         """Stop the marker watcher (if any) and clear cached activity state."""
         with self._lock:
             watcher = self._marker_watchers.pop(agent_id, None)
-            self._pending_tool_by_agent.pop(agent_id, None)
+            self._has_unmatched_tool_use_by_agent.pop(agent_id, None)
+            self._last_event_type_by_agent.pop(agent_id, None)
             self._activity_state_by_agent.pop(agent_id, None)
         if watcher is not None:
             watcher.stop()
@@ -938,31 +942,32 @@ class AgentManager:
         self._recompute_activity_state(agent_id, broadcast_on_change=True)
 
     def _recompute_activity_state(self, agent_id: str, *, broadcast_on_change: bool) -> None:
-        """Recompute activity state for ``agent_id`` from cached inputs and markers.
+        """Recompute activity state for ``agent_id`` from cached transcript signals + permissions marker.
 
         If the derived state differs from the previously cached state, the
         ``_agents`` entry is updated and (when ``broadcast_on_change`` is True)
         an ``agents_updated`` event is broadcast.
 
-        Called both from the marker-file watcher callback and from
-        :meth:`update_pending_tool_state`. A no-op for agents not in ``_agents``
+        Called from the marker-file watcher callback and from
+        :meth:`update_session_events`. A no-op for agents not in ``_agents``
         (e.g. the watcher fired moments after the agent was destroyed).
         """
         with self._lock:
             watcher = self._marker_watchers.get(agent_id)
             if watcher is None:
                 return
-        active, permissions_waiting = watcher.read_markers()
+        permissions_waiting = watcher.read_permissions_waiting()
 
         with self._lock:
             agent_state = self._agents.get(agent_id)
             if agent_state is None:
                 return
-            has_pending_tool = self._pending_tool_by_agent.get(agent_id, False)
+            has_pending_tool = self._has_unmatched_tool_use_by_agent.get(agent_id, False)
+            cached_last_event_type = self._last_event_type_by_agent.get(agent_id)
             new_state = derive_activity_state(
-                active_marker_present=active,
-                permissions_waiting_marker_present=permissions_waiting,
+                permissions_waiting=permissions_waiting,
                 has_pending_tool_use=has_pending_tool,
+                last_event_type=cached_last_event_type,
             )
             old_state = self._activity_state_by_agent.get(agent_id)
             if old_state == new_state and agent_state.activity_state == new_state.value:
@@ -980,19 +985,23 @@ class AgentManager:
         if broadcast_on_change:
             self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
-    def update_pending_tool_state(self, agent_id: str, events: list[dict[str, Any]]) -> None:
-        """Recompute pending-tool state from a sequence of session transcript events.
+    def update_session_events(self, agent_id: str, events: list[dict[str, Any]]) -> None:
+        """Recompute transcript-derived activity signals from the full event list.
 
         Called by ``server._get_or_create_watcher`` whenever the
         :class:`AgentSessionWatcher` learns of new events. Cheap to call: short
-        circuits when the unmatched-tool-use boolean is unchanged.
+        circuits when both the unmatched-tool-use boolean and the last event
+        type are unchanged.
         """
         new_pending = has_unmatched_tool_use(events)
+        new_last_type = last_event_type(events)
         with self._lock:
-            old_pending = self._pending_tool_by_agent.get(agent_id, False)
-            if old_pending == new_pending:
+            old_pending = self._has_unmatched_tool_use_by_agent.get(agent_id, False)
+            old_last_type = self._last_event_type_by_agent.get(agent_id)
+            if old_pending == new_pending and old_last_type == new_last_type:
                 return
-            self._pending_tool_by_agent[agent_id] = new_pending
+            self._has_unmatched_tool_use_by_agent[agent_id] = new_pending
+            self._last_event_type_by_agent[agent_id] = new_last_type
 
         self._recompute_activity_state(agent_id, broadcast_on_change=True)
 

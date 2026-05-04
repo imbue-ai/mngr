@@ -12,7 +12,6 @@ from watchdog.events import FileModifiedEvent
 from watchdog.events import FileMovedEvent
 
 from imbue.minds_workspace_server.activity_state import ActivityState
-from imbue.minds_workspace_server.activity_watcher import ACTIVE_MARKER_FILENAME
 from imbue.minds_workspace_server.activity_watcher import PERMISSIONS_WAITING_MARKER_FILENAME
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.agent_manager import _LogQueueCallback
@@ -921,15 +920,14 @@ def test_ensure_marker_watcher_seeds_idle_state_silently(
         agent_manager.stop()
 
 
-def test_marker_change_broadcasts_new_activity_state(
+def test_session_events_user_message_drives_thinking(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster, tmp_path: Path
 ) -> None:
-    """Touching the active marker flips the broadcast activity_state to THINKING.
+    """A user_message at the tail of the transcript flips activity_state to THINKING.
 
-    The marker file is created and ``_on_markers_changed`` is invoked directly
-    rather than waiting on the watchdog observer to fire -- watchdog's macOS
-    FSEvents backend is flaky under parallel xdist, and the recompute logic is
-    the same regardless of who triggers the callback.
+    Replaces the old behavior where THINKING was driven by a transient ``active``
+    marker file -- that marker could leak past the end of a turn and falsely
+    pin the indicator on "Thinking...". Transcript content is now authoritative.
     """
     state_dir = tmp_path / "agents" / "agent-1"
     state_dir.mkdir(parents=True)
@@ -938,8 +936,10 @@ def test_marker_change_broadcasts_new_activity_state(
 
     listener = broadcaster.register()
     try:
-        (state_dir / ACTIVE_MARKER_FILENAME).touch()
-        agent_manager._on_markers_changed("agent-1")
+        agent_manager.update_session_events(
+            "agent-1",
+            [{"type": "user_message", "content": "go"}],
+        )
         with agent_manager._lock:
             assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.THINKING
         latest = _last_agents_updated(_drain(listener))
@@ -951,16 +951,43 @@ def test_marker_change_broadcasts_new_activity_state(
         agent_manager.stop()
 
 
-def test_permissions_marker_overrides_thinking(
+def test_session_events_assistant_message_at_tail_is_idle(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster, tmp_path: Path
 ) -> None:
+    """An assistant_message with no pending tools at the tail means IDLE."""
     state_dir = tmp_path / "agents" / "agent-1"
     state_dir.mkdir(parents=True)
-    (state_dir / ACTIVE_MARKER_FILENAME).touch()
     _seed_agent(agent_manager, "agent-1")
     agent_manager._ensure_marker_watcher("agent-1")
 
     try:
+        agent_manager.update_session_events(
+            "agent-1",
+            [
+                {"type": "user_message", "content": "go"},
+                {"type": "assistant_message", "tool_calls": []},
+            ],
+        )
+        with agent_manager._lock:
+            assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.IDLE
+    finally:
+        agent_manager.stop()
+
+
+def test_permissions_marker_overrides_thinking(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster, tmp_path: Path
+) -> None:
+    """A live permissions_waiting marker overrides transcript-derived THINKING."""
+    state_dir = tmp_path / "agents" / "agent-1"
+    state_dir.mkdir(parents=True)
+    _seed_agent(agent_manager, "agent-1")
+    agent_manager._ensure_marker_watcher("agent-1")
+
+    try:
+        agent_manager.update_session_events(
+            "agent-1",
+            [{"type": "user_message", "content": "go"}],
+        )
         with agent_manager._lock:
             assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.THINKING
 
@@ -975,12 +1002,11 @@ def test_permissions_marker_overrides_thinking(
         agent_manager.stop()
 
 
-def test_update_pending_tool_state_flips_to_tool_running(
+def test_update_session_events_flips_to_tool_running(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster, tmp_path: Path
 ) -> None:
     state_dir = tmp_path / "agents" / "agent-1"
     state_dir.mkdir(parents=True)
-    (state_dir / ACTIVE_MARKER_FILENAME).touch()
     _seed_agent(agent_manager, "agent-1")
     agent_manager._ensure_marker_watcher("agent-1")
 
@@ -992,7 +1018,7 @@ def test_update_pending_tool_state_flips_to_tool_running(
                 "tool_calls": [{"tool_call_id": "call_a", "tool_name": "Bash"}],
             }
         ]
-        agent_manager.update_pending_tool_state("agent-1", events_with_pending)
+        agent_manager.update_session_events("agent-1", events_with_pending)
 
         with agent_manager._lock:
             assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.TOOL_RUNNING
@@ -1003,25 +1029,25 @@ def test_update_pending_tool_state_flips_to_tool_running(
         assert isinstance(agents, list)
         assert agents[0]["activity_state"] == ActivityState.TOOL_RUNNING.value
 
-        # Once the result lands, we flip back to THINKING.
+        # Once the result lands, we flip to THINKING (last event is tool_result,
+        # no pending tool_use remains).
         events_resolved = events_with_pending + [{"type": "tool_result", "tool_call_id": "call_a"}]
-        agent_manager.update_pending_tool_state("agent-1", events_resolved)
+        agent_manager.update_session_events("agent-1", events_resolved)
         with agent_manager._lock:
             assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.THINKING
     finally:
         agent_manager.stop()
 
 
-def test_update_pending_tool_state_no_op_when_no_watcher(agent_manager: AgentManager) -> None:
-    """Calling update_pending_tool_state for an unknown agent is a quiet no-op."""
-    agent_manager.update_pending_tool_state(
+def test_update_session_events_no_op_when_no_watcher(agent_manager: AgentManager) -> None:
+    """Calling update_session_events for an unknown agent is a quiet no-op."""
+    agent_manager.update_session_events(
         "ghost",
         [{"type": "assistant_message", "tool_calls": [{"tool_call_id": "x", "tool_name": "Bash"}]}],
     )
-    # No exception -- and no cached state should be created.
+    # No exception -- and no activity_state is derived because there's no
+    # watcher to read the permissions_waiting marker from.
     with agent_manager._lock:
-        # We do cache the pending-tool boolean even without a watcher, but no
-        # activity_state is derived because there's no watcher to read markers from.
         assert "ghost" not in agent_manager._activity_state_by_agent
 
 
@@ -1030,20 +1056,27 @@ def test_stop_marker_watcher_clears_caches(
 ) -> None:
     state_dir = tmp_path / "agents" / "agent-1"
     state_dir.mkdir(parents=True)
-    (state_dir / ACTIVE_MARKER_FILENAME).touch()
     _seed_agent(agent_manager, "agent-1")
     agent_manager._ensure_marker_watcher("agent-1")
+    # Seed a non-default cached state so we can verify it's cleared.
+    agent_manager.update_session_events(
+        "agent-1",
+        [{"type": "user_message", "content": "go"}],
+    )
 
     with agent_manager._lock:
         assert "agent-1" in agent_manager._marker_watchers
         assert "agent-1" in agent_manager._activity_state_by_agent
+        assert "agent-1" in agent_manager._has_unmatched_tool_use_by_agent
+        assert "agent-1" in agent_manager._last_event_type_by_agent
 
     agent_manager._stop_marker_watcher("agent-1")
 
     with agent_manager._lock:
         assert "agent-1" not in agent_manager._marker_watchers
         assert "agent-1" not in agent_manager._activity_state_by_agent
-        assert "agent-1" not in agent_manager._pending_tool_by_agent
+        assert "agent-1" not in agent_manager._has_unmatched_tool_use_by_agent
+        assert "agent-1" not in agent_manager._last_event_type_by_agent
 
 
 def test_handle_agent_destroyed_stops_marker_watcher(
@@ -1087,9 +1120,9 @@ def test_full_snapshot_preserves_activity_state_for_existing_watcher(
 
     state_dir = tmp_path / "agents" / str_id
     state_dir.mkdir(parents=True)
-    (state_dir / ACTIVE_MARKER_FILENAME).touch()
 
-    # First, simulate the agent already being tracked with a live watcher.
+    # First, simulate the agent already being tracked with a live watcher
+    # whose transcript signals THINKING (a user_message with no reply).
     discovered = DiscoveredAgent(
         host_id=HostId(),
         agent_id=test_agent_id,
@@ -1098,6 +1131,7 @@ def test_full_snapshot_preserves_activity_state_for_existing_watcher(
         certified_data={"labels": {}, "work_dir": str(tmp_path / "work")},
     )
     agent_manager._handle_agent_discovered(make_agent_discovery_event(discovered))
+    agent_manager.update_session_events(str_id, [{"type": "user_message", "content": "go"}])
     with agent_manager._lock:
         assert agent_manager._activity_state_by_agent[str_id] == ActivityState.THINKING
         assert agent_manager._agents[str_id].activity_state == ActivityState.THINKING.value
