@@ -974,6 +974,15 @@ class AgentManager:
         permissions_waiting = watcher.read_permissions_waiting()
 
         with self._lock:
+            # Re-check the watcher under the lock that guards the activity caches:
+            # ``_stop_marker_watcher`` may have run between the marker read above
+            # and re-entering the lock, in which case the per-agent caches were
+            # just cleared. Writing a fresh ``activity_state`` now would leak a
+            # stale entry into ``_activity_state_by_agent`` that nothing would
+            # ever reach to clean up, and would re-attach an ``activity_state``
+            # to an ``AgentStateItem`` whose marker watcher is gone.
+            if agent_id not in self._marker_watchers:
+                return
             agent_state = self._agents.get(agent_id)
             if agent_state is None:
                 return
