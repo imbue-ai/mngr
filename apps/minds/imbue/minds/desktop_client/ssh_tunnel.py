@@ -68,8 +68,7 @@ class LoopbackWithoutTunnelError(SSHTunnelError):
         self.agent_id = agent_id
         self.backend_url = backend_url
         super().__init__(
-            f"no SSH tunnel available for agent {agent_id}; "
-            f"refusing to dial host loopback at {backend_url}"
+            f"no SSH tunnel available for agent {agent_id}; refusing to dial host loopback at {backend_url}"
         )
 
 
