@@ -37,6 +37,11 @@
 
   function pollUntilHealthy() {
     if (pollTimer !== null) return;
+    // Set synchronously to a sentinel so concurrent re-entries (e.g. a
+    // second pollUntilHealthy() before the first fetch resolves) hit the
+    // guard above instead of spawning a second polling loop. The real
+    // timer id replaces this once the first tick resolves.
+    pollTimer = -1;
     var tick = function () {
       fetch('/api/agents/' + encodeURIComponent(agentId) + '/health', { credentials: 'same-origin' })
         .then(function (resp) { return resp.ok ? resp.json() : null; })
