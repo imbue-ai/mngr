@@ -731,10 +731,14 @@ def is_loopback_url(url: str) -> bool:
     Used by the desktop client's proxy to decide whether a registered backend
     URL is only safely reachable through an SSH tunnel: a loopback URL points
     at the agent container's interface, not the host's, so dialing it
-    directly from the host would hit an unrelated process. Hostnames that
-    are not IP literals (``example.com``, ``ws-backend``, etc.) are not
-    loopback even if they happen to resolve there in some environments --
-    only literal loopback URLs are gated.
+    directly from the host would hit an unrelated process.
+
+    The literal hostname ``localhost`` is also treated as loopback because
+    ``parse_url_host_port`` normalizes it to ``127.0.0.1`` before the IP
+    check. Other hostnames (``example.com``, ``ws-backend``, container/DNS
+    names, etc.) are NOT considered loopback even if they happen to resolve
+    there in some environments -- only loopback IP literals and
+    ``localhost`` are gated.
     """
     host, _ = parse_url_host_port(url)
     try:
