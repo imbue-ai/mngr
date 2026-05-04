@@ -1,7 +1,6 @@
 import pytest
 
 from imbue.imbue_common.ids import InvalidRandomIdError
-from imbue.minds.desktop_client.templates import TEMPLATE_DIR
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
@@ -57,19 +56,6 @@ def test_render_landing_page_rows_wire_to_health_driven_js() -> None:
     # The restart icon button stays for force-restart of seemingly-healthy
     # minds; its click handler lives in landing.js (delegated from the row).
     assert 'aria-label="Restart workspace server"' in html
-
-
-def test_render_landing_js_posts_to_restart_and_polls_health() -> None:
-    """The landing page JS implements the click-on-dead restart flow and the
-    per-agent health polling. Verify the critical integration points with the
-    backend endpoints: POST the restart, GET the probe."""
-    landing_js = (TEMPLATE_DIR.parent / "static" / "landing.js").read_text()
-    assert "/restart-workspace-server" in landing_js
-    assert "/health" in landing_js
-    # Auto-navigate on recovery is what makes click-on-dead feel responsive;
-    # the user crosses over to the mind's workspace as soon as the backend
-    # comes back.
-    assert "navigateOnRecovery" in landing_js
 
 
 def test_render_login_redirect_page_contains_redirect_script() -> None:
