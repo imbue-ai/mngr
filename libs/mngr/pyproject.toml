@@ -51,6 +51,9 @@ Repository = "https://github.com/imbue-ai/mngr"
 [project.scripts]
 mngr = "imbue.mngr.main:cli"
 
+[project.entry-points.resource_guards]
+mngr = "imbue.mngr.register_guards:register_mngr_guards"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

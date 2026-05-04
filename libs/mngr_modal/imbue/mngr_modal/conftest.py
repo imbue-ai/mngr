@@ -12,6 +12,7 @@ import modal.exception
 import pluggy
 import pytest
 import toml
+from loguru import logger
 from modal.environments import delete_environment
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -345,7 +346,8 @@ def _get_leaked_modal_apps() -> list[tuple[str, str]]:
             for app in apps
             if app.get("Description", "") in worker_modal_app_names and app.get("State", "") != "stopped"
         ]
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
+        logger.warning("Failed to list leaked modal apps: {}", e)
         return []
 
 
@@ -371,7 +373,8 @@ def _get_leaked_modal_volumes() -> list[str]:
             return []
         volumes = json.loads(result.stdout)
         return [v.get("Name", "") for v in volumes if v.get("Name", "") in worker_modal_volume_names]
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
+        logger.warning("Failed to list leaked modal volumes: {}", e)
         return []
 
 
@@ -397,7 +400,8 @@ def _get_leaked_modal_environments() -> list[str]:
             return []
         envs = json.loads(result.stdout)
         return [e.get("name", "") for e in envs if e.get("name", "") in worker_modal_environment_names]
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
+        logger.warning("Failed to list leaked modal environments: {}", e)
         return []
 
 

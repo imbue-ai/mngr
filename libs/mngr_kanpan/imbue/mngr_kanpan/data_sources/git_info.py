@@ -1,9 +1,11 @@
 from collections.abc import Sequence
 from pathlib import Path
 from subprocess import TimeoutExpired
+from typing import Literal
 
 from loguru import logger
 from pydantic import Field
+from pydantic import TypeAdapter
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
@@ -21,6 +23,7 @@ from imbue.mngr_kanpan.data_source import FieldValue
 class CommitsAheadField(FieldValue):
     """Number of commits ahead of the remote tracking branch."""
 
+    kind: Literal["commits_ahead"] = Field(default="commits_ahead", description="Discriminator tag")
     count: int | None = Field(description="Commits ahead count, None if unknown")
     has_work_dir: bool = Field(default=True, description="Whether the agent has a local work directory")
 
@@ -32,6 +35,9 @@ class CommitsAheadField(FieldValue):
         if self.count == 0:
             return CellDisplay(text="[up to date]")
         return CellDisplay(text=f"[{self.count} unpushed]")
+
+
+_COMMITS_AHEAD_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(CommitsAheadField)
 
 
 class GitInfoDataSource(FrozenModel):
@@ -50,8 +56,8 @@ class GitInfoDataSource(FrozenModel):
         return {FIELD_COMMITS_AHEAD: "GIT"}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        return {FIELD_COMMITS_AHEAD: CommitsAheadField}
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
+        return {FIELD_COMMITS_AHEAD: _COMMITS_AHEAD_ADAPTER}
 
     def compute(
         self,

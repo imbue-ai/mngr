@@ -535,7 +535,7 @@ def _apply_agent_changes(
 CommandHelpMetadata(
     key="limit",
     one_line_description="Configure limits for agents and hosts [experimental]",
-    synopsis="mngr [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--grant <PERM>] [--revoke <PERM>]",
+    synopsis="mngr [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--grant <PERM>] [--revoke <PERM>]",
     arguments_description="- `AGENTS`: Agent name(s) or ID(s) to configure (can also be specified via `--agent`)",
     description="""Agents effectively have permissions that are equivalent to the *union* of all
 permissions on the same host. Changing permissions for agents requires them

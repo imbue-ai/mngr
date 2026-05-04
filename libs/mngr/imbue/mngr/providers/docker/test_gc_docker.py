@@ -19,9 +19,9 @@ from imbue.mngr.api.gc import gc
 from imbue.mngr.api.gc import gc_machines
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
@@ -133,6 +133,11 @@ def test_gc_machines_destroys_running_docker_host_with_no_agents(
 ) -> None:
     """GC should destroy a running Docker host that has no agents.
 
+    destroy_host marks the host as DESTROYED but preserves the record so
+    gc_snapshots can age-gate snapshot cleanup. The record itself is
+    purged by a later gc_machines pass (via delete_host) once the host
+    has aged past destroyed_host_persisted_seconds.
+
     Overrides the 10-minute min-age GC guard (ae44584ac) via the
     ``config.providers[<name>]`` override hook. The guard protects real
     hosts from transient empty-agent windows; this test wants GC to
@@ -175,5 +180,8 @@ def test_gc_machines_destroys_running_docker_host_with_no_agents(
     assert len(result.machines_destroyed) == 1
     assert result.machines_destroyed[0].host_id == host_id
 
-    with pytest.raises(HostNotFoundError):
-        docker_provider.get_host(host_id)
+    # Record persists in DESTROYED state; default discovery excludes it,
+    # but include_destroyed=True surfaces it for gc_snapshots.
+    assert docker_provider.get_host(host_id).get_state() == HostState.DESTROYED
+    default_hosts = docker_provider.discover_hosts(temp_mngr_ctx.concurrency_group)
+    assert host_id not in {h.host_id for h in default_hosts}

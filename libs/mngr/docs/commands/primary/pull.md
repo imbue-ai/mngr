@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr pull [SOURCE] [DESTINATION] [--source-agent <AGENT>] [--dry-run] [--stop]
+mngr pull [SOURCE] [DESTINATION] [--source <SOURCE>] [--source-agent <AGENT>] [--sync-mode <MODE>] [--include PATTERN] [--dry-run] [--stop]
 ```
 
 Pull files or git commits from an agent to local machine [experimental].

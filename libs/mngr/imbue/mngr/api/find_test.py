@@ -1,10 +1,14 @@
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from pydantic import Field
 
+from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import ParsedSourceLocation
 from imbue.mngr.api.find import determine_resolved_path
+from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import find_agents_by_identifiers_or_state
 from imbue.mngr.api.find import find_all_matching_agents
 from imbue.mngr.api.find import find_all_matching_hosts
@@ -14,6 +18,8 @@ from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.find import parse_source_string
 from imbue.mngr.api.find import resolve_agent_reference
 from imbue.mngr.api.find import resolve_host_reference
+from imbue.mngr.cli.testing import create_test_agent
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import UserInputError
@@ -29,6 +35,7 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 
 def test_parse_source_string_with_agent_only() -> None:
@@ -957,3 +964,63 @@ def test_find_all_matching_agents_filtered_by_host() -> None:
     result = find_all_matching_agents("shared", {host1: [agent1], host2: [agent2]}, resolved_host=host1)
     assert len(result) == 1
     assert result[0] == (host1, agent1)
+
+
+class _TimeoutCapturingAgent(BaseAgent[AgentTypeConfig]):
+    """Test agent that records the timeout passed to wait_for_ready_signal."""
+
+    captured_timeouts: list[float | None] = Field(default_factory=list)
+
+    def wait_for_ready_signal(
+        self,
+        is_creating: bool,
+        start_action: Callable[[], None],
+        timeout: float | None = None,
+    ) -> None:
+        self.captured_timeouts.append(timeout)
+
+
+@pytest.mark.tmux
+def test_ensure_agent_started_uses_per_agent_ready_timeout(
+    local_provider: LocalProviderInstance,
+    temp_work_dir: Path,
+) -> None:
+    """ensure_agent_started must use the agent's configured ready_timeout_seconds."""
+    agent = create_test_agent(
+        local_provider,
+        temp_work_dir,
+        agent_config=None,
+        agent_type=None,
+        extra_data={"ready_timeout_seconds": 42.0},
+        agent_class=_TimeoutCapturingAgent,
+    )
+    assert isinstance(agent, _TimeoutCapturingAgent)
+    assert agent.get_lifecycle_state() == AgentLifecycleState.STOPPED
+
+    ensure_agent_started(agent, agent.host, is_start_desired=True)
+
+    assert agent.captured_timeouts == [42.0]
+
+
+@pytest.mark.tmux
+def test_ensure_agent_started_respects_env_var_when_data_unset(
+    local_provider: LocalProviderInstance,
+    temp_work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ensure_agent_started must honor MNGR_AGENT_READY_TIMEOUT when data.json has no override."""
+    monkeypatch.setenv("MNGR_AGENT_READY_TIMEOUT", "37.5")
+    agent = create_test_agent(
+        local_provider,
+        temp_work_dir,
+        agent_config=None,
+        agent_type=None,
+        extra_data=None,
+        agent_class=_TimeoutCapturingAgent,
+    )
+    assert isinstance(agent, _TimeoutCapturingAgent)
+    assert agent.get_lifecycle_state() == AgentLifecycleState.STOPPED
+
+    ensure_agent_started(agent, agent.host, is_start_desired=True)
+
+    assert agent.captured_timeouts == [37.5]

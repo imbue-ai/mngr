@@ -13,6 +13,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rul
 from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extension
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
 from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_without_strict_mode
+from imbue.imbue_common.test_profiles import detect_branch
 
 _REPO_ROOT = Path(__file__).parent
 
@@ -382,6 +383,40 @@ def test_every_project_with_tests_has_coverage_config() -> None:
 
     assert len(errors) == 0, "Projects with tests are missing coverage configuration:\n" + "\n".join(
         f"  - {e}" for e in errors
+    )
+
+
+# --- Changelog entry enforcement ---
+
+# Branch prefixes that are exempt from the changelog requirement
+_CHANGELOG_EXEMPT_BRANCH_PREFIXES: tuple[str, ...] = ("mngr/changelog-consolidation",)
+
+
+# Marked as acceptance because this check should be done soon before merging,
+# not during iteration.
+@pytest.mark.acceptance
+def test_pr_has_changelog_entry() -> None:
+    """Ensure every PR branch has a corresponding changelog entry file.
+
+    Each PR must include a file at changelog/<branch-name>.md where slashes
+    in the branch name are replaced with dashes. This is enforced so that
+    the nightly changelog consolidation agent has material to work with.
+    """
+    branch = detect_branch()
+
+    if not branch or branch in ("main", "release"):
+        pytest.skip("Not a PR branch")
+
+    for prefix in _CHANGELOG_EXEMPT_BRANCH_PREFIXES:
+        if branch.startswith(prefix):
+            pytest.skip(f"Branch '{branch}' is exempt from changelog requirement")
+
+    sanitized = branch.replace("/", "-")
+    changelog_file = _REPO_ROOT / "changelog" / f"{sanitized}.md"
+    assert changelog_file.exists(), (
+        f"Missing changelog entry for branch '{branch}'.\n"
+        f"Create the file: changelog/{sanitized}.md\n"
+        f"This file should briefly describe the user-visible changes in this PR."
     )
 
 

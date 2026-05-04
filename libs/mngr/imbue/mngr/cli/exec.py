@@ -256,7 +256,7 @@ def _emit_json_output(result: MultiExecResult) -> None:
 CommandHelpMetadata(
     key="exec",
     one_line_description="Execute a shell command on one or more agents' hosts",
-    synopsis="mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>]",
+    synopsis="mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>] [--[no-]start]",
     arguments_description=(
         "- `AGENTS`: Name(s) or ID(s) of the agent(s) whose host will run the command\n"
         "- `COMMAND`: Shell command to execute on the agent's host"

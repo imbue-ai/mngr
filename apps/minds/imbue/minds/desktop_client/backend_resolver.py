@@ -328,6 +328,16 @@ class MngrCliBackendResolver(BackendResolverInterface):
             except (OSError, RuntimeError) as e:
                 logger.warning("Resolver change callback failed: {}", e)
 
+    def notify_change(self) -> None:
+        """Public wake-up for SSE listeners after external state mutations.
+
+        ``_fire_on_change`` is fired internally on agent/service updates, but
+        the request inbox lives outside this resolver. Inbox mutations
+        (new request events, mirrored response events) call this so chrome
+        SSE consumers don't have to wait for the next 30s poll tick.
+        """
+        self._fire_on_change()
+
     def update_agents(self, result: ParsedAgentsResult) -> None:
         """Replace the known agent list and SSH info. Thread-safe."""
         with self._lock:
@@ -560,11 +570,7 @@ class MngrStreamManager(MutableModel):
         - AGENT_DESTROYED: incrementally removes a single agent
         - HOST_DESTROYED: removes all agents that were on the destroyed host
         """
-        try:
-            event = parse_discovery_event_line(line)
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.opt(exception=e).error("Failed to parse discovery event line (line: {})", line[:200])
-            return
+        event = parse_discovery_event_line(line)
 
         if isinstance(event, FullDiscoverySnapshotEvent):
             self._handle_full_snapshot(event)
@@ -578,8 +584,7 @@ class MngrStreamManager(MutableModel):
             self._handle_host_destroyed(event)
         elif isinstance(event, DiscoveryErrorEvent):
             self._handle_discovery_error(event)
-        elif event is None:
-            logger.warning("Unrecognized discovery event line: {}", line[:200])
+        # FIXME: make the match exhaustive so that we have to think about what to do when there are new types
         else:
             logger.trace("Ignoring discovery event: {}", type(event).__name__)
 
