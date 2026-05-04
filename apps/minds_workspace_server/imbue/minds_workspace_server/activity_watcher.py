@@ -101,11 +101,29 @@ class AgentMarkerWatcher:
         observer.start()
         self._observer = observer
 
-    def stop(self) -> None:
+    def request_stop(self) -> None:
+        """Signal the watchdog observer to stop without waiting for it to join.
+
+        Pair with :meth:`wait_stopped` for fan-out shutdown across many
+        watchers; use :meth:`stop` for the per-agent serial shutdown path.
+        """
         if self._observer is not None:
             self._observer.stop()
-            self._observer.join(timeout=5.0)
+
+    def wait_stopped(self, timeout: float = 5.0) -> None:
+        """Join the watchdog observer thread that ``request_stop`` signalled.
+
+        Safe to call without a prior ``request_stop`` (the join just returns
+        immediately for an already-stopped observer).
+        """
+        if self._observer is not None:
+            self._observer.join(timeout=timeout)
             self._observer = None
+
+    def stop(self) -> None:
+        """Stop and join the watchdog observer in a single synchronous call."""
+        self.request_stop()
+        self.wait_stopped()
 
     def read_permissions_waiting(self) -> bool:
         """Return True iff the ``permissions_waiting`` marker file exists."""

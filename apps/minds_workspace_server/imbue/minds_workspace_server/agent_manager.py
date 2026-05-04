@@ -231,8 +231,13 @@ class AgentManager:
         with self._lock:
             watchers = list(self._marker_watchers.values())
             self._marker_watchers.clear()
+        # Two-phase shutdown so total wall time is bounded by the join timeout
+        # rather than scaling linearly with the number of agents -- mirrors the
+        # ``_app_observers`` shutdown above.
         for watcher in watchers:
-            watcher.stop()
+            watcher.request_stop()
+        for watcher in watchers:
+            watcher.wait_stopped()
 
     @property
     def broadcaster(self) -> WebSocketBroadcaster:
