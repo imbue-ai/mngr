@@ -13,6 +13,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import PLACEHOLDER_ANTHROPIC_API_KEY
+from imbue.minds.desktop_client.agent_creator import _RedactingOutputCallback
 from imbue.minds.desktop_client.agent_creator import _build_inject_anthropic_command
 from imbue.minds.desktop_client.agent_creator import _build_latchkey_gateway_url
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
@@ -23,6 +24,8 @@ from imbue.minds.desktop_client.agent_creator import _leased_agent_address
 from imbue.minds.desktop_client.agent_creator import _load_lease_info
 from imbue.minds.desktop_client.agent_creator import _load_or_create_leased_host_keypair
 from imbue.minds.desktop_client.agent_creator import _make_host_name
+from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
+from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import _remove_dynamic_host_entry
 from imbue.minds.desktop_client.agent_creator import _remove_lease_info
 from imbue.minds.desktop_client.agent_creator import _save_lease_info
@@ -34,8 +37,8 @@ from imbue.minds.desktop_client.agent_creator import make_log_callback
 from imbue.minds.desktop_client.agent_creator import run_mngr_create
 from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
 from imbue.minds.desktop_client.host_pool_client import HostPoolClient
-from imbue.minds.desktop_client.latchkey.gateway import AGENT_SIDE_LATCHKEY_PORT
-from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
+from imbue.minds.desktop_client.latchkey.core import AGENT_SIDE_LATCHKEY_PORT
+from imbue.minds.desktop_client.latchkey.core import Latchkey
 from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
 from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyClient
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -100,6 +103,96 @@ def test_is_local_path_tilde() -> None:
 def test_is_local_path_url() -> None:
     assert _is_local_path("https://github.com/user/repo.git") is False
     assert _is_local_path("git@github.com:user/repo.git") is False
+
+
+# -- _redact_url_credentials tests --
+
+
+def test_redact_url_credentials_strips_user_password() -> None:
+    assert (
+        _redact_url_credentials("https://x-access-token:ghp_secret@github.com/user/repo.git")
+        == "https://github.com/user/repo.git"
+    )
+
+
+def test_redact_url_credentials_leaves_plain_url_untouched() -> None:
+    assert _redact_url_credentials("https://github.com/user/repo.git") == "https://github.com/user/repo.git"
+
+
+def test_redact_url_credentials_leaves_ssh_url_untouched() -> None:
+    # SSH-style URLs (git@host:path) have no scheme, so urlsplit returns an
+    # empty netloc. The function must pass them through unchanged.
+    assert _redact_url_credentials("git@github.com:user/repo.git") == "git@github.com:user/repo.git"
+
+
+def test_redact_url_credentials_leaves_local_path_untouched() -> None:
+    assert _redact_url_credentials("/home/user/my-template") == "/home/user/my-template"
+
+
+# -- _redact_url_credentials_in_text tests --
+
+
+def test_redact_url_credentials_in_text_strips_embedded_url() -> None:
+    # Typical git stderr on auth failure -- we must scrub the token but keep
+    # the rest of the message for debuggability.
+    line = "fatal: unable to access 'https://x-access-token:ghp_secret@github.com/user/repo.git/': 403"
+    assert _redact_url_credentials_in_text(line) == "fatal: unable to access 'https://github.com/user/repo.git/': 403"
+
+
+def test_redact_url_credentials_in_text_leaves_plain_text_untouched() -> None:
+    assert _redact_url_credentials_in_text("no URLs here") == "no URLs here"
+    assert _redact_url_credentials_in_text("Cloning into 'my-repo'...") == "Cloning into 'my-repo'..."
+
+
+def test_redact_url_credentials_in_text_strips_multiple_urls() -> None:
+    text = "a https://u:p@host1/x and b https://user@host2/y"
+    assert _redact_url_credentials_in_text(text) == "a https://host1/x and b https://host2/y"
+
+
+def test_redact_url_credentials_in_text_leaves_bare_scp_url_untouched() -> None:
+    # SCP-style SSH URLs don't have a scheme, so the regex won't match and
+    # the user@host prefix (not a secret) is preserved.
+    assert (
+        _redact_url_credentials_in_text("cloning from git@github.com:user/repo.git")
+        == "cloning from git@github.com:user/repo.git"
+    )
+
+
+@pytest.mark.timeout(30)
+def test_clone_git_repo_redacts_credentials_in_error(tmp_path: Path) -> None:
+    """GitCloneError must not leak embedded credentials from git's stderr."""
+    # Point at a clearly-bogus credentialed URL; git will fail and echo the
+    # URL in its stderr. The raised error must have the token stripped.
+    # Bound the run time: git's default connect behaviour is unspecified and
+    # a restrictive-firewall configuration could otherwise let this hang.
+    dest = tmp_path / "dest"
+    secret_token = "ghp_thisshouldneverappear"
+    bad_url = f"https://x-access-token:{secret_token}@127.0.0.1:1/does-not-exist.git"
+    with pytest.raises(GitCloneError) as excinfo:
+        clone_git_repo(GitUrl(bad_url), dest)
+    assert secret_token not in str(excinfo.value)
+
+
+# -- _RedactingOutputCallback tests --
+
+
+def test_redacting_output_callback_redacts_and_forwards_is_stdout_flag() -> None:
+    """The wrapper must scrub credentials and pass the is_stdout flag through."""
+    received: list[tuple[str, bool]] = []
+
+    def inner(line: str, is_stdout: bool) -> None:
+        received.append((line, is_stdout))
+
+    wrapper = _RedactingOutputCallback(inner=inner)
+    # A line with an embedded credentialed URL -- userinfo must be stripped,
+    # and the is_stdout flag must be forwarded verbatim.
+    wrapper("fatal: unable to access 'https://x-access-token:ghp_secret@github.com/u/r.git/'", False)
+    # A line with no URL -- must pass through unchanged, with is_stdout=True preserved.
+    wrapper("Cloning into 'my-repo'...", True)
+    assert received == [
+        ("fatal: unable to access 'https://github.com/u/r.git/'", False),
+        ("Cloning into 'my-repo'...", True),
+    ]
 
 
 # -- _build_mngr_create_command tests --
@@ -999,33 +1092,30 @@ def test_agent_creator_cleans_up_pre_spawned_latchkey_gateway_on_failure(
     )
     fake_binary.chmod(0o755)
 
-    gateway_manager = LatchkeyGatewayManager(latchkey_binary=str(fake_binary))
-    gateway_manager.start(data_dir=tmp_path / "gateway-data")
-    try:
-        creator = AgentCreator(
-            paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-            latchkey_gateway_manager=gateway_manager,
-            root_concurrency_group=root_concurrency_group,
-            notification_dispatcher=notification_dispatcher,
-        )
-        # "Local path" that does not exist -- mngr create will not even get
-        # the chance to fail; _create_agent_background aborts with MngrCommandError.
-        agent_id = creator.start_creation("/definitely/not/here", launch_mode=LaunchMode.DEV)
+    latchkey = Latchkey(latchkey_binary=str(fake_binary))
+    latchkey.initialize(data_dir=tmp_path / "gateway-data")
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        latchkey=latchkey,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
+    # "Local path" that does not exist -- mngr create will not even get
+    # the chance to fail; _create_agent_background aborts with MngrCommandError.
+    agent_id = creator.start_creation("/definitely/not/here", launch_mode=LaunchMode.DEV)
 
-        for _ in range(100):
-            info = creator.get_creation_info(agent_id)
-            if info is not None and info.status == AgentCreationStatus.FAILED:
-                break
-            threading.Event().wait(0.05)
+    for _ in range(100):
         info = creator.get_creation_info(agent_id)
-        assert info is not None
-        assert info.status == AgentCreationStatus.FAILED
-        creator.wait_for_all()
+        if info is not None and info.status == AgentCreationStatus.FAILED:
+            break
+        threading.Event().wait(0.05)
+    info = creator.get_creation_info(agent_id)
+    assert info is not None
+    assert info.status == AgentCreationStatus.FAILED
+    creator.wait_for_all()
 
-        # No lingering gateway or record for this agent.
-        assert gateway_manager.get_gateway_info(agent_id) is None
-    finally:
-        gateway_manager.stop()
+    # No lingering gateway or record for this agent.
+    assert latchkey.get_gateway_info(agent_id) is None
 
 
 def test_is_git_worktree_returns_false_for_normal_repo(tmp_path: Path) -> None:

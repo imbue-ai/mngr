@@ -1,6 +1,6 @@
 [project]
 name = "imbue-mngr"
-version = "0.2.5"
+version = "0.2.6"
 description = "Library for managing AI coding agents across different hosts"
 requires-python = ">=3.12"
 license = "MIT"
@@ -17,12 +17,12 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "imbue-common==0.1.14",
-    "resource-guards==0.1.4",
+    "imbue-common==0.1.15",
+    "resource-guards==0.1.5",
     "cel-python>=0.1.5",
     "click>=8.0",
     "click-option-group>=0.5.6",
-    "concurrency-group==0.1.14",
+    "concurrency-group==0.1.15",
     "coolname>=3.0.0",
     "cryptography>=42.0",
     # pinning docker because the guard registration module
@@ -50,6 +50,9 @@ Repository = "https://github.com/imbue-ai/mngr"
 
 [project.scripts]
 mngr = "imbue.mngr.main:cli"
+
+[project.entry-points.resource_guards]
+mngr = "imbue.mngr.register_guards:register_mngr_guards"
 
 [build-system]
 requires = ["hatchling"]

@@ -64,6 +64,7 @@ def _make_user_event(
     text: str = "",
     tool_results: list[dict[str, object]] | None = None,
 ) -> str:
+    """Build a real (human-typed) user event."""
     if text and not tool_results:
         content: str | list[dict[str, object]] = text
     else:
@@ -80,6 +81,23 @@ def _make_user_event(
             "uuid": uuid,
             "timestamp": timestamp,
             "message": {"role": "user", "content": content},
+        }
+    )
+
+
+def _make_meta_event(uuid: str, timestamp: str, text: str) -> str:
+    """Build a framework-injected event (isMeta=true), e.g. Claude Code stop hook output.
+
+    Claude Code emits these with type='user' and isMeta=true on the top-level
+    JSONL entry. They are not human input despite the user type.
+    """
+    return json.dumps(
+        {
+            "type": "user",
+            "uuid": uuid,
+            "timestamp": timestamp,
+            "isMeta": True,
+            "message": {"role": "user", "content": text},
         }
     )
 
@@ -494,6 +512,124 @@ def test_output_writes_to_correct_path(tmp_path: Path, stub_mngr_log_sh: str) ->
     expected_path = runner.agent_state_dir / "events" / "claude" / "common_transcript" / "events.jsonl"
     assert expected_path.exists()
     assert len(expected_path.read_text().strip().splitlines()) == 1
+
+
+def test_meta_user_message_classified_as_meta(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """isMeta=true messages (stop hook output, local-command caveats, etc.) get tool_name='meta'.
+
+    Claude Code injects framework-generated content into the user-message stream with
+    isMeta=true. Transcripts should show all such content under the tool role since no
+    human typed it.
+    """
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    feedback = (
+        "Stop hook feedback:\n[./scripts/main_claude_stop_hook.sh]: Everything up-to-date\nERROR: Some checks failed"
+    )
+    runner.write_input([_make_meta_event("uuid-stop", "2026-01-01T00:00:00Z", text=feedback)])
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    events = runner.get_output_events()
+    assert len(events) == 1
+    assert events[0]["type"] == "tool_result"
+    assert events[0]["tool_name"] == "meta"
+    assert events[0]["tool_call_id"] == "meta-uuid-stop"
+    assert events[0]["output"] == feedback
+    assert events[0]["is_error"] is False
+    assert events[0]["event_id"] == "uuid-stop-meta"
+
+
+def test_meta_user_message_truncates_long_output(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    feedback = "Stop hook feedback:\n" + "x" * 5000
+    runner.write_input([_make_meta_event("uuid-stop2", "2026-01-01T00:00:00Z", text=feedback)])
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    events = runner.get_output_events()
+    assert len(events) == 1
+    assert events[0]["type"] == "tool_result"
+    assert len(events[0]["output"]) <= 2003
+
+
+def test_meta_user_message_with_list_content(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """isMeta=true messages delivered as a content list (with a text block) are also reclassified."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    user = json.dumps(
+        {
+            "type": "user",
+            "uuid": "uuid-stop-list",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "isMeta": True,
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "Stop hook feedback:\nWARN: nothing"}],
+            },
+        }
+    )
+    runner.write_input([user])
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    events = runner.get_output_events()
+    assert len(events) == 1
+    assert events[0]["type"] == "tool_result"
+    assert events[0]["tool_name"] == "meta"
+
+
+def test_real_claude_stop_hook_entry_classified_correctly(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """Regression test pinned to a real Claude Code stop hook session entry.
+
+    If Claude Code drops the isMeta flag from these injected entries, this test
+    fails loudly so the converter can be updated deliberately. The fixture below
+    was captured from an actual ~/.claude/projects/.../*.jsonl line emitted by
+    Claude Code; only the uuid and timestamp were sanitized.
+    """
+    real_entry = (
+        '{"type": "user", "uuid": "fixture-uuid", "timestamp": "2026-01-01T00:00:00.000Z",'
+        ' "isMeta": true, "message": {"role": "user", "content":'
+        ' "Stop hook feedback:\\n[${CLAUDE_PLUGIN_ROOT}/scripts/stop_hook_orchestrator.sh]:'
+        " Everything up-to-date\\nThe following review gates have not been satisfied:\\n"
+        '  - architecture verification (/verify-architecture)"}}'
+    )
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner.write_input([real_entry])
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    events = runner.get_output_events()
+    assert len(events) == 1
+    assert events[0]["type"] == "tool_result"
+    assert events[0]["tool_name"] == "meta"
+
+
+def test_user_text_quoting_stop_hook_marker_without_is_meta_stays_user(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """A real user message quoting the stop hook marker (no isMeta) is NOT reclassified.
+
+    This is the discriminating case where a content-prefix-only check would misfire:
+    a human pasting the marker into chat must still appear under the user role.
+    """
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner.write_input(
+        [
+            _make_user_event(
+                "uuid-quote",
+                "2026-01-01T00:00:00Z",
+                text="Stop hook feedback:\nplease explain what this means",
+            )
+        ]
+    )
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    events = runner.get_output_events()
+    assert len(events) == 1
+    assert events[0]["type"] == "user_message"
 
 
 def test_incremental_conversion(tmp_path: Path, stub_mngr_log_sh: str) -> None:

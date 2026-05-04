@@ -576,6 +576,25 @@ def test_parse_project_name_returns_explicit_project(
     assert result == "explicit-project"
 
 
+def test_parse_project_name_treats_dot_as_default_derivation(
+    default_create_cli_opts: CreateCliOptions,
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """`--project .` (the default) triggers the source-based derivation chain, not a literal '.'."""
+    some_dir = tmp_path / "some-source"
+    some_dir.mkdir()
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
+    resolved = ResolvedSource(location=HostLocation(host=local_host, path=some_dir))
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().project, "."),
+    )
+
+    result = _parse_project_name(resolved, opts, remote_url=None)
+
+    assert result == "some-source"
+
+
 def test_parse_project_name_inherits_from_source_agent(
     default_create_cli_opts: CreateCliOptions,
     local_provider: LocalProviderInstance,
@@ -824,10 +843,10 @@ def test_create_headless_streams_output(
     """Creating a headless_command agent with --foreground should stream output.
 
     Registers a custom headless_command-based agent type with a specific command
-    via settings.toml (since --command is not a CLI flag). Uses an explicit
-    --source + --transfer=none to avoid depending on being inside a git repo
-    and to skip transfer (the shared path would otherwise try to rsync the
-    source dir, which is slow and unnecessary for a one-line ``echo`` agent).
+    via settings.toml. Uses an explicit --source + --transfer=none to avoid
+    depending on being inside a git repo and to skip transfer (the shared path
+    would otherwise try to rsync the source dir, which is slow and unnecessary
+    for a one-line ``echo`` agent).
     """
     profile_dir = get_or_create_profile_dir(temp_host_dir)
     _write_agent_type_command_to_settings(

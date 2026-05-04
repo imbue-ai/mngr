@@ -701,7 +701,8 @@ def _claude_json_has_primary_api_key() -> bool:
     try:
         config_data = json.loads(claude_json_path.read_text())
         return bool(config_data.get("primaryApiKey"))
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Could not read claude config at {}: {}", claude_json_path, e)
         return False
 
 
@@ -1477,8 +1478,14 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         # Use the agent ID as the stable UUID for session identification
         agent_uuid = str(self.id.get_uuid())
 
-        # Build the additional arguments (cli_args from config + agent_args from CLI)
-        all_extra_args = self.agent_config.cli_args + agent_args
+        # Build the additional arguments (cli_args from config + agent_args from CLI).
+        # cli_args reach here already shell-safe (string-form configs are split with non-POSIX
+        # shlex that preserves quotes). agent_args, by contrast, are raw argv strings passed
+        # through Click as click.UNPROCESSED -- the OS shell stripped quote chars when it built
+        # argv at invocation time, so we must re-quote each element before splicing it into a
+        # shell command string.
+        quoted_agent_args = tuple(shlex.quote(arg) for arg in agent_args)
+        all_extra_args = self.agent_config.cli_args + quoted_agent_args
         args_str = " ".join(all_extra_args) if all_extra_args else ""
 
         # Read the latest session ID from the tracking file written by the SessionStart hook.
@@ -1492,8 +1499,13 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         # Build both command variants using the dynamic session ID.
         # Use $CLAUDE_CONFIG_DIR (set in the agent's env file) to find session files
-        # in the per-agent config dir rather than ~/.claude/.
-        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && {base} --resume "$MAIN_CLAUDE_SESSION_ID"'
+        # in the per-agent config dir rather than ~/.claude/. Session files on disk
+        # are named "<session_id>.jsonl"; matching without the extension would
+        # always miss, the && would short-circuit, and the silent || fallback at
+        # the end of assemble_command would spawn a fresh `claude --session-id
+        # <agent_uuid>` without surfacing any error -- so an adopted session
+        # would appear to do nothing.
+        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {base} --resume "$MAIN_CLAUDE_SESSION_ID"'
         create_cmd = f"{base} --session-id {agent_uuid}"
 
         # Append additional args to both commands if present

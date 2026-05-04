@@ -5,12 +5,15 @@ description = "Lima VM provider backend plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.5",
+    "imbue-mngr==0.2.6",
     "pyyaml>=6.0",
 ]
 
 [project.entry-points.mngr]
 lima = "imbue.mngr_lima.backend"
+
+[project.entry-points.resource_guards]
+lima = "imbue.mngr_lima.register_guards:register_lima_guard"
 
 [build-system]
 requires = ["hatchling"]
