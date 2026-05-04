@@ -866,7 +866,7 @@ class AgentCreator(MutableModel):
             "Total budget for both stages of the workspace-readiness wait (URL registration "
             "plus HTTP 200 probe) after ``mngr create`` returns. On timeout, creation still "
             "completes and the user is redirected -- they'll see whatever error the subdomain "
-            "forwarder produces if the server still isn't up. Configurable so tests can lower it."
+            "forwarder produces if the server still isn't up."
         ),
     )
     workspace_ready_poll_interval_seconds: float = Field(
@@ -890,9 +890,7 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "HTTP client used to probe workspace-server readiness. Reused across polls so we "
-            "don't pay the connection-pool setup cost on every tick. Exposed as a constructor "
-            "field so tests can inject an ``httpx.MockTransport``-backed client without "
-            "reaching into private state."
+            "don't pay the connection-pool setup cost on every tick."
         ),
     )
 
@@ -1386,11 +1384,6 @@ class AgentCreator(MutableModel):
                 save_api_key_hash(self.paths.data_dir, agent_id, key_hash)
                 log_queue.put("[minds] API key generated and hash stored.")
 
-                # mngr create returning doesn't mean the in-agent workspace
-                # server is answering yet (container still booting, services
-                # still registering). Wait synchronously so the user stays on
-                # the log-streaming progress page until the workspace is
-                # actually reachable.
                 self._wait_for_workspace_ready(agent_id, log_queue)
 
                 log_queue.put("[minds] Agent created successfully.")
@@ -1677,10 +1670,6 @@ class AgentCreator(MutableModel):
         log_queue.put("[minds] API key hash stored.")
         log_queue.put("[minds] Leased agent started successfully.")
 
-        # mngr create returning doesn't mean the in-agent workspace server is
-        # answering yet (the container/SSH host is still bringing it up).
-        # Wait synchronously so the user stays on the log-streaming progress
-        # page until the workspace is actually reachable.
         self._wait_for_workspace_ready(agent_id, log_queue)
 
         redirect_url = "/goto/{}/".format(agent_id)
