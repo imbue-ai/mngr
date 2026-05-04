@@ -404,13 +404,15 @@ def test_get_events_seeds_pending_tool_state(tmp_path: Path, monkeypatch: pytest
             with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
                 response = test_client.get(f"/api/agents/{agent_id}/events")
             assert response.status_code == 200
+
+        # The watcher creation path seeds transcript-derived state
+        # synchronously. Assert before ``stop()``, which clears these
+        # caches alongside the marker watchers.
+        with manager._lock:
+            assert manager._has_unmatched_tool_use_by_agent[agent_id] is True
+            assert manager._activity_state_by_agent[agent_id] == ActivityState.TOOL_RUNNING
     finally:
         manager.stop()
-
-    # The watcher creation path seeds transcript-derived state synchronously.
-    with manager._lock:
-        assert manager._has_unmatched_tool_use_by_agent[agent_id] is True
-        assert manager._activity_state_by_agent[agent_id] == ActivityState.TOOL_RUNNING
 
 
 def test_request_event_endpoint_writes_latchkey_permission_event(

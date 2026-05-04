@@ -231,6 +231,12 @@ class AgentManager:
         with self._lock:
             watchers = list(self._marker_watchers.values())
             self._marker_watchers.clear()
+            # Drop the per-agent transcript caches alongside the watchers so
+            # the bulk shutdown matches the per-agent ``_stop_marker_watcher``
+            # invariant: these caches only ever describe live watchers.
+            self._has_unmatched_tool_use_by_agent.clear()
+            self._last_event_type_by_agent.clear()
+            self._activity_state_by_agent.clear()
         # Two-phase shutdown so total wall time is bounded by the join timeout
         # rather than scaling linearly with the number of agents -- mirrors the
         # ``_app_observers`` shutdown above.
