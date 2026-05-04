@@ -383,6 +383,16 @@ class Host(BaseHost, OnlineHostInterface):
             # via the ConcurrencyGroup's process runner instead.
             if _su_user is not None or _sudo or _doas:
                 raise NotImplementedError("Local host shell command bypass does not support _su_user, _sudo, or _doas")
+            # Retry kwargs are intentionally rejected loudly here rather than
+            # silently dropped: the remote pyinfra path honors them, so quiet
+            # divergence between local and remote would be a fail-silently
+            # surprise. No current caller passes non-default retry kwargs to a
+            # local Host; if one ever does, we want the fast-path to raise
+            # rather than swallow them.
+            if _retries != 0 or _retry_delay != 0 or _retry_until is not None:
+                raise NotImplementedError(
+                    "Local host shell command bypass does not support _retries, _retry_delay, or _retry_until"
+                )
             return self._run_shell_command_local(
                 command,
                 _timeout=_timeout,
