@@ -32,6 +32,7 @@ from pydantic import ValidationError
 from pyinfra.api.command import StringCommand
 from pyinfra.api.exceptions import ConnectError
 from pyinfra.connectors.util import CommandOutput
+from pyinfra.connectors.util import OutputLine
 from tenacity import retry
 from tenacity import retry_if_exception
 from tenacity import stop_after_attempt
@@ -372,6 +373,24 @@ class Host(BaseHost, OnlineHostInterface):
 
         Prefer using execute_command() instead whenever possible.
         """
+        if self.is_local:
+            # Bypass pyinfra's LocalConnector, which spawns local processes via
+            # gevent. gevent attaches a libev SIGCHLD child watcher to the
+            # thread-local Hub on first use; on Linux these can only attach to
+            # the default event loop, so any local-host command issued from a
+            # worker thread raises "child watchers are only available on the
+            # default loop". We don't need gevent here, so we run the command
+            # via the ConcurrencyGroup's process runner instead.
+            if _su_user is not None or _sudo or _doas:
+                raise NotImplementedError("Local host shell command bypass does not support _su_user, _sudo, or _doas")
+            return self._run_shell_command_local(
+                command,
+                _timeout=_timeout,
+                _success_exit_codes=_success_exit_codes,
+                _env=_env,
+                _chdir=_chdir,
+                _shell_executable=_shell_executable,
+            )
         pyinfra_kwargs: dict[str, Any] = {
             "_timeout": _timeout,
             "_success_exit_codes": _success_exit_codes,
@@ -458,6 +477,46 @@ class Host(BaseHost, OnlineHostInterface):
             )
 
         return result
+
+    def _run_shell_command_local(
+        self,
+        command: StringCommand,
+        *,
+        _timeout: int | None,
+        _success_exit_codes: tuple[int, ...] | None,
+        _env: dict[str, str] | None,
+        _chdir: str | None,
+        _shell_executable: str,
+    ) -> tuple[bool, CommandOutput]:
+        """Run a shell command on the local machine without going through pyinfra.
+
+        Bypasses pyinfra's LocalConnector to avoid gevent's thread-local Hub /
+        SIGCHLD child watcher constraint, which prevents calls from worker
+        threads on Linux. Returns the same (success, CommandOutput) shape that
+        the pyinfra path returns.
+        """
+        full_env: dict[str, str] | None = None
+        if _env is not None:
+            full_env = {**os.environ, **_env}
+        cwd_path = Path(_chdir) if _chdir is not None else None
+        finished = self.mngr_ctx.concurrency_group.run_process_to_completion(
+            [_shell_executable, "-c", command.get_raw_value()],
+            timeout=float(_timeout) if _timeout is not None else None,
+            is_checked_after=False,
+            cwd=cwd_path,
+            env=full_env,
+        )
+        success_codes: tuple[int, ...] = _success_exit_codes if _success_exit_codes else (0,)
+        success = finished.returncode in success_codes
+
+        lines: list[OutputLine] = []
+        for buffer_name, raw in (("stdout", finished.stdout), ("stderr", finished.stderr)):
+            if not raw:
+                continue
+            text = raw[:-1] if raw.endswith("\n") else raw
+            for line in text.split("\n"):
+                lines.append(OutputLine(buffer_name=buffer_name, line=line))
+        return success, CommandOutput(lines)
 
     def _get_file(
         self,

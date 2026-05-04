@@ -37,6 +37,24 @@ def test_get_unknown_backend_raises() -> None:
     assert "nonexistent" in str(exc_info.value)
 
 
+def test_get_unknown_backend_includes_plugin_install_hint_for_cataloged_backend() -> None:
+    """Unknown backend errors should name the actual package for cataloged plugins."""
+    with pytest.raises(UnknownBackendError) as exc_info:
+        get_backend("modal")
+    formatted = exc_info.value.format_message()
+    assert "imbue-mngr-modal" in formatted
+
+
+def test_get_unknown_backend_uses_generic_hint_for_uncataloged_backend() -> None:
+    """Unknown backend errors for uncataloged names should not fabricate a package name."""
+    with pytest.raises(UnknownBackendError) as exc_info:
+        get_backend("xyzzy")
+    formatted = exc_info.value.format_message()
+    assert "imbue-mngr-xyzzy" not in formatted
+    assert "do not recognize 'xyzzy'" in formatted
+    assert "third-party plugin" in formatted
+
+
 def test_get_local_provider_instance(temp_mngr_ctx: MngrContext) -> None:
     """Test getting a local provider instance."""
     provider = get_provider_instance(LOCAL_PROVIDER_NAME, temp_mngr_ctx)

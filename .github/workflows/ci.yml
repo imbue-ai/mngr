@@ -75,6 +75,11 @@ jobs:
       - name: Fetch offload image-cache git notes
         run: git fetch origin 'refs/notes/*:refs/notes/*' || true
 
+      - name: Configure git identity for image-cache note writes
+        run: |
+          git config user.email "dev@imbue.com"
+          git config user.name "imbue-dev"
+
       - name: Run tests via offload
         id: tests
         run: just test-offload
@@ -166,6 +171,11 @@ jobs:
         with:
           name: test-results-offload
           path: test-results/
+          # Offload pulls per-sandbox files into test-results/<sb>/.test_output/,
+          # which holds the flaky_tests_*.txt manifests used by the summary check.
+          # Default upload-artifact behavior strips hidden paths, making post-hoc
+          # debugging of the @flaky column impossible.
+          include-hidden-files: true
           retention-days: 30
 
   # Clean up old Modal test environments - runs on all branches including release,
@@ -263,6 +273,11 @@ jobs:
       - name: Fetch offload image-cache git notes
         run: git fetch origin 'refs/notes/*:refs/notes/*' || true
 
+      - name: Configure git identity for image-cache note writes
+        run: |
+          git config user.email "dev@imbue.com"
+          git config user.name "imbue-dev"
+
       - name: Run acceptance tests via offload
         id: tests
         run: just test-offload-acceptance
@@ -289,6 +304,10 @@ jobs:
         with:
           name: test-results-offload-acceptance
           path: test-results/
+          # Same rationale as the test-offload upload step above: offload's
+          # per-sandbox flaky_tests_*.txt manifests live under hidden
+          # test-results/<sb>/.test_output/ subdirs.
+          include-hidden-files: true
           retention-days: 30
 
   # Docker acceptance tests - runs on a GitHub runner with a real Docker daemon.
@@ -435,4 +454,7 @@ jobs:
         with:
           name: test-durations-release-${{ matrix.os }}-${{ matrix.group }}
           path: .test_output/test_durations_*.json
+          # The .test_output/ parent is hidden, so upload-artifact's default
+          # of stripping hidden paths would drop the entire glob match.
+          include-hidden-files: true
           retention-days: 30

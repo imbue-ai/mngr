@@ -1511,6 +1511,7 @@ def _make_raising_provider_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
     )
 
 
+@pytest.mark.allow_warnings(match=r"Error discovering agents for provider")
 def test_construct_discover_and_emit_for_provider_continue_mode_records_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -1918,6 +1919,7 @@ def test_collect_and_emit_details_for_host_no_filter_adds_all_agents(
 # =============================================================================
 
 
+@pytest.mark.allow_warnings(match=r"Error processing host")
 def test_process_host_with_error_handling_continue_mode_records_host_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:

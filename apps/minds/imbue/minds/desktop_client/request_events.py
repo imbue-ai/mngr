@@ -41,6 +41,7 @@ class RequestType(UpperCaseStrEnum):
 
     SHARING = auto()
     PERMISSIONS = auto()
+    LATCHKEY_PERMISSION = auto()
 
 
 class RequestStatus(UpperCaseStrEnum):
@@ -96,6 +97,19 @@ class PermissionsRequestEvent(RequestEvent):
     description: str = Field(default="", description="Human-readable description of the request")
 
 
+class LatchkeyPermissionRequestEvent(RequestEvent):
+    """A request for the user to authorize the agent to use a latchkey-managed service.
+
+    The agent only declares which service it wants and why. The user picks
+    the specific detent permission schemas to grant in the desktop dialog,
+    and the desktop client launches ``latchkey auth browser`` if no
+    credentials exist for the service yet.
+    """
+
+    service_name: str = Field(description="Latchkey service name (e.g. 'slack', 'github').")
+    rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
+
+
 class RequestResponseEvent(EventEnvelope):
     """A response to a request, written by the desktop client."""
 
@@ -104,6 +118,26 @@ class RequestResponseEvent(EventEnvelope):
     agent_id: str = Field(description="Agent ID the request was for")
     service_name: str | None = Field(default=None, description="Service name (for sharing requests)")
     request_type: str = Field(description="Type of request that was responded to")
+
+
+def create_latchkey_permission_request_event(
+    agent_id: str,
+    service_name: str,
+    rationale: str,
+    is_user_requested: bool = False,
+) -> "LatchkeyPermissionRequestEvent":
+    """Create a new latchkey-permission request event with auto-generated metadata."""
+    return LatchkeyPermissionRequestEvent(
+        timestamp=_now_iso(),
+        type=EventType("latchkey_permission_request"),
+        event_id=_generate_event_id(),
+        source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+        agent_id=agent_id,
+        request_type=str(RequestType.LATCHKEY_PERMISSION),
+        is_user_requested=is_user_requested,
+        service_name=service_name,
+        rationale=rationale,
+    )
 
 
 def create_sharing_request_event(
@@ -153,6 +187,8 @@ def _dedup_key(event: RequestEvent | RequestResponseEvent) -> tuple[str, str | N
     """Compute the deduplication key for a request or response event."""
     service_name: str | None = None
     if isinstance(event, SharingRequestEvent):
+        service_name = event.service_name
+    elif isinstance(event, LatchkeyPermissionRequestEvent):
         service_name = event.service_name
     elif isinstance(event, RequestResponseEvent):
         service_name = event.service_name
@@ -228,6 +264,8 @@ def parse_request_event(line: str) -> RequestEvent | None:
             return SharingRequestEvent.model_validate(data)
         elif request_type == str(RequestType.PERMISSIONS):
             return PermissionsRequestEvent.model_validate(data)
+        elif request_type == str(RequestType.LATCHKEY_PERMISSION):
+            return LatchkeyPermissionRequestEvent.model_validate(data)
         else:
             return RequestEvent.model_validate(data)
     except (json.JSONDecodeError, ValueError, TypeError) as e:

@@ -19,6 +19,7 @@ from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.primitives import ServiceName
+from imbue.mngr.errors import DiscoverySchemaChangedError
 from imbue.mngr.primitives import AgentId
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
@@ -513,10 +514,9 @@ def test_stream_manager_on_discovery_stream_output_ignores_empty_lines() -> None
     assert manager.resolver.list_known_agent_ids() == ()
 
 
-def test_stream_manager_on_discovery_stream_output_ignores_unrecognized_events() -> None:
-    """Unrecognized event types are ignored and do not update the resolver."""
+def test_stream_manager_on_discovery_stream_output_raises_on_unrecognized_event() -> None:
+    """Unknown discovery event types raise DiscoverySchemaChangedError so a real schema drift is visible."""
     manager = _make_stream_manager()
-    # Use an unrecognized event type so parse_discovery_event_line returns None
     line = json.dumps(
         {
             "type": "SOME_OTHER_EVENT",
@@ -525,13 +525,16 @@ def test_stream_manager_on_discovery_stream_output_ignores_unrecognized_events()
             "source": "mngr/discovery",
         }
     )
-    manager._on_discovery_stream_output(line, is_stdout=True)
+    with pytest.raises(DiscoverySchemaChangedError):
+        manager._on_discovery_stream_output(line, is_stdout=True)
     assert manager.resolver.list_known_agent_ids() == ()
 
 
-def test_stream_manager_handle_discovery_line_ignores_invalid_json() -> None:
+def test_stream_manager_handle_discovery_line_raises_on_invalid_json() -> None:
+    """Invalid JSON on the discovery stream surfaces as a JSONDecodeError; stdout should never carry non-JSON."""
     manager = _make_stream_manager()
-    manager._handle_discovery_line("not valid json {{{")
+    with pytest.raises(json.JSONDecodeError):
+        manager._handle_discovery_line("not valid json {{{")
     assert manager.resolver.list_known_agent_ids() == ()
 
 

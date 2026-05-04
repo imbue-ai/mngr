@@ -9,7 +9,10 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
+from imbue.mngr.utils.git_utils import build_project_filter_clause
 from imbue.mngr.utils.git_utils import clone_git_url_to_managed_dir
+from imbue.mngr.utils.git_utils import delete_git_branch
+from imbue.mngr.utils.git_utils import derive_project_name_for_source
 from imbue.mngr.utils.git_utils import derive_project_name_from_path
 from imbue.mngr.utils.git_utils import find_git_common_dir
 from imbue.mngr.utils.git_utils import find_git_worktree_root
@@ -22,6 +25,7 @@ from imbue.mngr.utils.git_utils import is_git_repository
 from imbue.mngr.utils.git_utils import is_git_url
 from imbue.mngr.utils.git_utils import parse_project_name_from_url
 from imbue.mngr.utils.git_utils import parse_worktree_git_file
+from imbue.mngr.utils.git_utils import resolve_project_filter_values
 
 
 def test_github_https_url() -> None:
@@ -76,6 +80,131 @@ def test_empty_url() -> None:
     """Test parsing an empty URL returns None."""
     url = ""
     assert parse_project_name_from_url(url) is None
+
+
+def test_resolve_project_filter_values_passes_through_non_dot_values(cg: ConcurrencyGroup) -> None:
+    """Non-dot values are returned unchanged."""
+    assert resolve_project_filter_values(("foo", "bar"), cg) == ("foo", "bar")
+
+
+def test_resolve_project_filter_values_expands_dot_to_current_project(
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The literal '.' is expanded to the current project name (derived from cwd)."""
+    project_dir = tmp_path / "my-project"
+    project_dir.mkdir()
+    monkeypatch.chdir(project_dir)
+
+    assert resolve_project_filter_values((".",), cg) == ("my-project",)
+    assert resolve_project_filter_values((".", "other"), cg) == ("my-project", "other")
+
+
+def test_resolve_project_filter_values_handles_empty(cg: ConcurrencyGroup) -> None:
+    """Empty input returns empty output without resolving the project."""
+    assert resolve_project_filter_values((), cg) == ()
+
+
+def test_resolve_project_filter_values_dedupes_preserving_order(
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Duplicate values (including duplicate '.' expansions) collapse, in insertion order."""
+    project_dir = tmp_path / "my-project"
+    project_dir.mkdir()
+    monkeypatch.chdir(project_dir)
+
+    # Plain duplicates collapse.
+    assert resolve_project_filter_values(("foo", "foo"), cg) == ("foo",)
+    # Duplicate '.' expansions collapse to a single project name.
+    assert resolve_project_filter_values((".", "."), cg) == ("my-project",)
+    # Mixed duplicates collapse and preserve relative insertion order of distinct values.
+    assert resolve_project_filter_values(("foo", ".", "foo", "."), cg) == ("foo", "my-project")
+
+
+def test_resolve_project_filter_values_uses_project_root_over_cwd(
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When project_root is provided, '.' resolves from there, not the (possibly nested) cwd."""
+    project_dir = tmp_path / "my-project"
+    project_dir.mkdir()
+    nested = project_dir / "nested" / "subdir"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=project_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/remote-project.git"],
+        cwd=project_dir,
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.chdir(nested)
+
+    # Without project_root, the cwd-based derivation cannot find the remote and falls back to the
+    # subdir name -- a wrong answer for "the current project". With project_root pointing at the
+    # worktree root, the remote is found and the correct project name is returned.
+    assert resolve_project_filter_values((".",), cg) == ("subdir",)
+    assert resolve_project_filter_values((".",), cg, project_root=project_dir) == ("remote-project",)
+
+
+def test_build_project_filter_clause_returns_none_for_empty(cg: ConcurrencyGroup) -> None:
+    """Empty input returns None so callers can skip appending a filter."""
+    assert build_project_filter_clause((), cg) is None
+
+
+def test_build_project_filter_clause_single_value(cg: ConcurrencyGroup) -> None:
+    """A single project name produces a single CEL equality clause."""
+    assert build_project_filter_clause(("foo",), cg) == 'labels.project == "foo"'
+
+
+def test_build_project_filter_clause_multiple_values_or_joined(cg: ConcurrencyGroup) -> None:
+    """Multiple project names are OR-joined in a single clause."""
+    assert build_project_filter_clause(("foo", "bar"), cg) == 'labels.project == "foo" || labels.project == "bar"'
+
+
+def test_build_project_filter_clause_expands_dot(
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The literal '.' is expanded to the cwd-derived project name in the resulting clause."""
+    project_dir = tmp_path / "my-project"
+    project_dir.mkdir()
+    monkeypatch.chdir(project_dir)
+
+    assert build_project_filter_clause((".",), cg) == 'labels.project == "my-project"'
+
+
+def test_derive_project_name_for_source_prefers_label(tmp_path: Path) -> None:
+    """source_project_label wins over remote_url and path."""
+    project_dir = tmp_path / "path-name"
+    project_dir.mkdir()
+
+    result = derive_project_name_for_source(
+        project_dir,
+        remote_url="https://github.com/owner/url-name.git",
+        source_project_label="label-name",
+    )
+
+    assert result == "label-name"
+
+
+def test_derive_project_name_for_source_uses_remote_url(tmp_path: Path) -> None:
+    """remote_url is used when no source_project_label is given."""
+    project_dir = tmp_path / "path-name"
+    project_dir.mkdir()
+
+    result = derive_project_name_for_source(
+        project_dir,
+        remote_url="https://github.com/owner/url-name.git",
+    )
+
+    assert result == "url-name"
+
+
+def test_derive_project_name_for_source_falls_back_to_path(tmp_path: Path) -> None:
+    """With no hints, falls back to the path's directory name."""
+    project_dir = tmp_path / "path-name"
+    project_dir.mkdir()
+
+    result = derive_project_name_for_source(project_dir)
+
+    assert result == "path-name"
 
 
 def test_derive_from_folder_name_when_no_git(tmp_path: Path, cg: ConcurrencyGroup) -> None:
@@ -458,6 +587,46 @@ def test_get_head_commit_returns_none_for_non_git_dir(tmp_path: Path, cg: Concur
     plain_dir.mkdir()
     result = get_head_commit(plain_dir, cg)
     assert result is None
+
+
+# =============================================================================
+# delete_git_branch Tests
+# =============================================================================
+
+
+def test_delete_git_branch_removes_branch(temp_git_repo: Path, cg: ConcurrencyGroup) -> None:
+    """delete_git_branch returns True and removes a branch that exists."""
+    branch_name = "feature/to-delete"
+    subprocess.run(
+        ["git", "-C", str(temp_git_repo), "branch", branch_name],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert delete_git_branch(branch_name, temp_git_repo, cg) is True
+
+    list_result = subprocess.run(
+        ["git", "-C", str(temp_git_repo), "for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert branch_name not in list_result.stdout.splitlines()
+
+
+@pytest.mark.allow_warnings(match=r"Failed to delete branch does-not-exist")
+def test_delete_git_branch_returns_false_for_missing_branch(temp_git_repo: Path, cg: ConcurrencyGroup) -> None:
+    """delete_git_branch returns False (and does not raise) when the branch does not exist; a warning is emitted at the call site so the failure is visible."""
+    assert delete_git_branch("does-not-exist", temp_git_repo, cg) is False
+
+
+@pytest.mark.allow_warnings(match=r"Failed to delete branch any-branch")
+def test_delete_git_branch_returns_false_for_non_git_dir(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """delete_git_branch returns False (and does not raise) when the path is not a git repo; a warning is emitted so the failure is visible."""
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+    assert delete_git_branch("any-branch", plain_dir, cg) is False
 
 
 # =============================================================================
