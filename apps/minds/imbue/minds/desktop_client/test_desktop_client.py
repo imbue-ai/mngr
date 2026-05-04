@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import HTMLResponse
