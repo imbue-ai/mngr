@@ -15,10 +15,10 @@ from click.core import ParameterSource
 from click_option_group import GroupedOption
 from click_option_group import OptionGroup
 from click_option_group import optgroup
+from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
@@ -30,12 +30,15 @@ from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.config.loader import parse_config
+from imbue.mngr.config.loader import resolve_strict_from_env
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.logging import setup_logging
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 # The set of built-in format names (case-insensitive). Any --format value not
 # matching one of these is treated as a format template string.
@@ -150,6 +153,12 @@ def setup_command_context(
     # wrapped in ConcurrencyExceptionGroup, which would break Click's error handling.
     ctx.call_on_close(lambda: cg.__exit__(None, None, None))
 
+    # Resolve strict here so the same policy applies to both load_config (which
+    # validates section field names) and apply_config_defaults below (which
+    # validates command parameter names).
+    if strict is None:
+        strict = resolve_strict_from_env()
+
     # Load config (is_interactive will be resolved below)
     pm = ctx.obj
     mngr_ctx = load_config(
@@ -190,7 +199,7 @@ def setup_command_context(
         )
 
     # Apply config defaults to parameters that came from defaults (not user-specified)
-    updated_params = apply_config_defaults(ctx, mngr_ctx.config, command_name)
+    updated_params = apply_config_defaults(ctx, mngr_ctx.config, command_name, strict=strict)
 
     # Apply create template if this is the create command and a template was specified
     if command_name == "create":
@@ -419,7 +428,13 @@ def apply_settings_to_config(
     return config.merge_with(settings_config)
 
 
-def apply_config_defaults(ctx: click.Context, config: MngrConfig, command_name: str) -> dict[str, Any]:
+def apply_config_defaults(
+    ctx: click.Context,
+    config: MngrConfig,
+    command_name: str,
+    *,
+    strict: bool = True,
+) -> dict[str, Any]:
     """Apply config defaults to parameters that were not explicitly set by the user.
 
     Uses ctx.get_parameter_source() to detect which parameters came from defaults.
@@ -428,6 +443,10 @@ def apply_config_defaults(ctx: click.Context, config: MngrConfig, command_name: 
     Special handling for tuple/list parameters:
     - An empty string value ("") clears the list (sets it to an empty tuple)
     - This allows env vars like MNGR_COMMANDS_CREATE_ADD_COMMAND= to clear config defaults
+
+    When strict=True, raises ConfigParseError for unknown parameter names; when
+    strict=False, logs a warning and skips them. Callers should resolve the
+    policy from MNGR_ALLOW_UNKNOWN_CONFIG once and pass the result through.
     """
     # Get command defaults from config
     command_defaults = config.commands.get(command_name)
@@ -442,7 +461,14 @@ def apply_config_defaults(ctx: click.Context, config: MngrConfig, command_name: 
     for param_name, config_value in command_defaults.defaults.items():
         # Check if this parameter exists in the context
         if param_name not in ctx.params:
-            continue
+            msg = (
+                f"Unknown parameter '{param_name}' in commands.{command_name} config. "
+                f"Valid parameters: {sorted(ctx.params.keys())}"
+            )
+            if not strict:
+                logger.warning(msg)
+                continue
+            raise ConfigParseError(msg)
 
         # Check the source of the parameter value
         source = ctx.get_parameter_source(param_name)
@@ -620,7 +646,7 @@ def _run_pre_command_scripts(config: MngrConfig, command_name: str, cg: Concurre
     # Run all scripts in parallel
     failures: list[tuple[str, int, str, str]] = []
     futures: list[Future[tuple[str, int, str, str]]] = []
-    with ConcurrencyGroupExecutor(parent_cg=cg, name="pre_command_scripts", max_workers=32) as executor:
+    with mngr_executor(parent_cg=cg, name="pre_command_scripts", max_workers=32) as executor:
         for script in scripts:
             futures.append(executor.submit(_run_single_script, script, cg, cwd))
     for future in futures:

@@ -116,8 +116,8 @@ name = "connect"
 command = "mngr connect $MNGR_AGENT_NAME"
 
 [plugins.kanpan.commands.l]
-name = "events"
-command = "mngr events $MNGR_AGENT_NAME"
+name = "event"
+command = "mngr event $MNGR_AGENT_NAME"
 refresh_afterwards = true
 ```
 
@@ -146,7 +146,7 @@ Built-in column names: `name`, `state`. Data source field keys: `commits_ahead`,
 
 ## Section order
 
-By default, sections are displayed in this order: Done (PR merged), Cancelled (PR closed), In review (PR pending), In progress (draft PR), In progress (no PR yet), In progress (PRs failed), Muted. To customize:
+By default, sections are displayed in this order: Done (PR merged), Cancelled (PR closed), In review (PR pending), In progress (draft PR), In progress (no PR yet), In progress (PRs not loaded), Muted. To customize:
 
 ```toml
 [plugins.kanpan]

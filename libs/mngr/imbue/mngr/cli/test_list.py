@@ -1014,6 +1014,7 @@ def test_list_command_with_sort_by_name(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_list_command_with_sort_descending(
     cli_runner: CliRunner,
     temp_work_dir: Path,

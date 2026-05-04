@@ -41,6 +41,11 @@ def _make_events_opts(
     )
 
 
+def test_events_cli_command_is_named_event_singular() -> None:
+    """The CLI command is registered as singular `event` for consistency with other commands."""
+    assert events.name == "event"
+
+
 def test_events_cli_options_can_be_constructed() -> None:
     """Verify the options class can be instantiated with all required fields."""
     opts = _make_events_opts()

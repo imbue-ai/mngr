@@ -26,7 +26,6 @@ def test_exec_cli_options_fields() -> None:
         agents=("my-agent",),
         agent_list=(),
         command_arg="echo hello",
-        user=None,
         cwd=None,
         timeout=None,
         start=True,
@@ -41,7 +40,6 @@ def test_exec_cli_options_fields() -> None:
     )
     assert opts.agents == ("my-agent",)
     assert opts.command_arg == "echo hello"
-    assert opts.user is None
     assert opts.cwd is None
     assert opts.timeout is None
     assert opts.start is True
@@ -87,6 +85,7 @@ def test_emit_human_output_single_success(capsys: pytest.CaptureFixture[str]) ->
     assert "hello world" in captured.out
 
 
+@pytest.mark.allow_warnings(match=r"^Command failed on agent test-agent")
 def test_emit_human_output_single_failure(capsys: pytest.CaptureFixture[str]) -> None:
     """Test human output handles failed commands."""
     exec_result = ExecResult(agent_name="test-agent", stdout="", stderr="bad command\n", success=False)
@@ -251,6 +250,7 @@ def test_emit_human_output_stdout_without_trailing_newline(capsys: pytest.Captur
     assert "no trailing newline" in captured.out
 
 
+@pytest.mark.allow_warnings(match=r"^Command failed on agent test-agent")
 def test_emit_human_output_stderr_without_trailing_newline(capsys: pytest.CaptureFixture[str]) -> None:
     """Test human output adds trailing newline if stderr doesn't have one."""
     result = ExecResult(agent_name="test-agent", stdout="", stderr="error output", success=False)

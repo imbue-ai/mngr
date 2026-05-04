@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-ttyd"
-version = "0.1.2"
+version = "0.1.3"
 description = "ttyd web terminal plugin for mngr - automatically launches a ttyd server alongside agents"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.5",
+    "imbue-mngr==0.2.6",
 ]
 
 [project.entry-points.mngr]

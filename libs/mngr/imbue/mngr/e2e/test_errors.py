@@ -15,6 +15,7 @@ def test_invalid_provider_fails(e2e: E2eSession) -> None:
     expect(result).to_fail()
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_duplicate_name_fails(e2e: E2eSession) -> None:

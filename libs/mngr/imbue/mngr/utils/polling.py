@@ -65,26 +65,3 @@ def wait_for(
     """
     if not poll_until(condition, timeout, poll_interval):
         raise TimeoutError(error_message)
-
-
-def run_periodically(
-    fn: Callable[[], None],
-    interval: float,
-) -> None:
-    """Run a function repeatedly at a fixed interval until interrupted.
-
-    Calls fn(), waits interval seconds, calls fn() again, and so on indefinitely.
-    Terminates only when an exception (typically KeyboardInterrupt) propagates from fn.
-
-    Internally uses poll_until with a never-satisfied condition -- the poll_interval
-    controls the execution interval, and the condition performs the actual work as a
-    side effect. This is intentionally "misusing" the polling semantics; run_periodically
-    exists so that callers don't have to do this themselves.
-    """
-    # The condition calls fn() for its side effect and always returns False,
-    # so poll_until keeps looping at the given interval.
-    poll_until(
-        condition=lambda: (fn(), False)[1],
-        timeout=100 * 365 * 24 * 3600.0,
-        poll_interval=interval,
-    )

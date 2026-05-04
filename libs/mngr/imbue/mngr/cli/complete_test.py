@@ -753,12 +753,12 @@ def test_get_completions_host_name_positional(
 ) -> None:
     """Commands with host_names in positional_completions should offer host names."""
     data = CompletionCacheData(
-        commands=["events"],
-        positional_completions={"events": [["agent_names", "host_names"], []]},
+        commands=["event"],
+        positional_completions={"event": [["agent_names", "host_names"], []]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["my-agent"], host_names=["saturn"])
-    set_comp_env("mngr events ", "2")
+    set_comp_env("mngr event ", "2")
 
     result = _get_completions()
 
@@ -1145,18 +1145,18 @@ def test_get_completions_config_set_pos1_string_field_no_completions(
     assert result == []
 
 
-def test_get_completions_events_pos0_agents_and_hosts(
+def test_get_completions_event_pos0_agents_and_hosts(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],
 ) -> None:
-    """events <TAB> at position 0 should offer both agents and hosts."""
+    """event <TAB> at position 0 should offer both agents and hosts."""
     data = CompletionCacheData(
-        commands=["events"],
-        positional_completions={"events": [["agent_names", "host_names"], []]},
+        commands=["event"],
+        positional_completions={"event": [["agent_names", "host_names"], []]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["my-agent"], host_names=["saturn"])
-    set_comp_env("mngr events ", "2")
+    set_comp_env("mngr event ", "2")
 
     result = _get_completions()
 

@@ -5,7 +5,6 @@ from typing import assert_never
 
 import click
 from click_option_group import optgroup
-from loguru import logger
 
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import discover_event_sources
@@ -20,6 +19,7 @@ from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 
 
 class TranscriptCliOptions(CommonCliOptions):
@@ -67,18 +67,16 @@ def _find_common_transcript_source(target: EventsTarget) -> str:
 def _parse_transcript_events(
     content: str,
     roles: tuple[str, ...],
+    source_description: str,
 ) -> list[dict[str, Any]]:
     """Parse JSONL content into transcript events, optionally filtering by role."""
     events: list[dict[str, Any]] = []
+    warner = MalformedJsonLineWarner(source_description=source_description)
     for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped:
+        parsed = warner.parse(line)
+        if parsed is None:
             continue
-        try:
-            event = json.loads(stripped)
-        except json.JSONDecodeError as e:
-            logger.trace("Skipped malformed JSON line in transcript: {}", e)
-            continue
+        event, _ = parsed
         if roles and _get_event_role(event) not in roles:
             continue
         events.append(event)
@@ -225,7 +223,9 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
         raise MngrError(f"Failed to read transcript for {target.display_name}: {e}") from e
 
     # Parse and filter events
-    all_events = _parse_transcript_events(content, roles=opts.role)
+    all_events = _parse_transcript_events(
+        content, roles=opts.role, source_description=f"transcript file '{event_file_name}' for {target.display_name}"
+    )
 
     # Apply head/tail
     if opts.head is not None:
@@ -268,7 +268,7 @@ Use --format to control output:
         ("Output as JSON", "mngr transcript my-agent --format json"),
     ),
     see_also=(
-        ("events", "View all events from an agent or host"),
+        ("event", "View all events from an agent or host"),
         ("message", "Send a message to an agent"),
     ),
 ).register()

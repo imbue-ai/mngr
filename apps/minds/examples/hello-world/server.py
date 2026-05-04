@@ -159,7 +159,7 @@ def _write_service_log(port: int) -> None:
 
     Writes to $MNGR_AGENT_STATE_DIR/events/services/events.jsonl following the convention
     that agents self-report their running services. Includes EventEnvelope fields
-    (timestamp, type, event_id, source) so mngr events can parse the records.
+    (timestamp, type, event_id, source) so mngr event can parse the records.
 
     Note: envelope generation is duplicated from web_server.py because this
     example runs standalone on the host without access to shared libraries.

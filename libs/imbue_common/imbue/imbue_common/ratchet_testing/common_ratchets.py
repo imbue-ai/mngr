@@ -223,7 +223,10 @@ PREVENT_NUM_PREFIX = RegexRatchetRule(
 
 PREVENT_TRAILING_COMMENTS = RegexRatchetRule(
     rule_name="trailing comments",
-    rule_description="Comments should be on their own line, not trailing after code. Trailing comments make code harder to read",
+    rule_description=(
+        "Comments should be on their own line, not trailing after code. Trailing comments make code harder to read. "
+        "`# ty: ignore[code]` is exempt."
+    ),
     pattern_string=r"[^\s#].*[ \t]#(?![0-9a-fA-F]{3,6}[;\s])(?!\s*ty:\s*ignore\[)",
 )
 
@@ -301,6 +304,18 @@ PREVENT_FSTRING_LOGGING = RegexRatchetRule(
         "logger.info('message {}', var) instead of logger.info(f'message {var}')"
     ),
     pattern_string=r"logger\.(trace|debug|info|warning|error|exception)\(f[\"']",
+)
+
+PREVENT_LOGGER_EXCEPTION = RegexRatchetRule(
+    rule_name="logger.exception() usages",
+    rule_description=(
+        "Never use logger.exception() -- it relies on sys.exc_info(), which is unreliable "
+        "in threaded code (the exception context can be cleared or replaced by another "
+        "thread between the except block and the actual log emission). Use "
+        "logger.opt(exception=exc).error(msg) instead so the exception is bound explicitly "
+        "and the traceback is captured deterministically."
+    ),
+    pattern_string=r"\w*logger\.exception\(",
 )
 
 PREVENT_CLICK_ECHO = RegexRatchetRule(
@@ -397,6 +412,19 @@ PREVENT_CAST_USAGE = RatchetRuleInfo(
         "Do not use cast() from typing. It bypasses the type checker and makes code less safe. "
         "If you need to override the type checker, use a '# ty: ignore[specific-error]' comment instead, "
         "but only if there is really no other way. Consider restructuring your code to avoid the need for type overrides."
+    ),
+)
+
+PREVENT_SILENT_DECODE_ERROR_CATCH = RatchetRuleInfo(
+    rule_name="silent catches of TOMLDecodeError / JSONDecodeError",
+    rule_description=(
+        "Never silently swallow a TOMLDecodeError or JSONDecodeError. For user-authored config / "
+        "settings files: re-raise (optionally wrapping) so the user knows to fix the file. For "
+        "internal state, JSONL streams, and external input (subprocess / API output, CLI flag "
+        "values): at minimum log at warning+ level so the corruption is visible. Handlers that "
+        "re-raise or call any `.warning(...)` / `.error(...)` / `.exception(...)` logger method "
+        "(including chained forms like `logger.opt(...).error(...)`) do not count. See style "
+        "guide section 'Try/except'."
     ),
 )
 

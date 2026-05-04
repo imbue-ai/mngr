@@ -1,19 +1,25 @@
-"""Pre-publish verification for CI: check versions, graph, and pin consistency.
+"""Pre-publish helpers for CI: verify versions/graph/pins, and list package dirs.
 
-Called from the publish workflow before building packages. Verifies:
+Called from the publish workflow. In its default mode, verifies:
 1. Displays all package versions
 2. If --expected-mngr-version is given, checks mngr version matches (for tag/dispatch checks)
 3. The hard-coded package graph matches actual pyproject.toml declarations
 4. All internal dependency pins are consistent
 
+With --list-package-dirs, instead prints `libs/<dir_name>` for each publishable
+package (one per line) and exits without running any verification. This is used
+by the publish workflow to drive the per-package build loop.
+
 Usage:
     uv run scripts/verify_publish.py
     uv run scripts/verify_publish.py --expected-mngr-version 0.1.5
+    uv run scripts/verify_publish.py --list-package-dirs
 """
 
 import argparse
 import sys
 
+from utils import PACKAGES
 from utils import get_package_versions
 from utils import validate_package_graph
 from utils import verify_pin_consistency
@@ -25,7 +31,17 @@ def main() -> None:
         "--expected-mngr-version",
         help="If set, verify the mngr package version matches this value",
     )
+    parser.add_argument(
+        "--list-package-dirs",
+        action="store_true",
+        help="Print one libs/<dir> per line for each publishable package, then exit",
+    )
     args = parser.parse_args()
+
+    if args.list_package_dirs:
+        for pkg in PACKAGES:
+            print(f"libs/{pkg.dir_name}")
+        return
 
     # Display all package versions
     versions = get_package_versions()

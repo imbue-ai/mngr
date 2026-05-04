@@ -126,8 +126,14 @@ def test_start_host_on_running_host_returns_same_host(docker_provider: DockerPro
 def test_destroy_host_removes_container(docker_provider: DockerProviderInstance) -> None:
     host = docker_provider.create_host(HostName("test-destroy"))
     host_id = host.id
-    docker_provider.destroy_host(host, delete_snapshots=True)
+    docker_provider.destroy_host(host)
 
+    # Container is removed but host record persists in DESTROYED state
+    # so that gc_snapshots can age-gate snapshot cleanup. delete_host
+    # purges the record fully.
+    offline = docker_provider.get_host(host_id)
+    assert isinstance(offline, OfflineHost)
+    docker_provider.delete_host(offline)
     with pytest.raises(HostNotFoundError):
         docker_provider.get_host(host_id)
 
@@ -404,13 +410,22 @@ def test_multiple_snapshots_ordering(docker_provider: DockerProviderInstance) ->
 @pytest.mark.release
 @pytest.mark.docker
 @pytest.mark.docker_sdk
-def test_destroy_with_snapshots_cleans_up_images(docker_provider: DockerProviderInstance) -> None:
-    """Verify destroy_host with delete_snapshots removes snapshot images."""
+def test_delete_host_cleans_up_snapshot_images(docker_provider: DockerProviderInstance) -> None:
+    """Verify delete_host removes snapshot images and the host record.
+
+    destroy_host preserves snapshots so gc_snapshots can age-gate them; the
+    full purge happens in delete_host.
+    """
     host = docker_provider.create_host(HostName("test-destroy-snap"))
     docker_provider.create_snapshot(host, SnapshotName("to-cleanup"))
 
     host_id = host.id
-    docker_provider.destroy_host(host, delete_snapshots=True)
+    docker_provider.destroy_host(host)
+
+    # After destroy_host, snapshots are still tracked
+    assert len(docker_provider.list_snapshots(host_id)) == 1
+
+    docker_provider.delete_host(docker_provider.get_host(host_id))
 
     # Host record should be gone
     with pytest.raises(HostNotFoundError):
@@ -431,7 +446,7 @@ def test_discover_hosts_excludes_destroyed_by_default(
     """Verify destroyed hosts are excluded from discover_hosts by default."""
     host = docker_provider.create_host(HostName("test-destroyed-list"))
     host_id = host.id
-    docker_provider.destroy_host(host, delete_snapshots=True)
+    docker_provider.destroy_host(host)
 
     hosts = docker_provider.discover_hosts(temp_mngr_ctx.concurrency_group)
     host_ids = {h.host_id for h in hosts}

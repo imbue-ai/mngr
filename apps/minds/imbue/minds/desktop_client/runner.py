@@ -12,6 +12,7 @@ from loguru import logger
 from pydantic import AnyUrl
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -23,16 +24,24 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
 from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
 from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
-from imbue.minds.desktop_client.latchkey.gateway import LATCHKEY_BINARY
-from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayDestructionHandler
-from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayDiscoveryHandler
-from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
-from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayReconcileCallback
+from imbue.minds.desktop_client.host_pool_client import HostPoolClient
+from imbue.minds.desktop_client.latchkey.core import LATCHKEY_BINARY
+from imbue.minds.desktop_client.latchkey.core import Latchkey
+from imbue.minds.desktop_client.latchkey.core import LatchkeyDestructionHandler
+from imbue.minds.desktop_client.latchkey.core import LatchkeyDiscoveryHandler
+from imbue.minds.desktop_client.latchkey.core import LatchkeyReconcileCallback
+from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.services_catalog import LatchkeyServicesCatalogError
+from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
+from imbue.minds.desktop_client.latchkey.services_catalog import load_services_catalog
+from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyClient
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.sharing_handler import SharingRequestHandler
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
@@ -131,29 +140,49 @@ def start_desktop_client(
     """
     paths = WorkspacePaths(data_dir=data_directory)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
+    is_electron = os.getenv("MINDS_ELECTRON") == "1"
+    notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
     backend_resolver = MngrCliBackendResolver()
-    stream_manager = MngrStreamManager(resolver=backend_resolver)
+    stream_manager = MngrStreamManager(resolver=backend_resolver, notification_dispatcher=notification_dispatcher)
     tunnel_manager = SSHTunnelManager()
-    latchkey_gateway_manager = _build_latchkey_gateway_manager(data_directory=data_directory)
-    latchkey_gateway_manager.start(data_dir=data_directory)
+    latchkey = _build_latchkey(data_directory=data_directory)
+    latchkey.initialize(data_dir=data_directory)
+
+    # Top-level ConcurrencyGroup that brackets the FastAPI lifespan. Every
+    # subprocess/thread spawned by the desktop client (agent setup subprocesses,
+    # background tunnel work, etc.) is tracked as a descendant so shutdown can
+    # wait on or cancel in-flight strands via the default ``__exit__`` path.
+    root_concurrency_group = ConcurrencyGroup(name="desktop-client")
+    root_concurrency_group.__enter__()
 
     minds_config = MindsConfig(data_dir=data_directory)
+    latchkey_permission_handler = LatchkeyPermissionGrantHandler(
+        data_dir=data_directory,
+        latchkey=latchkey,
+        services_catalog=_try_load_latchkey_services_catalog(),
+        mngr_message_sender=MngrMessageSender(),
+    )
     cloudflare_client = _build_cloudflare_client(minds_config.remote_service_connector_url)
     auth_backend_client = AuthBackendClient(base_url=minds_config.remote_service_connector_url)
+    host_pool_client = _build_host_pool_client(minds_config.remote_service_connector_url)
+    litellm_key_client = _build_litellm_key_client(minds_config.remote_service_connector_url)
     agent_creator = AgentCreator(
         paths=paths,
         server_port=port,
-        latchkey_gateway_manager=latchkey_gateway_manager,
+        latchkey=latchkey,
+        host_pool_client=host_pool_client,
+        litellm_key_client=litellm_key_client,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
-    is_electron = os.getenv("MINDS_ELECTRON") == "1"
-    notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
 
     # Initialize multi-account session store
     session_store = MultiAccountSessionStore(
         data_dir=data_directory,
         auth_backend_client=auth_backend_client,
     )
+    sharing_request_handler = SharingRequestHandler(session_store=session_store)
 
     # Initialize request inbox from stored response events
     response_events = load_response_events(data_directory)
@@ -196,19 +225,19 @@ def start_desktop_client(
     # subprocess for each discovered agent. For agents running in a container,
     # VM, or VPS the handler also sets up a reverse SSH tunnel so the agent
     # can reach the host-side gateway on a constant ``127.0.0.1`` URL.
-    latchkey_discovery_handler = LatchkeyGatewayDiscoveryHandler(
-        gateway_manager=latchkey_gateway_manager,
+    latchkey_discovery_handler = LatchkeyDiscoveryHandler(
+        latchkey=latchkey,
         tunnel_manager=tunnel_manager,
     )
-    latchkey_destruction_handler = LatchkeyGatewayDestructionHandler(gateway_manager=latchkey_gateway_manager)
+    latchkey_destruction_handler = LatchkeyDestructionHandler(latchkey=latchkey)
     stream_manager.add_on_agent_discovered_callback(latchkey_discovery_handler)
     stream_manager.add_on_agent_destroyed_callback(latchkey_destruction_handler)
 
     # Once the initial mngr-observe snapshot arrives, reconcile any adopted
     # gateways whose agent is no longer known so orphans from the previous
     # desktop-client session are cleaned up.
-    reconcile_callback = LatchkeyGatewayReconcileCallback(
-        gateway_manager=latchkey_gateway_manager,
+    reconcile_callback = LatchkeyReconcileCallback(
+        latchkey=latchkey,
         resolver=backend_resolver,
     )
     backend_resolver.add_on_change_callback(reconcile_callback)
@@ -223,7 +252,7 @@ def start_desktop_client(
         backend_resolver=backend_resolver,
         http_client=None,
         tunnel_manager=tunnel_manager,
-        latchkey_gateway_manager=latchkey_gateway_manager,
+        latchkey=latchkey,
         agent_creator=agent_creator,
         cloudflare_client=cloudflare_client,
         telegram_orchestrator=telegram_orchestrator,
@@ -234,8 +263,10 @@ def start_desktop_client(
         auth_backend_client=auth_backend_client,
         minds_config=minds_config,
         request_inbox=request_inbox,
+        request_event_handlers=(latchkey_permission_handler, sharing_request_handler),
         server_port=port,
         output_format=output_format,
+        root_concurrency_group=root_concurrency_group,
     )
 
     if not is_no_browser:
@@ -255,6 +286,35 @@ def start_desktop_client(
     uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
 
 
+def _try_load_latchkey_services_catalog() -> dict[str, ServicePermissionInfo]:
+    """Load the latchkey services catalog, downgrading failures to a logged warning.
+
+    A missing or malformed catalog must not prevent the desktop client
+    from starting -- agents that don't try to use latchkey are unaffected.
+    With an empty catalog the permission dialog renders a deny-only page
+    for any incoming permission request.
+    """
+    try:
+        return load_services_catalog()
+    except LatchkeyServicesCatalogError as e:
+        logger.warning("Could not load latchkey services catalog; permission dialogs disabled: {}", e)
+        return {}
+
+
+def _build_host_pool_client(connector_url: AnyUrl) -> HostPoolClient:
+    """Build a HostPoolClient from the remote service connector URL."""
+    return HostPoolClient(
+        connector_url=RemoteServiceConnectorUrl(str(connector_url)),
+    )
+
+
+def _build_litellm_key_client(connector_url: AnyUrl) -> LiteLLMKeyClient:
+    """Build a LiteLLMKeyClient from the remote service connector URL."""
+    return LiteLLMKeyClient(
+        connector_url=RemoteServiceConnectorUrl(str(connector_url)),
+    )
+
+
 def _build_cloudflare_client(connector_url: AnyUrl) -> CloudflareClient:
     """Build a shared CloudflareClient holding only the remote service connector URL.
 
@@ -266,15 +326,15 @@ def _build_cloudflare_client(connector_url: AnyUrl) -> CloudflareClient:
     )
 
 
-def _build_latchkey_gateway_manager(data_directory: Path) -> LatchkeyGatewayManager:
-    """Build a ``LatchkeyGatewayManager`` honoring minds-level env var overrides.
+def _build_latchkey(data_directory: Path) -> Latchkey:
+    """Build a ``Latchkey`` wrapper honoring minds-level env var overrides.
 
     ``MINDS_LATCHKEY_BINARY`` can override the path to the ``latchkey`` CLI
     (typically supplied by the Electron shell, which installs the npm
     package under its own ``node_modules``). ``MINDS_LATCHKEY_DIRECTORY``
-    overrides the shared ``LATCHKEY_DIRECTORY`` that every spawned gateway
+    overrides the shared ``LATCHKEY_DIRECTORY`` that every spawned subprocess
     inherits; when unset we default to ``<minds_data_dir>/latchkey`` so all
-    gateways share a single credential store instead of scribbling into
+    invocations share a single credential store instead of scribbling into
     ``~/.latchkey``.
     """
     binary_override = os.environ.get("MINDS_LATCHKEY_BINARY")
@@ -286,7 +346,7 @@ def _build_latchkey_gateway_manager(data_directory: Path) -> LatchkeyGatewayMana
     else:
         latchkey_directory = data_directory / "latchkey"
 
-    return LatchkeyGatewayManager(
+    return Latchkey(
         latchkey_binary=latchkey_binary,
         latchkey_directory=latchkey_directory,
     )

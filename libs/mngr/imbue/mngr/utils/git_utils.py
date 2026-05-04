@@ -1,3 +1,6 @@
+import re
+import shutil
+import uuid
 from pathlib import Path
 from typing import Final
 from urllib.parse import urlparse
@@ -8,6 +11,13 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import UserInputError
+
+_GIT_URL_SCHEMES: Final[frozenset[str]] = frozenset({"http", "https", "ssh", "git", "file"})
+# SCP-like SSH URL: user@host:path. Host part allows [\w.-]; path must be nonempty
+# and must not start with / or : (to avoid matching "user@host:/abs/path" handled by ssh-style parse).
+_SCP_URL_RE: Final[re.Pattern[str]] = re.compile(r"^[\w.-]+@[\w.-]+:[^/:][^:]*$")
+_GIT_CLONE_TIMEOUT_SECONDS: Final[float] = 600.0
 
 # Refspecs that replicate `git push --mirror` behavior for branches and tags,
 # without pushing remote-tracking refs (refs/remotes/*). Pushing symbolic
@@ -62,6 +72,26 @@ def remove_worktree(worktree_path: Path, source_repo_path: Path, cg: Concurrency
     )
 
 
+def delete_git_branch(branch_name: str, source_repo_path: Path, cg: ConcurrencyGroup) -> bool:
+    """Delete a git branch from the source repository.
+
+    Returns True on successful deletion, False otherwise. Failures are logged
+    as warnings; this never raises.
+    """
+    try:
+        result = cg.run_process_to_completion(
+            ["git", "-C", str(source_repo_path), "branch", "-D", branch_name],
+            is_checked_after=False,
+        )
+    except ProcessError as e:
+        logger.warning("Failed to delete branch {}: {}", branch_name, e)
+        return False
+    if result.returncode == 0:
+        return True
+    logger.warning("Failed to delete branch {}: {}", branch_name, result.stderr.strip())
+    return False
+
+
 def get_current_git_branch(path: Path | None, cg: ConcurrencyGroup) -> str | None:
     """Get the current git branch name for the repository at the given path.
 
@@ -77,6 +107,83 @@ def get_current_git_branch(path: Path | None, cg: ConcurrencyGroup) -> str | Non
     except ProcessError as e:
         logger.trace("Failed to get current git branch: {}", e)
         return None
+
+
+def resolve_project_filter_values(
+    values: tuple[str, ...],
+    cg: ConcurrencyGroup,
+    *,
+    project_root: Path | None = None,
+) -> tuple[str, ...]:
+    """Resolve --project filter values, expanding "." to the current project name.
+
+    The current project is derived from ``project_root`` when provided (typically
+    ``MngrContext.project_root``, the git worktree root), falling back to the
+    current working directory when not. This is important because running from a
+    subdirectory would otherwise miss the git remote and yield the subdirectory's
+    name. Other values are returned unchanged. The current project is derived at
+    most once. Duplicate values (after expansion) are collapsed while preserving
+    insertion order so the resulting CEL clause stays minimal.
+    """
+    current_project: str | None = None
+    resolved: dict[str, None] = {}
+    for value in values:
+        if value == ".":
+            if current_project is None:
+                current_project = derive_project_name_from_path(project_root or Path.cwd(), cg)
+            resolved[current_project] = None
+        else:
+            resolved[value] = None
+    return tuple(resolved)
+
+
+def build_project_filter_clause(
+    values: tuple[str, ...],
+    cg: ConcurrencyGroup,
+    *,
+    project_root: Path | None = None,
+) -> str | None:
+    """Build a CEL include clause for filtering agents by project label.
+
+    Returns ``None`` when ``values`` is empty, so callers can simply skip the
+    filter append. Otherwise expands "." sentinels via
+    ``resolve_project_filter_values`` and returns an OR-joined CEL clause like
+    ``labels.project == "foo" || labels.project == "bar"``. ``project_root``
+    is forwarded to ``resolve_project_filter_values`` (see its docstring).
+    """
+    if not values:
+        return None
+    project_names = resolve_project_filter_values(values, cg, project_root=project_root)
+    return " || ".join(f'labels.project == "{p}"' for p in project_names)
+
+
+def derive_project_name_for_source(
+    path: Path,
+    *,
+    remote_url: str | None = None,
+    source_project_label: str | None = None,
+) -> str:
+    """Derive a project name for a source location.
+
+    Priority:
+    1. ``source_project_label`` -- e.g. inherited from a source agent's label.
+    2. ``remote_url`` -- useful when the URL has already been fetched (which works
+       for remote sources where shelling to a local git binary would not).
+    3. Fall back to ``path``'s directory name (resolved to normalize symlinks /
+       ``..`` components).
+
+    The path fallback intentionally does *not* shell out to git: callers are
+    expected to have already fetched the remote URL via the source's own host
+    (which works for both local and remote sources). Re-running git locally
+    against a remote-source path would be either redundant or incorrect.
+    """
+    if source_project_label is not None:
+        return source_project_label
+    if remote_url is not None:
+        from_url = parse_project_name_from_url(remote_url)
+        if from_url is not None:
+            return from_url
+    return path.resolve().name
 
 
 def derive_project_name_from_path(path: Path, cg: ConcurrencyGroup) -> str:
@@ -162,6 +269,49 @@ def parse_project_name_from_url(url: str) -> str | None:
     except ValueError:
         pass
     return None
+
+
+@pure
+def is_git_url(source: str) -> bool:
+    """Return True if `source` looks like a git URL that can be cloned.
+
+    Recognizes explicit schemes (http/https/ssh/git) and the SCP-like SSH form
+    (user@host:path). Narrower than the bare-name grammar used for agents:
+    SCP-form requires a slash in the path or a `.git` suffix, so `name@host.modal`
+    is not mistaken for a git URL.
+    """
+    if not source:
+        return False
+
+    parsed = urlparse(source)
+    if parsed.scheme in _GIT_URL_SCHEMES:
+        return True
+
+    if _SCP_URL_RE.match(source):
+        path_part = source.split(":", 1)[1]
+        if source.endswith(".git") or "/" in path_part:
+            return True
+
+    return False
+
+
+def clone_git_url_to_managed_dir(url: str, base_dir: Path, name: str, cg: ConcurrencyGroup) -> Path:
+    """Clone a git URL into `base_dir/<name>-<uuid>/` and return the destination path.
+
+    Raises UserInputError on clone failure. Best-effort removes a half-populated
+    destination directory on failure so the caller sees a clean filesystem.
+    """
+    dest = base_dir / f"{name}-{uuid.uuid4().hex}"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        cg.run_process_to_completion(
+            ["git", "clone", url, str(dest)],
+            timeout=_GIT_CLONE_TIMEOUT_SECONDS,
+        )
+    except ProcessError as e:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise UserInputError(f"Failed to clone {url}: {e.stderr}") from e
+    return dest
 
 
 def _get_git_config_value(path: Path, key: str, cg: ConcurrencyGroup) -> str | None:

@@ -37,6 +37,7 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_ctx_with_plugins
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
@@ -473,6 +474,191 @@ def test_worktree_already_checked_out_gives_helpful_error(
             agent_options=agent_options,
             mngr_ctx=temp_mngr_ctx,
         )
+
+
+def test_worktree_in_repo_with_no_commits_gives_helpful_error(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    setup_git_config: None,
+) -> None:
+    """Worktree mode in a freshly init'd repo with no commits raises a clear UserInputError.
+
+    Mirrors the default `mngr create` flow, which passes both base_branch (current
+    branch, e.g. "main") and a new_branch_name. Without an initial commit, the
+    base branch reference does not resolve and `git worktree add` would fail with
+    a cryptic "fatal: invalid reference" error.
+    """
+    empty_repo = tmp_path / "empty_repo"
+    init_git_repo(empty_repo, initial_commit=False)
+
+    local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, empty_repo)
+
+    agent_options = CreateAgentOptions(
+        agent_type=AgentTypeName("worktree-test"),
+        name=AgentName("test-no-commits"),
+        command=CommandString("sleep 60"),
+        transfer_mode=TransferMode.GIT_WORKTREE,
+        git=AgentGitOptions(
+            base_branch="main",
+            new_branch_name="mngr/no-commits",
+        ),
+    )
+
+    with pytest.raises(UserInputError, match="no commits"):
+        create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=agent_options,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+
+# =============================================================================
+# Branch Cleanup on Create Failure
+# =============================================================================
+
+
+class _RaiseAfterFileCopy:
+    """Plugin that raises after work_dir creation to simulate a late-stage failure."""
+
+    @hookimpl
+    def on_after_initial_file_copy(
+        self, agent_options: CreateAgentOptions, host: OnlineHostInterface, work_dir_path: Path
+    ) -> None:
+        raise RuntimeError("simulated failure after file copy")
+
+
+def _list_branches(repo: Path) -> list[str]:
+    """List local branch names in the given git repo."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [line for line in result.stdout.splitlines() if line]
+
+
+def _list_worktree_paths(repo: Path) -> set[Path]:
+    """List worktree paths (excluding the source repo itself) for the given git repo."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    paths: set[Path] = set()
+    repo_resolved = repo.resolve()
+    for block in result.stdout.strip().split("\n\n"):
+        for line in block.splitlines():
+            if line.startswith("worktree "):
+                path = Path(line.removeprefix("worktree ")).resolve()
+                if path != repo_resolved:
+                    paths.add(path)
+                break
+    return paths
+
+
+def test_worktree_branch_is_cleaned_up_when_create_fails(
+    temp_mngr_ctx: MngrContext,
+    temp_git_repo: Path,
+) -> None:
+    """If create fails after we made a new worktree branch, the branch and the worktree are removed.
+
+    Reuses the destroy-time safety mechanism: only the branch we created
+    (recorded in created_branch_name) is deleted; pre-existing branches are not.
+    The worktree itself is always removed because we always create it ourselves.
+    """
+    agent_name = AgentName(f"test-cleanup-fail-{int(time.time())}")
+    leaked_branch = f"mngr/{agent_name}"
+
+    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [_RaiseAfterFileCopy()])
+    local_host, source_location = _get_local_host_and_location(test_ctx, temp_git_repo)
+
+    agent_options = CreateAgentOptions(
+        agent_type=AgentTypeName("worktree-test"),
+        name=agent_name,
+        command=CommandString("sleep 60"),
+        transfer_mode=TransferMode.GIT_WORKTREE,
+        git=AgentGitOptions(new_branch_name=leaked_branch),
+    )
+
+    branches_before = _list_branches(temp_git_repo)
+    assert leaked_branch not in branches_before
+    worktrees_before = _list_worktree_paths(temp_git_repo)
+
+    with pytest.raises(RuntimeError, match="simulated failure after file copy"):
+        create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=agent_options,
+            mngr_ctx=test_ctx,
+        )
+
+    branches_after = _list_branches(temp_git_repo)
+    assert leaked_branch not in branches_after, (
+        f"branch {leaked_branch} should have been cleaned up after create failure, "
+        f"but is still present: {branches_after}"
+    )
+    worktrees_after = _list_worktree_paths(temp_git_repo)
+    leaked_worktrees = worktrees_after - worktrees_before
+    assert not leaked_worktrees, (
+        f"worktree(s) should have been removed after create failure, but found: {leaked_worktrees}"
+    )
+    for path in leaked_worktrees:
+        assert not path.exists(), f"worktree directory {path} should be removed"
+
+
+def test_preexisting_branch_is_preserved_when_create_fails(
+    temp_mngr_ctx: MngrContext,
+    temp_git_repo: Path,
+) -> None:
+    """When create fails on a pre-existing branch (not created by us), keep the branch but remove the worktree.
+
+    Mirrors the destroy-time safety: created_branch_name is None when the user
+    reused an existing branch, so branch deletion is skipped. The worktree
+    itself is always removed because we always create it ourselves.
+    """
+    existing_branch = "feature/preexisting"
+    subprocess.run(
+        ["git", "-C", str(temp_git_repo), "branch", existing_branch],
+        check=True,
+    )
+
+    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [_RaiseAfterFileCopy()])
+    local_host, source_location = _get_local_host_and_location(test_ctx, temp_git_repo)
+
+    agent_options = CreateAgentOptions(
+        agent_type=AgentTypeName("worktree-test"),
+        name=AgentName(f"test-preserve-{int(time.time())}"),
+        command=CommandString("sleep 60"),
+        transfer_mode=TransferMode.GIT_WORKTREE,
+        # No new_branch_name -- agent attaches to the existing branch.
+        git=AgentGitOptions(base_branch=existing_branch),
+    )
+
+    worktrees_before = _list_worktree_paths(temp_git_repo)
+
+    with pytest.raises(RuntimeError, match="simulated failure after file copy"):
+        create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=agent_options,
+            mngr_ctx=test_ctx,
+        )
+
+    branches_after = _list_branches(temp_git_repo)
+    assert existing_branch in branches_after, (
+        f"pre-existing branch {existing_branch} must not be deleted by create cleanup"
+    )
+    worktrees_after = _list_worktree_paths(temp_git_repo)
+    leaked_worktrees = worktrees_after - worktrees_before
+    assert not leaked_worktrees, (
+        f"worktree(s) should have been removed after create failure even though branch was preserved, "
+        f"but found: {leaked_worktrees}"
+    )
+    for path in leaked_worktrees:
+        assert not path.exists(), f"worktree directory {path} should be removed"
 
 
 # =============================================================================

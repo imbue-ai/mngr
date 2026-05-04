@@ -305,7 +305,7 @@ mngr <command> [options]
 ### For maintenance:
 
 - [`cleanup`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/cleanup.md): Clean up stopped agents and unused resources
-- [`events`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/events.md): View agent and host event files
+- [`event`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/event.md): View agent and host event files
 - [`gc`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/gc.md): Garbage collect unused resources
 
 ### For managing mngr itself:

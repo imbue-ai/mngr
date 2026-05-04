@@ -21,10 +21,12 @@ from imbue.mngr.api.gc import _LOG_MAX_AGE_DAYS
 from imbue.mngr.api.gc import _clean_work_dir
 from imbue.mngr.api.gc import _discover_hosts_for_gc
 from imbue.mngr.api.gc import _gc_single_host_work_dir
+from imbue.mngr.api.gc import _get_orphaned_source_dirs
 from imbue.mngr.api.gc import _get_orphaned_work_dirs
 from imbue.mngr.api.gc import _handle_error
 from imbue.mngr.api.gc import _is_git_worktree
 from imbue.mngr.api.gc import _is_rotated_log_file
+from imbue.mngr.api.gc import _local_branches_not_on_any_remote_on_host
 from imbue.mngr.api.gc import _remove_directory
 from imbue.mngr.api.gc import _remove_git_worktree
 from imbue.mngr.api.gc import _remove_work_dir_from_certified_data
@@ -35,6 +37,7 @@ from imbue.mngr.api.gc import gc_machines
 from imbue.mngr.api.gc import gc_snapshots
 from imbue.mngr.api.gc import gc_volumes
 from imbue.mngr.api.gc import gc_work_dirs
+from imbue.mngr.api.gc import register_generated_source_dir
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import _DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS
@@ -256,6 +259,7 @@ def test_handle_error_abort_raises_mngr_error_when_no_exception() -> None:
         _handle_error("some message", ErrorBehavior.ABORT, exc=None)
 
 
+@pytest.mark.allow_warnings(match=r"^some message$")
 def test_handle_error_continue_does_not_raise() -> None:
     """CONTINUE behavior logs instead of raising."""
     # Should not raise
@@ -1044,6 +1048,9 @@ class _DiscoveryErrorProvider(MockProviderInstance):
         raise MngrError("simulated discovery failure from test")
 
 
+@pytest.mark.allow_warnings(
+    match=r"^Failed to discover hosts for provider error-provider: simulated discovery failure from test"
+)
 def test_discover_hosts_for_gc_skips_provider_on_error(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
     """_discover_hosts_for_gc skips a provider entirely when discovery raises MngrError.
 
@@ -1062,6 +1069,9 @@ def test_discover_hosts_for_gc_skips_provider_on_error(temp_host_dir: Path, temp
     assert result == []
 
 
+@pytest.mark.allow_warnings(
+    match=r"^Failed to discover hosts for provider error-provider: simulated discovery failure from test"
+)
 def test_discover_hosts_for_gc_continues_after_one_provider_fails(
     temp_host_dir: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -1325,6 +1335,9 @@ def test_clean_work_dir_removes_git_worktree(local_host: Host, temp_git_repo: Pa
 # =========================================================================
 
 
+@pytest.mark.allow_warnings(
+    match=r"^git worktree remove failed, falling back to directory removal: fatal: not a git repository \(or any of the parent directories\): \.git"
+)
 def test_remove_git_worktree_without_parseable_git_file_falls_back_to_rm(local_host: Host, tmp_path: Path) -> None:
     """_remove_git_worktree falls back to rm -rf when the .git file cannot be parsed."""
     work_dir = tmp_path / "pseudo_worktree"
@@ -1339,6 +1352,9 @@ def test_remove_git_worktree_without_parseable_git_file_falls_back_to_rm(local_h
     assert not work_dir.exists()
 
 
+@pytest.mark.allow_warnings(
+    match=r"^git worktree remove failed, falling back to directory removal: fatal: cannot change to '"
+)
 def test_remove_git_worktree_falls_back_to_rm_when_git_not_in_main_repo(local_host: Host, tmp_path: Path) -> None:
     """_remove_git_worktree falls back to rm -rf when git worktree remove fails."""
     work_dir = tmp_path / "pseudo_worktree2"
@@ -1528,6 +1544,7 @@ class _GetHostErrorProvider(MockProviderInstance):
         raise MngrError("simulated get_host failure from test")
 
 
+@pytest.mark.allow_warnings(match=r"Failed to check/destroy host .*: simulated get_host failure from test")
 def test_gc_machines_handles_mngr_error_with_continue(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
     """gc_machines catches MngrError per-host when ErrorBehavior.CONTINUE is set."""
     host = _make_offline_host(
@@ -1602,6 +1619,9 @@ class _ListSnapshotsErrorProvider(MockProviderInstance):
         raise MngrError("simulated list_snapshots failure from test")
 
 
+@pytest.mark.allow_warnings(
+    match=r"Failed to cleanup snapshots for host .*: simulated list_snapshots failure from test"
+)
 def test_gc_snapshots_handles_inner_mngr_error_with_continue(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
     """gc_snapshots records inner MngrError per-host and continues when CONTINUE behavior."""
     host = _make_offline_host(
@@ -1776,6 +1796,7 @@ class _DeleteVolumeErrorProvider(MockProviderInstance):
         raise MngrError(f"simulated delete_volume failure from test: {volume_id}")
 
 
+@pytest.mark.allow_warnings(match=r"Failed to delete volume .*: simulated delete_volume failure from test")
 def test_gc_volumes_handles_delete_error_with_continue(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
     """gc_volumes records MngrError from delete_volume and continues."""
     vol = VolumeInfo(
@@ -1867,6 +1888,9 @@ def test_gc_volumes_skips_provider_when_unavailable(temp_host_dir: Path, temp_mn
     assert len(result.errors) == 0
 
 
+@pytest.mark.allow_warnings(
+    match=r"Failed to process volumes for provider .*: simulated list_volumes failure from test"
+)
 def test_gc_volumes_handles_list_volumes_mngr_error_with_continue(
     temp_host_dir: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -2057,6 +2081,9 @@ def test_gc_work_dirs_skips_offline_host_not_online_interface(
 # =========================================================================
 
 
+@pytest.mark.allow_warnings(
+    match=r"^git worktree remove failed, falling back to directory removal: fatal: not a git repository \(or any of the parent directories\): \.git"
+)
 def test_remove_git_worktree_falls_back_when_git_file_absent(local_host: Host, tmp_path: Path) -> None:
     """_remove_git_worktree falls back to rm -rf when the .git file does not exist."""
     work_dir = tmp_path / "worktree_no_git_file"
@@ -2068,6 +2095,91 @@ def test_remove_git_worktree_falls_back_when_git_file_absent(local_host: Host, t
 
     # The directory should have been removed via rm -rf fallback.
     assert not work_dir.exists()
+
+
+# =========================================================================
+# Source dir GC tests (mngr-managed clones from --source <git-url>)
+# =========================================================================
+
+
+def _make_clone_with_remote(
+    source_upstream: Path, clone_path: Path, extra_local_branches: tuple[str, ...] = ()
+) -> None:
+    subprocess.run(
+        ["git", "clone", str(source_upstream), str(clone_path)],
+        check=True,
+        capture_output=True,
+    )
+    for branch_name in extra_local_branches:
+        subprocess.run(
+            ["git", "-C", str(clone_path), "checkout", "-b", branch_name],
+            check=True,
+            capture_output=True,
+        )
+        (clone_path / f"{branch_name.replace('/', '_')}.marker").write_text(branch_name)
+        subprocess.run(["git", "-C", str(clone_path), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(clone_path), "commit", "-m", f"local: {branch_name}"],
+            check=True,
+            capture_output=True,
+        )
+
+
+def test_local_branches_not_on_any_remote_empty_for_fresh_clone(
+    local_host: Host, temp_git_repo: Path, tmp_path: Path
+) -> None:
+    """A fresh clone has no local branches missing from remotes."""
+    clone = tmp_path / "clone"
+    _make_clone_with_remote(temp_git_repo, clone)
+    assert _local_branches_not_on_any_remote_on_host(local_host, clone) == []
+
+
+def test_local_branches_not_on_any_remote_finds_local_only_branch(
+    local_host: Host, temp_git_repo: Path, tmp_path: Path
+) -> None:
+    """A local branch with a commit not present on any remote is flagged."""
+    clone = tmp_path / "clone"
+    _make_clone_with_remote(temp_git_repo, clone, extra_local_branches=("local-only",))
+    unpushed = _local_branches_not_on_any_remote_on_host(local_host, clone)
+    assert "local-only" in unpushed
+
+
+def test_get_orphaned_source_dirs_deletes_clean_clone(
+    local_host: Host, local_provider: LocalProviderInstance, temp_git_repo: Path, tmp_path: Path
+) -> None:
+    """A tracked clone with no unpushed branches and no referencing worktree is deletable."""
+    clone = tmp_path / "clone"
+    _make_clone_with_remote(temp_git_repo, clone)
+    register_generated_source_dir(local_host, clone)
+
+    deletable, kept = _get_orphaned_source_dirs(host=local_host, provider_name=local_provider.name)
+    assert [info.path for info in deletable] == [clone]
+    assert kept == []
+
+
+def test_get_orphaned_source_dirs_keeps_clone_with_unpushed_branch(
+    local_host: Host, local_provider: LocalProviderInstance, temp_git_repo: Path, tmp_path: Path
+) -> None:
+    """A tracked clone with a local branch not on any remote is kept, not deleted."""
+    clone = tmp_path / "clone"
+    _make_clone_with_remote(temp_git_repo, clone, extra_local_branches=("mngr/x",))
+    register_generated_source_dir(local_host, clone)
+
+    deletable, kept = _get_orphaned_source_dirs(host=local_host, provider_name=local_provider.name)
+    assert deletable == []
+    assert [info.path for info in kept] == [clone]
+
+
+@pytest.mark.allow_warnings(match=r"Failed to list local branches in .*; treating as possibly-unpushed")
+def test_local_branches_not_on_any_remote_treats_failure_as_unpushed(local_host: Host, tmp_path: Path) -> None:
+    """If git for-each-ref fails (e.g. path is not a git repo), report non-empty so
+    the caller keeps the repo rather than deleting it. This guards against data loss
+    when branch enumeration cannot succeed.
+    """
+    not_a_repo = tmp_path / "not-a-repo"
+    not_a_repo.mkdir()
+    result = _local_branches_not_on_any_remote_on_host(local_host, not_a_repo)
+    assert result, "failure must be treated as possibly-unpushed so the caller keeps the repo"
 
 
 # =========================================================================
@@ -2252,6 +2364,7 @@ def test_gc_machines_destroys_old_online_host_with_no_agents(
     assert provider.destroyed_hosts == [host.id]
 
 
+@pytest.mark.allow_warnings(match=r"^Failed to authenticate with host")
 def test_gc_machines_skips_host_on_auth_error_during_discover(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
@@ -2276,6 +2389,7 @@ def test_gc_machines_skips_host_on_auth_error_during_discover(
     assert provider.destroyed_hosts == []
 
 
+@pytest.mark.allow_warnings(match=r"^Failed to connect to host")
 def test_gc_machines_skips_host_on_connection_error_during_discover(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
@@ -2314,6 +2428,7 @@ def test_gc_machines_dry_run_identifies_but_does_not_destroy_old_online_host(
     assert provider.destroyed_hosts == []
 
 
+@pytest.mark.allow_warnings(match=r"^Cannot determine last activity of host")
 def test_gc_machines_skips_host_when_activity_time_unreadable(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
@@ -2400,6 +2515,7 @@ def test_gc_machines_skips_old_running_host_with_no_activity(
     assert provider.destroyed_hosts == []
 
 
+@pytest.mark.allow_warnings(match=r"^Cannot determine state of host")
 def test_gc_machines_skips_host_when_get_state_unreadable(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,

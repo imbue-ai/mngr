@@ -50,6 +50,13 @@ PACKAGES: Final[tuple[PackageInfo, ...]] = (
     PackageInfo(dir_name="mngr_recursive", pypi_name="imbue-mngr-recursive", internal_deps=("imbue-mngr",)),
     PackageInfo(dir_name="mngr_ttyd", pypi_name="imbue-mngr-ttyd", internal_deps=("imbue-mngr",)),
     PackageInfo(dir_name="mngr_wait", pypi_name="imbue-mngr-wait", internal_deps=("imbue-mngr",)),
+    PackageInfo(dir_name="mngr_vps_docker", pypi_name="imbue-mngr-vps-docker", internal_deps=("imbue-mngr",)),
+    PackageInfo(dir_name="mngr_lima", pypi_name="imbue-mngr-lima", internal_deps=("imbue-mngr",)),
+    PackageInfo(
+        dir_name="mngr_vultr",
+        pypi_name="imbue-mngr-vultr",
+        internal_deps=("imbue-mngr", "imbue-mngr-vps-docker"),
+    ),
 )
 
 PACKAGE_BY_PYPI_NAME: Final[dict[str, PackageInfo]] = {pkg.pypi_name: pkg for pkg in PACKAGES}

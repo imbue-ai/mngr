@@ -73,7 +73,7 @@ mngr observe [OPTIONS]
 ## See Also
 
 - [mngr list](../primary/list.md) - List available agents
-- [mngr events](./events.md) - View events from an agent or host
+- [mngr event](./event.md) - View events from an agent or host
 
 ## Examples
 

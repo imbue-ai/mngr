@@ -4,6 +4,7 @@ import queue
 import signal
 import socket
 import threading
+import traceback
 from collections.abc import AsyncIterator
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
@@ -44,7 +45,10 @@ from imbue.minds_workspace_server.models import RandomNameResponse
 from imbue.minds_workspace_server.models import SendMessageRequest
 from imbue.minds_workspace_server.models import SendMessageResponse
 from imbue.minds_workspace_server.plugins import get_plugin_manager
+from imbue.minds_workspace_server.request_writer import KNOWN_REQUEST_TYPES
+from imbue.minds_workspace_server.request_writer import UnknownRequestTypeError
 from imbue.minds_workspace_server.request_writer import write_refresh_request
+from imbue.minds_workspace_server.request_writer import write_request_event
 from imbue.minds_workspace_server.service_dispatcher import register_service_routes
 from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
 from imbue.minds_workspace_server.sharing_proxy import SharingProxyError
@@ -343,7 +347,7 @@ def _send_message_endpoint(agent_id: str, send_message_request: SendMessageReque
 
     success = send_message(agent_info.name, send_message_request.message)
     if not success:
-        error = ErrorResponse(detail=f"Failed to send message to agent '{agent_info.name}'")
+        error = ErrorResponse(detail=f"Failed to send message to agent '{agent_info.name}' (0 successful agents)")
         return JSONResponse(content=error.model_dump(), status_code=500)
 
     return JSONResponse(content=SendMessageResponse(status="ok").model_dump())
@@ -683,12 +687,68 @@ async def _request_sharing_edit_endpoint(service_name: str) -> JSONResponse:
         return JSONResponse(content=error.model_dump(), status_code=502)
 
 
+async def _request_event_endpoint(request: Request) -> JSONResponse:
+    """Append a generic ``RequestEvent`` to ``events/requests/events.jsonl``.
+
+    The body must be a JSON object containing at least ``request_type`` (e.g.
+    ``"LATCHKEY_PERMISSION"``) plus whatever request-type-specific fields the
+    desktop client expects (e.g. ``service_name``, ``rationale``). Server-
+    controlled metadata fields (``timestamp``, ``type``, ``event_id``,
+    ``source``, ``agent_id``) are filled in by the workspace server and
+    silently override any caller-provided values for those keys.
+    """
+    try:
+        body: object = await request.json()
+    except json.JSONDecodeError as e:
+        error = ErrorResponse(detail=f"Invalid JSON body: {e}")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    if not isinstance(body, dict):
+        error = ErrorResponse(detail="Request body must be a JSON object")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    request_type_raw = body.get("request_type")
+    if not isinstance(request_type_raw, str) or not request_type_raw:
+        error = ErrorResponse(detail="Field 'request_type' is required and must be a non-empty string")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    if request_type_raw not in KNOWN_REQUEST_TYPES:
+        known = ", ".join(sorted(KNOWN_REQUEST_TYPES))
+        error = ErrorResponse(detail=f"Unknown request_type {request_type_raw!r}; expected one of: {known}")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    is_user_requested_raw = body.get("is_user_requested", True)
+    if not isinstance(is_user_requested_raw, bool):
+        error = ErrorResponse(detail="Field 'is_user_requested' must be a boolean")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    payload: dict[str, object] = {
+        key: value for key, value in body.items() if key not in {"request_type", "is_user_requested"}
+    }
+
+    try:
+        event = await run_in_threadpool(
+            write_request_event,
+            request_type_raw,
+            payload,
+            is_user_requested_raw,
+        )
+    except UnknownRequestTypeError as e:
+        error = ErrorResponse(detail=str(e))
+        return JSONResponse(content=error.model_dump(), status_code=400)
+    except (RuntimeError, OSError) as e:
+        error = ErrorResponse(detail=str(e))
+        return JSONResponse(content=error.model_dump(), status_code=500)
+
+    return JSONResponse(content={"ok": True, "event_id": event["event_id"]})
+
+
 async def _refresh_service_request_endpoint(service_name: str) -> JSONResponse:
     """Append a refresh-service event to the agent's refresh events file.
 
     Called by agents inside the container to tell the minds desktop client
     that an open web-service tab should reload. The desktop client picks the
-    event up via ``mngr events --follow`` and POSTs back to the broadcast
+    event up via ``mngr event --follow`` and POSTs back to the broadcast
     endpoint below.
     """
     try:
@@ -703,7 +763,7 @@ async def _refresh_service_broadcast_endpoint(service_name: str, request: Reques
     """Broadcast a refresh_service WebSocket message for the given service_name.
 
     Called by the desktop client after it observes a refresh event on the
-    mngr events stream. Locked to loopback clients since no authentication
+    mngr event stream. Locked to loopback clients since no authentication
     exists between the desktop client and the workspace server inside the
     container.
     """
@@ -732,6 +792,16 @@ def create_application(
     agent_manager: AgentManager | None = None,
 ) -> FastAPI:
     application = FastAPI(lifespan=_lifespan)
+
+    @application.exception_handler(Exception)
+    async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        logger.error("Unhandled exception on {} {}: {}\n{}", request.method, request.url.path, exc, "".join(tb))
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Internal server error: {exc}"},
+        )
+
     application.state.preconfigured_agent_manager = agent_manager
     application.state.config = config or Config()
     application.state.provider_names = provider_names
@@ -756,6 +826,7 @@ def create_application(
     application.add_api_route("/api/agents/{agent_id}/destroy", _destroy_agent, methods=["POST"])
     application.add_api_route("/api/sharing/{service_name}", _get_sharing_status_endpoint, methods=["GET"])
     application.add_api_route("/api/sharing/{service_name}/request", _request_sharing_edit_endpoint, methods=["POST"])
+    application.add_api_route("/api/permissions/request", _request_event_endpoint, methods=["POST"])
     application.add_api_route(
         "/api/refresh-service/{service_name}", _refresh_service_request_endpoint, methods=["POST"]
     )

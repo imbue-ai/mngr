@@ -7,6 +7,7 @@ IF YOU FAIL TO FOLLOW ONE, YOU MUST EXPLICITLY CALL THAT OUT IN YOUR RESPONSE.
 - This is a monorepo.
 - ALWAYS run commands by calling "uv run" from the root of the git checkout (ex: "uv run mngr create ..."). Do NOT call "mngr" directly (it will refer to the wrong version).
 - NEVER amend commits or rebase--always create new commits.
+- NEVER use `pkill -f` or `killall` with broad patterns. These can kill unrelated processes (including the Claude Code session itself). Always find the specific PID first (e.g. via `pgrep -af` or `ps aux | grep`), verify it's the right process, and then `kill` that exact PID.
 - If you ever need to work with another *git* repo that is *outside* of this monorepo, you should do so by creating a worktree for that repo and putting it within a ".external_worktrees/" directory *within* this root folder (ie, at the same level as the ".git/" folder).  Use the same branch name in the worktree as the branch you are working on in this repo, and be sure to commit inside there as well.
 
 # How to get started on any task:
@@ -126,6 +127,16 @@ By default, or if instructed to commit:
 If instructed not to commit:
 - do not commit anything! Simply leave the git state as it is at the end of your response.
 - NEVER run git commands like git reset, git checkout, etc that might change the git state (when instructed not to commit you are collaborating with others in the same directory, so should not change other files or the git state).
+
+# Changelog
+
+Every PR must include a changelog entry file. CI will fail if it is missing.
+
+- Create the file at `changelog/<branch-name>.md`, where slashes in the branch name are replaced with dashes.
+  - Example: branch `mngr/add-feature` -> `changelog/mngr-add-feature.md`
+- The file should briefly describe the user-visible changes in the PR.
+- A nightly agent consolidates entries into `UNABRIDGED_CHANGELOG.md` (full verbatim entries) and `CHANGELOG.md` (concise AI-generated summary).
+- The changelog consolidation agent's own PRs (`mngr/changelog-consolidation-*`) are exempt from this requirement.
 
 # Silly error workarounds
 
