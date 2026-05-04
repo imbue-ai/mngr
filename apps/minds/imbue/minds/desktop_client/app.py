@@ -1635,8 +1635,13 @@ async def _handle_agent_health_probe(
     user to click in. Updates the health tracker as a side effect, so a stuck
     server surfaced here also drives the in-tab overlay via the SSE stream.
 
-    A ``restarting`` agent short-circuits without hitting the backend: actively
-    probing mid-restart would flip the tracker out of restarting to stuck.
+    The probe always hits the backend, even when the tracker is already in
+    ``RESTARTING``. To keep the UI from thrashing between "Restarting..." and
+    "Not responding" when a restart briefly breaks connectivity, failure paths
+    during ``RESTARTING`` skip the ``record_failure`` write and return
+    ``RESTARTING`` unchanged. A successful probe during ``RESTARTING`` is
+    treated as the restart completing and flips the tracker to ``HEALTHY``,
+    which is what clears the overlay via the SSE push.
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(
