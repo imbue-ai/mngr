@@ -1,6 +1,6 @@
 import json
 import shutil
-import time
+import threading
 from datetime import datetime
 from datetime import timezone
 from functools import cached_property
@@ -301,7 +301,9 @@ class LimaProviderInstance(BaseProviderInstance):
                     attempt + 1,
                     _HOST_KEY_SCAN_MAX_ATTEMPTS,
                 )
-                time.sleep(_HOST_KEY_SCAN_RETRY_DELAY_SECONDS)
+                # Use Event.wait instead of time.sleep so the wait is
+                # interruptible and stays out of gevent's way (PREVENT_TIME_SLEEP).
+                threading.Event().wait(_HOST_KEY_SCAN_RETRY_DELAY_SECONDS)
         raise MngrError(
             f"ssh-keyscan could not read a host key for {hostname}:{port} after "
             f"{_HOST_KEY_SCAN_MAX_ATTEMPTS} attempts; the Lima VM may not have "
