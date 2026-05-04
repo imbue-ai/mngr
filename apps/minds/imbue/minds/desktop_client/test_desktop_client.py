@@ -1184,11 +1184,7 @@ def _install_fake_mngr(
     bin_dir.mkdir(parents=True, exist_ok=True)
     log_path = bin_dir / "mngr.log"
     fake_mngr = bin_dir / "mngr"
-    fake_mngr.write_text(
-        '#!/bin/bash\n'
-        'printf "%s\\n" "$@" >> "{}"\n'
-        'exit {}\n'.format(log_path, exit_code)
-    )
+    fake_mngr.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >> "{}"\nexit {}\n'.format(log_path, exit_code))
     fake_mngr.chmod(0o755)
     monkeypatch.setenv("PATH", "{}:{}".format(bin_dir, os.environ.get("PATH", "")))
     app = client.app

@@ -1264,7 +1264,6 @@ class AgentCreator(MutableModel):
                         parent_cg=self.root_concurrency_group,
                     )
 
-
                 with self._lock:
                     self._statuses[aid] = AgentCreationStatus.CREATING
 

@@ -1693,9 +1693,7 @@ async def _handle_workspace_delete(
     spinner while this runs.
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(
-            status_code=403, content='{"error": "Not authenticated"}', media_type="application/json"
-        )
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
 
     # 1. Disassociate + tear down CF tunnel first so the UI stops trying to
     #    route to an agent we're about to kill.
