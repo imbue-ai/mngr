@@ -153,6 +153,14 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
     if agent_info.id in watchers:
         return watchers[agent_info.id]
 
+    # Single-element holder so the ``on_events`` closure can reach the watcher
+    # we are about to construct. Capturing the watcher directly (rather than
+    # looking it up in ``watchers`` by id on every event) keeps the callback
+    # self-contained: it cannot KeyError if the dict entry has since been
+    # removed, and it does not depend on the implicit invariant that the
+    # entry was already inserted before the first event fires.
+    watcher_holder: list[AgentSessionWatcher] = []
+
     def on_events(agent_id: str, events: list[dict[str, Any]]) -> None:
         for event in events:
             event_queues.broadcast(agent_id, event)
@@ -161,7 +169,7 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
         # the newest lines, but the activity tracker needs the full transcript
         # to detect unmatched tool_uses across turns and to read the last
         # event's type.
-        agent_manager.update_session_events(agent_id, watchers[agent_id].get_all_events())
+        agent_manager.update_session_events(agent_id, watcher_holder[0].get_all_events())
 
     watcher = AgentSessionWatcher(
         agent_id=agent_info.id,
@@ -169,6 +177,7 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
         claude_config_dir=agent_info.claude_config_dir,
         on_events=on_events,
     )
+    watcher_holder.append(watcher)
     watchers[agent_info.id] = watcher
     watcher.start()
     # Seed transcript-derived activity signals once at watcher creation so the
