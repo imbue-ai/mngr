@@ -11,6 +11,7 @@ session transcript is the authoritative source for the IDLE / THINKING /
 TOOL_RUNNING states.
 """
 
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,7 @@ class _MarkerFileHandler(FileSystemEventHandler):
         paths = [event.src_path]
         if isinstance(event, FileMovedEvent):
             paths.append(event.dest_path)
-        if any(Path(p).name == PERMISSIONS_WAITING_MARKER_FILENAME for p in paths):
+        if any(os.path.basename(p) == PERMISSIONS_WAITING_MARKER_FILENAME for p in paths):
             self.on_change()
 
 
