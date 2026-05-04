@@ -241,6 +241,7 @@ class DesktopClientFixture:
             notification_dispatcher=NotificationDispatcher.create(
                 is_electron=False, tkinter_module=None, is_macos=False
             ),
+            backend_resolver=backend_resolver,
         )
 
         app = create_desktop_client(

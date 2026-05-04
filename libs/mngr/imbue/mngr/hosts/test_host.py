@@ -63,6 +63,7 @@ from imbue.mngr.utils.testing import capture_tmux_pane_contents
 from imbue.mngr.utils.testing import generate_ssh_keypair
 from imbue.mngr.utils.testing import local_sshd
 from imbue.mngr.utils.testing import tmux_session_cleanup
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
 @pytest.fixture
@@ -168,6 +169,28 @@ def test_run_command_captures_multiline_output(host_with_temp_dir: tuple[Host, P
     assert "line1" in output.stdout
     assert "line2" in output.stdout
     assert "line3" in output.stdout
+
+
+def test_run_command_local_from_worker_thread(
+    host_with_temp_dir: tuple[Host, Path],
+    active_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Local-host shell commands must work when issued from mngr_executor worker threads.
+
+    Regression test for: pyinfra's LocalConnector uses gevent.subprocess.Popen,
+    which attaches a libev SIGCHLD child watcher to the thread-local Hub. On
+    Linux these watchers can only attach to the *default* event loop, so
+    running a local command from a worker thread previously raised
+    "child watchers are only available on the default loop". Host now bypasses
+    pyinfra for local hosts and runs commands via the ConcurrencyGroup process
+    runner instead.
+    """
+    host, _ = host_with_temp_dir
+    with mngr_executor(parent_cg=active_concurrency_group, name="local-cmd-thread", max_workers=2) as executor:
+        future = executor.submit(host._run_shell_command, StringCommand("echo from_worker"))
+        success, output = future.result(timeout=30.0)
+    assert success is True
+    assert output.stdout == "from_worker"
 
 
 # =============================================================================
