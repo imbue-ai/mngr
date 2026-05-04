@@ -992,10 +992,17 @@ class AgentManager:
         :class:`AgentSessionWatcher` learns of new events. Cheap to call: short
         circuits when both the unmatched-tool-use boolean and the last event
         type are unchanged.
+
+        No-op for agents that have no marker watcher registered (e.g. remote
+        agents, or stale callbacks for an agent that was just destroyed). This
+        prevents the per-agent caches from accumulating entries that
+        ``_stop_marker_watcher`` would never reach.
         """
         new_pending = has_unmatched_tool_use(events)
         new_last_type = last_event_type(events)
         with self._lock:
+            if agent_id not in self._marker_watchers:
+                return
             old_pending = self._has_unmatched_tool_use_by_agent.get(agent_id, False)
             old_last_type = self._last_event_type_by_agent.get(agent_id)
             if old_pending == new_pending and old_last_type == new_last_type:

@@ -1037,15 +1037,21 @@ def test_update_session_events_flips_to_tool_running(
 
 
 def test_update_session_events_no_op_when_no_watcher(agent_manager: AgentManager) -> None:
-    """Calling update_session_events for an unknown agent is a quiet no-op."""
+    """Calling update_session_events for an unknown agent is a quiet no-op.
+
+    Beyond not raising, it must leave no residue in the per-agent caches:
+    otherwise those entries would never be cleared (``_stop_marker_watcher``
+    only fires for agents that previously had a watcher), accumulating
+    indefinitely.
+    """
     agent_manager.update_session_events(
         "ghost",
         [{"type": "assistant_message", "tool_calls": [{"tool_call_id": "x", "tool_name": "Bash"}]}],
     )
-    # No exception -- and no activity_state is derived because there's no
-    # watcher to read the permissions_waiting marker from.
     with agent_manager._lock:
         assert "ghost" not in agent_manager._activity_state_by_agent
+        assert "ghost" not in agent_manager._has_unmatched_tool_use_by_agent
+        assert "ghost" not in agent_manager._last_event_type_by_agent
 
 
 def test_stop_marker_watcher_clears_caches(agent_manager: AgentManager, tmp_path: Path) -> None:
