@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import HTMLResponse
@@ -1480,32 +1481,28 @@ def _create_subdomain_test_client_with_failing_backend(
     return client, auth_store
 
 
-def test_subdomain_forward_connect_error_returns_502(tmp_path: Path) -> None:
-    # Workspace URL is registered but nothing is listening on the port. The
-    # forwarder surfaces a 502 to all clients (HTML and non-HTML alike); the
-    # creating-page readiness probe is what gates the user-facing redirect
-    # so this state shouldn't be reached via the normal creation flow.
+@pytest.mark.parametrize(
+    "backend_error",
+    [
+        # Nothing is listening on the workspace port yet.
+        pytest.param(httpx.ConnectError("connection refused"), id="connect_error"),
+        # The TCP socket accepted the connection but the server closed it
+        # before sending an HTTP response (uvicorn's window between bind
+        # and lifespan completing).
+        pytest.param(
+            httpx.RemoteProtocolError("Server disconnected without sending a response."),
+            id="remote_protocol_error",
+        ),
+    ],
+)
+def test_subdomain_forward_failing_backend_returns_502(tmp_path: Path, backend_error: Exception) -> None:
+    # Workspace URL is registered but the backend isn't fully serving HTTP
+    # yet. The forwarder surfaces a 502 to all clients (HTML and non-HTML
+    # alike); the creating-page readiness probe is what gates the
+    # user-facing redirect so this state shouldn't be reached via the
+    # normal creation flow.
     agent_id = AgentId()
-    client, auth_store = _create_subdomain_test_client_with_failing_backend(
-        tmp_path, agent_id, httpx.ConnectError("connection refused")
-    )
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    html_response = client.get("/", headers={"accept": "text/html"})
-    api_response = client.get("/api/layout", headers={"accept": "application/json"})
-
-    assert html_response.status_code == 502
-    assert api_response.status_code == 502
-
-
-def test_subdomain_forward_remote_protocol_error_returns_502(tmp_path: Path) -> None:
-    # The TCP socket accepted the connection but the server closed it before
-    # sending an HTTP response (uvicorn's window between bind and lifespan
-    # completing). The forwarder surfaces a 502 to all clients.
-    agent_id = AgentId()
-    client, auth_store = _create_subdomain_test_client_with_failing_backend(
-        tmp_path, agent_id, httpx.RemoteProtocolError("Server disconnected without sending a response.")
-    )
+    client, auth_store = _create_subdomain_test_client_with_failing_backend(tmp_path, agent_id, backend_error)
     _authenticate_client(client=client, auth_store=auth_store)
 
     html_response = client.get("/", headers={"accept": "text/html"})
