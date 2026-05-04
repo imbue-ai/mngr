@@ -84,9 +84,9 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
       const hasMessageText = messageText.trim().length > 0;
 
       return m("div", { class: "message-input mx-auto w-full" }, [
-        m("div", { class: "message-input-box flex flex-col" }, [
+        m("div", { class: "message-input-box flex flex-row items-center" }, [
           m("textarea", {
-            class: "message-input-textbox w-full resize-none focus:outline-none",
+            class: "message-input-textbox flex-1 resize-none focus:outline-none",
             placeholder: "Type a message...",
             rows: 1,
             value: messageText,

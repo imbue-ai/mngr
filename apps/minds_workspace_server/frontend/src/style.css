@@ -186,7 +186,7 @@ body {
   color: var(--color-text-primary);
   background: transparent;
   border: none;
-  padding: 16px 20px 8px;
+  padding: 14px 8px 14px 20px;
 }
 
 .message-input-textbox::placeholder {
@@ -196,9 +196,9 @@ body {
 .message-input-toolbar {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
   gap: 8px;
-  padding: 6px 16px 14px;
+  padding-right: 12px;
+  flex-shrink: 0;
 }
 
 .message-input-send-button {
