@@ -89,8 +89,14 @@ def _create_test_desktop_client(
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
     agent_creator: AgentCreator | None = None,
+    base_url: str = "http://localhost",
 ) -> tuple[TestClient, FileAuthStore]:
-    """Create a desktop client with the given backend resolver."""
+    """Create a desktop client with the given backend resolver.
+
+    ``base_url`` controls the TestClient's default origin and is overridable
+    for tests that need to exercise the workspace-subdomain handler (e.g.
+    ``http://<agent-id>.localhost``).
+    """
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
 
@@ -100,7 +106,7 @@ def _create_test_desktop_client(
         http_client=http_client,
         agent_creator=agent_creator,
     )
-    client = TestClient(app, base_url="http://localhost")
+    client = TestClient(app, base_url=base_url)
 
     return client, auth_store
 
@@ -1456,22 +1462,16 @@ def _create_loopback_subdomain_client(
     """Build a desktop client whose resolver returns a loopback workspace URL
     and which has no SSH tunnel manager available (so ``_get_ssh_info`` is None).
     """
-    auth_dir = tmp_path / "auth"
-    auth_store = FileAuthStore(data_directory=auth_dir)
-
-    discovered_agents = make_agents_json(agent_id)
     resolver = make_resolver_with_data(
-        agents_json=discovered_agents,
+        agents_json=make_agents_json(agent_id),
         service_logs={str(agent_id): make_service_log("system_interface", workspace_url)},
     )
-
-    app = create_desktop_client(
-        auth_store=auth_store,
+    return _create_test_desktop_client(
+        tmp_path=tmp_path,
         backend_resolver=resolver,
         http_client=None,
+        base_url=f"http://{agent_id}.localhost",
     )
-    client = TestClient(app, base_url=f"http://{agent_id}.localhost")
-    return client, auth_store
 
 
 @pytest.mark.parametrize(
