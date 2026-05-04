@@ -29,6 +29,7 @@ from imbue.minds_workspace_server.activity_state import has_unmatched_tool_use
 from imbue.minds_workspace_server.activity_state import last_event_type
 from imbue.minds_workspace_server.activity_watcher import AgentMarkerWatcher
 from imbue.minds_workspace_server.agent_discovery import discover_agents
+from imbue.minds_workspace_server.agent_discovery import get_host_dir
 from imbue.minds_workspace_server.models import AgentCreationError
 from imbue.minds_workspace_server.models import AgentStateItem
 from imbue.minds_workspace_server.models import ApplicationEntry
@@ -194,7 +195,7 @@ class AgentManager:
         manager._creation_cg = ConcurrencyGroup(name="agent-creation")
         manager._creation_cg.__enter__()
         manager._mngr_binary = mngr_binary
-        manager._host_dir = Path(os.environ.get("MNGR_HOST_DIR", str(Path.home() / ".mngr")))
+        manager._host_dir = get_host_dir()
         manager._marker_watchers = {}
         manager._has_unmatched_tool_use_by_agent = {}
         manager._last_event_type_by_agent = {}

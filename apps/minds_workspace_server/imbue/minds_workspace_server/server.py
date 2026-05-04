@@ -28,6 +28,7 @@ from starlette.websockets import WebSocketDisconnect
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
 from imbue.minds_workspace_server.agent_discovery import discover_agents
+from imbue.minds_workspace_server.agent_discovery import get_host_dir
 from imbue.minds_workspace_server.agent_discovery import read_claude_config_dir_from_env_file
 from imbue.minds_workspace_server.agent_discovery import send_message
 from imbue.minds_workspace_server.agent_manager import AgentManager
@@ -246,11 +247,6 @@ def _list_agents_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(content=AgentListResponse(agents=items).model_dump())
 
 
-def _get_host_dir() -> Path:
-    """Get the mngr host directory from the environment."""
-    return Path(os.environ.get("MNGR_HOST_DIR", str(Path.home() / ".mngr")))
-
-
 def _find_agent(agent_id: str, request: Request) -> AgentInfo | None:
     """Find a specific agent by ID.
 
@@ -263,7 +259,7 @@ def _find_agent(agent_id: str, request: Request) -> AgentInfo | None:
     if agent_state is None:
         return None
 
-    host_dir = _get_host_dir()
+    host_dir = get_host_dir()
     agent_state_dir = host_dir / "agents" / agent_id
     claude_config_dir = read_claude_config_dir_from_env_file(agent_state_dir)
 
@@ -435,7 +431,7 @@ def _primary_agent_layout_dir() -> Path | None:
     agent_id = os.environ.get("MNGR_AGENT_ID", "")
     if not agent_id:
         return None
-    return _get_host_dir() / "agents" / agent_id / "workspace_layout"
+    return get_host_dir() / "agents" / agent_id / "workspace_layout"
 
 
 def _get_layout() -> Response:
