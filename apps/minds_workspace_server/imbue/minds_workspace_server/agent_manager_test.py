@@ -951,9 +951,7 @@ def test_session_events_user_message_drives_thinking(
         agent_manager.stop()
 
 
-def test_session_events_assistant_message_at_tail_is_idle(
-    agent_manager: AgentManager, tmp_path: Path
-) -> None:
+def test_session_events_assistant_message_at_tail_is_idle(agent_manager: AgentManager, tmp_path: Path) -> None:
     """An assistant_message with no pending tools at the tail means IDLE."""
     state_dir = tmp_path / "agents" / "agent-1"
     state_dir.mkdir(parents=True)
@@ -974,9 +972,7 @@ def test_session_events_assistant_message_at_tail_is_idle(
         agent_manager.stop()
 
 
-def test_permissions_marker_overrides_thinking(
-    agent_manager: AgentManager, tmp_path: Path
-) -> None:
+def test_permissions_marker_overrides_thinking(agent_manager: AgentManager, tmp_path: Path) -> None:
     """A live permissions_waiting marker overrides transcript-derived THINKING."""
     state_dir = tmp_path / "agents" / "agent-1"
     state_dir.mkdir(parents=True)
