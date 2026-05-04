@@ -1706,9 +1706,11 @@ async def _handle_agent_health_probe(
     # 4xx/5xx from the upstream workspace_server -- the backend is reachable
     # but returning app-level errors. We don't flip the tracker on these:
     # neither the proxy path nor this probe treats them as healthy/stuck
-    # transitions. Return whatever the tracker already knows (defaulting to
-    # healthy since the probe itself did complete).
-    return _probe_response(parsed_id, tracker.get_health(str(parsed_id)) or AgentHealth.HEALTHY)
+    # transitions. Honor whatever the tracker already knows; if there's no
+    # prior observation, default to STUCK rather than HEALTHY -- a workspace
+    # server whose root URL returns an error is not somewhere we want the
+    # landing page to send a click without the recovery affordance.
+    return _probe_response(parsed_id, tracker.get_health(str(parsed_id)) or AgentHealth.STUCK)
 
 
 # -- Chrome (persistent shell) route handlers --
