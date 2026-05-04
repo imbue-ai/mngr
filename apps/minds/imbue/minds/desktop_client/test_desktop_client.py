@@ -1835,6 +1835,27 @@ def test_subdomain_forward_success_clears_stuck_state(tmp_path: Path) -> None:
     assert tracker.get_health(str(agent_id)) == "HEALTHY"
 
 
+def test_subdomain_forward_sse_setup_failure_marks_stuck_and_returns_502(tmp_path: Path) -> None:
+    """An SSE request whose backend disconnects during the handshake (raising
+    httpx.RemoteProtocolError from http_client.send) must flow through the same
+    tracker / 502-recovery plumbing as a non-SSE request, not propagate as a 500.
+
+    Regression test for the SSE branch of _forward_workspace_http catching only
+    ConnectError + TimeoutException while the non-SSE branch caught all four
+    transport exceptions, leaving wedged-during-SSE-handshake unhandled.
+    """
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_client_with_disconnecting_workspace(tmp_path, agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    tracker = _get_health_tracker(client)
+
+    response = client.get("/api/events", headers={"accept": "text/event-stream"})
+
+    assert response.status_code == 502
+    assert tracker.get_health(str(agent_id)) == "STUCK"
+
+
 # -- Session cookie stripping tests --
 
 

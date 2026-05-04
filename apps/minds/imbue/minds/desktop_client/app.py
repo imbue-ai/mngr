@@ -639,6 +639,12 @@ async def _forward_workspace_http(
         except httpx.ConnectError:
             tracker.record_failure(str(agent_id))
             return _proxy_failure_response(request, agent_id, 502, "Workspace server connection refused")
+        except httpx.ReadError:
+            tracker.record_failure(str(agent_id))
+            return _proxy_failure_response(request, agent_id, 502, "Workspace server connection lost")
+        except httpx.RemoteProtocolError:
+            tracker.record_failure(str(agent_id))
+            return _proxy_failure_response(request, agent_id, 502, "Workspace server disconnected without response")
         except httpx.TimeoutException:
             tracker.record_failure(str(agent_id))
             return _proxy_failure_response(request, agent_id, 504, "Workspace server stream timed out")
