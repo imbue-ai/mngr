@@ -109,8 +109,11 @@ class AgentMarkerWatcher:
     def wait_stopped(self, timeout: float = 5.0) -> None:
         """Join the watchdog observer thread that ``request_stop`` signalled.
 
-        Safe to call without a prior ``request_stop`` (the join just returns
-        immediately for an already-stopped observer).
+        Intended to be called after :meth:`request_stop`. Joins the observer
+        thread with a timeout and then clears the cached reference. If called
+        without a prior ``request_stop``, the join will block until the
+        timeout elapses, since the observer thread is still running. A second
+        call after the reference has been cleared is a no-op.
         """
         if self._observer is not None:
             self._observer.join(timeout=timeout)
