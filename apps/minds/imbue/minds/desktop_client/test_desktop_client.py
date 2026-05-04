@@ -1460,7 +1460,7 @@ def _create_loopback_subdomain_client(
     workspace_url: str,
 ) -> tuple[TestClient, FileAuthStore]:
     """Build a desktop client whose resolver returns a loopback workspace URL
-    and which has no SSH tunnel manager available (so ``_get_ssh_info`` is None).
+    and which has no SSH tunnel manager available (so ``get_ssh_info`` is None).
     """
     resolver = make_resolver_with_data(
         agents_json=make_agents_json(agent_id),
