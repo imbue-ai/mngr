@@ -3,9 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from imbue.imbue_common.event_envelope import EventType
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
-from imbue.mngr.api.discovery_events import DiscoveryEventType
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import _make_envelope_fields
 from imbue.mngr.api.discovery_events import make_full_discovery_snapshot_event
@@ -36,6 +34,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import HostState
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import make_test_discovered_agent
 from imbue.mngr.utils.testing import make_test_discovered_host
@@ -255,9 +254,32 @@ def test_load_base_state_from_history_handles_malformed_lines(temp_host_dir: Pat
         f.write("not valid json\n")
         f.write(event_json + "\n")
 
-    tracked = load_base_state_from_history(temp_host_dir)
+    with capture_loguru(level="WARNING") as log_output:
+        tracked = load_base_state_from_history(temp_host_dir)
     assert len(tracked) == 1
     assert tracked[str(agent.id)].agent_state == "RUNNING"
+    # Mid-file corruption (followed by another line) should surface as a warning
+    assert "Skipped corrupt JSONL line" in log_output.getvalue()
+
+
+def test_load_base_state_from_history_silent_on_partial_last_line(temp_host_dir: Path) -> None:
+    events_path = get_observe_events_path(temp_host_dir)
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+
+    agent = make_test_agent_details(state=AgentLifecycleState.RUNNING)
+    event = make_full_agent_state_event([agent])
+    event_json = json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
+
+    with open(events_path, "w") as f:
+        f.write(event_json + "\n")
+        # Last line: a partial write at EOF (no trailing newline, malformed JSON)
+        f.write("incomplete{")
+
+    with capture_loguru(level="WARNING") as log_output:
+        tracked = load_base_state_from_history(temp_host_dir)
+    assert len(tracked) == 1
+    assert tracked[str(agent.id)].agent_state == "RUNNING"
+    assert log_output.getvalue() == ""
 
 
 # === Lock Tests ===
@@ -534,12 +556,13 @@ def test_agent_observer_on_discovery_stream_output_ignores_non_stdout(
     assert len(observer._known_hosts) == 0
 
 
-def test_agent_observer_on_discovery_stream_output_ignores_invalid_json(
+def test_agent_observer_on_discovery_stream_output_raises_on_invalid_json(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
-    """Verify that invalid JSON lines from the discovery stream are gracefully ignored."""
+    """Invalid JSON on the discovery stream surfaces as a JSONDecodeError so the upstream bug is visible."""
     observer = _make_observer(temp_mngr_ctx, noop_binary)
-    observer._on_discovery_stream_output("not valid json at all", is_stdout=True)
+    with pytest.raises(json.JSONDecodeError):
+        observer._on_discovery_stream_output("not valid json at all", is_stdout=True)
     assert len(observer._known_hosts) == 0
 
 
@@ -698,7 +721,6 @@ def test_agent_observer_handle_host_destroyed_removes_host(temp_mngr_ctx: MngrCo
         timestamp, event_id = _make_envelope_fields()
         destroyed_event = HostDestroyedEvent(
             timestamp=timestamp,
-            type=EventType(DiscoveryEventType.HOST_DESTROYED),
             event_id=event_id,
             source=DISCOVERY_EVENT_SOURCE,
             host_id=host.host_id,
@@ -725,7 +747,6 @@ def test_agent_observer_on_discovery_stream_output_handles_host_destroyed(
         timestamp, event_id = _make_envelope_fields()
         destroyed_event = HostDestroyedEvent(
             timestamp=timestamp,
-            type=EventType(DiscoveryEventType.HOST_DESTROYED),
             event_id=event_id,
             source=DISCOVERY_EVENT_SOURCE,
             host_id=host.host_id,

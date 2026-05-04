@@ -265,7 +265,7 @@ class VpsDockerHostStore:
                     agent_data = json.loads(content)
                     agent_data_by_host_id.setdefault(host_id, []).append(agent_data)
                 except json.JSONDecodeError as e:
-                    logger.trace("Skipped invalid agent record {}: {}", file_path, e)
+                    logger.warning("Skipped invalid agent record {}: {}", file_path, e)
 
         return host_records, agent_data_by_host_id
 
@@ -311,11 +311,8 @@ class VpsDockerHostStore:
     def _parse_batched_json_files(self, output: str) -> list[dict[str, Any]]:
         """Parse JSON files from batched output."""
         results: list[dict[str, Any]] = []
-        for file_path, content in self._split_batched_output(output):
-            try:
-                results.append(json.loads(content))
-            except json.JSONDecodeError as e:
-                logger.trace("Skipped invalid JSON file {}: {}", file_path, e)
+        for _file_path, content in self._split_batched_output(output):
+            results.append(json.loads(content))
         return results
 
     def clear_cache(self) -> None:

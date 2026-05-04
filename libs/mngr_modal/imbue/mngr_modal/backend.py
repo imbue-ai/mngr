@@ -30,7 +30,7 @@ from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.deploy_utils import collect_provider_profile_files
-from imbue.mngr.utils.testing import TEST_ENV_PATTERN
+from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr_modal import hookimpl
 from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig

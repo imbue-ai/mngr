@@ -1,0 +1,52 @@
+{% extends 'base.html' %}
+{% import '_macros.html' as ui %}
+{% block title %}Welcome to Minds{% endblock %}
+{% block content %}
+  <div class="min-h-screen flex items-center justify-center">
+    <div class="max-w-sm w-full px-6 text-center">
+      <h1 class="text-3xl font-bold text-zinc-900 mb-2">Welcome to Minds</h1>
+      <p class="text-zinc-500 text-sm mb-8">Run persistent, autonomous AI agents</p>
+
+      <div class="flex flex-col gap-3 mb-6">
+        {{ ui.btn_link('Sign Up', '/auth/signup', variant='primary', block=true) }}
+        {{ ui.btn_link('Log In', '/auth/login', variant='secondary', block=true) }}
+      </div>
+
+      <button type="button" id="skip-account-btn"
+              class="text-xs text-zinc-400 hover:text-zinc-600 transition-colors cursor-pointer">
+        Continue without an account
+      </button>
+
+      <div id="skip-dialog" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+        <div class="bg-white rounded-xl shadow-lg border border-zinc-200 max-w-sm w-full mx-4 p-6 text-left">
+          <h2 class="text-lg font-semibold text-zinc-900 mb-3">Continue without an account?</h2>
+          <p class="text-sm text-zinc-600 mb-2">An Imbue account enables:</p>
+          <ul class="text-sm text-zinc-600 list-disc pl-5 mb-4 space-y-1">
+            <li>Project sharing</li>
+            <li>Imbue-hosted cloud projects</li>
+            <li>No need to bring your own API keys</li>
+          </ul>
+          <p class="text-xs text-zinc-400 mb-5">You can always create an account later by clicking "log in" in the upper right.</p>
+          <div class="flex justify-end gap-3">
+            {{ ui.btn_button('Cancel', variant='secondary', id='skip-cancel-btn') }}
+            {{ ui.btn_link('Continue', '/create', variant='primary', id='skip-continue-btn') }}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+{% block scripts %}
+  <script>
+    (function() {
+      var btn = document.getElementById('skip-account-btn');
+      var dialog = document.getElementById('skip-dialog');
+      var cancel = document.getElementById('skip-cancel-btn');
+      btn.addEventListener('click', function() { dialog.classList.remove('hidden'); });
+      cancel.addEventListener('click', function() { dialog.classList.add('hidden'); });
+      dialog.addEventListener('click', function(e) {
+        if (e.target === dialog) dialog.classList.add('hidden');
+      });
+    })();
+  </script>
+{% endblock %}

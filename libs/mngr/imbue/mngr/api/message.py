@@ -7,7 +7,6 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
@@ -29,6 +28,7 @@ from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
 class MessageResult(MutableModel):
@@ -92,7 +92,7 @@ def send_message_to_agents(
 
     # Process each host concurrently: resolve host, filter agents, send messages.
     futures: list[Future[None]] = []
-    with ConcurrencyGroupExecutor(
+    with mngr_executor(
         parent_cg=mngr_ctx.concurrency_group, name="send_message_to_agents", max_workers=32
     ) as executor:
         for host_ref, agent_refs in agents_by_host.items():
@@ -211,9 +211,7 @@ def _process_host_for_messaging(
 
         # Send messages to matching agents concurrently
         send_futures: list[Future[None]] = []
-        with ConcurrencyGroupExecutor(
-            parent_cg=parent_cg, name=f"send_msgs_{host_ref.host_id}", max_workers=32
-        ) as send_executor:
+        with mngr_executor(parent_cg=parent_cg, name=f"send_msgs_{host_ref.host_id}", max_workers=32) as send_executor:
             for agent in agents_to_send:
                 send_futures.append(
                     send_executor.submit(

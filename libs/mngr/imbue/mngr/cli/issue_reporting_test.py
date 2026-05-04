@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -8,15 +9,17 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.cli.issue_reporting import ExistingIssue
 from imbue.mngr.cli.issue_reporting import GITHUB_BASE_URL
-from imbue.mngr.cli.issue_reporting import UNEXPECTED_ERROR_TITLE_PREFIX
+from imbue.mngr.cli.issue_reporting import MNGR_REPO_URL
+from imbue.mngr.cli.issue_reporting import _print_diagnose_instructions
+from imbue.mngr.cli.issue_reporting import build_diagnose_prompt
 from imbue.mngr.cli.issue_reporting import build_issue_body
 from imbue.mngr.cli.issue_reporting import build_issue_title
 from imbue.mngr.cli.issue_reporting import build_new_issue_url
-from imbue.mngr.cli.issue_reporting import build_unexpected_error_issue_body
-from imbue.mngr.cli.issue_reporting import build_unexpected_error_issue_title
 from imbue.mngr.cli.issue_reporting import handle_not_implemented_error
 from imbue.mngr.cli.issue_reporting import handle_unexpected_error
 from imbue.mngr.cli.issue_reporting import search_for_existing_issue
+from imbue.mngr.cli.issue_reporting import write_diagnose_prompt_file
+from imbue.mngr.utils.testing import capture_loguru
 
 
 def _fake_finished_process(returncode: int, stdout: str, command: tuple[str, ...] = ("fake",)) -> FinishedProcess:
@@ -202,6 +205,7 @@ def test_search_for_existing_issue_returns_none_when_no_results(
 # =============================================================================
 
 
+@pytest.mark.allow_warnings(match=r"^Error: --sync-mode=full is not implemented yet")
 def test_handle_not_implemented_error_non_interactive_exits(monkeypatch: pytest.MonkeyPatch) -> None:
     """In non-interactive mode, handle_not_implemented_error logs error and exits."""
     monkeypatch.setattr("imbue.mngr.cli.issue_reporting.sys.stdin.isatty", lambda: False)
@@ -212,6 +216,7 @@ def test_handle_not_implemented_error_non_interactive_exits(monkeypatch: pytest.
     assert exc_info.value.code == 1
 
 
+@pytest.mark.allow_warnings(match=r"^Error: some feature")
 def test_handle_not_implemented_error_interactive_declined(monkeypatch: pytest.MonkeyPatch) -> None:
     """In interactive mode, if user declines to report, just exits."""
     monkeypatch.setattr("imbue.mngr.cli.issue_reporting.sys.stdin.isatty", lambda: True)
@@ -223,6 +228,7 @@ def test_handle_not_implemented_error_interactive_declined(monkeypatch: pytest.M
     assert exc_info.value.code == 1
 
 
+@pytest.mark.allow_warnings(match=r"^Error: Feature not implemented")
 def test_handle_not_implemented_error_empty_message(monkeypatch: pytest.MonkeyPatch) -> None:
     """NotImplementedError with no message uses a default."""
     monkeypatch.setattr("imbue.mngr.cli.issue_reporting.sys.stdin.isatty", lambda: False)
@@ -231,6 +237,7 @@ def test_handle_not_implemented_error_empty_message(monkeypatch: pytest.MonkeyPa
         handle_not_implemented_error(NotImplementedError())
 
 
+@pytest.mark.allow_warnings(match=r"^Error: --sync-mode=full is not implemented yet")
 def test_handle_not_implemented_error_interactive_opens_existing_issue(monkeypatch: pytest.MonkeyPatch) -> None:
     """In interactive mode with existing issue found, opens its URL."""
     monkeypatch.setattr("imbue.mngr.cli.issue_reporting.sys.stdin.isatty", lambda: True)
@@ -266,6 +273,7 @@ def test_handle_not_implemented_error_interactive_opens_existing_issue(monkeypat
     assert opened_urls[0] == "https://github.com/imbue-ai/mngr/issues/77"
 
 
+@pytest.mark.allow_warnings(match=r"^Error: --exclude is not implemented yet")
 def test_handle_not_implemented_error_interactive_opens_new_issue_form(monkeypatch: pytest.MonkeyPatch) -> None:
     """In interactive mode with no existing issue, opens new issue form."""
     monkeypatch.setattr("imbue.mngr.cli.issue_reporting.sys.stdin.isatty", lambda: True)
@@ -296,6 +304,7 @@ def test_handle_not_implemented_error_interactive_opens_new_issue_form(monkeypat
 # =============================================================================
 
 
+@pytest.mark.allow_warnings(match=r"^Error: some feature")
 def test_handle_not_implemented_error_is_interactive_false_exits_without_prompting() -> None:
     """When is_interactive=False is explicitly passed, exits without prompting regardless of TTY state.
 
@@ -309,6 +318,7 @@ def test_handle_not_implemented_error_is_interactive_false_exits_without_prompti
     assert exc_info.value.code == 1
 
 
+@pytest.mark.allow_warnings(match=r"^Unexpected error")
 def test_handle_unexpected_error_is_interactive_false_exits_without_prompting() -> None:
     """When is_interactive=False is explicitly passed, exits without prompting regardless of TTY state.
 
@@ -333,33 +343,108 @@ def test_existing_issue_is_frozen() -> None:
 
 
 # =============================================================================
-# Tests for build_unexpected_error_issue_title and build_unexpected_error_issue_body
+# Tests for build_diagnose_prompt
 # =============================================================================
 
 
-def test_build_unexpected_error_issue_title_includes_error_type_and_message() -> None:
-    """build_unexpected_error_issue_title should include the error type and first line of message."""
-    error = ValueError("Something went wrong\nSecond line details")
-    title = build_unexpected_error_issue_title(error)
-    assert title.startswith(UNEXPECTED_ERROR_TITLE_PREFIX)
-    assert "ValueError" in title
-    assert "Something went wrong" in title
-    assert "Second line details" not in title
+def test_build_diagnose_prompt_contains_version_and_traceback() -> None:
+    prompt = build_diagnose_prompt(
+        error_type="ValueError",
+        error_message="oops",
+        traceback_str="Traceback (most recent call last):\n  foo",
+        mngr_version="0.2.4",
+    )
+    assert "0.2.4" in prompt
+    assert "ValueError: oops" in prompt
+    assert "Traceback (most recent call last):" in prompt
+    # Includes agent instructions; `uv run` prefix is required per monorepo CLAUDE.md
+    assert "uv run python scripts/open_issue.py" in prompt
+    assert "Root cause analysis" in prompt
 
 
-def test_build_unexpected_error_issue_title_handles_empty_message() -> None:
-    """build_unexpected_error_issue_title should handle errors with no message."""
-    error = RuntimeError()
-    title = build_unexpected_error_issue_title(error)
-    assert "RuntimeError" in title
-    assert "No message" in title
+# =============================================================================
+# Tests for write_diagnose_prompt_file
+# =============================================================================
 
 
-def test_build_unexpected_error_issue_body_includes_traceback() -> None:
-    """build_unexpected_error_issue_body should include the error type and traceback."""
-    error = KeyError("missing_key")
-    body = build_unexpected_error_issue_body(error, "Traceback (most recent call last):\n  ...")
-    assert "KeyError" in body
-    assert "missing_key" in body
-    assert "Traceback" in body
-    assert "Bug Report" in body
+def test_write_diagnose_prompt_file_writes_prompt_text(tmp_path: Path) -> None:
+    path = write_diagnose_prompt_file(
+        traceback_str="Traceback:\n  ValueError: oops",
+        mngr_version="0.2.4",
+        error_type="ValueError",
+        error_message="oops",
+        base_dir=tmp_path,
+    )
+    assert path.exists()
+    content = path.read_text(encoding="utf-8")
+    assert "0.2.4" in content
+    assert "ValueError: oops" in content
+    assert "Traceback:\n  ValueError: oops" in content
+
+
+def test_write_diagnose_prompt_file_deterministic_name(tmp_path: Path) -> None:
+    """Same inputs produce the same file path (content-addressed)."""
+    path1 = write_diagnose_prompt_file("Err", "msg", "tb", "0.2.4", base_dir=tmp_path)
+    path2 = write_diagnose_prompt_file("Err", "msg", "tb", "0.2.4", base_dir=tmp_path)
+    assert path1 == path2
+    assert path1.name.startswith("mngr-diagnose-prompt-")
+    assert path1.name.endswith(".txt")
+
+
+def test_write_diagnose_prompt_file_different_inputs(tmp_path: Path) -> None:
+    """Different inputs produce different file paths."""
+    path1 = write_diagnose_prompt_file("Err", "msg1", "tb1", "0.2.4", base_dir=tmp_path)
+    path2 = write_diagnose_prompt_file("Err", "msg2", "tb2", "0.2.4", base_dir=tmp_path)
+    assert path1 != path2
+
+
+# =============================================================================
+# Tests for _print_diagnose_instructions
+# =============================================================================
+
+
+def test_print_diagnose_instructions_prints_create_command() -> None:
+    """_print_diagnose_instructions prints a `mngr create` command referencing the prompt file."""
+    prompt_path = Path("/tmp/mngr-diagnose-prompt-abc123.txt")
+    with capture_loguru(level="INFO") as log_output:
+        _print_diagnose_instructions(prompt_path)
+    output = log_output.getvalue()
+    assert "mngr create" in output
+    assert f"--source {MNGR_REPO_URL}" in output
+    assert "--branch main:" in output
+    assert f"--message-file {prompt_path}" in output
+
+
+def test_handle_unexpected_error_interactive_writes_prompt_and_logs_command() -> None:
+    """In interactive mode, handle_unexpected_error writes the prompt file and logs the mngr create command.
+
+    End-to-end cover for the 'happy path' of handle_unexpected_error, which was
+    otherwise only exercised through its building-block helpers.
+    """
+    marker = f"interactive-write-test-{uuid4().hex}"
+
+    with capture_loguru(level="INFO") as log_output:
+        with pytest.raises(SystemExit) as exc_info:
+            handle_unexpected_error(RuntimeError(marker), is_interactive=True)
+
+    assert exc_info.value.code == 1
+
+    output = log_output.getvalue()
+    assert "mngr create" in output
+    assert f"--source {MNGR_REPO_URL}" in output
+
+    # Extract the prompt file path from the logged command and verify the file exists
+    # and contains the error marker. The filename is content-addressed off the prompt,
+    # so pulling it from the log is reliable.
+    prefix = "--message-file "
+    assert prefix in output
+    # Grab the token that follows the prefix (the path ends at the newline)
+    prompt_path_str = output.split(prefix, 1)[1].splitlines()[0].strip()
+    prompt_path = Path(prompt_path_str)
+    try:
+        assert prompt_path.exists()
+        content = prompt_path.read_text(encoding="utf-8")
+        assert marker in content
+        assert "RuntimeError" in content
+    finally:
+        prompt_path.unlink(missing_ok=True)

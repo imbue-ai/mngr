@@ -68,7 +68,7 @@ mngr transcript [OPTIONS] TARGET
 
 ## See Also
 
-- [mngr events](./events.md) - View all events from an agent or host
+- [mngr event](./event.md) - View all events from an agent or host
 - [mngr message](./message.md) - Send a message to an agent
 
 ## Examples

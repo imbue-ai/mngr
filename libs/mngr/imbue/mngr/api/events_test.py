@@ -21,6 +21,7 @@ from imbue.mngr.api.events import _handle_online_offline_transition
 from imbue.mngr.api.events import _maybe_emit_source_mismatch_warning
 from imbue.mngr.api.events import _parse_discovered_files
 from imbue.mngr.api.events import _pygtail_offset_file_path
+from imbue.mngr.api.events import _record_from_event_data
 from imbue.mngr.api.events import _sort_rotated_files_oldest_first
 from imbue.mngr.api.events import _start_tail_thread
 from imbue.mngr.api.events import _tail_source_thread_local
@@ -33,6 +34,7 @@ from imbue.mngr.api.events import resolve_events_target
 from imbue.mngr.api.events import sort_events_by_timestamp
 from imbue.mngr.api.events import stream_all_events
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -42,6 +44,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.polling import poll_for_value
+from imbue.mngr.utils.testing import capture_loguru
 
 
 @pytest.fixture
@@ -286,25 +289,29 @@ def test_parse_event_line_missing_source_uses_hint() -> None:
     assert record.source == "my_source"
 
 
-def test_parse_event_line_missing_timestamp_returns_none() -> None:
+def test_parse_event_line_missing_timestamp_raises() -> None:
+    """Event JSON without a timestamp envelope field is treated as upstream corruption."""
     line = '{"type":"test","event_id":"evt-abc","source":"messages"}'
-    record = parse_event_line(line, source_hint="fallback")
-    assert record is None
+    with pytest.raises(MalformedJsonlLineError, match="timestamp"):
+        parse_event_line(line, source_hint="fallback")
 
 
-def test_parse_event_line_malformed_json_returns_none() -> None:
-    record = parse_event_line("not json at all", source_hint="fallback")
-    assert record is None
+def test_parse_event_line_malformed_json_raises() -> None:
+    """Malformed JSON surfaces as JSONDecodeError; callers that need partial-write tolerance use MalformedJsonLineWarner."""
+    with pytest.raises(json.JSONDecodeError):
+        parse_event_line("not json at all", source_hint="fallback")
 
 
-def test_parse_event_line_empty_string_returns_none() -> None:
-    record = parse_event_line("", source_hint="fallback")
-    assert record is None
+def test_parse_event_line_empty_string_raises() -> None:
+    """parse_event_line is for individual non-empty lines; the watcher pre-strips empties before calling."""
+    with pytest.raises(json.JSONDecodeError):
+        parse_event_line("", source_hint="fallback")
 
 
-def test_parse_event_line_whitespace_only_returns_none() -> None:
-    record = parse_event_line("   \n  ", source_hint="fallback")
-    assert record is None
+def test_parse_event_line_whitespace_only_raises() -> None:
+    """Whitespace-only input is treated identically to empty: not a valid event line."""
+    with pytest.raises(json.JSONDecodeError):
+        parse_event_line("   \n  ", source_hint="fallback")
 
 
 # =============================================================================
@@ -542,6 +549,49 @@ def test_read_all_historical_events_includes_rotated_files(tmp_path: Path) -> No
     events, _ = read_all_historical_events(target, sources, [], [])
 
     assert [e.event_id for e in events] == ["old1", "new1"]
+
+
+def test_read_all_historical_events_warns_on_mid_file_corruption(tmp_path: Path) -> None:
+    events_dir = tmp_path / "events"
+    events_dir.mkdir()
+    (events_dir / "src").mkdir()
+    # Three lines: valid, malformed (mid-file), valid. The malformed line is followed
+    # by a valid line, proving it was not a partial write at EOF.
+    (events_dir / "src" / "events.jsonl").write_text(
+        '{"timestamp":"2026-01-01T00:00:00Z","event_id":"e1","source":"src"}\n'
+        "this is not valid json {{{\n"
+        '{"timestamp":"2026-01-02T00:00:00Z","event_id":"e2","source":"src"}\n'
+    )
+    volume = LocalVolume(root_path=events_dir)
+    target = EventsTarget(volume=volume, display_name="test")
+    sources = [EventSourceInfo(source_path="src", rotated_files=(), is_current_file_present=True)]
+
+    with capture_loguru(level="WARNING") as log_output:
+        events, _ = read_all_historical_events(target, sources, [], [])
+
+    assert [e.event_id for e in events] == ["e1", "e2"]
+    output = log_output.getvalue()
+    assert "Skipped corrupt JSONL line" in output
+    assert "this is not valid json" in output
+
+
+def test_read_all_historical_events_silent_when_only_last_line_corrupted(tmp_path: Path) -> None:
+    events_dir = tmp_path / "events"
+    events_dir.mkdir()
+    (events_dir / "src").mkdir()
+    # Last line is malformed and not newline-terminated -- treat as partial write at EOF.
+    (events_dir / "src" / "events.jsonl").write_text(
+        '{"timestamp":"2026-01-01T00:00:00Z","event_id":"e1","source":"src"}\nincomplete{'
+    )
+    volume = LocalVolume(root_path=events_dir)
+    target = EventsTarget(volume=volume, display_name="test")
+    sources = [EventSourceInfo(source_path="src", rotated_files=(), is_current_file_present=True)]
+
+    with capture_loguru(level="WARNING") as log_output:
+        events, _ = read_all_historical_events(target, sources, [], [])
+
+    assert [e.event_id for e in events] == ["e1"]
+    assert log_output.getvalue() == ""
 
 
 def test_read_all_historical_events_with_cel_filter(tmp_path: Path) -> None:
@@ -1383,10 +1433,10 @@ def test_events_target_rejects_online_host_without_events_path(
 # =============================================================================
 
 
-def test_parse_event_line_non_dict_json_returns_none() -> None:
-    """JSON arrays should be rejected (only dicts are valid events)."""
-    result = parse_event_line("[1, 2, 3]", "test")
-    assert result is None
+def test_parse_event_line_non_dict_json_raises() -> None:
+    """JSON arrays cannot be valid events; parse_event_line raises rather than returning None."""
+    with pytest.raises(MalformedJsonlLineError, match="Expected JSON object"):
+        parse_event_line("[1, 2, 3]", "test")
 
 
 def test_parse_event_line_backfills_source_into_data() -> None:
@@ -1417,6 +1467,37 @@ def test_parse_event_line_matching_source_has_no_original() -> None:
     assert result is not None
     assert result.source == "messages"
     assert result.original_source is None
+
+
+def test_record_from_event_data_does_not_mutate_input_when_source_mismatched() -> None:
+    """_record_from_event_data must not mutate caller-owned input dicts.
+
+    The function is marked @pure and now accepts dicts owned by
+    MalformedJsonLineWarner.parse(); a regression to in-place source-field
+    mutation would silently affect callers that retain the dict.
+    """
+    data = {
+        "timestamp": "2025-01-01T00:00:00Z",
+        "event_id": "evt-1",
+        "source": "wrong_source",
+    }
+    original_data = dict(data)
+    record = _record_from_event_data(data, '{"event_id":"evt-1"}', "correct_source")
+    assert record is not None
+    assert record.source == "correct_source"
+    assert record.data["source"] == "correct_source"
+    # Caller-owned input dict must be untouched.
+    assert data == original_data
+
+
+def test_record_from_event_data_does_not_mutate_input_when_source_missing() -> None:
+    """Backfilling a missing source must not mutate the caller-owned dict."""
+    data = {"timestamp": "2025-01-01T00:00:00Z", "event_id": "evt-1"}
+    original_data = dict(data)
+    record = _record_from_event_data(data, '{"event_id":"evt-1"}', "my-source")
+    assert record is not None
+    assert record.data["source"] == "my-source"
+    assert data == original_data
 
 
 # =============================================================================

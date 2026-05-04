@@ -14,7 +14,8 @@
     "test": "node --test electron/classify-frame.test.js electron/log-writer.test.js electron/iframe-log-buffer.test.js electron/log-router.test.js"
   },
   "dependencies": {
-    "@todesktop/runtime": "^1.6.0"
+    "@todesktop/runtime": "^1.6.0",
+    "latchkey": "^2.7.2"
   },
   "devDependencies": {
     "electron": "35.7.5",

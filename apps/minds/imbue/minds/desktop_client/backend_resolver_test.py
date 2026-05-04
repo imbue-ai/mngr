@@ -19,6 +19,7 @@ from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.primitives import ServiceName
+from imbue.mngr.errors import DiscoverySchemaChangedError
 from imbue.mngr.primitives import AgentId
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
@@ -513,10 +514,9 @@ def test_stream_manager_on_discovery_stream_output_ignores_empty_lines() -> None
     assert manager.resolver.list_known_agent_ids() == ()
 
 
-def test_stream_manager_on_discovery_stream_output_ignores_unrecognized_events() -> None:
-    """Unrecognized event types are ignored and do not update the resolver."""
+def test_stream_manager_on_discovery_stream_output_raises_on_unrecognized_event() -> None:
+    """Unknown discovery event types raise DiscoverySchemaChangedError so a real schema drift is visible."""
     manager = _make_stream_manager()
-    # Use an unrecognized event type so parse_discovery_event_line returns None
     line = json.dumps(
         {
             "type": "SOME_OTHER_EVENT",
@@ -525,13 +525,16 @@ def test_stream_manager_on_discovery_stream_output_ignores_unrecognized_events()
             "source": "mngr/discovery",
         }
     )
-    manager._on_discovery_stream_output(line, is_stdout=True)
+    with pytest.raises(DiscoverySchemaChangedError):
+        manager._on_discovery_stream_output(line, is_stdout=True)
     assert manager.resolver.list_known_agent_ids() == ()
 
 
-def test_stream_manager_handle_discovery_line_ignores_invalid_json() -> None:
+def test_stream_manager_handle_discovery_line_raises_on_invalid_json() -> None:
+    """Invalid JSON on the discovery stream surfaces as a JSONDecodeError; stdout should never carry non-JSON."""
     manager = _make_stream_manager()
-    manager._handle_discovery_line("not valid json {{{")
+    with pytest.raises(json.JSONDecodeError):
+        manager._handle_discovery_line("not valid json {{{")
     assert manager.resolver.list_known_agent_ids() == ()
 
 
@@ -588,6 +591,61 @@ def test_stream_manager_on_events_stream_output_later_entry_overrides_earlier() 
     manager._on_events_stream_output(line2, is_stdout=True, agent_id=_AGENT_A)
 
     assert manager.resolver.get_backend_url(_AGENT_A, _SERVICE_WEB) == "http://127.0.0.1:9200"
+
+
+def test_stream_manager_on_events_stream_output_dispatches_refresh_source() -> None:
+    """A refresh-source event fires the refresh callback, not the service update path."""
+    manager = _make_stream_manager()
+    manager._events_services[str(_AGENT_A)] = {}
+
+    received: list[tuple[str, str]] = []
+    manager.resolver.add_on_refresh_callback(lambda aid, raw: received.append((aid, raw)))
+
+    refresh_line = json.dumps({"source": "refresh", "type": "refresh_service", "service_name": "web"})
+    manager._on_events_stream_output(refresh_line, is_stdout=True, agent_id=_AGENT_A)
+
+    assert len(received) == 1
+    aid, raw = received[0]
+    assert aid == str(_AGENT_A)
+    assert json.loads(raw)["service_name"] == "web"
+    # Must not touch the service map.
+    assert manager.resolver.list_services_for_agent(_AGENT_A) == ()
+
+
+def test_stream_manager_on_events_stream_output_dispatches_requests_source() -> None:
+    """A requests-source event fires the request callback, not the refresh callback."""
+    manager = _make_stream_manager()
+    manager._events_services[str(_AGENT_A)] = {}
+
+    refresh_seen: list[tuple[str, str]] = []
+    request_seen: list[tuple[str, str]] = []
+    manager.resolver.add_on_refresh_callback(lambda aid, raw: refresh_seen.append((aid, raw)))
+    manager.resolver.add_on_request_callback(lambda aid, raw: request_seen.append((aid, raw)))
+
+    request_line = json.dumps({"source": "requests", "type": "sharing_request"})
+    manager._on_events_stream_output(request_line, is_stdout=True, agent_id=_AGENT_A)
+
+    assert len(request_seen) == 1
+    assert refresh_seen == []
+
+
+def test_refresh_callback_remove_stops_dispatch() -> None:
+    """remove_on_refresh_callback unregisters the callback."""
+    manager = _make_stream_manager()
+    manager._events_services[str(_AGENT_A)] = {}
+
+    received: list[tuple[str, str]] = []
+
+    def _cb(aid: str, raw: str) -> None:
+        received.append((aid, raw))
+
+    manager.resolver.add_on_refresh_callback(_cb)
+    manager.resolver.remove_on_refresh_callback(_cb)
+
+    refresh_line = json.dumps({"source": "refresh", "service_name": "web"})
+    manager._on_events_stream_output(refresh_line, is_stdout=True, agent_id=_AGENT_A)
+
+    assert received == []
 
 
 def _make_discovery_full_line(

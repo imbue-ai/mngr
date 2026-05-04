@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [cleanup|clean] [--destroy|--stop] [--older-than DURATION] [--idle-for DURATION] [--provider PROVIDER] [--type TYPE] [--host-label KEY=VALUE] [-f|--force|--yes] [--dry-run]
+mngr [cleanup|clean] [--destroy|--stop] [--older-than DURATION] [--idle-for DURATION] [--include PATTERN] [--exclude PATTERN] [--provider PROVIDER] [--type TYPE] [--host-label KEY=VALUE] [-f|--force|--yes] [--dry-run]
 ```
 
 Destroy or stop agents and hosts to free up resources [experimental].

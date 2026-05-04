@@ -292,6 +292,17 @@ mngr list --archived
 # show only active agents (anything not archived/destroyed/crashed/failed)
 mngr list --active
 
+# you can make any of those filters the default for "mngr list" by setting it in your config.
+# for example, to hide agents from dead/destroyed hosts by default:
+mngr config set commands.list.active true
+# to opt out for a single call, override the env var: MNGR_COMMANDS_LIST_ACTIVE=false mngr list
+
+# note: --active only excludes hosts in CRASHED/FAILED/DESTROYED state and archived agents,
+# *not* STOPPED or DONE agents. if you want to also hide STOPPED and DONE agents from the default,
+# use an exclude filter instead:
+#   [commands.list]
+#   exclude = ['state == "STOPPED"', 'state == "DONE"']
+
 # show only agents running locally
 mngr list --local
 
@@ -489,6 +500,9 @@ mngr archive my-task
 # stop all running agents
 mngr list --ids | mngr stop -
 
+# archive all stopped agents (handy for cleaning up "mngr list" after a batch of finished work).
+mngr list --stopped --ids | mngr archive -
+
 # dry-run to see what would be stopped
 mngr list --ids | mngr stop - --dry-run
 
@@ -638,26 +652,26 @@ watch -n60 mngr gc
 ##############################################################################
 
 # view all events for an agent
-mngr events my-task
+mngr event my-task
 # all events are json objects that are guaranteed to have at least the following fields: "event_id", "timestamp", "source" and "type"
 # events are printed as JSONL (one JSON object per line), so you can easily pipe them to jq for filtering and formatting, or to other tools for monitoring and alerting
 
 # follow events in real time (like tail -f). Extremely useful for scripting.
-mngr events my-task --follow
+mngr event my-task --follow
 
 # restrict the event stream to a specific type of event (source)
 # in this case we're looking at the "claude/common_transcript" events for a claude agent,
 # which shows the conversation messages in and out of the agent in a unified format
-mngr events my-task --follow claude/common_transcript
+mngr event my-task --follow claude/common_transcript
 
 # show only the last 20 events
-mngr events my-task --tail 20
+mngr event my-task --tail 20
 
 # show only the first 10 events
-mngr events my-task --head 10
+mngr event my-task --head 10
 
 # include only events matching a CEL expression
-mngr events my-task --include 'type == "user_message"'
+mngr event my-task --include 'type == "user_message"'
 
 # view the transcript of an agent's conversation
 mngr transcript my-task
@@ -667,6 +681,9 @@ mngr transcript my-task --role assistant
 
 # view the last 5 messages
 mngr transcript my-task --tail 5
+
+# quickly peek at an agent's most recent message without connecting (handy for sanity-checking many agents)
+mngr transcript my-task --tail 1
 
 # output transcript as JSONL for programmatic use
 mngr transcript my-task --format jsonl
@@ -787,6 +804,19 @@ mngr create my-task --project other-project
 
 # filter agents by project using CEL expressions
 mngr list --include 'project == "my-project"'
+
+# the literal "." is expanded to the current project (derived from your git worktree
+# root's remote origin, falling back to its source-repo dir name (for worktrees) or
+# folder name, so it stays correct from any subdirectory), so this lists agents for
+# the project you're currently in:
+mngr list --project .
+# this also works for "mngr kanpan --project ."
+
+# to make this the default, set it in the project-scoped config (.mngr/settings.toml).
+# project-scoped config only applies when run from inside that project, so you get a
+# per-project default for free:
+#   [commands.list]
+#   project = ["."]
 
 # see which projects have agents by looking at the project field
 mngr list --fields "name,project,state"
@@ -1158,6 +1188,26 @@ done
 #   These options are typically less commonly used or more advanced
 ##############################################################################
 
+# MNGR_HOST_DIR / default_host_dir: by default mngr stores its state (agent metadata, events,
+# discovery cache, etc.) under ~/.mngr. if you'd rather scope state per-project, point it at a
+# project-local directory. note that this completely isolates state per-project (you won't see
+# agents from other projects), so it's most useful for sandboxes or clean per-project setups.
+# the cleanest way to do this is with direnv -- add a .envrc to your project:
+#   export MNGR_HOST_DIR="$PWD/.mngr-state"
+# and then "direnv allow". you can also set it as an absolute path in config:
+#   default_host_dir = "/abs/path/to/project/.mngr-state"
+
+# work_dir_extra_paths: include extra files (outside of git) in each new agent work directory.
+# useful for things like .env files, .venv, build caches, or local config that aren't tracked in git.
+# add this to .mngr/settings.toml (or settings.local.toml):
+#   [work_dir_extra_paths]
+#   ".env" = "COPY"
+#   ".mngr/settings.local.toml" = "SHARE"
+#   ".venv" = "COPY"
+# "COPY" makes an independent copy via rsync (good for branch-dependent paths like .venv).
+# "SHARE" symlinks to the source on the same host (good for shared config like settings.local.toml,
+# so that editing the one file at the project root immediately applies to every local agent).
+# "SHARE" automatically falls back to a copy when transferring to a different host.
 
 ##############################################################################
 # OUTPUT FORMATS AND MACHINE-READABLE OUTPUT
@@ -1231,8 +1281,11 @@ for task in "fix-auth" "add-logging" "update-deps" "write-docs"; do
   mngr create "$task"@.modal --no-connect --message "Work on: $task"
 done
 
-# monitor all agents in a watch loop
-mngr list --watch 5 --running
+# monitor all agents in a refreshing dashboard (uses Unix watch(1))
+watch -n 5 mngr list --running
+
+# or get a JSONL stream of host/agent discovery events for programmatic consumers
+mngr observe --discovery-only
 
 # collect results from all agents
 for agent in "fix-auth" "add-logging" "update-deps" "write-docs"; do
@@ -1286,11 +1339,11 @@ mngr list --fields "name,state,host.provider,host.name"
 
 # auto-generated by Claude, remove when a human has sanctioned this
 # view recent events to understand what happened
-mngr events my-task --tail 20
+mngr event my-task --tail 20
 
 # auto-generated by Claude, remove when a human has sanctioned this
 # follow events in real time while reproducing an issue
-mngr events my-task --follow
+mngr event my-task --follow
 
 # auto-generated by Claude, remove when a human has sanctioned this
 # check the agent's transcript for error messages

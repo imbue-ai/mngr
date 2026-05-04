@@ -5,6 +5,7 @@ import json
 import secrets
 import uuid
 from typing import Any
+from uuid import UUID
 
 import pytest
 from supertokens_python.recipe.emailpassword.interfaces import ConsumePasswordResetTokenOkResult
@@ -733,4 +734,287 @@ def make_fake_supertokens_backend() -> FakeSuperTokensBackend:
     backend.sent_verification_emails = []
     backend.sent_reset_emails = []
     backend.sdk_errors_by_method = {}
+    return backend
+
+
+# ---------------------------------------------------------------------------
+# Host pool fakes
+#
+# Similar to FakeSuperTokensBackend, this provides an in-memory replacement
+# for the psycopg2 database and paramiko SSH operations used by the host pool
+# endpoints.  ``FakePoolBackend.install_on_app_module`` patches the module
+# references through a single for-loop (same pattern as the SuperTokens fakes)
+# so the test-patching ratchet count increases by exactly one line.
+# ---------------------------------------------------------------------------
+
+
+class FakePoolRow:
+    """In-memory record for a single pool_hosts row."""
+
+    host_id: UUID
+    vps_ip: str
+    vps_instance_id: str
+    agent_id: str
+    host_id_str: str
+    ssh_port: int
+    ssh_user: str
+    container_ssh_port: int
+    status: str
+    version: str
+    leased_to_user: str | None
+    leased_at: str | None
+    released_at: str | None
+
+
+def _make_pool_row(
+    host_id: UUID,
+    vps_ip: str,
+    agent_id: str,
+    host_id_str: str,
+    ssh_port: int,
+    ssh_user: str,
+    container_ssh_port: int,
+    version: str,
+    status: str = "available",
+    leased_to_user: str | None = None,
+    leased_at: str | None = None,
+) -> FakePoolRow:
+    row = FakePoolRow()
+    row.host_id = host_id
+    row.vps_ip = vps_ip
+    row.vps_instance_id = f"vps-{host_id}"
+    row.agent_id = agent_id
+    row.host_id_str = host_id_str
+    row.ssh_port = ssh_port
+    row.ssh_user = ssh_user
+    row.container_ssh_port = container_ssh_port
+    row.status = status
+    row.version = version
+    row.leased_to_user = leased_to_user
+    row.leased_at = leased_at
+    row.released_at = None
+    return row
+
+
+class FakeCursor:
+    """In-memory cursor that simulates psycopg2 cursor behavior against FakePoolBackend."""
+
+    _backend: "FakePoolBackend"
+    _results: list[tuple[Any, ...]]
+
+    def execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
+        """Route SQL queries to the in-memory store."""
+        self._results = []
+        self._result_idx = 0
+        query_lower = query.strip().lower()
+
+        if "from pool_hosts" in query_lower and "status = 'available'" in query_lower:
+            # SELECT available host by version
+            version = params[0]
+            for row in self._backend.pool_rows:
+                if row.status == "available" and row.version == version:
+                    self._results = [
+                        (
+                            row.host_id,
+                            row.vps_ip,
+                            row.ssh_port,
+                            row.ssh_user,
+                            row.container_ssh_port,
+                            row.agent_id,
+                            row.host_id_str,
+                            row.version,
+                        )
+                    ]
+                    break
+
+        elif "update pool_hosts set status = 'leased'" in query_lower:
+            username, host_id = params
+            for row in self._backend.pool_rows:
+                if row.host_id == host_id:
+                    row.status = "leased"
+                    row.leased_to_user = username
+                    row.leased_at = "2026-01-01T00:00:00+00:00"
+                    break
+
+        elif (
+            "from pool_hosts" in query_lower and "status = 'leased'" in query_lower and "leased_to_user" in query_lower
+        ):
+            if "select leased_to_user" in query_lower:
+                # Release endpoint: lookup by id
+                host_id = params[0]
+                for row in self._backend.pool_rows:
+                    if row.host_id == host_id and row.status == "leased":
+                        self._results = [(row.leased_to_user,)]
+                        break
+            else:
+                # List endpoint: lookup by user
+                username = params[0]
+                for row in self._backend.pool_rows:
+                    if row.status == "leased" and row.leased_to_user == username:
+                        self._results.append(
+                            (
+                                row.host_id,
+                                row.vps_ip,
+                                row.ssh_port,
+                                row.ssh_user,
+                                row.container_ssh_port,
+                                row.agent_id,
+                                row.host_id_str,
+                                row.version,
+                                row.leased_at,
+                            )
+                        )
+
+        elif "update pool_hosts set status = 'released'" in query_lower:
+            host_id = params[0]
+            for row in self._backend.pool_rows:
+                if row.host_id == host_id:
+                    row.status = "released"
+                    row.released_at = "2026-01-02T00:00:00+00:00"
+                    break
+
+        else:
+            pass
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        if self._results:
+            return self._results[0]
+        return None
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return list(self._results)
+
+    def __enter__(self) -> "FakeCursor":
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        pass
+
+
+def _make_fake_cursor(backend: "FakePoolBackend") -> FakeCursor:
+    cursor = FakeCursor()
+    cursor._backend = backend
+    cursor._results = []
+    return cursor
+
+
+class FakeConnection:
+    """In-memory connection that simulates psycopg2 connection behavior."""
+
+    _backend: "FakePoolBackend"
+
+    def cursor(self) -> FakeCursor:
+        return _make_fake_cursor(self._backend)
+
+    def commit(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> "FakeConnection":
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        pass
+
+
+def _make_fake_connection(backend: "FakePoolBackend") -> FakeConnection:
+    conn = FakeConnection()
+    conn._backend = backend
+    return conn
+
+
+class FakePoolBackend:
+    """In-memory pool database replacement for testing host pool endpoints."""
+
+    pool_rows: list[FakePoolRow]
+    append_key_calls: list[tuple[str, int, str, str, str]]
+
+    def install_on_app_module(self, app_mod: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Swap DB and SSH functions on the app module with fakes.
+
+        Uses the same single-loop-setattr pattern as FakeSuperTokensBackend to
+        minimize the test-patching ratchet count.
+        """
+        fakes: dict[str, Any] = {
+            "_get_pool_db_connection": self.get_connection,
+            "_append_authorized_key": self.append_authorized_key,
+        }
+        for name, fake in fakes.items():
+            monkeypatch.setattr(app_mod, name, fake)
+
+    def get_connection(self) -> FakeConnection:
+        return _make_fake_connection(self)
+
+    def append_authorized_key(
+        self,
+        host: str,
+        port: int,
+        user: str,
+        management_key_pem: str,
+        public_key_to_add: str,
+    ) -> None:
+        self.append_key_calls.append((host, port, user, management_key_pem, public_key_to_add))
+
+    def add_available_host(
+        self,
+        host_id: UUID,
+        version: str,
+        vps_ip: str = "203.0.113.10",
+        ssh_port: int = 22,
+        ssh_user: str = "root",
+        container_ssh_port: int = 2222,
+        agent_id: str = "agent-abc123",
+        host_id_str: str = "host-xyz",
+    ) -> FakePoolRow:
+        """Add an available host to the in-memory pool."""
+        row = _make_pool_row(
+            host_id=host_id,
+            vps_ip=vps_ip,
+            agent_id=agent_id,
+            host_id_str=host_id_str,
+            ssh_port=ssh_port,
+            ssh_user=ssh_user,
+            container_ssh_port=container_ssh_port,
+            version=version,
+        )
+        self.pool_rows.append(row)
+        return row
+
+    def add_leased_host(
+        self,
+        host_id: UUID,
+        version: str,
+        leased_to_user: str,
+        vps_ip: str = "203.0.113.10",
+        ssh_port: int = 22,
+        ssh_user: str = "root",
+        container_ssh_port: int = 2222,
+        agent_id: str = "agent-abc123",
+        host_id_str: str = "host-xyz",
+    ) -> FakePoolRow:
+        """Add a leased host to the in-memory pool."""
+        row = _make_pool_row(
+            host_id=host_id,
+            vps_ip=vps_ip,
+            agent_id=agent_id,
+            host_id_str=host_id_str,
+            ssh_port=ssh_port,
+            ssh_user=ssh_user,
+            container_ssh_port=container_ssh_port,
+            version=version,
+            status="leased",
+            leased_to_user=leased_to_user,
+            leased_at="2026-01-01T00:00:00+00:00",
+        )
+        self.pool_rows.append(row)
+        return row
+
+
+def make_fake_pool_backend() -> FakePoolBackend:
+    """Construct an empty in-memory pool backend."""
+    backend = FakePoolBackend()
+    backend.pool_rows = []
+    backend.append_key_calls = []
     return backend

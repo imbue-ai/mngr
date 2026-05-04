@@ -1,6 +1,8 @@
 from enum import auto
 from pathlib import Path
+from typing import Annotated
 from typing import Any
+from typing import Literal
 
 from pydantic import Field
 
@@ -67,8 +69,15 @@ class DataSourceConfig(FrozenModel):
 
 
 class CustomCommand(FrozenModel):
-    """A command definition for the kanpan board (builtin or user-defined)."""
+    """A user-defined command for the kanpan board.
 
+    The ``kind`` discriminator distinguishes this from the builtin command
+    shapes in ``KanpanCommand``; user TOML configs always parse as this
+    shape and so cannot reach the builtin-specific dispatch paths
+    (``mngr destroy`` for delete, ``git push`` for push).
+    """
+
+    kind: Literal["user"] = "user"
     name: str = Field(description="Display name shown in the status bar")
     command: str = Field(
         default="",
@@ -81,6 +90,64 @@ class CustomCommand(FrozenModel):
         description="If truthy, pressing the key marks agents for batch execution with x instead of running immediately."
         " Set to a color name (e.g. 'light red') to customize the mark indicator color.",
     )
+
+
+class ActionBuiltinRole(UpperCaseStrEnum):
+    """Identifies a non-markable builtin action that runs immediately on key press.
+
+    Dispatch in ``_dispatch_command`` uses ``match`` over this enum with
+    ``assert_never`` so the type checker flags any missing branch when a
+    new action role is added.
+    """
+
+    REFRESH = auto()
+    MUTE = auto()
+    UNMARK = auto()
+    EXECUTE = auto()
+
+
+class MarkableBuiltinRole(UpperCaseStrEnum):
+    """Identifies a markable builtin whose key press toggles a mark.
+
+    Batch dispatch in ``_submit_batch_item`` uses ``match`` over this enum
+    with ``assert_never`` so the type checker flags any missing branch when
+    a new markable role is added.
+    """
+
+    PUSH = auto()
+    DELETE = auto()
+
+
+class ActionBuiltinCommand(FrozenModel):
+    """A non-markable kanpan builtin (refresh, mute, unmark, execute).
+
+    Constructed only internally in ``tui._BUILTIN_COMMANDS``. The
+    ``markable`` field is not modelled here: by construction these are
+    never markable.
+    """
+
+    kind: Literal["action_builtin"] = "action_builtin"
+    role: ActionBuiltinRole = Field(description="Which action this is; drives dispatch in tui._dispatch_command.")
+    name: str = Field(description="Display name shown in the status bar")
+    enabled: bool = Field(default=True, description="Whether this builtin is active")
+
+
+class MarkableBuiltinCommand(FrozenModel):
+    """A markable kanpan builtin (push, delete).
+
+    Constructed only internally in ``tui._BUILTIN_COMMANDS``. Markable is a
+    required color string by construction; key press toggles a mark, and
+    later ``_submit_batch_item`` dispatches based on ``role``.
+    """
+
+    kind: Literal["markable_builtin"] = "markable_builtin"
+    role: MarkableBuiltinRole = Field(description="Which markable builtin this is; drives batch dispatch.")
+    name: str = Field(description="Display name shown in the status bar")
+    enabled: bool = Field(default=True, description="Whether this builtin is active")
+    markable: str = Field(description="Mark indicator color (e.g. 'light red').")
+
+
+KanpanCommand = Annotated[CustomCommand | ActionBuiltinCommand | MarkableBuiltinCommand, Field(discriminator="kind")]
 
 
 class KanpanPluginConfig(PluginConfig):

@@ -100,8 +100,6 @@ def _process_events(
     """Parse JSONL content and send notifications for RUNNING -> WAITING transitions."""
     for line in content.splitlines():
         record = parse_event_line(line, AGENT_STATES_SOURCE)
-        if record is None:
-            continue
 
         if record.data.get("type") != "AGENT_STATE_CHANGE":
             continue

@@ -2,6 +2,7 @@ import copy
 import fcntl
 import json
 import os
+import re
 import shutil
 from collections.abc import Generator
 from collections.abc import Mapping
@@ -452,15 +453,26 @@ def find_project_config(projects: Mapping[str, Any], path: Path) -> dict[str, An
 # Project Directory Encoding
 # =============================================================================
 
+# Matches every character that Claude Code's project-dir encoder maps to '-'
+# (i.e. everything that is not an ASCII alphanumeric or literal '-').
+_NON_DASH_ALNUM_ASCII: Final = re.compile(r"[^A-Za-z0-9-]")
+
 
 @pure
 def encode_claude_project_dir_name(path: Path) -> str:
     """Encode a filesystem path into Claude Code's project directory name.
 
     Claude Code stores per-project data in ~/.claude/projects/<encoded-path>/.
-    The encoding replaces '/' and '.' with '-'.
+    The encoding keeps only ASCII alphanumerics and ``-``, mapping every
+    other character (``/``, ``.``, ``_``, space, ``@``, ``+``, accented
+    letters, CJK, etc.) to ``-`` -- per the algorithm documented in
+    anthropics/claude-code#19972. If this encoder diverges from Claude
+    Code's, ``on_after_provisioning`` writes the adopted JSONL to a
+    project subdir Claude Code never reads on resume, the find guard in
+    ``assemble_command`` returns no match, and ``--adopt-session``
+    silently spawns a fresh session via the ``||`` fallback.
     """
-    return str(path).replace("/", "-").replace(".", "-")
+    return _NON_DASH_ALNUM_ASCII.sub("-", str(path))
 
 
 # =============================================================================
@@ -487,7 +499,11 @@ def build_readiness_hooks_config() -> dict[str, Any]:
     - PostToolUseFailure: removes 'permissions_waiting' file (tool failed/denied, permission resolved)
     - Notification (idle_prompt): removes 'active' and 'permissions_waiting' files
     - Stop: runs wait_for_stop_hook.sh which waits for all other stop hooks to
-      finish, then removes 'active' and 'permissions_waiting' and emits an activity event
+      finish, then runs post-completion actions (uploads the current commit's
+      autofix issue file to the Modal code-review-json volume when the
+      code-guardian orchestrator wrote .reviewer/outputs/orchestrator_success,
+      and invokes notify_user best-effort), and finally removes 'active' and
+      'permissions_waiting' and emits an activity event
 
     File semantics:
     - session_started: Claude Code session has started (for initial message timing)
@@ -512,7 +528,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                         {
                             "type": "command",
                             "command": _SESSION_GUARD
-                            + 'echo "The base branch for this work is: ${GIT_BASE_BRANCH:-main}"',
+                            + 'echo "The base branch for this work is: ${MNGR_GIT_BASE_BRANCH:-main}"',
                         },
                         {
                             "type": "command",

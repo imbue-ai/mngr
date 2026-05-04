@@ -34,6 +34,38 @@ function getGitBinDir() {
   return path.dirname(getGitPath());
 }
 
+/**
+ * Path to the Latchkey CLI shipped as an npm dependency of this app.
+ *
+ * Dev mode: pnpm installs the package into ``apps/minds/node_modules`` and
+ * creates a ``.bin/latchkey`` wrapper (shebang ``#!/usr/bin/env node``). We
+ * invoke that directly, so any developer who already has Node on PATH (a
+ * prerequisite for running Electron itself) gets Latchkey for free.
+ *
+ * Packaged mode: build.js stages a fresh, flat ``npm install`` of latchkey
+ * (including every platform-specific native prebuild) into
+ * ``resources/latchkey/node_modules/`` and emits a small shim at
+ * ``resources/latchkey/bin/latchkey``. The shim uses the packaged Electron
+ * binary as Node (``ELECTRON_RUN_AS_NODE=1``) so we do not have to bundle a
+ * second Node runtime. See ``scripts/build.js::bundleLatchkey`` for details.
+ */
+function getLatchkeyPath() {
+  if (isDev()) {
+    return path.join(__dirname, '..', 'node_modules', '.bin', 'latchkey');
+  }
+  return path.join(getResourcesDir(), 'latchkey', 'bin', 'latchkey');
+}
+
+/**
+ * Directory where all minds-managed Latchkey gateways keep their shared
+ * credential/config state (``LATCHKEY_DIRECTORY``). Sharing one directory
+ * across gateways lets the user authenticate with each third-party service
+ * once for all their agents, instead of once per agent.
+ */
+function getLatchkeyDirectory() {
+  return path.join(getDataDir(), 'latchkey');
+}
+
 function getMindsRootName() {
   const name = process.env.MINDS_ROOT_NAME || 'minds';
   if (!/^[a-z0-9_-]+$/.test(name)) {
@@ -91,6 +123,8 @@ module.exports = {
   getUvBinDir,
   getGitPath,
   getGitBinDir,
+  getLatchkeyPath,
+  getLatchkeyDirectory,
   getMindsRootName,
   getDataDir,
   getMngrHostDir,

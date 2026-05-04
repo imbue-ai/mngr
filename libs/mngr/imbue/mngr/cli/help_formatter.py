@@ -299,7 +299,9 @@ def _write_git_style_help(
     if metadata.see_also:
         output.write(f"{_format_section_title('See Also')}\n")
         for ref_name, description in metadata.see_also:
-            output.write(f"       mngr help {ref_name} - {description}\n")
+            # Strip "#anchor" suffix; anchors are only meaningful for the markdown renderer.
+            bare_name = ref_name.partition("#")[0]
+            output.write(f"       mngr help {bare_name} - {description}\n")
         output.write("\n")
 
     # EXAMPLES section (if provided)

@@ -88,11 +88,17 @@ Example configuration in mngr.toml:
                 expanded_hosts[host_name] = host_config
         hosts = expanded_hosts
 
+        # Resolve dynamic hosts file path
+        dynamic_hosts_file = config.dynamic_hosts_file
+        if dynamic_hosts_file is None:
+            dynamic_hosts_file = mngr_ctx.profile_dir / "providers" / str(name) / "dynamic_hosts.toml"
+
         return SSHProviderInstance(
             name=name,
             host_dir=host_dir,
             mngr_ctx=mngr_ctx,
             hosts=hosts,
+            dynamic_hosts_file=dynamic_hosts_file,
         )
 
 
