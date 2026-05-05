@@ -33,6 +33,9 @@ function runEnvSetup(onProgress) {
     const args = [
       'sync',
       '--project', pyprojectDir,
+      // --active makes uv honor VIRTUAL_ENV instead of `<project-dir>/.venv`
+      // (which is inside the signed .app bundle and read-only on macOS).
+      '--active',
       '--python-preference', 'only-managed',
     ];
 
