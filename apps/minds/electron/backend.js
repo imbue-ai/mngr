@@ -184,6 +184,11 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
           // reports contain enough context to debug "Discovering agents..."
           // hangs. Single v keeps noise manageable; -vv (DEBUG) is dev-only.
           'run', '--project', pyprojectDir,
+          // --active makes uv use VIRTUAL_ENV (~/.minds/.venv) instead of
+          // <project>/.venv, which is inside the signed .app bundle and
+          // read-only on macOS. Without this, `uv run` tries to create
+          // .venv inside the bundle and fails with "Operation not permitted".
+          '--active',
           'minds', '-v', '--format', 'jsonl',
           '--log-file', path.join(logDir, 'minds-events.jsonl'),
           'forward',
@@ -218,9 +223,11 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
           // Tell the packaged latchkey shim which Electron binary to use as Node.
           MINDS_ELECTRON_EXEC_PATH: process.execPath,
+          // Set VIRTUAL_ENV to the per-user venv so `uv run --active` uses
+          // it. Without this, uv falls back to <project>/.venv which is
+          // inside the signed .app bundle (read-only on macOS).
+          VIRTUAL_ENV: paths.getVenvDir(),
         };
-        // Remove VIRTUAL_ENV to avoid uv warnings about path mismatches
-        delete env.VIRTUAL_ENV;
       }
 
       const child = spawn(uvBin, args, {
