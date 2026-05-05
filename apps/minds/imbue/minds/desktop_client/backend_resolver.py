@@ -1,4 +1,5 @@
 import json
+import subprocess
 import threading
 from abc import ABC
 from abc import abstractmethod
@@ -940,6 +941,21 @@ class MngrStreamManager(MutableModel):
             return
 
         aid_str = str(agent_id)
+        # Kill any orphan `mngr event <aid>` subprocesses left behind by a prior
+        # backend incarnation. Without this, after an unclean Electron restart
+        # (SIGKILL, debugger crash) the orphans keep tailing the agent's
+        # events.jsonl and starve our newly-spawned subprocess of events --
+        # which manifests as "Workspace server not yet available. Retrying..."
+        # forever in the chat UI. pkill returns 1 when no matches; that's fine.
+        try:
+            subprocess.run(
+                ["pkill", "-9", "-f", f"mngr event {aid_str}"],
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
         self._events_services[aid_str] = {}
 
         logger.info("Starting events stream for agent {}", aid_str)
