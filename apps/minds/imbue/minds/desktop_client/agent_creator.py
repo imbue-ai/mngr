@@ -1241,20 +1241,23 @@ class AgentCreator(MutableModel):
                     if clone_target.exists():
                         shutil.rmtree(clone_target)
                     log_queue.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
+                    # Full clone (no --depth=1): mngr's downstream mirror push
+                    # to the agent VM rejects shallow updates ("shallow update
+                    # not allowed"). The total clone time is no better than a
+                    # full clone after mngr unshallows anyway.
                     clone_git_repo(
                         GitUrl(repo_source),
                         clone_target,
                         on_output=emit_log,
                         branch=branch,
-                        is_shallow=True,
                         parent_cg=self.root_concurrency_group,
                     )
                     workspace_dir = clone_target
 
                 # Local file:// clone above didn't pass --branch, so a
                 # post-clone checkout is needed to switch branches when the
-                # worktree's HEAD doesn't already match. Remote shallow
-                # clones already used --branch so this is a no-op.
+                # worktree's HEAD doesn't already match. Remote clones already
+                # used --branch so this is a no-op there.
                 if branch:
                     log_queue.put("[minds] Checking out branch '{}'...".format(branch))
                     checkout_branch(
