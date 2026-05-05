@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from loguru import logger as _loguru_logger
@@ -117,7 +118,14 @@ def discover_agents(
 
 def send_message(agent_name: str, message: str) -> bool:
     """Send a message to an agent. Returns True on success."""
+    t_start = time.monotonic()
+    logger.info(
+        "SEND_MSG_TIMING agent_discovery.send_message: agent={} msg_len={}",
+        agent_name, len(message),
+    )
     mngr_ctx, cg = _get_mngr_context()
+    t_ctx = time.monotonic()
+    logger.info("SEND_MSG_TIMING got mngr_ctx in {:.0f}ms", (t_ctx - t_start) * 1000)
     try:
         result = send_message_to_agents(
             mngr_ctx=mngr_ctx,
@@ -127,4 +135,12 @@ def send_message(agent_name: str, message: str) -> bool:
         )
     finally:
         cg.__exit__(None, None, None)
-    return len(result.successful_agents) > 0
+    elapsed_ms = (time.monotonic() - t_start) * 1000
+    success = len(result.successful_agents) > 0
+    logger.info(
+        "SEND_MSG_TIMING agent_discovery.send_message done: agent={} success={} "
+        "successful_agents={} failed_agents={} elapsed_ms={:.0f}",
+        agent_name, success, len(result.successful_agents),
+        result.failed_agents, elapsed_ms,
+    )
+    return success

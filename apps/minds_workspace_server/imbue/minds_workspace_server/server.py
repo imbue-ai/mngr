@@ -4,6 +4,7 @@ import queue
 import signal
 import socket
 import threading
+import time
 import traceback
 from collections.abc import AsyncIterator
 from collections.abc import Iterator
@@ -345,15 +346,44 @@ def _stream_events(agent_id: str, request: Request) -> Response:
 
 def _send_message_endpoint(agent_id: str, send_message_request: SendMessageRequest, request: Request) -> JSONResponse:
     """Send a message to an agent."""
+    t_start = time.monotonic()
+    msg_len = len(send_message_request.message)
+    logger.info("SEND_MSG_TIMING endpoint enter: agent_id={} msg_len={}", agent_id, msg_len)
     agent_info = _find_agent(agent_id, request)
     if agent_info is None:
+        logger.info(
+            "SEND_MSG_TIMING endpoint: agent not found agent_id={} elapsed_ms={:.0f}",
+            agent_id, (time.monotonic() - t_start) * 1000,
+        )
         return _agent_not_found_response(agent_id)
 
-    success = send_message(agent_info.name, send_message_request.message)
+    t_found = time.monotonic()
+    logger.info(
+        "SEND_MSG_TIMING endpoint: found agent={} in {:.0f}ms; calling send_message",
+        agent_info.name, (t_found - t_start) * 1000,
+    )
+    try:
+        success = send_message(agent_info.name, send_message_request.message)
+    except BaseException as exc:
+        elapsed_ms = (time.monotonic() - t_start) * 1000
+        logger.exception(
+            "SEND_MSG_TIMING endpoint: send_message raised after {:.0f}ms agent={} exc={}",
+            elapsed_ms, agent_info.name, type(exc).__name__,
+        )
+        raise
+    elapsed_ms = (time.monotonic() - t_start) * 1000
     if not success:
+        logger.info(
+            "SEND_MSG_TIMING endpoint: send_message returned False agent={} total_elapsed_ms={:.0f}",
+            agent_info.name, elapsed_ms,
+        )
         error = ErrorResponse(detail=f"Failed to send message to agent '{agent_info.name}' (0 successful agents)")
         return JSONResponse(content=error.model_dump(), status_code=500)
 
+    logger.info(
+        "SEND_MSG_TIMING endpoint: send_message succeeded agent={} total_elapsed_ms={:.0f}",
+        agent_info.name, elapsed_ms,
+    )
     return JSONResponse(content=SendMessageResponse(status="ok").model_dump())
 
 

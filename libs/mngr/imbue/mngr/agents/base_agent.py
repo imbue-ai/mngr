@@ -445,9 +445,16 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         the host and uses ``tmux load-buffer`` + ``tmux paste-buffer`` to avoid
         the tmux "command too long" error.
         """
-        if len(message) < LONG_MESSAGE_THRESHOLD:
+        msg_len = len(message)
+        if msg_len < LONG_MESSAGE_THRESHOLD:
             send_msg_cmd = f"tmux send-keys -t '{tmux_target}' -l {shlex.quote(message)}"
+            t0 = time.monotonic()
             result = self.host.execute_stateful_command(send_msg_cmd)
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            logger.info(
+                "SEND_MSG_TIMING tmux send-keys -l: len={} success={} elapsed_ms={:.0f}",
+                msg_len, result.success, elapsed_ms,
+            )
             if not result.success:
                 raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
         else:
@@ -455,15 +462,25 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             quoted_buffer = shlex.quote(f"mngr-{self.session_name}")
             quoted_path = shlex.quote(str(tmp_path))
             try:
+                t0 = time.monotonic()
                 self.host.write_text_file(tmp_path, message)
+                t_write = time.monotonic()
                 load_cmd = f"tmux load-buffer -b {quoted_buffer} {quoted_path}"
                 result = self.host.execute_stateful_command(load_cmd)
+                t_load = time.monotonic()
                 if not result.success:
                     raise SendMessageError(
                         str(self.name), f"tmux load-buffer failed: {result.stderr or result.stdout}"
                     )
                 paste_cmd = f"tmux paste-buffer -b {quoted_buffer} -t '{tmux_target}'"
                 result = self.host.execute_stateful_command(paste_cmd)
+                t_paste = time.monotonic()
+                logger.info(
+                    "SEND_MSG_TIMING tmux load+paste-buffer: len={} success={} "
+                    "write_ms={:.0f} load_ms={:.0f} paste_ms={:.0f}",
+                    msg_len, result.success,
+                    (t_write - t0) * 1000, (t_load - t_write) * 1000, (t_paste - t_load) * 1000,
+                )
                 if not result.success:
                     raise SendMessageError(
                         str(self.name), f"tmux paste-buffer failed: {result.stderr or result.stdout}"
@@ -497,14 +514,30 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         Once the message is confirmed on screen, sends Enter via
         ``_send_enter_and_wait`` for submission signal synchronization.
         """
+        overall_start = time.monotonic()
+        logger.info(
+            "SEND_MSG_TIMING begin paste-detection send: agent={} target={} len={}",
+            self.name, tmux_target, len(message),
+        )
+
         # Send keys WITHOUT a trailing newline (so it probably does not submit)
+        t0 = time.monotonic()
         self._send_tmux_literal_keys(tmux_target, message)
+        t_keys = time.monotonic()
+        logger.info("SEND_MSG_TIMING send_tmux_literal_keys done in {:.0f}ms", (t_keys - t0) * 1000)
 
         # Wait for the pasted content to appear on screen
         self._wait_for_paste_visible(tmux_target, message)
+        t_wait = time.monotonic()
+        logger.info("SEND_MSG_TIMING wait_for_paste_visible done in {:.0f}ms", (t_wait - t_keys) * 1000)
 
         # Send Enter and wait for submission signal
         self._send_enter_and_wait(tmux_target)
+        t_enter = time.monotonic()
+        logger.info(
+            "SEND_MSG_TIMING send_enter_and_wait done in {:.0f}ms (total={:.0f}ms)",
+            (t_enter - t_wait) * 1000, (t_enter - overall_start) * 1000,
+        )
 
     def _capture_pane_content(self, tmux_target: str, include_scrollback: bool = False) -> str | None:
         """Capture the current pane content, returning None on failure."""
@@ -550,16 +583,79 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         2. A fuzzy content match: join all pane lines, strip to lowercase
            alphanumeric, and check that the last chunk of the message
            (similarly normalized) is present.
+
+        Heavily instrumented to diagnose timeout root cause.
         """
+        poll_interval = 0.1
+        start = time.monotonic()
+        deadline = start + _SEND_MESSAGE_TIMEOUT_SECONDS
+        poll_count = 0
+        capture_failures = 0
+        last_periodic_log = start
+        last_pane_content: str | None = None
+        last_capture_ms: float = -1.0
+
         with log_span("Waiting for pasted content to appear"):
-            if not poll_until(
-                lambda: self._is_paste_visible(tmux_target, message),
-                timeout=_SEND_MESSAGE_TIMEOUT_SECONDS,
-            ):
-                self._raise_send_timeout(
-                    tmux_target,
-                    f"Timeout waiting for pasted content to appear (waited {_SEND_MESSAGE_TIMEOUT_SECONDS:.1f}s)",
-                )
+            logger.info(
+                "SEND_MSG_TIMING wait_for_paste_visible: starting polling (timeout={:.1f}s, interval={:.2f}s)",
+                _SEND_MESSAGE_TIMEOUT_SECONDS, poll_interval,
+            )
+            while time.monotonic() < deadline:
+                poll_count += 1
+                t_capture_start = time.monotonic()
+                content = self._capture_pane_content(tmux_target)
+                last_capture_ms = (time.monotonic() - t_capture_start) * 1000
+                if content is None:
+                    capture_failures += 1
+                else:
+                    last_pane_content = content
+                    if _check_paste_content(content, message):
+                        elapsed_ms = (time.monotonic() - start) * 1000
+                        has_indicator = "[Pasted text " in content
+                        logger.info(
+                            "SEND_MSG_TIMING paste visible: elapsed_ms={:.0f} polls={} "
+                            "capture_failures={} indicator={} pane_size={} last_capture_ms={:.0f}",
+                            elapsed_ms, poll_count, capture_failures, has_indicator,
+                            len(content), last_capture_ms,
+                        )
+                        return
+                now = time.monotonic()
+                if now - last_periodic_log >= 2.0:
+                    pane_size = len(last_pane_content) if last_pane_content is not None else -1
+                    logger.info(
+                        "SEND_MSG_TIMING paste poll status: elapsed={:.1f}s polls={} "
+                        "capture_failures={} pane_size={} last_capture_ms={:.0f}",
+                        now - start, poll_count, capture_failures, pane_size, last_capture_ms,
+                    )
+                    last_periodic_log = now
+                time.sleep(poll_interval)
+
+            elapsed = time.monotonic() - start
+            normalized_msg = _normalize_for_match(message)
+            probe_len = min(60, len(normalized_msg))
+            probe = normalized_msg[-probe_len:] if probe_len > 0 else ""
+            normalized_pane = _normalize_for_match(last_pane_content) if last_pane_content else ""
+            indicator_present = "[Pasted text " in (last_pane_content or "")
+            probe_in_pane = probe in normalized_pane if probe else True
+            logger.error(
+                "SEND_MSG_TIMING paste TIMEOUT after {:.2f}s: polls={} capture_failures={} "
+                "pane_size={} indicator_present={} probe_len={} probe_in_normalized_pane={} "
+                "normalized_pane_size={}",
+                elapsed, poll_count, capture_failures,
+                len(last_pane_content) if last_pane_content else -1,
+                indicator_present, len(probe), probe_in_pane, len(normalized_pane),
+            )
+            if last_pane_content is not None:
+                logger.error("SEND_MSG_TIMING final pane content (full):\n{}", last_pane_content)
+            else:
+                logger.error("SEND_MSG_TIMING final pane content: <every capture failed>")
+            logger.error("SEND_MSG_TIMING probe (last {} normalized alnum chars of msg): {!r}", probe_len, probe)
+            self._raise_send_timeout(
+                tmux_target,
+                f"Timeout waiting for pasted content to appear (waited {_SEND_MESSAGE_TIMEOUT_SECONDS:.1f}s, "
+                f"polls={poll_count}, capture_failures={capture_failures}, "
+                f"indicator_present={indicator_present}, probe_in_pane={probe_in_pane})",
+            )
 
     def _is_paste_visible(self, tmux_target: str, message: str) -> bool:
         """Check whether the pasted message is visible in the pane.
