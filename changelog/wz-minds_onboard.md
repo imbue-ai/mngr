@@ -1,0 +1,6 @@
+- minds.app: kill orphan `mngr event` subprocesses before starting fresh stream, fixing "Workspace server not yet available" when prior backend exits uncleanly
+- minds.app: bump version to 0.2.10
+- minds.app: pyproject declares psycopg2-binary so packaged build matches dev workspace
+- minds.app: env-setup and backend pass `--active` to `uv` so the venv lives in user-writable space (~/.minds/.venv) instead of the read-only signed bundle
+- mngr_lima: replace time.sleep with threading.Event().wait() for known_hosts retry; drop is_shallow=True on remote-URL git mirror clone (mirror push rejects shallow updates); raise limactl_start_new default timeout to 1800s
+- pyproject: exclude tests from wheel builds across mngr/mngr_lima/mngr_modal/imbue_common
