@@ -548,6 +548,29 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             include_scrollback=include_scrollback,
         )
 
+    def _capture_tmux_window_diagnostics(self, tmux_target: str) -> str:
+        """Capture window/client/pane sizing diagnostics for the given tmux session.
+
+        Used to diagnose empty-pane / tiny-window failures in paste detection. We suspect
+        a phantom 2x1 client + window-size=latest can shrink the window so capture-pane
+        returns 0 bytes; this captures the evidence for/against that.
+        """
+        # Note: tmux_target is the session name as used in `-t`.
+        display_fmt = (
+            "win=#{window_width}x#{window_height} pane=#{pane_width}x#{pane_height} alt=#{alternate_on}"
+        )
+        cmd = (
+            f"tmux display-message -t '{tmux_target}' -p '{display_fmt}'; "
+            f"echo ---; "
+            f"tmux list-clients -t '{tmux_target}' "
+            f"-F 'client name=#{{client_name}} size=#{{client_width}}x#{{client_height}} "
+            f"flags=#{{client_flags}} session=#{{client_session}}'"
+        )
+        result = self.host.execute_idempotent_command(cmd, timeout_seconds=_CAPTURE_PANE_TIMEOUT_SECONDS)
+        if result.success:
+            return result.stdout.strip()
+        return f"<diagnostics failed: stderr={result.stderr!r}>"
+
     def _wait_for_tui_ready(self, tmux_target: str, indicator: str) -> None:
         """Wait until the TUI is ready by looking for the indicator string in the pane.
 
@@ -627,6 +650,14 @@ class BaseAgent(AgentInterface[AgentConfigT]):
                         "capture_failures={} pane_size={} last_capture_ms={:.0f}",
                         now - start, poll_count, capture_failures, pane_size, last_capture_ms,
                     )
+                    # If pane is empty/tiny, dump window/client diagnostics to identify the
+                    # 2x1-client / window-size=latest theory.
+                    if pane_size <= 10:
+                        diagnostics = self._capture_tmux_window_diagnostics(tmux_target)
+                        logger.info(
+                            "SEND_MSG_TIMING paste poll diagnostics (pane_size={}):\n{}",
+                            pane_size, diagnostics,
+                        )
                     last_periodic_log = now
                 time.sleep(poll_interval)
 
@@ -650,6 +681,8 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             else:
                 logger.error("SEND_MSG_TIMING final pane content: <every capture failed>")
             logger.error("SEND_MSG_TIMING probe (last {} normalized alnum chars of msg): {!r}", probe_len, probe)
+            final_diagnostics = self._capture_tmux_window_diagnostics(tmux_target)
+            logger.error("SEND_MSG_TIMING final tmux window diagnostics:\n{}", final_diagnostics)
             self._raise_send_timeout(
                 tmux_target,
                 f"Timeout waiting for pasted content to appear (waited {_SEND_MESSAGE_TIMEOUT_SECONDS:.1f}s, "
