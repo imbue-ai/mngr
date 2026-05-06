@@ -12,10 +12,19 @@ from imbue.mngr.primitives import UserId
 
 
 class ModalMode(UpperCaseStrEnum):
-    """Mode for the Modal provider backend."""
+    """Mode for the Modal provider backend.
+
+    Currently only ``DIRECT`` is supported. The previous ``TESTING`` value was
+    a half-measure that put a test-only construction path into production
+    config and forced ``mngr_modal.backend`` to import ``modal_proxy.testing``
+    at module top, dragging the in-process fake into every production import
+    graph (and breaking packaged builds that exclude ``**/testing.py`` from
+    wheels). Tests now bypass ``build_provider_instance`` entirely and inject
+    a ``TestingModalInterface`` via ``mngr_modal.testing.make_testing_provider``,
+    so production code never references the fake.
+    """
 
     DIRECT = auto()
-    TESTING = auto()
 
 
 class ModalProviderConfig(ProviderInstanceConfig):

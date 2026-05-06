@@ -16,7 +16,6 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_modal.backend import STATE_VOLUME_SUFFIX
-from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.instance import HostRecord
 from imbue.mngr_modal.instance import ModalProviderApp
@@ -58,7 +57,6 @@ def make_testing_provider(
     )
 
     config = ModalProviderConfig(
-        mode=ModalMode.TESTING,
         app_name=app_name,
         host_dir=mngr_ctx.config.default_host_dir,
         default_sandbox_timeout=300,
