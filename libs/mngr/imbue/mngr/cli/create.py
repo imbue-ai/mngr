@@ -101,7 +101,6 @@ from imbue.mngr.utils.editor import EditorSession
 from imbue.mngr.utils.git_utils import clone_git_url_to_managed_dir
 from imbue.mngr.utils.git_utils import derive_project_name_for_source
 from imbue.mngr.utils.git_utils import find_git_worktree_root
-from imbue.mngr.utils.git_utils import get_current_git_branch
 from imbue.mngr.utils.git_utils import is_git_url
 from imbue.mngr.utils.git_utils import parse_project_name_from_url
 from imbue.mngr.utils.logging import LoggingConfig
@@ -1290,13 +1289,18 @@ def _resolve_target_host(
     return resolved_target_host
 
 
-def _get_current_git_branch(source_location: HostLocation, mngr_ctx: MngrContext) -> str | None:
-    if not source_location.host.is_local:
-        raise NotImplementedError(
-            "Have to re-implement this function so that it works via HostInterface calls instead!"
-        )
+def _get_current_git_branch(source_location: HostLocation) -> str | None:
+    """Return the current git branch at the source location, or None if unavailable.
 
-    return get_current_git_branch(source_location.path, mngr_ctx.concurrency_group)
+    Runs via the host interface so it works for both local and remote sources.
+    """
+    result = source_location.host.execute_idempotent_command(
+        "git rev-parse --abbrev-ref HEAD",
+        cwd=source_location.path,
+    )
+    if not result.success:
+        return None
+    return result.stdout.strip() or None
 
 
 def _is_git_repo(path: Path, cg: ConcurrencyGroup) -> bool:
@@ -1431,7 +1435,7 @@ def _parse_agent_opts(
         git = None
     else:
         git = AgentGitOptions(
-            base_branch=base_branch or _get_current_git_branch(source_location, mngr_ctx),
+            base_branch=base_branch or _get_current_git_branch(source_location),
             new_branch_name=new_branch_name,
             is_include_unclean=is_include_unclean,
             is_include_gitignored=opts.include_gitignored,
