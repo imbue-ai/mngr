@@ -1116,18 +1116,20 @@ def test_stop_agent_kills_orphaned_processes_by_env_marker(
     # their parent dies, which is what `&` from a subshell models here.
     marker_file = tmp_path / "orphan_pid"
     agent_command = (
-        f"(sleep 8472 </dev/null >/dev/null 2>&1 & echo $! > {marker_file}) "
-        f"</dev/null >/dev/null 2>&1; sleep 1000"
+        f"(sleep 8472 </dev/null >/dev/null 2>&1 & echo $! > {marker_file}) </dev/null >/dev/null 2>&1; sleep 1000"
     )
 
-    agent = host.create_agent_state(
-        work_dir_path=temp_work_dir,
-        options=CreateAgentOptions(
-            name=AgentName("orphan-test"),
-            agent_type=AgentTypeName("generic"),
-            command=CommandString(agent_command),
-        ),
+    options = CreateAgentOptions(
+        name=AgentName("orphan-test"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString(agent_command),
     )
+    agent = host.create_agent_state(work_dir_path=temp_work_dir, options=options)
+    # provision_agent is what writes the agent env file (MNGR_AGENT_ID etc.).
+    # Without it the pane shell's `set -a; . agent_env` sources nothing and the
+    # orphan inherits no marker -- exactly the failure mode the assertion below
+    # is guarding against.
+    host.provision_agent(agent, options, mngr_ctx)
     host.start_agents([agent.id])
     session_name = f"{mngr_test_prefix}{agent.name}"
 
