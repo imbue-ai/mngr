@@ -93,11 +93,21 @@ def get_user_claude_config_dir() -> Path:
     credentials or settings) should call this function instead.
 
     Resolution order:
-    1. $ORIGINAL_CLAUDE_CONFIG_DIR (set by mngr when creating agents)
+    1. $ORIGINAL_CLAUDE_CONFIG_DIR (set by mngr when creating agents), but
+       only if that path actually exists as a directory on disk.
     2. Falls back to get_claude_config_dir() ($CLAUDE_CONFIG_DIR or ~/.claude/)
+
+    The directory-existence check on $ORIGINAL_CLAUDE_CONFIG_DIR handles
+    nested-sandbox scenarios (e.g. a Linux lima VM running on a macOS host):
+    the env var is inherited from when the agent was first created on the
+    host, so it points at a host path like /Users/<user>/.claude that does
+    not exist inside the VM. Treating that as if the var were unset lets
+    callers (most importantly the credentials provisioner) fall through to
+    the per-agent CLAUDE_CONFIG_DIR, which is where the live credentials
+    actually live in that scenario.
     """
     original = os.environ.get("ORIGINAL_CLAUDE_CONFIG_DIR")
-    if original:
+    if original and Path(original).is_dir():
         return Path(original)
     return get_claude_config_dir()
 
