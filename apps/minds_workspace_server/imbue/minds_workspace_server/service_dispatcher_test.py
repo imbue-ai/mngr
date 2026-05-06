@@ -18,6 +18,8 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
 from fastapi.responses import PlainTextResponse
+from fastapi.responses import RedirectResponse
+from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocket
@@ -91,6 +93,21 @@ def _build_stub_backend() -> FastAPI:
     @stub.get("/echo-query")
     def echo_query(request: Request) -> JSONResponse:
         return JSONResponse({"query": request.url.query})
+
+    @stub.get("/redirect-absolute-path")
+    def redirect_absolute_path() -> RedirectResponse:
+        return RedirectResponse(url="/login", status_code=302)
+
+    @stub.get("/redirect-same-origin")
+    def redirect_same_origin(request: Request) -> Response:
+        target = f"{request.url.scheme}://{request.url.netloc}/login?next=/dashboard"
+        response = Response(status_code=302)
+        response.headers["Location"] = target
+        return response
+
+    @stub.get("/redirect-external")
+    def redirect_external() -> RedirectResponse:
+        return RedirectResponse(url="https://example.com/elsewhere", status_code=302)
 
     @stub.get("/events")
     def sse_endpoint() -> StreamingResponse:
@@ -224,6 +241,52 @@ def test_set_cookie_is_rewritten_to_service_path(workspace_client: TestClient) -
     assert response.status_code == 200
     set_cookie = response.headers.get("set-cookie", "")
     assert "Path=/service/web/" in set_cookie
+
+
+def test_redirect_absolute_path_location_is_prefixed(workspace_client: TestClient) -> None:
+    """A 3xx with an absolute-path Location header is rewritten under the service prefix."""
+    response = workspace_client.get(
+        "/service/web/redirect-absolute-path",
+        cookies={"sw_installed_web": "1"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    assert response.headers["location"] == "/service/web/login"
+
+
+def test_redirect_same_origin_absolute_url_is_rewritten_to_prefixed_path(
+    workspace_client: TestClient,
+) -> None:
+    """A 3xx with a same-origin absolute-URL Location is rewritten to a proxy-relative prefixed path."""
+    response = workspace_client.get(
+        "/service/web/redirect-same-origin",
+        cookies={"sw_installed_web": "1"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    assert response.headers["location"] == "/service/web/login?next=/dashboard"
+
+
+def test_redirect_external_location_passes_through(workspace_client: TestClient) -> None:
+    """A 3xx with an external Location URL is left unchanged."""
+    response = workspace_client.get(
+        "/service/web/redirect-external",
+        cookies={"sw_installed_web": "1"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    assert response.headers["location"] == "https://example.com/elsewhere"
+
+
+def test_2xx_without_location_is_unchanged(workspace_client: TestClient) -> None:
+    """A 2xx response with no Location header passes through with no Location added."""
+    response = workspace_client.get(
+        "/service/web/plain",
+        cookies={"sw_installed_web": "1"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 200
+    assert "location" not in {k.lower() for k in response.headers.keys()}
 
 
 def test_unknown_service_returns_loading_page_for_html(workspace_client: TestClient) -> None:

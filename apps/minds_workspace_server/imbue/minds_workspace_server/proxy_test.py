@@ -7,6 +7,7 @@ from imbue.minds_workspace_server.proxy import generate_service_worker_js
 from imbue.minds_workspace_server.proxy import generate_websocket_shim_js
 from imbue.minds_workspace_server.proxy import rewrite_absolute_paths_in_html
 from imbue.minds_workspace_server.proxy import rewrite_cookie_path
+from imbue.minds_workspace_server.proxy import rewrite_location_header
 from imbue.minds_workspace_server.proxy import rewrite_proxied_html
 
 _TEST_SERVICE: ServiceName = ServiceName("web")
@@ -78,6 +79,120 @@ def test_rewrite_cookie_path_does_not_double_prefix() -> None:
         service_name=_TEST_SERVICE,
     )
     assert result == snapshot("sid=abc; Path=/service/web/api")
+
+
+# -- Location header rewriting --
+
+_BACKEND_URL: str = "http://127.0.0.1:8000"
+
+
+def test_rewrite_location_absolute_path_is_prefixed() -> None:
+    result = rewrite_location_header(
+        location="/login",
+        service_name=_TEST_SERVICE,
+        backend_url=_BACKEND_URL,
+    )
+    assert result == snapshot("/service/web/login")
+
+
+def test_rewrite_location_absolute_path_preserves_query_and_fragment() -> None:
+    result = rewrite_location_header(
+        location="/login?next=/dashboard#anchor",
+        service_name=_TEST_SERVICE,
+        backend_url=_BACKEND_URL,
+    )
+    assert result == snapshot("/service/web/login?next=/dashboard#anchor")
+
+
+def test_rewrite_location_absolute_path_does_not_double_prefix() -> None:
+    result = rewrite_location_header(
+        location="/service/web/login",
+        service_name=_TEST_SERVICE,
+        backend_url=_BACKEND_URL,
+    )
+    assert result == snapshot("/service/web/login")
+
+
+def test_rewrite_location_same_origin_url_becomes_proxy_relative_path() -> None:
+    result = rewrite_location_header(
+        location="http://127.0.0.1:8000/login",
+        service_name=_TEST_SERVICE,
+        backend_url=_BACKEND_URL,
+    )
+    assert result == snapshot("/service/web/login")
+
+
+def test_rewrite_location_same_origin_url_preserves_query() -> None:
+    result = rewrite_location_header(
+        location="http://127.0.0.1:8000/login?next=/dashboard",
+        service_name=_TEST_SERVICE,
+        backend_url=_BACKEND_URL,
+    )
+    assert result == snapshot("/service/web/login?next=/dashboard")
+
+
+def test_rewrite_location_external_url_is_unchanged() -> None:
+    result = rewrite_location_header(
+        location="https://example.com/elsewhere",
+        service_name=_TEST_SERVICE,
+        backend_url=_BACKEND_URL,
+    )
+    assert result == snapshot("https://example.com/elsewhere")
+
+
+def test_rewrite_location_protocol_relative_url_is_unchanged() -> None:
+    result = rewrite_location_header(
+        location="//example.com/page",
+        service_name=_TEST_SERVICE,
+        backend_url=_BACKEND_URL,
+    )
+    assert result == snapshot("//example.com/page")
+
+
+def test_rewrite_location_relative_path_is_unchanged() -> None:
+    result = rewrite_location_header(
+        location="login",
+        service_name=_TEST_SERVICE,
+        backend_url=_BACKEND_URL,
+    )
+    assert result == snapshot("login")
+
+
+def test_rewrite_location_dot_relative_path_is_unchanged() -> None:
+    result = rewrite_location_header(
+        location="./login",
+        service_name=_TEST_SERVICE,
+        backend_url=_BACKEND_URL,
+    )
+    assert result == snapshot("./login")
+
+
+def test_rewrite_location_fragment_only_is_unchanged() -> None:
+    result = rewrite_location_header(
+        location="#anchor",
+        service_name=_TEST_SERVICE,
+        backend_url=_BACKEND_URL,
+    )
+    assert result == snapshot("#anchor")
+
+
+def test_rewrite_location_absolute_path_does_not_double_prefix_exact_match() -> None:
+    prefix = f"/service/{_TEST_SERVICE}"
+    result = rewrite_location_header(
+        location=prefix,
+        service_name=_TEST_SERVICE,
+        backend_url=_BACKEND_URL,
+    )
+    assert result == prefix
+
+
+def test_rewrite_location_site_absolute_root_is_prefixed() -> None:
+    result = rewrite_location_header(
+        location="/",
+        service_name=_TEST_SERVICE,
+        backend_url=_BACKEND_URL,
+    )
+    assert result == snapshot("/service/web/")
 
 
 # -- Absolute path rewriting --
