@@ -53,7 +53,7 @@ mngr connect [OPTIONS] [AGENT]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--reconnect`, `--no-reconnect` | boolean | Automatically reconnect if dropped [future] | `True` |
-| `--attach-command` | text | Command to run instead of attaching to main session [future] | None |
+| `--session-command` | text | Command to run instead of attaching to main session [future] | None |
 | `--allow-unknown-host`, `--no-allow-unknown-host` | boolean | Allow connecting to hosts without a known_hosts file (disables SSH host key verification) | `False` |
 
 ## Filtering

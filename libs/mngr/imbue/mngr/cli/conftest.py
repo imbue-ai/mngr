@@ -94,7 +94,7 @@ def default_create_cli_opts() -> CreateCliOptions:
         message=None,
         message_file=None,
         edit_message=False,
-        attach_command=None,
+        session_command=None,
         connect_command=None,
         idle_timeout=None,
         idle_mode=None,
@@ -129,7 +129,7 @@ def default_connect_cli_opts() -> ConnectCliOptions:
         agent=None,
         start=True,
         reconnect=True,
-        attach_command=None,
+        session_command=None,
         allow_unknown_host=False,
     )
 
