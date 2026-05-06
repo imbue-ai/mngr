@@ -92,9 +92,6 @@ from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.env_utils import build_source_env_shell_commands
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
-from imbue.mngr.utils.git_utils import get_current_git_branch
-from imbue.mngr.utils.git_utils import get_git_author_info
-from imbue.mngr.utils.git_utils import get_git_remote_url
 from imbue.mngr.utils.name_generator import GENERIC_AGENT_NAME_HINT
 from imbue.mngr.utils.polling import wait_for
 
@@ -203,6 +200,18 @@ def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
 def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
     """Compute the state directory path for an agent given the host directory and agent ID."""
     return host_dir / "agents" / str(agent_id)
+
+
+def _git_command_stdout(host: OnlineHostInterface, command: str, cwd: Path) -> str | None:
+    """Run a git command on a host and return its stripped stdout, or None if it failed or was empty.
+
+    Used to read git metadata (current branch, user.name, origin URL, etc.) without
+    branching on whether the host is local or remote.
+    """
+    result = host.execute_idempotent_command(command, cwd=cwd)
+    if not result.success:
+        return None
+    return result.stdout.strip() or None
 
 
 class HostLocation(FrozenModel):
@@ -1583,32 +1592,15 @@ class Host(BaseHost, OnlineHostInterface):
         new_branch_name = options.git.new_branch_name if options.git else None
         if options.git and options.git.base_branch:
             base_branch_name = options.git.base_branch
-        elif source_host.is_local:
-            base_branch_name = get_current_git_branch(source_path, self.mngr_ctx.concurrency_group) or "main"
         else:
-            result = source_host.execute_idempotent_command(
-                "git rev-parse --abbrev-ref HEAD",
-                cwd=source_path,
+            base_branch_name = (
+                _git_command_stdout(source_host, "git rev-parse --abbrev-ref HEAD", source_path) or "main"
             )
-            base_branch_name = result.stdout.strip() if result.success else "main"
 
         # Get git author info and origin remote URL from source repo
-        if source_host.is_local:
-            git_author_name, git_author_email = get_git_author_info(source_path, self.mngr_ctx.concurrency_group)
-            origin_url = get_git_remote_url(source_path, "origin", self.mngr_ctx.concurrency_group)
-        else:
-            name_result = source_host.execute_idempotent_command("git config user.name", cwd=source_path)
-            email_result = source_host.execute_idempotent_command("git config user.email", cwd=source_path)
-            git_author_name = (
-                name_result.stdout.strip() if name_result.success and name_result.stdout.strip() else None
-            )
-            git_author_email = (
-                email_result.stdout.strip() if email_result.success and email_result.stdout.strip() else None
-            )
-            origin_result = source_host.execute_idempotent_command("git remote get-url origin", cwd=source_path)
-            origin_url = (
-                origin_result.stdout.strip() if origin_result.success and origin_result.stdout.strip() else None
-            )
+        git_author_name = _git_command_stdout(source_host, "git config user.name", source_path)
+        git_author_email = _git_command_stdout(source_host, "git config user.email", source_path)
+        origin_url = _git_command_stdout(source_host, "git remote get-url origin", source_path)
 
         with info_span(
             "Transferring git repository...",

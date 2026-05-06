@@ -18,8 +18,6 @@ from imbue.mngr.utils.git_utils import find_git_common_dir
 from imbue.mngr.utils.git_utils import find_git_worktree_root
 from imbue.mngr.utils.git_utils import find_source_repo_of_worktree
 from imbue.mngr.utils.git_utils import get_current_branch
-from imbue.mngr.utils.git_utils import get_git_author_info
-from imbue.mngr.utils.git_utils import get_git_remote_url
 from imbue.mngr.utils.git_utils import get_head_commit
 from imbue.mngr.utils.git_utils import is_git_repository
 from imbue.mngr.utils.git_utils import is_git_url
@@ -395,61 +393,6 @@ def test_find_git_common_dir_from_subdirectory(tmp_path: Path, cg: ConcurrencyGr
     result = find_git_common_dir(subdir, cg)
     assert result is not None
     assert result == git_dir / ".git"
-
-
-def test_get_git_author_info_returns_configured_values(temp_git_repo: Path, cg: ConcurrencyGroup) -> None:
-    """Test that get_git_author_info returns name and email from a configured repo."""
-    name, email = get_git_author_info(temp_git_repo, cg)
-    assert name == "Test User"
-    assert email == "test@example.com"
-
-
-def test_get_git_author_info_returns_none_when_not_configured(tmp_path: Path, cg: ConcurrencyGroup) -> None:
-    """Test that get_git_author_info returns (None, None) for a repo without author config."""
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
-    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
-    name, email = get_git_author_info(repo_dir, cg)
-    assert name is None
-    assert email is None
-
-
-def test_get_git_author_info_returns_none_for_non_git_dir(tmp_path: Path, cg: ConcurrencyGroup) -> None:
-    """Test that get_git_author_info returns (None, None) for a non-git directory."""
-    plain_dir = tmp_path / "plain"
-    plain_dir.mkdir()
-    name, email = get_git_author_info(plain_dir, cg)
-    assert name is None
-    assert email is None
-
-
-def test_get_git_remote_url_returns_url_when_remote_exists(tmp_path: Path, cg: ConcurrencyGroup) -> None:
-    """Test that get_git_remote_url returns the URL when the remote exists."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "remote", "add", "origin", "https://github.com/owner/repo.git"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    assert get_git_remote_url(repo, "origin", cg) == "https://github.com/owner/repo.git"
-
-
-def test_get_git_remote_url_returns_none_when_remote_missing(tmp_path: Path, cg: ConcurrencyGroup) -> None:
-    """Test that get_git_remote_url returns None when the remote does not exist."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    assert get_git_remote_url(repo, "origin", cg) is None
-
-
-def test_get_git_remote_url_returns_none_for_non_git_dir(tmp_path: Path, cg: ConcurrencyGroup) -> None:
-    """Test that get_git_remote_url returns None for a non-git directory."""
-    plain_dir = tmp_path / "plain"
-    plain_dir.mkdir()
-    assert get_git_remote_url(plain_dir, "origin", cg) is None
 
 
 # =============================================================================
