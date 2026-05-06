@@ -2559,33 +2559,35 @@ class Host(BaseHost, OnlineHostInterface):
         """Validate and execute file transfers from the agent.
 
         First validates that all required files exist, then executes transfers.
+        Always emits a "Transferring agent files" log_span (with count=0 when
+        the agent declared no transfers) so timing is visible at -vv.
         """
-        if not transfers:
-            return
+        with log_span("Transferring agent files", count=len(transfers)):
+            if not transfers:
+                return
 
-        # Validate required files first
-        missing_required: list[Path] = []
-        for transfer in transfers:
-            if transfer.is_required and not transfer.local_path.exists():
-                missing_required.append(transfer.local_path)
+            # Validate required files first
+            missing_required: list[Path] = []
+            for transfer in transfers:
+                if transfer.is_required and not transfer.local_path.exists():
+                    missing_required.append(transfer.local_path)
 
-        if missing_required:
-            missing_str = ", ".join(str(p) for p in missing_required)
-            raise MngrError(f"Required files for provisioning not found: {missing_str}")
+            if missing_required:
+                missing_str = ", ".join(str(p) for p in missing_required)
+                raise MngrError(f"Required files for provisioning not found: {missing_str}")
 
-        # Execute transfers
-        for transfer in transfers:
-            if not transfer.local_path.exists():
-                # Optional file doesn't exist, skip it
-                logger.trace("Skipped optional file transfer (file not found): {}", transfer.local_path)
-                continue
+            for transfer in transfers:
+                if not transfer.local_path.exists():
+                    # Optional file doesn't exist, skip it
+                    logger.trace("Skipped optional file transfer (file not found): {}", transfer.local_path)
+                    continue
 
-            # Resolve relative remote paths to work_dir
-            remote_path = agent.work_dir / transfer.agent_path
+                # Resolve relative remote paths to work_dir
+                remote_path = agent.work_dir / transfer.agent_path
 
-            local_content = transfer.local_path.read_bytes()
-            self.write_file(remote_path, local_content)
-            logger.trace("Transferred agent file: {} -> {}", transfer.local_path, remote_path)
+                local_content = transfer.local_path.read_bytes()
+                self.write_file(remote_path, local_content)
+                logger.trace("Transferred agent file: {} -> {}", transfer.local_path, remote_path)
 
     def rename_agent(
         self,
