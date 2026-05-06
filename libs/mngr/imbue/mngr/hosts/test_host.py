@@ -1148,7 +1148,7 @@ def test_stop_agent_kills_orphaned_processes_by_env_marker(
     # env propagation chain (set -a in build_source_env_shell_commands) is what
     # matters.
     success, _ = host._run_shell_command(
-        StringCommand(f"grep -qzaF 'MNGR_AGENT_ID={agent.id}' /proc/{orphan_pid}/environ")
+        StringCommand(f"grep -qza '^MNGR_AGENT_ID={agent.id}' /proc/{orphan_pid}/environ")
     )
     assert success, (
         f"Orphan {orphan_pid} does not have MNGR_AGENT_ID={agent.id} in its environ. "

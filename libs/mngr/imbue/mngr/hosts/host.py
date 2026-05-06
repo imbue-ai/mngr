@@ -2889,9 +2889,17 @@ class Host(BaseHost, OnlineHostInterface):
         there -- the tree walk handles the typical macOS case where the pane
         process is still alive.
         """
+        # AgentId is `agent-<32 hex chars>` (see RandomId), so the value is
+        # regex-safe and does not need escaping for grep BRE.
         quoted_id = shlex.quote(str(agent_id))
         # SELF excludes our own scan shell so a caller running inside an agent that
         # happens to inherit the env doesn't kill itself.
+        #
+        # The grep pattern is anchored with `^` so it matches only env vars
+        # *named* MNGR_AGENT_ID. Under `grep -z`, `^` matches the start of each
+        # NUL-separated record (i.e. the start of each KEY=VALUE pair), so a
+        # hypothetical env var like `OTHER_MNGR_AGENT_ID=...` cannot trigger a
+        # false match. We use BRE (drop -F) because -F has no anchors.
         #
         # Trailing `; true` forces a clean exit: the for loop's exit code is the
         # last iteration's `[ -r ... ] && grep ... && echo ...` chain, which is 1
@@ -2906,7 +2914,7 @@ class Host(BaseHost, OnlineHostInterface):
             "  for d in /proc/[0-9]*; do "
             "    pid=${d##*/}; "
             '    [ "$pid" = "$SELF" ] && continue; '
-            '    [ -r "$d/environ" ] && grep -qzaF "MNGR_AGENT_ID=$AGENT_ID" "$d/environ" 2>/dev/null && echo "$pid"; '
+            '    [ -r "$d/environ" ] && grep -qza "^MNGR_AGENT_ID=$AGENT_ID" "$d/environ" 2>/dev/null && echo "$pid"; '
             "  done; "
             "fi; true"
         )
