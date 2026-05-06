@@ -7,7 +7,7 @@ Minds ships as a standalone desktop application built with Electron and distribu
 The Electron shell is deliberately thin. It handles four things:
 
 1. **Environment setup**: Runs `uv sync` on launch to install/update the Python environment
-2. **Backend lifecycle**: Spawns and monitors the `minds forward` process
+2. **Backend lifecycle**: Spawns and monitors the `minds run` process
 3. **Auth handshake**: Parses the login URL from stdout and navigates to it
 4. **Window management**: Displays the backend's web UI in a native window
 

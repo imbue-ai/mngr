@@ -878,6 +878,13 @@ def _write_generated_files(
     For local hosts, writes files directly. For remote hosts, stages
     files to a local temp dir and rsyncs them in a single call.
     """
+    file_summary = sorted((str(rel), len(content)) for rel, content in generated_files.items())
+    logger.info(
+        "_write_generated_files: host.is_local={}, config_dir={}, files={}",
+        host.is_local,
+        config_dir,
+        file_summary,
+    )
     if host.is_local:
         for relative, content in generated_files.items():
             dest = config_dir / relative
@@ -896,7 +903,33 @@ def _write_generated_files(
                 staged = Path(staging) / relative
                 staged.parent.mkdir(parents=True, exist_ok=True)
                 staged.write_text(content)
-            host.copy_directory(local_host, Path(staging), config_dir)
+            staged_listing = sorted(p.relative_to(staging).as_posix() for p in Path(staging).rglob("*") if p.is_file())
+            logger.info(
+                "_write_generated_files: staged {} file(s) in {} -> {}",
+                len(staged_listing),
+                staging,
+                staged_listing,
+            )
+            try:
+                host.copy_directory(local_host, Path(staging), config_dir)
+            except MngrError as exc:
+                logger.opt(exception=exc).error(
+                    "_write_generated_files: copy_directory failed (staging={}, config_dir={})",
+                    staging,
+                    config_dir,
+                )
+                raise
+        # Verify the rsync deposited what we expected -- if files end up missing
+        # at config_dir despite a clean copy_directory return, we want loud
+        # evidence in the bake/provisioning logs (vs. the silent no-op pattern
+        # that surfaced as a FileNotFoundError much later in patch-claude-config).
+        ls_result = host.execute_idempotent_command(f"ls -la {shlex.quote(str(config_dir))}", timeout_seconds=10.0)
+        logger.info(
+            "_write_generated_files: post-rsync ls of {} (success={}): stdout={!r}",
+            config_dir,
+            ls_result.success,
+            ls_result.stdout.strip(),
+        )
 
 
 def _sync_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink: bool) -> None:
@@ -1754,6 +1787,16 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         config = self.agent_config
         config_dir = self.get_claude_config_dir()
         source_claude_dir = get_user_claude_config_dir()
+        logger.info(
+            "_setup_per_agent_config_dir: agent={} host.is_local={} config_dir={} "
+            "sync_home_settings={} sync_claude_json={} sync_claude_credentials={}",
+            self.id,
+            host.is_local,
+            config_dir,
+            config.sync_home_settings,
+            config.sync_claude_json,
+            config.sync_claude_credentials,
+        )
 
         # Build runtime context
         copy_project_config_from: Path | None = None
@@ -1787,7 +1830,12 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             sync_local=config.sync_claude_json,
             version=config.version,
         )
-        approve_api_key_for_claude(claude_json_data)
+        # Pass host + options so approval finds keys arriving via --env, --pass-env,
+        # --pass-host-env, --host-env, and --host-env-file -- not just os.environ. The
+        # LOCAL/Docker minds path lands its ANTHROPIC_API_KEY only on the host's env
+        # file (via --host-env-file <repo>/.env), so without these arguments the
+        # approval missed the key and claude blocked on the custom-key TUI prompt.
+        approve_api_key_for_claude(claude_json_data, host=host, options=options)
 
         settings_json = _build_settings_json(source_claude_dir, config, ctx, sync_local=config.sync_home_settings)
 
@@ -2590,17 +2638,63 @@ def modify_env_vars_for_deploy(
     env_vars["IS_SANDBOX"] = "1"
 
 
-def approve_api_key_for_claude(data: dict[str, Any]):
-    """Approve the API key so that the agent doesn't get blocked by the custom API key dialog."""
+def approve_api_key_for_claude(
+    data: dict[str, Any],
+    host: OnlineHostInterface | None = None,
+    options: CreateAgentOptions | None = None,
+) -> None:
+    """Approve every reachable ANTHROPIC_API_KEY so claude doesn't block on the custom-key dialog.
+
+    Claude challenges any ``ANTHROPIC_API_KEY`` it sees in env that doesn't match either
+    ``primaryApiKey`` in its config or an entry in ``customApiKeyResponses.approved``. The
+    challenge is interactive (TUI prompt), which deadlocks ``mngr``'s ``wait_for_ready_signal``.
+
+    Sources we consult, in priority order, mirroring ``_has_api_credentials_available``:
+
+    - ``os.environ.get("ANTHROPIC_API_KEY")`` -- the running mngr process (e.g. ``mngr_imbue_cloud``
+      injects the LiteLLM key here via ``subprocess_env`` before calling ``mngr create``).
+    - ``options.environment.env_vars`` -- explicit ``--env`` / ``--pass-env`` from the CLI.
+    - ``host.get_env_var("ANTHROPIC_API_KEY")`` -- the *target host's* env file, populated by
+      ``_write_host_env_vars`` from ``--host-env``, ``--pass-host-env``, and ``--host-env-file``.
+      The last one is critical: minds passes the workspace ``.env`` via ``--host-env-file`` and
+      its ``ANTHROPIC_API_KEY`` only ever lives there, never in ``os.environ``. Without consulting
+      the host env, the approval was a no-op for the LOCAL/Docker path (see PR thread for
+      assistant2 reproduction).
+    - ``primaryApiKey`` in the user's ``~/.claude.json``.
+
+    ``host`` and ``options`` default to ``None`` because :func:`approve_api_key_for_claude` is
+    also called from the deploy-image path (``_collect_files_for_deploy``) where there is no
+    host yet and the only credential source is ``os.environ`` / the user's claude config.
+    """
+    keys_to_approve: list[str] = []
+
+    env_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if env_key:
+        keys_to_approve.append(env_key)
+
+    if options is not None:
+        for env_var in options.environment.env_vars:
+            if env_var.key == "ANTHROPIC_API_KEY" and env_var.value:
+                keys_to_approve.append(env_var.value)
+
+    if host is not None:
+        host_key = host.get_env_var("ANTHROPIC_API_KEY") or ""
+        if host_key:
+            keys_to_approve.append(host_key)
+
     user_config = read_claude_config(find_user_claude_config())
     conf_key = user_config.get("primaryApiKey", "")
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if api_key or conf_key:
-        approved_section = data.setdefault("customApiKeyResponses", {})
-        approved_list = approved_section.get("approved", [])
-        if api_key[-20:] not in approved_list:
-            approved_list.append(api_key[-20:])
-        if conf_key[-20:] not in approved_list:
-            approved_list.append(conf_key[-20:])
-        approved_section["approved"] = approved_list
-        approved_section["rejected"] = []
+    if conf_key:
+        keys_to_approve.append(conf_key)
+
+    if not keys_to_approve:
+        return
+
+    approved_section = data.setdefault("customApiKeyResponses", {})
+    approved_list = list(approved_section.get("approved", []))
+    for key in keys_to_approve:
+        suffix = key[-20:]
+        if suffix not in approved_list:
+            approved_list.append(suffix)
+    approved_section["approved"] = approved_list
+    approved_section["rejected"] = []

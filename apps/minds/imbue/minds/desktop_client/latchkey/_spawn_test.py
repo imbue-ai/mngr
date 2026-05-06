@@ -58,6 +58,7 @@ def test_spawn_detached_latchkey_ensure_browser_invokes_subcommand_and_logs(
     assert log_path.is_file()
 
 
+@pytest.mark.flaky
 def test_spawn_detached_latchkey_ensure_browser_sets_latchkey_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

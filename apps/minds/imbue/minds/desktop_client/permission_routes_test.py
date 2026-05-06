@@ -421,6 +421,7 @@ class _StubSharingHandler(RequestEventHandler):
         self,
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
+        mngr_forward_origin: str,
     ) -> Response:
         return Response(content="ok", status_code=200)
 

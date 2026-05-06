@@ -18,14 +18,14 @@ The minds app creates and manages persistent Claude agents running in Docker con
 curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/apps/minds/scripts/install.sh | bash
 
 # Start the desktop client
-minds forward
+minds run
 
 # Visit the URL printed in the terminal to create your first agent
 ```
 
 ## How it works
 
-1. The **desktop client** (`minds forward`) runs locally and provides:
+1. The **desktop client** (`minds run`) runs locally and provides:
    - Authentication via one-time login codes
    - A web UI for creating agents from template repositories
    - Reverse proxying to agent web servers (HTTP + WebSocket)

@@ -57,12 +57,18 @@ class RequestEventHandler(MutableModel, ABC):
         self,
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
+        mngr_forward_origin: str,
     ) -> Response:
         """Render the request-detail page (``GET /requests/{id}``).
 
         The route layer has already authenticated the caller and looked
         up ``req_event``; the handler's job is purely to produce the
         HTML (or JSON) the user agent should see.
+
+        ``mngr_forward_origin`` is the bare-origin URL of the
+        ``mngr forward`` plugin (e.g. ``"http://localhost:8421"``);
+        handlers thread it into rendered templates so workspace links
+        target the plugin's ``/goto/<agent>/`` route rather than minds.
         """
 
     @abstractmethod

@@ -48,6 +48,9 @@ retry_count = 1
 # Those tests run in a separate GitHub runner job (test-docker) until offload Docker-in-Docker support lands.
 filters = "-m 'acceptance and not docker and not docker_sdk'"
 
+[history]
+path = "offload-history-modal-acceptance.jsonl"
+
 [report]
 output_dir = "test-results"
 junit = true

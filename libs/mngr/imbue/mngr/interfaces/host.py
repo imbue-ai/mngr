@@ -481,8 +481,20 @@ class OnlineHostInterface(HostInterface, ABC):
         ...
 
     @abstractmethod
-    def rename_agent(self, agent: AgentInterface, new_name: AgentName) -> AgentInterface:
-        """Rename an agent and return the updated agent object."""
+    def rename_agent(
+        self,
+        agent: AgentInterface,
+        new_name: AgentName,
+        labels_to_merge: Mapping[str, str] | None = None,
+    ) -> AgentInterface:
+        """Rename an agent (and optionally merge labels in the same write) and return it.
+
+        When ``labels_to_merge`` is non-empty, those keys/values are merged into
+        the agent's existing labels as part of the same read-modify-write of
+        ``data.json``, so an external observer (e.g. ``mngr observe``) never
+        sees an in-between state where the new name is set but the new labels
+        are not. Existing label keys are overwritten by ``labels_to_merge``.
+        """
         ...
 
     @abstractmethod

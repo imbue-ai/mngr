@@ -2,11 +2,17 @@
 
 A sharing request asks the user to expose one of the agent's services
 (e.g. ``web``) at a public Cloudflare URL with an optional email-based
-ACL. Granting the request runs exactly the same Cloudflare work as the
+ACL. Granting the request runs exactly the same plugin work as the
 direct ``/sharing/{agent_id}/{service_name}`` editor: create the tunnel
 if needed, register the service, and apply the ACL. The two paths are
 factored through :func:`enable_sharing_via_cloudflare` so they cannot
 drift.
+
+All Cloudflare state is owned by the connector behind ``mngr imbue_cloud
+tunnels …``; minds keeps no local tunnel-token cache. The plugin's
+``create_tunnel`` is idempotent on the connector side -- calling it for
+an existing tunnel returns the same token rather than rotating, so
+re-injection on every grant is safe.
 
 The on-the-wire response shape is intentionally a 303 redirect rather
 than JSON: ``static/sharing.js`` issues the request via ``fetch`` and
@@ -24,9 +30,11 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client.api_v1 import get_cf_client_with_auth
 from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestStatus
@@ -38,10 +46,17 @@ from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.templates import render_sharing_editor
-from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token
-from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
+
+
+class SharingError(RuntimeError):
+    """Raised by :func:`enable_sharing_via_cloudflare` on a soft failure.
+
+    Carries a single user-presentable message; the route handler turns it
+    into a 502 + JSON body that ``static/sharing.js`` displays inline
+    instead of silently navigating away.
+    """
 
 
 def parse_emails_form_value(form_value: str) -> list[str]:
@@ -59,45 +74,86 @@ def parse_emails_form_value(form_value: str) -> list[str]:
     return [str(e) for e in parsed]
 
 
+def resolve_account_email_for_workspace(
+    session_store: MultiAccountSessionStore | None,
+    agent_id: AgentId,
+) -> str:
+    """Return the email of the account that owns ``agent_id``.
+
+    Raises :class:`SharingError` if no signed-in account is associated
+    with the workspace -- without an account the plugin can't make
+    authenticated calls to the connector and there's nothing useful for
+    the route to do.
+    """
+    if session_store is None:
+        raise SharingError("Session store unavailable; sign in to enable sharing.")
+    account = session_store.get_account_for_workspace(str(agent_id))
+    if account is None:
+        raise SharingError(
+            f"Workspace {agent_id} is not associated with any signed-in account; "
+            "associate one from the workspace settings page first."
+        )
+    return str(account.email)
+
+
 def enable_sharing_via_cloudflare(
     request: Request,
     agent_id: AgentId,
     service_name: ServiceName,
     emails: Sequence[str],
     backend_resolver: BackendResolverInterface,
-) -> bool:
-    """Perform the Cloudflare side-effects for enabling sharing.
+) -> TunnelInfo:
+    """Perform the plugin-side work to enable or update sharing.
 
     Used by both the direct sharing editor and the sharing-request grant
-    flow so the two cannot drift. Returns ``True`` if the service was
-    successfully registered with Cloudflare; ``False`` if any of the
-    preconditions failed (no auth, no backend URL, etc.). Logs a warning
-    on a soft failure but never raises -- the caller decides how to
-    surface that to the user.
+    flow so the two cannot drift. On success, returns the (idempotently
+    created) tunnel; the caller can use ``tunnel.tunnel_name`` for any
+    follow-up. On any soft failure -- missing CLI, no account, no
+    backend URL, plugin error -- raises :class:`SharingError` with a
+    user-presentable message.
     """
-    cf_client, _ = get_cf_client_with_auth(request, agent_id=agent_id)
-    if cf_client is None:
-        return False
+    cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
+    if cli is None:
+        raise SharingError("imbue_cloud CLI is not configured on this app.")
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    account_email = resolve_account_email_for_workspace(session_store, agent_id)
 
     backend_url = backend_resolver.get_backend_url(agent_id, service_name)
     if not backend_url:
-        return False
+        raise SharingError(
+            f"No backend URL is registered yet for service '{service_name}' on workspace "
+            f"{agent_id}; wait for the agent to publish its services and try again."
+        )
 
-    paths: WorkspacePaths = request.app.state.api_v1_paths
-    stored_token = load_tunnel_token(paths.data_dir, agent_id)
-    if stored_token is None:
-        token, _ = cf_client.create_tunnel(agent_id)
-        if token:
-            save_tunnel_token(paths.data_dir, agent_id, token)
-            inject_tunnel_token_into_agent(agent_id, token)
+    try:
+        tunnel = cli.create_tunnel(account=account_email, agent_id=str(agent_id))
+    except ImbueCloudCliError as exc:
+        raise SharingError(f"Failed to create or fetch the tunnel: {exc}") from exc
+    if tunnel.token is None:
+        raise SharingError("Tunnel created but the connector did not return a Cloudflare token.")
+    inject_tunnel_token_into_agent(agent_id, tunnel.token.get_secret_value())
 
-    cf_client.add_service(agent_id, service_name, backend_url)
+    try:
+        cli.add_service(
+            account=account_email,
+            tunnel_name=tunnel.tunnel_name,
+            service_name=str(service_name),
+            service_url=backend_url,
+        )
+    except ImbueCloudCliError as exc:
+        raise SharingError(f"Failed to register service '{service_name}' on the tunnel: {exc}") from exc
+
     if emails:
-        rules: list[dict[str, object]] = [
-            {"action": "allow", "include": [{"email": {"email": e}} for e in emails]},
-        ]
-        cf_client.set_service_auth(agent_id, str(service_name), rules)
-    return True
+        try:
+            cli.set_service_auth(
+                account=account_email,
+                tunnel_name=tunnel.tunnel_name,
+                service_name=str(service_name),
+                policy={"emails": list(emails)},
+            )
+        except ImbueCloudCliError as exc:
+            raise SharingError(f"Failed to apply the access policy: {exc}") from exc
+    return tunnel
 
 
 class SharingRequestHandler(RequestEventHandler):
@@ -106,8 +162,9 @@ class SharingRequestHandler(RequestEventHandler):
     Holds the small amount of additional state the sharing dialog needs
     (currently just the session store, used to resolve a friendly
     workspace name for the editor header). Per-request Cloudflare auth
-    is still attached at call time via :func:`get_cf_client_with_auth`,
-    so this object can be safely shared across requests.
+    is still attached at call time via the per-request
+    ``ImbueCloudCli`` from ``request.app.state``, so this object can be
+    safely shared across requests.
     """
 
     session_store: MultiAccountSessionStore | None = Field(
@@ -132,6 +189,7 @@ class SharingRequestHandler(RequestEventHandler):
         self,
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
+        mngr_forward_origin: str,
     ) -> Response:
         if not isinstance(req_event, SharingRequestEvent):
             return HTMLResponse(content="<p>Unsupported request type</p>", status_code=500)
@@ -145,6 +203,7 @@ class SharingRequestHandler(RequestEventHandler):
             agent_id=req_event.agent_id,
             service_name=req_event.service_name,
             title=f"Sharing Request: {req_event.service_name}",
+            mngr_forward_origin=mngr_forward_origin,
             initial_emails=suggested,
             is_request=True,
             request_id=request_id,
@@ -170,25 +229,30 @@ class SharingRequestHandler(RequestEventHandler):
 
         agent_id = AgentId(req_event.agent_id)
         service_name = ServiceName(req_event.service_name)
-        sharing_succeeded = enable_sharing_via_cloudflare(
-            request=request,
-            agent_id=agent_id,
-            service_name=service_name,
-            emails=emails,
-            backend_resolver=backend_resolver,
-        )
-        if not sharing_succeeded:
-            # Don't write GRANTED if Cloudflare didn't accept the change:
+        try:
+            enable_sharing_via_cloudflare(
+                request=request,
+                agent_id=agent_id,
+                service_name=service_name,
+                emails=emails,
+                backend_resolver=backend_resolver,
+            )
+        except SharingError as exc:
+            # Don't write GRANTED if the plugin didn't accept the change:
             # the agent must not see GRANTED without the tunnel actually
-            # being set up. The dialog stays open so the user can retry.
+            # being set up. Surface the message as a 502 + JSON body so
+            # the editor JS can display it inline; the dialog stays open
+            # so the user can retry.
             logger.warning(
-                "Sharing grant for agent {} service {} failed at Cloudflare; not writing GRANTED",
+                "Sharing grant for agent {} service {} failed; not writing GRANTED: {}",
                 agent_id,
                 service_name,
+                exc,
             )
             return Response(
-                status_code=303,
-                headers={"Location": f"/sharing/{agent_id}/{service_name}"},
+                status_code=502,
+                content=json.dumps({"error": str(exc)}),
+                media_type="application/json",
             )
 
         self._write_response_event_and_mirror(
