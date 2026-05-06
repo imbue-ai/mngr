@@ -2859,11 +2859,44 @@ class Host(BaseHost, OnlineHostInterface):
                     all_pids.extend(self._get_all_descendant_pids(pane_pid))
         return all_pids
 
+    def _collect_pids_by_agent_id_env(self, agent_id: AgentId) -> list[str]:
+        """Find all PIDs whose MNGR_AGENT_ID environment matches agent_id.
+
+        The agent's env file (sourced via `set -a`) exports MNGR_AGENT_ID into every
+        process spawned in its tmux session. Scanning by env var catches orphans
+        whose ancestor died abruptly (SIGKILL, OOM, segfault) -- their reparenting
+        to PID 1 hides them from the tmux pane / pgrep -P descendant walk.
+
+        Linux: walks /proc/<pid>/environ (NUL-separated; grep -z makes -F search
+        per-record). macOS: ps -E does not expose env for processes once they've
+        reparented to launchd (SIP restriction), so this is a best-effort no-op
+        there -- the tree walk handles the typical macOS case where the pane
+        process is still alive.
+        """
+        quoted_id = shlex.quote(str(agent_id))
+        # SELF excludes our own scan shell so a caller running inside an agent that
+        # happens to inherit the env doesn't kill itself.
+        cmd = (
+            f"AGENT_ID={quoted_id}; "
+            "SELF=$$; "
+            'if [ "$(uname -s)" = "Linux" ]; then '
+            "  for d in /proc/[0-9]*; do "
+            "    pid=${d##*/}; "
+            '    [ "$pid" = "$SELF" ] && continue; '
+            '    [ -r "$d/environ" ] && grep -qzaF "MNGR_AGENT_ID=$AGENT_ID" "$d/environ" 2>/dev/null && echo "$pid"; '
+            "  done; "
+            "fi"
+        )
+        result = self.execute_idempotent_command(cmd)
+        if not result.success or not result.stdout.strip():
+            return []
+        return [pid for pid in result.stdout.strip().split("\n") if pid.strip()]
+
     def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
         """Stop agents by killing all processes in their tmux sessions.
 
         This ensures all processes in all panes are terminated by:
-        1. Getting all PIDs (panes + descendants)
+        1. Getting all PIDs (panes + descendants + orphans matched by MNGR_AGENT_ID env)
         2. Sending SIGTERM to each individual process
         3. Waiting briefly, then sending SIGKILL to any survivors
         4. Finally killing the tmux session itself
@@ -2881,6 +2914,12 @@ class Host(BaseHost, OnlineHostInterface):
                 current_agents.append(agent)
                 session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
                 all_pids.extend(self._collect_session_pids(session_name))
+                # Also pick up orphans (e.g. children of an OOM-killed claude) that
+                # reparented to PID 1 and so are invisible to the pane-descendant walk.
+                all_pids.extend(self._collect_pids_by_agent_id_env(agent.id))
+
+            # Deduplicate while preserving order (a pid may appear in both lists).
+            all_pids = list(dict.fromkeys(all_pids))
 
             if all_pids:
                 pid_list = " ".join(all_pids)
