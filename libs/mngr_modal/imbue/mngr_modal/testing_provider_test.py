@@ -6,6 +6,9 @@ Modal credentials or SSH connections.
 """
 
 import contextlib
+import json
+import subprocess
+import sys
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -931,11 +934,10 @@ def test_on_connection_error_clears_caches(
 #
 # These tests cover the pure naming logic extracted from
 # ``build_provider_instance`` (see ``_derive_modal_names``). They previously
-# called ``build_provider_instance`` with ``mode=ModalMode.TESTING`` to pay
-# only the in-memory cost of constructing a fake Modal app; that pattern
-# pulled the test-only ``modal_proxy.testing`` module into production-side
-# dispatch and was removed. The pure helper makes these unit-testable
-# without any Modal interface at all.
+# called ``build_provider_instance`` via a now-removed in-process testing
+# dispatch on ``ModalProviderConfig.mode``; that path pulled the test-only
+# ``modal_proxy.testing`` module into the production-side import graph.
+# The pure helper makes these unit-testable without any Modal interface at all.
 
 
 def test_derive_modal_names_environment_name_derived_from_prefix(
@@ -979,6 +981,45 @@ def test_derive_modal_names_truncates_long_app_name(
     )
     # App name must leave room for the state-volume suffix.
     assert len(app_name) <= MODAL_NAME_MAX_LENGTH
+
+
+def test_production_import_does_not_load_modal_proxy_testing() -> None:
+    """Regression: importing mngr_modal.backend (the production-side entry
+    point that ``mngr forward`` triggers via the plugin registry) must not
+    drag the test-only in-process fake into the import graph.
+
+    ``modal_proxy/testing.py`` defines ``TestingModalInterface`` -- only
+    instantiated by tests. The standard wheel build excludes
+    ``**/testing.py`` from the published wheel, so any production-side
+    code that loads ``imbue.modal_proxy.testing`` crashes packaged
+    builds with ``ModuleNotFoundError`` (the symptom that motivated the
+    DI cleanup; see the changelog entry for this PR).
+
+    Runs in a fresh subprocess so a previous test's import doesn't pollute
+    sys.modules. If this fails, look for a top-level
+    ``from imbue.modal_proxy.testing import ...`` in any production module
+    that ``mngr_modal.backend`` transitively imports.
+    """
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import imbue.mngr_modal.backend as _; "
+            "import sys, json; "
+            "print(json.dumps('imbue.modal_proxy.testing' in sys.modules))",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    loaded = json.loads(completed.stdout.strip())
+    assert loaded is False, (
+        "imbue.mngr_modal.backend pulled imbue.modal_proxy.testing into the "
+        "production import graph. modal_proxy/testing.py is excluded from the "
+        "modal_proxy wheel, so this would crash any packaged consumer at "
+        "module load. Find and remove the top-level "
+        "`from imbue.modal_proxy.testing import ...`."
+    )
 
 
 # ---------------------------------------------------------------------------

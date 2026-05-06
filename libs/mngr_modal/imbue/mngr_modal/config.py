@@ -1,30 +1,12 @@
-from enum import auto
 from pathlib import Path
 
 from pydantic import Field
 
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import UserId
-
-
-class ModalMode(UpperCaseStrEnum):
-    """Mode for the Modal provider backend.
-
-    Currently only ``DIRECT`` is supported. The previous ``TESTING`` value was
-    a half-measure that put a test-only construction path into production
-    config and forced ``mngr_modal.backend`` to import ``modal_proxy.testing``
-    at module top, dragging the in-process fake into every production import
-    graph (and breaking packaged builds that exclude ``**/testing.py`` from
-    wheels). Tests now bypass ``build_provider_instance`` entirely and inject
-    a ``TestingModalInterface`` via ``mngr_modal.testing.make_testing_provider``,
-    so production code never references the fake.
-    """
-
-    DIRECT = auto()
 
 
 class ModalProviderConfig(ProviderInstanceConfig):
@@ -33,10 +15,6 @@ class ModalProviderConfig(ProviderInstanceConfig):
     backend: ProviderBackendName = Field(
         default=ProviderBackendName("modal"),
         description="Provider backend (always 'modal' for this type)",
-    )
-    mode: ModalMode = Field(
-        default=ModalMode.DIRECT,
-        description=("Modal interface mode. DIRECT calls the Modal SDK directly (bring your own key)."),
     )
     user_id: UserId | None = Field(
         default=None,
