@@ -2,6 +2,7 @@
 
 import math
 import time
+from pathlib import Path
 
 from loguru import logger
 
@@ -12,8 +13,7 @@ from imbue.mngr.api.create import resolve_target_host
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import HostError
-from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentGitOptions
@@ -26,6 +26,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.primitives import TransferMode
 from imbue.mngr_tmr.data_types import TestAgentInfo
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
 from imbue.mngr_tmr.prompts import build_integrator_prompt
@@ -36,6 +37,8 @@ from imbue.mngr_tmr.utils import short_random_id
 from imbue.mngr_tmr.utils import transfer_mode_for_provider
 
 _AGENT_CREATION_TIMEOUT_SECONDS = 600.0
+
+SNAPSHOTTER_CHECKOUT_PATH = Path("/opt/snapshotter")
 
 
 def _resolve_build_options(config: TmrLaunchConfig, mngr_ctx: MngrContext) -> NewHostBuildOptions:
@@ -53,15 +56,24 @@ def build_agent_options(
     branch_name: str,
     config: TmrLaunchConfig,
     initial_message: str | None = None,
+    transfer_mode: TransferMode | None = None,
+    target_path: Path | None = None,
 ) -> CreateAgentOptions:
-    """Build CreateAgentOptions for a tmr agent."""
-    transfer_mode = transfer_mode_for_provider(config.provider_name)
+    """Build CreateAgentOptions for a tmr agent.
+
+    If transfer_mode is None, defaults to the natural mode for the provider
+    (git-worktree for local, git-mirror for remote).
+    """
+    resolved_transfer_mode = (
+        transfer_mode if transfer_mode is not None else transfer_mode_for_provider(config.provider_name)
+    )
     is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
     return CreateAgentOptions(
         agent_type=config.agent_type,
         name=agent_name,
         initial_message=initial_message,
-        transfer_mode=transfer_mode,
+        transfer_mode=resolved_transfer_mode,
+        target_path=target_path,
         git=AgentGitOptions(
             new_branch_name=branch_name,
         ),
@@ -80,14 +92,31 @@ def _create_tmr_agent(
     initial_message: str | None = None,
     existing_host: OnlineHostInterface | None = None,
     host_name: HostName | None = None,
+    source_location: HostLocation | None = None,
+    transfer_mode: TransferMode | None = None,
+    target_path: Path | None = None,
 ) -> CreateAgentResult:
     """Create an agent on the configured provider with an optional initial message.
 
     If existing_host is provided, the agent is placed on that host instead of
     creating a new one (used for host sharing in remote providers).
+
+    If source_location is None, the local user checkout (config.source_host,
+    config.source_dir) is used.
     """
-    agent_options = build_agent_options(agent_name, branch_name, config, initial_message=initial_message)
-    source_location = HostLocation(host=config.source_host, path=config.source_dir)
+    agent_options = build_agent_options(
+        agent_name,
+        branch_name,
+        config,
+        initial_message=initial_message,
+        transfer_mode=transfer_mode,
+        target_path=target_path,
+    )
+    resolved_source = (
+        source_location
+        if source_location is not None
+        else HostLocation(host=config.source_host, path=config.source_dir)
+    )
 
     if existing_host is not None:
         target_host: OnlineHostInterface | NewHostOptions = existing_host
@@ -98,7 +127,7 @@ def _create_tmr_agent(
         target_host = NewHostOptions(provider=config.provider_name, name=resolved_host_name, build=build)
 
     return api_create(
-        source_location=source_location,
+        source_location=resolved_source,
         target_host=target_host,
         agent_options=agent_options,
         mngr_ctx=mngr_ctx,
@@ -114,23 +143,64 @@ def launch_test_agent(
     existing_host: OnlineHostInterface | None = None,
     host_name: HostName | None = None,
 ) -> tuple[TestAgentInfo, OnlineHostInterface]:
-    """Launch a single agent to run and optionally fix one test."""
+    """Launch a single agent to run and optionally fix one test.
+
+    When a snapshot is available for a remote provider, the test agent's host
+    is pre-resolved (creating a new host from the snapshot if needed) and used
+    as both the source and target, transferring via git-worktree from
+    /opt/snapshotter (which is baked into the snapshot by the snapshotter
+    agent). Without a snapshot we fall back to the natural transfer mode for
+    the provider (git-mirror from the local user checkout for remote, or
+    git-worktree from the local user checkout for local).
+    """
     agent_name_suffix = sanitize_test_name_for_agent(test_node_id)
     short_id = short_random_id()
     agent_name = AgentName(f"tmr-{agent_name_suffix}-{short_id}")
+    branch = f"mngr-tmr/{agent_name_suffix}-{short_id}"
 
     logger.info("Launching agent '{}' for test: {}", agent_name, test_node_id)
+
+    is_local = config.provider_name.lower() == LOCAL_PROVIDER_NAME
+    # The /opt/snapshotter fast path requires the host to have been built from
+    # a snapshot containing that checkout. If we have no snapshot (local
+    # provider, snapshot-incapable provider, or snapshot creation failed), we
+    # must fall back to transferring from the local user checkout.
+    if is_local or config.snapshot is None:
+        source_location: HostLocation | None = None
+        transfer_mode: TransferMode | None = None
+        resolved_existing_host = existing_host
+        # host_name is only consulted by _create_tmr_agent when existing_host
+        # is None, so forward it for the fall-back branch.
+        effective_host_name: HostName | None = host_name
+    else:
+        # Remote provider with a snapshot: pre-resolve the target host (from
+        # the snapshot) and source the test agent's worktree from
+        # /opt/snapshotter on the same host. This avoids re-uploading the git
+        # repo for every agent.
+        if existing_host is not None:
+            resolved_existing_host = existing_host
+        else:
+            build = _resolve_build_options(config, mngr_ctx)
+            new_host_opts = NewHostOptions(provider=config.provider_name, name=host_name, build=build)
+            resolved_existing_host = resolve_target_host(new_host_opts, mngr_ctx)
+        source_location = HostLocation(host=resolved_existing_host, path=SNAPSHOTTER_CHECKOUT_PATH)
+        transfer_mode = TransferMode.GIT_WORKTREE
+        # The host has already been materialised, so host_name is irrelevant
+        # for the downstream _create_tmr_agent call.
+        effective_host_name = None
+
     create_result = _create_tmr_agent(
         agent_name=agent_name,
-        branch_name=f"mngr-tmr/{agent_name_suffix}-{short_id}",
+        branch_name=branch,
         config=config,
         mngr_ctx=mngr_ctx,
         initial_message=build_test_agent_prompt(test_node_id, pytest_flags, prompt_suffix),
-        existing_host=existing_host,
-        host_name=host_name,
+        existing_host=resolved_existing_host,
+        host_name=effective_host_name,
+        source_location=source_location,
+        transfer_mode=transfer_mode,
     )
 
-    branch = f"mngr-tmr/{agent_name_suffix}-{short_id}"
     return (
         TestAgentInfo(
             test_node_id=test_node_id,
@@ -148,7 +218,12 @@ def _create_snapshot_host(
     config: TmrLaunchConfig,
     mngr_ctx: MngrContext,
 ) -> SnapshotName:
-    """Launch a dedicated snapshotter agent, snapshot its host, then stop it."""
+    """Launch a dedicated snapshotter agent, snapshot its host, then stop it.
+
+    The snapshotter's git checkout is placed at /opt/snapshotter so that
+    test agents launched from the snapshot can create git worktrees from it
+    without re-uploading the repo.
+    """
     short_id = short_random_id()
     agent_name = AgentName(f"tmr-snapshotter-{short_id}")
 
@@ -158,6 +233,7 @@ def _create_snapshot_host(
         branch_name=f"mngr-tmr/snapshotter-{short_id}",
         config=config,
         mngr_ctx=mngr_ctx,
+        target_path=SNAPSHOTTER_CHECKOUT_PATH,
     )
 
     snapshotter_host = create_result.host
@@ -178,7 +254,7 @@ def stop_agent_on_host(host: OnlineHostInterface, agent_id: AgentId, agent_name:
     try:
         host.stop_agents([agent_id])
         logger.info("Stopped agent '{}'", agent_name)
-    except (MngrError, HostError) as exc:
+    except BaseMngrError as exc:
         logger.warning("Failed to stop agent '{}': {}", agent_name, exc)
 
 
@@ -206,11 +282,30 @@ def _create_host_pool(
         for future in futures:
             try:
                 hosts.append(future.result())
-            except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
+            except (BaseMngrError, OSError, BaseExceptionGroup) as exc:
                 logger.warning("Failed to create host: {}", exc)
 
     logger.info("Created {} host(s) for agent placement", len(hosts))
     return hosts
+
+
+def ensure_snapshot(config: TmrLaunchConfig, mngr_ctx: MngrContext) -> TmrLaunchConfig:
+    """Build a snapshot host if the provider supports it and one is not already set.
+
+    Returns the (possibly updated) config. For providers that don't support
+    snapshots (e.g. local), returns the config unchanged.
+    """
+    if config.snapshot is not None:
+        return config
+    provider = get_provider_instance(config.provider_name, mngr_ctx)
+    if not provider.supports_snapshots:
+        return config
+    try:
+        snapshot_name = _create_snapshot_host(config, mngr_ctx)
+    except (BaseMngrError, OSError, BaseExceptionGroup) as exc:
+        logger.warning("Failed to create snapshot, launching agents without snapshot: {}", exc)
+        return config
+    return config.model_copy_update(to_update(config.field_ref().snapshot, snapshot_name))
 
 
 def launch_all_test_agents(
@@ -219,7 +314,6 @@ def launch_all_test_agents(
     mngr_ctx: MngrContext,
     pytest_flags: tuple[str, ...],
     prompt_suffix: str = "",
-    use_snapshot: bool = False,
     max_parallel: int = 4,
     launch_delay_seconds: float = 2.0,
     agents_per_host: int = 4,
@@ -227,34 +321,21 @@ def launch_all_test_agents(
 ) -> tuple[list[TestAgentInfo], dict[str, OnlineHostInterface], SnapshotName | None]:
     """Launch agents for all collected tests.
 
-    For remote providers, agents_per_host controls how many agents share a single
-    host. Hosts are pre-created in a pool and agents are assigned round-robin.
-    For local providers, this setting is ignored (all agents share localhost).
+    Assumes a snapshot has already been built (or is impossible for the
+    provider). For remote providers, agents_per_host controls how many agents
+    share a single host. Hosts are pre-created in a pool and agents are assigned
+    round-robin. For local providers, this setting is ignored (all agents share
+    localhost).
     """
     agents: list[TestAgentInfo] = []
     agent_hosts: dict[str, OnlineHostInterface] = {}
 
-    launch_config = config
-    if use_snapshot:
-        provider = get_provider_instance(config.provider_name, mngr_ctx)
-        if provider.supports_snapshots:
-            try:
-                snapshot_name = _create_snapshot_host(config, mngr_ctx)
-                launch_config = config.model_copy_update(to_update(config.field_ref().snapshot, snapshot_name))
-            except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
-                logger.warning("Failed to create snapshot, launching agents without snapshot: {}", exc)
-        else:
-            logger.warning(
-                "Provider '{}' does not support snapshots, launching all agents without snapshot",
-                config.provider_name,
-            )
-
-    is_local = launch_config.provider_name.lower() == LOCAL_PROVIDER_NAME
+    is_local = config.provider_name.lower() == LOCAL_PROVIDER_NAME
     host_pool: list[OnlineHostInterface] = []
     if not is_local and agents_per_host > 0:
         host_count = math.ceil(len(test_node_ids) / agents_per_host)
         if host_count > 0:
-            host_pool = _create_host_pool(host_count, launch_config, mngr_ctx, run_name, max_parallel)
+            host_pool = _create_host_pool(host_count, config, mngr_ctx, run_name, max_parallel)
 
     with ConcurrencyGroupExecutor(
         parent_cg=mngr_ctx.concurrency_group,
@@ -271,7 +352,7 @@ def launch_all_test_agents(
                 executor.submit(
                     launch_test_agent,
                     test_node_id,
-                    launch_config,
+                    config,
                     mngr_ctx,
                     pytest_flags,
                     prompt_suffix,
@@ -284,11 +365,11 @@ def launch_all_test_agents(
                 info, host = future.result()
                 agents.append(info)
                 agent_hosts[str(info.agent_id)] = host
-            except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
+            except (BaseMngrError, OSError, BaseExceptionGroup) as exc:
                 logger.warning("Failed to launch agent: {}", exc)
 
     logger.info("Launched {} agent(s)", len(agents))
-    return agents, agent_hosts, launch_config.snapshot
+    return agents, agent_hosts, config.snapshot
 
 
 def launch_with_timeout(
@@ -328,7 +409,7 @@ def launch_agents_up_to_limit(
         except TimeoutError:
             logger.warning("Agent creation timed out after {}s for {}", _AGENT_CREATION_TIMEOUT_SECONDS, test_node_id)
             continue
-        except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
+        except (BaseMngrError, OSError, BaseExceptionGroup) as exc:
             logger.warning("Failed to launch agent for {}: {}", test_node_id, exc)
             continue
         all_agents.append(info)

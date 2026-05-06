@@ -103,11 +103,14 @@ def sanitize_test_name_for_agent(test_node_id: str) -> str:
 
 
 def transfer_mode_for_provider(provider_name: ProviderInstanceName) -> TransferMode:
-    """Determine the transfer mode based on the provider.
+    """Pick a default transfer mode for the user's local checkout.
 
-    GIT_WORKTREE only works when source and target are on the same host, so it is
-    only usable with the local provider. Remote providers (docker, modal, etc.)
-    use GIT_MIRROR to transfer git history efficiently.
+    GIT_WORKTREE only works when source and target are on the same host. With the
+    local provider both source and target are local, so GIT_WORKTREE is the
+    natural default. With remote providers (docker, modal, etc.) the source
+    (local user checkout) and target (remote host) differ, so we fall back to
+    GIT_MIRROR. Callers that have arranged source and target to be on the same
+    remote host can pass GIT_WORKTREE explicitly.
     """
     is_local = provider_name.lower() == LOCAL_PROVIDER_NAME
     return TransferMode.GIT_WORKTREE if is_local else TransferMode.GIT_MIRROR
