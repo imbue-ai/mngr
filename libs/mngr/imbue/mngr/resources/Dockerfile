@@ -49,17 +49,12 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
 	&& apt install gh -y
 
 # Install offload binary (provides `apply-diff`, used by Modal thin-diff
-# image builds in scripts/modal_sandbox.py). Pinned to the pre-merge SHA on
-# imbue-ai/offload PR #208 because the apply-diff subcommand is not yet in
-# any published release. When that PR merges and a new offload version
-# ships, switch to `cargo install --locked offload --version <ver>` (or a
-# released static binary) and drop the rustup install/uninstall dance.
-ARG OFFLOAD_GIT_REV=5c99d22bb0918871d143ddd7d7a03f8297a79a48
+# image builds).
+ARG OFFLOAD_VERSION=0.9.1
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
         sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path && \
     . "$HOME/.cargo/env" && \
-    cargo install --locked --git https://github.com/imbue-ai/offload \
-        --rev ${OFFLOAD_GIT_REV} --root /usr/local offload && \
+    cargo install --locked offload --version ${OFFLOAD_VERSION} --root /usr/local && \
     rustup self uninstall -y && \
     rm -rf "$HOME/.cargo" "$HOME/.rustup"
 
