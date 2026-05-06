@@ -293,13 +293,21 @@ def test_cleanup_stop_action_with_real_agent(
 
 @pytest.mark.tmux
 @pytest.mark.flaky
+@pytest.mark.timeout(30)
 def test_cleanup_destroy_multiple_agents(
     cli_runner: CliRunner,
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that cleanup --yes destroys multiple agents at once."""
+    """Test that cleanup --yes destroys multiple agents at once.
+
+    The 30-second pytest-timeout is wider than the default 10s because this
+    test's ExitStack tears down two ``tmux_session_cleanup`` contexts back-to-
+    back (each can spend up to ~5s in its bounded subprocess calls). 10s was
+    cutting it close in CI's offload sandboxes -- the test body itself takes
+    almost the full 10s locally.
+    """
     timestamp = int(time.time())
     agent_name1 = f"test-cleanup-multi1-{timestamp}"
     agent_name2 = f"test-cleanup-multi2-{timestamp}"

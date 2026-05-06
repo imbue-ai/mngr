@@ -261,6 +261,12 @@ class ServiceTokenInfo(BaseModel):
 
 class AdminAuth(BaseModel):
     username: str
+    # Verified email associated with the SuperTokens user, looked up at auth
+    # time so that paid-feature endpoints (host pool, LiteLLM keys) can gate
+    # access by ``PAID_ACCOUNT_SUFFIXES``. ``None`` when the SuperTokens
+    # user record has no email or when the lookup failed -- in that case the
+    # paid-feature gate denies access.
+    email: str | None = None
 
 
 class AgentAuth(BaseModel):
@@ -276,7 +282,12 @@ AuthResult = AdminAuth | AgentAuth
 
 class LeaseHostRequest(BaseModel):
     ssh_public_key: str = Field(description="SSH public key to authorize on the leased host")
-    version: str = Field(description="Pool host version tag to match (e.g. v0.1.0)")
+    attributes: dict[str, Any] = Field(
+        description=(
+            "Lease-attribute filter. Matches with PostgreSQL '@>' so only fields the request "
+            "explicitly sets are constrained; missing fields are unconstrained. Required."
+        ),
+    )
 
 
 class LeaseHostResponse(BaseModel):
@@ -287,7 +298,7 @@ class LeaseHostResponse(BaseModel):
     container_ssh_port: int = Field(description="SSH port mapped to the Docker container")
     agent_id: str = Field(description="Pre-provisioned mngr agent ID")
     host_id: str = Field(description="Host ID in the mngr provider")
-    version: str = Field(description="Pool host version tag")
+    attributes: dict[str, Any] = Field(description="Attributes the row was matched against")
 
 
 class ReleaseHostResponse(BaseModel):
@@ -302,7 +313,7 @@ class LeasedHostInfo(BaseModel):
     container_ssh_port: int = Field(description="SSH port mapped to the Docker container")
     agent_id: str = Field(description="Pre-provisioned mngr agent ID")
     host_id: str = Field(description="Host ID in the mngr provider")
-    version: str = Field(description="Pool host version tag")
+    attributes: dict[str, Any] = Field(description="Attributes attached to the lease row")
     leased_at: str = Field(description="ISO 8601 timestamp when the host was leased")
 
 
@@ -907,9 +918,29 @@ class ForwardingCtx:
         tid = tunnel["id"]
         agent_id = extract_agent_id_prefix(tunnel_name, username)
         hostname = make_hostname(service_name, agent_id, username, self.domain)
-        self.ops.create_cname(hostname, f"{tid}.cfargotunnel.com")
+        cname_target = f"{tid}.cfargotunnel.com"
+        existing_dns = self.ops.list_dns_records(name=hostname)
+        if not existing_dns:
+            self.ops.create_cname(hostname, cname_target)
+        elif existing_dns[0].get("content") != cname_target:
+            raise CloudflareApiError(
+                status_code=409,
+                errors=[
+                    {
+                        "message": (
+                            f"DNS record for {hostname} already exists pointing to "
+                            f"{existing_dns[0].get('content')!r}, not {cname_target!r}"
+                        )
+                    }
+                ],
+            )
+        else:
+            # CNAME already points at this tunnel; idempotent re-add.
+            pass
         config = self.ops.get_tunnel_config(tid)
-        rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
+        rules = [
+            r for r in non_catchall_rules(config.get("config", {}).get("ingress", [])) if r.get("hostname") != hostname
+        ]
         rules.append(
             {
                 "hostname": hostname,
@@ -1007,10 +1038,18 @@ class ForwardingCtx:
             logger.warning("Failed to delete Access Application for %s: %s", hostname, exc)
 
     def _apply_default_access_policy(self, tunnel_name: str, hostname: str) -> None:
-        """Apply the tunnel's default auth policy to a new service, if one is set."""
+        """Apply the tunnel's default auth policy to a new service, if one is set.
+
+        Skipped when an Access Application already exists for the hostname:
+        on a re-add the service may have a customized per-service policy from
+        a prior :meth:`set_service_auth` call, and re-applying the tunnel
+        default would clobber it.
+        """
         try:
             raw = self.ops.kv_get(tunnel_name)
             if raw is None:
+                return
+            if self.ops.get_access_app_by_domain(hostname) is not None:
                 return
             policy = AuthPolicy.model_validate_json(raw)
             access_app = self.ops.create_access_app(hostname, f"cf-fwd-{hostname}", allowed_idps=self.allowed_idps)
@@ -1138,9 +1177,46 @@ def _authenticate_agent(token: str, ops: CloudflareOps) -> AgentAuth:
 _USER_ID_PREFIX_LENGTH = 16
 
 
+def _default_email_getter(
+    user_id: str,
+    user_getter: Callable[[str], Any] = get_user,
+) -> str | None:
+    """Return the first **verified** email registered for the given SuperTokens user_id.
+
+    A SuperTokens user may have several login methods (email/password, OAuth
+    providers) with independent ``verified`` flags. Only login methods whose
+    ``verified`` flag is True are considered, since the paid-feature gate
+    authorizes by domain ownership and that requires the email to actually
+    have been verified. Returns the first matching email, or ``None`` if the
+    user has no verified email.
+
+    Only the SuperTokens SDK's typed errors (``SuperTokensSessionError``,
+    ``SuperTokensGeneralError``) are caught and turned into ``None`` (with a
+    warning log); any other exception (e.g. transport-level network errors
+    that escape the SDK) is allowed to propagate, so that truly unexpected
+    failures surface loudly rather than silently denying paid-feature access.
+
+    ``user_getter`` is exposed for tests so they can drive each branch
+    (``None`` user, missing emails, SDK exception) without monkeypatching the
+    SuperTokens SDK; production callers should rely on the default.
+    """
+    try:
+        user = user_getter(user_id)
+    except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
+        logger.warning("Failed to fetch SuperTokens user %s: %s", user_id[:8], exc)
+        return None
+    if user is None:
+        return None
+    for login_method in user.login_methods:
+        if login_method.email and login_method.verified:
+            return login_method.email
+    return None
+
+
 def _authenticate_supertokens(
     token: str,
     session_getter: Callable[..., Any] = get_session_without_request_response,
+    email_getter: Callable[[str], str | None] = _default_email_getter,
 ) -> AdminAuth:
     """Validate a SuperTokens JWT access token. Returns AdminAuth with user_id_prefix as username."""
     connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
@@ -1167,8 +1243,9 @@ def _authenticate_supertokens(
     user_id = session.get_user_id()
     # Derive 16-char hex prefix from UUID
     user_id_prefix = user_id.replace("-", "")[:_USER_ID_PREFIX_LENGTH]
+    email = email_getter(user_id)
 
-    return AdminAuth(username=user_id_prefix)
+    return AdminAuth(username=user_id_prefix, email=email)
 
 
 def _get_user_id_from_access_token(token: str) -> str:
@@ -1203,6 +1280,57 @@ def require_tunnel_access(auth: AuthResult, tunnel_name: str) -> str:
     if auth.tunnel_name != tunnel_name:
         raise HTTPException(status_code=403, detail=f"Token does not grant access to tunnel '{tunnel_name}'")
     return extract_username_from_tunnel_name(tunnel_name)
+
+
+_PAID_ACCOUNT_SUFFIXES_ENV = "PAID_ACCOUNT_SUFFIXES"
+
+
+def _parse_paid_account_suffixes(raw: str) -> tuple[str, ...]:
+    """Split a ``PAID_ACCOUNT_SUFFIXES`` value into a normalized tuple of suffixes."""
+    return tuple(s.strip().lower() for s in raw.split(",") if s.strip())
+
+
+def is_email_in_paid_account_allowlist(email: str | None, raw_suffixes: str) -> bool:
+    """Pure helper: does ``email`` match any of the comma-separated suffixes?
+
+    Suffix matching is case-insensitive. An empty/missing suffix list always
+    returns ``False`` (no email is allowed), and a missing email always
+    returns ``False``.
+    """
+    suffixes = _parse_paid_account_suffixes(raw_suffixes)
+    if not suffixes:
+        return False
+    if not email:
+        return False
+    email_lower = email.lower()
+    return any(email_lower.endswith(suffix) for suffix in suffixes)
+
+
+def require_paid_account(auth: AdminAuth) -> None:
+    """Enforce the ``PAID_ACCOUNT_SUFFIXES`` allowlist for paid features.
+
+    Raises ``HTTPException(403)`` when the env var is unset/empty (paid
+    features disabled on this server) or when ``auth.email`` does not end
+    with any of the configured suffixes. ``/tunnels/*`` (Cloudflare
+    forwarding) intentionally does NOT call this gate -- email-verified
+    accounts can still use forwarding regardless of the allowlist.
+    """
+    raw = os.environ.get(_PAID_ACCOUNT_SUFFIXES_ENV, "")
+    if not _parse_paid_account_suffixes(raw):
+        raise HTTPException(
+            status_code=403,
+            detail="Paid features (host pool, LiteLLM keys) are not enabled on this server",
+        )
+    if not auth.email:
+        raise HTTPException(
+            status_code=403,
+            detail="Account email unavailable; cannot authorize paid feature access",
+        )
+    if not is_email_in_paid_account_allowlist(auth.email, raw):
+        raise HTTPException(
+            status_code=403,
+            detail="Account is not authorized for paid features",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1431,24 +1559,28 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
+        require_paid_account(admin)
         conn = _get_pool_db_connection()
         try:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, version "
+                        "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes "
                         "FROM pool_hosts "
-                        "WHERE status = 'available' AND version = %s "
+                        "WHERE status = 'available' AND attributes @> %s::jsonb "
                         "ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
-                        (body.version,),
+                        (json.dumps(body.attributes),),
                     )
                     row = cur.fetchone()
                     if row is None:
                         raise HTTPException(
                             status_code=503,
-                            detail="No pre-created agents are currently ready. Please ask Josh to provision more.",
+                            detail=(
+                                "No pre-created agents match the requested attributes. "
+                                "Please ask Josh to provision more, or relax the attribute filter."
+                            ),
                         )
-                    host_db_id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, version = row
+                    host_db_id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes = row
 
                     # Inject the user's SSH public key on VPS and container
                     management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
@@ -1470,6 +1602,7 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                     )
         finally:
             conn.close()
+        attrs_dict = attributes if isinstance(attributes, dict) else {}
         return LeaseHostResponse(
             host_db_id=host_db_id,
             vps_ip=vps_ip,
@@ -1478,7 +1611,7 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
             container_ssh_port=container_ssh_port,
             agent_id=agent_id,
             host_id=host_id,
-            version=version,
+            attributes=attrs_dict,
         ).model_dump()
 
 
@@ -1488,12 +1621,16 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
+        require_paid_account(admin)
         conn = _get_pool_db_connection()
         try:
             with conn.cursor() as cur:
+                # ``str(host_db_id)`` because psycopg2 can't adapt the
+                # Python ``UUID`` type that FastAPI parsed from the path
+                # (it raises "can't adapt type 'UUID'").
                 cur.execute(
                     "SELECT leased_to_user FROM pool_hosts WHERE id = %s AND status = 'leased'",
-                    (host_db_id,),
+                    (str(host_db_id),),
                 )
                 row = cur.fetchone()
                 if row is None:
@@ -1503,7 +1640,7 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
                     raise HTTPException(status_code=403, detail="You do not own this host lease")
                 cur.execute(
                     "UPDATE pool_hosts SET status = 'released', released_at = NOW() WHERE id = %s",
-                    (host_db_id,),
+                    (str(host_db_id),),
                 )
                 conn.commit()
         finally:
@@ -1517,11 +1654,12 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
+        require_paid_account(admin)
         conn = _get_pool_db_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, version, leased_at "
+                    "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes, leased_at "
                     "FROM pool_hosts "
                     "WHERE status = 'leased' AND leased_to_user = %s",
                     (admin.username,),
@@ -1538,7 +1676,7 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
                 container_ssh_port=r[4],
                 agent_id=r[5],
                 host_id=r[6],
-                version=r[7],
+                attributes=r[7] if isinstance(r[7], dict) else {},
                 leased_at=str(r[8]) if r[8] is not None else "",
             ).model_dump()
             for r in rows
@@ -1605,7 +1743,8 @@ def create_litellm_key(request: Request, body: CreateKeyRequest) -> dict[str, ob
     """Create a new LiteLLM virtual key for the authenticated user."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        require_admin(auth)
+        admin = require_admin(auth)
+        require_paid_account(admin)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
@@ -1633,16 +1772,30 @@ def list_litellm_keys(request: Request) -> list[dict[str, object]]:
     """List all LiteLLM virtual keys owned by the authenticated user."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        require_admin(auth)
+        admin = require_admin(auth)
+        require_paid_account(admin)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
-        resp = _litellm_request("GET", "/key/list", params={"user_id": user_id})
+        # Without ``return_full_object=true`` LiteLLM returns the keys as a
+        # bare list of token-id strings (and the ``KeyInfo`` mapping below
+        # would crash on ``entry.get(...)``); with it, each entry is a dict
+        # carrying alias / spend / budget / etc.
+        resp = _litellm_request(
+            "GET",
+            "/key/list",
+            params={"user_id": user_id, "return_full_object": "true"},
+        )
         data = resp.json()
 
         keys_raw = data if isinstance(data, list) else data.get("keys", [])
         result: list[dict[str, object]] = []
         for entry in keys_raw:
+            if not isinstance(entry, dict):
+                # Defensive: if LiteLLM ever flips back to bare token strings,
+                # surface what we have rather than 500ing.
+                result.append(KeyInfo(token=str(entry)).model_dump())
+                continue
             result.append(
                 KeyInfo(
                     token=entry.get("token", ""),
@@ -1662,7 +1815,8 @@ def get_litellm_key_info(request: Request, key_id: str) -> dict[str, object]:
     """Get info (including spend and budget) for a specific LiteLLM key."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        require_admin(auth)
+        admin = require_admin(auth)
+        require_paid_account(admin)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
@@ -1689,7 +1843,8 @@ def update_litellm_key_budget(request: Request, key_id: str, body: UpdateBudgetR
     """Update the budget for a LiteLLM key owned by the authenticated user."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        require_admin(auth)
+        admin = require_admin(auth)
+        require_paid_account(admin)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
@@ -1715,7 +1870,8 @@ def delete_litellm_key(request: Request, key_id: str) -> dict[str, object]:
     """Delete a LiteLLM key owned by the authenticated user."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        require_admin(auth)
+        admin = require_admin(auth)
+        require_paid_account(admin)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
@@ -2301,6 +2457,7 @@ def _init_supertokens() -> None:
         modal.Secret.from_name(f"neon-{_DEPLOY_ENV}"),
         modal.Secret.from_name(f"pool-ssh-{_DEPLOY_ENV}"),
         modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}"),
+        modal.Secret.from_name(f"paid-accounts-{_DEPLOY_ENV}"),
         modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV}),
     ]
 )

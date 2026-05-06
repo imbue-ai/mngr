@@ -93,11 +93,17 @@
   }
 
   async function oauthSignIn(provider) {
+    var flowId = null;
     try {
       var res = await fetch('/auth/oauth/' + provider);
       var data = await res.json();
       if (data.status !== 'OK') {
         alert('Failed to start OAuth: ' + (data.error || data.message));
+        return;
+      }
+      flowId = data.flow_id;
+      if (!flowId) {
+        alert('Failed to start OAuth: server did not return a flow_id');
         return;
       }
     } catch (err) {
@@ -116,14 +122,31 @@
         return;
       }
       try {
-        var r = await fetch('/auth/api/status');
+        var r = await fetch('/auth/oauth/status/' + flowId);
         var s = await r.json();
-        if (s.signedIn) {
+        if (s.status !== 'OK') {
+          // Server forgot the flow (e.g. desktop server restart). Stop polling.
+          clearInterval(oauthPollInterval);
+          oauthPollInterval = null;
+          document.querySelectorAll('.oauth-btn').forEach(function (b) { b.disabled = false; });
+          alert('Sign-in lost track of this flow. Try again.');
+          return;
+        }
+        if (s.state === 'done') {
           clearInterval(oauthPollInterval);
           oauthPollInterval = null;
           window.location.href = '/accounts';
+          return;
         }
-      } catch (e) { /* transient */ }
+        if (s.state === 'error') {
+          clearInterval(oauthPollInterval);
+          oauthPollInterval = null;
+          document.querySelectorAll('.oauth-btn').forEach(function (b) { b.disabled = false; });
+          alert('Sign-in failed: ' + (s.error || 'unknown error'));
+          return;
+        }
+        // state === 'running' -- keep polling.
+      } catch (e) { /* transient network blip; keep polling */ }
     }, 2000);
   }
 

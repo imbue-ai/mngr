@@ -17,6 +17,7 @@ Usage:
         --template-dir ~/project/forever-claude-template
 """
 
+import io
 import json
 import os
 import shlex
@@ -33,19 +34,13 @@ import psycopg2
 import psycopg2.extras
 from loguru import logger
 
+from imbue.imbue_common.pool_host_constants import PLACEHOLDER_ANTHROPIC_API_KEY
+
 _DEFAULT_REGION: Final[str] = "ewr"
 _DEFAULT_PLAN: Final[str] = "vc2-2c-4gb"
 _CONTAINER_SSH_PORT: Final[int] = 2222
 _MNGR_COMMAND_TIMEOUT_SECONDS: Final[int] = 1800
 _SSH_COMMAND_TIMEOUT_SECONDS: Final[int] = 60
-
-# Placeholder ANTHROPIC_API_KEY injected into pool hosts at creation time so
-# that mngr provisioning writes it into the agent env file and claude config.
-# During lease setup the placeholder is sed-replaced with the real LiteLLM
-# virtual key.
-_PLACEHOLDER_ANTHROPIC_API_KEY: Final[str] = (
-    "sk-ant-api03-PLACEHOLDER000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-)
 
 
 def _run_mngr_command(
@@ -53,10 +48,20 @@ def _run_mngr_command(
     timeout: int = _MNGR_COMMAND_TIMEOUT_SECONDS,
     cwd: str | None = None,
     env: dict[str, str] | None = None,
+    is_streaming: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a mngr CLI command via `uv run` and return the result."""
+    """Run a mngr CLI command via `uv run` and return the result.
+
+    When ``is_streaming`` is True, the child's combined stdout/stderr is
+    streamed line-by-line to our stderr in real time (and also captured in
+    the returned ``CompletedProcess.stdout``). Use this for long-running
+    invocations like ``mngr create`` so a multi-minute provisioning step
+    isn't a silent black box.
+    """
     full_command = ["uv", "run", "mngr"] + args
     logger.info("  Running: {}", " ".join(full_command))
+    if is_streaming:
+        return _run_streaming(full_command, timeout=timeout, cwd=cwd, env=env)
     return subprocess.run(
         full_command,
         capture_output=True,
@@ -64,6 +69,42 @@ def _run_mngr_command(
         timeout=timeout,
         cwd=cwd,
         env=env,
+    )
+
+
+def _run_streaming(
+    full_command: list[str],
+    timeout: int,
+    cwd: str | None,
+    env: dict[str, str] | None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a subprocess streaming stdout/stderr through to ours in real time."""
+    output_lines: list[str] = []
+    process = subprocess.Popen(
+        full_command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        cwd=cwd,
+        env=env,
+    )
+    if process.stdout is None:
+        raise RuntimeError("Popen returned None stdout despite stdout=PIPE")
+    try:
+        for line in process.stdout:
+            logger.info("  | {}", line.rstrip())
+            output_lines.append(line)
+        return_code = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        raise
+    return subprocess.CompletedProcess(
+        args=full_command,
+        returncode=return_code,
+        stdout="".join(output_lines),
+        stderr="",
     )
 
 
@@ -270,10 +311,13 @@ def _create_single_pool_host(
 
     # Set the placeholder ANTHROPIC_API_KEY in the environment so that
     # --pass-host-env picks it up and writes it to /mngr/env on the host.
-    create_env = dict(os.environ, ANTHROPIC_API_KEY=_PLACEHOLDER_ANTHROPIC_API_KEY)
+    create_env = dict(os.environ, ANTHROPIC_API_KEY=PLACEHOLDER_ANTHROPIC_API_KEY)
 
     # Run mngr create from the template directory so it picks up the
     # template's .mngr/settings.toml (workspace server, services, etc.).
+    # Streaming output: this step takes ~10-15min (Vultr VM provision +
+    # Docker image build + container boot). Without is_streaming=True it
+    # appears to hang for the full duration before logging anything.
     create_result = _run_mngr_command(
         [
             "create",
@@ -297,6 +341,7 @@ def _create_single_pool_host(
         ],
         cwd=template_dir,
         env=create_env,
+        is_streaming=True,
     )
     if create_result.returncode != 0:
         logger.error("mngr create failed: {}", create_result.stderr)
@@ -446,6 +491,17 @@ def create_pool_hosts(
     plan: str,
     template_dir: str,
 ) -> None:
+    # Force line-buffered stdout/stderr so logger output and streamed
+    # subprocess lines appear immediately when this script's output is
+    # redirected to a file (e.g. when run from a justfile recipe). Default
+    # CPython behavior is block-buffered for non-TTY stdout. The isinstance
+    # guards keep pyright happy: sys.stdout's static type is TextIO, which
+    # doesn't carry .reconfigure().
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(line_buffering=True)
+    if isinstance(sys.stderr, io.TextIOWrapper):
+        sys.stderr.reconfigure(line_buffering=True)
+
     management_public_key = Path(management_public_key_file).read_text().strip()
     if not management_public_key:
         logger.error("Management public key file is empty")

@@ -21,7 +21,8 @@
 </head>
 <body class="font-sans antialiased bg-zinc-900"
       data-is-mac="{{ 'true' if is_mac else 'false' }}"
-      data-is-authenticated="{{ 'true' if is_authenticated else 'false' }}">
+      data-is-authenticated="{{ 'true' if is_authenticated else 'false' }}"
+      data-mngr-forward-origin="{{ mngr_forward_origin }}">
 
 <div id="minds-titlebar"
      class="fixed top-0 left-0 right-0 h-[38px] bg-zinc-900 flex items-center select-none z-[100] border-b border-white/10 px-1 {% if is_mac %}pl-[72px]{% endif %}">

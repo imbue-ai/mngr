@@ -1,6 +1,7 @@
 """Tests for the FastAPI server."""
 
 import json
+import queue
 from pathlib import Path
 from typing import Generator
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
+from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
 from imbue.minds_workspace_server.server import create_application
 
@@ -331,6 +333,36 @@ def test_refresh_service_broadcast_rejects_non_loopback(app: FastAPI) -> None:
     with TestClient(app, client=("10.0.0.1", _TEST_CLIENT_PORT)) as remote_client:
         response = remote_client.post("/api/refresh-service/web/broadcast")
     assert response.status_code == 403
+
+
+@pytest.mark.timeout(5)
+def test_proto_agent_logs_endpoint_not_found_sends_error_and_closes(client: TestClient) -> None:
+    """When the proto-agent is missing, the endpoint sends a structured not-found message and closes."""
+    with client.websocket_connect("/api/proto-agents/missing-agent/logs") as ws:
+        payload = json.loads(ws.receive_text())
+    assert payload == {"done": True, "success": False, "error": "Proto-agent not found"}
+
+
+@pytest.mark.timeout(5)
+def test_proto_agent_logs_endpoint_streams_messages_until_sentinel(app: FastAPI) -> None:
+    """The endpoint forwards real log lines and closes when the queue yields ``None``."""
+    log_queue: queue.Queue[str | None] = queue.Queue()
+    log_queue.put(json.dumps({"line": "starting"}))
+    log_queue.put(json.dumps({"line": "still going"}))
+    log_queue.put(None)
+
+    with TestClient(app) as test_client:
+        # The TestClient context manager triggers the lifespan startup that
+        # populates ``app.state.agent_manager``; inject the queue afterwards.
+        agent_manager: AgentManager = app.state.agent_manager
+        agent_manager._log_queues["proto-1"] = log_queue
+
+        with test_client.websocket_connect("/api/proto-agents/proto-1/logs") as ws:
+            first = json.loads(ws.receive_text())
+            second = json.loads(ws.receive_text())
+
+    assert first == {"line": "starting"}
+    assert second == {"line": "still going"}
 
 
 def test_request_event_endpoint_writes_latchkey_permission_event(

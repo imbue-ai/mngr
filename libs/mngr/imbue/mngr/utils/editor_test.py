@@ -191,6 +191,7 @@ def test_editor_session_cleanup_terminates_running_process(
         assert session.is_running() is False
 
 
+@pytest.mark.allow_warnings(match=r"^Editor process did not terminate gracefully")
 def test_editor_session_cleanup_handles_stubborn_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

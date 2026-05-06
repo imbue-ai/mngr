@@ -7,11 +7,13 @@ import time
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from uuid import uuid4
 
 import psutil
 import pytest
 from pydantic import PrivateAttr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.minds.desktop_client.latchkey.core import CredentialStatus
 from imbue.minds.desktop_client.latchkey.core import Latchkey
@@ -328,14 +330,20 @@ def test_discovery_handler_spawns_for_every_provider(tmp_path: Path) -> None:
     manager = Latchkey(latchkey_binary=str(fake_binary))
     manager.initialize(data_dir=tmp_path)
     tunnel_manager = SSHTunnelManager()
+    agent_by_provider: dict[str, AgentId] = {}
     try:
-        handler = LatchkeyDiscoveryHandler(latchkey=manager, tunnel_manager=tunnel_manager)
-        agent_by_provider = {name: AgentId() for name in ("local", "docker", "lima", "vultr", "modal")}
-        for provider_name, agent_id in agent_by_provider.items():
-            # ssh_info=None is fine here -- it keeps the test off the SSH path.
-            # The "does it also set up a reverse tunnel when ssh_info is given"
-            # behavior is covered by a dedicated test below.
-            handler(agent_id, None, provider_name)
+        with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+            handler = LatchkeyDiscoveryHandler(
+                latchkey=manager,
+                tunnel_manager=tunnel_manager,
+                concurrency_group=cg,
+            )
+            agent_by_provider = {name: AgentId() for name in ("local", "docker", "lima", "vultr", "modal")}
+            for provider_name, agent_id in agent_by_provider.items():
+                # ssh_info=None is fine here -- it keeps the test off the SSH path.
+                # The "does it also set up a reverse tunnel when ssh_info is given"
+                # behavior is covered by a dedicated test below.
+                handler(agent_id, None, provider_name)
         assert {info.agent_id for info in manager.list_gateways()} == set(agent_by_provider.values())
     finally:
         for agent_id in agent_by_provider.values():
@@ -352,10 +360,8 @@ class _RecordingTunnelManager(SSHTunnelManager):
         self,
         ssh_info: RemoteSSHInfo,
         local_port: int,
-        agent_state_dir: str | None = None,
         remote_port: int = 0,
     ) -> int:
-        del agent_state_dir
         self._calls.append((ssh_info, local_port, remote_port))
         return remote_port
 
@@ -365,11 +371,20 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: 
     manager = Latchkey(latchkey_binary=str(fake_binary))
     manager.initialize(data_dir=tmp_path)
     tunnel_manager = _RecordingTunnelManager()
+    agent_id = AgentId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=22, key_path=tmp_path / "k")
     try:
-        handler = LatchkeyDiscoveryHandler(latchkey=manager, tunnel_manager=tunnel_manager)
-        ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=22, key_path=tmp_path / "k")
-        agent_id = AgentId()
-        handler(agent_id, ssh_info, "docker")
+        # The handler dispatches tunnel setup onto a CG worker thread, so
+        # exit the CG (joining its threads) before asserting on the
+        # recording tunnel manager's calls -- otherwise the assertion races
+        # the worker.
+        with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+            handler = LatchkeyDiscoveryHandler(
+                latchkey=manager,
+                tunnel_manager=tunnel_manager,
+                concurrency_group=cg,
+            )
+            handler(agent_id, ssh_info, "docker")
 
         info = manager.get_gateway_info(agent_id)
         assert info is not None
@@ -387,10 +402,15 @@ def test_discovery_handler_skips_reverse_tunnel_for_dev_agents(tmp_path: Path) -
     manager = Latchkey(latchkey_binary=str(fake_binary))
     manager.initialize(data_dir=tmp_path)
     tunnel_manager = _RecordingTunnelManager()
+    agent_id = AgentId()
     try:
-        handler = LatchkeyDiscoveryHandler(latchkey=manager, tunnel_manager=tunnel_manager)
-        agent_id = AgentId()
-        handler(agent_id, None, "local")
+        with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+            handler = LatchkeyDiscoveryHandler(
+                latchkey=manager,
+                tunnel_manager=tunnel_manager,
+                concurrency_group=cg,
+            )
+            handler(agent_id, None, "local")
 
         assert manager.get_gateway_info(agent_id) is not None
         assert tunnel_manager._calls == []
@@ -403,8 +423,13 @@ def test_discovery_handler_swallows_gateway_errors(tmp_path: Path) -> None:
     manager = Latchkey(latchkey_binary=str(tmp_path / "missing"))
     manager.initialize(data_dir=tmp_path)
     tunnel_manager = _RecordingTunnelManager()
-    handler = LatchkeyDiscoveryHandler(latchkey=manager, tunnel_manager=tunnel_manager)
-    handler(AgentId(), None, "local")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+        )
+        handler(AgentId(), None, "local")
     assert manager.list_gateways() == ()
     assert tunnel_manager._calls == []
 
@@ -485,14 +510,19 @@ def test_destruction_handler_stops_gateway(tmp_path: Path) -> None:
     manager = Latchkey(latchkey_binary=str(fake_binary))
     manager.initialize(data_dir=tmp_path)
     tunnel_manager = _RecordingTunnelManager()
-    discovery = LatchkeyDiscoveryHandler(latchkey=manager, tunnel_manager=tunnel_manager)
-    destruction = LatchkeyDestructionHandler(latchkey=manager)
-    agent_id = AgentId()
-    discovery(agent_id, None, "docker")
-    info = manager.get_gateway_info(agent_id)
-    assert info is not None
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        discovery = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+        )
+        destruction = LatchkeyDestructionHandler(latchkey=manager)
+        agent_id = AgentId()
+        discovery(agent_id, None, "docker")
+        info = manager.get_gateway_info(agent_id)
+        assert info is not None
 
-    destruction(agent_id)
+        destruction(agent_id)
     assert manager.get_gateway_info(agent_id) is None
     assert load_gateway_info(tmp_path, agent_id) is None
     assert _wait_for_process_exit(info.pid)

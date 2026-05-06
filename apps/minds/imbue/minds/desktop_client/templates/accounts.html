@@ -7,15 +7,24 @@
 
     {% if accounts %}
       {% for acct in accounts %}
+        {% set acct_enabled = enabled_by_user_id.get(acct.user_id | string, True) %}
         {% call ui.card_row() %}
           <div>
-            <div class="font-medium">{{ acct.email }}</div>
+            <div class="font-medium">
+              {{ acct.email }}
+              {% if not acct_enabled %}
+                <span class="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800 border border-amber-200" title="Session was rejected by the server. Sign in again to re-enable.">Signed out</span>
+              {% endif %}
+            </div>
             <div class="text-xs text-zinc-400">
               {{ acct.workspace_ids | length }} workspace(s)
               {% if acct.user_id | string == default_account_id %} &middot; Default{% endif %}
             </div>
           </div>
           <div class="flex gap-2">
+            {% if not acct_enabled %}
+              {{ ui.btn_link('Sign in again', '/auth/login', variant='primary') }}
+            {% endif %}
             {% if acct.user_id | string != default_account_id %}
               <form method="POST" action="/accounts/set-default">
                 <input type="hidden" name="user_id" value="{{ acct.user_id }}">

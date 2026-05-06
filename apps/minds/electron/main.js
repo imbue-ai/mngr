@@ -1246,6 +1246,7 @@ async function startBackendWithRetry() {
       (status) => broadcastStatusToLoadingWindows(status),
       (event) => handleNotification(event),
       (event) => handleAuthEvent(event),
+      (event) => handleMngrForwardStarted(event),
     );
 
     // Use `localhost` (not `127.0.0.1`) so the auth cookie, which is issued with
@@ -1411,6 +1412,41 @@ function handleNotification(event) {
   });
   notification.show();
 }
+
+// Pre-set the plugin's session cookie on `localhost:<mngr_forward_port>` so
+// the user is already authenticated to the `mngr forward` plugin before any
+// agent-subdomain navigation. The plugin's server treats a cookie value
+// matching the freshly-minted preauth token as authenticated -- see
+// `libs/mngr_forward/imbue/mngr_forward/cookie.py::verify_session_cookie`.
+//
+// Mirrors the cookie into the workspace content partition so any
+// chrome/iframe / WebContentsView using that partition is authenticated too.
+async function handleMngrForwardStarted(event) {
+  const port = event.mngr_forward_port;
+  const preauth = event.preauth_cookie;
+  if (!port || !preauth) {
+    console.warn('[startup] mngr_forward_started missing port or preauth_cookie:', event);
+    return;
+  }
+  const url = `http://localhost:${port}`;
+  const baseSpec = {
+    url,
+    name: 'mngr_forward_session',
+    value: preauth,
+    httpOnly: true,
+    sameSite: 'lax',
+    path: '/',
+  };
+  try {
+    await session.defaultSession.cookies.set(baseSpec);
+    const contentSession = session.fromPartition(CONTENT_PARTITION);
+    await contentSession.cookies.set(baseSpec);
+    console.log('[startup] mngr_forward_session cookie pre-set on', url);
+  } catch (err) {
+    console.warn('[startup] Failed to set mngr_forward_session cookie:', err);
+  }
+}
+
 
 function handleAuthEvent(event) {
   if (event.event === 'auth_success') {

@@ -10,8 +10,6 @@ def _make_store(tmp_path: Path) -> MultiAccountSessionStore:
 
 def _add_user(store: MultiAccountSessionStore, user_id: str = "user-1", email: str = "a@b.com") -> None:
     store.add_or_update_session(
-        access_token="tok-" + user_id,
-        refresh_token=None,
         user_id=user_id,
         email=email,
     )
@@ -25,7 +23,6 @@ def test_add_and_load_session(tmp_path: Path) -> None:
     loaded = store.get_session("user-aaa")
     assert loaded is not None
     assert loaded.email == "aaa@example.com"
-    assert str(loaded.access_token) == "tok-user-aaa"
 
 
 def test_add_multiple_accounts(tmp_path: Path) -> None:
@@ -41,23 +38,22 @@ def test_add_multiple_accounts(tmp_path: Path) -> None:
 
 
 def test_update_existing_session_preserves_workspaces(tmp_path: Path) -> None:
-    """Updating tokens for an existing user preserves workspace associations."""
+    """Updating an account's display fields preserves workspace associations."""
     store = _make_store(tmp_path)
     _add_user(store, "user-1", "a@b.com")
     store.associate_workspace("user-1", "agent-xyz")
 
-    # Re-add with new tokens
+    # Re-add with a new display name (no token state any more).
     store.add_or_update_session(
-        access_token="new-tok",
-        refresh_token=None,
         user_id="user-1",
         email="a@b.com",
+        display_name="Renamed",
     )
 
     session = store.get_session("user-1")
     assert session is not None
     assert session.workspace_ids == ["agent-xyz"]
-    assert str(session.access_token) == "new-tok"
+    assert session.display_name == "Renamed"
 
 
 def test_remove_session(tmp_path: Path) -> None:
@@ -123,8 +119,6 @@ def test_get_user_info(tmp_path: Path) -> None:
     """get_user_info returns a UserInfo with derived prefix."""
     store = _make_store(tmp_path)
     store.add_or_update_session(
-        access_token="tok",
-        refresh_token=None,
         user_id="abcd1234-5678-9abc-def0-1234567890ab",
         email="test@example.com",
         display_name="Test User",
@@ -188,18 +182,17 @@ def test_associate_to_nonexistent_user_is_noop(tmp_path: Path) -> None:
     assert store.list_accounts() == []
 
 
-def test_get_access_token_returns_token(tmp_path: Path) -> None:
-    """get_access_token returns the stored token when not expired."""
+def test_get_account_email(tmp_path: Path) -> None:
+    """get_account_email returns the email for a known user_id."""
     store = _make_store(tmp_path)
-    _add_user(store, "user-1")
-    token = store.get_access_token("user-1")
-    assert token == "tok-user-1"
+    _add_user(store, "user-1", "alice@example.com")
+    assert store.get_account_email("user-1") == "alice@example.com"
 
 
-def test_get_access_token_nonexistent_user_returns_none(tmp_path: Path) -> None:
-    """get_access_token returns None for nonexistent user."""
+def test_get_account_email_nonexistent_returns_none(tmp_path: Path) -> None:
+    """get_account_email returns None for an unknown user_id."""
     store = _make_store(tmp_path)
-    assert store.get_access_token("nonexistent") is None
+    assert store.get_account_email("nonexistent") is None
 
 
 def test_get_user_info_nonexistent_returns_none(tmp_path: Path) -> None:

@@ -150,7 +150,12 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(0))
+    # ``forward_cli.py`` carries one ``# noqa: S603`` next to the
+    # ``subprocess.Popen`` call that spawns ``mngr forward``. The S603
+    # suppression must be on the same line as the call for ruff to
+    # recognize it; ``# noqa`` is intentionally not in the trailing-
+    # comment exempt list.
+    rc.check_trailing_comments(_DIR, snapshot(1))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -245,7 +250,22 @@ def test_prevent_direct_subprocess() -> None:
     # ratchet is designed to enforce (managed cleanup via ConcurrencyGroup),
     # so we exclude that tiny helper specifically; see its module docstring
     # for the full justification.
-    excluded = TEST_FILE_PATTERNS + ("testing.py", "scripts/*.py", "*/latchkey/_spawn.py")
+    #
+    # ``forward_cli.py`` similarly uses ``subprocess.Popen`` directly so it
+    # can hold a reference to the ``mngr forward`` plugin's ``Popen.pid``
+    # for the ``SIGHUP``-bounce path. ``ConcurrencyGroup.RunningProcess``
+    # does not expose the PID today; once it does (a separate cleanup spec
+    # in the concurrency_group lib), this exclusion can be dropped.
+    excluded = TEST_FILE_PATTERNS + (
+        "testing.py",
+        "scripts/*.py",
+        "*/latchkey/_spawn.py",
+        "*/desktop_client/forward_cli.py",
+        # ``destroying.py`` spawns a detached ``bash -c '<mngr destroy ...>'``
+        # so the destroy survives a minds-backend exit; same justification as
+        # ``latchkey/_spawn.py``. See specs/detached-destroy-flow/spec.md.
+        "*/desktop_client/destroying.py",
+    )
     rc.check_direct_subprocess(_DIR, snapshot(0), excluded_patterns=excluded)
 
 

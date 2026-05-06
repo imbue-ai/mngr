@@ -42,7 +42,7 @@
                   class="w-full px-3 py-2.5 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
             {% for mode in launch_modes %}
               <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
-                      {% if mode.value == 'LEASED' %}data-requires-account="true"{% endif %}>{{ mode.value | lower }}</option>
+                      {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ mode.value | lower }}</option>
             {% endfor %}
           </select>
           <p id="leased-tooltip" class="hidden mt-1 text-xs text-amber-600">Leased mode requires an account.</p>
@@ -118,16 +118,16 @@
         var leasedOption = launchSelect.querySelector('option[data-requires-account]');
         if (leasedOption) {
           leasedOption.disabled = !hasAccount;
-          if (!hasAccount && launchSelect.value === 'LEASED') {
+          if (!hasAccount && launchSelect.value === 'IMBUE_CLOUD') {
             launchSelect.value = 'LOCAL';
           }
         }
-        leasedTooltip.classList.toggle('hidden', hasAccount || launchSelect.value !== 'LEASED');
+        leasedTooltip.classList.toggle('hidden', hasAccount || launchSelect.value !== 'IMBUE_CLOUD');
       }
 
       accountSelect.addEventListener('change', updateLeasedState);
       launchSelect.addEventListener('change', function() {
-        leasedTooltip.classList.toggle('hidden', accountSelect.value !== '' || launchSelect.value !== 'LEASED');
+        leasedTooltip.classList.toggle('hidden', accountSelect.value !== '' || launchSelect.value !== 'IMBUE_CLOUD');
       });
       updateLeasedState();
     })();

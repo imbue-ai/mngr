@@ -2587,13 +2587,23 @@ class Host(BaseHost, OnlineHostInterface):
             self.write_file(remote_path, local_content)
             logger.trace("Transferred agent file: {} -> {}", transfer.local_path, remote_path)
 
-    def rename_agent(self, agent: AgentInterface, new_name: AgentName) -> AgentInterface:
-        """Rename an agent and return the updated agent object.
+    def rename_agent(
+        self,
+        agent: AgentInterface,
+        new_name: AgentName,
+        labels_to_merge: Mapping[str, str] | None = None,
+    ) -> AgentInterface:
+        """Rename an agent (optionally merging labels) and return the updated object.
 
         The operation is idempotent: if interrupted mid-rename, re-running
         will complete it. This works because data.json (the "commit point")
         is updated last, while tmux and env changes are applied first and
         are safe to repeat.
+
+        When ``labels_to_merge`` is non-empty, those keys are merged into the
+        agent's existing labels as part of the same atomic data.json write, so
+        an external observer of the agent's state never sees the rename without
+        also seeing the new labels.
         """
         with log_span("Renaming agent", agent_id=str(agent.id), old_name=str(agent.name), new_name=str(new_name)):
             # Prevent same-host name collisions (the tmux session name is derived
@@ -2628,10 +2638,16 @@ class Host(BaseHost, OnlineHostInterface):
             except FileNotFoundError:
                 logger.debug("No env file found for agent {}, skipping env update", agent.id)
 
-            # Update data.json last (the "commit point" for the rename)
+            # Update data.json last (the "commit point" for the rename). Any
+            # provided labels are merged into the existing labels in the same
+            # atomic write so observers see the new name and the new labels
+            # together.
             content = self.read_text_file(data_path)
             data = json.loads(content)
             data["name"] = str(new_name)
+            if labels_to_merge:
+                current_labels = data.get("labels") or {}
+                data["labels"] = {**current_labels, **dict(labels_to_merge)}
             self.write_file(data_path, json.dumps(data, indent=2).encode(), is_atomic=True)
             self.save_agent_data(agent.id, data)
 
