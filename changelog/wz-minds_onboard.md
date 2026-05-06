@@ -1,4 +1,7 @@
-- minds.app: kill orphan `mngr event` subprocesses before starting fresh stream, fixing "Workspace server not yet available" when prior backend exits uncleanly
+- minds.app: bump version to 0.2.11; merge latest origin/main bringing the mngr_forward/mngr_imbue_cloud rearchitecture (single mngr forward subprocess via EnvelopeStreamConsumer in place of MngrStreamManager + per-agent mngr event followers)
+- minds.app: default new-agent branch to `pilot_2` (FCT pilot + main's settings.toml fixes: drop ANTHROPIC_API_KEY from pass_env, sync_claude_credentials=false, /welcome baked into create_templates.main)
+- minds.app: reject `--port 0` / `--mngr-forward-port 0` for `minds run` with a clear UsageError instead of letting mngr_forward crash later on `--reverse 0:0`
+- minds.app: kill orphan `mngr event` subprocesses before starting fresh stream, fixing "Workspace server not yet available" when prior backend exits uncleanly (legacy MngrStreamManager path; superseded by main's rearchitecture but preserved in v0.2.10)
 - minds.app: bump version to 0.2.10
 - minds.app: pyproject declares psycopg2-binary so packaged build matches dev workspace
 - minds.app: env-setup and backend pass `--active` to `uv` so the venv lives in user-writable space (~/.minds/.venv) instead of the read-only signed bundle
