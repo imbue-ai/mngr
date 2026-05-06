@@ -34,15 +34,17 @@ const MONOREPO_ROOT = path.resolve(ROOT, '../..');
  * not included.
  */
 const WORKSPACE_PACKAGES = {
-  'minds':             'apps/minds',
-  'imbue-mngr':        'libs/mngr',
-  'imbue-mngr-claude': 'libs/mngr_claude',
-  'imbue-mngr-lima':   'libs/mngr_lima',
-  'imbue-mngr-modal':  'libs/mngr_modal',
-  'imbue-common':      'libs/imbue_common',
-  'concurrency-group': 'libs/concurrency_group',
-  'resource-guards':   'libs/resource_guards',
-  'modal-proxy':       'libs/modal_proxy',
+  'minds':                  'apps/minds',
+  'imbue-mngr':             'libs/mngr',
+  'imbue-mngr-claude':      'libs/mngr_claude',
+  'imbue-mngr-forward':     'libs/mngr_forward',
+  'imbue-mngr-imbue-cloud': 'libs/mngr_imbue_cloud',
+  'imbue-mngr-lima':        'libs/mngr_lima',
+  'imbue-mngr-modal':       'libs/mngr_modal',
+  'imbue-common':           'libs/imbue_common',
+  'concurrency-group':      'libs/concurrency_group',
+  'resource-guards':        'libs/resource_guards',
+  'modal-proxy':            'libs/modal_proxy',
 };
 
 /**
