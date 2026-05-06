@@ -158,6 +158,43 @@ def test_rewrite_location_relative_path_is_unchanged() -> None:
     assert result == snapshot("login")
 
 
+def test_rewrite_location_dot_relative_path_is_unchanged() -> None:
+    result = rewrite_location_header(
+        location="./login",
+        service_name=_TEST_SERVICE,
+        backend_url=_BACKEND_URL,
+    )
+    assert result == snapshot("./login")
+
+
+def test_rewrite_location_fragment_only_is_unchanged() -> None:
+    result = rewrite_location_header(
+        location="#anchor",
+        service_name=_TEST_SERVICE,
+        backend_url=_BACKEND_URL,
+    )
+    assert result == snapshot("#anchor")
+
+
+def test_rewrite_location_absolute_path_does_not_double_prefix_exact_match() -> None:
+    prefix = f"/service/{_TEST_SERVICE}"
+    result = rewrite_location_header(
+        location=prefix,
+        service_name=_TEST_SERVICE,
+        backend_url=_BACKEND_URL,
+    )
+    assert result == prefix
+
+
+def test_rewrite_location_site_absolute_root_is_prefixed() -> None:
+    result = rewrite_location_header(
+        location="/",
+        service_name=_TEST_SERVICE,
+        backend_url=_BACKEND_URL,
+    )
+    assert result == snapshot("/service/web/")
+
+
 # -- Absolute path rewriting --
 
 
