@@ -1103,12 +1103,20 @@ def test_stop_agent_kills_orphaned_processes_by_env_marker(
 
     # Spawn the orphan as part of the agent's command so it inherits MNGR_AGENT_ID
     # via the agent's env file (sourced with `set -a` when the pane shell starts).
-    # The (...) subshell backgrounds setsid sleep, records its pid, and exits --
+    # The (...) subshell backgrounds a sleep, records its pid, and exits --
     # leaving the sleep reparented to PID 1. The trailing `sleep 1000` keeps the
     # agent process alive so stop_agents has something to stop.
+    #
+    # Note: do NOT use `setsid` here. `setsid` is a pgleader so it forks
+    # internally and exits the intermediate process; bash's `$!` would then
+    # report the dead intermediate's PID rather than the actual sleep, and the
+    # PID would be reused or zombied by the time the test reads environ. The
+    # production bug scenario (claude crash leaves npm/playwright children) does
+    # not involve setsid -- regular forked children also reparent to PID 1 when
+    # their parent dies, which is what `&` from a subshell models here.
     marker_file = tmp_path / "orphan_pid"
     agent_command = (
-        f"(setsid sleep 8472 </dev/null >/dev/null 2>&1 & echo $! > {marker_file}) "
+        f"(sleep 8472 </dev/null >/dev/null 2>&1 & echo $! > {marker_file}) "
         f"</dev/null >/dev/null 2>&1; sleep 1000"
     )
 
