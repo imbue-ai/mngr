@@ -12,9 +12,11 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import LatchkeyAgentEnv
 from imbue.minds.desktop_client.agent_creator import PLACEHOLDER_ANTHROPIC_API_KEY
 from imbue.minds.desktop_client.agent_creator import _RedactingOutputCallback
 from imbue.minds.desktop_client.agent_creator import _build_inject_anthropic_command
+from imbue.minds.desktop_client.agent_creator import _build_inject_latchkey_command
 from imbue.minds.desktop_client.agent_creator import _build_latchkey_gateway_url
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _build_patch_claude_config_command
@@ -1021,11 +1023,23 @@ def test_cleanup_failed_lease(
 
 def _sample_gateway_info(port: int) -> LatchkeyGatewayInfo:
     return LatchkeyGatewayInfo(
-        agent_id=AgentId(),
         host="127.0.0.1",
         port=port,
         pid=99999,
         started_at=datetime.now(timezone.utc),
+    )
+
+
+def _sample_latchkey_agent_env(
+    *,
+    gateway_url: str = "http://127.0.0.1:5050",
+    password: str = "sup3rs3cret",
+    permissions_override_jwt: str = "jwt.fake.value",
+) -> LatchkeyAgentEnv:
+    return LatchkeyAgentEnv(
+        gateway_url=gateway_url,
+        password=password,
+        permissions_override_jwt=permissions_override_jwt,
     )
 
 
@@ -1043,44 +1057,78 @@ def test_build_latchkey_gateway_url_containerized_uses_fixed_agent_side_port(lau
     assert url == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
 
 
-def test_build_mngr_create_command_injects_latchkey_gateway_env() -> None:
+def test_build_mngr_create_command_injects_all_three_latchkey_env_vars() -> None:
     cmd, _api_key = _build_mngr_create_command(
         launch_mode=LaunchMode.DEV,
         agent_name=AgentName("test-agent"),
         agent_id=AgentId(),
-        latchkey_gateway_url="http://127.0.0.1:5050",
+        latchkey_agent_env=_sample_latchkey_agent_env(
+            gateway_url="http://127.0.0.1:5050",
+            password="sup3rs3cret",
+            permissions_override_jwt="jwt.fake.value",
+        ),
     )
     env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--env"]
     assert "LATCHKEY_GATEWAY=http://127.0.0.1:5050" in env_values
+    assert "LATCHKEY_GATEWAY_PASSWORD=sup3rs3cret" in env_values
+    assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=jwt.fake.value" in env_values
 
 
-def test_build_mngr_create_command_omits_latchkey_gateway_env_by_default() -> None:
+def test_build_mngr_create_command_omits_latchkey_env_vars_by_default() -> None:
     cmd, _api_key = _build_mngr_create_command(
         launch_mode=LaunchMode.DEV,
         agent_name=AgentName("test-agent"),
         agent_id=AgentId(),
     )
     env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--env"]
-    assert not any(v.startswith("LATCHKEY_GATEWAY=") for v in env_values)
+    assert not any(v.startswith("LATCHKEY_GATEWAY") for v in env_values)
+    assert not any(v.startswith("LATCHKEY_GATEWAY_PASSWORD") for v in env_values)
+    assert not any(v.startswith("LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE") for v in env_values)
+
+
+def test_build_inject_latchkey_command_writes_all_three_env_vars() -> None:
+    cmd = _build_inject_latchkey_command(
+        latchkey_agent_env=_sample_latchkey_agent_env(
+            gateway_url="http://127.0.0.1:1989",
+            password="pwd",
+            permissions_override_jwt="abc.def.ghi",
+        ),
+        env_path="/mngr/agents/some-id/env",
+    )
+    assert "LATCHKEY_GATEWAY=http://127.0.0.1:1989" in cmd
+    assert "LATCHKEY_GATEWAY_PASSWORD=pwd" in cmd
+    assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=abc.def.ghi" in cmd
+    assert "/mngr/agents/some-id/env" in cmd
+    # Each variable is removed before being re-appended so re-runs replace
+    # rather than duplicate.
+    assert "sed -i '/^LATCHKEY_GATEWAY=/d'" in cmd
+    assert "sed -i '/^LATCHKEY_GATEWAY_PASSWORD=/d'" in cmd
+    assert "sed -i '/^LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=/d'" in cmd
 
 
 @pytest.mark.timeout(30)
-def test_agent_creator_cleans_up_pre_spawned_latchkey_gateway_on_failure(
+def test_agent_creator_does_not_tear_down_shared_gateway_on_failure(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    """When mngr create fails, any latchkey gateway pre-spawned for the agent must be torn down.
+    """When ``mngr create`` fails, the shared gateway must keep running.
 
-    Uses a fake ``latchkey`` binary so this test does not require a real
-    Latchkey install. The agent creation itself fails because the "local
-    path" does not exist, which is the shortest path to exercising the
-    failure-cleanup branch.
+    The shared gateway serves every other agent, so a per-agent
+    creation failure must not drag it down. The per-agent permissions
+    file is also kept around for consistency with how minds keeps
+    other per-agent state across failed creation attempts.
     """
     fake_binary = tmp_path / "latchkey"
     fake_binary.write_text(
         "#!/usr/bin/env python3\n"
         "import os, socket, signal, sys\n"
+        'if sys.argv[1] == "ensure-browser":\n'
+        "    sys.exit(0)\n"
+        'if sys.argv[1:3] == ["gateway", "create-jwt"]:\n'
+        "    args = [a for a in sys.argv[3:] if not a.startswith('--')]\n"
+        "    print(f'fake-jwt-for:{args[0]}')\n"
+        "    sys.exit(0)\n"
         "host = os.environ['LATCHKEY_GATEWAY_LISTEN_HOST']\n"
         "port = int(os.environ['LATCHKEY_GATEWAY_LISTEN_PORT'])\n"
         "sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
@@ -1100,11 +1148,16 @@ def test_agent_creator_cleans_up_pre_spawned_latchkey_gateway_on_failure(
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
-    # "Local path" that does not exist -- mngr create will not even get
-    # the chance to fail; _create_agent_background aborts with MngrCommandError.
-    agent_id = creator.start_creation("/definitely/not/here", launch_mode=LaunchMode.DEV)
+    # Real local path that exists so creation gets past the early
+    # validate-path check and reaches the latchkey-wiring + mngr-create
+    # steps. ``mngr create`` itself fails because the directory is
+    # empty (no ``.mngr/settings.toml``), which is what we want -- the
+    # gateway gets started, then the agent's actual creation fails.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    agent_id = creator.start_creation(str(workspace), launch_mode=LaunchMode.DEV)
 
-    for _ in range(100):
+    for _ in range(200):
         info = creator.get_creation_info(agent_id)
         if info is not None and info.status == AgentCreationStatus.FAILED:
             break
@@ -1114,8 +1167,10 @@ def test_agent_creator_cleans_up_pre_spawned_latchkey_gateway_on_failure(
     assert info.status == AgentCreationStatus.FAILED
     creator.wait_for_all()
 
-    # No lingering gateway or record for this agent.
-    assert latchkey.get_gateway_info(agent_id) is None
+    # The shared gateway is still up: the failure was per-agent and
+    # the gateway is intentionally not torn down.
+    assert latchkey.get_gateway_info() is not None
+    latchkey.stop_gateway()
 
 
 def test_is_git_worktree_returns_false_for_normal_repo(tmp_path: Path) -> None:

@@ -27,9 +27,7 @@ from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorU
 from imbue.minds.desktop_client.host_pool_client import HostPoolClient
 from imbue.minds.desktop_client.latchkey.core import LATCHKEY_BINARY
 from imbue.minds.desktop_client.latchkey.core import Latchkey
-from imbue.minds.desktop_client.latchkey.core import LatchkeyDestructionHandler
 from imbue.minds.desktop_client.latchkey.core import LatchkeyDiscoveryHandler
-from imbue.minds.desktop_client.latchkey.core import LatchkeyReconcileCallback
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import LatchkeyServicesCatalogError
@@ -221,26 +219,17 @@ def start_desktop_client(
     )
     stream_manager.add_on_agent_discovered_callback(discovery_handler)
 
-    # Register callbacks that spawn/terminate a dedicated ``latchkey gateway``
-    # subprocess for each discovered agent. For agents running in a container,
-    # VM, or VPS the handler also sets up a reverse SSH tunnel so the agent
-    # can reach the host-side gateway on a constant ``127.0.0.1`` URL.
+    # Register a callback that ensures the shared ``latchkey gateway``
+    # subprocess is running and (for agents in a container, VM, or VPS)
+    # sets up a reverse SSH tunnel so the agent can reach the host-side
+    # gateway on a constant ``127.0.0.1`` URL. Per-agent gateway
+    # teardown is no longer needed: a single shared gateway serves
+    # every agent and its lifetime is independent of any one agent.
     latchkey_discovery_handler = LatchkeyDiscoveryHandler(
         latchkey=latchkey,
         tunnel_manager=tunnel_manager,
     )
-    latchkey_destruction_handler = LatchkeyDestructionHandler(latchkey=latchkey)
     stream_manager.add_on_agent_discovered_callback(latchkey_discovery_handler)
-    stream_manager.add_on_agent_destroyed_callback(latchkey_destruction_handler)
-
-    # Once the initial mngr-observe snapshot arrives, reconcile any adopted
-    # gateways whose agent is no longer known so orphans from the previous
-    # desktop-client session are cleaned up.
-    reconcile_callback = LatchkeyReconcileCallback(
-        latchkey=latchkey,
-        resolver=backend_resolver,
-    )
-    backend_resolver.add_on_change_callback(reconcile_callback)
 
     stream_manager.start()
 

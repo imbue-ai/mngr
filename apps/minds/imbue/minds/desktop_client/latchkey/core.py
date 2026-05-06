@@ -1,13 +1,14 @@
 """Single wrapper around all interactions with the latchkey CLI.
 
-The ``Latchkey`` class consolidates three responsibilities that all
+The ``Latchkey`` class consolidates four responsibilities that all
 ultimately shell out to the same upstream binary:
 
-1. Spawning, adopting, and tracking per-agent ``latchkey gateway``
-   subprocesses (the lifecycle work that used to live in a separate
-   ``LatchkeyGatewayManager``).
-2. Probing credential status for a service via ``latchkey services info``.
-3. Launching the interactive ``latchkey auth browser`` flow when the user
+1. Spawning, adopting, and tracking the single shared
+   ``latchkey gateway`` subprocess (one for all minds-managed agents).
+2. Deriving the gateway's shared password and minting per-agent
+   permissions-override JWTs via ``latchkey gateway create-jwt``.
+3. Probing credential status for a service via ``latchkey services info``.
+4. Launching the interactive ``latchkey auth browser`` flow when the user
    needs to authenticate.
 
 Keeping these in one class means there is exactly one place that knows
@@ -15,11 +16,12 @@ about the binary path, the shared ``LATCHKEY_DIRECTORY``, and the global
 locking concerns, and exactly one place to mock or replace when something
 needs to change.
 
-The mngr-stream discovery callbacks (``LatchkeyDiscoveryHandler`` etc.)
-also live here because they exist purely to wire ``Latchkey`` into the
+The mngr-stream discovery callbacks (``LatchkeyDiscoveryHandler``) also
+live here because they exist purely to wire ``Latchkey`` into the
 agent-lifecycle event flow.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -45,16 +47,16 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey._spawn import spawn_detached_latchkey_ensure_browser
 from imbue.minds.desktop_client.latchkey._spawn import spawn_detached_latchkey_gateway
 from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
 from imbue.minds.desktop_client.latchkey.store import LatchkeyPermissionsConfig
+from imbue.minds.desktop_client.latchkey.store import default_permissions_path
 from imbue.minds.desktop_client.latchkey.store import delete_gateway_info
+from imbue.minds.desktop_client.latchkey.store import delete_legacy_per_agent_gateway_records
 from imbue.minds.desktop_client.latchkey.store import ensure_browser_log_path
 from imbue.minds.desktop_client.latchkey.store import gateway_log_path
-from imbue.minds.desktop_client.latchkey.store import list_gateway_infos
-from imbue.minds.desktop_client.latchkey.store import permissions_path_for_agent
+from imbue.minds.desktop_client.latchkey.store import load_gateway_info
 from imbue.minds.desktop_client.latchkey.store import save_gateway_info
 from imbue.minds.desktop_client.latchkey.store import save_permissions
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
@@ -70,17 +72,27 @@ _LIVENESS_CONNECT_TIMEOUT_SECONDS: Final[float] = 1.0
 
 _TERMINATE_GRACE_SECONDS: Final[float] = 5.0
 
-# Services-info is normally instant but can stall on slow keychains. The
-# auth-browser flow waits on a real human and is intentionally untimed.
+# Services-info / create-jwt are normally instant but can stall on slow keychains.
+# The auth-browser flow waits on a real human and is intentionally untimed.
 _SERVICES_INFO_TIMEOUT_SECONDS: Final[float] = 15.0
+_CREATE_JWT_TIMEOUT_SECONDS: Final[float] = 15.0
 
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
-# this to the dynamic per-agent gateway port on the desktop host, so the
+# this to the dynamic shared-gateway port on the desktop host, so the
 # ``LATCHKEY_GATEWAY`` env var injected at ``mngr create`` time can be the
 # same constant URL for every agent. Matches the documented default of the
 # upstream ``latchkey gateway`` CLI (``1989``).
 AGENT_SIDE_LATCHKEY_PORT: Final[int] = 1989
+
+# Sentinel path passed to ``latchkey gateway create-jwt --no-validate`` when
+# deriving the gateway's password. The path itself never exists and is
+# never consulted by the gateway; only the encryption-key-derived signing
+# key matters here. Hashing the resulting JWT yields a stable
+# password-shaped string that is ultimately a function of the user's
+# Latchkey encryption key, so it survives desktop-client restarts without
+# us having to persist it in plaintext.
+_GATEWAY_PASSWORD_SENTINEL_PATH: Final[str] = "/__minds_gateway_password__/sentinel"
 
 
 class LatchkeyError(Exception):
@@ -93,6 +105,10 @@ class LatchkeyBinaryNotFoundError(LatchkeyError, FileNotFoundError):
 
 class LatchkeyNotInitializedError(LatchkeyError, RuntimeError):
     """Raised when ``Latchkey`` is used before ``initialize()`` has been called."""
+
+
+class LatchkeyJwtMintError(LatchkeyError, RuntimeError):
+    """Raised when ``latchkey gateway create-jwt`` fails to produce a JWT."""
 
 
 class CredentialStatus(UpperCaseStrEnum):
@@ -214,20 +230,18 @@ def _is_info_alive(info: LatchkeyGatewayInfo) -> bool:
         process = psutil.Process(info.pid)
         cmdline = process.cmdline()
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as e:
-        logger.debug("Latchkey info for {} is stale (pid={}): {}", info.agent_id, info.pid, e)
+        logger.debug("Latchkey gateway record is stale (pid={}): {}", info.pid, e)
         return False
     if not _cmdline_looks_like_latchkey_gateway(cmdline):
         logger.debug(
-            "Latchkey info for {} points at pid {} whose cmdline is not ours: {!r}",
-            info.agent_id,
+            "Latchkey gateway record points at pid {} whose cmdline is not ours: {!r}",
             info.pid,
             cmdline,
         )
         return False
     if not _is_port_listening(info.host, info.port):
         logger.debug(
-            "Latchkey info for {} points at pid {} but {}:{} is not accepting connections",
-            info.agent_id,
+            "Latchkey gateway record points at pid {} but {}:{} is not accepting connections",
             info.pid,
             info.host,
             info.port,
@@ -308,6 +322,22 @@ def _parse_set_credentials_example(payload: Mapping[str, object], service_name: 
     return raw_example
 
 
+def _build_local_latchkey_env(latchkey_directory: Path | None) -> dict[str, str]:
+    """Build an env override for *local* ``latchkey`` invocations.
+
+    ``LATCHKEY_GATEWAY`` is explicitly cleared so commands that refuse to
+    run in gateway mode (e.g. ``gateway create-jwt``) work even if the
+    user has the env var set in their shell. ``LATCHKEY_DIRECTORY`` is
+    pinned to the same shared directory the rest of minds uses so the
+    derived encryption key matches the one the gateway itself will use.
+    """
+    env = dict(os.environ)
+    env.pop("LATCHKEY_GATEWAY", None)
+    if latchkey_directory is not None:
+        env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    return env
+
+
 def _build_env_with_latchkey_directory(latchkey_directory: Path | None) -> dict[str, str] | None:
     """Build an env override that pins ``LATCHKEY_DIRECTORY`` for a child process.
 
@@ -324,26 +354,29 @@ def _build_env_with_latchkey_directory(latchkey_directory: Path | None) -> dict[
 class Latchkey(MutableModel):
     """Wraps every interaction with the upstream ``latchkey`` CLI.
 
-    Spawns, adopts, and tracks per-agent ``latchkey gateway`` subprocesses;
+    Spawns, adopts, and tracks the single shared ``latchkey gateway``
+    subprocess; derives the gateway's shared password and mints
+    per-agent permissions-override JWTs via ``latchkey gateway create-jwt``;
     exposes ``services_info`` to query credential state and supported auth
-    options; and ``auth_browser`` to launch the interactive sign-in flow. Gateways are spawned detached
-    (``start_new_session=True`` inside :func:`spawn_detached_latchkey_gateway`)
-    so they survive desktop-client restarts; lifecycle is reconciled against
-    persisted records on ``start()``.
+    options; and ``auth_browser`` to launch the interactive sign-in flow.
+    The gateway is spawned detached (``start_new_session=True`` inside
+    :func:`spawn_detached_latchkey_gateway`) so it survives desktop-client
+    restarts; its lifecycle is reconciled against the persisted record on
+    ``initialize()``.
     """
 
     latchkey_binary: str = Field(default=LATCHKEY_BINARY, frozen=True, description="Path to Latchkey binary")
     listen_host: str = Field(
         default=_DEFAULT_LISTEN_HOST,
         frozen=True,
-        description="Host to bind each spawned gateway to",
+        description="Host to bind the shared gateway to",
     )
     latchkey_directory: Path | None = Field(
         default=None,
         frozen=True,
         description=(
             "Value to pass through as ``LATCHKEY_DIRECTORY`` to every spawned subprocess "
-            "(gateway, services-info, auth-browser, ensure-browser). When set, all "
+            "(gateway, services-info, auth-browser, ensure-browser, create-jwt). When set, all "
             "minds-managed latchkey calls share this credential/config directory "
             "instead of falling back to the default ``~/.latchkey``. When ``None``, "
             "latchkey uses its own default."
@@ -351,7 +384,8 @@ class Latchkey(MutableModel):
     )
 
     _data_dir: Path | None = PrivateAttr(default=None)
-    _infos: dict[str, LatchkeyGatewayInfo] = PrivateAttr(default_factory=dict)
+    _info: LatchkeyGatewayInfo | None = PrivateAttr(default=None)
+    _gateway_password: str | None = PrivateAttr(default=None)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _is_initialized: bool = PrivateAttr(default=False)
     _has_ensured_browser: bool = PrivateAttr(default=False)
@@ -359,119 +393,203 @@ class Latchkey(MutableModel):
     # -- Gateway lifecycle ---------------------------------------------------
 
     def initialize(self, data_dir: Path) -> None:
-        """Load persisted gateway infos from ``data_dir``, adopting still-alive ones.
+        """Load the persisted gateway info from ``data_dir``, adopting it if alive.
 
-        Dead records are removed from disk. Gateways that are still running
-        and still look like ours are tracked internally so subsequent calls
-        to ``ensure_gateway_started`` are no-ops for those agents.
+        A dead record is removed from disk. A live, still-ours gateway is
+        adopted so subsequent calls to ``ensure_gateway_started`` are
+        no-ops. Any leftover per-agent gateway records from older
+        minds versions are also cleaned up here (their PIDs are
+        terminated best-effort) since the new architecture only uses one
+        shared gateway.
 
-        Liveness probes include a TCP connect per info (up to
-        ``_LIVENESS_CONNECT_TIMEOUT_SECONDS`` each), which is why they run
+        Liveness probes include a TCP connect (up to
+        ``_LIVENESS_CONNECT_TIMEOUT_SECONDS``), which is why they run
         outside the lock. ``initialize()`` is only expected to be called
         once before any concurrent use, so there is no real contention here.
         """
-        adopted: list[LatchkeyGatewayInfo] = []
-        stale: list[LatchkeyGatewayInfo] = []
-        for info in list_gateway_infos(data_dir):
-            if _is_info_alive(info):
-                adopted.append(info)
-            else:
-                stale.append(info)
+        existing = load_gateway_info(data_dir)
+        is_alive = existing is not None and _is_info_alive(existing)
+
+        # Best-effort cleanup of legacy per-agent gateway records that an
+        # older minds version might have left behind. We can't recover
+        # the PIDs from the record alone here (the records were already
+        # parsed inside ``delete_legacy_per_agent_gateway_records`` and
+        # discarded along with the file), but the intent is just to
+        # avoid stale files lying around -- leftover processes will be
+        # reaped when the user's machine reboots or when the user
+        # explicitly cleans them up.
+        legacy_agent_ids = delete_legacy_per_agent_gateway_records(data_dir)
+        if legacy_agent_ids:
+            logger.info(
+                "Removed {} legacy per-agent latchkey gateway record(s); minds now uses a single shared gateway",
+                len(legacy_agent_ids),
+            )
 
         with self._lock:
             if self._is_initialized:
                 return
             self._data_dir = data_dir
-            self._infos.clear()
-            for info in adopted:
+            if is_alive and existing is not None:
                 logger.info(
-                    "Adopted existing Latchkey gateway for agent {} (pid={}, {}:{})",
-                    info.agent_id,
-                    info.pid,
-                    info.host,
-                    info.port,
+                    "Adopted existing shared Latchkey gateway (pid={}, {}:{})",
+                    existing.pid,
+                    existing.host,
+                    existing.port,
                 )
-                self._infos[str(info.agent_id)] = info
-            for info in stale:
+                self._info = existing
+            elif existing is not None:
                 logger.info(
-                    "Discarding stale Latchkey gateway record for agent {} (pid={})",
-                    info.agent_id,
-                    info.pid,
+                    "Discarding stale Latchkey gateway record (pid={})",
+                    existing.pid,
                 )
-                delete_gateway_info(data_dir, info.agent_id)
+                delete_gateway_info(data_dir)
+                self._info = None
+            else:
+                self._info = None
             self._is_initialized = True
 
-    def ensure_gateway_started(self, agent_id: AgentId) -> LatchkeyGatewayInfo:
-        """Start a gateway for ``agent_id`` if one is not already running.
+    def ensure_gateway_started(self) -> LatchkeyGatewayInfo:
+        """Start the shared gateway if it is not already running.
 
         Idempotent: returns the existing info when an adopted/live gateway
         is already tracked, otherwise spawns a fresh one on a newly
         allocated free port and persists a record.
 
         The slow steps -- liveness probe of an existing info and subprocess
-        spawn -- run outside the lock; committing the result to ``_infos``
+        spawn -- run outside the lock; committing the result to ``_info``
         and the on-disk record is done atomically under the lock.
         """
-        aid_str = str(agent_id)
         with self._lock:
             data_dir = self._require_initialized_locked()
-            existing = self._infos.get(aid_str)
+            existing = self._info
         if existing is not None and _is_info_alive(existing):
             return existing
         # Stale or absent -- spawn a replacement outside the lock.
-        info = self._spawn_gateway(agent_id, data_dir)
+        info = self._spawn_gateway(data_dir)
         with self._lock:
-            self._infos[aid_str] = info
+            self._info = info
             save_gateway_info(data_dir, info)
         return info
 
-    def stop_gateway_for_agent(self, agent_id: AgentId) -> None:
-        """Terminate the gateway for ``agent_id`` and delete its records.
+    def stop_gateway(self) -> None:
+        """Terminate the shared gateway and delete its record.
 
         The in-memory entry and the on-disk gateway record are removed
         atomically under the lock so no other caller can observe a
         half-torn-down state. ``_terminate_pid`` is deliberately called
         outside the lock because it can wait up to
-        ``_TERMINATE_GRACE_SECONDS`` for the child to exit. The per-agent
-        ``latchkey_permissions.json`` is intentionally *not* deleted: minds does not
-        currently delete other per-agent state on destruction either, and
-        keeping the file around means previously-granted permissions
-        survive desktop-client restarts and reboots.
+        ``_TERMINATE_GRACE_SECONDS`` for the child to exit. Per-agent
+        ``latchkey_permissions.json`` files are intentionally *not*
+        deleted: minds does not delete other per-agent state on
+        destruction either, and keeping them around means previously
+        granted permissions survive desktop-client restarts and reboots.
         """
-        aid_str = str(agent_id)
         with self._lock:
             data_dir = self._data_dir
-            info = self._infos.pop(aid_str, None)
-            if info is not None and data_dir is not None:
-                delete_gateway_info(data_dir, agent_id)
+            info = self._info
+            self._info = None
+            if data_dir is not None:
+                delete_gateway_info(data_dir)
         if info is not None:
-            logger.info("Stopping Latchkey gateway for agent {} (pid={})", agent_id, info.pid)
+            logger.info("Stopping shared Latchkey gateway (pid={})", info.pid)
             _terminate_pid(info.pid)
 
-    def reconcile_with_known_agents(self, known_agent_ids: frozenset[AgentId]) -> None:
-        """Terminate gateways whose agent is no longer in ``known_agent_ids``.
+    def get_gateway_info(self) -> LatchkeyGatewayInfo | None:
+        """Return the shared gateway info, or ``None`` if no gateway is tracked."""
+        with self._lock:
+            return self._info
 
-        Intended to be called once after the initial ``mngr observe``
-        snapshot has arrived, so we can clean up gateways that belonged to
-        agents destroyed while the desktop client was not running.
+    # -- Password / JWT derivation ------------------------------------------
+
+    def derive_gateway_password(self) -> str:
+        """Return a stable password for the shared gateway.
+
+        Derived by minting a permissions-override JWT for a hard-coded
+        sentinel path (which is never validated, never reached, and
+        never consulted by the gateway itself) and SHA-256-hashing the
+        result. The derivation is purely a function of the user's
+        Latchkey encryption key, so the password is stable across
+        desktop-client restarts without minds having to persist it in
+        plaintext anywhere.
+
+        The same value is set as ``LATCHKEY_GATEWAY_LISTEN_PASSWORD`` on
+        the spawned gateway and as ``LATCHKEY_GATEWAY_PASSWORD`` on every
+        agent so the gateway accepts agent traffic.
+
+        Cached after the first successful invocation. Raises
+        ``LatchkeyJwtMintError`` if ``latchkey gateway create-jwt``
+        fails (e.g. no encryption key configured).
         """
         with self._lock:
-            if not self._is_initialized:
-                return
-            orphaned = [aid_str for aid_str in self._infos if AgentId(aid_str) not in known_agent_ids]
-        for aid_str in orphaned:
-            logger.info("Reconciling: agent {} no longer known; terminating its Latchkey gateway", aid_str)
-            self.stop_gateway_for_agent(AgentId(aid_str))
-
-    def get_gateway_info(self, agent_id: AgentId) -> LatchkeyGatewayInfo | None:
-        """Return the gateway info for ``agent_id``, or ``None`` if no gateway is tracked."""
+            cached = self._gateway_password
+        if cached is not None:
+            return cached
+        sentinel_jwt = self._run_create_jwt(_GATEWAY_PASSWORD_SENTINEL_PATH)
+        password = hashlib.sha256(sentinel_jwt.encode("utf-8")).hexdigest()
         with self._lock:
-            return self._infos.get(str(agent_id))
+            self._gateway_password = password
+        return password
 
-    def list_gateways(self) -> tuple[LatchkeyGatewayInfo, ...]:
-        """Return all currently tracked gateways."""
-        with self._lock:
-            return tuple(self._infos.values())
+    def create_permissions_override_jwt(self, permissions_path: Path) -> str:
+        """Mint an HS256 JWT that points the gateway at ``permissions_path``.
+
+        Wraps ``latchkey gateway create-jwt --no-validate <path>``. The
+        ``--no-validate`` flag is used because the file may not exist on
+        the desktop-client filesystem at JWT-mint time (it lives wherever
+        the gateway can read it; for now that is the same machine, but
+        the JWT itself does not depend on existence). The returned JWT
+        is the value to send in ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE``
+        / the ``X-Latchkey-Gateway-Permissions-Override`` header.
+
+        Raises ``LatchkeyJwtMintError`` if minting fails.
+        """
+        return self._run_create_jwt(str(permissions_path))
+
+    def _run_create_jwt(self, permissions_config_path: str) -> str:
+        """Run ``latchkey gateway create-jwt --no-validate <path>`` and return the JWT.
+
+        Skips the existence check (``--no-validate``) so callers can
+        mint JWTs for paths the desktop-client process cannot see (and
+        so we can use the password-derivation sentinel path which is
+        intentionally bogus). ``LATCHKEY_GATEWAY`` is explicitly
+        cleared from the child env: the upstream CLI refuses to run
+        ``gateway create-jwt`` in gateway-client mode, and the user
+        might have it set in their shell.
+        """
+        env = _build_local_latchkey_env(self.latchkey_directory)
+        cg = ConcurrencyGroup(name="latchkey-create-jwt")
+        try:
+            with cg:
+                result = cg.run_process_to_completion(
+                    command=[
+                        self.latchkey_binary,
+                        "gateway",
+                        "create-jwt",
+                        "--no-validate",
+                        permissions_config_path,
+                    ],
+                    timeout=_CREATE_JWT_TIMEOUT_SECONDS,
+                    is_checked_after=False,
+                    env=env,
+                )
+        except ConcurrencyExceptionGroup as group:
+            if not group.only_exception_is_instance_of(ProcessSetupError):
+                raise
+            raise LatchkeyJwtMintError(f"Failed to launch 'latchkey gateway create-jwt': {group}") from group
+        if result.returncode != 0:
+            raise LatchkeyJwtMintError(
+                "'latchkey gateway create-jwt' exited {} for {!r}: {}".format(
+                    result.returncode,
+                    permissions_config_path,
+                    result.stderr.strip() or result.stdout.strip(),
+                )
+            )
+        jwt = result.stdout.strip()
+        if not jwt:
+            raise LatchkeyJwtMintError(
+                f"'latchkey gateway create-jwt' produced empty output for {permissions_config_path!r}"
+            )
+        return jwt
 
     # -- Service introspection -----------------------------------------------
 
@@ -575,36 +693,48 @@ class Latchkey(MutableModel):
             )
         return self._data_dir
 
-    def _spawn_gateway(self, agent_id: AgentId, data_dir: Path) -> LatchkeyGatewayInfo:
+    def _spawn_gateway(self, data_dir: Path) -> LatchkeyGatewayInfo:
         """Build a fresh ``LatchkeyGatewayInfo`` by spawning a detached gateway.
 
-        Does not mutate ``_infos`` or persist the info -- the caller is
-        responsible for committing both under the lock.
+        Materializes the deny-all default permissions file, derives the
+        gateway password (so the agent-side password matches), and only
+        then spawns. Does not mutate ``_info`` or persist the info -- the
+        caller is responsible for committing both under the lock.
         """
         if shutil.which(self.latchkey_binary) is None and not Path(self.latchkey_binary).is_file():
             raise LatchkeyBinaryNotFoundError(f"Latchkey binary not found: {self.latchkey_binary}")
 
         # Fire off ``latchkey ensure-browser`` in parallel the first time we
-        # actually spawn something in this minds session. It runs detached
-        # alongside the gateway spawn below and we don't wait for it.
+        # actually spawn the gateway in this minds session. It runs
+        # detached alongside the gateway spawn below and we don't wait for
+        # it.
         self._ensure_browser_once(data_dir)
 
-        port = _allocate_free_port(self.listen_host)
-        log_path = gateway_log_path(data_dir, agent_id)
-        permissions_path = permissions_path_for_agent(data_dir, agent_id)
-
         # Latchkey treats a missing permissions file as ``allow all``, so
-        # we always materialize an empty-rules file before spawning the
-        # gateway. This guarantees the gateway starts in a deny-all state
-        # and only grants permissions the user has explicitly approved.
-        # Pre-existing files are left untouched so previously granted
-        # permissions survive desktop-client restarts.
-        if not permissions_path.is_file():
-            save_permissions(permissions_path, LatchkeyPermissionsConfig())
+        # we always materialize an empty-rules default file before
+        # spawning the gateway. This guarantees that any request that
+        # fails to attach a valid permissions-override JWT is denied for
+        # every service rather than implicitly granted. Pre-existing
+        # files are left untouched; minds always rewrites them with
+        # empty rules anyway, but on adoption we leave the existing one
+        # alone in case the user inspected it.
+        default_perms = default_permissions_path(data_dir)
+        if not default_perms.is_file():
+            save_permissions(default_perms, LatchkeyPermissionsConfig())
+
+        # Derive the password before spawning so the gateway and the
+        # eventual agent-side env var agree on a value. ``derive_gateway_password``
+        # is cached, so subsequent calls are free.
+        try:
+            password = self.derive_gateway_password()
+        except LatchkeyJwtMintError as e:
+            raise LatchkeyError(f"Failed to derive gateway password: {e}") from e
+
+        port = _allocate_free_port(self.listen_host)
+        log_path = gateway_log_path(data_dir)
 
         with log_span(
-            "Starting Latchkey gateway for agent {} on {}:{}",
-            agent_id,
+            "Starting shared Latchkey gateway on {}:{}",
             self.listen_host,
             port,
         ):
@@ -615,13 +745,13 @@ class Latchkey(MutableModel):
                     listen_port=port,
                     log_path=log_path,
                     latchkey_directory=self.latchkey_directory,
-                    permissions_config_path=permissions_path,
+                    permissions_config_path=default_perms,
+                    listen_password=password,
                 )
             except OSError as e:
-                raise LatchkeyError(f"Failed to spawn Latchkey gateway for agent {agent_id}: {e}") from e
+                raise LatchkeyError(f"Failed to spawn shared Latchkey gateway: {e}") from e
 
         return LatchkeyGatewayInfo(
-            agent_id=agent_id,
             host=self.listen_host,
             port=port,
             pid=pid,
@@ -635,7 +765,7 @@ class Latchkey(MutableModel):
         browser into the shared latchkey directory. It only needs to succeed
         once per machine, but re-running it is a cheap no-op. We call it
         once per minds session at the point we know latchkey is actually
-        being used (i.e. right before spawning our first gateway), fire and
+        being used (i.e. right before spawning the gateway), fire and
         forget. Failures here are logged but must not prevent gateway spawn.
         """
         with self._lock:
@@ -655,23 +785,24 @@ class Latchkey(MutableModel):
         logger.info("Spawned ``latchkey ensure-browser`` (pid={}, log={})", pid, log_path)
 
 
-# -- mngr-stream discovery callbacks ------------------------------------------
+# -- mngr-stream discovery callback -------------------------------------------
 
 
 class LatchkeyDiscoveryHandler(FrozenModel):
-    """Discovery callback that spawns a Latchkey gateway for each agent and tunnels it in.
+    """Discovery callback that spawns the shared Latchkey gateway and tunnels it in.
 
     Intended to be registered via ``MngrStreamManager.add_on_agent_discovered_callback``.
 
-    For every discovered agent, ensures a dedicated ``latchkey gateway`` subprocess
-    is running on the desktop host. Agents that reach the desktop via SSH
-    (containers, VMs, VPS) also get a reverse tunnel that exposes the host-side
-    gateway on the agent's own ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``. DEV-mode
-    agents run on the bare host and need no tunnel; their ``LATCHKEY_GATEWAY``
-    env var points directly at the dynamic host port.
+    For every discovered agent, ensures the shared ``latchkey gateway``
+    subprocess is running on the desktop host. Agents that reach the
+    desktop via SSH (containers, VMs, VPS) also get a reverse tunnel that
+    exposes the host-side gateway on the agent's own
+    ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``. DEV-mode agents run on the
+    bare host and need no tunnel; their ``LATCHKEY_GATEWAY`` env var
+    points directly at the dynamic host port.
     """
 
-    latchkey: Latchkey = Field(description="Latchkey wrapper that owns the gateway subprocesses")
+    latchkey: Latchkey = Field(description="Latchkey wrapper that owns the shared gateway subprocess")
     tunnel_manager: SSHTunnelManager = Field(
         description="SSH tunnel manager used to reverse-forward the host-side gateway into remote agents"
     )
@@ -679,9 +810,9 @@ class LatchkeyDiscoveryHandler(FrozenModel):
     def __call__(self, agent_id: AgentId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
         del provider_name
         try:
-            info = self.latchkey.ensure_gateway_started(agent_id)
+            info = self.latchkey.ensure_gateway_started()
         except LatchkeyError as e:
-            logger.warning("Failed to start Latchkey gateway for agent {}: {}", agent_id, e)
+            logger.warning("Failed to start shared Latchkey gateway for agent {}: {}", agent_id, e)
             return
 
         if ssh_info is None:
@@ -702,41 +833,3 @@ class LatchkeyDiscoveryHandler(FrozenModel):
                 info.port,
                 e,
             )
-
-
-class LatchkeyDestructionHandler(FrozenModel):
-    """Discovery callback that tears down the gateway when an agent is destroyed."""
-
-    latchkey: Latchkey = Field(description="Latchkey wrapper that owns the gateway subprocesses")
-
-    def __call__(self, agent_id: AgentId) -> None:
-        self.latchkey.stop_gateway_for_agent(agent_id)
-
-
-class LatchkeyReconcileCallback(MutableModel):
-    """Resolver change callback that reconciles gateways once initial discovery completes.
-
-    Registered against ``MngrCliBackendResolver.add_on_change_callback`` by the
-    desktop client startup. Fires once (the first time
-    ``has_completed_initial_discovery`` returns True), terminates any gateways
-    whose agent is no longer known, then unregisters itself.
-    """
-
-    latchkey: Latchkey = Field(frozen=True, description="Latchkey wrapper to reconcile")
-    resolver: MngrCliBackendResolver = Field(
-        frozen=True, description="Backend resolver whose discovery status we watch"
-    )
-
-    _has_fired: bool = PrivateAttr(default=False)
-    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-
-    def __call__(self) -> None:
-        with self._lock:
-            if self._has_fired:
-                return
-            if not self.resolver.has_completed_initial_discovery():
-                return
-            self._has_fired = True
-        known_agent_ids = frozenset(self.resolver.list_known_agent_ids())
-        self.latchkey.reconcile_with_known_agents(known_agent_ids)
-        self.resolver.remove_on_change_callback(self)
