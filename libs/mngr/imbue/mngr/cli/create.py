@@ -1250,7 +1250,7 @@ def _resolve_source_location(
     # resolve it locally without loading all providers. Loading all
     # providers is expensive and can fail if a provider's external service
     # (e.g. Docker daemon, Modal credentials) is unavailable.
-    if parsed.agent is None and parsed.host is None:
+    if parsed.agent is None and parsed.host_name is None and parsed.provider_name is None:
         source_path = parsed.path if parsed.path is not None else os.getcwd()
         _check_source_does_not_contain_state_dir(Path(source_path), mngr_ctx)
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)

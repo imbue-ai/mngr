@@ -1,8 +1,10 @@
-Fix `mngr create --from @HOST.PROVIDER:PATH` (e.g. `--from @m1.modal:/some/path`),
-which previously failed with "Could not find host with ID or name: HOST.PROVIDER".
-The same fix also lets `mngr limit --host` and other host-name-or-ID inputs accept
-the `host.provider` disambiguation form.
+Accept the `host.provider` qualifier consistently anywhere mngr takes a host
+identifier (previously only the positional `agent@host.provider` form worked).
+For example, `mngr create --from @m1.modal:/some/path`, `mngr limit --host
+m1.modal`, `mngr snapshot create --host m1.modal`, and the `--host` filter on
+list-style commands now all resolve `host.provider` deterministically.
 
-Also fix `mngr create --from` against a remote source: the current-branch lookup
-previously raised `NotImplementedError` for non-local hosts and now runs via the
-host interface so it works for any provider.
+Also fix `mngr create --from` against a remote source: the current-branch
+lookup, and the related git-author/origin-URL lookups in remote-source flows,
+now run through the host interface so they work for any provider rather than
+raising `NotImplementedError`.
