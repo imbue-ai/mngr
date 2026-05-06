@@ -198,6 +198,27 @@ def test_resolve_host_reference_raises_when_not_found() -> None:
         )
 
 
+def test_resolve_host_reference_disambiguates_with_host_provider_form() -> None:
+    """resolve_host_reference should pick the right host when 'host.provider' is given."""
+    host_modal = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("m1"),
+        provider_name=ProviderInstanceName("modal"),
+    )
+    host_docker = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("m1"),
+        provider_name=ProviderInstanceName("docker"),
+    )
+
+    result = resolve_host_reference(
+        host_identifier="m1.modal",
+        all_hosts=[host_modal, host_docker],
+    )
+
+    assert result == host_modal
+
+
 def test_resolve_host_reference_raises_when_multiple_hosts_with_same_name() -> None:
     host_ref1 = DiscoveredHost(
         host_id=HostId.generate(),
@@ -879,6 +900,42 @@ def test_find_all_matching_hosts_multiple() -> None:
     )
     result = find_all_matching_hosts("shared", [host1, host2])
     assert len(result) == 2
+
+
+def test_find_all_matching_hosts_by_host_provider_form() -> None:
+    """find_all_matching_hosts should match the 'host.provider' form."""
+    host_modal = DiscoveredHost(
+        host_id=HostId.generate(), host_name=HostName("m1"), provider_name=ProviderInstanceName("modal")
+    )
+    host_docker = DiscoveredHost(
+        host_id=HostId.generate(), host_name=HostName("m1"), provider_name=ProviderInstanceName("docker")
+    )
+    result = find_all_matching_hosts("m1.modal", [host_modal, host_docker])
+    assert result == [host_modal]
+
+
+def test_find_all_matching_hosts_exact_name_takes_precedence_over_split() -> None:
+    """A host literally named 'foo.bar' should match 'foo.bar' before any host.provider split."""
+    host_literal = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("foo.bar"),
+        provider_name=ProviderInstanceName("docker"),
+    )
+    host_split = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("foo"),
+        provider_name=ProviderInstanceName("bar"),
+    )
+    result = find_all_matching_hosts("foo.bar", [host_literal, host_split])
+    assert result == [host_literal]
+
+
+def test_find_all_matching_hosts_host_provider_form_no_match() -> None:
+    """If the provider suffix does not match any host, return no matches."""
+    host = DiscoveredHost(
+        host_id=HostId.generate(), host_name=HostName("m1"), provider_name=ProviderInstanceName("modal")
+    )
+    assert find_all_matching_hosts("m1.docker", [host]) == []
 
 
 # --- find_all_matching_agents ---

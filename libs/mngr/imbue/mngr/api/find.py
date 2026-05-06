@@ -137,7 +137,12 @@ def find_all_matching_hosts(
     identifier: str,
     all_hosts: Sequence[DiscoveredHost],
 ) -> list[DiscoveredHost]:
-    """Find all hosts matching the given identifier (by ID or name)."""
+    """Find all hosts matching the given identifier (by ID or name).
+
+    Supports the ``host.provider`` form (e.g. ``m1.modal``): if no exact name
+    match is found, the identifier is split on the final dot and matched
+    against the host's ``host_name`` and ``provider_name`` fields.
+    """
     # Try as ID first
     try:
         host_id = HostId(identifier)
@@ -147,12 +152,21 @@ def find_all_matching_hosts(
     except ValueError:
         pass
 
-    # Try as name
+    # Try as name (exact match)
     try:
         host_name = HostName(identifier)
     except ValueError:
         return []
-    return [h for h in all_hosts if h.host_name == host_name]
+    matches = [h for h in all_hosts if h.host_name == host_name]
+    if matches:
+        return matches
+
+    # Fall back to host.provider form
+    provider_name = host_name.provider_name
+    if provider_name is None:
+        return []
+    short_host_name = HostName(host_name.short_name)
+    return [h for h in all_hosts if h.host_name == short_host_name and h.provider_name == provider_name]
 
 
 @pure
