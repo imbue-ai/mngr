@@ -264,6 +264,47 @@ def test_every_project_has_pypi_readme() -> None:
     assert len(errors) == 0, "Projects with PyPI readme issues:\n" + "\n".join(f"  - {e}" for e in errors)
 
 
+_REQUIRED_WHEEL_EXCLUDE_PATTERNS: tuple[str, ...] = (
+    "*_test.py",
+    "test_*.py",
+    "**/conftest.py",
+    "**/testing.py",
+)
+
+
+def test_every_project_excludes_tests_from_wheel() -> None:
+    """Ensure each project's wheel build excludes test code from the published artifact.
+
+    Without this, hatchling bundles `_test.py`, `conftest.py`, and `testing.py`
+    helpers into the wheel, so any consumer that pip-installs the package ships our
+    test code in their `site-packages/`.
+
+    Each project's `[tool.hatch.build.targets.wheel].exclude` must literally contain all
+    of `*_test.py`, `test_*.py`, `**/conftest.py`, and `**/testing.py`. The patterns are
+    required uniformly even for projects that do not currently have a matching file --
+    that way, adding a new `testing.py` (or similar) tomorrow needs no second PR.
+
+    Projects with `only-include` (an explicit whitelist) are exempt.
+    """
+    missing: list[str] = []
+    for project_dir in _get_all_project_dirs():
+        pyproject = tomlkit.parse((project_dir / "pyproject.toml").read_text())
+        wheel = pyproject.get("tool", {}).get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {})
+        if "only-include" in wheel:
+            continue
+        exclude_patterns = [str(x) for x in wheel.get("exclude", [])]
+        absent = [pat for pat in _REQUIRED_WHEEL_EXCLUDE_PATTERNS if pat not in exclude_patterns]
+        if absent:
+            missing.append(f"{project_dir.name} (missing: {absent})")
+
+    assert len(missing) == 0, (
+        "Projects must exclude test files from their wheel build. Add to "
+        "[tool.hatch.build.targets.wheel]:\n"
+        '    exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]\n\n'
+        "Offending projects:\n" + "\n".join(f"  - {m}" for m in missing)
+    )
+
+
 def _has_test_files(project_dir: Path) -> bool:
     """Return True if the project contains any test files."""
     for pattern in ["*_test.py", "test_*.py"]:
