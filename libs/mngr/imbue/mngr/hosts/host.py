@@ -2892,6 +2892,13 @@ class Host(BaseHost, OnlineHostInterface):
         quoted_id = shlex.quote(str(agent_id))
         # SELF excludes our own scan shell so a caller running inside an agent that
         # happens to inherit the env doesn't kill itself.
+        #
+        # Trailing `; true` forces a clean exit: the for loop's exit code is the
+        # last iteration's `[ -r ... ] && grep ... && echo ...` chain, which is 1
+        # when the final PID doesn't match (the common case). Without `; true`,
+        # `result.success` would be False even when stdout contains real matches,
+        # and the env-scan fallback would silently no-op. We rely on stdout
+        # content alone -- the exit code carries no useful signal here.
         cmd = (
             f"AGENT_ID={quoted_id}; "
             "SELF=$$; "
@@ -2901,10 +2908,10 @@ class Host(BaseHost, OnlineHostInterface):
             '    [ "$pid" = "$SELF" ] && continue; '
             '    [ -r "$d/environ" ] && grep -qzaF "MNGR_AGENT_ID=$AGENT_ID" "$d/environ" 2>/dev/null && echo "$pid"; '
             "  done; "
-            "fi"
+            "fi; true"
         )
         result = self.execute_idempotent_command(cmd)
-        if not result.success or not result.stdout.strip():
+        if not result.stdout.strip():
             return []
         return [pid for pid in result.stdout.strip().split("\n") if pid.strip()]
 
