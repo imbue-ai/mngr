@@ -437,15 +437,7 @@ Supported build arguments for the modal provider:
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
     ) -> ProviderInstanceInterface:
-        """Build a Modal provider instance.
-
-        Always constructs a real ``DirectModalInterface``. Tests that need an
-        in-process fake (``modal_proxy.testing.TestingModalInterface``) bypass
-        this factory and construct ``ModalProviderInstance`` directly via
-        ``mngr_modal.testing.make_testing_provider``. This keeps test-only code
-        out of the production import graph (per ``modal_proxy``'s wheel build,
-        which excludes ``testing.py`` from the published wheel).
-        """
+        """Build a Modal provider instance."""
         if not isinstance(config, ModalProviderConfig):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
 
