@@ -27,6 +27,7 @@ import os
 import shutil
 import socket
 import threading
+import time
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -71,6 +72,14 @@ _DEFAULT_LISTEN_HOST: Final[str] = "127.0.0.1"
 _LIVENESS_CONNECT_TIMEOUT_SECONDS: Final[float] = 1.0
 
 _TERMINATE_GRACE_SECONDS: Final[float] = 5.0
+
+# Maximum time to wait after spawning the ``latchkey gateway`` subprocess
+# for it to bind its listen port. Without this, ``_spawn_gateway`` could
+# publish a fresh ``LatchkeyGatewayInfo`` while the child was still in
+# its startup window, and a second ``ensure_gateway_started`` caller's
+# liveness probe would fail and trigger a spurious second spawn.
+_GATEWAY_BIND_TIMEOUT_SECONDS: Final[float] = 10.0
+_GATEWAY_BIND_POLL_INTERVAL_SECONDS: Final[float] = 0.05
 
 # Services-info / create-jwt are normally instant but can stall on slow keychains.
 # The auth-browser flow waits on a real human and is intentionally untimed.
@@ -216,6 +225,29 @@ def _is_port_listening(host: str, port: int) -> bool:
         except OSError:
             return False
     return True
+
+
+def _wait_for_port_listening(host: str, port: int, timeout: float) -> bool:
+    """Poll until ``host:port`` accepts TCP connections, or ``timeout`` elapses.
+
+    Used by ``_spawn_gateway`` to make sure the freshly-spawned
+    ``latchkey gateway`` has bound its port before its
+    ``LatchkeyGatewayInfo`` is published. Without this, a second
+    ``ensure_gateway_started`` caller would probe the still-binding
+    port, see it as dead, and spuriously spawn a duplicate gateway
+    even though the spawn lock was held correctly.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _is_port_listening(host, port):
+            return True
+        # ``threading.Event().wait`` is the canonical interruptible
+        # short sleep in this codebase (the project ratchets against
+        # ``time.sleep`` as a polling primitive).
+        threading.Event().wait(timeout=_GATEWAY_BIND_POLL_INTERVAL_SECONDS)
+    # One last probe in case the port came up between the final sleep
+    # and the deadline, so a slow CI host doesn't false-fail.
+    return _is_port_listening(host, port)
 
 
 def _is_info_alive(info: LatchkeyGatewayInfo) -> bool:
@@ -387,6 +419,14 @@ class Latchkey(MutableModel):
     _info: LatchkeyGatewayInfo | None = PrivateAttr(default=None)
     _gateway_password: str | None = PrivateAttr(default=None)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # Held *only* across the slow spawn path so two concurrent
+    # ``ensure_gateway_started`` callers cannot both decide to spawn
+    # a fresh gateway and leak the loser's subprocess. Kept separate
+    # from ``_lock`` (which is held only for short state-mutation
+    # critical sections) so the TCP liveness probe inside the slow
+    # path doesn't block fast-path readers like ``get_gateway_info``
+    # or ``stop_gateway``.
+    _spawn_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _is_initialized: bool = PrivateAttr(default=False)
     _has_ensured_browser: bool = PrivateAttr(default=False)
 
@@ -451,25 +491,42 @@ class Latchkey(MutableModel):
     def ensure_gateway_started(self) -> LatchkeyGatewayInfo:
         """Start the shared gateway if it is not already running.
 
-        Idempotent: returns the existing info when an adopted/live gateway
-        is already tracked, otherwise spawns a fresh one on a newly
-        allocated free port and persists a record.
+        Idempotent and thread-safe: concurrent callers either all see
+        the existing gateway (fast path) or serialize on ``_spawn_lock``
+        so exactly one of them spawns a fresh subprocess and the others
+        adopt its result (slow path). Without that serialization, two
+        threads racing past the initial ``_info`` check would each spawn
+        a real ``latchkey gateway`` subprocess and the second write to
+        ``_info`` would leak the loser's process.
 
-        The slow steps -- liveness probe of an existing info and subprocess
-        spawn -- run outside the lock; committing the result to ``_info``
-        and the on-disk record is done atomically under the lock.
+        The TCP liveness probe and subprocess spawn run outside
+        ``_lock`` so unrelated fast-path callers (``get_gateway_info``,
+        ``stop_gateway``, ``_ensure_browser_once``) are not blocked
+        for the up-to-1s probe / subprocess fork window.
         """
+        # Fast path: read current state under the short lock, then
+        # liveness-probe the existing gateway (if any) without
+        # blocking other state accesses.
         with self._lock:
             data_dir = self._require_initialized_locked()
             existing = self._info
         if existing is not None and _is_info_alive(existing):
             return existing
-        # Stale or absent -- spawn a replacement outside the lock.
-        info = self._spawn_gateway(data_dir)
-        with self._lock:
-            self._info = info
-            save_gateway_info(data_dir, info)
-        return info
+        # Slow path: serialize spawning. The double-check after
+        # acquiring ``_spawn_lock`` matters: while we waited for the
+        # spawn lock another caller may have already spawned and
+        # published a fresh gateway, in which case we adopt it and
+        # do not spawn a second one.
+        with self._spawn_lock:
+            with self._lock:
+                existing = self._info
+            if existing is not None and _is_info_alive(existing):
+                return existing
+            info = self._spawn_gateway(data_dir)
+            with self._lock:
+                self._info = info
+                save_gateway_info(data_dir, info)
+            return info
 
     def stop_gateway(self) -> None:
         """Terminate the shared gateway and delete its record.
@@ -750,6 +807,21 @@ class Latchkey(MutableModel):
                 )
             except OSError as e:
                 raise LatchkeyError(f"Failed to spawn shared Latchkey gateway: {e}") from e
+
+            # Block until the freshly-spawned subprocess actually binds
+            # its port. Returning earlier would let a concurrent
+            # ``ensure_gateway_started`` caller probe the not-yet-bound
+            # port, conclude the gateway is dead, and spuriously spawn
+            # a second one. If the gateway never comes up we tear it
+            # down so the caller doesn't end up with a leaked
+            # subprocess plus a misleading published record.
+            if not _wait_for_port_listening(self.listen_host, port, timeout=_GATEWAY_BIND_TIMEOUT_SECONDS):
+                _terminate_pid(pid)
+                raise LatchkeyError(
+                    "Spawned latchkey gateway (pid={}) did not bind {}:{} within {:.1f}s; see {} for details".format(
+                        pid, self.listen_host, port, _GATEWAY_BIND_TIMEOUT_SECONDS, log_path
+                    )
+                )
 
         return LatchkeyGatewayInfo(
             host=self.listen_host,

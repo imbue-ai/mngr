@@ -273,6 +273,82 @@ def test_initialize_cleans_up_legacy_per_agent_records(tmp_path: Path) -> None:
     assert not (legacy_dir / "latchkey_gateway.json").exists()
 
 
+def test_concurrent_ensure_gateway_started_spawns_at_most_one_subprocess(tmp_path: Path) -> None:
+    """Two threads racing through ``ensure_gateway_started`` must not both spawn.
+
+    Without the spawn lock, both callers would observe ``_info`` as
+    ``None``, both would proceed to spawn a real subprocess, and the
+    second write to ``_info`` would leak the loser's process. We
+    detect that by counting how many distinct PIDs the manager hands
+    back across many concurrent callers and how many ``latchkey``
+    invocations reached the binary.
+    """
+    invocation_counter = tmp_path / "gateway_invocations"
+    script = tmp_path / "latchkey"
+    # The fake binary records every invocation that hits the
+    # ``gateway`` subcommand (not ``ensure-browser`` / ``create-jwt``,
+    # which are unrelated bookkeeping) and then sleeps briefly before
+    # binding its port. The artificial delay widens the race window
+    # so the test reliably catches a regression to the no-lock
+    # behaviour.
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, socket, signal, sys, time\n"
+        'if sys.argv[1] == "ensure-browser":\n'
+        "    sys.exit(0)\n"
+        'if sys.argv[1:3] == ["gateway", "create-jwt"]:\n'
+        "    args = [a for a in sys.argv[3:] if not a.startswith('--')]\n"
+        "    print(f'fake-jwt-for:{args[0]}')\n"
+        "    sys.exit(0)\n"
+        'assert sys.argv[1] == "gateway"\n'
+        f"open({str(invocation_counter)!r}, 'a').write(f'{{os.getpid()}}\\n')\n"
+        "time.sleep(0.5)\n"
+        "host = os.environ['LATCHKEY_GATEWAY_LISTEN_HOST']\n"
+        "port = int(os.environ['LATCHKEY_GATEWAY_LISTEN_PORT'])\n"
+        "sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+        "sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        "sock.bind((host, port))\n"
+        "sock.listen(128)\n"
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+        "signal.pause()\n"
+    )
+    script.chmod(0o755)
+
+    manager = Latchkey(latchkey_binary=str(script))
+    manager.initialize(data_dir=tmp_path)
+
+    barrier = threading.Barrier(8)
+    results: list[LatchkeyGatewayInfo] = []
+    results_lock = threading.Lock()
+
+    def worker() -> None:
+        # Sync all workers so they all attempt the spawn at roughly
+        # the same instant. This maximises the chance of catching a
+        # regression to the no-lock behaviour.
+        barrier.wait()
+        info = manager.ensure_gateway_started()
+        with results_lock:
+            results.append(info)
+
+    threads = [threading.Thread(target=worker, name=f"spawn-race-{i}") for i in range(8)]
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
+        # All callers must agree on a single gateway info.
+        assert len({(info.pid, info.port) for info in results}) == 1, results
+        # And the fake binary must have been invoked exactly once for
+        # the ``gateway`` subcommand. (``ensure-browser`` and
+        # ``create-jwt`` invocations are short-circuited above and do
+        # not write to this file.)
+        assert invocation_counter.is_file()
+        invocations = invocation_counter.read_text().splitlines()
+        assert len(invocations) == 1, f"expected one gateway spawn, got {invocations}"
+    finally:
+        manager.stop_gateway()
+
+
 def test_stop_gateway_terminates_subprocess_and_removes_record(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_binary=str(fake_binary))
