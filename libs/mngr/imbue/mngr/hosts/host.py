@@ -2885,11 +2885,12 @@ class Host(BaseHost, OnlineHostInterface):
         whose ancestor died abruptly (SIGKILL, OOM, segfault) -- their reparenting
         to PID 1 hides them from the tmux pane / pgrep -P descendant walk.
 
-        Linux: walks /proc/<pid>/environ (NUL-separated; grep -z makes -F search
-        per-record). macOS: ps -E does not expose env for processes once they've
-        reparented to launchd (SIP restriction), so this is a best-effort no-op
-        there -- the tree walk handles the typical macOS case where the pane
-        process is still alive.
+        Linux: walks /proc/<pid>/environ. The file is NUL-separated KEY=VALUE
+        records, so `grep -z` is used and `^` anchors at the start of each record
+        (see the inline comment below for why anchoring matters). macOS: ps -E
+        does not expose env for processes once they've reparented to launchd
+        (SIP restriction), so this is a best-effort no-op there -- the tree walk
+        handles the typical macOS case where the pane process is still alive.
 
         Why an env-marker scan instead of a process-group / setsid mechanism: prior
         attempts to manage the agent process tree via process groups have been
