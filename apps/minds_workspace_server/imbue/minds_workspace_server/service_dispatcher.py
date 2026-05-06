@@ -194,6 +194,8 @@ def _build_proxy_response(
                 service_name=service_name,
                 backend_url=backend_request_url,
             )
+        else:
+            pass
         resp_headers.setdefault(header_key, [])
         resp_headers[header_key].append(header_value)
 
