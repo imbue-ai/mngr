@@ -918,7 +918,7 @@ class CreateCliOptions(CommonCliOptions):
     message: str | None
     message_file: str | None
     edit_message: bool
-    attach_command: str | None
+    session_command: str | None
     idle_timeout: str | None
     idle_mode: str | None
     activity_sources: str | None

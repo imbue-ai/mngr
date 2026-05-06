@@ -187,7 +187,7 @@ def _resolve_or_generate_agent_name(address: AgentAddress, opts: CreateCliOption
 # ``_reject_incompatible_headless_flags`` for rationale.
 _HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
     ("edit_message", "--edit-message"),
-    ("attach_command", "--attach-command"),
+    ("session_command", "--session-command"),
     ("connect_command", "--connect-command"),
 )
 
@@ -239,7 +239,7 @@ def _reject_incompatible_headless_flags(
         raise UserInputError(
             f"Headless agent type '{agent_type_name}' does not support: {flags_str}. "
             f"The headless flow streams output and auto-destroys, so flags for the "
-            f"post-create connect/attach phase (e.g. --reconnect, --attach-command), "
+            f"post-create connect/attach phase (e.g. --reconnect, --session-command), "
             f"for send-message-based delivery (--edit-message), and for long-lived "
             f"agents (--reuse, --update, --start-on-boot) do not apply."
         )
@@ -522,7 +522,7 @@ class _CreateCommand(click.Command):
     is_flag=True,
     help="Open an editor to compose the initial message (uses $EDITOR). Editor runs in parallel with agent creation. If --message or --message-file is provided, their content is used as initial editor content.",
 )
-@optgroup.option("--attach-command", help="Command to run instead of attaching to main session")
+@optgroup.option("--session-command", help="Command to run instead of attaching to main session")
 @optgroup.option(
     "--connect-command",
     help="Command to run instead of the builtin connect. MNGR_AGENT_NAME and MNGR_SESSION_NAME env vars are set.",
@@ -817,7 +817,7 @@ def _create_agent(
         message=None,
         retry_count=mngr_ctx.config.retry.connect_retry_times,
         retry_delay=mngr_ctx.config.retry.connect_retry_delay,
-        attach_command=opts.attach_command,
+        session_command=opts.session_command,
     )
 
     # If --reuse is set, try to find and reuse an existing agent with the same name
