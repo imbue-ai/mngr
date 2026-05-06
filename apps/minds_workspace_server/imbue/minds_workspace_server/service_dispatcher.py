@@ -39,6 +39,7 @@ from imbue.minds_workspace_server.proxy import generate_backend_loading_html
 from imbue.minds_workspace_server.proxy import generate_bootstrap_html
 from imbue.minds_workspace_server.proxy import generate_service_worker_js
 from imbue.minds_workspace_server.proxy import rewrite_cookie_path
+from imbue.minds_workspace_server.proxy import rewrite_location_header
 from imbue.minds_workspace_server.proxy import rewrite_proxied_html
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -176,6 +177,8 @@ def _build_proxy_response(
     service_name: ServiceName,
 ) -> Response:
     """Transform a backend httpx response into a FastAPI Response with header/content rewriting."""
+    is_redirect = 300 <= backend_response.status_code < 400
+    backend_request_url = str(backend_response.request.url)
     resp_headers: dict[str, list[str]] = {}
     for header_key, header_value in backend_response.headers.multi_items():
         if header_key.lower() in _EXCLUDED_RESPONSE_HEADERS:
@@ -184,6 +187,12 @@ def _build_proxy_response(
             header_value = rewrite_cookie_path(
                 set_cookie_header=header_value,
                 service_name=service_name,
+            )
+        elif is_redirect and header_key.lower() == "location":
+            header_value = rewrite_location_header(
+                location=header_value,
+                service_name=service_name,
+                backend_url=backend_request_url,
             )
         resp_headers.setdefault(header_key, [])
         resp_headers[header_key].append(header_value)
