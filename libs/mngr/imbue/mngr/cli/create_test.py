@@ -1022,7 +1022,7 @@ def test_create_headless_allows_no_forms_of_boolean_pair_flags(
     Matches the --no-connect treatment: headless already does not
     connect/reconnect/reuse/update/start-on-boot, so the --no-* form is a
     redundant-but-compatible assertion, not a conflict. Pairs each
-    allowed flag with --attach-command (still rejected) so the validator
+    allowed flag with --session-command (still rejected) so the validator
     runs and we can confirm the allowed flag is not in the error listing.
     """
     result = cli_runner.invoke(
@@ -1032,14 +1032,14 @@ def test_create_headless_allows_no_forms_of_boolean_pair_flags(
             "headless_command",
             "--foreground",
             no_form_flag,
-            "--attach-command",
+            "--session-command",
             "tmux attach",
         ],
         obj=plugin_manager,
     )
 
     assert result.exit_code != 0
-    assert "--attach-command" in result.output
+    assert "--session-command" in result.output
     assert no_form_flag not in result.output
 
 

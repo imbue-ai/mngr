@@ -580,7 +580,7 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
             "--pass-host-env",
             "--activity-sources",
             "--reconnect",
-            "--attach-command",
+            "--session-command",
             "--connect-command",
         }
     ),
