@@ -2890,6 +2890,17 @@ class Host(BaseHost, OnlineHostInterface):
         reparented to launchd (SIP restriction), so this is a best-effort no-op
         there -- the tree walk handles the typical macOS case where the pane
         process is still alive.
+
+        Why an env-marker scan instead of a process-group / setsid mechanism: prior
+        attempts to manage the agent process tree via process groups have been
+        deliberately retired. setsid-wrapping the pane command was removed in
+        c4ac00242c (forked-and-exited intermediate caused a start_agents race),
+        and `kill -- -<pgid>` was abandoned in 4ebf66d2f4 because bash job control
+        in interactive panes puts every backgrounded process (e.g. `npm exec ... &`
+        spawned by claude) into its own pgrp, so the pane's pgrp does not cover the
+        descendants we need to kill. Env-marker inheritance survives both job
+        control and reparenting without re-introducing the issues those commits
+        fixed.
         """
         # AgentId is `agent-<32 hex chars>` (see RandomId), so the value is
         # regex-safe and does not need escaping for grep BRE.
