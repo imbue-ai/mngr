@@ -1082,6 +1082,12 @@ def test_stop_agent_kills_orphaned_processes_by_env_marker(
     walk in _collect_session_pids and so survived `mngr stop`. The fix scans by
     MNGR_AGENT_ID env var, which the agent's env file exports into every spawned
     process and which is preserved across reparenting.
+
+    The orphan is spawned from inside the agent's tmux pane (via the agent's own
+    command) so MNGR_AGENT_ID is inherited via the real production path -- the
+    env file sourced with `set -a`. This validates the load-bearing assumption
+    of the fix end-to-end: if `set -a` is removed or env propagation breaks, the
+    orphan won't carry MNGR_AGENT_ID and the env-scan kill silently no-ops.
     """
     config = MngrConfig(default_host_dir=temp_host_dir, prefix=mngr_test_prefix)
     mngr_ctx = MngrContext(
@@ -1095,31 +1101,31 @@ def test_stop_agent_kills_orphaned_processes_by_env_marker(
     host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
+    # Spawn the orphan as part of the agent's command so it inherits MNGR_AGENT_ID
+    # via the agent's env file (sourced with `set -a` when the pane shell starts).
+    # The (...) subshell backgrounds setsid sleep, records its pid, and exits --
+    # leaving the sleep reparented to PID 1. The trailing `sleep 1000` keeps the
+    # agent process alive so stop_agents has something to stop.
+    marker_file = tmp_path / "orphan_pid"
+    agent_command = (
+        f"(setsid sleep 8472 </dev/null >/dev/null 2>&1 & echo $! > {marker_file}) "
+        f"</dev/null >/dev/null 2>&1; sleep 1000"
+    )
+
     agent = host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
             name=AgentName("orphan-test"),
             agent_type=AgentTypeName("generic"),
-            command=CommandString("sleep 1000"),
+            command=CommandString(agent_command),
         ),
     )
     host.start_agents([agent.id])
     session_name = f"{mngr_test_prefix}{agent.name}"
 
-    # Spawn an orphan: a sleep with MNGR_AGENT_ID set whose parent (the subshell)
-    # exits immediately, leaving the sleep reparented to PID 1. This simulates a
-    # playwright-mcp / claude child surviving after its claude parent dies abruptly.
-    marker_file = tmp_path / "orphan_pid"
-    spawn_cmd = (
-        f"( env MNGR_AGENT_ID={agent.id} setsid sleep 8472 </dev/null >/dev/null 2>&1 & "
-        f"  echo $! > {marker_file} ) </dev/null >/dev/null 2>&1"
-    )
-    success, _ = host._run_shell_command(StringCommand(spawn_cmd))
-    assert success
-
     wait_for(
         lambda: marker_file.exists() and marker_file.read_text().strip() != "",
-        timeout=5.0,
+        timeout=15.0,
         error_message="Orphan PID marker file was not written",
     )
     orphan_pid = marker_file.read_text().strip()
@@ -1127,6 +1133,19 @@ def test_stop_agent_kills_orphaned_processes_by_env_marker(
 
     success, _ = host._run_shell_command(StringCommand(f"kill -0 {orphan_pid} 2>/dev/null"))
     assert success, f"Orphan process {orphan_pid} should be alive before stop"
+
+    # Validate the load-bearing assumption: MNGR_AGENT_ID was inherited by the
+    # orphan through the agent's env file. If this fails, the env-scan fix would
+    # silently no-op in production even though its own logic is correct -- the
+    # env propagation chain (set -a in build_source_env_shell_commands) is what
+    # matters.
+    success, _ = host._run_shell_command(
+        StringCommand(f"grep -qzaF 'MNGR_AGENT_ID={agent.id}' /proc/{orphan_pid}/environ")
+    )
+    assert success, (
+        f"Orphan {orphan_pid} does not have MNGR_AGENT_ID={agent.id} in its environ. "
+        f"The agent env file `set -a` chain that this fix depends on is broken."
+    )
 
     # Sanity-check: orphan is NOT a descendant of any pane PID. This is what makes
     # it invisible to the old pane-descendant walk and is precisely the case the
