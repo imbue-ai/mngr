@@ -10,6 +10,7 @@ Sub-modules:
 """
 
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 from loguru import logger
@@ -112,6 +113,7 @@ def launch_and_poll_agents(
     report_path: Path | None,
     all_agents: list[TestAgentInfo],
     all_hosts: dict[str, OnlineHostInterface],
+    launch_failures: list[TestMapReduceResult],
     artifact_output_dir: Path | None = None,
     source_dir: Path | None = None,
     base_commit: str | None = None,
@@ -125,9 +127,9 @@ def launch_and_poll_agents(
     2. Pre-launched polling (test_node_ids empty, all_agents pre-populated):
        polls the already-launched agents without launching any new ones.
 
-    all_agents and all_hosts are input/output parameters: pre-existing entries
-    are tracked from the start, and newly launched agents are appended during
-    execution.
+    all_agents, all_hosts, and launch_failures are input/output parameters:
+    pre-existing entries are tracked from the start, and newly launched
+    agents (or new launch failures) are appended during execution.
 
     Returns (final_details, timed_out_ids, cached_results).
     """
@@ -157,6 +159,7 @@ def launch_and_poll_agents(
         "all_agents": all_agents,
         "all_hosts": all_hosts,
         "agent_id_to_info": agent_id_to_info,
+        "launch_failures": launch_failures,
     }
 
     launch_agents_up_to_limit(**launch_kwargs)
@@ -165,7 +168,7 @@ def launch_and_poll_agents(
             last_result_check[aid] = agent_id_to_info[aid].created_at
 
     if report_path is not None:
-        current_results = build_current_results(all_agents, final_details, timed_out_ids, all_hosts)
+        current_results = build_current_results(all_agents, final_details, timed_out_ids, all_hosts, launch_failures)
         generate_html_report(current_results, report_path, test_artifacts_dir=artifact_output_dir)
 
     while pending_ids or remaining_tests:
@@ -194,7 +197,9 @@ def launch_and_poll_agents(
                 last_result_check[aid] = agent_id_to_info[aid].created_at
 
         if timed_out_this_round and report_path is not None:
-            current_results = build_current_results(all_agents, final_details, timed_out_ids, all_hosts)
+            current_results = build_current_results(
+                all_agents, final_details, timed_out_ids, all_hosts, launch_failures
+            )
             generate_html_report(current_results, report_path, test_artifacts_dir=artifact_output_dir)
 
         if not pending_ids and not remaining_tests:
@@ -305,7 +310,9 @@ def launch_and_poll_agents(
                     changed = True
 
         if (changed or timed_out_this_round) and report_path is not None:
-            current_results = build_current_results(all_agents, final_details, timed_out_ids, all_hosts)
+            current_results = build_current_results(
+                all_agents, final_details, timed_out_ids, all_hosts, launch_failures
+            )
             generate_html_report(current_results, report_path, test_artifacts_dir=artifact_output_dir)
 
         if pending_ids or remaining_tests:
@@ -413,8 +420,13 @@ def gather_results(
     cg: ConcurrencyGroup,
     base_commit: str | None = None,
     cached_results: dict[str, TestResult] | None = None,
+    launch_failures: Sequence[TestMapReduceResult] = (),
 ) -> list[TestMapReduceResult]:
-    """Gather results from all finished agents, pulling branches where appropriate."""
+    """Gather results from all finished agents, pulling branches where appropriate.
+
+    ``launch_failures`` are prepended to the returned list so agents that
+    failed to launch still appear in the report.
+    """
     results = _collect_agent_results(
         agents=agents,
         final_details=final_details,
@@ -444,7 +456,7 @@ def gather_results(
                         base_commit=base_commit,
                     )
 
-    return results
+    return [*launch_failures, *results]
 
 
 def build_current_results(
@@ -452,16 +464,24 @@ def build_current_results(
     final_details: dict[str, AgentDetails],
     timed_out_ids: set[str],
     hosts: dict[str, OnlineHostInterface],
+    launch_failures: Sequence[TestMapReduceResult] = (),
 ) -> list[TestMapReduceResult]:
-    """Build current results without pulling branches, for intermediate reports."""
-    return _collect_agent_results(
-        agents=agents,
-        final_details=final_details,
-        timed_out_ids=timed_out_ids,
-        hosts=hosts,
-        missing_detail_errored=False,
-        missing_detail_summary="Agent is still running...",
-    )
+    """Build current results without pulling branches, for intermediate reports.
+
+    ``launch_failures`` are prepended so agents that failed to launch still
+    appear in the report.
+    """
+    return [
+        *launch_failures,
+        *_collect_agent_results(
+            agents=agents,
+            final_details=final_details,
+            timed_out_ids=timed_out_ids,
+            hosts=hosts,
+            missing_detail_errored=False,
+            missing_detail_summary="Agent is still running...",
+        ),
+    ]
 
 
 def wait_for_integrator(

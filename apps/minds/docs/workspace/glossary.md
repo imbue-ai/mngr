@@ -6,7 +6,7 @@ Key concepts in the minds system:
 
 - **template repository**: a git repository (e.g. forever-claude-template) that defines a workspace's entire runtime: Dockerfile, services, skills, scripts, and mngr configuration.
 
-- **desktop client**: a local process (`minds forward`) that handles authentication, agent creation, and reverse proxying. Multiplexes access to multiple workspaces through a single local endpoint.
+- **desktop client**: a local process (`minds run`) that handles authentication, agent creation, and reverse proxying. Multiplexes access to multiple workspaces through a single local endpoint.
 
 - **bootstrap service manager**: a process running inside each agent container that watches `services.toml` and starts/stops background services in tmux windows.
 

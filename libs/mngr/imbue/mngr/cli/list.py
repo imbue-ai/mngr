@@ -84,9 +84,7 @@ def _resolve_field_alias(field: str) -> str:
 
 
 @pure
-def _is_streaming_eligible(
-    is_sort_explicit: bool,
-) -> bool:
+def _is_streaming_eligible(is_sort_explicit: bool) -> bool:
     """Whether the general conditions for streaming mode are met.
 
     Streaming requires no explicit sort (needs all results before sorting). A limit is
@@ -97,10 +95,7 @@ def _is_streaming_eligible(
 
 
 @pure
-def _should_use_streaming_mode(
-    output_format: OutputFormat,
-    is_sort_explicit: bool,
-) -> bool:
+def _should_use_streaming_mode(output_format: OutputFormat, is_sort_explicit: bool) -> bool:
     """Determine whether to use streaming mode for human list output."""
     return output_format == OutputFormat.HUMAN and _is_streaming_eligible(is_sort_explicit=is_sort_explicit)
 
@@ -259,7 +254,9 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
             custom_headers[field_name.strip()] = label.strip()
 
     # Translate filter aliases (--running, --project, etc.) into CEL strings.
-    include_filters_tuple, exclude_filters_tuple = build_agent_filter_cel(opts)
+    include_filters_tuple, exclude_filters_tuple = build_agent_filter_cel(
+        opts, mngr_ctx.concurrency_group, project_root=mngr_ctx.project_root
+    )
 
     # --stdin: read agent/host refs from stdin and add as an OR'd include filter.
     # List-specific because kanpan and other commands don't take stdin input.

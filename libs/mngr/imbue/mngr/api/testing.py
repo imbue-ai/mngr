@@ -130,6 +130,15 @@ class FakeHost(MutableModel):
             return None
         return self.ssh_info
 
+    def get_env_var(self, key: str) -> str | None:
+        """No-op env-var lookup. Tests that need env-var introspection should use a richer fake."""
+        del key
+        return None
+
+    def get_env_vars(self) -> dict[str, str]:
+        """No-op env-var dump. Tests that need env-var introspection should use a richer fake."""
+        return {}
+
 
 class SyncTestContext(FrozenModel):
     """Shared test context for sync integration tests (pull, push, pair)."""

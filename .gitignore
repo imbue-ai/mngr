@@ -229,6 +229,9 @@
 # Local mngr settings (not committed)
 **/.mngr/settings.local.toml
 
+# Local working / scratch markdown (not committed)
+**/*.local.md
+
 # so the user can make their own notification script
 **/scripts/notify_user.local.sh
 

@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr push [TARGET] [SOURCE] [--target-agent <AGENT>] [--dry-run] [--stop]
+mngr push [TARGET] [SOURCE] [--target <TARGET>] [--source <DIR>] [--target-agent <AGENT>] [--sync-mode <MODE>] [--mirror] [--dry-run] [--stop]
 ```
 
 Push files or git commits from local machine to an agent [experimental].

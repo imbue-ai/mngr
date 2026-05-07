@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import selectors
 import shlex
 import shutil
@@ -495,6 +496,31 @@ def _get_descendant_pids(pid: str) -> list[str]:
     return descendants
 
 
+_TMUX_CLEANUP_SUBPROCESS_TIMEOUT_SECONDS: float = 5.0
+
+
+def _run_with_timeout(*args: str) -> "subprocess.CompletedProcess[bytes]":
+    """Run a subprocess command with a hard timeout, swallowing TimeoutExpired.
+
+    Test cleanup runs inside the test's ``pytest-timeout`` window (because
+    ``timeout_func_only = true`` counts ``ExitStack`` teardown as test-body
+    time). A hung ``tmux`` or ``pkill`` here would block the test indefinitely
+    -- even though the next cleanup steps (SIGTERM/SIGKILL via os.kill) do
+    not depend on the previous tmux call having returned. Capping every
+    subprocess.run lets cleanup keep making forward progress instead of
+    stalling on a single stuck step.
+    """
+    try:
+        return subprocess.run(
+            list(args),
+            capture_output=True,
+            timeout=_TMUX_CLEANUP_SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        # Empty placeholder so callers checking returncode don't crash.
+        return subprocess.CompletedProcess(args=list(args), returncode=-1)
+
+
 def cleanup_tmux_session(session_name: str) -> None:
     """Clean up a tmux session, all its processes, and any associated activity monitors.
 
@@ -509,14 +535,14 @@ def cleanup_tmux_session(session_name: str) -> None:
     3. Kills the tmux session itself
     4. Sends SIGKILL to any processes that survived
     5. Kills any orphaned activity monitors for this session
+
+    Every ``subprocess.run`` is bounded by ``_TMUX_CLEANUP_SUBPROCESS_TIMEOUT_SECONDS``;
+    a hung ``tmux`` step can't block the rest of the cleanup.
     """
     # Collect all pane PIDs and their descendants before killing the session.
     # Guard with has-session first: list-panes -s does not support the = prefix for
     # exact matching, so it would prefix-match a different session if this one is gone.
-    has_result = subprocess.run(
-        ["tmux", "has-session", "-t", f"={session_name}"],
-        capture_output=True,
-    )
+    has_result = _run_with_timeout("tmux", "has-session", "-t", f"={session_name}")
     all_pids: list[str] = []
     if has_result.returncode == 0:
         # Session exists -- safe to list panes (no risk of prefix-matching a different session).
@@ -525,6 +551,8 @@ def cleanup_tmux_session(session_name: str) -> None:
             ["tmux", "list-panes", "-s", "-t", session_name, "-F", "#{pane_pid}"],
             capture_output=True,
             text=True,
+            timeout=_TMUX_CLEANUP_SUBPROCESS_TIMEOUT_SECONDS,
+            check=False,
         )
         if result.returncode == 0 and result.stdout.strip():
             for pane_pid in result.stdout.strip().split("\n"):
@@ -540,10 +568,7 @@ def cleanup_tmux_session(session_name: str) -> None:
             pass
 
     # Kill the tmux session (sends SIGHUP to remaining pane processes)
-    subprocess.run(
-        ["tmux", "kill-session", "-t", f"={session_name}"],
-        capture_output=True,
-    )
+    _run_with_timeout("tmux", "kill-session", "-t", f"={session_name}")
 
     # SIGKILL any survivors
     for pid in all_pids:
@@ -553,10 +578,7 @@ def cleanup_tmux_session(session_name: str) -> None:
             pass
 
     # Kill any orphaned activity monitors for this session (started with nohup, detached)
-    subprocess.run(
-        ["pkill", "-9", "-f", f"list-panes -t {session_name}"],
-        capture_output=True,
-    )
+    _run_with_timeout("pkill", "-9", "-f", f"list-panes -t {session_name}")
 
 
 @contextmanager
@@ -794,6 +816,36 @@ def get_short_random_string() -> str:
     return uuid4().hex[:8]
 
 
+# Stack of opt-out frames for the autouse "no unexpected loguru warnings"
+# check. Each frame is either None (allow any warning) or a compiled regex
+# (allow only warnings whose message matches it; non-matching ones still fail
+# the test). The top frame governs. capture_loguru and allow_warnings push
+# frames; the autouse fixture in conftest.py pushes a frame when the test
+# carries ``@pytest.mark.allow_warnings``. This name is public because the
+# project conftest reads/mutates it as well as this module.
+WARNINGS_ALLOWED_STACK: list[re.Pattern[str] | None] = []
+
+
+@contextmanager
+def allow_warnings(match: str | None = None) -> Generator[None, None, None]:
+    """Suppress the autouse "no unexpected loguru warnings" check inside this scope.
+
+    The autouse fixture in libs/mngr/conftest.py fails any test that emits a
+    loguru WARNING-level (or higher) record. Wrap code that intentionally emits
+    such records in this context manager. For whole-test opt-out use
+    ``@pytest.mark.allow_warnings`` (optionally ``@pytest.mark.allow_warnings(match=...)``).
+
+    If ``match`` is given, only warning messages whose text matches the regex
+    (via ``re.search``) are allowed; non-matching warnings still fail the test.
+    """
+    pattern = re.compile(match) if match is not None else None
+    WARNINGS_ALLOWED_STACK.append(pattern)
+    try:
+        yield
+    finally:
+        WARNINGS_ALLOWED_STACK.pop()
+
+
 @contextmanager
 def capture_loguru(level: str = "WARNING") -> Generator[StringIO, None, None]:
     """Capture loguru output at the given level into a StringIO buffer.
@@ -801,11 +853,16 @@ def capture_loguru(level: str = "WARNING") -> Generator[StringIO, None, None]:
     Loguru's handlers don't follow CliRunner's sys.stderr replacement, so
     tests that need to verify logged messages should use this context manager
     instead of checking result.output.
+
+    Implicitly opts out of the autouse "no unexpected loguru warnings" check
+    while the context is active, since tests using ``capture_loguru`` are
+    inspecting warnings on purpose.
     """
     log_output = StringIO()
     sink_id = logger.add(log_output, level=level, format="{message}")
     try:
-        yield log_output
+        with allow_warnings():
+            yield log_output
     finally:
         logger.remove(sink_id)
 

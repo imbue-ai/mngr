@@ -1,6 +1,7 @@
 """Tests for the FastAPI server."""
 
 import json
+import queue
 from pathlib import Path
 from typing import Generator
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
+from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
 from imbue.minds_workspace_server.server import create_application
 
@@ -331,3 +333,142 @@ def test_refresh_service_broadcast_rejects_non_loopback(app: FastAPI) -> None:
     with TestClient(app, client=("10.0.0.1", _TEST_CLIENT_PORT)) as remote_client:
         response = remote_client.post("/api/refresh-service/web/broadcast")
     assert response.status_code == 403
+
+
+@pytest.mark.timeout(5)
+def test_proto_agent_logs_endpoint_not_found_sends_error_and_closes(client: TestClient) -> None:
+    """When the proto-agent is missing, the endpoint sends a structured not-found message and closes."""
+    with client.websocket_connect("/api/proto-agents/missing-agent/logs") as ws:
+        payload = json.loads(ws.receive_text())
+    assert payload == {"done": True, "success": False, "error": "Proto-agent not found"}
+
+
+@pytest.mark.timeout(5)
+def test_proto_agent_logs_endpoint_streams_messages_until_sentinel(app: FastAPI) -> None:
+    """The endpoint forwards real log lines and closes when the queue yields ``None``."""
+    log_queue: queue.Queue[str | None] = queue.Queue()
+    log_queue.put(json.dumps({"line": "starting"}))
+    log_queue.put(json.dumps({"line": "still going"}))
+    log_queue.put(None)
+
+    with TestClient(app) as test_client:
+        # The TestClient context manager triggers the lifespan startup that
+        # populates ``app.state.agent_manager``; inject the queue afterwards.
+        agent_manager: AgentManager = app.state.agent_manager
+        agent_manager._log_queues["proto-1"] = log_queue
+
+        with test_client.websocket_connect("/api/proto-agents/proto-1/logs") as ws:
+            first = json.loads(ws.receive_text())
+            second = json.loads(ws.receive_text())
+
+    assert first == {"line": "starting"}
+    assert second == {"line": "still going"}
+
+
+def test_request_event_endpoint_writes_latchkey_permission_event(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /api/permissions/request appends a request event with server-filled metadata."""
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-7")
+
+    response = client.post(
+        "/api/permissions/request",
+        json={
+            "request_type": "LATCHKEY_PERMISSION",
+            "service_name": "slack",
+            "rationale": "to post status updates",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["event_id"].startswith("evt-")
+
+    events_file = tmp_path / "events" / "requests" / "events.jsonl"
+    assert events_file.exists()
+    event = json.loads(events_file.read_text().splitlines()[0])
+    assert event["event_id"] == body["event_id"]
+    assert event["type"] == "latchkey_permission_request"
+    assert event["source"] == "requests"
+    assert event["agent_id"] == "agent-7"
+    assert event["request_type"] == "LATCHKEY_PERMISSION"
+    assert event["is_user_requested"] is True
+    assert event["service_name"] == "slack"
+    assert event["rationale"] == "to post status updates"
+
+
+def test_request_event_endpoint_rejects_missing_request_type(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-7")
+
+    response = client.post("/api/permissions/request", json={"service_name": "slack"})
+    assert response.status_code == 400
+    assert "request_type" in response.json()["detail"]
+
+
+def test_request_event_endpoint_rejects_non_object_body(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-7")
+
+    response = client.post("/api/permissions/request", json=["not", "an", "object"])
+    assert response.status_code == 400
+
+
+def test_request_event_endpoint_rejects_unknown_request_type(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-7")
+
+    response = client.post(
+        "/api/permissions/request",
+        json={"request_type": "CUSTOM_THING", "service_name": "slack"},
+    )
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "CUSTOM_THING" in detail
+    assert "LATCHKEY_PERMISSION" in detail
+
+    events_file = tmp_path / "events" / "requests" / "events.jsonl"
+    assert not events_file.exists()
+
+
+def test_request_event_endpoint_honors_caller_is_user_requested(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-7")
+
+    response = client.post(
+        "/api/permissions/request",
+        json={
+            "request_type": "LATCHKEY_PERMISSION",
+            "service_name": "github",
+            "rationale": "open PRs",
+            "is_user_requested": False,
+        },
+    )
+    assert response.status_code == 200
+
+    events_file = tmp_path / "events" / "requests" / "events.jsonl"
+    event = json.loads(events_file.read_text().splitlines()[0])
+    assert event["is_user_requested"] is False
+
+
+def test_request_event_endpoint_returns_500_when_agent_id_unset(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("MNGR_AGENT_ID", raising=False)
+
+    response = client.post(
+        "/api/permissions/request",
+        json={"request_type": "LATCHKEY_PERMISSION", "service_name": "slack", "rationale": "r"},
+    )
+    assert response.status_code == 500
+    assert "MNGR_AGENT_ID" in response.json()["detail"]

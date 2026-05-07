@@ -62,6 +62,36 @@ def find_source_repo_of_worktree(worktree_path: Path) -> Path | None:
     return parse_worktree_git_file(content)
 
 
+def remove_worktree(worktree_path: Path, source_repo_path: Path, cg: ConcurrencyGroup) -> None:
+    """Remove a git worktree, running git from the source repository.
+
+    Raises ProcessError if the removal fails.
+    """
+    cg.run_process_to_completion(
+        ["git", "-C", str(source_repo_path), "worktree", "remove", "--force", str(worktree_path)],
+    )
+
+
+def delete_git_branch(branch_name: str, source_repo_path: Path, cg: ConcurrencyGroup) -> bool:
+    """Delete a git branch from the source repository.
+
+    Returns True on successful deletion, False otherwise. Failures are logged
+    as warnings; this never raises.
+    """
+    try:
+        result = cg.run_process_to_completion(
+            ["git", "-C", str(source_repo_path), "branch", "-D", branch_name],
+            is_checked_after=False,
+        )
+    except ProcessError as e:
+        logger.warning("Failed to delete branch {}: {}", branch_name, e)
+        return False
+    if result.returncode == 0:
+        return True
+    logger.warning("Failed to delete branch {}: {}", branch_name, result.stderr.strip())
+    return False
+
+
 def get_current_git_branch(path: Path | None, cg: ConcurrencyGroup) -> str | None:
     """Get the current git branch name for the repository at the given path.
 
@@ -77,6 +107,83 @@ def get_current_git_branch(path: Path | None, cg: ConcurrencyGroup) -> str | Non
     except ProcessError as e:
         logger.trace("Failed to get current git branch: {}", e)
         return None
+
+
+def resolve_project_filter_values(
+    values: tuple[str, ...],
+    cg: ConcurrencyGroup,
+    *,
+    project_root: Path | None = None,
+) -> tuple[str, ...]:
+    """Resolve --project filter values, expanding "." to the current project name.
+
+    The current project is derived from ``project_root`` when provided (typically
+    ``MngrContext.project_root``, the git worktree root), falling back to the
+    current working directory when not. This is important because running from a
+    subdirectory would otherwise miss the git remote and yield the subdirectory's
+    name. Other values are returned unchanged. The current project is derived at
+    most once. Duplicate values (after expansion) are collapsed while preserving
+    insertion order so the resulting CEL clause stays minimal.
+    """
+    current_project: str | None = None
+    resolved: dict[str, None] = {}
+    for value in values:
+        if value == ".":
+            if current_project is None:
+                current_project = derive_project_name_from_path(project_root or Path.cwd(), cg)
+            resolved[current_project] = None
+        else:
+            resolved[value] = None
+    return tuple(resolved)
+
+
+def build_project_filter_clause(
+    values: tuple[str, ...],
+    cg: ConcurrencyGroup,
+    *,
+    project_root: Path | None = None,
+) -> str | None:
+    """Build a CEL include clause for filtering agents by project label.
+
+    Returns ``None`` when ``values`` is empty, so callers can simply skip the
+    filter append. Otherwise expands "." sentinels via
+    ``resolve_project_filter_values`` and returns an OR-joined CEL clause like
+    ``labels.project == "foo" || labels.project == "bar"``. ``project_root``
+    is forwarded to ``resolve_project_filter_values`` (see its docstring).
+    """
+    if not values:
+        return None
+    project_names = resolve_project_filter_values(values, cg, project_root=project_root)
+    return " || ".join(f'labels.project == "{p}"' for p in project_names)
+
+
+def derive_project_name_for_source(
+    path: Path,
+    *,
+    remote_url: str | None = None,
+    source_project_label: str | None = None,
+) -> str:
+    """Derive a project name for a source location.
+
+    Priority:
+    1. ``source_project_label`` -- e.g. inherited from a source agent's label.
+    2. ``remote_url`` -- useful when the URL has already been fetched (which works
+       for remote sources where shelling to a local git binary would not).
+    3. Fall back to ``path``'s directory name (resolved to normalize symlinks /
+       ``..`` components).
+
+    The path fallback intentionally does *not* shell out to git: callers are
+    expected to have already fetched the remote URL via the source's own host
+    (which works for both local and remote sources). Re-running git locally
+    against a remote-source path would be either redundant or incorrect.
+    """
+    if source_project_label is not None:
+        return source_project_label
+    if remote_url is not None:
+        from_url = parse_project_name_from_url(remote_url)
+        if from_url is not None:
+            return from_url
+    return path.resolve().name
 
 
 def derive_project_name_from_path(path: Path, cg: ConcurrencyGroup) -> str:
