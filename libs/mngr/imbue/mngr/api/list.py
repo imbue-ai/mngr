@@ -35,10 +35,23 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
+from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
+from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
-from imbue.mngr.utils.cel_utils import tolerant_dict
+from imbue.mngr.utils.cel_utils import replace_paths_with_tolerant_map
 from imbue.mngr.utils.thread_cleanup import mngr_executor
+
+# Paths in the agent CEL context whose missing-key access should evaluate to a
+# clean False (and let `has()` report absence) rather than warn per agent.
+# Each is a schemaless dict on AgentDetails / HostDetails; their contents are
+# user- or plugin-supplied, so different agents legitimately have different
+# keys. See `replace_paths_with_tolerant_map` in cel_utils.
+_AGENT_SCHEMALESS_PATHS: tuple[tuple[str, ...], ...] = (
+    ("labels",),
+    ("plugin",),
+    ("host", "tags"),
+    ("host", "plugin"),
+)
 
 
 class ErrorInfo(FrozenModel):
@@ -629,15 +642,6 @@ def agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
     if host_dict is not None and "provider_name" in host_dict:
         host_dict["provider"] = host_dict["provider_name"]
 
-    # Schemaless fields: missing keys must not produce per-agent warnings.
-    # AgentDetails / HostDetails declare these with default_factory=dict, so
-    # model_dump always emits them as dicts -- no defensive isinstance needed.
-    result["labels"] = tolerant_dict(result["labels"])
-    result["plugin"] = tolerant_dict(result["plugin"])
-    if host_dict is not None:
-        host_dict["tags"] = tolerant_dict(host_dict["tags"])
-        host_dict["plugin"] = tolerant_dict(host_dict["plugin"])
-
     return result
 
 
@@ -651,9 +655,10 @@ def _apply_cel_filters(
     Returns True if the agent should be included (matches all include filters
     and doesn't match any exclude filters).
     """
-    context = agent_details_to_cel_context(agent)
-    return apply_cel_filters_to_context(
-        context=context,
+    cel_context = build_cel_context(agent_details_to_cel_context(agent))
+    replace_paths_with_tolerant_map(cel_context, _AGENT_SCHEMALESS_PATHS)
+    return apply_compiled_cel_filters(
+        cel_context=cel_context,
         include_filters=include_filters,
         exclude_filters=exclude_filters,
         error_context_description=f"agent {agent.name}",

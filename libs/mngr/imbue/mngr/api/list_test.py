@@ -23,6 +23,7 @@ from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import HostErrorInfo
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.api.list import ProviderErrorInfo
+from imbue.mngr.api.list import _AGENT_SCHEMALESS_PATHS
 from imbue.mngr.api.list import _ListAgentsParams
 from imbue.mngr.api.list import _apply_cel_filters
 from imbue.mngr.api.list import _collect_and_emit_details_for_host
@@ -64,9 +65,9 @@ from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
 from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.utils.cel_utils import TolerantMapType
-from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr.utils.cel_utils import replace_paths_with_tolerant_map
 from imbue.mngr.utils.testing import capture_loguru
 
 # =============================================================================
@@ -516,62 +517,67 @@ def test_agent_details_to_cel_context_idle_uses_most_recent_activity() -> None:
     assert 580 < context["idle"] < 620
 
 
+def test_agent_schemaless_paths_lists_all_four_fields() -> None:
+    """Sanity-check the schemaless-paths constant covers the documented set."""
+    assert set(_AGENT_SCHEMALESS_PATHS) == {
+        ("labels",),
+        ("plugin",),
+        ("host", "tags"),
+        ("host", "plugin"),
+    }
+
+
 @pytest.mark.parametrize(
-    "field_path,exclude_expr",
+    "exclude_expr",
     [
-        ("labels", 'labels.mngr_subagent_proxy == "child"'),
-        ("plugin", 'plugin.some_plugin_field == "x"'),
-        ("host.tags", 'host.tags.foo == "x"'),
-        ("host.plugin", 'host.plugin.some_plugin_field == "x"'),
+        'labels.mngr_subagent_proxy == "child"',
+        'plugin.some_plugin_field == "x"',
+        'host.tags.foo == "x"',
+        'host.plugin.some_plugin_field == "x"',
     ],
 )
-def test_agent_details_to_cel_context_wraps_schemaless_fields_tolerantly(field_path: str, exclude_expr: str) -> None:
-    """Schemaless fields must filter cleanly without per-agent warnings.
+def test_apply_cel_filters_no_warning_for_missing_key_on_schemaless_field(exclude_expr: str) -> None:
+    """Filtering on a missing key under any schemaless field must not warn.
 
     Reproduces the bug where `--exclude 'labels.X == "Y"'` warned for every
-    agent without that label. `labels`, `plugin`, `host.tags`, and `host.plugin`
-    are all schemaless dicts and must each be wrapped to tolerate missing keys.
+    agent without that label. labels, plugin, host.tags, host.plugin are all
+    schemaless and `_apply_cel_filters` must apply tolerance to all of them.
     """
-    host_details = _make_host_details()
-    agent = _make_agent_details("test-agent", host_details)
-
-    # Verify the relevant raw field defaults to an empty dict (so the missing
-    # key in the filter is genuinely missing).
-    assert agent.labels == {}
-    assert agent.plugin == {}
-    assert agent.host.tags == {}
-    assert agent.host.plugin == {}
-
-    # Sanity check the wrapper: build_cel_context must produce a TolerantMapType
-    # at the wrapped level for each schemaless field.
-    cel_context = build_cel_context(agent_details_to_cel_context(agent))
-    if "." in field_path:
-        outer, inner = field_path.split(".", 1)
-        assert isinstance(cel_context[outer][inner], TolerantMapType)
-    else:
-        assert isinstance(cel_context[field_path], TolerantMapType)
+    agent = _make_agent_details("test-agent", _make_host_details())
+    # All four schemaless fields default to empty dict, so the missing key
+    # in the filter is genuinely missing.
+    assert agent.labels == {} and agent.plugin == {}
+    assert agent.host.tags == {} and agent.host.plugin == {}
 
     include_filters, exclude_filters = compile_cel_filters(
         include_filters=(),
         exclude_filters=(exclude_expr,),
     )
     with capture_loguru(level="WARNING") as log_output:
-        result = apply_cel_filters_to_context(
-            context=agent_details_to_cel_context(agent),
-            include_filters=include_filters,
-            exclude_filters=exclude_filters,
-            error_context_description=f"agent {agent.name}",
-        )
+        result = _apply_cel_filters(agent, include_filters, exclude_filters)
     assert result is True
     assert "Error evaluating" not in log_output.getvalue()
 
 
-def test_agent_details_to_cel_context_has_macro_correctly_reports_label_presence() -> None:
+@pytest.mark.parametrize("path", list(_AGENT_SCHEMALESS_PATHS))
+def test_apply_cel_filters_wraps_each_schemaless_path_with_tolerant_map(path: tuple[str, ...]) -> None:
+    """The agent CEL context after the production composition has TolerantMapType
+    at each schemaless path; siblings stay strict.
+    """
+    agent = _make_agent_details("test-agent", _make_host_details())
+    cel_context = build_cel_context(agent_details_to_cel_context(agent))
+    replace_paths_with_tolerant_map(cel_context, _AGENT_SCHEMALESS_PATHS)
+
+    target: Any = cel_context
+    for step in path:
+        target = target[step]
+    assert isinstance(target, TolerantMapType)
+
+
+def test_apply_cel_filters_has_macro_correctly_reports_label_presence() -> None:
     """`has(labels.X)` must return True only when X is actually set on the agent.
 
-    Tolerant maps are designed so that the `has()` macro still distinguishes
-    present from absent keys. Without this, `--include 'has(labels.foo)'` would
-    silently match every agent.
+    Without this, `--include 'has(labels.foo)'` would silently match every agent.
     """
     host_details = _make_host_details()
     base_with = _make_agent_details("with-label", host_details)
@@ -585,18 +591,8 @@ def test_agent_details_to_cel_context_has_macro_correctly_reports_label_presence
         exclude_filters=(),
     )
     with capture_loguru(level="WARNING") as log_output:
-        result_with = apply_cel_filters_to_context(
-            context=agent_details_to_cel_context(agent_with_label),
-            include_filters=include_filters,
-            exclude_filters=exclude_filters,
-            error_context_description=f"agent {agent_with_label.name}",
-        )
-        result_without = apply_cel_filters_to_context(
-            context=agent_details_to_cel_context(agent_without_label),
-            include_filters=include_filters,
-            exclude_filters=exclude_filters,
-            error_context_description=f"agent {agent_without_label.name}",
-        )
+        result_with = _apply_cel_filters(agent_with_label, include_filters, exclude_filters)
+        result_without = _apply_cel_filters(agent_without_label, include_filters, exclude_filters)
     assert result_with is True
     assert result_without is False
     assert "Error evaluating" not in log_output.getvalue()

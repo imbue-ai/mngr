@@ -1,5 +1,7 @@
 """Tests for CEL utilities."""
 
+from typing import Any
+
 import celpy
 import celpy.celtypes
 import pytest
@@ -8,13 +10,23 @@ from celpy.evaluation import CELEvalError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.cel_utils import TolerantMapType
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
+from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
 from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.cel_utils import compile_cel_sort_keys
 from imbue.mngr.utils.cel_utils import evaluate_cel_sort_key
 from imbue.mngr.utils.cel_utils import parse_cel_sort_spec
-from imbue.mngr.utils.cel_utils import tolerant_dict
+from imbue.mngr.utils.cel_utils import replace_paths_with_tolerant_map
 from imbue.mngr.utils.testing import capture_loguru
+
+
+def _build_cel_context_with_tolerant_paths(
+    raw_context: dict[str, Any], paths: tuple[tuple[str, ...], ...]
+) -> dict[str, Any]:
+    """Test helper: convert + apply tolerance, mirroring how production callers compose."""
+    cel_context = build_cel_context(raw_context)
+    replace_paths_with_tolerant_map(cel_context, paths)
+    return cel_context
 
 
 def test_cel_string_contains_method() -> None:
@@ -292,7 +304,7 @@ def test_evaluate_cel_sort_key_returns_none_for_missing_field() -> None:
 
 
 # =============================================================================
-# Tests for tolerant_dict / TolerantMapType
+# Tests for TolerantMapType / replace_paths_with_tolerant_map
 # =============================================================================
 
 
@@ -302,9 +314,10 @@ def test_tolerant_map_missing_key_does_not_warn_in_exclude() -> None:
         include_filters=(),
         exclude_filters=('labels.mngr_subagent_proxy == "child"',),
     )
+    cel_context = _build_cel_context_with_tolerant_paths({"labels": {}}, (("labels",),))
     with capture_loguru(level="WARNING") as log_output:
-        result = apply_cel_filters_to_context(
-            context={"labels": tolerant_dict({})},
+        result = apply_compiled_cel_filters(
+            cel_context=cel_context,
             include_filters=includes,
             exclude_filters=excludes,
             error_context_description="agent test",
@@ -319,9 +332,10 @@ def test_tolerant_map_missing_key_in_include_filter_evaluates_false() -> None:
         include_filters=('labels.project == "mngr"',),
         exclude_filters=(),
     )
+    cel_context = _build_cel_context_with_tolerant_paths({"labels": {}}, (("labels",),))
     with capture_loguru(level="WARNING") as log_output:
-        result = apply_cel_filters_to_context(
-            context={"labels": tolerant_dict({})},
+        result = apply_compiled_cel_filters(
+            cel_context=cel_context,
             include_filters=includes,
             exclude_filters=excludes,
             error_context_description="agent test",
@@ -336,8 +350,9 @@ def test_tolerant_map_present_key_compares_normally() -> None:
         include_filters=('labels.project == "mngr"',),
         exclude_filters=(),
     )
-    result = apply_cel_filters_to_context(
-        context={"labels": tolerant_dict({"project": "mngr"})},
+    cel_context = _build_cel_context_with_tolerant_paths({"labels": {"project": "mngr"}}, (("labels",),))
+    result = apply_compiled_cel_filters(
+        cel_context=cel_context,
         include_filters=includes,
         exclude_filters=excludes,
         error_context_description="agent test",
@@ -373,55 +388,35 @@ def test_tolerant_map_type_returns_cel_eval_error_on_missing_key() -> None:
 
 def test_tolerant_map_has_macro_correctly_reports_presence() -> None:
     """has() on a TolerantMapType correctly distinguishes present vs missing keys."""
-    includes_missing, excludes_missing = compile_cel_filters(
+    includes_has, excludes_has = compile_cel_filters(
         include_filters=("has(labels.archived_at)",),
         exclude_filters=(),
     )
-    result_missing = apply_cel_filters_to_context(
-        context={"labels": tolerant_dict({})},
-        include_filters=includes_missing,
-        exclude_filters=excludes_missing,
+    cel_context_missing = _build_cel_context_with_tolerant_paths({"labels": {}}, (("labels",),))
+    cel_context_present = _build_cel_context_with_tolerant_paths(
+        {"labels": {"archived_at": "2024-01-01"}}, (("labels",),)
+    )
+    result_missing = apply_compiled_cel_filters(
+        cel_context=cel_context_missing,
+        include_filters=includes_has,
+        exclude_filters=excludes_has,
         error_context_description="agent test",
     )
-    result_present = apply_cel_filters_to_context(
-        context={"labels": tolerant_dict({"archived_at": "2024-01-01"})},
-        include_filters=includes_missing,
-        exclude_filters=excludes_missing,
+    result_present = apply_compiled_cel_filters(
+        cel_context=cel_context_present,
+        include_filters=includes_has,
+        exclude_filters=excludes_has,
         error_context_description="agent test",
     )
     assert result_missing is False
     assert result_present is True
 
 
-def test_tolerant_map_nested_dict_inner_missing_key() -> None:
-    """A nested tolerant dict inside another tolerant dict swallows missing keys cleanly."""
-    includes, excludes = compile_cel_filters(
-        include_filters=(),
-        exclude_filters=('plugin.foo.bar == "x"',),
-    )
-    with capture_loguru(level="WARNING") as log_output:
-        result = apply_cel_filters_to_context(
-            context={"plugin": tolerant_dict({"foo": tolerant_dict({})})},
-            include_filters=includes,
-            exclude_filters=excludes,
-            error_context_description="agent test",
-        )
-    assert result is True
-    assert "Error evaluating" not in log_output.getvalue()
-
-
-def test_tolerant_marker_at_depth_in_strict_dict() -> None:
-    """Marking a nested dict only relaxes that level; siblings stay strict.
-
-    The build_cel_context output is inspected directly because cel-python's
-    behavior on missing-key access has shifted between versions (0.4.0 returns
-    BoolType(False) silently; 0.5.0 raises CELEvalError that the filter loop
-    reports as a warning). Asserting on the runtime types makes this test
-    independent of celpy version while still proving the marker is honored
-    only at the wrapped level.
-    """
-    raw_context = {"host": {"tags": tolerant_dict({}), "name": "h1"}}
+def test_replace_paths_with_tolerant_map_at_nested_path() -> None:
+    """A nested path target gets wrapped tolerantly; siblings stay strict."""
+    raw_context = {"host": {"tags": {}, "name": "h1"}}
     cel_context = build_cel_context(raw_context)
+    replace_paths_with_tolerant_map(cel_context, (("host", "tags"),))
     host = cel_context["host"]
     assert isinstance(host, celpy.celtypes.MapType)
     assert not isinstance(host, TolerantMapType)
@@ -430,3 +425,27 @@ def test_tolerant_marker_at_depth_in_strict_dict() -> None:
     assert isinstance(tags[celpy.json_to_cel("foo")], CELEvalError)
     with pytest.raises(KeyError):
         _ = host[celpy.json_to_cel("missing")]
+
+
+def test_replace_paths_with_tolerant_map_multiple_paths() -> None:
+    """Multiple paths can be wrapped in one call; non-listed paths stay strict."""
+    raw_context = {
+        "labels": {"a": "1"},
+        "plugin": {},
+        "host": {"tags": {}, "name": "h1", "ssh": {"host": "h"}},
+    }
+    cel_context = build_cel_context(raw_context)
+    replace_paths_with_tolerant_map(
+        cel_context,
+        (("labels",), ("plugin",), ("host", "tags")),
+    )
+    assert isinstance(cel_context["labels"], TolerantMapType)
+    assert isinstance(cel_context["plugin"], TolerantMapType)
+    host = cel_context["host"]
+    assert isinstance(host, celpy.celtypes.MapType)
+    assert not isinstance(host, TolerantMapType)
+    assert isinstance(host[celpy.json_to_cel("tags")], TolerantMapType)
+    # Non-listed nested map (host.ssh) stays strict.
+    ssh = host[celpy.json_to_cel("ssh")]
+    assert isinstance(ssh, celpy.celtypes.MapType)
+    assert not isinstance(ssh, TolerantMapType)
