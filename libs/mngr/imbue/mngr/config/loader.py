@@ -39,6 +39,7 @@ from imbue.mngr.config.provider_config_registry import list_registered_provider_
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UnknownBackendError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.plugin_catalog import get_plugin_install_hint
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -215,7 +216,14 @@ def load_config(
     # Validate and apply defaults using normal constructor
     final_config = MngrConfig.model_validate(config_dict)
 
-    # check whether we're in pytest
+    # Check whether we're in pytest. The expected way to hit this branch is a
+    # poorly-scoped test whose subprocess mngr picked up the repo's
+    # .mngr/settings.toml because MNGR_ROOT_NAME / MNGR_HOST_DIR aren't pointed
+    # at a tmp directory. The shared plugin test fixtures handle that
+    # scoping; if they aren't available for a given test, use MNGR_ALLOW_PYTEST
+    # as the explicit opt-in instead of stripping PYTEST_CURRENT_TEST or
+    # setting is_allowed_in_pytest=True in the repo config (both dodge the
+    # guard without actually fixing the isolation).
     if not final_config.is_allowed_in_pytest and "PYTEST_CURRENT_TEST" in os.environ:
         if os.environ.get("MNGR_ALLOW_PYTEST") != "1":
             raise ConfigParseError(
@@ -394,12 +402,7 @@ def _parse_providers(
                     f" block. Currently disabled plugins: {', '.join(sorted(disabled_plugins))}"
                 )
             else:
-                msg += (
-                    f" The plugin package that provides the"
-                    f" '{backend}' backend may not be installed. If you installed mngr"
-                    f" as a tool, try reinstalling with the plugin package"
-                    f" (e.g. --with 'imbue-mngr-{backend}')."
-                )
+                msg += f" {get_plugin_install_hint(backend)}"
             if strict:
                 raise ConfigParseError(msg) from e
             else:

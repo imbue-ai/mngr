@@ -97,12 +97,9 @@ def _has_api_credentials_available(
 
     auth_path = _get_pi_home_dir(home_dir) / "auth.json"
     if auth_path.exists():
-        try:
-            auth_data = json.loads(auth_path.read_text())
-            if auth_data:
-                return True
-        except (json.JSONDecodeError, OSError) as e:
-            logger.debug("Could not read auth.json: {}", e)
+        auth_data = json.loads(auth_path.read_text())
+        if auth_data:
+            return True
 
     return False
 

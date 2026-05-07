@@ -19,7 +19,7 @@ def _make_connect_opts(
     agent: str | None = "my-agent",
     start: bool = True,
     reconnect: bool = True,
-    attach_command: str | None = None,
+    session_command: str | None = None,
     allow_unknown_host: bool = False,
     output_format: str = "human",
     quiet: bool = False,
@@ -34,7 +34,7 @@ def _make_connect_opts(
         agent=agent,
         start=start,
         reconnect=reconnect,
-        attach_command=attach_command,
+        session_command=session_command,
         allow_unknown_host=allow_unknown_host,
         output_format=output_format,
         quiet=quiet,
@@ -204,7 +204,7 @@ def test_build_connection_options_default_values(temp_mngr_ctx: MngrContext) -> 
     assert conn_opts.is_reconnect is True
     assert conn_opts.retry_count == temp_mngr_ctx.config.retry.connect_retry_times
     assert conn_opts.retry_delay == temp_mngr_ctx.config.retry.connect_retry_delay
-    assert conn_opts.attach_command is None
+    assert conn_opts.session_command is None
     assert conn_opts.is_unknown_host_allowed is False
 
 
@@ -212,14 +212,14 @@ def test_build_connection_options_custom_values(temp_mngr_ctx: MngrContext) -> N
     """_build_connection_options should map custom CLI values correctly."""
     opts = _make_connect_opts(
         reconnect=False,
-        attach_command="ssh user@host",
+        session_command="ssh user@host",
         allow_unknown_host=True,
     )
     conn_opts = _build_connection_options(opts, temp_mngr_ctx)
     assert conn_opts.is_reconnect is False
     assert conn_opts.retry_count == temp_mngr_ctx.config.retry.connect_retry_times
     assert conn_opts.retry_delay == temp_mngr_ctx.config.retry.connect_retry_delay
-    assert conn_opts.attach_command == "ssh user@host"
+    assert conn_opts.session_command == "ssh user@host"
     assert conn_opts.is_unknown_host_allowed is True
 
 
