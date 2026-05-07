@@ -79,6 +79,7 @@ from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import workspace_accent
+from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -492,40 +493,64 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     git_url = str(form.get("git_url", "")).strip()
     agent_name = str(form.get("agent_name", "")).strip()
     branch = str(form.get("branch", "")).strip()
-    # HTML checkboxes submit their value only when checked; absence means unchecked.
-    include_env_file = form.get("include_env_file") is not None
     try:
         launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.LOCAL.value)))
     except ValueError:
         launch_mode = LaunchMode.LOCAL
+    try:
+        ai_provider = AIProvider(str(form.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
+    except ValueError:
+        ai_provider = AIProvider.SUBSCRIPTION
     account_id = str(form.get("account_id", "")).strip()
-    if not git_url:
-        session_store_inst: MultiAccountSessionStore | None = request.app.state.session_store
-        minds_config_inst: MindsConfig | None = request.app.state.minds_config
+    anthropic_api_key = str(form.get("anthropic_api_key", "")).strip()
+    gh_token = str(form.get("gh_token", "")).strip()
+
+    session_store_inst: MultiAccountSessionStore | None = request.app.state.session_store
+
+    def _re_render_with_error(message: str, status: int = 400) -> Response:
         accounts_list = session_store_inst.list_accounts() if session_store_inst else []
-        default_acct_id = minds_config_inst.get_default_account_id() if minds_config_inst else None
-        html = render_create_form(
-            git_url="",
+        # Re-render with the user's submitted account_id pre-selected
+        # (including "" -> "No account") rather than the config default,
+        # so a validation error doesn't silently revert their choice.
+        html_body = render_create_form(
+            git_url=git_url,
             agent_name=agent_name,
             branch=branch,
             launch_mode=launch_mode,
+            ai_provider=ai_provider,
             accounts=accounts_list,
-            default_account_id=default_acct_id or "",
+            default_account_id=account_id,
+            gh_token=gh_token,
+            anthropic_api_key=anthropic_api_key,
+            error_message=message,
         )
-        return HTMLResponse(content=html, status_code=400)
+        return HTMLResponse(content=html_body, status_code=status)
 
-    # Resolve the account email for IMBUE_CLOUD mode. The mngr_imbue_cloud
-    # plugin owns the SuperTokens session and is responsible for fetching a
-    # fresh access token at the time of each subprocess invocation, so minds
-    # only needs to know which account to ask for.
+    if not git_url:
+        return _re_render_with_error("Repository URL is required.")
+
+    is_imbue_cloud_compute = launch_mode is LaunchMode.IMBUE_CLOUD
+    is_imbue_cloud_ai = ai_provider is AIProvider.IMBUE_CLOUD
+    if not account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai):
+        return _re_render_with_error(
+            "imbue_cloud requires an account. Select an account or pick a different "
+            "option for both the compute and AI providers."
+        )
+
+    if ai_provider is AIProvider.API_KEY and not anthropic_api_key:
+        return _re_render_with_error("An Anthropic API key is required when AI provider is set to api_key.")
+
+    # Resolve the account email when needed (imbue_cloud compute or AI). The
+    # mngr_imbue_cloud plugin owns the SuperTokens session and is responsible
+    # for fetching a fresh access token at the time of each subprocess
+    # invocation, so minds only needs to know which account to ask for.
     account_email = ""
+    if account_id and session_store_inst is not None and (is_imbue_cloud_compute or is_imbue_cloud_ai):
+        account_email = session_store_inst.get_account_email(account_id) or ""
+
     branch_or_tag = branch
-    if launch_mode is LaunchMode.IMBUE_CLOUD:
-        session_store_for_account: MultiAccountSessionStore | None = request.app.state.session_store
-        if session_store_for_account and account_id:
-            account_email = session_store_for_account.get_account_email(account_id) or ""
-        if not branch_or_tag:
-            branch_or_tag = resolve_template_version(git_url, branch, parent_cg=agent_creator.root_concurrency_group)
+    if is_imbue_cloud_compute and not branch_or_tag:
+        branch_or_tag = resolve_template_version(git_url, branch, parent_cg=agent_creator.root_concurrency_group)
 
     # Build a post-creation callback that injects the tunnel token
     on_created = _build_on_created_callback(request, account_id)
@@ -540,9 +565,11 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         agent_name=agent_name,
         branch=branch,
         launch_mode=launch_mode,
-        include_env_file=include_env_file,
+        ai_provider=ai_provider,
         account_email=account_email,
         branch_or_tag=branch_or_tag,
+        anthropic_api_key=anthropic_api_key,
+        gh_token=gh_token,
         on_created=on_created,
     )
 
@@ -598,7 +625,6 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     git_url = str(body.get("git_url", "")).strip()
     agent_name = str(body.get("agent_name", "")).strip()
     branch = str(body.get("branch", "")).strip()
-    include_env_file = bool(body.get("include_env_file", False))
     try:
         launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.LOCAL.value)))
     except ValueError:
@@ -607,19 +633,59 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             content='{"error": "Invalid launch_mode"}',
             media_type="application/json",
         )
+    try:
+        ai_provider = AIProvider(str(body.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
+    except ValueError:
+        return Response(
+            status_code=400,
+            content='{"error": "Invalid ai_provider"}',
+            media_type="application/json",
+        )
+    anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
+    gh_token = str(body.get("gh_token", "")).strip()
+    account_id = str(body.get("account_id", "")).strip()
     if not git_url:
         return Response(
             status_code=400,
             content='{"error": "git_url is required"}',
             media_type="application/json",
         )
+    # Mirror the form path's account requirement so the API rejects
+    # imbue_cloud-without-account up front instead of failing later inside
+    # the background thread with a vague MngrCommandError.
+    is_imbue_cloud_compute = launch_mode is LaunchMode.IMBUE_CLOUD
+    is_imbue_cloud_ai = ai_provider is AIProvider.IMBUE_CLOUD
+    if not account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai):
+        return Response(
+            status_code=400,
+            content='{"error": "account_id is required when launch_mode or ai_provider is IMBUE_CLOUD"}',
+            media_type="application/json",
+        )
+    if ai_provider is AIProvider.API_KEY and not anthropic_api_key:
+        return Response(
+            status_code=400,
+            content='{"error": "anthropic_api_key is required when ai_provider is API_KEY"}',
+            media_type="application/json",
+        )
+
+    # Resolve the account email when an imbue_cloud field is selected so the
+    # background creation can mint a LiteLLM key / lease a pool host. The
+    # session store is the source of truth for email <-> user_id mapping.
+    account_email = ""
+    if account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai):
+        session_store_inst: MultiAccountSessionStore | None = request.app.state.session_store
+        if session_store_inst is not None:
+            account_email = session_store_inst.get_account_email(account_id) or ""
 
     creation_id = agent_creator.start_creation(
         git_url,
         agent_name=agent_name,
         branch=branch,
         launch_mode=launch_mode,
-        include_env_file=include_env_file,
+        ai_provider=ai_provider,
+        account_email=account_email,
+        anthropic_api_key=anthropic_api_key,
+        gh_token=gh_token,
     )
     # API contract: the JSON field stays named ``agent_id`` for backwards
     # compatibility with existing API clients, but the value is now a

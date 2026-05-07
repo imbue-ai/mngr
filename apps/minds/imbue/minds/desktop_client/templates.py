@@ -20,6 +20,7 @@ from jinja2 import select_autoescape
 
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
+from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -124,19 +125,32 @@ def render_create_form(
     git_url: str = "",
     agent_name: str = "",
     branch: str = "",
-    launch_mode: LaunchMode = LaunchMode.LOCAL,
+    launch_mode: LaunchMode | None = None,
+    ai_provider: AIProvider | None = None,
     accounts: Sequence[object] | None = None,
     default_account_id: str = "",
+    gh_token: str = "",
+    anthropic_api_key: str = "",
+    error_message: str = "",
 ) -> str:
-    """Render the agent creation form page."""
+    """Render the agent creation form page.
+
+    The compute provider (``launch_mode``) and AI provider are independent.
+    Both default to ``IMBUE_CLOUD`` when an account is selected; without
+    an account we drop them to ``LOCAL`` / ``SUBSCRIPTION`` so the form
+    starts in a valid state for the no-account flow.
+    """
     effective_url = git_url if git_url else _DEFAULT_GIT_URL
     effective_name = agent_name if agent_name else _DEFAULT_AGENT_NAME
     effective_branch = branch if branch else _DEFAULT_BRANCH
     has_account = bool(default_account_id and accounts)
-    effective_mode = (
-        launch_mode
-        if launch_mode != LaunchMode.LOCAL
-        else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LOCAL)
+    effective_launch_mode = (
+        launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LOCAL)
+    )
+    effective_ai_provider = (
+        ai_provider
+        if ai_provider is not None
+        else (AIProvider.IMBUE_CLOUD if has_account else AIProvider.SUBSCRIPTION)
     )
     template = JINJA_ENV.get_template("create.html")
     return template.render(
@@ -144,9 +158,14 @@ def render_create_form(
         agent_name=effective_name,
         branch=effective_branch,
         launch_modes=list(LaunchMode),
-        selected_launch_mode=effective_mode.value,
+        selected_launch_mode=effective_launch_mode.value,
+        ai_providers=list(AIProvider),
+        selected_ai_provider=effective_ai_provider.value,
         accounts=accounts or [],
         default_account_id=default_account_id,
+        gh_token=gh_token,
+        anthropic_api_key=anthropic_api_key,
+        error_message=error_message,
     )
 
 

@@ -815,6 +815,201 @@ def test_create_form_shows_launch_mode_dropdown(tmp_path: Path) -> None:
     assert "dev" in response.text
 
 
+def test_create_form_shows_ai_provider_dropdown(tmp_path: Path) -> None:
+    """GET /create form includes the AI provider dropdown with all three options."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.get("/create")
+    assert response.status_code == 200
+    assert 'name="ai_provider"' in response.text
+    assert 'value="IMBUE_CLOUD"' in response.text
+    assert 'value="API_KEY"' in response.text
+    assert 'value="SUBSCRIPTION"' in response.text
+
+
+def test_create_form_does_not_show_env_file_checkbox(tmp_path: Path) -> None:
+    """The .env-file checkbox has been removed from the form."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.get("/create")
+    assert response.status_code == 200
+    assert "include_env_file" not in response.text
+
+
+def test_create_form_shows_gh_token_input_in_advanced(tmp_path: Path) -> None:
+    """The advanced section includes an optional GH_TOKEN field."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.get("/create")
+    assert response.status_code == 200
+    assert 'name="gh_token"' in response.text
+
+
+def test_create_form_submit_rejects_imbue_cloud_compute_without_account(tmp_path: Path) -> None:
+    """Selecting IMBUE_CLOUD compute without an account is rejected with a clear message."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/create",
+        data={
+            "git_url": "file:///nonexistent-repo",
+            "agent_name": "my-agent",
+            "launch_mode": "IMBUE_CLOUD",
+            "ai_provider": "SUBSCRIPTION",
+            "account_id": "",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert "imbue_cloud requires an account" in response.text
+
+
+def test_create_form_submit_rejects_imbue_cloud_ai_without_account(tmp_path: Path) -> None:
+    """Selecting IMBUE_CLOUD AI provider without an account is rejected."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/create",
+        data={
+            "git_url": "file:///nonexistent-repo",
+            "agent_name": "my-agent",
+            "launch_mode": "LOCAL",
+            "ai_provider": "IMBUE_CLOUD",
+            "account_id": "",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert "imbue_cloud requires an account" in response.text
+
+
+def test_create_form_submit_rejects_api_key_provider_without_key(tmp_path: Path) -> None:
+    """Selecting AI provider API_KEY without supplying a key is rejected."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/create",
+        data={
+            "git_url": "file:///nonexistent-repo",
+            "agent_name": "my-agent",
+            "launch_mode": "LOCAL",
+            "ai_provider": "API_KEY",
+            "anthropic_api_key": "",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert "Anthropic API key is required" in response.text
+
+
+def test_create_form_submit_accepts_subscription_with_no_account(tmp_path: Path) -> None:
+    """Subscription mode + no account is the no-account default and must be accepted."""
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/create",
+        data={
+            "git_url": "file:///nonexistent-repo",
+            "agent_name": "my-agent",
+            "launch_mode": "LOCAL",
+            "ai_provider": "SUBSCRIPTION",
+            "account_id": "",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    agent_creator.wait_for_all()
+
+
+def test_create_agent_api_rejects_api_key_provider_without_key(tmp_path: Path) -> None:
+    """The JSON API also rejects AI provider API_KEY without a key."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        json={
+            "git_url": "file:///nonexistent-repo",
+            "ai_provider": "API_KEY",
+            "anthropic_api_key": "",
+        },
+    )
+    assert response.status_code == 400
+    assert "anthropic_api_key is required" in response.json()["error"]
+
+
+def test_create_agent_api_rejects_invalid_ai_provider(tmp_path: Path) -> None:
+    """An unknown ai_provider is rejected by the JSON API."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        json={
+            "git_url": "file:///nonexistent-repo",
+            "ai_provider": "BOGUS",
+        },
+    )
+    assert response.status_code == 400
+    assert "Invalid ai_provider" in response.json()["error"]
+
+
+def test_create_agent_api_rejects_imbue_cloud_compute_without_account(tmp_path: Path) -> None:
+    """API parity with the form path: IMBUE_CLOUD compute requires an account."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        json={
+            "git_url": "file:///nonexistent-repo",
+            "launch_mode": "IMBUE_CLOUD",
+            "ai_provider": "SUBSCRIPTION",
+        },
+    )
+    assert response.status_code == 400
+    assert "account_id is required" in response.json()["error"]
+
+
+def test_create_agent_api_rejects_imbue_cloud_ai_without_account(tmp_path: Path) -> None:
+    """API parity with the form path: IMBUE_CLOUD AI provider requires an account."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        json={
+            "git_url": "file:///nonexistent-repo",
+            "launch_mode": "LOCAL",
+            "ai_provider": "IMBUE_CLOUD",
+        },
+    )
+    assert response.status_code == 400
+    assert "account_id is required" in response.json()["error"]
+
+
+def test_create_form_submit_preserves_account_id_on_validation_error(tmp_path: Path) -> None:
+    """When validation fails and the form re-renders, the user's account_id choice
+    must survive instead of reverting to the config default. The form submits
+    ``account_id=""`` for "No account"; the re-rendered page must show that
+    option as ``selected`` and must NOT show any other account as selected."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    # Trigger a validation error (IMBUE_CLOUD AI without an account).
+    response = client.post(
+        "/create",
+        data={
+            "git_url": "file:///nonexistent-repo",
+            "agent_name": "my-agent",
+            "launch_mode": "LOCAL",
+            "ai_provider": "IMBUE_CLOUD",
+            "account_id": "",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    # The "No account (private project)" option is selected when default_account_id is empty.
+    assert 'value=""' in response.text and "No account" in response.text
+    # And the IMBUE_CLOUD warning should be present.
+    assert "imbue_cloud requires an account" in response.text
+
+
 def test_unhandled_exception_returns_500_with_message(tmp_path: Path) -> None:
     """Unhandled exceptions in routes produce a 500 response with the error message."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})

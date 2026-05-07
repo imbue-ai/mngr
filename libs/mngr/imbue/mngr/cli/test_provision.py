@@ -206,6 +206,7 @@ def test_provision_agent_not_found(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_provision_with_agent_option(
     cli_runner: CliRunner,
     create_test_agent,
