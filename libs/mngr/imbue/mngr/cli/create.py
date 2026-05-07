@@ -203,7 +203,7 @@ _HEADLESS_INCOMPATIBLE_BOOLEAN_PAIR_FLAGS: tuple[tuple[str, Callable[[CreateCliO
     ("reconnect", lambda o: o.reconnect, "--reconnect"),
     ("reuse", lambda o: o.reuse, "--reuse"),
     ("update", lambda o: o.update, "--update"),
-    ("start_on_boot", lambda o: bool(o.start_on_boot), "--start-on-boot"),
+    ("start_on_boot", lambda o: o.start_on_boot, "--start-on-boot"),
 )
 
 
