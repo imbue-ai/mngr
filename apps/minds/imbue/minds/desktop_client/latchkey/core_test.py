@@ -19,6 +19,7 @@ from imbue.minds.desktop_client.latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.minds.desktop_client.latchkey.core import CredentialStatus
 from imbue.minds.desktop_client.latchkey.core import Latchkey
 from imbue.minds.desktop_client.latchkey.core import LatchkeyBinaryNotFoundError
+from imbue.minds.desktop_client.latchkey.core import LatchkeyDestructionHandler
 from imbue.minds.desktop_client.latchkey.core import LatchkeyDiscoveryHandler
 from imbue.minds.desktop_client.latchkey.core import LatchkeyJwtMintError
 from imbue.minds.desktop_client.latchkey.core import LatchkeyNotInitializedError
@@ -521,18 +522,25 @@ def test_discovery_handler_spawns_shared_gateway_for_every_provider(tmp_path: Pa
 
 
 class _RecordingTunnelManager(SSHTunnelManager):
-    """SSHTunnelManager that records setup_reverse_tunnel calls instead of doing SSH."""
+    """SSHTunnelManager that records setup/remove calls instead of doing SSH."""
 
     _calls: list[tuple[RemoteSSHInfo, int, int]] = PrivateAttr(default_factory=list)
+    _removed_agent_ids: list[str] = PrivateAttr(default_factory=list)
 
     def setup_reverse_tunnel(
         self,
         ssh_info: RemoteSSHInfo,
         local_port: int,
         remote_port: int = 0,
+        agent_id: str | None = None,
     ) -> int:
+        del agent_id
         self._calls.append((ssh_info, local_port, remote_port))
         return remote_port
+
+    def remove_reverse_tunnels_for_agent(self, agent_id: str) -> int:
+        self._removed_agent_ids.append(agent_id)
+        return 0
 
 
 def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: Path) -> None:
@@ -675,6 +683,21 @@ def test_ensure_browser_not_called_when_binary_missing(tmp_path: Path) -> None:
     with pytest.raises(LatchkeyBinaryNotFoundError):
         manager.ensure_gateway_started()
     assert not ensure_browser_log_path(tmp_path).exists()
+
+
+# -- Destruction handler --
+
+
+def test_destruction_handler_removes_reverse_tunnels_for_destroyed_agent() -> None:
+    """The handler must ask the tunnel manager to drop the destroyed agent's
+    reverse tunnels. The shared gateway must NOT be touched -- it serves
+    other agents.
+    """
+    tunnel_manager = _RecordingTunnelManager()
+    handler = LatchkeyDestructionHandler(tunnel_manager=tunnel_manager)
+    agent_id = AgentId()
+    handler(agent_id)
+    assert tunnel_manager._removed_agent_ids == [str(agent_id)]
 
 
 # -- services_info / auth_browser --
