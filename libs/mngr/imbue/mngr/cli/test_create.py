@@ -10,7 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
-from imbue.mngr.api.agent_addr import parse_agent_address
+from imbue.mngr.api.addresses import parse_new_agent_location
 from imbue.mngr.cli.create import _create_agent
 from imbue.mngr.cli.create import _resolve_transfer_mode
 from imbue.mngr.cli.create import _setup_create
@@ -169,7 +169,7 @@ def test_connect_flag_calls_tmux_attach_for_local_agent(
     """
     agent_name = f"test-connect-local-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
-    address = parse_agent_address(agent_name)
+    address = parse_new_agent_location(agent_name)
 
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().type, "command"),

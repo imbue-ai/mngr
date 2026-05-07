@@ -6,7 +6,11 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.addresses import AgentAddress
+from imbue.mngr.api.addresses import HostAddress
 from imbue.mngr.api.provision import provision_agent
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import HOST_ADDRESS
 from imbue.mngr.cli.agent_utils import find_agent_for_command
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -27,9 +31,9 @@ from imbue.mngr.primitives import OutputFormat
 class ProvisionCliOptions(CommonCliOptions):
     """Options passed from the CLI to the provision command."""
 
-    agent: str | None
-    agent_option: str | None
-    host: str | None
+    agent: AgentAddress | None
+    agent_option: AgentAddress | None
+    host: HostAddress | None
     # Behavior options
     bootstrap: str | None
     destroy_on_fail: bool
@@ -58,16 +62,18 @@ def _output_result(agent_name: str, output_opts: OutputOptions) -> None:
 
 
 @click.command(name="provision")
-@click.argument("agent", required=False, default=None)
+@click.argument("agent", type=AGENT_ADDRESS, required=False, default=None)
 @optgroup.group("Target Selection")
 @optgroup.option(
     "--agent",
     "agent_option",
-    help="Agent name or ID to provision (alternative to positional argument)",
+    type=AGENT_ADDRESS,
+    help="Agent address (NAME[@HOST[.PROVIDER]]) to provision (alternative to positional argument)",
 )
 @optgroup.option(
     "--host",
-    help="Filter by host name or ID [future]",
+    type=HOST_ADDRESS,
+    help="Filter by host address (HOST[.PROVIDER]) [future]",
 )
 @optgroup.group("Behavior")
 @optgroup.option(
@@ -136,21 +142,15 @@ def provision(ctx: click.Context, **kwargs: Any) -> None:
     if opts.destroy_on_fail:
         raise NotImplementedError("--destroy-on-fail is not implemented yet")
 
-    # Resolve agent identifier from positional argument or --agent option
-    agent_identifier: str | None
+    # Resolve agent address from positional argument or --agent option
     if opts.agent is not None and opts.agent_option is not None:
         raise UserInputError("Cannot specify both positional agent and --agent option")
-    elif opts.agent is not None:
-        agent_identifier = opts.agent
-    elif opts.agent_option is not None:
-        agent_identifier = opts.agent_option
-    else:
-        agent_identifier = None
+    address: AgentAddress | None = opts.agent if opts.agent is not None else opts.agent_option
 
     # Find the agent (start the host if needed, but don't require the agent to be running)
     result = find_agent_for_command(
         mngr_ctx=mngr_ctx,
-        agent_identifier=agent_identifier,
+        address=address,
         command_usage="provision",
         host_filter=None,
         is_start_desired=True,

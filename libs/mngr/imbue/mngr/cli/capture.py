@@ -5,6 +5,8 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.addresses import AgentAddress
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.agent_utils import find_agent_for_command
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -16,13 +18,13 @@ from imbue.mngr.config.data_types import CommonCliOptions
 class CaptureCliOptions(CommonCliOptions):
     """Options passed from the CLI to the capture command."""
 
-    agent: str | None
+    agent: AgentAddress | None
     start: bool
     full: bool
 
 
 @click.command()
-@click.argument("agent", default=None, required=False)
+@click.argument("agent", type=AGENT_ADDRESS, default=None, required=False)
 @optgroup.group("General")
 @optgroup.option(
     "--start/--no-start",
@@ -47,7 +49,7 @@ def capture(ctx: click.Context, **kwargs: Any) -> None:
 
     result = find_agent_for_command(
         mngr_ctx=mngr_ctx,
-        agent_identifier=opts.agent,
+        address=opts.agent,
         command_usage="capture",
         host_filter=None,
         is_start_desired=opts.start,

@@ -1,5 +1,6 @@
 """Unit tests for the connect CLI command."""
 
+from imbue.mngr.api.addresses import AgentAddress
 from imbue.mngr.cli.connect import ConnectCliOptions
 from imbue.mngr.cli.connect import _build_connection_options
 from imbue.mngr.cli.connect import build_status_text
@@ -16,7 +17,7 @@ from imbue.mngr.utils.testing import make_test_agent_details
 
 
 def _make_connect_opts(
-    agent: str | None = "my-agent",
+    agent: AgentAddress | None = None,
     start: bool = True,
     reconnect: bool = True,
     session_command: str | None = None,
@@ -53,8 +54,9 @@ def _make_connect_opts(
 
 def test_connect_cli_options_can_be_instantiated() -> None:
     """Test that ConnectCliOptions can be instantiated with all required fields."""
-    opts = _make_connect_opts()
-    assert opts.agent == "my-agent"
+    address = AgentAddress(agent=AgentName("my-agent"))
+    opts = _make_connect_opts(agent=address)
+    assert opts.agent == address
     assert opts.start is True
     assert opts.reconnect is True
 

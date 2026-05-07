@@ -308,26 +308,20 @@ class AgentName(SafeName):
     """Human-readable name for an agent."""
 
 
-class HostName(NonEmptyStr):
+class HostName(SafeName):
     """Human-readable name for a host.
 
-    Supports the format ``host_name.provider_name``. Not validated with
-    SafeName because host names can be IP addresses or other formats.
+    Host names never contain dots: the dot is reserved as the deterministic
+    separator in ``HOST.PROVIDER`` host addresses (see ``api/addresses.py``).
     """
 
-    @property
-    def provider_name(self) -> ProviderInstanceName | None:
-        """Extract the provider name if specified as 'host_name.provider_name'."""
-        parts = self.split(".")
-        if len(parts) == 2:
-            return ProviderInstanceName(parts[1])
-        return None
 
-    @property
-    def short_name(self) -> str:
-        """Get the short host name without the provider suffix."""
-        parts = self.split(".")
-        return parts[0]
+# A "name or id" reference where the parser couldn't disambiguate at parse time;
+# downstream code matches by ID first, then falls back to name.
+# IDs are listed first so pydantic's union resolution prefers the more specific
+# type when validating string inputs that already match an ID prefix.
+AgentNameOrId = AgentId | AgentName
+HostNameOrId = HostId | HostName
 
 
 class AgentTypeName(SafeName):

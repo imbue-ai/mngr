@@ -6,10 +6,12 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.api.addresses import AgentAddress
 from imbue.mngr.cli.start import StartCliOptions
 from imbue.mngr.cli.start import _output_result
 from imbue.mngr.cli.start import start
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
 
 
@@ -17,7 +19,7 @@ def test_start_cli_options_fields() -> None:
     """Test StartCliOptions has required fields."""
     opts = StartCliOptions(
         agents=("agent1", "agent2"),
-        agent_list=("agent3",),
+        agent_list=(AgentAddress(agent=AgentName("agent3")),),
         connect=False,
         connect_command=None,
         host=(),
@@ -30,7 +32,7 @@ def test_start_cli_options_fields() -> None:
         disable_plugin=(),
     )
     assert opts.agents == ("agent1", "agent2")
-    assert opts.agent_list == ("agent3",)
+    assert opts.agent_list == (AgentAddress(agent=AgentName("agent3")),)
     assert opts.connect is False
 
 

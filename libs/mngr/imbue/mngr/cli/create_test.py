@@ -12,8 +12,9 @@ import tomlkit
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
-from imbue.mngr.api.agent_addr import AgentAddress
-from imbue.mngr.api.agent_addr import parse_agent_address
+from imbue.mngr.api.addresses import HostAddress
+from imbue.mngr.api.addresses import NewAgentLocation
+from imbue.mngr.api.addresses import parse_new_agent_location
 from imbue.mngr.api.find import ResolvedSource
 from imbue.mngr.cli.create import _AutoLabels
 from imbue.mngr.cli.create import _CreateCommand
@@ -33,7 +34,6 @@ from imbue.mngr.cli.create import _resolve_agent_type_name
 from imbue.mngr.cli.create import _resolve_initial_message_content
 from imbue.mngr.cli.create import _resolve_source_location
 from imbue.mngr.cli.create import _resolve_target_host
-from imbue.mngr.cli.create import _split_address_and_target_path
 from imbue.mngr.cli.create import _split_cli_args
 from imbue.mngr.cli.create import _try_reuse_existing_agent
 from imbue.mngr.cli.create import create
@@ -504,7 +504,10 @@ def test_resolve_source_location_clones_git_url(
     url = f"file://{temp_git_repo}"
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().source, url),
-        to_update(default_create_cli_opts.field_ref().positional_name, "clone-target"),
+        to_update(
+            default_create_cli_opts.field_ref().positional_name,
+            NewAgentLocation(name=AgentName("clone-target")),
+        ),
     )
 
     result = _resolve_source_location(
@@ -1245,7 +1248,7 @@ def test_parse_agent_opts_includes_labels(
 
     result, _ = _parse_agent_opts(
         opts=opts,
-        address=AgentAddress(),
+        address=NewAgentLocation(),
         target_host=None,
         initial_message=None,
         source_location=source_location,
@@ -1271,7 +1274,7 @@ def test_parse_agent_opts_label_invalid_format_raises(
     with pytest.raises(UserInputError, match="KEY=VALUE"):
         _parse_agent_opts(
             opts=opts,
-            address=AgentAddress(),
+            address=NewAgentLocation(),
             target_host=None,
             initial_message=None,
             source_location=source_location,
@@ -1291,7 +1294,7 @@ def test_parse_agent_opts_empty_labels_by_default(
 
     result, _ = _parse_agent_opts(
         opts=default_create_cli_opts,
-        address=AgentAddress(),
+        address=NewAgentLocation(),
         target_host=None,
         initial_message=None,
         source_location=source_location,
@@ -1317,7 +1320,7 @@ def test_parse_agent_opts_with_agent_id(
 
     result, _ = _parse_agent_opts(
         opts=opts,
-        address=AgentAddress(),
+        address=NewAgentLocation(),
         target_host=None,
         initial_message=None,
         source_location=source_location,
@@ -1339,7 +1342,7 @@ def test_parse_agent_opts_agent_id_none_by_default(
 
     result, _ = _parse_agent_opts(
         opts=default_create_cli_opts,
-        address=AgentAddress(),
+        address=NewAgentLocation(),
         target_host=None,
         initial_message=None,
         source_location=source_location,
@@ -1365,7 +1368,7 @@ def test_parse_agent_opts_matching_type_and_positional_ok(
 
     result, _ = _parse_agent_opts(
         opts=opts,
-        address=AgentAddress(),
+        address=NewAgentLocation(),
         target_host=None,
         initial_message=None,
         source_location=source_location,
@@ -1469,113 +1472,99 @@ def test_parse_branch_flag_new_without_wildcard() -> None:
 
 
 # =============================================================================
-# Tests for parse_agent_address
+# Tests for parse_new_agent_location
 # =============================================================================
 
 
-def test_parse_agent_address_empty_string() -> None:
-    """Empty string produces an address with all None fields."""
-    result = parse_agent_address("")
+def test_parse_new_agent_location_empty_string() -> None:
+    """Empty string produces a location with all None fields."""
+    result = parse_new_agent_location("")
 
-    assert result.agent_name is None
-    assert result.host_name is None
-    assert result.provider_name is None
+    assert result == NewAgentLocation()
 
 
-def test_parse_agent_address_simple_name() -> None:
+def test_parse_new_agent_location_simple_name() -> None:
     """A simple name with no @ produces just an agent name."""
-    result = parse_agent_address("my-agent")
+    result = parse_new_agent_location("my-agent")
 
-    assert result.agent_name == AgentName("my-agent")
-    assert result.host_name is None
-    assert result.provider_name is None
+    assert result == NewAgentLocation(name=AgentName("my-agent"))
 
 
-def test_parse_agent_address_name_and_host() -> None:
+def test_parse_new_agent_location_name_and_host() -> None:
     """NAME@HOST produces agent name and host name."""
-    result = parse_agent_address("my-agent@myhost")
+    result = parse_new_agent_location("my-agent@myhost")
 
-    assert result.agent_name == AgentName("my-agent")
-    assert result.host_name == HostName("myhost")
-    assert result.provider_name is None
+    assert result == NewAgentLocation(
+        name=AgentName("my-agent"),
+        host=HostAddress(host=HostName("myhost")),
+    )
 
 
-def test_parse_agent_address_name_host_and_provider() -> None:
+def test_parse_new_agent_location_name_host_and_provider() -> None:
     """NAME@HOST.PROVIDER produces all three components."""
-    result = parse_agent_address("my-agent@myhost.modal")
+    result = parse_new_agent_location("my-agent@myhost.modal")
 
-    assert result.agent_name == AgentName("my-agent")
-    assert result.host_name == HostName("myhost")
-    assert result.provider_name == ProviderInstanceName("modal")
+    assert result == NewAgentLocation(
+        name=AgentName("my-agent"),
+        host=HostAddress(host=HostName("myhost"), provider=ProviderInstanceName("modal")),
+    )
 
 
-def test_parse_agent_address_name_and_provider_only() -> None:
+def test_parse_new_agent_location_name_and_provider_only() -> None:
     """NAME@.PROVIDER produces agent name and provider (implies new host)."""
-    result = parse_agent_address("my-agent@.modal")
+    result = parse_new_agent_location("my-agent@.modal")
 
-    assert result.agent_name == AgentName("my-agent")
-    assert result.host_name is None
-    assert result.provider_name == ProviderInstanceName("modal")
+    assert result == NewAgentLocation(
+        name=AgentName("my-agent"),
+        host=HostAddress(provider=ProviderInstanceName("modal")),
+    )
 
 
-def test_parse_agent_address_no_name_with_host_and_provider() -> None:
+def test_parse_new_agent_location_no_name_with_host_and_provider() -> None:
     """@HOST.PROVIDER produces host and provider, no agent name."""
-    result = parse_agent_address("@myhost.modal")
+    result = parse_new_agent_location("@myhost.modal")
 
-    assert result.agent_name is None
-    assert result.host_name == HostName("myhost")
-    assert result.provider_name == ProviderInstanceName("modal")
+    assert result == NewAgentLocation(
+        host=HostAddress(host=HostName("myhost"), provider=ProviderInstanceName("modal")),
+    )
 
 
-def test_parse_agent_address_no_name_with_provider_only() -> None:
+def test_parse_new_agent_location_no_name_with_provider_only() -> None:
     """@.PROVIDER produces just provider (implies new host, auto-generate name)."""
-    result = parse_agent_address("@.docker")
+    result = parse_new_agent_location("@.docker")
 
-    assert result.agent_name is None
-    assert result.host_name is None
-    assert result.provider_name == ProviderInstanceName("docker")
+    assert result == NewAgentLocation(host=HostAddress(provider=ProviderInstanceName("docker")))
 
 
-def test_parse_agent_address_trailing_at_ignored() -> None:
+def test_parse_new_agent_location_trailing_at_ignored() -> None:
     """NAME@ is treated as just NAME (trailing @ with no host)."""
-    result = parse_agent_address("my-agent@")
+    result = parse_new_agent_location("my-agent@")
 
-    assert result.agent_name == AgentName("my-agent")
-    assert result.host_name is None
-    assert result.provider_name is None
-    assert result.has_host_component is False
-
-
-def test_parse_agent_address_has_host_component() -> None:
-    """has_host_component is True when any host info is present."""
-    assert parse_agent_address("foo").has_host_component is False
-    assert parse_agent_address("foo@host").has_host_component is True
-    assert parse_agent_address("foo@.modal").has_host_component is True
-    assert parse_agent_address("foo@host.modal").has_host_component is True
+    assert result == NewAgentLocation(name=AgentName("my-agent"))
 
 
 def test_is_creating_new_host() -> None:
-    """_is_creating_new_host reflects both address and flag."""
+    """_is_creating_new_host reflects both location and flag."""
     # Implied new host (no host name, has provider)
-    addr = parse_agent_address("foo@.modal")
-    assert _is_creating_new_host(addr, new_host_flag=False) is True
-    assert _is_creating_new_host(addr, new_host_flag=True) is True
+    loc = parse_new_agent_location("foo@.modal")
+    assert _is_creating_new_host(loc, new_host_flag=False) is True
+    assert _is_creating_new_host(loc, new_host_flag=True) is True
 
     # Existing host (has host name)
-    addr = parse_agent_address("foo@myhost.modal")
-    assert _is_creating_new_host(addr, new_host_flag=False) is False
-    assert _is_creating_new_host(addr, new_host_flag=True) is True
+    loc = parse_new_agent_location("foo@myhost.modal")
+    assert _is_creating_new_host(loc, new_host_flag=False) is False
+    assert _is_creating_new_host(loc, new_host_flag=True) is True
 
     # No host component at all
-    addr = parse_agent_address("foo")
-    assert _is_creating_new_host(addr, new_host_flag=False) is False
+    loc = parse_new_agent_location("foo")
+    assert _is_creating_new_host(loc, new_host_flag=False) is False
 
 
 def test_parse_target_host_local_provider_uses_fixed_host(
     default_create_cli_opts: CreateCliOptions,
 ) -> None:
     """_parse_target_host returns None (use fixed localhost) when provider is local."""
-    address = parse_agent_address("foo@.local")
+    address = parse_new_agent_location("foo@.local")
     lifecycle = HostLifecycleOptions()
 
     result = _parse_target_host(
@@ -1593,7 +1582,7 @@ def test_parse_target_host_local_provider_with_new_host_flag(
     default_create_cli_opts: CreateCliOptions,
 ) -> None:
     """_parse_target_host returns None for local provider even with --new-host flag."""
-    address = parse_agent_address("foo@myhost.local")
+    address = parse_new_agent_location("foo@myhost.local")
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().new_host, True),
     )
@@ -1613,7 +1602,7 @@ def test_parse_target_host_non_local_provider_creates_new_host(
     default_create_cli_opts: CreateCliOptions,
 ) -> None:
     """_parse_target_host returns NewHostOptions for non-local providers."""
-    address = parse_agent_address("foo@.modal")
+    address = parse_new_agent_location("foo@.modal")
     lifecycle = HostLifecycleOptions()
 
     result = _parse_target_host(
@@ -1627,34 +1616,57 @@ def test_parse_target_host_non_local_provider_creates_new_host(
     assert result.provider == ProviderInstanceName("modal")
 
 
-def test_parse_agent_address_rejects_multiple_dots() -> None:
-    """Addresses with more than one dot in the host part are invalid."""
+def test_parse_new_agent_location_rejects_multiple_dots() -> None:
+    """Locations with more than one dot in the host part are invalid."""
     with pytest.raises(UserInputError, match="more than one dot"):
-        parse_agent_address("foo@host.provider.extra")
-
-    with pytest.raises(UserInputError, match="more than one dot"):
-        parse_agent_address("foo@a.b.c")
+        parse_new_agent_location("foo@host.provider.extra")
 
     with pytest.raises(UserInputError, match="more than one dot"):
-        parse_agent_address("@host.provider.extra")
+        parse_new_agent_location("foo@a.b.c")
+
+    with pytest.raises(UserInputError, match="more than one dot"):
+        parse_new_agent_location("@host.provider.extra")
 
 
-def test_parse_agent_address_trailing_dot_means_host_only() -> None:
+def test_parse_new_agent_location_trailing_dot_means_host_only() -> None:
     """A trailing dot 'host.' means host name with no provider."""
-    result = parse_agent_address("foo@host.")
+    result = parse_new_agent_location("foo@host.")
 
-    assert result.agent_name == AgentName("foo")
-    assert result.host_name == HostName("host")
-    assert result.provider_name is None
+    assert result == NewAgentLocation(
+        name=AgentName("foo"),
+        host=HostAddress(host=HostName("host")),
+    )
 
 
-def test_parse_agent_address_bare_dot_means_nothing() -> None:
-    """'@.' means no host and no provider (both parts empty)."""
-    result = parse_agent_address("foo@.")
+def test_parse_new_agent_location_bare_dot_means_nothing() -> None:
+    """'@.' has neither host nor provider, which is rejected by HostAddress."""
+    with pytest.raises(UserInputError):
+        parse_new_agent_location("foo@.")
 
-    assert result.agent_name == AgentName("foo")
-    assert result.host_name is None
-    assert result.provider_name is None
+
+def test_parse_new_agent_location_with_path() -> None:
+    """NAME@HOST:PATH parses path component."""
+    result = parse_new_agent_location("foo@myhost:/work/dir")
+
+    assert result == NewAgentLocation(
+        name=AgentName("foo"),
+        host=HostAddress(host=HostName("myhost")),
+        path=Path("/work/dir"),
+    )
+
+
+def test_parse_new_agent_location_path_only() -> None:
+    """':PATH' produces a location with only a path."""
+    result = parse_new_agent_location(":/tmp/work")
+
+    assert result == NewAgentLocation(path=Path("/tmp/work"))
+
+
+def test_parse_new_agent_location_trailing_colon_no_path() -> None:
+    """Trailing ':' produces no path."""
+    result = parse_new_agent_location("foo:")
+
+    assert result == NewAgentLocation(name=AgentName("foo"))
 
 
 # =============================================================================
@@ -1997,27 +2009,3 @@ def test_resolve_source_location_raises_outside_git_repo(
             mngr_ctx=temp_mngr_ctx,
             is_start_desired=True,
         )
-
-
-# =============================================================================
-# Tests for _split_address_and_target_path
-# =============================================================================
-
-
-@pytest.mark.parametrize(
-    ("raw", "expected_addr", "expected_path"),
-    [
-        pytest.param("foo", "foo", None, id="no_colon"),
-        pytest.param("", "", None, id="empty_string"),
-        pytest.param("foo:/tmp/work", "foo", Path("/tmp/work"), id="absolute_path"),
-        pytest.param(":./rel/path", "", Path("./rel/path"), id="relative_path"),
-        pytest.param("foo@host.modal:/root/work", "foo@host.modal", Path("/root/work"), id="full_address_with_path"),
-        pytest.param(":/tmp/work", "", Path("/tmp/work"), id="path_only"),
-        pytest.param("foo:", "foo", None, id="trailing_colon"),
-    ],
-)
-def test_split_address_and_target_path(raw: str, expected_addr: str, expected_path: Path | None) -> None:
-    """_split_address_and_target_path parses address and optional :PATH suffix."""
-    addr, path = _split_address_and_target_path(raw)
-    assert addr == expected_addr
-    assert path == expected_path

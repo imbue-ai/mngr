@@ -46,8 +46,8 @@ mngr provision [OPTIONS] [AGENT]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--agent` | text | Agent name or ID to provision (alternative to positional argument) | None |
-| `--host` | text | Filter by host name or ID [future] | None |
+| `--agent` | agent_address | Agent address (NAME[@HOST[.PROVIDER]]) to provision (alternative to positional argument) | None |
+| `--host` | host_address | Filter by host address (HOST[.PROVIDER]) [future] | None |
 
 ## Behavior
 

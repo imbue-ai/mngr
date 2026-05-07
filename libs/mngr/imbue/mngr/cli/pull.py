@@ -4,10 +4,15 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.addresses import AgentAddress
+from imbue.mngr.api.addresses import HostAddress
+from imbue.mngr.api.addresses import SourceLocation
 from imbue.mngr.api.pull import pull_files
 from imbue.mngr.api.pull import pull_git
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import HOST_ADDRESS
+from imbue.mngr.cli.address_params import SOURCE_LOCATION
 from imbue.mngr.cli.agent_utils import find_agent_for_command
-from imbue.mngr.cli.agent_utils import parse_agent_spec
 from imbue.mngr.cli.agent_utils import stop_agent_after_sync
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -27,11 +32,11 @@ class PullCliOptions(CommonCliOptions):
     Inherits common options (output_format, quiet, verbose, etc.) from CommonCliOptions.
     """
 
-    source_pos: str | None
+    source_pos: SourceLocation | None
     destination_pos: str | None
-    source: str | None
-    source_agent: str | None
-    source_host: str | None
+    source: SourceLocation | None
+    source_agent: AgentAddress | None
+    source_host: HostAddress | None
     source_path: str | None
     destination: str | None
     dry_run: bool
@@ -42,9 +47,9 @@ class PullCliOptions(CommonCliOptions):
     uncommitted_changes: str
     target_branch: str | None
     # Planned features (not yet implemented)
-    target: str | None
-    target_agent: str | None
-    target_host: str | None
+    target: SourceLocation | None
+    target_agent: AgentAddress | None
+    target_host: HostAddress | None
     target_path: str | None
     stdin: bool
     include: tuple[str, ...]
@@ -63,12 +68,17 @@ class PullCliOptions(CommonCliOptions):
 
 
 @click.command()
-@click.argument("source_pos", default=None, required=False, metavar="SOURCE")
+@click.argument("source_pos", type=SOURCE_LOCATION, default=None, required=False, metavar="SOURCE")
 @click.argument("destination_pos", default=None, required=False, metavar="DESTINATION")
 @optgroup.group("Source Selection")
-@optgroup.option("--source", "source", help="Source specification: AGENT, AGENT:PATH, or PATH")
-@optgroup.option("--source-agent", help="Source agent name or ID")
-@optgroup.option("--source-host", help="Source host name or ID [future]")
+@optgroup.option(
+    "--source",
+    "source",
+    type=SOURCE_LOCATION,
+    help="Source specification: AGENT[@HOST[.PROVIDER]][:PATH]",
+)
+@optgroup.option("--source-agent", type=AGENT_ADDRESS, help="Source agent address (NAME[@HOST[.PROVIDER]])")
+@optgroup.option("--source-host", type=HOST_ADDRESS, help="Source host address (HOST[.PROVIDER]) [future]")
 @optgroup.option("--source-path", help="Path within the agent's work directory")
 @optgroup.group("Destination")
 @optgroup.option(
@@ -110,10 +120,11 @@ class PullCliOptions(CommonCliOptions):
 @optgroup.group("Target (for agent-to-agent sync)")
 @optgroup.option(
     "--target",
-    help="Target specification: AGENT, AGENT@HOST, AGENT@HOST.PROVIDER:PATH, or @HOST:PATH [future]",
+    type=SOURCE_LOCATION,
+    help="Target specification: AGENT[@HOST[.PROVIDER]][:PATH] [future]",
 )
-@optgroup.option("--target-agent", help="Target agent name or ID [future]")
-@optgroup.option("--target-host", help="Target host name or ID [future]")
+@optgroup.option("--target-agent", type=AGENT_ADDRESS, help="Target agent address [future]")
+@optgroup.option("--target-host", type=HOST_ADDRESS, help="Target host address [future]")
 @optgroup.option("--target-path", help="Path within target to sync to [future]")
 @optgroup.group("Multi-source")
 @optgroup.option(
@@ -178,7 +189,7 @@ def pull(ctx: click.Context, **kwargs) -> None:
     )
 
     # Merge positional and named arguments (named option takes precedence)
-    effective_source = opts.source if opts.source is not None else opts.source_pos
+    effective_source_loc: SourceLocation | None = opts.source if opts.source is not None else opts.source_pos
     effective_destination = opts.destination if opts.destination is not None else opts.destination_pos
 
     # Check for unsupported options
@@ -241,13 +252,24 @@ def pull(ctx: click.Context, **kwargs) -> None:
     if opts.uncommitted_source is not None:
         raise NotImplementedError("--uncommitted-source is not implemented yet")
 
-    # Parse source specification
-    agent_identifier, source_path = parse_agent_spec(
-        spec=effective_source,
-        explicit_agent=opts.source_agent,
-        spec_name="Source",
-        default_subpath=opts.source_path,
-    )
+    # Build source address and sub-path from positional/named source options.
+    source_address: AgentAddress | None = None
+    source_subpath: Path | None = None
+    if effective_source_loc is not None:
+        if effective_source_loc.agent is None:
+            raise UserInputError("Source must include an agent name or ID")
+        source_address = AgentAddress(agent=effective_source_loc.agent, host=effective_source_loc.host)
+        source_subpath = effective_source_loc.path
+    if opts.source_agent is not None:
+        if source_address is not None and source_address != opts.source_agent:
+            raise UserInputError("Cannot specify both --source and --source-agent with different values")
+        source_address = opts.source_agent
+    if opts.source_path is not None:
+        explicit_source_path = Path(opts.source_path)
+        if source_subpath is not None and source_subpath != explicit_source_path:
+            raise UserInputError("Cannot specify both a subpath in source and --source-path")
+        source_subpath = explicit_source_path
+    source_path: str | None = str(source_subpath) if source_subpath is not None else None
 
     # Determine destination
     destination_path = Path(effective_destination) if effective_destination else Path.cwd()
@@ -255,7 +277,7 @@ def pull(ctx: click.Context, **kwargs) -> None:
     # Find the agent
     result = find_agent_for_command(
         mngr_ctx=mngr_ctx,
-        agent_identifier=agent_identifier,
+        address=source_address,
         command_usage="pull <agent-id> <path>",
         host_filter=None,
     )

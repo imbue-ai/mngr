@@ -8,10 +8,12 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.api.addresses import AgentAddress
 from imbue.mngr.cli.stop import StopCliOptions
 from imbue.mngr.cli.stop import _output_result
 from imbue.mngr.cli.stop import stop
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
 
 
@@ -19,7 +21,7 @@ def test_stop_cli_options_fields() -> None:
     """Test StopCliOptions has required fields."""
     opts = StopCliOptions(
         agents=("agent1", "agent2"),
-        agent_list=("agent3",),
+        agent_list=(AgentAddress(agent=AgentName("agent3")),),
         archive=False,
         sessions=(),
         snapshot_mode=None,
@@ -34,7 +36,7 @@ def test_stop_cli_options_fields() -> None:
         disable_plugin=(),
     )
     assert opts.agents == ("agent1", "agent2")
-    assert opts.agent_list == ("agent3",)
+    assert opts.agent_list == (AgentAddress(agent=AgentName("agent3")),)
     assert opts.sessions == ()
 
 
@@ -95,7 +97,7 @@ def test_stop_cli_options_accepts_all_optional_fields() -> None:
     """Test StopCliOptions can be instantiated with all optional fields set."""
     opts = StopCliOptions(
         agents=("a1", "a2", "a3"),
-        agent_list=("a4",),
+        agent_list=(AgentAddress(agent=AgentName("a4")),),
         archive=True,
         sessions=("mngr-session-1", "mngr-session-2"),
         snapshot_mode="auto",

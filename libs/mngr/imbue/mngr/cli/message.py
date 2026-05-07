@@ -6,9 +6,11 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.agent_addr import parse_identifier_as_address
+from imbue.mngr.api.addresses import AgentAddress
 from imbue.mngr.api.message import MessageResult
 from imbue.mngr.api.message import send_message_to_agents
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import parse_agent_addresses_or_raise
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -39,7 +41,7 @@ class MessageCliOptions(CommonCliOptions):
     """
 
     agents: tuple[str, ...]
-    agent_list: tuple[str, ...]
+    agent_list: tuple[AgentAddress, ...]
     message_content: str | None
     message_file: str | None
     provider: tuple[str, ...]
@@ -53,8 +55,9 @@ class MessageCliOptions(CommonCliOptions):
 @optgroup.option(
     "--agent",
     "agent_list",
+    type=AGENT_ADDRESS,
     multiple=True,
-    help="Agent name or ID to send message to (can be specified multiple times)",
+    help="Agent address (NAME[@HOST[.PROVIDER]]) to send message to (can be specified multiple times)",
 )
 @optgroup.option(
     "--start/--no-start",
@@ -108,12 +111,14 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
     if opts.message_content is not None and opts.message_file is not None:
         raise UserInputError("Cannot provide both --message and --message-file")
 
-    # Build list of agent identifiers
+    # Build list of agent addresses
     stdin_consumed = STDIN_PLACEHOLDER in opts.agents
-    agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
+    agent_addresses: list[AgentAddress] = parse_agent_addresses_or_raise(expand_stdin_placeholder(opts.agents)) + list(
+        opts.agent_list
+    )
 
     # Validate input: must have agents specified
-    if not agent_identifiers:
+    if not agent_addresses:
         if not stdin_consumed:
             raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
         return
@@ -130,19 +135,18 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
-    # Build include filters from agent identifiers, parsing addresses
+    # Build include filters from agent addresses.
     include_filters: list[str] = []
-    if agent_identifiers:
-        # Create a CEL filter that matches any of the provided identifiers.
-        # Parse agent addresses to extract the name/ID part and host/provider constraints.
+    if agent_addresses:
         ref_filters = []
-        for ref in agent_identifiers:
-            plain_id, address = parse_identifier_as_address(ref)
+        for address in agent_addresses:
+            plain_id = str(address.agent)
             ref_filter = f'(name == "{plain_id}" || id == "{plain_id}")'
-            if address.host_name is not None:
-                ref_filter += f' && host.name == "{address.host_name}"'
-            if address.provider_name is not None:
-                ref_filter += f' && host.provider == "{address.provider_name}"'
+            if address.host is not None:
+                if address.host.host is not None:
+                    ref_filter += f' && host.name == "{address.host.host}"'
+                if address.host.provider is not None:
+                    ref_filter += f' && host.provider == "{address.host.provider}"'
             ref_filters.append(f"({ref_filter})")
         combined_filter = " || ".join(ref_filters)
         include_filters.append(combined_filter)

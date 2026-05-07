@@ -20,8 +20,9 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.addresses import parse_agent_name_or_id
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import find_and_maybe_start_agent_by_name_or_id
+from imbue.mngr.api.find import find_and_maybe_start_agent
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.primitives import AgentLifecycleState
@@ -90,8 +91,8 @@ def _resolve_agent(agent_name: str, mngr_ctx: MngrContext) -> AgentInterface:
         include_destroyed=False,
         reset_caches=False,
     )
-    agent, _host = find_and_maybe_start_agent_by_name_or_id(
-        agent_name,
+    agent, _host = find_and_maybe_start_agent(
+        parse_agent_name_or_id(agent_name),
         agents_by_host,
         mngr_ctx,
         "schedule-verify",

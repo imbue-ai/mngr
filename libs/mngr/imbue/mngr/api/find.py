@@ -10,6 +10,8 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.addresses import HostAddress
+from imbue.mngr.api.addresses import SourceLocation
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
@@ -23,113 +25,21 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentNameOrId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostNameOrId
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 
 
-class ParsedSourceLocation(FrozenModel):
-    """Parsed components of a source location string.
-
-    Produced by parse_source_string(); consumed by resolve_source_location().
-    """
-
-    agent: str | None = Field(default=None, description="Agent ID or name")
-    host_name: HostName | None = Field(default=None, description="Host ID or name; never includes a .PROVIDER suffix")
-    provider_name: ProviderInstanceName | None = Field(
-        default=None, description="Provider name when explicitly qualified with .PROVIDER"
-    )
-    path: str | None = Field(default=None, description="File path")
-
-
-@pure
-def parse_host_qualifier(host_part: str) -> tuple[HostName | None, ProviderInstanceName | None]:
-    """Parse a `[HOST][.PROVIDER]` string into (host_name, provider_name).
-
-    Empty input returns (None, None). The dot is treated as a deterministic
-    separator: real host names do not contain dots in this DSL, so any dot is
-    interpreted as the start of a `.PROVIDER` qualifier. More than one dot is
-    rejected.
-    """
-    if not host_part:
-        return (None, None)
-    dot_count = host_part.count(".")
-    if dot_count > 1:
-        raise UserInputError(
-            f"Invalid host qualifier '{host_part}': contains more than one dot. Expected format: [HOST][.PROVIDER]"
-        )
-    if dot_count == 0:
-        return (HostName(host_part), None)
-    host_str, provider_str = host_part.split(".", 1)
-    host_name = HostName(host_str) if host_str else None
-    provider_name = ProviderInstanceName(provider_str) if provider_str else None
-    return (host_name, provider_name)
-
-
-@pure
-def parse_address_part(
-    address_part: str,
-) -> tuple[str | None, HostName | None, ProviderInstanceName | None]:
-    """Parse a `[NAME][@[HOST][.PROVIDER]]` string into (name_str, host_name, provider_name).
-
-    The name part is returned as a raw string so callers may further validate it
-    according to their own rules (as AgentName, AgentId, HostId, etc.). The host
-    and provider parts are deterministically split on a single dot.
-    """
-    if not address_part:
-        return (None, None, None)
-    if "@" not in address_part:
-        return (address_part, None, None)
-    name_part, host_part = address_part.split("@", 1)
-    host_name, provider_name = parse_host_qualifier(host_part)
-    return (name_part or None, host_name, provider_name)
-
-
-@pure
-def parse_source_string(source: str) -> ParsedSourceLocation:
-    """Parse a --from/--source string into its components.
-
-    The DSL encodes four variants:
-
-      1. AGENT_ADDR             agent's host + agent's work_dir
-      2. AGENT_ADDR:PATH        agent's host + explicit PATH
-      3. @HOST[.PROVIDER]:PATH  explicit host + PATH (@ without agent name)
-      4. :PATH                  local path
-
-    where AGENT_ADDR is NAME[@HOST[.PROVIDER]]. The host and provider are split
-    deterministically on a single dot; real host names are assumed not to contain
-    dots in this DSL.
-
-    Paths starting with /, ./, ~/, or ../ are also recognized directly
-    (i.e. --from /abs/path works without requiring the : prefix).
-
-    Note: a bare name like "foo" refers to agent "foo", not a directory.
-    Use ":foo" to specify a relative directory named foo.
-    """
-    # Recognize unambiguous path prefixes as a convenience
-    if source.startswith(("/", "./", "~/", "../")):
-        return ParsedSourceLocation(path=source)
-
-    # Split on first : to separate address from path
-    if ":" in source:
-        address_part, path_part = source.split(":", 1)
-        path = path_part or None
-    else:
-        address_part = source
-        path = None
-
-    name_str, host_name, provider_name = parse_address_part(address_part)
-    return ParsedSourceLocation(agent=name_str, host_name=host_name, provider_name=provider_name, path=path)
-
-
 @pure
 def determine_resolved_path(
-    parsed_path: str | None,
+    parsed_path: Path | None,
     resolved_agent: DiscoveredAgent | None,
     agent_work_dir_if_available: Path | None,
 ) -> Path:
@@ -139,7 +49,7 @@ def determine_resolved_path(
     Raises UserInputError if path cannot be determined.
     """
     if parsed_path is not None:
-        return Path(parsed_path)
+        return parsed_path
     if resolved_agent is not None and agent_work_dir_if_available is not None:
         return agent_work_dir_if_available
     if resolved_agent is not None:
@@ -149,54 +59,42 @@ def determine_resolved_path(
 
 @pure
 def _find_matching_hosts(
-    host_name_or_id: HostName | None,
-    provider_name: ProviderInstanceName | None,
+    host: HostNameOrId | None,
+    provider: ProviderInstanceName | None,
     all_hosts: Sequence[DiscoveredHost],
 ) -> list[DiscoveredHost]:
-    """Find hosts matching the given parsed components.
+    """Find hosts whose name/ID and provider match the given filter components.
 
-    ``host_name_or_id`` may be either a host name or a HostId-shaped string;
-    when it parses as a HostId, the lookup matches by ID, otherwise by name.
-    ``provider_name`` filters in either case -- e.g. a host ID with a
-    non-matching ``.PROVIDER`` qualifier deliberately yields no match.
-    Returns ``all_hosts`` unchanged if both arguments are None.
+    Either component may be ``None`` to skip that filter; if both are ``None``,
+    returns ``all_hosts`` unchanged. Matching by ``host`` dispatches on its
+    runtime type: a :class:`HostId` matches by ID, a :class:`HostName` by name.
     """
-    if host_name_or_id is None and provider_name is None:
+    if host is None and provider is None:
         return list(all_hosts)
 
     matches = list(all_hosts)
-    if host_name_or_id is not None:
-        try:
-            host_id = HostId(str(host_name_or_id))
-        except ValueError:
-            host_id = None
-        if host_id is not None:
-            matches = [h for h in matches if h.host_id == host_id]
+    if host is not None:
+        if isinstance(host, HostId):
+            matches = [h for h in matches if h.host_id == host]
         else:
-            matches = [h for h in matches if h.host_name == host_name_or_id]
-    if provider_name is not None:
-        matches = [h for h in matches if h.provider_name == provider_name]
+            matches = [h for h in matches if h.host_name == host]
+    if provider is not None:
+        matches = [h for h in matches if h.provider_name == provider]
     return matches
 
 
 @pure
 def find_all_matching_hosts(
-    identifier: str,
+    address: HostAddress,
     all_hosts: Sequence[DiscoveredHost],
 ) -> list[DiscoveredHost]:
-    """Find all hosts matching a raw identifier string.
-
-    The identifier may be a HostId, a HostName, or a ``host.provider`` form.
-    Dots are treated as the deterministic ``.PROVIDER`` separator; this assumes
-    real host names do not contain dots in this DSL.
-    """
-    host_name, provider_name = parse_host_qualifier(identifier)
-    return _find_matching_hosts(host_name, provider_name, all_hosts)
+    """Find all hosts matching a :class:`HostAddress` filter."""
+    return _find_matching_hosts(address.host, address.provider, all_hosts)
 
 
 @pure
 def find_all_matching_agents(
-    identifier: str,
+    agent: AgentNameOrId,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
     resolved_host: DiscoveredHost | None = None,
 ) -> list[tuple[DiscoveredHost, DiscoveredAgent]]:
@@ -205,97 +103,85 @@ def find_all_matching_agents(
     for host_ref, agent_refs in agents_by_host.items():
         if resolved_host is not None and host_ref.host_id != resolved_host.host_id:
             continue
-
         for agent_ref in agent_refs:
-            try:
-                agent_id = AgentId(identifier)
-                if agent_ref.agent_id == agent_id:
-                    matches.append((host_ref, agent_ref))
-            except ValueError:
-                try:
-                    agent_name = AgentName(identifier)
-                except ValueError:
-                    continue
-                if agent_ref.agent_name == agent_name:
-                    matches.append((host_ref, agent_ref))
+            is_match = agent_ref.agent_id == agent if isinstance(agent, AgentId) else agent_ref.agent_name == agent
+            if is_match:
+                matches.append((host_ref, agent_ref))
     return matches
 
 
 @pure
 def _find_one_matching_host(
-    host_name_or_id: HostName | None,
-    provider_name: ProviderInstanceName | None,
+    host: HostNameOrId | None,
+    provider: ProviderInstanceName | None,
     all_hosts: Sequence[DiscoveredHost],
 ) -> DiscoveredHost | None:
-    """Find the single host matching the given parsed components.
+    """Find the single host matching the given filter components.
 
-    Returns None when both arguments are None. Raises UserInputError when no
-    host matches or when more than one matches.
+    Returns ``None`` when both arguments are ``None``. Raises
+    :class:`UserInputError` when no host matches or when more than one matches.
     """
-    if host_name_or_id is None and provider_name is None:
+    if host is None and provider is None:
         return None
 
-    matches = _find_matching_hosts(host_name_or_id, provider_name, all_hosts)
+    matches = _find_matching_hosts(host, provider, all_hosts)
     if len(matches) == 0:
-        descriptor = _host_descriptor(host_name_or_id, provider_name)
+        descriptor = _host_descriptor(host, provider)
         raise UserInputError(f"Could not find host with ID or name: {descriptor}")
     if len(matches) > 1:
-        descriptor = _host_descriptor(host_name_or_id, provider_name)
+        descriptor = _host_descriptor(host, provider)
         raise UserInputError(f"Multiple hosts found with name: {descriptor}")
     return matches[0]
 
 
 @pure
-def _host_descriptor(host_name_or_id: HostName | None, provider_name: ProviderInstanceName | None) -> str:
-    """Render parsed host components back into the user-facing `host.provider` form."""
-    if host_name_or_id is not None and provider_name is not None:
-        return f"{host_name_or_id}.{provider_name}"
-    if host_name_or_id is not None:
-        return str(host_name_or_id)
-    if provider_name is not None:
-        return f".{provider_name}"
+def _host_descriptor(host: HostNameOrId | None, provider: ProviderInstanceName | None) -> str:
+    """Render filter components back into the user-facing ``host.provider`` form."""
+    if host is not None and provider is not None:
+        return f"{host}.{provider}"
+    if host is not None:
+        return str(host)
+    if provider is not None:
+        return f".{provider}"
     return ""
 
 
 @pure
 def resolve_host_reference(
-    host_identifier: str | None,
+    address: HostAddress | None,
     all_hosts: Sequence[DiscoveredHost],
 ) -> DiscoveredHost | None:
-    """Resolve a raw host identifier string to a DiscoveredHost.
+    """Resolve a :class:`HostAddress` to a unique :class:`DiscoveredHost`.
 
-    Returns None if host_identifier is None. Accepts a HostId, a HostName, or a
-    ``host.provider`` form. Raises UserInputError if no host matches or if more
-    than one matches.
+    Returns ``None`` if ``address`` is ``None``. Raises
+    :class:`UserInputError` if no host matches or if more than one matches.
     """
-    if host_identifier is None:
+    if address is None:
         return None
-    host_name, provider_name = parse_host_qualifier(host_identifier)
-    return _find_one_matching_host(host_name, provider_name, all_hosts)
+    return _find_one_matching_host(address.host, address.provider, all_hosts)
 
 
 @pure
 def resolve_agent_reference(
-    agent_identifier: str | None,
+    agent: AgentNameOrId | None,
     resolved_host: DiscoveredHost | None,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
 ) -> tuple[DiscoveredHost, DiscoveredAgent] | None:
     """Resolve an agent identifier (ID or name) to host and agent references.
 
-    Returns None if agent_identifier is None.
-    Raises UserInputError if agent cannot be found or multiple agents match.
+    Returns ``None`` if ``agent`` is ``None``. Raises :class:`UserInputError`
+    if the agent cannot be found or multiple agents match.
     """
-    if agent_identifier is None:
+    if agent is None:
         return None
 
-    matches = find_all_matching_agents(agent_identifier, agents_by_host, resolved_host)
+    matches = find_all_matching_agents(agent, agents_by_host, resolved_host)
 
     if len(matches) == 0:
-        raise UserInputError(f"Could not find agent with ID or name: {agent_identifier}")
-    elif len(matches) > 1:
-        raise UserInputError(f"Multiple agents found with ID or name: {agent_identifier}")
-    else:
-        return matches[0]
+        raise UserInputError(f"Could not find agent with ID or name: {agent}")
+    if len(matches) > 1:
+        raise UserInputError(f"Multiple agents found with ID or name: {agent}")
+    return matches[0]
 
 
 class ResolvedSource(FrozenModel):
@@ -309,41 +195,35 @@ class ResolvedSource(FrozenModel):
 
 @log_call
 def resolve_source_location(
-    parsed: ParsedSourceLocation,
+    parsed: SourceLocation,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
     mngr_ctx: MngrContext,
     *,
     is_start_desired: bool = True,
 ) -> ResolvedSource:
-    """Resolve a previously-parsed source location to a concrete host, path, and optional agent.
+    """Resolve a :class:`SourceLocation` to a concrete host, path, and optional agent.
 
-    Takes a ParsedSourceLocation (produced by parse_source_string) and resolves
-    agent/host references against the discovered hosts and agents.
-
-    If the resolved host is offline, it will be started if is_start_desired is True (the default).
-    If is_start_desired is False and the host is offline, raises UserInputError.
+    Resolves agent/host references against the discovered hosts and agents.
+    If the resolved host is offline, it will be started if ``is_start_desired``
+    is True (the default); otherwise raises :class:`UserInputError`.
     """
     logger.trace(
-        "Resolving source: agent={} host_name={} provider_name={} path={}",
+        "Resolving source: agent={} host={} path={}",
         parsed.agent,
-        parsed.host_name,
-        parsed.provider_name,
+        parsed.host,
         parsed.path,
     )
 
-    # Resolve host and agent references from the parsed components
     all_hosts = list(agents_by_host.keys())
     with log_span("Resolving host reference"):
-        resolved_host = _find_one_matching_host(parsed.host_name, parsed.provider_name, all_hosts)
+        resolved_host = resolve_host_reference(parsed.host, all_hosts)
     with log_span("Resolving agent reference"):
         agent_result = resolve_agent_reference(parsed.agent, resolved_host, agents_by_host)
 
-    # Extract resolved agent if found
     resolved_agent: DiscoveredAgent | None = None
     if agent_result is not None:
         resolved_host, resolved_agent = agent_result
 
-    # Get the host interface from the provider
     with log_span("Getting host interface from provider"):
         if resolved_host is None:
             provider = get_provider_instance(ProviderInstanceName(LOCAL_PROVIDER_NAME), mngr_ctx)
@@ -352,7 +232,6 @@ def resolve_source_location(
             provider = get_provider_instance(resolved_host.provider_name, mngr_ctx)
             host_interface = provider.get_host(resolved_host.host_id)
 
-    # Ensure host is online for file operations (starts the host if needed)
     if not isinstance(host_interface, OnlineHostInterface):
         online_host, _was_started = ensure_host_started(
             host_interface, is_start_desired=is_start_desired, provider=provider
@@ -360,7 +239,6 @@ def resolve_source_location(
     else:
         online_host = host_interface
 
-    # Resolve the final path
     agent_work_dir: Path | None = None
     if resolved_agent is not None:
         for agent_ref in online_host.discover_agents():
@@ -435,7 +313,6 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
     If the agent is stopped and is_start_desired is True, starts the agent.
     If the agent is stopped and is_start_desired is False, raises UserInputError.
     """
-    # Check if the agent's tmux session exists and start it if needed
     lifecycle_state = agent.get_lifecycle_state()
     if lifecycle_state not in (
         AgentLifecycleState.RUNNING,
@@ -458,8 +335,8 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
 
 
 @log_call
-def find_and_maybe_start_agent_by_name_or_id(
-    agent_str: str,
+def find_and_maybe_start_agent(
+    agent: AgentNameOrId,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
     mngr_ctx: MngrContext,
     command_name: str,
@@ -468,52 +345,41 @@ def find_and_maybe_start_agent_by_name_or_id(
 ) -> tuple[AgentInterface, OnlineHostInterface]:
     """Find an agent by name or ID and return the agent and host interfaces.
 
-    This function resolves an agent identifier to the actual agent and host objects,
-    which is needed by CLI commands that need to interact with the agent.
+    Resolves a typed :class:`AgentNameOrId` to the live agent and host
+    objects that CLI commands need to interact with.
 
-    is_start_desired: if True, start both the host and the agent when they are stopped.
-    skip_agent_state_check: if True, skip the agent lifecycle state check entirely
-        (useful for commands like provision that need the host online but don't care
-        whether the agent process is running).
+    is_start_desired: if True, start both the host and the agent when stopped.
+    skip_agent_state_check: if True, skip the agent lifecycle state check
+        (useful for commands like provision that need the host online but don't
+        care whether the agent process is running).
 
-    Raises AgentNotFoundError if the agent cannot be found by ID.
-    Raises UserInputError if the agent cannot be found by name or if multiple agents match.
+    Raises :class:`AgentNotFoundError` if the agent cannot be found by ID.
+    Raises :class:`UserInputError` if the agent cannot be found by name or if
+    multiple agents match.
     """
-
-    # Try parsing as an AgentId first
-    try:
-        agent_id = AgentId(agent_str)
-    except ValueError:
-        agent_id = None
-
-    if agent_id is not None:
+    if isinstance(agent, AgentId):
         for host_ref, agent_refs in agents_by_host.items():
             for agent_ref in agent_refs:
-                if agent_ref.agent_id == agent_id:
+                if agent_ref.agent_id == agent:
                     provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
                     host = provider.get_host(host_ref.host_id)
                     online_host, _was_started = ensure_host_started(
                         host, is_start_desired=is_start_desired, provider=provider
                     )
-                    for agent in online_host.get_agents():
-                        if agent.id == agent_id:
+                    for live_agent in online_host.get_agents():
+                        if live_agent.id == agent:
                             if not skip_agent_state_check:
-                                ensure_agent_started(agent, online_host, is_start_desired=is_start_desired)
-                            return agent, online_host
-        raise AgentNotFoundError(agent_id)
+                                ensure_agent_started(live_agent, online_host, is_start_desired=is_start_desired)
+                            return live_agent, online_host
+        raise AgentNotFoundError(agent)
 
-    # Try matching by name
-    agent_name = AgentName(agent_str)
     matching: list[tuple[AgentInterface, OnlineHostInterface]] = []
-    # Track display info for error messages: (agent_id, host_name, provider_name)
     match_display_info: list[tuple[AgentId, HostName, ProviderInstanceName]] = []
-
-    # Track agents found during discovery but missing from get_agents()
     missing_from_host: list[tuple[AgentId, HostName, ProviderInstanceName]] = []
 
     for host_ref, agent_refs in agents_by_host.items():
         for agent_ref in agent_refs:
-            if agent_ref.agent_name == agent_name:
+            if agent_ref.agent_name == agent:
                 provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
                 host = provider.get_host(host_ref.host_id)
                 online_host, _was_started = ensure_host_started(
@@ -521,9 +387,9 @@ def find_and_maybe_start_agent_by_name_or_id(
                 )
                 # Find the specific agent by ID (not name, to avoid duplicates)
                 found_on_host = False
-                for agent in online_host.get_agents():
-                    if agent.id == agent_ref.agent_id:
-                        matching.append((agent, online_host))
+                for live_agent in online_host.get_agents():
+                    if live_agent.id == agent_ref.agent_id:
+                        matching.append((live_agent, online_host))
                         match_display_info.append((agent_ref.agent_id, host_ref.host_name, host_ref.provider_name))
                         found_on_host = True
                         break
@@ -536,48 +402,42 @@ def find_and_maybe_start_agent_by_name_or_id(
         )
         if not matching:
             # This is an internal consistency error: discovery found agents but
-            # they weren't on their hosts. We don't want to hard-fail if we still
-            # have a unique agent to connect to, but since we'd fail just below
-            # anyway (no matching agents), take the opportunity to raise as
-            # RuntimeError instead of UserInputError so the unexpected-error
-            # handler suggests reporting to GitHub.
+            # they weren't on their hosts. Raise as RuntimeError so the
+            # unexpected-error handler suggests reporting to GitHub.
             raise RuntimeError(
-                f"Agent '{agent_str}' was found during discovery but not on host(s). "
+                f"Agent '{agent}' was found during discovery but not on host(s). "
                 f"Missing: {missing_details}. "
                 f"This indicates a stale discovery cache or host state inconsistency."
             )
-        # Some agents disappeared but others were found. Log a warning and proceed.
         logger.warning(
             "Some agents named '{}' were discovered but not found on their host(s): {}",
-            agent_str,
+            agent,
             missing_details,
         )
 
     if not matching:
-        raise UserInputError(f"No agent found with name or ID: {agent_str}")
+        raise UserInputError(f"No agent found with name or ID: {agent}")
 
     if len(matching) > 1:
-        # Build helpful error message showing the matching agents with address syntax
         agent_list = "\n".join(
             [
-                f"  - {agent_str}@{host_name}.{provider_name} (ID: {agent_id})"
+                f"  - {agent}@{host_name}.{provider_name} (ID: {agent_id})"
                 for agent_id, host_name, provider_name in match_display_info
             ]
         )
         raise UserInputError(
-            f"Multiple agents found with name '{agent_str}':\n{agent_list}\n\n"
+            f"Multiple agents found with name '{agent}':\n{agent_list}\n\n"
             f"Disambiguate using the address format:\n"
-            f"  mngr {command_name} {agent_str}@<host>.<provider>\n\n"
+            f"  mngr {command_name} {agent}@<host>.<provider>\n\n"
             f"Or use the agent ID directly:\n"
             f"  mngr {command_name} <agent-id>"
         )
 
-    # make sure the agent is started
-    agent, host = matching[0]
+    found_agent, found_host = matching[0]
     if not skip_agent_state_check:
-        ensure_agent_started(agent, host, is_start_desired=is_start_desired)
+        ensure_agent_started(found_agent, found_host, is_start_desired=is_start_desired)
 
-    return agent, host
+    return found_agent, found_host
 
 
 class AgentMatch(FrozenModel):
@@ -591,7 +451,7 @@ class AgentMatch(FrozenModel):
 
 
 def find_agents_by_identifiers_or_state(
-    agent_identifiers: Sequence[str],
+    agent_identifiers: Sequence[AgentNameOrId],
     filter_all: bool,
     target_state: AgentLifecycleState | None,
     mngr_ctx: MngrContext,
@@ -602,8 +462,7 @@ def find_agents_by_identifiers_or_state(
 
     When filter_all is True, returns all agents in the target_state
     (or all agents if target_state is None).
-    When filter_all is False, returns agents matching the given identifiers
-    (by name or ID).
+    When filter_all is False, returns agents matching the given identifiers.
 
     When provider_names is set, only those providers are queried during discovery.
 
@@ -612,28 +471,28 @@ def find_agents_by_identifiers_or_state(
     agents_by_host, _ = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=provider_names,
-        agent_identifiers=tuple(agent_identifiers) if not filter_all and agent_identifiers else None,
+        agent_identifiers=tuple(str(i) for i in agent_identifiers) if not filter_all and agent_identifiers else None,
         include_destroyed=include_destroyed,
         reset_caches=False,
     )
 
-    # Collect candidate matches from the lightweight agent references
     candidates: list[AgentMatch] = []
-    matched_identifiers: set[str] = set()
+    matched_identifiers: set[AgentNameOrId] = set()
 
     for host_ref, agent_refs in agents_by_host.items():
         for agent_ref in agent_refs:
             should_include: bool
             if filter_all:
-                # State filtering is deferred below when target_state is set
                 should_include = True
             elif agent_identifiers:
-                agent_name_str = str(agent_ref.agent_name)
-                agent_id_str = str(agent_ref.agent_id)
-
                 should_include = False
                 for identifier in agent_identifiers:
-                    if identifier == agent_name_str or identifier == agent_id_str:
+                    is_match = (
+                        agent_ref.agent_id == identifier
+                        if isinstance(identifier, AgentId)
+                        else agent_ref.agent_name == identifier
+                    )
+                    if is_match:
                         should_include = True
                         matched_identifiers.add(identifier)
             else:
@@ -650,19 +509,15 @@ def find_agents_by_identifiers_or_state(
                     )
                 )
 
-    # Verify all specified identifiers were found
     if agent_identifiers:
         unmatched_identifiers = set(agent_identifiers) - matched_identifiers
         if unmatched_identifiers:
-            unmatched_list = ", ".join(sorted(unmatched_identifiers))
+            unmatched_list = ", ".join(sorted(str(i) for i in unmatched_identifiers))
             raise AgentNotFoundError(f"No agent(s) found matching: {unmatched_list}")
 
-    # If no state filtering is needed, return the candidates directly
     if not filter_all or target_state is None:
         return candidates
 
-    # State filtering: go online to each host and check lifecycle state.
-    # Agents on offline hosts are treated as STOPPED.
     matches: list[AgentMatch] = []
     candidates_by_host = group_agents_by_host(candidates)
     for host_key, agent_list in candidates_by_host.items():
@@ -671,7 +526,6 @@ def find_agents_by_identifiers_or_state(
         provider = get_provider_instance(provider_name, mngr_ctx)
         host = provider.get_host(HostId(host_id_str))
         if not isinstance(host, OnlineHostInterface):
-            # Offline hosts: all agents are considered STOPPED
             if target_state == AgentLifecycleState.STOPPED:
                 matches.extend(agent_list)
             continue

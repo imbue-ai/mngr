@@ -6,6 +6,8 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.api.addresses import AgentAddress
+from imbue.mngr.api.addresses import HostAddress
 from imbue.mngr.cli.snapshot import SnapshotCreateCliOptions
 from imbue.mngr.cli.snapshot import SnapshotDestroyCliOptions
 from imbue.mngr.cli.snapshot import SnapshotListCliOptions
@@ -18,6 +20,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.main import cli
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
@@ -31,8 +35,8 @@ def test_snapshot_create_cli_options_fields() -> None:
     """Test SnapshotCreateCliOptions has required fields."""
     opts = SnapshotCreateCliOptions(
         identifiers=("agent1",),
-        agent_list=("agent2",),
-        hosts=("host1",),
+        agent_list=(AgentAddress(agent=AgentName("agent2")),),
+        hosts=(HostAddress(host=HostName("host1")),),
         name="my-snapshot",
         on_error="continue",
         tag=(),
@@ -49,8 +53,8 @@ def test_snapshot_create_cli_options_fields() -> None:
         disable_plugin=(),
     )
     assert opts.identifiers == ("agent1",)
-    assert opts.agent_list == ("agent2",)
-    assert opts.hosts == ("host1",)
+    assert opts.agent_list == (AgentAddress(agent=AgentName("agent2")),)
+    assert opts.hosts == (HostAddress(host=HostName("host1")),)
     assert opts.name == "my-snapshot"
     assert opts.on_error == "continue"
 
@@ -60,7 +64,7 @@ def test_snapshot_list_cli_options_fields() -> None:
     opts = SnapshotListCliOptions(
         identifiers=("agent1",),
         agent_list=(),
-        hosts=("host1",),
+        hosts=(HostAddress(host=HostName("host1")),),
         limit=10,
         after=None,
         before=None,
@@ -73,7 +77,7 @@ def test_snapshot_list_cli_options_fields() -> None:
         disable_plugin=(),
     )
     assert opts.identifiers == ("agent1",)
-    assert opts.hosts == ("host1",)
+    assert opts.hosts == (HostAddress(host=HostName("host1")),)
     assert opts.limit == 10
 
 
@@ -181,7 +185,7 @@ def test_classify_mixed_identifiers_no_agents_treats_all_as_hosts(
     """When no agents exist, all identifiers are classified as host identifiers."""
     agent_ids, host_ids = _classify_mixed_identifiers(["foo", "bar"], temp_mngr_ctx)
     assert agent_ids == []
-    assert host_ids == ["foo", "bar"]
+    assert host_ids == [HostAddress(host=HostName("foo")), HostAddress(host=HostName("bar"))]
 
 
 # =============================================================================
@@ -257,7 +261,7 @@ def test_snapshot_list_cli_options_can_be_instantiated() -> None:
     """Test SnapshotListCliOptions can be instantiated with various field values."""
     opts = SnapshotListCliOptions(
         identifiers=("a1", "a2"),
-        agent_list=("a3",),
+        agent_list=(AgentAddress(agent=AgentName("a3")),),
         hosts=(),
         limit=5,
         after=None,
@@ -286,7 +290,7 @@ def test_classify_mixed_identifiers_single_unknown_identifier(
     """A single unknown identifier is classified as a host identifier."""
     agent_ids, host_ids = _classify_mixed_identifiers(["some-host-id"], temp_mngr_ctx)
     assert agent_ids == []
-    assert host_ids == ["some-host-id"]
+    assert host_ids == [HostAddress(host=HostName("some-host-id"))]
 
 
 def test_classify_mixed_identifiers_multiple_unknown_identifiers(
@@ -295,7 +299,11 @@ def test_classify_mixed_identifiers_multiple_unknown_identifiers(
     """Multiple unknown identifiers are all classified as host identifiers."""
     agent_ids, host_ids = _classify_mixed_identifiers(["host-a", "host-b", "host-c"], temp_mngr_ctx)
     assert agent_ids == []
-    assert host_ids == ["host-a", "host-b", "host-c"]
+    assert host_ids == [
+        HostAddress(host=HostName("host-a")),
+        HostAddress(host=HostName("host-b")),
+        HostAddress(host=HostName("host-c")),
+    ]
 
 
 # =============================================================================

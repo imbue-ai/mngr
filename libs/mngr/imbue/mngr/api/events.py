@@ -25,7 +25,11 @@ from imbue.imbue_common.logging import ROTATED_JSONL_PATTERN
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.addresses import AgentAddress
+from imbue.mngr.api.addresses import parse_agent_address
+from imbue.mngr.api.addresses import parse_host_address
 from imbue.mngr.api.agent_addr import discover_by_address
+from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import resolve_agent_reference
 from imbue.mngr.api.find import resolve_host_reference
 from imbue.mngr.api.providers import get_provider_instance
@@ -36,6 +40,8 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import Volume
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
@@ -132,31 +138,41 @@ def resolve_events_target(
 ) -> EventsTarget:
     """Resolve a target identifier (agent or host name/ID) to an EventsTarget.
 
-    Supports agent address syntax: NAME[@[HOST][.PROVIDER]].
+    Supports agent address syntax: ``NAME[@[HOST][.PROVIDER]]``.
 
-    First tries to find an agent with the given identifier.
-    If no agent is found, tries to find a host.
-    Uses resolve_agent_reference and resolve_host_reference from api/find.py.
+    Tries to interpret the identifier as an agent first, then falls back to
+    interpreting it as a host. Uses :func:`resolve_agent_reference` and
+    :func:`resolve_host_reference` from :mod:`imbue.mngr.api.find`.
 
-    When the target host is online, the returned EventsTarget includes the
-    online host and events path for direct command execution (e.g., tail -f).
+    When the target host is online, the returned :class:`EventsTarget`
+    includes the online host and events path for direct command execution
+    (e.g. ``tail -f``).
     """
-    with log_span("Loading agents and hosts"):
-        plain_id, filtered_agents_by_host, _providers = discover_by_address(
-            identifier, mngr_ctx, include_destroyed=False
-        )
+    # Parse the identifier as an agent address. If the agent component itself
+    # parses cleanly (i.e., the user typed something that could be an agent
+    # name or ID), we run the agent-first search. If it does not, the input
+    # must be a host identifier and we go directly to the host search.
+    address: AgentAddress | None
+    try:
+        address = parse_agent_address(identifier)
+    except UserInputError:
+        address = None
+
+    filtered_agents_by_host: dict[DiscoveredHost, Sequence[DiscoveredAgent]] = {}
+    agent_result: tuple[DiscoveredHost, DiscoveredAgent] | None = None
+    if address is not None:
+        with log_span("Loading agents and hosts"):
+            filtered_agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
+        # Try finding as an agent first; suppress "not found" but re-raise ambiguity
+        try:
+            agent_result = resolve_agent_reference(address.agent, None, filtered_agents_by_host)
+        except UserInputError as e:
+            if "Multiple" in str(e):
+                raise
+            logger.trace("Agent lookup did not find {}: {}", identifier, e)
+            agent_result = None
 
     all_hosts = list(filtered_agents_by_host.keys())
-
-    # Try finding as an agent first
-    # Only suppress "not found" errors; re-raise ambiguity ("Multiple") errors
-    try:
-        agent_result = resolve_agent_reference(plain_id, None, filtered_agents_by_host)
-    except UserInputError as e:
-        if "Multiple" in str(e):
-            raise
-        logger.trace("Agent lookup did not find {}: {}", identifier, e)
-        agent_result = None
 
     if agent_result is not None:
         host_ref, agent_ref = agent_result
@@ -192,15 +208,31 @@ def resolve_events_target(
             events_subpath=agent_events_subpath,
         )
 
-    # Try finding as a host
-    # Only suppress "not found" errors; re-raise ambiguity ("Multiple") errors
+    # Try finding as a host. Discover hosts if the agent-shaped path didn't.
+    if not all_hosts:
+        host_agents_by_host, _ = discover_hosts_and_agents(
+            mngr_ctx,
+            provider_names=None,
+            agent_identifiers=None,
+            include_destroyed=False,
+            reset_caches=False,
+        )
+        all_hosts = list(host_agents_by_host.keys())
+
     try:
-        host_ref = resolve_host_reference(plain_id, all_hosts)
-    except UserInputError as e:
-        if "Multiple" in str(e):
-            raise
-        logger.trace("Host lookup did not find {}: {}", plain_id, e)
-        host_ref = None
+        host_address = parse_host_address(identifier)
+    except UserInputError:
+        host_address = None
+
+    host_ref: DiscoveredHost | None = None
+    if host_address is not None:
+        try:
+            host_ref = resolve_host_reference(host_address, all_hosts)
+        except UserInputError as e:
+            if "Multiple" in str(e):
+                raise
+            logger.trace("Host lookup did not find {}: {}", identifier, e)
+            host_ref = None
 
     if host_ref is not None:
         with log_span("Getting events access for host {}", host_ref.host_name):

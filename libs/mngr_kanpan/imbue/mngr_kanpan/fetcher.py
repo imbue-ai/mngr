@@ -14,7 +14,7 @@ from pydantic import TypeAdapter
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import find_and_maybe_start_agent_by_name_or_id
+from imbue.mngr.api.find import find_and_maybe_start_agent
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -226,8 +226,8 @@ def toggle_agent_mute(mngr_ctx: MngrContext, agent_name: AgentName) -> bool:
         include_destroyed=False,
         reset_caches=False,
     )
-    agent, _host = find_and_maybe_start_agent_by_name_or_id(
-        str(agent_name),
+    agent, _host = find_and_maybe_start_agent(
+        agent_name,
         agents_by_host,
         mngr_ctx,
         command_name="kanpan",

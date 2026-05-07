@@ -4,6 +4,7 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.api.addresses import AgentAddress
 from imbue.mngr.cli.limit import LimitCliOptions
 from imbue.mngr.cli.limit import _build_updated_activity_config
 from imbue.mngr.cli.limit import _build_updated_permissions
@@ -15,6 +16,7 @@ from imbue.mngr.cli.limit import limit
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.primitives import ActivitySource
+from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import Permission
@@ -60,7 +62,7 @@ def test_limit_cli_options_fields() -> None:
     """Test LimitCliOptions has required fields."""
     opts = LimitCliOptions(
         agents=("agent1", "agent2"),
-        agent_list=("agent3",),
+        agent_list=(AgentAddress(agent=AgentName("agent3")),),
         hosts=(),
         start_on_boot=None,
         idle_timeout=None,
@@ -82,7 +84,7 @@ def test_limit_cli_options_fields() -> None:
         disable_plugin=(),
     )
     assert opts.agents == ("agent1", "agent2")
-    assert opts.agent_list == ("agent3",)
+    assert opts.agent_list == (AgentAddress(agent=AgentName("agent3")),)
     assert opts.hosts == ()
 
 

@@ -1,15 +1,17 @@
 import pluggy
 from click.testing import CliRunner
 
+from imbue.mngr.api.addresses import AgentAddress
 from imbue.mngr.cli.archive import ArchiveCliOptions
 from imbue.mngr.cli.archive import archive
+from imbue.mngr.primitives import AgentName
 
 
 def test_archive_cli_options_fields() -> None:
     """Test ArchiveCliOptions has required fields."""
     opts = ArchiveCliOptions(
         agents=("agent1",),
-        agent_list=("agent2",),
+        agent_list=(AgentAddress(agent=AgentName("agent2")),),
         archive_all=False,
         force=True,
         dry_run=False,
@@ -22,7 +24,7 @@ def test_archive_cli_options_fields() -> None:
         disable_plugin=(),
     )
     assert opts.agents == ("agent1",)
-    assert opts.agent_list == ("agent2",)
+    assert opts.agent_list == (AgentAddress(agent=AgentName("agent2")),)
     assert opts.archive_all is False
     assert opts.force is True
     assert opts.dry_run is False

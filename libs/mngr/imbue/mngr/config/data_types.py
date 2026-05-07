@@ -21,6 +21,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.addresses import NewAgentLocation
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import AgentTypeName
@@ -877,7 +878,7 @@ class CreateCliOptions(CommonCliOptions):
     For that information, see the click.option() and click.argument() decorators on the create() function itself.
     """
 
-    positional_name: str | None
+    positional_name: NewAgentLocation | None
     positional_agent_type: str | None
     agent_args: tuple[str, ...]
     template: tuple[str, ...]
@@ -887,7 +888,7 @@ class CreateCliOptions(CommonCliOptions):
     foreground: bool
     connect_command: str | None
     ensure_clean: bool
-    name: str | None
+    name: NewAgentLocation | None
     id: str | None
     name_style: str
     extra_window: tuple[str, ...]

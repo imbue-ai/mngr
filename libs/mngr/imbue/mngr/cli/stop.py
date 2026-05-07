@@ -7,11 +7,14 @@ from typing import assert_never
 import click
 from click_option_group import optgroup
 
+from imbue.mngr.api.addresses import AgentAddress
 from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import parse_agent_addresses_or_raise
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.destroy import get_agent_name_from_session
@@ -39,7 +42,7 @@ class StopCliOptions(CommonCliOptions):
     """Options passed from the CLI to the stop command."""
 
     agents: tuple[str, ...]
-    agent_list: tuple[str, ...]
+    agent_list: tuple[AgentAddress, ...]
     archive: bool
     sessions: tuple[str, ...]
     # Planned features (not yet implemented)
@@ -79,8 +82,9 @@ def _output_result(stopped_agents: Sequence[str], output_opts: OutputOptions) ->
 @optgroup.option(
     "--agent",
     "agent_list",
+    type=AGENT_ADDRESS,
     multiple=True,
-    help="Agent name or ID to stop (can be specified multiple times)",
+    help="Agent address (NAME[@HOST[.PROVIDER]]) to stop (can be specified multiple times)",
 )
 @optgroup.option(
     "--session",
@@ -130,12 +134,15 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
     if opts.graceful_timeout is not None:
         raise NotImplementedError("--graceful-timeout is not implemented yet")
 
-    # Validate input
-    agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
+    # Validate input. Variadic positional is parsed here (after stdin expansion);
+    # --agent is already typed by Click.
+    agent_addresses: list[AgentAddress] = parse_agent_addresses_or_raise(expand_stdin_placeholder(opts.agents)) + list(
+        opts.agent_list
+    )
 
     # Handle --session option by extracting agent names from session names
     if opts.sessions:
-        if agent_identifiers:
+        if agent_addresses:
             raise UserInputError("Cannot specify --session with agent names")
         for session_name in opts.sessions:
             agent_name = get_agent_name_from_session(session_name, mngr_ctx.config.prefix)
@@ -144,16 +151,16 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
                     f"Session '{session_name}' does not match the expected format. "
                     f"Session names should start with the configured prefix '{mngr_ctx.config.prefix}'."
                 )
-            agent_identifiers.append(agent_name)
+            agent_addresses.append(parse_agent_addresses_or_raise([agent_name])[0])
 
-    if not agent_identifiers:
+    if not agent_addresses:
         if STDIN_PLACEHOLDER not in opts.agents:
             raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
         return
 
     # Find agents to stop (RUNNING agents)
     agents_to_stop = find_agents_by_addresses(
-        raw_identifiers=agent_identifiers,
+        addresses=agent_addresses,
         filter_all=False,
         target_state=AgentLifecycleState.RUNNING,
         mngr_ctx=mngr_ctx,

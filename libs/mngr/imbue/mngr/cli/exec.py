@@ -5,6 +5,7 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.addresses import AgentAddress
 from imbue.mngr.api.exec import ExecResult
 from imbue.mngr.api.exec import MissingOuterBehavior
 from imbue.mngr.api.exec import MultiExecResult
@@ -12,6 +13,8 @@ from imbue.mngr.api.exec import OuterExecResult
 from imbue.mngr.api.exec import SkippedAgent
 from imbue.mngr.api.exec import exec_command_on_agents
 from imbue.mngr.api.exec import exec_command_on_outer_hosts
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import parse_agent_addresses_or_raise
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -38,7 +41,7 @@ class ExecCliOptions(CommonCliOptions):
     """
 
     agents: tuple[str, ...]
-    agent_list: tuple[str, ...]
+    agent_list: tuple[AgentAddress, ...]
     command_arg: str
     cwd: str | None
     timeout: float | None
@@ -55,8 +58,9 @@ class ExecCliOptions(CommonCliOptions):
 @optgroup.option(
     "--agent",
     "agent_list",
+    type=AGENT_ADDRESS,
     multiple=True,
-    help="Agent name or ID to exec on (can be specified multiple times)",
+    help="Agent address (NAME[@HOST[.PROVIDER]]) to exec on (can be specified multiple times)",
 )
 @optgroup.group("Execution")
 @optgroup.option(
@@ -126,10 +130,12 @@ def _exec_impl(ctx: click.Context, **kwargs: Any) -> None:
     )
     logger.debug("Started exec command")
 
-    # Build list of agent identifiers
-    agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
+    # Build list of agent addresses
+    agent_addresses: list[AgentAddress] = parse_agent_addresses_or_raise(expand_stdin_placeholder(opts.agents)) + list(
+        opts.agent_list
+    )
 
-    if not agent_identifiers:
+    if not agent_addresses:
         if STDIN_PLACEHOLDER not in opts.agents:
             raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
         return
@@ -142,7 +148,7 @@ def _exec_impl(ctx: click.Context, **kwargs: Any) -> None:
             ctx=ctx,
             mngr_ctx=mngr_ctx,
             output_opts=output_opts,
-            agent_identifiers=agent_identifiers,
+            addresses=agent_addresses,
             command=opts.command_arg,
             cwd=opts.cwd,
             timeout=opts.timeout,
@@ -155,7 +161,7 @@ def _exec_impl(ctx: click.Context, **kwargs: Any) -> None:
     if output_opts.output_format == OutputFormat.JSONL:
         result = exec_command_on_agents(
             mngr_ctx=mngr_ctx,
-            agent_identifiers=agent_identifiers,
+            addresses=agent_addresses,
             command=opts.command_arg,
             is_all=False,
             cwd=opts.cwd,
@@ -172,7 +178,7 @@ def _exec_impl(ctx: click.Context, **kwargs: Any) -> None:
     # For other formats, collect all results first
     result = exec_command_on_agents(
         mngr_ctx=mngr_ctx,
-        agent_identifiers=agent_identifiers,
+        addresses=agent_addresses,
         command=opts.command_arg,
         is_all=False,
         cwd=opts.cwd,
@@ -201,7 +207,7 @@ def _run_outer_exec(
     ctx: click.Context,
     mngr_ctx: Any,
     output_opts: OutputOptions,
-    agent_identifiers: list[str],
+    addresses: list[AgentAddress],
     command: str,
     cwd: str | None,
     timeout: float | None,
@@ -212,7 +218,7 @@ def _run_outer_exec(
     if output_opts.output_format == OutputFormat.JSONL:
         result = exec_command_on_outer_hosts(
             mngr_ctx=mngr_ctx,
-            agent_identifiers=agent_identifiers,
+            addresses=addresses,
             command=command,
             is_all=False,
             cwd=cwd,
@@ -226,7 +232,7 @@ def _run_outer_exec(
     else:
         result = exec_command_on_outer_hosts(
             mngr_ctx=mngr_ctx,
-            agent_identifiers=agent_identifiers,
+            addresses=addresses,
             command=command,
             is_all=False,
             cwd=cwd,

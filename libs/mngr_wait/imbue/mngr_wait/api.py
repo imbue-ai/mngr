@@ -8,6 +8,9 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
+from imbue.mngr.api.addresses import parse_agent_address
+from imbue.mngr.api.addresses import parse_agent_name_or_id
+from imbue.mngr.api.addresses import parse_host_address
 from imbue.mngr.api.agent_addr import discover_by_address
 from imbue.mngr.api.find import resolve_agent_reference
 from imbue.mngr.api.find import resolve_host_reference
@@ -51,10 +54,11 @@ def resolve_wait_target(
 
     Uses the existing find.py resolution functions for agent/host lookup.
     """
+    address = parse_agent_address(identifier)
+    plain_id = str(address.agent)
+
     with log_span("Discovering hosts and agents"):
-        plain_id, filtered_agents_by_host, _providers = discover_by_address(
-            identifier, mngr_ctx, include_destroyed=False
-        )
+        filtered_agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
 
     all_hosts = list(filtered_agents_by_host.keys())
 
@@ -78,7 +82,9 @@ def _build_agent_resolved_target(
     resolve_agent_reference raises UserInputError if not found; it only returns None
     when identifier is None, which cannot happen here.
     """
-    result = resolve_agent_reference(identifier, resolved_host=None, agents_by_host=agents_by_host)
+    result = resolve_agent_reference(
+        parse_agent_name_or_id(identifier), resolved_host=None, agents_by_host=agents_by_host
+    )
     assert result is not None
     host_ref, agent_ref = result
     provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
@@ -100,7 +106,7 @@ def _build_host_resolved_target(
     resolve_host_reference raises UserInputError if not found; it only returns None
     when identifier is None, which cannot happen here.
     """
-    host_ref = resolve_host_reference(identifier, all_hosts)
+    host_ref = resolve_host_reference(parse_host_address(identifier), all_hosts)
     assert host_ref is not None
     provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
     return ResolvedTarget(
@@ -125,7 +131,9 @@ def _resolve_by_name(
     agent_result: tuple[DiscoveredHost, DiscoveredAgent] | None = None
     agent_error: UserInputError | None = None
     try:
-        agent_result = resolve_agent_reference(identifier, resolved_host=None, agents_by_host=agents_by_host)
+        agent_result = resolve_agent_reference(
+            parse_agent_name_or_id(identifier), resolved_host=None, agents_by_host=agents_by_host
+        )
     except UserInputError as exc:
         agent_error = exc
 
@@ -133,7 +141,7 @@ def _resolve_by_name(
     host_ref: DiscoveredHost | None = None
     host_error: UserInputError | None = None
     try:
-        host_ref = resolve_host_reference(identifier, all_hosts)
+        host_ref = resolve_host_reference(parse_host_address(identifier), all_hosts)
     except UserInputError as exc:
         host_error = exc
 
