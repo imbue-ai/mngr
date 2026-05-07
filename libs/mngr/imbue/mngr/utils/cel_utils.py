@@ -11,30 +11,36 @@ from imbue.mngr.errors import MngrError
 
 
 class TolerantMapType(celpy.celtypes.MapType):
-    """A CEL MapType whose missing-key access returns None instead of raising.
+    """A CEL MapType whose missing-key access yields a CELEvalError value
+    instead of raising, so that boolean expressions short-circuit cleanly.
 
     Used for schemaless fields (e.g. agent labels) where the absence of a key
     should evaluate to a clean False in equality checks rather than emit a
     per-agent warning at filter time.
+
+    Returning a CELEvalError *value* (not raising) plays nicely with cel-python:
+    its evaluator carries CELEvalError through arithmetic / comparison ops,
+    so `labels.X == "Y"` short-circuits to BoolType(False) at the top level
+    with no error escaping evaluate(); and `has(labels.X)` correctly returns
+    False (cel-python's `has()` macro reports `not isinstance(_, CELEvalError)`,
+    see `celpy/evaluation.py::macro_has_eval`).
 
     The canonical CEL idiom for this would be optional-type field selection
     (`labels.?key`, see cel-spec proposal 246), but cel-python does not yet
     implement optional types, so we hand-roll this targeted subclass instead.
     Drop this once cel-python supports `?`-prefixed field selection.
 
-    Trade-off: cel-python's `has(map.key)` macro is implemented as "did the
-    expression error?" (`celpy/evaluation.py::macro_has_eval`). Because
-    TolerantMapType returns None instead of raising on missing keys, `has()`
-    against a TolerantMapType always returns True. Use `map.key != null` or
-    direct comparison (`map.key == "x"`) to test for presence on tolerant
-    fields.
+    Caveat: comparisons against `null` do not work as you might expect on a
+    tolerant miss (`labels.X != null` evaluates to BoolType(True) even when X
+    is absent, because the LHS is a CELEvalError, not null). Use `has(field)`
+    as the canonical presence check.
     """
 
     def __getitem__(self, key: Any) -> Any:
         try:
             return super().__getitem__(key)
         except KeyError:
-            return None
+            return CELEvalError(f"no such member in mapping: {key!r}", KeyError, None)
 
 
 class _TolerantDict(dict):

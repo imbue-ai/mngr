@@ -3,6 +3,7 @@
 import celpy
 import celpy.celtypes
 import pytest
+from celpy.evaluation import CELEvalError
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.cel_utils import TolerantMapType
@@ -358,38 +359,37 @@ def test_strict_map_type_raises_on_missing_key() -> None:
         _ = strict[celpy.json_to_cel("missing")]
 
 
-def test_tolerant_map_type_returns_none_on_missing_key() -> None:
-    """TolerantMapType returns None on missing-key access (the core change)."""
+def test_tolerant_map_type_returns_cel_eval_error_on_missing_key() -> None:
+    """TolerantMapType yields a CELEvalError value (not raises) on missing keys.
+
+    Returning a CELEvalError lets cel-python's evaluator carry the error
+    through boolean ops (so `labels.X == "Y"` short-circuits to False) and
+    lets the `has()` macro correctly detect absence.
+    """
     tolerant = TolerantMapType({celpy.json_to_cel("present"): celpy.json_to_cel("v")})
     assert tolerant[celpy.json_to_cel("present")] == celpy.json_to_cel("v")
-    assert tolerant[celpy.json_to_cel("missing")] is None
+    assert isinstance(tolerant[celpy.json_to_cel("missing")], CELEvalError)
 
 
-def test_tolerant_map_has_macro_always_true() -> None:
-    """has() on a TolerantMapType always returns True.
-
-    Trade-off documented on TolerantMapType: cel-python's has() macro reports
-    "is this expression non-erroring?", so a tolerant lookup that returns None
-    instead of raising is treated as present. Use `field != null` or direct
-    comparison to test for presence on tolerant fields.
-    """
-    includes, excludes = compile_cel_filters(
+def test_tolerant_map_has_macro_correctly_reports_presence() -> None:
+    """has() on a TolerantMapType correctly distinguishes present vs missing keys."""
+    includes_missing, excludes_missing = compile_cel_filters(
         include_filters=("has(labels.archived_at)",),
         exclude_filters=(),
     )
     result_missing = apply_cel_filters_to_context(
         context={"labels": tolerant_dict({})},
-        include_filters=includes,
-        exclude_filters=excludes,
+        include_filters=includes_missing,
+        exclude_filters=excludes_missing,
         error_context_description="agent test",
     )
     result_present = apply_cel_filters_to_context(
         context={"labels": tolerant_dict({"archived_at": "2024-01-01"})},
-        include_filters=includes,
-        exclude_filters=excludes,
+        include_filters=includes_missing,
+        exclude_filters=excludes_missing,
         error_context_description="agent test",
     )
-    assert result_missing is True
+    assert result_missing is False
     assert result_present is True
 
 
@@ -427,6 +427,6 @@ def test_tolerant_marker_at_depth_in_strict_dict() -> None:
     assert not isinstance(host, TolerantMapType)
     tags = host[celpy.json_to_cel("tags")]
     assert isinstance(tags, TolerantMapType)
-    assert tags[celpy.json_to_cel("foo")] is None
+    assert isinstance(tags[celpy.json_to_cel("foo")], CELEvalError)
     with pytest.raises(KeyError):
         _ = host[celpy.json_to_cel("missing")]

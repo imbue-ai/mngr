@@ -566,6 +566,42 @@ def test_agent_details_to_cel_context_wraps_schemaless_fields_tolerantly(field_p
     assert "Error evaluating" not in log_output.getvalue()
 
 
+def test_agent_details_to_cel_context_has_macro_correctly_reports_label_presence() -> None:
+    """`has(labels.X)` must return True only when X is actually set on the agent.
+
+    Tolerant maps are designed so that the `has()` macro still distinguishes
+    present from absent keys. Without this, `--include 'has(labels.foo)'` would
+    silently match every agent.
+    """
+    host_details = _make_host_details()
+    base_with = _make_agent_details("with-label", host_details)
+    agent_with_label = base_with.model_copy_update(
+        to_update(base_with.field_ref().labels, {"project": "mngr"}),
+    )
+    agent_without_label = _make_agent_details("without-label", host_details)
+
+    include_filters, exclude_filters = compile_cel_filters(
+        include_filters=("has(labels.project)",),
+        exclude_filters=(),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result_with = apply_cel_filters_to_context(
+            context=agent_details_to_cel_context(agent_with_label),
+            include_filters=include_filters,
+            exclude_filters=exclude_filters,
+            error_context_description=f"agent {agent_with_label.name}",
+        )
+        result_without = apply_cel_filters_to_context(
+            context=agent_details_to_cel_context(agent_without_label),
+            include_filters=include_filters,
+            exclude_filters=exclude_filters,
+            error_context_description=f"agent {agent_without_label.name}",
+        )
+    assert result_with is True
+    assert result_without is False
+    assert "Error evaluating" not in log_output.getvalue()
+
+
 def test_agent_details_to_cel_context_exposes_host_provider_under_both_names() -> None:
     """agent_details_to_cel_context exposes host.provider_name as host.provider too.
 
