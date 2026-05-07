@@ -13,10 +13,11 @@ Show Claude Code rolling-window quota usage (5h, 7d, overage).
 
 Reports Claude Code's rolling 5-hour, 7-day, and overage quota windows.
 
-The data is sourced from response headers on every Claude Code API call and
-captured into a shared cache by per-agent statusline shims. When the cache is
-stale, `mngr usage` (by default) spawns a brief `claude -p` call to refresh it
-(approx $0.005 per refresh).
+The data is sourced from the JSON snapshot Claude Code feeds to its statusline
+on every render; a small shim installed in each per-agent settings.json
+captures it into a shared cache under your profile_dir. `mngr usage` is purely
+a reader -- the cache is populated by interactive Claude sessions as a side
+effect of normal use, with no API cost.
 
 **Usage:**
 
@@ -45,8 +46,7 @@ mngr usage [OPTIONS]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--refresh` | boolean | Force a refresh probe even if the cache is fresh. Spawns `claude -p` (~$0.005). | `False` |
-| `--max-age` | text | Override the freshness threshold (e.g. '300', '5m', '2h'). Default: from plugin config. | None |
+| `--max-age` | text | Stale-warning threshold (e.g. '300', '5m', '2h'). Default: from plugin config. | None |
 
 ## Examples
 
@@ -56,13 +56,7 @@ mngr usage [OPTIONS]
 $ mngr usage
 ```
 
-**Force a refresh**
-
-```bash
-$ mngr usage --refresh
-```
-
-**Treat the cache as stale after 60s**
+**Treat the cache as stale after 60s (warning only)**
 
 ```bash
 $ mngr usage --max-age 60
