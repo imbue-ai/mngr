@@ -80,19 +80,17 @@ ENV UV_LINK_MODE=copy
 # defeating the checkpoint cache. Keep OFFLOAD_VERSION in sync with the
 # offload version pinned in .github/workflows/ci.yml.
 #
-# rustup is fetched, used once for `cargo install offload`, and the
-# cargo registry cache is purged afterwards. The rustup-managed
-# toolchain itself is left in place for any future cargo-installed
-# tools; remove rustup + ~/.rustup if image size becomes a concern.
+# rustup is fetched, used once for `cargo install offload`, and then both
+# the rustup toolchain and the cargo cache are deleted -- offload is the
+# only cargo-installed tool in the image, so the toolchain has no further
+# purpose. If a future tool needs to be cargo-installed, install it in
+# this same RUN before the cleanup line.
 ARG OFFLOAD_VERSION=0.9.4
-ENV CARGO_HOME=/root/.cargo
-ENV RUSTUP_HOME=/root/.rustup
-ENV PATH="/root/.cargo/bin:${PATH}"
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
-    && cargo install offload@${OFFLOAD_VERSION} --locked --root /opt/offload \
+    && /root/.cargo/bin/cargo install offload@${OFFLOAD_VERSION} --locked --root /opt/offload \
     && cp /opt/offload/bin/offload /usr/local/bin/offload \
-    && rm -rf /opt/offload /root/.cargo/registry /root/.cargo/git
+    && rm -rf /opt/offload /root/.cargo /root/.rustup
 
 # Set working directory to the project root before the COPY so the post-
 # source-setup script (and any user shells) start at the same path that
