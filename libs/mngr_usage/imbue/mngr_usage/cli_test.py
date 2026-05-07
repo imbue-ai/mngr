@@ -80,6 +80,13 @@ def test_load_cache_returns_none_for_corrupt_file(tmp_path: Path) -> None:
     assert _load_cache(p) is None
 
 
+def test_load_cache_returns_none_for_non_utf8_bytes(tmp_path: Path) -> None:
+    """A cache file with non-UTF-8 bytes should be treated as corrupt, not crash."""
+    p = tmp_path / "binary.json"
+    p.write_bytes(b"\xff\xfe\x00\x01\x02\x03")
+    assert _load_cache(p) is None
+
+
 def test_load_cache_round_trips(tmp_path: Path) -> None:
     p = tmp_path / "cache.json"
     cache = CacheDoc(

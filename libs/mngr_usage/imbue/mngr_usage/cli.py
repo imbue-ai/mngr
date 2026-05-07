@@ -52,7 +52,7 @@ def _load_cache(path: Path) -> CacheDoc | None:
     except OSError as e:
         logger.debug("Failed to read rate-limit cache at {}: {}", path, e)
         return None
-    except json.JSONDecodeError as e:
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
         logger.warning("Rate-limit cache at {} is corrupt and will be ignored: {}", path, e)
         return None
     if not isinstance(raw, dict):
