@@ -97,14 +97,14 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 # `mngr schedule` and offload's post_patch_cmd assume.
 WORKDIR /code/mngr/
 
-# Copy the build context. Three shapes are supported (the shape is
+# Copy the build context. Two shapes are supported (the shape is
 # detected and normalized inside scripts/post-source-setup.sh below):
-#   - Real source tree (offload's exported repo, the test_modal_create
-#     release test's unpacked tree, local docker builds).
+#   - Real source tree (offload's exported repo, mngr_schedule's
+#     producer-side-extracted tree, the test_modal_create release
+#     test's unpacked tree, local docker builds).
 #   - .mngr/dev/build/ keyframe directory containing only
 #     current.tar.gz + a .checkpoint marker (typical end-user flow via
 #     .mngr/settings.toml's pre_command_scripts hook + create_templates).
-#   - mngr_schedule's producer-side-extracted source tree.
 # COPY lands files owned by root:root by default, so no chown is needed.
 COPY . /code/mngr/
 
