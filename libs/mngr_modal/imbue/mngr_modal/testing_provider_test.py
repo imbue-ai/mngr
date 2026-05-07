@@ -931,13 +931,6 @@ def test_on_connection_error_clears_caches(
 # ---------------------------------------------------------------------------
 # Modal Name Derivation Tests
 # ---------------------------------------------------------------------------
-#
-# These tests cover the pure naming logic extracted from
-# ``build_provider_instance`` (see ``_derive_modal_names``). They previously
-# called ``build_provider_instance`` via a now-removed in-process testing
-# dispatch on ``ModalProviderConfig.mode``; that path pulled the test-only
-# ``modal_proxy.testing`` module into the production-side import graph.
-# The pure helper makes these unit-testable without any Modal interface at all.
 
 
 def test_derive_modal_names_environment_name_derived_from_prefix(
