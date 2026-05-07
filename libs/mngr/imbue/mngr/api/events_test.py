@@ -200,16 +200,7 @@ def events_host_target(
 
 
 def test_read_event_content_via_host(events_host_target: tuple[EventsTarget, Path]) -> None:
-    """Verify read_event_content works via host execute_command when volume is None.
-
-    Pyinfra's ``CommandOutput.stdout`` would otherwise drop the file's
-    trailing newline (it joins lines with ``\n`` after stripping each
-    line's own trailing ``\n``), so ``read_event_content`` wraps the
-    ``cat`` command with a sentinel suffix to preserve the file's true
-    byte ending. Confirmed below by asserting *exact* equality including
-    the trailing newline -- previously this test had to settle for
-    substring containment because the trailing newline was lost.
-    """
+    """Verify read_event_content works via host execute_command when volume is None."""
     target, events_dir = events_host_target
     (events_dir / "test.log").write_text("hello from host\nsecond line\n")
 
@@ -221,15 +212,7 @@ def test_read_event_content_via_host(events_host_target: tuple[EventsTarget, Pat
 def test_read_event_content_via_host_preserves_no_trailing_newline(
     events_host_target: tuple[EventsTarget, Path],
 ) -> None:
-    """Files that genuinely don't end with ``\n`` must round-trip without one too.
-
-    The sentinel-suffix wrapper handles both endings symmetrically: a
-    file ending in ``\n`` keeps it, a file that doesn't gain it. This is
-    essential for the follow-mode tail loop -- if it sees a synthetic
-    trailing newline that isn't really there, ``split_complete_lines``
-    treats the partial in-flight write as complete and emits garbage to
-    its consumer.
-    """
+    """Files that genuinely don't end with ``\n`` must round-trip without one too."""
     target, events_dir = events_host_target
     # Mid-write style content: line1 complete, line2 still being appended.
     (events_dir / "midwrite.log").write_bytes(b"line1\nline2_partial")
