@@ -170,7 +170,16 @@ def _resolve_agent_type_name(
     value is then forwarded to _parse_agent_opts so both paths agree on
     a single agent type.
 
-    Precedence: explicit --type flag > positional argument > --type default ("claude").
+    ``type_flag`` is ``opts.type`` -- the value of ``--type`` after CLI,
+    config (``[commands.create]``), template (``[create_templates.X]``),
+    and click-default resolution. ``is_type_explicit`` is True only when
+    the user passed ``--type`` on the command line.
+
+    Precedence:
+      1. an explicitly-set ``--type`` flag (``is_type_explicit`` is True),
+      2. otherwise the positional agent type if given,
+      3. otherwise ``type_flag`` (which falls back to the click default
+         ``"claude"`` when neither CLI nor config/template supplied a value).
     """
     if not is_type_explicit and positional_agent_type is not None:
         return positional_agent_type
