@@ -18,6 +18,7 @@ from imbue.mngr_usage.cli import _build_render_model
 from imbue.mngr_usage.cli import _coerce_optional_int
 from imbue.mngr_usage.cli import _flatten_for_template
 from imbue.mngr_usage.cli import _format_duration
+from imbue.mngr_usage.cli import _has_statusline_data
 from imbue.mngr_usage.cli import _ingest_refresh_stdout
 from imbue.mngr_usage.cli import _load_cache
 from imbue.mngr_usage.cli import _normalize_window_key
@@ -242,6 +243,20 @@ def test_render_model_computes_seconds_until_reset() -> None:
     assert flat["seven_day.is_present"] == "false"
 
 
+def test_has_statusline_data_distinguishes_sources() -> None:
+    assert _has_statusline_data(None) is False
+    assert _has_statusline_data(CacheDoc()) is False
+    sdk_only = CacheDoc(windows={"five_hour": WindowSnapshot(status="allowed", source="sdk", updated_at=1)})
+    assert _has_statusline_data(sdk_only) is False
+    mixed = CacheDoc(
+        windows={
+            "five_hour": WindowSnapshot(status="allowed", source="sdk", updated_at=1),
+            "seven_day": WindowSnapshot(used_percentage=10.0, source="statusline", updated_at=2),
+        }
+    )
+    assert _has_statusline_data(mixed) is True
+
+
 @pytest.fixture
 def cli_profile_dir(temp_host_dir: Path, temp_profile_dir: Path) -> Path:
     """Pin the CLI's auto-resolved profile_dir to match temp_profile_dir.
@@ -354,3 +369,35 @@ def test_usage_command_no_data_message(
     )
     assert result.exit_code == 0, result.output
     assert "No rate-limit data yet" in result.output
+
+
+def test_usage_command_warns_when_only_sdk_data_present(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_mngr_ctx: MngrContext,
+    cli_profile_dir: Path,
+) -> None:
+    """When the cache only has SDK-sourced entries (no statusline render), warn
+    so the user knows why they see status=... instead of percentages."""
+    cache = CacheDoc(
+        windows={
+            "five_hour": WindowSnapshot(
+                status="allowed", resets_at=999_999_999_999, source="sdk", updated_at=999_999_999_999
+            ),
+        }
+    )
+    _atomic_write_cache(cache_path(temp_mngr_ctx), cache)
+
+    result = cli_runner.invoke(
+        usage,
+        ["--max-age", "300"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    # The status line still renders normally
+    assert "status=allowed" in result.output
+    # Warning lands on stderr (loguru routes warnings there); CliRunner mixes
+    # stderr into result.output unless mix_stderr=False is passed at runner
+    # construction time, so it shows up in result.output here.
+    assert "Statusline shim has never fired" in result.output

@@ -265,6 +265,19 @@ def _atomic_write_cache(path: Path, cache: CacheDoc) -> None:
 
 
 @pure
+def _has_statusline_data(cache: CacheDoc | None) -> bool:
+    """True if any cached window was last written by the statusline shim.
+
+    Used to detect the "shim has never fired" case: when only SDK refresh
+    probes have populated the cache, ``used_percentage`` is always None and
+    `mngr usage` falls back to displaying ``status=...`` instead.
+    """
+    if cache is None:
+        return False
+    return any(window.source == "statusline" for window in cache.windows.values())
+
+
+@pure
 def _format_duration(seconds: int) -> str:
     """Render seconds as a compact human duration: '1h 12m', '4d 3h', '45s'."""
     if seconds <= 0:
@@ -459,6 +472,17 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
 
     model = _build_render_model(cache, effective_max_age, now)
     _emit_output(model, output_opts.output_format, output_opts.format_template, now)
+
+    # If the cache has data but none of it came from the statusline shim, only
+    # the SDK refresh path has ever populated the cache. used_percentage will be
+    # None and the human output falls back to `status=...` strings. Tell the user
+    # how to wire up the shim so they get percentages.
+    if cache is not None and cache.windows and not _has_statusline_data(cache):
+        logger.warning(
+            "Statusline shim has never fired -- used_percentage is unavailable. "
+            "Start an interactive Claude agent (e.g. `mngr create ... claude`) "
+            "and send it any prompt; the next render will populate the cache."
+        )
 
 
 CommandHelpMetadata(
