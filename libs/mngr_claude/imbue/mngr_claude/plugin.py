@@ -426,18 +426,12 @@ def _read_source_claude_settings(source_claude_dir: Path) -> dict[str, Any]:
 
 
 def _gather_claude_extra_settings(
-    mngr_ctx: MngrContext | None,
+    mngr_ctx: MngrContext,
     source_settings: dict[str, Any],
     agent_state_dir: Path,
     is_local: bool,
 ) -> tuple[ClaudeExtraSettingsContribution, ...]:
-    """Call the claude_extra_per_agent_settings hook and return non-None contributions.
-
-    Returns an empty tuple if mngr_ctx is None (e.g. in deploy / test paths that
-    skip plugin invocation).
-    """
-    if mngr_ctx is None:
-        return ()
+    """Call the claude_extra_per_agent_settings hook and return non-None contributions."""
     raw = mngr_ctx.pm.hook.claude_extra_per_agent_settings(
         mngr_ctx=mngr_ctx,
         source_settings=source_settings,
