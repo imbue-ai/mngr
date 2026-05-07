@@ -207,7 +207,7 @@ def apply_cel_filters_to_context(
     CEL-compatible types via `build_cel_context`, then evaluated.
 
     Callers that need tolerant missing-key behavior on specific paths should
-    call `build_cel_context`, then `replace_paths_with_tolerant_map`, then
+    call `build_cel_context`, then `with_tolerant_paths`, then
     `apply_compiled_cel_filters` directly.
     """
     cel_context = build_cel_context(context)
