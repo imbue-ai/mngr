@@ -304,15 +304,13 @@ class SSHTunnelManager(MutableModel):
         tunnel_key: tuple[str, int],
         conn_key: str,
         tunnel_info: ReverseTunnelInfo,
-        error: BaseException,
+        error: Exception,
     ) -> None:
         """Update backoff bookkeeping after a failed repair, dropping the tunnel after N strikes.
 
         Split out of ``_check_and_repair_tunnels`` for readability; the only
-        caller is the ``except`` arm of the repair loop. ``BaseException``
-        in the type signature reflects the loose ``except`` clauses around
-        ``setup_reverse_tunnel`` -- in practice paramiko, OSError, and our
-        own ``SSHTunnelError`` are what land here.
+        caller is the ``except`` arm of the repair loop, which catches
+        ``paramiko.SSHException``, ``OSError``, and our own ``SSHTunnelError``.
         """
         with self._lock:
             failure_state = self._failure_state.get(tunnel_key)
