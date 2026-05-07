@@ -12,8 +12,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.plugin_registry import register_plugin_config
 from imbue.mngr_claude.hookspecs import ClaudeExtraSettingsContribution
 from imbue.mngr_usage import resources as _usage_resources
+from imbue.mngr_usage.cli import cache_path
 from imbue.mngr_usage.cli import usage
-from imbue.mngr_usage.data_types import CACHE_RELATIVE_PATH
 from imbue.mngr_usage.data_types import UsagePluginConfig
 
 register_plugin_config("usage", UsagePluginConfig)
@@ -81,10 +81,9 @@ def claude_extra_per_agent_settings(
     if not is_local:
         return None
 
-    cache_path = mngr_ctx.profile_dir / CACHE_RELATIVE_PATH
     env: dict[str, str] = {
         "MNGR_RATE_LIMITS_WRITER": str(agent_state_dir / "commands" / _RATE_LIMITS_WRITER_SCRIPT),
-        "MNGR_RATE_LIMITS_CACHE": str(cache_path),
+        "MNGR_RATE_LIMITS_CACHE": str(cache_path(mngr_ctx)),
         "MNGR_PROFILE_DIR": str(mngr_ctx.profile_dir),
     }
     user_cmd = _extract_user_statusline_command(source_settings)
