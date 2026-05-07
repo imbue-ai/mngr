@@ -76,8 +76,9 @@ def test_writer_creates_cache(writer_path: Path, cache_path: Path) -> None:
 
 
 def test_writer_preserves_unknown_fields(writer_path: Path, cache_path: Path) -> None:
-    """The writer only updates statusline-known fields. Other fields written by
-    a different code path (e.g. mngr usage --refresh) must survive the merge."""
+    """The writer only updates statusline-known fields. Any other fields already
+    present on a window (e.g. left over from older cache schemas, or written by a
+    future writer) must survive the merge unchanged."""
     cache_path.write_text(
         json.dumps(
             {
