@@ -1,8 +1,9 @@
-from enum import Enum
+from enum import auto
 from pathlib import Path
 
 from pydantic import Field
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import IdleMode
@@ -10,15 +11,15 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import UserId
 
 
-class ModalMode(str, Enum):
+class ModalMode(UpperCaseStrEnum):
     """How the modal provider backend talks to Modal.
 
     ``DIRECT`` uses the Modal SDK against the user's account.
     ``PROXIED`` routes Modal traffic through the imbue_cloud gateway.
     """
 
-    DIRECT = "DIRECT"
-    PROXIED = "PROXIED"
+    DIRECT = auto()
+    PROXIED = auto()
 
 
 class ModalProviderConfig(ProviderInstanceConfig):
