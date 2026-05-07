@@ -185,6 +185,12 @@ class SSHTunnelManager(MutableModel):
 
         Concurrent calls for the same host are serialized via a per-host lock to
         prevent establishing duplicate reverse tunnels.
+
+        ``agent_id`` (optional) tags the resulting ``ReverseTunnelInfo`` with the
+        owning agent's stringified ID so callers can later ask the manager to
+        tear down all tunnels belonging to a destroyed agent via
+        ``remove_reverse_tunnels_for_agent``. Pass ``None`` (the default) when
+        the tunnel is not associated with a specific agent.
         """
         conn_key = f"{ssh_info.host}:{ssh_info.port}"
         tunnel_key = (conn_key, local_port)
