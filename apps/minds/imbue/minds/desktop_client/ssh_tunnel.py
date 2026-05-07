@@ -375,26 +375,8 @@ class SSHTunnelManager(MutableModel):
             ]
         return self._drop_tunnel_keys(tuple(keys))
 
-    def remove_reverse_tunnels_for_host(self, conn_key: str) -> int:
-        """Tear down every reverse tunnel that runs over the SSH host ``conn_key``.
-
-        The conn_key is the same ``"<host>:<port>"`` string used internally to
-        key ``_connections``. Cancels each matching port forward, drops every
-        such tunnel from the registry, clears backoff bookkeeping, and closes
-        the SSH connection (so the paramiko transport thread exits).
-
-        Returns the number of tunnels removed.
-        """
-        with self._lock:
-            keys = [
-                tunnel_key
-                for tunnel_key in self._reverse_tunnels
-                if tunnel_key[0] == conn_key
-            ]
-        return self._drop_tunnel_keys(tuple(keys))
-
     def _drop_tunnel_keys(self, tunnel_keys: tuple[tuple[str, int], ...]) -> int:
-        """Internal shared cleanup used by both ``remove_*`` APIs and the backoff drop path.
+        """Internal shared cleanup used by ``remove_reverse_tunnels_for_agent`` and the backoff drop path.
 
         For each ``(conn_key, local_port)`` in ``tunnel_keys``: cancel its
         reverse port forward (best-effort -- the transport may already be
