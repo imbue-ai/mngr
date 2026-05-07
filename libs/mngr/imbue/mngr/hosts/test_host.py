@@ -1130,54 +1130,68 @@ def test_stop_agent_kills_orphaned_processes_by_env_marker(
     # orphan inherits no marker -- exactly the failure mode the assertion below
     # is guarding against.
     host.provision_agent(agent, options, mngr_ctx)
-    host.start_agents([agent.id])
     session_name = f"{mngr_test_prefix}{agent.name}"
 
-    wait_for(
-        lambda: marker_file.exists() and marker_file.read_text().strip() != "",
-        timeout=15.0,
-        error_message="Orphan PID marker file was not written",
-    )
-    orphan_pid = marker_file.read_text().strip()
-    assert orphan_pid.isdigit(), f"Expected numeric pid, got {orphan_pid!r}"
+    # Wrap in tmux_session_cleanup so the foreground `sleep 1000` and tmux
+    # session are always torn down. The reparented `sleep 8472` is by design
+    # NOT a pane descendant, so tmux_session_cleanup alone won't kill it -- the
+    # inner try/finally below handles that case explicitly.
+    with tmux_session_cleanup(session_name):
+        host.start_agents([agent.id])
 
-    success, _ = host._run_shell_command(StringCommand(f"kill -0 {orphan_pid} 2>/dev/null"))
-    assert success, f"Orphan process {orphan_pid} should be alive before stop"
+        wait_for(
+            lambda: marker_file.exists() and marker_file.read_text().strip() != "",
+            timeout=15.0,
+            error_message="Orphan PID marker file was not written",
+        )
+        orphan_pid = marker_file.read_text().strip()
+        assert orphan_pid.isdigit(), f"Expected numeric pid, got {orphan_pid!r}"
 
-    # Validate the load-bearing assumption: MNGR_AGENT_ID was inherited by the
-    # orphan through the agent's env file. If this fails, the env-scan fix would
-    # silently no-op in production even though its own logic is correct -- the
-    # env propagation chain (set -a in build_source_env_shell_commands) is what
-    # matters.
-    success, _ = host._run_shell_command(
-        StringCommand(f"grep -qza '^MNGR_AGENT_ID={agent.id}' /proc/{orphan_pid}/environ")
-    )
-    assert success, (
-        f"Orphan {orphan_pid} does not have MNGR_AGENT_ID={agent.id} in its environ. "
-        f"The agent env file `set -a` chain that this fix depends on is broken."
-    )
+        try:
+            success, _ = host._run_shell_command(StringCommand(f"kill -0 {orphan_pid} 2>/dev/null"))
+            assert success, f"Orphan process {orphan_pid} should be alive before stop"
 
-    # Sanity-check: orphan is NOT a descendant of any pane PID. This is what makes
-    # it invisible to the old pane-descendant walk and is precisely the case the
-    # env-scan fix addresses.
-    pane_descendant_pids = host._collect_session_pids(session_name)
-    assert orphan_pid not in pane_descendant_pids, (
-        f"Test setup invalid: orphan {orphan_pid} is in pane descendants "
-        f"{pane_descendant_pids}; reparenting did not occur"
-    )
+            # Validate the load-bearing assumption: MNGR_AGENT_ID was inherited by the
+            # orphan through the agent's env file. If this fails, the env-scan fix would
+            # silently no-op in production even though its own logic is correct -- the
+            # env propagation chain (set -a in build_source_env_shell_commands) is what
+            # matters.
+            success, _ = host._run_shell_command(
+                StringCommand(f"grep -qza '^MNGR_AGENT_ID={agent.id}' /proc/{orphan_pid}/environ")
+            )
+            assert success, (
+                f"Orphan {orphan_pid} does not have MNGR_AGENT_ID={agent.id} in its environ. "
+                f"The agent env file `set -a` chain that this fix depends on is broken."
+            )
 
-    host.stop_agents([agent.id], timeout_seconds=3.0)
+            # Sanity-check: orphan is NOT a descendant of any pane PID. This is what makes
+            # it invisible to the old pane-descendant walk and is precisely the case the
+            # env-scan fix addresses.
+            pane_descendant_pids = host._collect_session_pids(session_name)
+            assert orphan_pid not in pane_descendant_pids, (
+                f"Test setup invalid: orphan {orphan_pid} is in pane descendants "
+                f"{pane_descendant_pids}; reparenting did not occur"
+            )
 
-    def orphan_is_dead() -> bool:
-        success, _ = host._run_shell_command(StringCommand(f"kill -0 {orphan_pid} 2>/dev/null"))
-        return not success
+            host.stop_agents([agent.id], timeout_seconds=3.0)
 
-    wait_for(
-        orphan_is_dead,
-        timeout=10,
-        error_message=f"Orphan process {orphan_pid} (MNGR_AGENT_ID={agent.id}) "
-        f"survived stop_agents -- env-scan fallback failed",
-    )
+            def orphan_is_dead() -> bool:
+                success, _ = host._run_shell_command(StringCommand(f"kill -0 {orphan_pid} 2>/dev/null"))
+                return not success
+
+            wait_for(
+                orphan_is_dead,
+                timeout=10,
+                error_message=f"Orphan process {orphan_pid} (MNGR_AGENT_ID={agent.id}) "
+                f"survived stop_agents -- env-scan fallback failed",
+            )
+        finally:
+            # Belt-and-braces: SIGKILL the orphan unconditionally. On the success
+            # path it's already dead (ESRCH is harmless); on a failure path this
+            # is what prevents the reparented sleep from outliving the test,
+            # since it has no parent to reap it and is invisible to the
+            # pane-descendant walk that tmux_session_cleanup performs.
+            host._run_shell_command(StringCommand(f"kill -KILL {orphan_pid} 2>/dev/null || true"))
 
 
 @pytest.mark.tmux
