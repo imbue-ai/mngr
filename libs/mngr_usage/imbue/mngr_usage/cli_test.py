@@ -235,9 +235,9 @@ def test_usage_command_no_data_message(
     temp_mngr_ctx: MngrContext,
     cli_profile_dir: Path,
 ) -> None:
-    """Empty cache prints the install/wire-up hint."""
+    """Empty cache prints the wire-up hint."""
     result = cli_runner.invoke(usage, [], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
     assert "No rate-limit data yet" in result.output
-    assert "imbue-mngr-usage" in result.output
+    assert "provision" in result.output
     assert "mngr create" in result.output

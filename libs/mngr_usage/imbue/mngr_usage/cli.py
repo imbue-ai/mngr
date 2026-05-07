@@ -226,12 +226,12 @@ def _flatten_for_template(model: _UsageRenderModel, now: int) -> dict[str, str]:
 
 _NO_DATA_HINT = (
     "No rate-limit data yet. The cache is populated by a per-agent statusline "
-    "shim that fires whenever an interactive Claude session renders. To get "
-    "data flowing: ensure imbue-mngr-usage is installed in whichever env runs "
-    "your `mngr` (so the plugin entry point is loaded), then run "
-    "`mngr create ... claude` and send the new agent any prompt. Existing "
-    "agents whose settings.json was generated before this plugin was active "
-    "won't have the shim until they're re-provisioned."
+    "shim that fires whenever an interactive Claude session renders. The most "
+    "likely cause is that all your existing Claude agents were provisioned "
+    "before this plugin was active, so their settings.json doesn't have the "
+    "shim. To populate the cache, provision a fresh agent (e.g. "
+    "`mngr create ... claude`) and prompt it at least once, or re-provision "
+    "any existing agent."
 )
 
 
