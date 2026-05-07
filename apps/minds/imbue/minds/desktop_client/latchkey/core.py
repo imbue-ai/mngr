@@ -754,7 +754,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
 
 
 class LatchkeyDestructionHandler(FrozenModel):
-    """Discovery callback that tears down the gateway and reverse tunnel when an agent is destroyed.
+    """Destruction callback that tears down the gateway and reverse tunnel when an agent is destroyed.
 
     Tearing down both is necessary: stopping the gateway kills the local
     Latchkey subprocess, and removing the reverse tunnel makes the
