@@ -524,7 +524,7 @@ def test_discovery_handler_spawns_shared_gateway_for_every_provider(tmp_path: Pa
 class _RecordingTunnelManager(SSHTunnelManager):
     """SSHTunnelManager that records setup/remove calls instead of doing SSH."""
 
-    _calls: list[tuple[RemoteSSHInfo, int, int]] = PrivateAttr(default_factory=list)
+    _calls: list[tuple[RemoteSSHInfo, int, int, str | None]] = PrivateAttr(default_factory=list)
     _removed_agent_ids: list[str] = PrivateAttr(default_factory=list)
 
     def setup_reverse_tunnel(
@@ -534,8 +534,7 @@ class _RecordingTunnelManager(SSHTunnelManager):
         remote_port: int = 0,
         agent_id: str | None = None,
     ) -> int:
-        del agent_id
-        self._calls.append((ssh_info, local_port, remote_port))
+        self._calls.append((ssh_info, local_port, remote_port, agent_id))
         return remote_port
 
     def remove_reverse_tunnels_for_agent(self, agent_id: str) -> int:
@@ -567,8 +566,11 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: 
         assert info is not None
 
         # Exactly one reverse tunnel, bridging the dynamic host-side gateway port
-        # to the fixed agent-side port on the container's loopback.
-        assert tunnel_manager._calls == [(ssh_info, info.port, AGENT_SIDE_LATCHKEY_PORT)]
+        # to the fixed agent-side port on the container's loopback. The tunnel
+        # must also be tagged with the owning agent's id, so the destruction
+        # handler can find and tear it down via remove_reverse_tunnels_for_agent;
+        # without that tag the original CPU leak would re-surface.
+        assert tunnel_manager._calls == [(ssh_info, info.port, AGENT_SIDE_LATCHKEY_PORT, str(agent_id))]
     finally:
         manager.stop_gateway()
 
