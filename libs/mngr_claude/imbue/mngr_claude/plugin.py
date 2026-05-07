@@ -482,6 +482,12 @@ def _build_settings_json(
             env_block = data.setdefault("env", {})
             if isinstance(env_block, dict):
                 env_block.update(contribution.env)
+            else:
+                logger.warning(
+                    "settings.json env block is not a dict (got {}); dropping plugin-contributed env keys: {}",
+                    type(env_block).__name__,
+                    sorted(contribution.env.keys()),
+                )
 
     return json.dumps(data, indent=2) + "\n"
 
