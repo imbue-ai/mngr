@@ -1,7 +1,7 @@
 """Writes event files to ``$MNGR_AGENT_STATE_DIR/events/<source>/events.jsonl``.
 
 This module is used by the workspace server to create agent-originated events
-(sharing requests, refresh signals, etc.) that the minds desktop client picks
+(permissions requests, refresh signals, etc.) that the minds desktop client picks
 up via ``mngr event --follow``.
 """
 
@@ -29,7 +29,6 @@ _RESERVED_REQUEST_EVENT_KEYS: Final[frozenset[str]] = frozenset(
 # types in this table are accepted by ``write_request_event``; adding a new
 # RequestType requires updating both this mapping and the desktop-side enum.
 _REQUEST_TYPE_TO_EVENT_TYPE: Final[dict[str, str]] = {
-    "SHARING": "sharing_request",
     "PERMISSIONS": "permissions_request",
     "LATCHKEY_PERMISSION": "latchkey_permission_request",
 }
@@ -116,33 +115,6 @@ def write_request_event(
     _append_event_line(_get_request_events_file(), event)
     logger.info("Wrote {} request event for agent {}", request_type, agent_id)
     return event
-
-
-def write_sharing_request(
-    agent_id: str,
-    service_name: str,
-    is_user_requested: bool = False,
-    current_status: dict[str, object] | None = None,
-    suggested_emails: list[str] | None = None,
-) -> None:
-    """Write a sharing request event to the agent's request events file."""
-    event: dict[str, object] = {
-        "timestamp": _now_iso(),
-        "type": "sharing_request",
-        "event_id": _generate_event_id(),
-        "source": "requests",
-        "agent_id": agent_id,
-        "request_type": "SHARING",
-        "is_user_requested": is_user_requested,
-        "service_name": service_name,
-    }
-    if current_status is not None:
-        event["current_status"] = current_status
-    if suggested_emails:
-        event["suggested_emails"] = suggested_emails
-
-    _append_event_line(_get_request_events_file(), event)
-    logger.info("Wrote sharing request event for agent {} service {}", agent_id, service_name)
 
 
 def write_refresh_request(service_name: str) -> None:

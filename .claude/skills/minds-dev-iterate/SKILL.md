@@ -25,24 +25,36 @@ local mngr repo  -->  FCT worktree's vendor/mngr/  -->  Docker container's /code
                       (under .external_worktrees/)     (via rsync over SSH)
 ```
 
-The desktop client runs on the host (via Electron). The workspace server + mngr run inside the container. `just create-pool-hosts-dev` does the first sync; `apps/minds/scripts/propagate_changes` does subsequent ones to a running agent.
+The desktop client runs on the host (via Electron). The workspace server + mngr run inside the container. The first sync is the bake's `--mngr-source` option (`mngr imbue_cloud admin pool create --mngr-source <monorepo-root>` rsyncs the working tree into the FCT worktree's `vendor/mngr/` for the duration of the bake); `apps/minds/scripts/propagate_changes` does subsequent ones to a running agent.
 
 ## Quick start
-
-The just recipes handle the boring setup -- use them instead of the manual steps unless something is broken:
 
 ```bash
 # 1. Install electron deps once.
 cd apps/minds && pnpm install && cd ../..
 
 # 2. Stand up an FCT worktree at .external_worktrees/forever-claude-template/
-#    on a branch parallel-named to your current mngr branch, with this repo's
-#    working tree rsynced into vendor/mngr/, then provision a Vultr pool host.
-#    Optional -- skip this if you don't need a pool host yet; minds-start will
-#    fall back to ~/project/forever-claude-template if the worktree is missing.
-just create-pool-hosts-dev 1 production
+#    on a branch named after your current mngr branch (so template-side
+#    edits stay parallel-named). Required by `just minds-start`.
+git -C ~/project/forever-claude-template worktree add \
+    -b "$(git rev-parse --abbrev-ref HEAD)" \
+    "$PWD/.external_worktrees/forever-claude-template" \
+    josh/start-minds   # or another base branch / tag
 
-# 3. Start the desktop client. Auto-sets MINDS_WORKSPACE_{GIT_URL,NAME,BRANCH}
+# 3. (Optional) Bake a fresh pool host with the working-tree mngr code
+#    rsynced into vendor/mngr/. Skip this if a matching pool host (one
+#    whose `attributes` include your `repo_branch_or_tag`) already
+#    exists.
+set -a && . .env && . .minds/production/neon.sh && . .minds/production/pool-ssh.sh && set +a
+uv run mngr imbue_cloud admin pool create \
+    --count 1 \
+    --attributes "{\"repo_branch_or_tag\": \"$(git rev-parse --abbrev-ref HEAD)\"}" \
+    --workspace-dir "$PWD/.external_worktrees/forever-claude-template" \
+    --management-public-key-file .minds/production/pool_management_key/id_ed25519.pub \
+    --database-url "$DATABASE_URL" \
+    --mngr-source "$PWD"
+
+# 4. Start the desktop client. Auto-sets MINDS_WORKSPACE_{GIT_URL,NAME,BRANCH}
 #    so the create-form auto-fills "repository", "name", "branch". Sources
 #    .env so ANTHROPIC_API_KEY etc. are visible.
 just minds-start
@@ -107,8 +119,7 @@ Do NOT use a key from `~/.mngr/profiles/...` -- that belongs to non-minds mngr a
 |---|---|
 | `just minds-start` | Launch the desktop client with `MINDS_WORKSPACE_*` env vars set so the create-form auto-fills. Sources `.env`. |
 | `just minds-build` | Build the desktop client distributable via `todesktop` (slow, only for releases). |
-| `just create-pool-hosts-dev <count>` | Persistent FCT worktree at `.external_worktrees/forever-claude-template/` on a parallel branch, with this repo's working tree rsynced into `vendor/mngr/`, then provision N Vultr pool hosts. Resets `vendor/mngr/` after success so the worktree's tracked state stays clean. |
-| `just create-pool-hosts <count>` | Provision N pool hosts from a tagged FCT release; never touches `vendor/mngr/`. Use for reproducible release-style provisioning, not iteration. |
+| `mngr imbue_cloud admin pool create --mngr-source <monorepo-root> ...` | Bake a Vultr pool host. Pass `--mngr-source` to rsync the monorepo working tree into the FCT worktree's `vendor/mngr/` for the duration of provisioning. (The previous `just create-pool-hosts*` recipes have been removed.) |
 | `just deploy-connector [env]` | Deploy `remote-service-connector` to Modal. |
 | `just deploy-litellm [env]` | Deploy `modal_litellm` proxy to Modal. |
 | `just deploy-all [env]` | Push secrets + deploy connector + deploy litellm. |
@@ -120,7 +131,7 @@ Do NOT use a key from `~/.mngr/profiles/...` -- that belongs to non-minds mngr a
 |----------|---------|----------------|
 | `MINDS_WORKSPACE_GIT_URL` | Template repo path/URL for the create-form | `<repo>/.external_worktrees/forever-claude-template/` if it exists, else `~/project/forever-claude-template` |
 | `MINDS_WORKSPACE_NAME` | Default agent name in the create-form | `mindtest` (override with `agent_name=...`) |
-| `MINDS_WORKSPACE_BRANCH` | Default git branch for the template | The FCT path's current branch (matches your mngr branch when using the worktree from `create-pool-hosts-dev`) |
+| `MINDS_WORKSPACE_BRANCH` | Default git branch for the template | The FCT path's current branch (matches your mngr branch when you set up the worktree on a parallel-named branch) |
 
 The desktop client reads these in `apps/minds/imbue/minds/desktop_client/templates.py`.
 
@@ -138,7 +149,7 @@ If this chain breaks (orphaned `mngr observe`/`mngr event` processes appear), so
 
 ### Rsync exclusions
 
-Both `create-pool-hosts-dev` (mngr-working-tree -> vendor/mngr) and `propagate_changes` exclude:
+Both `mngr imbue_cloud admin pool create --mngr-source ...` (mngr-working-tree -> vendor/mngr) and `propagate_changes` exclude:
 `.git`, `__pycache__`, `.venv`, `node_modules`, `.test_output`, `.mypy_cache`, `.ruff_cache`, `.pytest_cache`, `uv.lock`, `.external_worktrees`
 
 `propagate_changes` additionally protects `runtime/`, `.mngr/`, and `.claude/settings.local.json` from deletion.
@@ -185,7 +196,7 @@ rsync -a --delete \
     ./ .external_worktrees/forever-claude-template/vendor/mngr/
 ```
 
-This is what `create-pool-hosts-dev` does as part of the worktree prep, and the same rsync that `propagate_changes` does as step 1 on each iteration.
+This is what `mngr imbue_cloud admin pool create --mngr-source ...` does for the duration of the bake (then resets `vendor/mngr/` to HEAD when the bake finishes), and the same rsync that `propagate_changes` does as step 1 on each iteration.
 
 ### Start electron by hand without the just recipe
 

@@ -13,11 +13,6 @@
 
     {% if not has_account %}
       {% include '_associate.html' %}
-      {% if is_request %}
-        <form method="POST" action="/requests/{{ request_id }}/deny" class="mt-2">
-          {{ ui.btn_submit('Deny request', variant='danger') }}
-        </form>
-      {% endif %}
     {% else %}
 
       <div id="sharing-editor">
@@ -45,14 +40,10 @@
         </div>
 
         <div class="flex gap-2 mt-5 justify-between" id="action-buttons">
-          {% if is_request %}
-            {{ ui.btn_button('Deny', variant='danger', id='deny-btn', onclick='submitDeny()') }}
-          {% else %}
-            <div class="flex gap-2">
-              {{ ui.btn_link('Cancel', '/workspace/' ~ agent_id ~ '/settings', variant='secondary') }}
-              {{ ui.btn_button('Disable Sharing', variant='danger', id='disable-btn', onclick='submitDisable()', extra='hidden') }}
-            </div>
-          {% endif %}
+          <div class="flex gap-2">
+            {{ ui.btn_link('Cancel', '/workspace/' ~ agent_id ~ '/settings', variant='secondary') }}
+            {{ ui.btn_button('Disable Sharing', variant='danger', id='disable-btn', onclick='submitDisable()', extra='hidden') }}
+          </div>
           {{ ui.btn_button('Update', variant='success', id='action-btn', onclick='submitUpdate()') }}
         </div>
         <div id="submit-spinner" class="hidden py-4">
@@ -75,8 +66,6 @@
   "serviceName": {{ service_name | tojson }},
   "wsName": {{ (ws_name or agent_id) | tojson }},
   "accountEmail": {{ (account_email or '') | tojson }},
-  "isRequest": {{ is_request | tojson }},
-  "requestId": {{ request_id | tojson }},
   "initialEmails": {{ initial_emails | tojson }}
 }
     </script>

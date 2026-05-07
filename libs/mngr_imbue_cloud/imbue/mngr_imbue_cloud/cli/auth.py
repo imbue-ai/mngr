@@ -189,6 +189,39 @@ def signout(account: str | None, connector_url: str | None) -> None:
     emit_json({"removed": True, "user_id": str(session.user_id), "email": str(session.email)})
 
 
+@auth.command(name="list")
+@handle_imbue_cloud_errors
+def list_accounts() -> None:
+    """Emit one JSON object per signed-in account.
+
+    Each entry contains ``user_id``, ``email``, ``display_name``, and
+    ``is_active`` (whether this account is the one ``auth use`` /
+    ``auth signin`` last marked active). Used by minds to source account
+    identity (account chips, the workspace<->account dropdown, the
+    bootstrap reconciliation) without keeping its own on-disk copy.
+
+    Accounts whose session file is missing or unreadable are skipped
+    silently -- callers should treat the output as the authoritative
+    list of "currently signed in".
+    """
+    store = make_session_store()
+    active = store.get_active_account()
+    accounts: list[dict[str, Any]] = []
+    for email in store.list_accounts():
+        session = store.load_by_account(email)
+        if session is None:
+            continue
+        accounts.append(
+            {
+                "user_id": str(session.user_id),
+                "email": str(session.email),
+                "display_name": session.display_name,
+                "is_active": active == email,
+            }
+        )
+    emit_json(accounts)
+
+
 @auth.command(name="status")
 @click.option(
     "--account",
