@@ -442,7 +442,7 @@ Supported build arguments for the modal provider:
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
 
         modal_interface: ModalInterface = DirectModalInterface()
-        environment_name, app_name, host_dir = _derive_modal_names(name, config, mngr_ctx)
+        environment_name, app_name, host_dir = ModalProviderBackend._derive_modal_names(name, config, mngr_ctx)
 
         # Create the ModalProviderApp that manages the Modal app and its resources
         try:
@@ -479,46 +479,46 @@ Supported build arguments for the modal provider:
             modal_app=modal_app,
         )
 
+    @staticmethod
+    def _derive_modal_names(
+        name: ProviderInstanceName,
+        config: ModalProviderConfig,
+        mngr_ctx: MngrContext,
+    ) -> tuple[str, str, Path]:
+        """Compute the ``(environment_name, app_name, host_dir)`` triple for a Modal provider.
 
-def _derive_modal_names(
-    name: ProviderInstanceName,
-    config: ModalProviderConfig,
-    mngr_ctx: MngrContext,
-) -> tuple[str, str, Path]:
-    """Compute the ``(environment_name, app_name, host_dir)`` triple for a Modal provider.
+        Pure function (no Modal SDK calls, no filesystem mutation) so the naming
+        rules can be unit-tested without instantiating a ModalInterface.
 
-    Pure function (no Modal SDK calls, no filesystem mutation) so the naming
-    rules can be unit-tested without instantiating a ModalInterface.
+        Conventions:
+        - ``environment_name`` = ``f"{prefix}{user_id}"``, truncated to ``MODAL_NAME_MAX_LENGTH``.
+          The provider config can override the profile's user_id to allow sharing
+          Modal resources across different mngr profiles or installations.
+        - ``app_name`` = ``config.app_name`` if set, else ``f"{prefix}{name}"``,
+          truncated to leave room for the state-volume suffix.
+        - ``host_dir`` = ``config.host_dir`` if set, else ``Path("/mngr")``.
 
-    Conventions:
-    - ``environment_name`` = ``f"{prefix}{user_id}"``, truncated to ``MODAL_NAME_MAX_LENGTH``.
-      The provider config can override the profile's user_id to allow sharing
-      Modal resources across different mngr profiles or installations.
-    - ``app_name`` = ``config.app_name`` if set, else ``f"{prefix}{name}"``,
-      truncated to leave room for the state-volume suffix.
-    - ``host_dir`` = ``config.host_dir`` if set, else ``Path("/mngr")``.
+        Logs a warning when truncation actually shortens a name.
+        """
+        prefix = mngr_ctx.config.prefix
+        user_id = config.user_id if config.user_id is not None else mngr_ctx.get_profile_user_id()
 
-    Logs a warning when truncation actually shortens a name.
-    """
-    prefix = mngr_ctx.config.prefix
-    user_id = config.user_id if config.user_id is not None else mngr_ctx.get_profile_user_id()
+        environment_name = f"{prefix}{user_id}"
+        if len(environment_name) > MODAL_NAME_MAX_LENGTH:
+            logger.warning(
+                "Truncating Modal environment name to {} characters: {}", MODAL_NAME_MAX_LENGTH, environment_name
+            )
+        environment_name = truncate_modal_name(environment_name, max_length=MODAL_NAME_MAX_LENGTH)
 
-    environment_name = f"{prefix}{user_id}"
-    if len(environment_name) > MODAL_NAME_MAX_LENGTH:
-        logger.warning(
-            "Truncating Modal environment name to {} characters: {}", MODAL_NAME_MAX_LENGTH, environment_name
-        )
-    environment_name = truncate_modal_name(environment_name, max_length=MODAL_NAME_MAX_LENGTH)
+        default_app_name = f"{prefix}{name}"
+        app_name = config.app_name if config.app_name is not None else default_app_name
+        max_app_name_length = MODAL_NAME_MAX_LENGTH - len(STATE_VOLUME_SUFFIX)
+        if len(app_name) > max_app_name_length:
+            logger.warning("Truncating Modal app name to {} characters: {}", max_app_name_length, app_name)
+        app_name = truncate_modal_name(app_name, max_length=max_app_name_length)
 
-    default_app_name = f"{prefix}{name}"
-    app_name = config.app_name if config.app_name is not None else default_app_name
-    max_app_name_length = MODAL_NAME_MAX_LENGTH - len(STATE_VOLUME_SUFFIX)
-    if len(app_name) > max_app_name_length:
-        logger.warning("Truncating Modal app name to {} characters: {}", max_app_name_length, app_name)
-    app_name = truncate_modal_name(app_name, max_length=max_app_name_length)
-
-    host_dir = config.host_dir if config.host_dir is not None else Path("/mngr")
-    return environment_name, app_name, host_dir
+        host_dir = config.host_dir if config.host_dir is not None else Path("/mngr")
+        return environment_name, app_name, host_dir
 
 
 # SSH key and host key file names stored in the modal provider's profile directory.

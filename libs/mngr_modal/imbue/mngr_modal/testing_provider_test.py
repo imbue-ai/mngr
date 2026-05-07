@@ -44,7 +44,6 @@ from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
 from imbue.mngr_modal.backend import ModalAppContextHandle
 from imbue.mngr_modal.backend import ModalProviderBackend
 from imbue.mngr_modal.backend import _create_environment
-from imbue.mngr_modal.backend import _derive_modal_names
 from imbue.mngr_modal.backend import _enter_ephemeral_app_context_with_env_retry
 from imbue.mngr_modal.backend import _exit_modal_app_context
 from imbue.mngr_modal.backend import _lookup_persistent_app_with_env_retry
@@ -949,7 +948,7 @@ def test_derive_modal_names_environment_name_derived_from_prefix(
         app_name="env-name-test",
         host_dir=temp_mngr_ctx.config.default_host_dir,
     )
-    environment_name, _, _ = _derive_modal_names(
+    environment_name, _, _ = ModalProviderBackend._derive_modal_names(
         ProviderInstanceName("test"),
         config,
         temp_mngr_ctx,
@@ -967,7 +966,7 @@ def test_derive_modal_names_truncates_long_app_name(
         app_name="a" * 100,
         host_dir=temp_mngr_ctx.config.default_host_dir,
     )
-    _, app_name, _ = _derive_modal_names(
+    _, app_name, _ = ModalProviderBackend._derive_modal_names(
         ProviderInstanceName("test"),
         config,
         temp_mngr_ctx,
