@@ -209,10 +209,8 @@ def _git_command_stdout(host: OnlineHostInterface, command: str, cwd: Path) -> s
 def _is_same_machine(a: OnlineHostInterface, b: OnlineHostInterface) -> bool:
     """Whether ``a`` and ``b`` share a filesystem so file ops do not need SSH.
 
-    True for literal same-host pairs (matching ``host_id``) and for any pair
-    of local hosts (which always share the laptop's filesystem, even if the
-    test scaffolding builds two ``LocalProviderInstance`` objects with
-    distinct ids).
+    True when the two hosts share a ``host_id``, or when both are local
+    (any two local hosts share the laptop's filesystem regardless of id).
     """
     if a.id == b.id:
         return True
@@ -1222,22 +1220,15 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     ) -> None:
         """Push git repo from source to target, mirroring branches and tags."""
         self._warn_if_submodules_detected(source_host, source_path)
-
-        # When source and target are on the same machine (same host id, or
-        # both local), skip SSH entirely and push between two local paths on
-        # that machine. Otherwise the SSH path below ends up shipping
-        # laptop-local key paths to a remote source host and failing with
-        # "Identity file ... not accessible".
-        if _is_same_machine(source_host, self):
-            self._git_push_to_target_same_host(source_host, source_path, target_path)
-            return
-
-        # Cross-host. (Same-host was handled above; if both source and self
-        # were on the laptop they would share an id and have taken that path.)
+        same_machine = _is_same_machine(source_host, self)
         target_ssh_info = self.get_ssh_connection_info()
 
-        if target_ssh_info is None:
-            # Remote source -> local target: clone --mirror from source.
+        # Same-machine push uses a bare local-on-host URL with no SSH
+        # transport (covers both local-laptop-to-itself and
+        # remote-host-to-itself).
+        if same_machine:
+            git_url = str(target_path / ".git")
+        elif target_ssh_info is None:
             source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
             if source_ssh_info is None:
                 raise MngrError("Cannot determine SSH connection info for remote source host")
@@ -1255,26 +1246,36 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 except ProcessError as e:
                     raise MngrError(f"Failed to clone from remote source: {e}") from e
                 return
-
-        user, hostname, port, key_path = target_ssh_info
-        git_url = f"ssh://{user}@{hostname}:{port}{target_path}/.git"
+        else:
+            user, hostname, port, key_path = target_ssh_info
+            git_url = f"ssh://{user}@{hostname}:{port}{target_path}/.git"
 
         # Build the environment and command for a mirror-like push. We use
         # explicit refspecs instead of --mirror to avoid pushing remote-tracking
         # refs (refs/remotes/*), which cause "inconsistent aliased update"
         # errors on git 2.45+ due to symbolic refs like refs/remotes/origin/HEAD.
         # --no-verify skips hooks, since they can sometimes fail on mirror pushes.
-        target_known_hosts = get_ssh_known_hosts_file(self)
-        git_ssh_cmd = build_ssh_transport_command(key_path, port, target_known_hosts)
-        env: dict[str, str] = {
-            "GIT_SSH_COMMAND": git_ssh_cmd,
-            # Don't bother pushing LFS objects -- they can be transferred later
-            # as needed, and without this it can take a ridiculously long time.
-            "GIT_LFS_SKIP_PUSH": "1",
-        }
+        env: dict[str, str] = {}
+        if target_ssh_info is not None and not same_machine:
+            user, hostname, port, key_path = target_ssh_info
+            target_known_hosts = get_ssh_known_hosts_file(self)
+            git_ssh_cmd = build_ssh_transport_command(key_path, port, target_known_hosts)
+            env["GIT_SSH_COMMAND"] = git_ssh_cmd
+
+        # Don't bother pushing LFS objects - they can be transferred later as needed,
+        # and without this, it can take a ridiculously long time.
+        env["GIT_LFS_SKIP_PUSH"] = "1"
 
         with log_span("Pushing git repo to target: {}", git_url):
-            if source_host.is_local:
+            if same_machine:
+                # Run the push on the shared machine via the host interface.
+                refspecs = " ".join(shlex.quote(r) for r in GIT_MIRROR_PUSH_REFSPECS)
+                push_cmd = f"git push --no-verify --force --prune {shlex.quote(git_url)} {refspecs}"
+                result = source_host.execute_idempotent_command(push_cmd, cwd=source_path, env=env)
+                if not result.success:
+                    output = (result.stderr + "\n" + result.stdout).strip()
+                    raise MngrError(f"Failed to push git repo on same host: {output}")
+            elif source_host.is_local:
                 command_args = [
                     "git",
                     "-C",
@@ -1302,28 +1303,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 if not result.success:
                     output = (result.stderr + "\n" + result.stdout).strip()
                     raise MngrError(f"Failed to push git repo from remote source: {output}")
-
-    def _git_push_to_target_same_host(
-        self,
-        host: OnlineHostInterface,
-        source_path: Path,
-        target_path: Path,
-    ) -> None:
-        """Mirror a git repo between two local paths on a single host (no SSH).
-
-        Pushes the source's branches and tags into the bare repo at
-        ``target_path / ".git"`` via a single ``git push`` invocation on
-        ``host``. ``GIT_LFS_SKIP_PUSH=1`` skips LFS objects (they can be
-        fetched on demand later, and pushing them can be very slow).
-        """
-        refspecs = " ".join(shlex.quote(r) for r in GIT_MIRROR_PUSH_REFSPECS)
-        git_url = shlex.quote(str(target_path / ".git"))
-        push_cmd = f"git push --no-verify --force --prune {git_url} {refspecs}"
-        with log_span("Pushing git repo to target on same host: {}", target_path):
-            result = host.execute_idempotent_command(push_cmd, cwd=source_path, env={"GIT_LFS_SKIP_PUSH": "1"})
-            if not result.success:
-                output = (result.stderr + "\n" + result.stdout).strip()
-                raise MngrError(f"Failed to push git repo on same host: {output}")
 
     def _warn_if_submodules_detected(
         self,
@@ -1557,27 +1536,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     ) -> None:
         """Run rsync to transfer files from source to target.
 
-        - If source and target are on the same machine (same host id, or both
-          local), run rsync on that machine between two local paths (no SSH,
-          no laptop intermediary)
+        - If source and target are on the same machine, run rsync on that
+          machine between two local paths (no SSH)
         - If source is local and target is remote, push to target via SSH
         - If target is local and source is remote, pull from source via SSH
         - If source and target are different remote hosts, sync via a local
           temp directory as intermediary (pull from source, then push to target)
         """
-        # Same-machine short-circuit -- runs rsync in a single shell on that
-        # machine. Covers literal same-host and both-local (the latter shows up
-        # in tests that build two LocalProviderInstance objects with different
-        # ids but a shared filesystem).
-        if _is_same_machine(source_host, self):
-            self._rsync_files_same_host(
-                source_path,
-                target_path,
-                extra_args=extra_args,
-                files_from=files_from,
-                exclude_git=exclude_git,
-            )
-            return
+        same_machine = _is_same_machine(source_host, self)
 
         # Build rsync arguments
         rsync_args = ["rsync", "-rlpt"]
@@ -1585,15 +1551,45 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             rsync_args.extend(["--exclude", ".git"])
         if extra_args:
             rsync_args.extend(shlex.split(extra_args))
+
+        # files_from points at a temp file on the laptop. For cross-host
+        # rsync (which always runs on the laptop) we can pass that path
+        # directly. For same-machine rsync we mirror it onto the host first
+        # so rsync running on the host can read it.
+        host_files_from: Path | None = None
         if files_from is not None:
-            rsync_args.extend(["--files-from", str(files_from)])
+            if same_machine:
+                paths = [p for p in files_from.read_text().splitlines() if p]
+                if not paths:
+                    return
+                host_files_from = self.host_dir / "tmp" / f"rsync-files-from-{uuid4().hex}.txt"
+                # write_file creates parent directories as needed.
+                self.write_file(host_files_from, ("\n".join(paths) + "\n").encode())
+                rsync_args.extend(["--files-from", str(host_files_from)])
+            else:
+                rsync_args.extend(["--files-from", str(files_from)])
 
         source_path_str = str(source_path).rstrip("/") + "/"
         target_path_str = str(target_path).rstrip("/") + "/"
 
-        # Local-to-local is handled by the same-host short-circuit above (the
-        # local connector exposes a single Host instance, so a local source
-        # and local target share an id).
+        # Same-machine rsync runs between two local paths on the shared
+        # machine via the host interface (no SSH, no laptop intermediary).
+        if same_machine:
+            rsync_args.extend([source_path_str, target_path_str])
+            rsync_cmd = " ".join(shlex.quote(a) for a in rsync_args)
+            with log_span("rsync: same-host {} -> {}", source_path, target_path):
+                try:
+                    result = self.execute_idempotent_command(rsync_cmd)
+                    if not result.success:
+                        raise MngrError(f"rsync failed (same-host): {result.stderr}")
+                    logger.trace("Ran rsync command (same-host): {}", rsync_cmd)
+                finally:
+                    if host_files_from is not None:
+                        self.execute_idempotent_command(
+                            f"rm -f {shlex.quote(str(host_files_from))}", timeout_seconds=5.0
+                        )
+            return
+
         if source_host.is_local and not self.is_local:
             # Local to remote
             target_ssh_info = self.get_ssh_connection_info()
@@ -1669,55 +1665,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             except ProcessError as e:
                 raise MngrError(f"rsync failed: {e.stderr}") from e
             logger.trace("Ran rsync command: {}", " ".join(rsync_args))
-
-    def _rsync_files_same_host(
-        self,
-        source_path: Path,
-        target_path: Path,
-        *,
-        extra_args: str | None,
-        files_from: Path | None,
-        exclude_git: bool,
-    ) -> None:
-        """Run rsync between two local paths on this single host.
-
-        When a ``files_from`` path is given (a temp file on the laptop), its
-        contents are written to a per-call temp file under ``host_dir/tmp/``
-        on the host so rsync can read it as ``--files-from=<host-path>``. The
-        host-side temp file is removed in a ``finally`` block. An empty file
-        list short-circuits before invoking rsync.
-        """
-        rsync_args = ["rsync", "-rlpt"]
-        if exclude_git:
-            rsync_args.extend(["--exclude", ".git"])
-        if extra_args:
-            rsync_args.extend(shlex.split(extra_args))
-
-        host_files_from: Path | None = None
-        if files_from is not None:
-            paths = [p for p in files_from.read_text().splitlines() if p]
-            if not paths:
-                return
-            host_files_from = self.host_dir / "tmp" / f"rsync-files-from-{uuid4().hex}.txt"
-            # write_file creates parent directories as needed.
-            self.write_file(host_files_from, ("\n".join(paths) + "\n").encode())
-            rsync_args.extend(["--files-from", str(host_files_from)])
-
-        source_path_str = str(source_path).rstrip("/") + "/"
-        target_path_str = str(target_path).rstrip("/") + "/"
-        rsync_args.extend([source_path_str, target_path_str])
-
-        rsync_cmd = " ".join(shlex.quote(a) for a in rsync_args)
-
-        with log_span("rsync: same-host {} -> {}", source_path, target_path):
-            try:
-                result = self.execute_idempotent_command(rsync_cmd)
-                if not result.success:
-                    raise MngrError(f"rsync failed (same-host): {result.stderr}")
-                logger.trace("Ran rsync command (same-host): {}", rsync_cmd)
-            finally:
-                if host_files_from is not None:
-                    self.execute_idempotent_command(f"rm -f {shlex.quote(str(host_files_from))}", timeout_seconds=5.0)
 
     def _create_work_dir_as_git_worktree(
         self,
