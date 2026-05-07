@@ -132,14 +132,20 @@ def _wrap_paths_recursively(node: Any, paths: Sequence[tuple[str, ...]]) -> Any:
     path means "wrap `node` itself." Recurses into children specified by the
     first segment of any non-empty path; children not on any path are shared
     by reference.
+
+    Raises TypeError if a path's target (or any prefix segment) is not a
+    dict/MapType. This signals a programming error in the caller's `paths`
+    argument; the precondition is documented on `with_tolerant_paths`.
     """
     wrap_here = any(len(p) == 0 for p in paths)
     descend = [p for p in paths if len(p) > 0]
 
     if not isinstance(node, dict):
-        # Can't descend further; if the caller wanted to wrap a non-dict node
-        # tolerantly, that's a programming error -- return node unchanged.
-        return node
+        raise TypeError(
+            f"with_tolerant_paths: cannot descend into / wrap non-dict node "
+            f"of type {type(node).__name__}; check that every path targets a "
+            f"MapType in the CEL context"
+        )
 
     new_node: dict[Any, Any] = dict(node)
     by_first: dict[str, list[tuple[str, ...]]] = {}
