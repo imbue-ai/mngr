@@ -1678,9 +1678,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 # invoking it with an empty file list.
                 return
             host_files_from = self.host_dir / "tmp" / f"rsync-files-from-{uuid4().hex}.txt"
-            self.execute_idempotent_command(
-                f"mkdir -p {shlex.quote(str(host_files_from.parent))}", timeout_seconds=5.0
-            )
+            # write_file creates parent directories as needed.
             self.write_file(host_files_from, ("\n".join(paths) + "\n").encode())
             rsync_args.extend(["--files-from", str(host_files_from)])
 
