@@ -5,6 +5,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Final
@@ -28,6 +29,15 @@ _SHUTDOWN_POLL_SECONDS: Final[float] = 0.2
 _SOCKET_POLL_SECONDS: Final[float] = 0.01
 
 _REVERSE_TUNNEL_HEALTH_CHECK_SECONDS: Final[float] = 30.0
+
+# Diagnostic: every N seconds, log internal manager state (connection / tunnel /
+# thread counts). Time-series of these counts disambiguates a thread leak (counts
+# climb monotonically) from a per-relay busy-loop (counts flat while CPU high).
+_DIAGNOSTIC_HEARTBEAT_SECONDS: Final[float] = 10.0
+
+# Diagnostic: a relay thread that runs more than this many iterations per second
+# while transferring zero bytes is treated as a busy-loop and logged.
+_RELAY_SPIN_THRESHOLD_RATE: Final[float] = 50.0
 
 # Maximum AF_UNIX socket path length, conservative across macOS and Linux.
 # macOS sun_path is 104 bytes, Linux is 108. Python's socket.bind rejects
@@ -112,6 +122,7 @@ class SSHTunnelManager(MutableModel):
     _reverse_tunnels: dict[tuple[str, int], ReverseTunnelInfo] = PrivateAttr(default_factory=dict)
     _reverse_tunnel_setup_locks: dict[str, threading.Lock] = PrivateAttr(default_factory=dict)
     _health_check_thread: threading.Thread | None = PrivateAttr(default=None)
+    _diagnostic_thread: threading.Thread | None = PrivateAttr(default=None)
     _on_tunnel_repaired_callbacks: list[Callable[["ReverseTunnelInfo"], None]] = PrivateAttr(default_factory=list)
 
     def _get_tmpdir(self) -> Path:
@@ -146,7 +157,7 @@ class SSHTunnelManager(MutableModel):
             except (OSError, paramiko.SSHException) as e:
                 logger.trace("Error closing stale SSH connection: {}", e)
 
-        logger.debug("Establishing SSH connection to {}:{}", ssh_info.host, ssh_info.port)
+        logger.info("Establishing SSH connection to {}:{}", ssh_info.host, ssh_info.port)
         client = _create_ssh_client(ssh_info)
         self._connections[conn_key] = client
         return client
@@ -280,6 +291,48 @@ class SSHTunnelManager(MutableModel):
             name="reverse-tunnel-health-check",
         )
         self._health_check_thread.start()
+        # Also start the diagnostic heartbeat. Cheap (one log line every 10s) and
+        # only used during the live CPU-pin investigation; safe to leave on.
+        if self._diagnostic_thread is None:
+            self._diagnostic_thread = threading.Thread(
+                target=self._diagnostic_heartbeat_loop,
+                daemon=True,
+                name="ssh-tunnel-diagnostic-heartbeat",
+            )
+            self._diagnostic_thread.start()
+
+    def _diagnostic_heartbeat_loop(self) -> None:
+        """Periodic state dump for diagnosing CPU pin / thread leaks.
+
+        Counts internal manager state (connections, reverse tunnels, forward
+        tunnel threads) plus a process-wide thread tally split by name prefix
+        so we can see paramiko Transport threads accumulating over time.
+        """
+        while not self._shutdown_event.wait(timeout=_DIAGNOSTIC_HEARTBEAT_SECONDS):
+            with self._lock:
+                connections_count = len(self._connections)
+                reverse_tunnels_count = len(self._reverse_tunnels)
+                tunnel_threads_total = len(self._tunnel_threads)
+                tunnel_threads_alive = sum(1 for t in self._tunnel_threads.values() if t.is_alive())
+            all_threads = threading.enumerate()
+            relay_count = sum(
+                1 for t in all_threads if t.name.startswith("ssh-relay-") or t.name.startswith("reverse-relay-")
+            )
+            ssh_tunnel_count = sum(1 for t in all_threads if t.name.startswith("ssh-tunnel-"))
+            paramiko_count = sum(1 for t in all_threads if "paramiko" in t.name.lower() or "Transport" in t.name)
+            logger.info(
+                "tunnel diagnostic: connections={} reverse_tunnels={} "
+                "forward_tunnel_threads_alive={}/{} relay_threads={} ssh_tunnel_threads={} "
+                "paramiko_transport_threads={} total_threads={}",
+                connections_count,
+                reverse_tunnels_count,
+                tunnel_threads_alive,
+                tunnel_threads_total,
+                relay_count,
+                ssh_tunnel_count,
+                paramiko_count,
+                len(all_threads),
+            )
 
     def _check_and_repair_tunnels(self) -> None:
         """Check all reverse tunnels and re-establish any that are broken.
@@ -290,10 +343,14 @@ class SSHTunnelManager(MutableModel):
         ``ReverseTunnelInfo`` so consumers (e.g. the plugin's
         ``ReverseTunnelHandler``) can emit a fresh envelope event.
         """
+        iter_start = time.monotonic()
         with self._lock:
             tunnels = dict(self._reverse_tunnels)
             callbacks = list(self._on_tunnel_repaired_callbacks)
 
+        alive_count = 0
+        broken_count = 0
+        repair_failures = 0
         for tunnel_key, tunnel_info in tunnels.items():
             conn_key, _local_port = tunnel_key
             with self._lock:
@@ -301,7 +358,9 @@ class SSHTunnelManager(MutableModel):
 
             is_alive = client is not None and _ssh_connection_is_active(client)
             if is_alive:
+                alive_count += 1
                 continue
+            broken_count += 1
 
             logger.info(
                 "Reverse tunnel to {} (local {}) is broken, re-establishing...",
@@ -329,12 +388,22 @@ class SSHTunnelManager(MutableModel):
                         except (OSError, RuntimeError) as e:
                             logger.warning("Tunnel-repaired callback failed: {}", e)
             except (paramiko.SSHException, OSError, SSHTunnelError) as e:
+                repair_failures += 1
                 logger.warning(
                     "Failed to re-establish reverse tunnel to {} (local {}): {}",
                     conn_key,
                     tunnel_info.local_port,
                     e,
                 )
+        elapsed_ms = (time.monotonic() - iter_start) * 1000
+        logger.info(
+            "health check iter: tunnels={} alive={} broken={} repair_failures={} elapsed_ms={:.0f}",
+            len(tunnels),
+            alive_count,
+            broken_count,
+            repair_failures,
+            elapsed_ms,
+        )
 
     def add_on_tunnel_repaired_callback(self, callback: "Callable[[ReverseTunnelInfo], None]") -> None:
         """Register a callback fired once per successful repair of a broken tunnel.
@@ -359,6 +428,9 @@ class SSHTunnelManager(MutableModel):
         if self._health_check_thread is not None:
             self._health_check_thread.join(timeout=5.0)
             self._health_check_thread = None
+        if self._diagnostic_thread is not None:
+            self._diagnostic_thread.join(timeout=5.0)
+            self._diagnostic_thread = None
 
         for thread in self._tunnel_threads.values():
             thread.join(timeout=5.0)
@@ -499,27 +571,32 @@ def _tunnel_accept_loop(
             logger.trace("Error unlinking tunnel socket: {}", e)
 
 
-def _relay_step(sock: socket.socket, channel: paramiko.Channel) -> bool:
+def _relay_step(sock: socket.socket, channel: paramiko.Channel) -> tuple[bool, int]:
     """Perform one relay step: transfer available data between sock and channel.
 
-    Returns True to continue relaying, False when either end has closed.
+    Returns ``(should_continue, bytes_transferred)``. ``should_continue`` is
+    False when either end has closed. ``bytes_transferred`` is the total bytes
+    moved in this iteration in either direction.
     """
+    bytes_xferred = 0
     r, _, _ = select.select([sock, channel], [], [], _SELECT_TIMEOUT_SECONDS)
 
     if sock in r:
         data = sock.recv(_BUFFER_SIZE)
         if not data:
-            return False
+            return False, bytes_xferred
         channel.sendall(data)
+        bytes_xferred += len(data)
 
     if channel in r:
         if channel.recv_ready():
             data = channel.recv(_BUFFER_SIZE)
             if not data:
-                return False
+                return False, bytes_xferred
             sock.sendall(data)
+            bytes_xferred += len(data)
 
-    return True
+    return True, bytes_xferred
 
 
 def _relay_data(sock: socket.socket, channel: paramiko.Channel) -> None:
@@ -527,10 +604,45 @@ def _relay_data(sock: socket.socket, channel: paramiko.Channel) -> None:
 
     Uses select() to multiplex reads from both ends. Terminates when either
     end closes or an error occurs.
+
+    Spin-loop guard: paramiko's ``Channel.fileno()`` is poked for any channel
+    event (data, EOF, window-adjust). When ``select`` reports the channel as
+    readable but ``channel.recv_ready()`` is False (e.g. half-closed channel
+    pending cleanup), the loop will iterate without sleeping and burn CPU.
+    The diagnostic block below detects this and logs once per second, with a
+    snapshot of the channel state, while the spin persists.
     """
+    thread_name = threading.current_thread().name
+    spin_window_start = time.monotonic()
+    spin_iter_count = 0
+    spin_bytes_count = 0
     try:
-        while _relay_step(sock, channel):
-            pass
+        while True:
+            should_continue, bytes_xferred = _relay_step(sock, channel)
+            if not should_continue:
+                break
+
+            spin_iter_count += 1
+            spin_bytes_count += bytes_xferred
+            now = time.monotonic()
+            elapsed = now - spin_window_start
+            if elapsed >= 1.0:
+                iters_per_sec = spin_iter_count / elapsed
+                if iters_per_sec > _RELAY_SPIN_THRESHOLD_RATE and spin_bytes_count == 0:
+                    logger.warning(
+                        "relay thread {} spinning: {} iters in {:.2f}s ({:.0f}/s) with 0 bytes; "
+                        "channel.closed={} channel.eof_received={} channel.recv_ready={}",
+                        thread_name,
+                        spin_iter_count,
+                        elapsed,
+                        iters_per_sec,
+                        channel.closed,
+                        channel.eof_received,
+                        channel.recv_ready(),
+                    )
+                spin_window_start = now
+                spin_iter_count = 0
+                spin_bytes_count = 0
     except (OSError, EOFError, paramiko.SSHException) as e:
         logger.trace("SSH tunnel relay ended: {}", e)
     finally:
