@@ -5,7 +5,7 @@
 # checkpoint cache. Keep this version pinned in sync with the offload
 # version pinned in .github/workflows/ci.yml.
 FROM rust:1-bookworm AS offload-builder
-ARG OFFLOAD_VERSION=0.9.2
+ARG OFFLOAD_VERSION=0.9.4
 RUN cargo install offload@${OFFLOAD_VERSION} --locked --root /opt/offload
 
 FROM python:3.12-slim
