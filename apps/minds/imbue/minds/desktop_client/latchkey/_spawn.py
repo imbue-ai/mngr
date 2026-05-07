@@ -27,6 +27,7 @@ def spawn_detached_latchkey_gateway(
     log_path: Path,
     latchkey_directory: Path | None = None,
     permissions_config_path: Path | None = None,
+    listen_password: str | None = None,
 ) -> int:
     """Start a detached ``latchkey gateway`` and return its PID.
 
@@ -42,12 +43,20 @@ def spawn_detached_latchkey_gateway(
     The parent directory is created if needed.
 
     When ``permissions_config_path`` is supplied, ``LATCHKEY_PERMISSIONS_CONFIG``
-    is set in the child's environment so this gateway enforces a
-    per-agent permission ruleset. Latchkey treats a missing file as
-    ``allow all``, so callers are responsible for ensuring the file
-    exists (with empty rules at minimum) before this function is
-    invoked -- otherwise the gateway would start in an unsafe
-    permit-all state until the desktop client wrote its first grant.
+    is set in the child's environment so this gateway enforces the supplied
+    file as the *default* permissions ruleset (used for any request that
+    does not present a valid ``X-Latchkey-Gateway-Permissions-Override``
+    JWT). Latchkey treats a missing file as ``allow all``, so callers are
+    responsible for ensuring the file exists (with empty rules at minimum)
+    before this function is invoked -- otherwise the gateway would start
+    in an unsafe permit-all state for any request that bypasses the JWT
+    mechanism.
+
+    When ``listen_password`` is supplied, ``LATCHKEY_GATEWAY_LISTEN_PASSWORD``
+    is set in the child's environment so the gateway rejects with ``401``
+    any incoming request that does not carry the same value in the
+    ``X-Latchkey-Gateway-Password`` header. Pair with
+    ``LATCHKEY_GATEWAY_PASSWORD`` on the client side.
 
     The returned ``Popen`` object is intentionally allowed to go out of
     scope. Python's ``subprocess`` module parks finished children on an
@@ -64,6 +73,8 @@ def spawn_detached_latchkey_gateway(
         env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
     if permissions_config_path is not None:
         env["LATCHKEY_PERMISSIONS_CONFIG"] = str(permissions_config_path)
+    if listen_password is not None:
+        env["LATCHKEY_GATEWAY_LISTEN_PASSWORD"] = listen_password
 
     log_file = log_path.open("ab")
     try:

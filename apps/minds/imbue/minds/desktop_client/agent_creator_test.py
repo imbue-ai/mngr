@@ -95,12 +95,117 @@ def test_build_mngr_create_command_injects_latchkey_for_non_dev_modes() -> None:
     assert expected in command
 
 
-def test_build_mngr_create_command_omits_latchkey_for_dev_mode() -> None:
-    """DEV runs the agent on the bare host with no reverse tunnel, so no
-    ``LATCHKEY_GATEWAY`` is injected. Tests that need one set it themselves."""
+def test_build_mngr_create_command_omits_latchkey_for_dev_mode_without_url() -> None:
+    """DEV with no explicit URL gets no latchkey wiring.
+
+    There's no constant agent-side URL to fall back on for DEV (no
+    reverse tunnel), so the caller is responsible for computing the
+    live gateway URL when it wants DEV agents to use latchkey.
+    """
     command, _ = _build_mngr_create_command(launch_mode=LaunchMode.DEV, agent_name=AgentName("hello"))
     joined = " ".join(command)
     assert "LATCHKEY_GATEWAY" not in joined
+    # ``LATCHKEY_DISABLE_COUNTING`` is part of the latchkey wiring, so it's
+    # also absent when latchkey is not wired (DEV without explicit URL).
+    assert "LATCHKEY_DISABLE_COUNTING" not in joined
+
+
+def test_build_mngr_create_command_disables_latchkey_counting_when_wired() -> None:
+    """Whenever latchkey is wired into the workspace, the workspace-side
+    ``latchkey`` CLI runs in client mode against the host-side gateway.
+    The gateway already counts as one active user, so the workspace must
+    set ``LATCHKEY_DISABLE_COUNTING=1`` to avoid double-counting every
+    agent as a separate goatcounter.com user.
+    """
+    # Non-DEV mode: gets the constant agent-side URL by default, so latchkey is wired.
+    for mode in (LaunchMode.LOCAL, LaunchMode.LIMA, LaunchMode.CLOUD):
+        command, _ = _build_mngr_create_command(launch_mode=mode, agent_name=AgentName("hello"))
+        assert "LATCHKEY_DISABLE_COUNTING=1" in command, f"{mode} command missing disable-counting env: {command}"
+    # DEV with explicit URL: latchkey is wired, so disable-counting is too.
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.DEV,
+        agent_name=AgentName("hello"),
+        latchkey_gateway_url="http://127.0.0.1:54321",
+    )
+    assert "LATCHKEY_DISABLE_COUNTING=1" in command
+
+
+def test_build_mngr_create_command_injects_latchkey_for_dev_mode_with_explicit_url() -> None:
+    """DEV with an explicit live gateway URL gets the full latchkey wiring.
+
+    The caller (``AgentCreator._maybe_compute_latchkey_gateway_url``)
+    queries the live gateway info for DEV, since DEV has no reverse
+    tunnel and must talk directly to the gateway's host port.
+    """
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.DEV,
+        agent_name=AgentName("hello"),
+        latchkey_gateway_url="http://127.0.0.1:54321",
+        latchkey_gateway_password="sup3rs3cret",
+        latchkey_permissions_override_jwt="eyJhbGc.fake.jwt",
+    )
+    assert "LATCHKEY_GATEWAY=http://127.0.0.1:54321" in command
+    assert "LATCHKEY_GATEWAY_PASSWORD=sup3rs3cret" in command
+    assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=eyJhbGc.fake.jwt" in command
+
+
+def test_build_mngr_create_command_explicit_url_overrides_constant_for_non_dev() -> None:
+    """Passing ``latchkey_gateway_url`` overrides the default for any mode."""
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.LOCAL,
+        agent_name=AgentName("hello"),
+        latchkey_gateway_url="http://127.0.0.1:9999",
+    )
+    assert "LATCHKEY_GATEWAY=http://127.0.0.1:9999" in command
+    # The constant agent-side URL is not also injected.
+    assert f"LATCHKEY_GATEWAY=http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}" not in command
+
+
+def test_build_mngr_create_command_injects_latchkey_password_when_supplied() -> None:
+    """Password is injected at create time so the agent's first
+    ``latchkey curl`` already authenticates to the password-protected
+    shared gateway -- no fragile post-create step required.
+    """
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.LOCAL,
+        agent_name=AgentName("hello"),
+        latchkey_gateway_password="sup3rs3cret",
+    )
+    assert "LATCHKEY_GATEWAY_PASSWORD=sup3rs3cret" in command
+
+
+def test_build_mngr_create_command_omits_latchkey_password_for_dev_mode() -> None:
+    """DEV mode skips all latchkey env injection (no tunnel, no gateway wiring)."""
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.DEV,
+        agent_name=AgentName("hello"),
+        latchkey_gateway_password="sup3rs3cret",
+    )
+    assert not any(arg.startswith("LATCHKEY_GATEWAY_PASSWORD=") for arg in command)
+
+
+def test_build_mngr_create_command_injects_latchkey_jwt_when_supplied() -> None:
+    """The permissions-override JWT is injected at create time so the
+    agent's env file has it from the very first service start. This is
+    what fixes the previous-design bug where post-create ``mngr provision
+    --env`` could silently fail and leave
+    ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` missing.
+    """
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.LOCAL,
+        agent_name=AgentName("hello"),
+        latchkey_permissions_override_jwt="eyJhbGc.fake.jwt",
+    )
+    assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=eyJhbGc.fake.jwt" in command
+
+
+def test_build_mngr_create_command_omits_latchkey_jwt_for_dev_mode() -> None:
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.DEV,
+        agent_name=AgentName("hello"),
+        latchkey_permissions_override_jwt="eyJhbGc.fake.jwt",
+    )
+    assert not any(arg.startswith("LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=") for arg in command)
 
 
 def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() -> None:

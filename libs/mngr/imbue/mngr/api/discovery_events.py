@@ -403,32 +403,6 @@ def emit_discovery_error_event(
     logger.trace("Emitted discovery_error event: {} from {}", error_type, source_name)
 
 
-def emit_discovery_error_to_stdout(
-    error_type: str,
-    error_message: str,
-    source_name: str,
-    provider_name: str | None = None,
-) -> None:
-    """Write a discovery error event as a JSONL line to stdout.
-
-    Used in contexts where the events_base_dir is not available (e.g. list.py).
-    The discovery stream tail thread will pick it up from stdout.
-    """
-    timestamp, event_id = _make_envelope_fields()
-    event = DiscoveryErrorEvent(
-        timestamp=timestamp,
-        event_id=event_id,
-        source=DISCOVERY_EVENT_SOURCE,
-        error_type=error_type,
-        error_message=error_message,
-        source_name=source_name,
-        provider_name=provider_name,
-    )
-    line = json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
-    sys.stdout.write(line + "\n")
-    sys.stdout.flush()
-
-
 def emit_discovery_events_for_host(
     config: MngrConfig,
     host: OnlineHostInterface,
