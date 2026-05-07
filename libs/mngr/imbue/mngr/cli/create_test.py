@@ -772,18 +772,18 @@ def test_split_cli_args_empty() -> None:
 
 
 def test_resolve_agent_type_name_type_flag_wins() -> None:
-    """--type flag takes precedence over positional."""
-    assert _resolve_agent_type_name("headless_command", "claude") == "headless_command"
+    """Explicit --type flag takes precedence over positional."""
+    assert _resolve_agent_type_name("headless_command", True, "claude") == "headless_command"
 
 
 def test_resolve_agent_type_name_positional_fallback() -> None:
-    """Positional arg used when --type is None."""
-    assert _resolve_agent_type_name(None, "headless_claude") == "headless_claude"
+    """Positional arg used when --type is not explicit."""
+    assert _resolve_agent_type_name("claude", False, "headless_claude") == "headless_claude"
 
 
-def test_resolve_agent_type_name_all_none() -> None:
-    """All None returns None (default to claude)."""
-    assert _resolve_agent_type_name(None, None) is None
+def test_resolve_agent_type_name_default() -> None:
+    """No positional and no explicit --type returns the --type default."""
+    assert _resolve_agent_type_name("claude", False, None) == "claude"
 
 
 # =============================================================================
@@ -1249,6 +1249,7 @@ def test_parse_agent_opts_includes_labels(
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
+        resolved_agent_type="claude",
     )
 
     assert result.label_options.labels == {"project": "mngr", "env": "prod"}
@@ -1274,6 +1275,7 @@ def test_parse_agent_opts_label_invalid_format_raises(
             initial_message=None,
             source_location=source_location,
             mngr_ctx=temp_mngr_ctx,
+            resolved_agent_type="claude",
         )
 
 
@@ -1293,6 +1295,7 @@ def test_parse_agent_opts_empty_labels_by_default(
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
+        resolved_agent_type="claude",
     )
 
     assert result.label_options.labels == {}
@@ -1318,6 +1321,7 @@ def test_parse_agent_opts_with_agent_id(
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
+        resolved_agent_type="claude",
     )
 
     assert result.agent_id == explicit_id
@@ -1339,6 +1343,7 @@ def test_parse_agent_opts_agent_id_none_by_default(
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
+        resolved_agent_type="claude",
     )
 
     assert result.agent_id is None
@@ -1364,6 +1369,7 @@ def test_parse_agent_opts_matching_type_and_positional_ok(
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
+        resolved_agent_type="claude",
     )
 
     assert result.agent_type is not None

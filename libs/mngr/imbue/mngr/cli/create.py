@@ -160,18 +160,20 @@ def _split_address_and_target_path(raw: str) -> tuple[str, Path | None]:
 
 @pure
 def _resolve_agent_type_name(
-    type_flag: str | None,
+    type_flag: str,
+    is_type_explicit: bool,
     positional_agent_type: str | None,
-) -> str | None:
+) -> str:
     """Resolve the agent type name from CLI options.
 
     Shared logic for both the early headless detection path and the full
-    _parse_agent_opts path. Returns the resolved type name, or None when
-    neither --type nor positional agent type is set (caller defaults to "claude").
+    _parse_agent_opts path.
 
-    Precedence: --type flag > positional argument.
+    Precedence: explicit --type flag > positional argument > --type default ("claude").
     """
-    return type_flag if type_flag is not None else positional_agent_type
+    if not is_type_explicit and positional_agent_type is not None:
+        return positional_agent_type
+    return type_flag
 
 
 def _resolve_or_generate_agent_name(address: AgentAddress, opts: CreateCliOptions) -> AgentName:
@@ -336,7 +338,7 @@ class _CreateCommand(click.Command):
     show_default=True,
     help="Auto-generated name style",
 )
-@optgroup.option("--type", help="Which type of agent to run [default: claude]")
+@optgroup.option("--type", default="claude", show_default=True, help="Which type of agent to run")
 # FOLLOWUP: hmm... I wonder if the name of this should be changed to something more like "window" to be more closely aligned with the tmux primitive it actually creates...
 #  more generally, we probably need to do a pass at refining *all* of these option names...
 @optgroup.option(
@@ -461,7 +463,7 @@ class _CreateCommand(click.Command):
     "--worktree-base-folder",
     default=None,
     type=click.Path(),
-    help="Base folder for git worktrees [default: ~/.mngr/worktrees/]",
+    help="Base folder for git worktrees [default: <host_dir>/worktrees]",
 )
 @optgroup.group("Environment Variables")
 @optgroup.option("--env", multiple=True, help="Set environment variable KEY=VALUE")
@@ -509,7 +511,11 @@ class _CreateCommand(click.Command):
 )
 @optgroup.option("--activity-sources", help="Activity sources for idle detection (comma-separated)")
 @optgroup.option(
-    "--start-on-boot/--no-start-on-boot", "start_on_boot", default=None, help="Restart on host boot [default: no]"
+    "--start-on-boot/--no-start-on-boot",
+    "start_on_boot",
+    default=False,
+    show_default=True,
+    help="Restart on host boot",
 )
 @optgroup.group("Connection Options")
 @optgroup.option(
@@ -608,7 +614,8 @@ def create(ctx: click.Context, **kwargs) -> None:
         # Validate conflicting agent types early (before the headless path
         # returns). This is the single check; _parse_agent_opts uses the
         # shared _resolve_agent_type_name helper which assumes no conflict.
-        if opts.positional_agent_type and opts.type and opts.type != opts.positional_agent_type:
+        is_type_explicit = is_param_explicit(ctx, "type")
+        if opts.positional_agent_type and is_type_explicit and opts.type != opts.positional_agent_type:
             raise UserInputError(
                 f"Conflicting agent types: positional argument says '{opts.positional_agent_type}' "
                 f"but --type says '{opts.type}'. Use one or the other."
@@ -617,8 +624,8 @@ def create(ctx: click.Context, **kwargs) -> None:
         # Detect headless agent types and enforce the --foreground flag.
         # --foreground is required for headless types (makes the behavior explicit)
         # and rejected for non-headless types (it doesn't apply).
-        resolved_agent_type = _resolve_agent_type_name(opts.type, opts.positional_agent_type)
-        is_headless = resolved_agent_type is not None and is_streaming_headless_agent_type(resolved_agent_type)
+        resolved_agent_type = _resolve_agent_type_name(opts.type, is_type_explicit, opts.positional_agent_type)
+        is_headless = is_streaming_headless_agent_type(resolved_agent_type)
 
         if is_headless and not opts.foreground:
             raise UserInputError(
@@ -626,13 +633,11 @@ def create(ctx: click.Context, **kwargs) -> None:
                 f"Use --foreground to run it (streams output and auto-destroys when done)."
             )
         if opts.foreground and not is_headless:
-            type_desc = f"'{resolved_agent_type}'" if resolved_agent_type else "'claude' (default)"
             raise UserInputError(
-                f"--foreground is only valid with headless agent types, but {type_desc} is not headless."
+                f"--foreground is only valid with headless agent types, but '{resolved_agent_type}' is not headless."
             )
 
         if is_headless:
-            assert resolved_agent_type is not None
             _reject_incompatible_headless_flags(ctx, resolved_agent_type, opts)
 
         # Collect plugin-registered CLI params so they can be merged into plugin_data.
@@ -649,7 +654,7 @@ def create(ctx: click.Context, **kwargs) -> None:
         # the same way for both. The fork is what happens afterwards: a
         # headless agent is streamed and destroyed; an interactive agent
         # is connected to and the command returns after finish.
-        create_result, connection_opts = _create_agent(mngr_ctx, output_opts, opts, setup)
+        create_result, connection_opts = _create_agent(mngr_ctx, output_opts, opts, setup, resolved_agent_type)
 
         if is_headless:
             _stream_and_destroy_headless_agent(create_result, output_opts)
@@ -763,6 +768,7 @@ def _create_agent(
     output_opts: OutputOptions,
     opts: CreateCliOptions,
     setup: _CreateSetup,
+    resolved_agent_type: str,
 ) -> tuple[CreateAgentResult, ConnectionOptions]:
     """Parse opts, resolve host, create agent."""
     address = setup.address
@@ -802,6 +808,7 @@ def _create_agent(
         source_agent_state_dir=source_agent_state_dir,
         mngr_ctx=mngr_ctx,
         target_path=setup.target_path,
+        resolved_agent_type=resolved_agent_type,
     )
 
     # Merge plugin-registered CLI params into plugin_data so plugin hooks can access them
@@ -1402,6 +1409,7 @@ def _parse_agent_opts(
     initial_message: str | None,
     source_location: HostLocation,
     mngr_ctx: MngrContext,
+    resolved_agent_type: str,
     source_agent_state_dir: Path | None = None,
     target_path: Path | None = None,
 ) -> tuple[CreateAgentOptions, bool]:
@@ -1479,10 +1487,8 @@ def _parse_agent_opts(
 
     # target_path comes from :PATH in the address or --target-path (merged upstream)
 
-    # Determine agent type using the shared resolution logic.
-    # Conflicting types are already validated in the create() entry point.
+    # Agent type is resolved in the create() entry point and passed in.
     resolved_agent_args = opts.agent_args
-    resolved_agent_type = _resolve_agent_type_name(opts.type, opts.positional_agent_type)
 
     is_clone = source_agent_state_dir is not None
 
@@ -1491,7 +1497,7 @@ def _parse_agent_opts(
 
     agent_opts = CreateAgentOptions(
         agent_id=AgentId(opts.id) if opts.id else None,
-        agent_type=AgentTypeName(resolved_agent_type) if resolved_agent_type else None,
+        agent_type=AgentTypeName(resolved_agent_type),
         name=parsed_agent_name,
         additional_commands=tuple(NamedCommand.from_string(c) for c in opts.extra_window),
         agent_args=resolved_agent_args,

@@ -881,7 +881,7 @@ class CreateCliOptions(CommonCliOptions):
     positional_agent_type: str | None
     agent_args: tuple[str, ...]
     template: tuple[str, ...]
-    type: str | None
+    type: str
     reuse: bool
     connect: bool
     foreground: bool
@@ -923,7 +923,7 @@ class CreateCliOptions(CommonCliOptions):
     idle_mode: str | None
     activity_sources: str | None
     worktree_base_folder: str | None
-    start_on_boot: bool | None
+    start_on_boot: bool
     start_host: bool
     grant: tuple[str, ...]
     extra_provision_command: tuple[str, ...]

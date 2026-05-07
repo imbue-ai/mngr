@@ -1628,7 +1628,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     ) -> CreateWorkDirResult:
         """Create a work_dir using git worktree.
 
-        Worktrees are placed at ~/.mngr/worktrees/<name>-<uuid>/ by default,
+        Worktrees are placed at <host_dir>/worktrees/<name>-<uuid>/ by default,
         or at <worktree_base_folder>/<name>-<uuid>/ if worktree_base_folder is set.
 
         In update mode (options.is_update), the worktree already exists.
