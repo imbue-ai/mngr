@@ -613,8 +613,9 @@ def create(ctx: click.Context, **kwargs) -> None:
             raise UserInputError("--update requires --reuse. Use --reuse --update together.")
 
         # Validate conflicting agent types early (before the headless path
-        # returns). This is the single check; _parse_agent_opts uses the
-        # shared _resolve_agent_type_name helper which assumes no conflict.
+        # returns). This is the single check; the resolution helper below
+        # (and _parse_agent_opts, which receives the resolved value) assume
+        # no conflict.
         is_type_explicit = is_param_explicit(ctx, "type")
         if opts.positional_agent_type and is_type_explicit and opts.type != opts.positional_agent_type:
             raise UserInputError(
