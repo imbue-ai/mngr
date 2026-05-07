@@ -10,13 +10,15 @@ otherwise persisted to disk. This plugin makes the same data available to shell 
 
 ## How it works
 
-Two writers populate a shared cache file at `<profile_dir>/usage/claude_rate_limits.json`:
+A statusline shim is installed into each per-agent Claude config; whenever Claude Code
+renders its statusline it pipes a JSON snapshot (including `rate_limits`) to the shim,
+which atomically merges the rate-limit fields into a shared cache file at
+`<profile_dir>/usage/claude_rate_limits.json`. The shim composes with any pre-existing
+user `statusLine.command`, so caveman / starship / etc. keep working unchanged.
 
-1. A statusline shim is installed into each per-agent Claude config; whenever Claude Code
-   refreshes its statusline it pipes the rate-limit JSON to the shim, which atomically merges
-   it into the cache (free, fires often during normal Claude Code use).
-2. The `mngr usage` command reads the cache, and when stale spawns a brief `claude -p` call
-   to refresh (configurable; ~$0.005 per refresh).
+`mngr usage` is purely a reader -- it never spawns Claude or hits the API, so it incurs
+no Anthropic charges. If the cache is empty (no interactive Claude session has rendered
+yet under this profile) it prints an actionable hint instead of empty windows.
 
 ## Output
 
