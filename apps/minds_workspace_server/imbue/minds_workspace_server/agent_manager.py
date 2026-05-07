@@ -714,12 +714,13 @@ class AgentManager:
         if not is_stdout:
             _loguru_logger.warning("mngr observe stderr: {}", stripped)
             return
-        try:
-            event = parse_discovery_event_line(stripped)
-            if event is not None:
-                self._handle_discovery_event(event)
-        except (json.JSONDecodeError, ValueError, KeyError) as e:
-            _loguru_logger.opt(exception=e).error("Error parsing observe line: {}", stripped[:200])
+        event = parse_discovery_event_line(stripped)
+        if event is None:
+            # parse_discovery_event_line only returns None for empty/whitespace lines,
+            # which we filtered out above; reaching here indicates an internal contract
+            # violation in the parser.
+            raise BaseMngrError(f"parse_discovery_event_line returned None for non-empty line: {stripped[:200]!r}")
+        self._handle_discovery_event(event)
 
     def _handle_discovery_event(self, event: object) -> None:
         """Handle a discovery event from mngr observe."""
@@ -731,6 +732,7 @@ class AgentManager:
             self._handle_agent_destroyed(event)
         elif isinstance(event, HostDestroyedEvent):
             self._handle_host_destroyed(event)
+        # FIXME: make the match exhaustive so that we have to think about what to do for new types
         else:
             pass
 

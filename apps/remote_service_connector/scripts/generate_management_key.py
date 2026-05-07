@@ -72,12 +72,12 @@ def generate_management_key(output_dir: str) -> None:
     logger.info("     Then push it:")
     logger.info("       uv run scripts/push_modal_secrets.py <env>")
     logger.info("")
-    logger.info("  2. Pass the public key file to the pool creation script:")
-    logger.info("     uv run python apps/remote_service_connector/scripts/create_pool_hosts.py \\")
-    logger.info(
-        "       --count 3 --version v0.1.0 --management-public-key-file {} \\",
-        public_key_path,
-    )
+    logger.info("  2. Pass the public key file to the pool bake command:")
+    logger.info("     uv run mngr imbue_cloud admin pool create \\")
+    logger.info("       --count 3 \\")
+    logger.info('       --attributes \'{"repo_branch_or_tag": "<branch-or-tag>"}\' \\')
+    logger.info("       --workspace-dir <path/to/forever-claude-template> \\")
+    logger.info("       --management-public-key-file {} \\", public_key_path)
     logger.info("       --database-url $DATABASE_URL")
     logger.info("")
     logger.info("  3. Keep the private key secure. Do not commit it to the repository.")

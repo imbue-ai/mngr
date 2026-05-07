@@ -70,6 +70,10 @@ def test_prevent_builtin_exception_raises() -> None:
     rc.check_builtin_exception_raises(_DIR, snapshot(0))
 
 
+def test_prevent_silent_decode_error_catches() -> None:
+    rc.check_silent_decode_error_catches(_DIR, snapshot(6))
+
+
 # --- Import style ---
 
 
@@ -106,7 +110,15 @@ def test_prevent_asyncio_import() -> None:
     # cancellation-aware gather; the spirit of the ratchet is "prefer the
     # project's concurrency_group for threads/procs", which doesn't apply
     # to pure asyncio tasks.
-    rc.check_asyncio_import(_DIR, snapshot(1))
+    # +1 for ws_broadcaster.py: register() captures asyncio.current_task() /
+    # get_running_loop() so eviction can cancel a wedged WS handler via
+    # loop.call_soon_threadsafe(task.cancel) -- the only way to free a coroutine
+    # blocked in ``await websocket.send_text(...)`` from a non-asyncio thread.
+    # Same exception as the existing +1: pure asyncio cancellation.
+    # +1 for ws_broadcaster_test.py's asyncio.run, which drives the cancel-on-
+    # eviction test. It needs a real Task and event loop to verify the
+    # call_soon_threadsafe(task.cancel) path actually cancels.
+    rc.check_asyncio_import(_DIR, snapshot(3))
 
 
 def test_prevent_pandas_import() -> None:

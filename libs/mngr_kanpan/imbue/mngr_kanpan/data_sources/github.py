@@ -278,6 +278,7 @@ def _parse_gh_output(
     try:
         return json.loads(stdout)
     except (json.JSONDecodeError, TypeError) as e:
+        logger.warning("Failed to parse gh CLI JSON output: {}", e)
         return f"parse error: {e}"
 
 
@@ -699,7 +700,8 @@ def _parse_conflicts(stdout: str) -> bool:
     try:
         data = json.loads(stdout)
         return data.get("mergeable") == "CONFLICTING"
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning("Failed to parse gh pr view --json mergeable output: {}", e)
         return False
 
 
@@ -753,5 +755,6 @@ def _parse_unresolved(stdout: str, ignore_user: str | None = None) -> bool:
                 return True
 
         return False
-    except (json.JSONDecodeError, TypeError, AttributeError):
+    except (json.JSONDecodeError, TypeError, AttributeError) as e:
+        logger.warning("Failed to parse gh pr view --json reviewThreads output: {}", e)
         return False

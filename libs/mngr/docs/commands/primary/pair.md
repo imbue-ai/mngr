@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr pair [SOURCE] [--target <DIR>] [--sync-direction <DIR>] [--conflict <MODE>]
+mngr pair [SOURCE] [--source <SOURCE>] [--target <DIR>] [--sync-direction <DIR>] [--conflict <MODE>] [--include PATTERN] [--exclude PATTERN]
 ```
 
 Continuously sync files between an agent and local directory [experimental].

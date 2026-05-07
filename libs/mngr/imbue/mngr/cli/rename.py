@@ -12,6 +12,7 @@ from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
+from imbue.mngr.cli.label import parse_label_string
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
@@ -28,6 +29,7 @@ class RenameCliOptions(CommonCliOptions):
     current: str
     new_name: str
     dry_run: bool
+    label: tuple[str, ...] = ()
     # Planned features (not yet implemented)
     host: bool
 
@@ -75,6 +77,18 @@ def _output_result(
     is_flag=True,
     help="Rename a host instead of an agent [future]",
 )
+@optgroup.group("Labels")
+@optgroup.option(
+    "-l",
+    "--label",
+    multiple=True,
+    help=(
+        "Apply a KEY=VALUE label in the same atomic write as the rename "
+        "(repeatable). Avoids the race where an external observer sees the "
+        "renamed agent before separate `mngr label` calls have applied "
+        "labels."
+    ),
+)
 @add_common_options
 @click.pass_context
 def rename(ctx: click.Context, **kwargs: Any) -> None:
@@ -94,6 +108,12 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
         new_agent_name = AgentName(opts.new_name)
     except ValueError as e:
         raise UserInputError(f"Invalid new name: {e}") from None
+
+    # Parse any --label KEY=VALUE pairs to merge in the same write as the rename.
+    labels_to_merge: dict[str, str] = {}
+    for label_str in opts.label:
+        key, value = parse_label_string(label_str)
+        labels_to_merge[key] = value
 
     # Resolve the agent (without requiring the agent process to be running)
     plain_id, agents_by_host, _ = discover_by_address(opts.current, mngr_ctx)
@@ -117,10 +137,12 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
     # Handle dry-run mode
     if opts.dry_run:
         _output(f"Would rename agent: {old_name} -> {new_agent_name}", output_opts)
+        if labels_to_merge:
+            _output(f"Would merge labels: {labels_to_merge}", output_opts)
         return
 
-    # Perform the rename
-    updated_agent = host.rename_agent(agent, new_agent_name)
+    # Perform the rename (and atomic label merge if any).
+    updated_agent = host.rename_agent(agent, new_agent_name, labels_to_merge=labels_to_merge or None)
 
     # Emit discovery events for renamed agent and host
     emit_discovery_events_for_host(mngr_ctx.config, host)
@@ -142,7 +164,7 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="rename",
     one_line_description="Rename an agent or host [experimental]",
-    synopsis="mngr [rename|mv] <CURRENT> <NEW-NAME> [--dry-run] [--host]",
+    synopsis="mngr [rename|mv] <CURRENT> <NEW-NAME> [--dry-run] [--host] [-l KEY=VALUE ...]",
     arguments_description="- `CURRENT`: Current name or ID of the agent to rename\n- `NEW-NAME`: New name for the agent",
     description="""Updates the agent's name in its data.json and renames the tmux session
 if the agent is currently running. Git branch names are not renamed.

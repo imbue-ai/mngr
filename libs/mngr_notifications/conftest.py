@@ -1,9 +1,6 @@
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
 from imbue.mngr.utils.logging import suppress_warnings
-from imbue.resource_guards.resource_guards import register_resource_guard
 
 suppress_warnings()
-
-register_resource_guard("tmux")
 
 register_conftest_hooks(globals())

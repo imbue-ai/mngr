@@ -15,4 +15,5 @@ rm -rf "$CACHE_DIR/imbue-mngr" "$CACHE_DIR/imbue-code-guardian" 2>/dev/null || t
 # The plugin and marketplace are configured at project scope in
 # .claude/settings.json (extraKnownMarketplaces + enabledPlugins),
 # so Claude Code handles installation automatically. Just update.
-claude plugin update "$PLUGIN_ID" 2>/dev/null || true
+GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes' \
+  claude plugin update "$PLUGIN_ID" 2>/dev/null || true

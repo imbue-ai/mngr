@@ -6,6 +6,10 @@
   var currentWorkspaceId = null;
   var lastWorkspaces = [];
 
+  // ``mngr forward`` plugin's bare origin (e.g. ``http://localhost:8421``).
+  // Workspace links go to the plugin, not minds.
+  var mngrForwardOrigin = (document.body && document.body.dataset.mngrForwardOrigin) || '';
+
   // Per-agent accent color comes from the shared
   // `window.mindsAccent.get(agentId, cb)` helper in
   // /_static/workspace_accent.js (itself mirroring workspace_accent() in
@@ -14,7 +18,7 @@
   function getAccent(agentId, cb) { window.mindsAccent.get(agentId, cb); }
 
   function selectWorkspace(agentId) {
-    if (isElectron) window.minds.navigateContent('/goto/' + agentId + '/');
+    if (isElectron) window.minds.navigateContent(mngrForwardOrigin + '/goto/' + agentId + '/');
   }
 
   function openInNewWindow(agentId) {

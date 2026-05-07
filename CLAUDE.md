@@ -128,6 +128,16 @@ If instructed not to commit:
 - do not commit anything! Simply leave the git state as it is at the end of your response.
 - NEVER run git commands like git reset, git checkout, etc that might change the git state (when instructed not to commit you are collaborating with others in the same directory, so should not change other files or the git state).
 
+# Changelog
+
+Every PR must include a changelog entry file. CI will fail if it is missing.
+
+- Create the file at `changelog/<branch-name>.md`, where slashes in the branch name are replaced with dashes.
+  - Example: branch `mngr/add-feature` -> `changelog/mngr-add-feature.md`
+- The file should briefly describe the user-visible changes in the PR.
+- A nightly agent consolidates entries into `UNABRIDGED_CHANGELOG.md` (full verbatim entries) and `CHANGELOG.md` (concise AI-generated summary).
+- The changelog consolidation agent's own PRs (`mngr/changelog-consolidation-*`) are exempt from this requirement.
+
 # Silly error workarounds
 
 If you get a failure in `test_no_type_errors` that seems spurious, try running `uv sync --all-packages` and then re-running the tests. If that doesn't work, the error is probably real, and should be fixed.
