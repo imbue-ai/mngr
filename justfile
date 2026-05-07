@@ -382,6 +382,85 @@ propagate-changes agent_name mngr_host_dir="$HOME/.minds/mngr":
         --agent "$agent_name" \
         --user root --host 127.0.0.1 --port "$port" --key "$key"
 
+# Spin up a new PRIVATE personal GitHub repo as a full-history copy of
+# imbue-ai/forever-claude-template's main. Clones into
+# <parent_dir>/<repo_name> (default parent: $HOME/project), creates the
+# repo under whichever account `gh` is authenticated as, pushes main,
+# and prints a pre-filled URL for a fine-grained PAT scoped to it. See
+# .claude/skills/new-forever-claude-clone/SKILL.md for the rationale.
+# Create a new private personal repo from forever-claude-template.
+create-new-mind-repo repo_name parent_dir="$HOME/project":
+    #!/bin/bash
+    set -ueo pipefail
+    repo="{{repo_name}}"
+    parent="{{parent_dir}}"
+    fct="$HOME/project/forever-claude-template"
+
+    if ! command -v gh >/dev/null 2>&1; then
+        echo "error: gh CLI not found on PATH" >&2; exit 2
+    fi
+    if ! gh auth status >/dev/null 2>&1; then
+        echo "error: gh is not authenticated; run 'gh auth login' first" >&2; exit 2
+    fi
+    owner=$(gh api user --jq .login)
+    if [ -z "$owner" ]; then
+        echo "error: could not determine GitHub username from 'gh api user'" >&2; exit 2
+    fi
+    if [ ! -d "$fct/.git" ]; then
+        echo "error: $fct is not a git repo (skill expects forever-claude-template here)" >&2; exit 2
+    fi
+    if [ ! -d "$parent" ]; then
+        echo "error: parent directory '$parent' does not exist" >&2; exit 2
+    fi
+    target="$parent/$repo"
+    if [ -e "$target" ]; then
+        echo "error: $target already exists; refusing to overwrite" >&2; exit 2
+    fi
+    if gh repo view "$owner/$repo" >/dev/null 2>&1; then
+        echo "error: github repo $owner/$repo already exists; refusing to push into it" >&2; exit 2
+    fi
+
+    cd "$parent"
+    git clone git@github.com:imbue-ai/forever-claude-template.git "$repo"
+    cd "$repo"
+    git checkout main
+    git remote remove origin
+    gh repo create "$owner/$repo" --private --source=. --remote=origin --push
+
+    commits=$(git rev-list --count HEAD)
+    pat_url="https://github.com/settings/personal-access-tokens/new?name=${repo}&description=${repo}%20token&target_name=${owner}&expires_in=none&contents=write&metadata=read&pull_requests=write&issues=write&workflows=write"
+
+    echo
+    echo "Created $owner/$repo"
+    echo "  Web:    https://github.com/$owner/$repo"
+    echo "  Clone:  git@github.com:$owner/$repo.git"
+    echo "  Local:  $target"
+    echo "  Commits: $commits"
+    echo
+    echo "Create a fine-grained PAT scoped to this repo (no expiration, contents/PR/issues/workflows write):"
+    echo "  $pat_url"
+    echo
+    echo "After opening the link: GitHub does not accept repository selection via URL params,"
+    echo "so under 'Repository access' choose 'Only select repositories' and add $owner/$repo."
+    echo
+
+    if [ ! -t 0 ]; then
+        echo "(stdin is not a TTY; skipping interactive token prompt -- create .env manually if needed)"
+        exit 0
+    fi
+    echo "Paste the generated PAT here (input hidden), or press Enter to skip writing .env:"
+    token=""
+    read -r -s token || token=""
+    echo
+    if [ -z "$token" ]; then
+        echo "No token entered; skipped .env"
+        exit 0
+    fi
+    env_file="$target/.env"
+    printf 'export GH_TOKEN=%s\n' "$token" > "$env_file"
+    chmod 600 "$env_file"
+    echo "Wrote $env_file (mode 600)"
+
 # Destroy and remove every host in the pool with status='released'.
 # Sources .minds/<env>/neon.sh for DATABASE_URL.
 cleanup-pool-hosts env="production":
