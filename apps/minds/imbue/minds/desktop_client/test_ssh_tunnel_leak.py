@@ -243,12 +243,10 @@ def test_remove_reverse_tunnels_for_agent_actually_releases_resources(tmp_path: 
 
 
 @pytest.mark.acceptance
-def test_remove_reverse_tunnels_for_agent_is_noop_for_unknown_agent(tmp_path: Path) -> None:
+def test_remove_reverse_tunnels_for_agent_is_noop_for_unknown_agent() -> None:
     """Idempotent: removing a nonexistent agent's tunnels returns 0 and does not raise."""
-    _, template = _write_test_keys(tmp_path)
     manager = SSHTunnelManager()
     try:
-        del template
         assert manager.remove_reverse_tunnels_for_agent("never-existed") == 0
     finally:
         manager.cleanup()
