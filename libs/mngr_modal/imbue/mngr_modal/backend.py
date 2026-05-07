@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from typing import ClassVar
 from typing import Final
+from typing import assert_never
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -31,6 +32,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.deploy_utils import collect_provider_profile_files
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr_modal import hookimpl
+from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.instance import ModalProviderApp
 from imbue.mngr_modal.instance import ModalProviderInstance
@@ -441,7 +443,16 @@ Supported build arguments for the modal provider:
         if not isinstance(config, ModalProviderConfig):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
 
-        modal_interface: ModalInterface = DirectModalInterface()
+        match config.mode:
+            case ModalMode.DIRECT:
+                modal_interface: ModalInterface = DirectModalInterface()
+            case ModalMode.PROXIED:
+                raise NotImplementedError(
+                    "ModalMode.PROXIED (routing through imbue_cloud gateway) is not yet implemented.",
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
         environment_name, app_name, host_dir = ModalProviderBackend._derive_modal_names(name, config, mngr_ctx)
 
         # Create the ModalProviderApp that manages the Modal app and its resources

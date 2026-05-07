@@ -1,3 +1,4 @@
+from enum import Enum
 from pathlib import Path
 
 from pydantic import Field
@@ -9,12 +10,32 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import UserId
 
 
+class ModalMode(str, Enum):
+    """How the modal provider backend talks to Modal.
+
+    ``DIRECT`` uses the Modal SDK against the user's account. ``PROXIED``
+    is reserved for routing Modal traffic through the imbue_cloud gateway
+    (not yet implemented).
+    """
+
+    DIRECT = "DIRECT"
+    PROXIED = "PROXIED"
+
+
 class ModalProviderConfig(ProviderInstanceConfig):
     """Configuration for the modal provider backend."""
 
     backend: ProviderBackendName = Field(
         default=ProviderBackendName("modal"),
         description="Provider backend (always 'modal' for this type)",
+    )
+    mode: ModalMode = Field(
+        default=ModalMode.DIRECT,
+        description=(
+            "How to reach Modal. ``DIRECT`` (default) uses the Modal SDK against the "
+            "user's Modal account. ``PROXIED`` is reserved for routing through the "
+            "imbue_cloud gateway and currently raises NotImplementedError when selected."
+        ),
     )
     user_id: UserId | None = Field(
         default=None,
