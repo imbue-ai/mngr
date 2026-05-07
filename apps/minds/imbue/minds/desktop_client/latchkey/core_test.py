@@ -361,7 +361,9 @@ class _RecordingTunnelManager(SSHTunnelManager):
         ssh_info: RemoteSSHInfo,
         local_port: int,
         remote_port: int = 0,
+        agent_id: str | None = None,
     ) -> int:
+        del agent_id
         self._calls.append((ssh_info, local_port, remote_port))
         return remote_port
 
@@ -516,7 +518,7 @@ def test_destruction_handler_stops_gateway(tmp_path: Path) -> None:
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
         )
-        destruction = LatchkeyDestructionHandler(latchkey=manager)
+        destruction = LatchkeyDestructionHandler(latchkey=manager, tunnel_manager=tunnel_manager)
         agent_id = AgentId()
         discovery(agent_id, None, "docker")
         info = manager.get_gateway_info(agent_id)

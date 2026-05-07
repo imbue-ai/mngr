@@ -733,6 +733,13 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 ssh_info=ssh_info,
                 local_port=host_side_port,
                 remote_port=AGENT_SIDE_LATCHKEY_PORT,
+                # Tag the tunnel with the owning agent so the destruction
+                # handler can ask the manager to drop it via
+                # ``remove_reverse_tunnels_for_agent``. Without this the
+                # tunnel registry leaks across destroyed agents and the
+                # 30s health check loop spins paramiko transports against
+                # ports that no longer exist.
+                agent_id=str(agent_id),
             )
         except (SSHTunnelError, OSError, paramiko.SSHException) as e:
             logger.warning(
@@ -747,12 +754,24 @@ class LatchkeyDiscoveryHandler(MutableModel):
 
 
 class LatchkeyDestructionHandler(FrozenModel):
-    """Discovery callback that tears down the gateway when an agent is destroyed."""
+    """Discovery callback that tears down the gateway and reverse tunnel when an agent is destroyed.
+
+    Tearing down both is necessary: stopping the gateway kills the local
+    Latchkey subprocess, and removing the reverse tunnel makes the
+    ``SSHTunnelManager`` close the underlying paramiko transport so it
+    stops health-checking a tunnel target that no longer exists.
+    """
 
     latchkey: Latchkey = Field(description="Latchkey wrapper that owns the gateway subprocesses")
+    tunnel_manager: SSHTunnelManager = Field(
+        description="Manager whose reverse tunnels for the destroyed agent must be torn down"
+    )
 
     def __call__(self, agent_id: AgentId) -> None:
         self.latchkey.stop_gateway_for_agent(agent_id)
+        removed = self.tunnel_manager.remove_reverse_tunnels_for_agent(str(agent_id))
+        if removed:
+            logger.debug("Removed {} reverse tunnel(s) for destroyed agent {}", removed, agent_id)
 
 
 class LatchkeyReconcileCallback(MutableModel):

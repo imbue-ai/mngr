@@ -214,7 +214,7 @@ def run(
         tunnel_manager=tunnel_manager,
         concurrency_group=root_concurrency_group,
     )
-    latchkey_destruction_handler = LatchkeyDestructionHandler(latchkey=latchkey)
+    latchkey_destruction_handler = LatchkeyDestructionHandler(latchkey=latchkey, tunnel_manager=tunnel_manager)
     consumer.add_on_agent_discovered_callback(latchkey_discovery_handler)
     consumer.add_on_agent_destroyed_callback(latchkey_destruction_handler)
     reconcile_callback = LatchkeyReconcileCallback(latchkey=latchkey, resolver=backend_resolver)

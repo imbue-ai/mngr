@@ -232,7 +232,9 @@ class _FakeReverseTunnelManager(SSHTunnelManager):
         ssh_info: RemoteSSHInfo,
         local_port: int,
         remote_port: int = 0,
+        agent_id: str | None = None,
     ) -> int:
+        del agent_id
         self._setup_calls.append((ssh_info, local_port, remote_port))
         if self._setup_raise is not None:
             raise self._setup_raise("simulated failure")
