@@ -205,6 +205,29 @@ def _make_permissions_env_reporter_binary(tmp_path: Path) -> Path:
     return script
 
 
+def _make_password_env_reporter_binary(tmp_path: Path) -> Path:
+    """Build a fake ``latchkey`` that records ``LATCHKEY_GATEWAY_LISTEN_PASSWORD`` and blocks."""
+    script = tmp_path / "latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, socket, signal, sys\n"
+        'assert sys.argv[1] == "gateway"\n'
+        "host = os.environ['LATCHKEY_GATEWAY_LISTEN_HOST']\n"
+        "port = int(os.environ['LATCHKEY_GATEWAY_LISTEN_PORT'])\n"
+        "password = os.environ.get('LATCHKEY_GATEWAY_LISTEN_PASSWORD', '')\n"
+        "report_path = os.environ['FAKE_LATCHKEY_REPORT']\n"
+        "open(report_path, 'w').write(password)\n"
+        "sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+        "sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        "sock.bind((host, port))\n"
+        "sock.listen(128)\n"
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+        "signal.pause()\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
 def test_spawn_detached_latchkey_gateway_sets_latchkey_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -304,6 +327,61 @@ def test_spawn_detached_latchkey_gateway_without_permissions_config_does_not_set
     report_path = tmp_path / "report"
     monkeypatch.setenv("FAKE_LATCHKEY_REPORT", str(report_path))
     monkeypatch.delenv("LATCHKEY_PERMISSIONS_CONFIG", raising=False)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+
+    pid = spawn_detached_latchkey_gateway(
+        latchkey_binary=str(fake_binary),
+        listen_host="127.0.0.1",
+        listen_port=port,
+        log_path=tmp_path / "log",
+    )
+    try:
+        assert _wait_for_listening("127.0.0.1", port)
+        assert report_path.read_text() == ""
+    finally:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+
+def test_spawn_detached_latchkey_gateway_sets_listen_password(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_binary = _make_password_env_reporter_binary(tmp_path)
+    report_path = tmp_path / "report"
+    monkeypatch.setenv("FAKE_LATCHKEY_REPORT", str(report_path))
+    monkeypatch.delenv("LATCHKEY_GATEWAY_LISTEN_PASSWORD", raising=False)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+
+    pid = spawn_detached_latchkey_gateway(
+        latchkey_binary=str(fake_binary),
+        listen_host="127.0.0.1",
+        listen_port=port,
+        log_path=tmp_path / "log",
+        listen_password="sup3rs3cret",
+    )
+    try:
+        assert _wait_for_listening("127.0.0.1", port)
+        assert report_path.read_text() == "sup3rs3cret"
+    finally:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+
+def test_spawn_detached_latchkey_gateway_without_password_does_not_set_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_binary = _make_password_env_reporter_binary(tmp_path)
+    report_path = tmp_path / "report"
+    monkeypatch.setenv("FAKE_LATCHKEY_REPORT", str(report_path))
+    monkeypatch.delenv("LATCHKEY_GATEWAY_LISTEN_PASSWORD", raising=False)
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
