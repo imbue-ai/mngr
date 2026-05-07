@@ -17,8 +17,11 @@ from imbue.minds.desktop_client.latchkey.store import delete_legacy_per_agent_ga
 from imbue.minds.desktop_client.latchkey.store import gateway_info_path
 from imbue.minds.desktop_client.latchkey.store import gateway_log_path
 from imbue.minds.desktop_client.latchkey.store import granted_permissions_for_scope
+from imbue.minds.desktop_client.latchkey.store import link_opaque_permissions_to_agent
 from imbue.minds.desktop_client.latchkey.store import load_gateway_info
 from imbue.minds.desktop_client.latchkey.store import load_permissions
+from imbue.minds.desktop_client.latchkey.store import new_opaque_permissions_path
+from imbue.minds.desktop_client.latchkey.store import opaque_permissions_dir
 from imbue.minds.desktop_client.latchkey.store import permissions_path_for_agent
 from imbue.minds.desktop_client.latchkey.store import save_gateway_info
 from imbue.minds.desktop_client.latchkey.store import save_permissions
@@ -116,6 +119,120 @@ def test_delete_legacy_per_agent_gateway_records_skips_non_agent_dirs(tmp_path: 
     assert removed == []
     # The file is left alone so the user can investigate.
     assert (rogue / "latchkey_gateway.json").exists()
+
+
+# -- Opaque permissions handle tests --
+
+
+def test_opaque_permissions_dir_lives_under_data_dir(tmp_path: Path) -> None:
+    assert opaque_permissions_dir(tmp_path) == tmp_path / "latchkey" / "permissions"
+
+
+def test_new_opaque_permissions_path_is_unique_uuid_named(tmp_path: Path) -> None:
+    a = new_opaque_permissions_path(tmp_path)
+    b = new_opaque_permissions_path(tmp_path)
+    # Both live under the opaque dir.
+    assert a.parent == opaque_permissions_dir(tmp_path)
+    assert b.parent == a.parent
+    # Suffix is .json, basename is hex-only (UUID4 with dashes stripped).
+    assert a.suffix == ".json"
+    assert all(c in "0123456789abcdef" for c in a.stem)
+    assert len(a.stem) == 32
+    # Distinct allocations don't collide.
+    assert a != b
+    # Paths returned are not yet materialized -- the caller writes the file.
+    assert not a.exists()
+    assert not b.exists()
+
+
+def test_new_opaque_permissions_path_creates_parent_dir(tmp_path: Path) -> None:
+    """The opaque dir is created lazily so callers don't have to mkdir themselves."""
+    assert not opaque_permissions_dir(tmp_path).exists()
+    new_opaque_permissions_path(tmp_path)
+    assert opaque_permissions_dir(tmp_path).is_dir()
+
+
+def test_link_opaque_permissions_promotes_baseline_to_agent_path(tmp_path: Path) -> None:
+    """First creation: opaque baseline file becomes the agent's canonical permissions file.
+
+    The baseline (deny-all empty rules) is moved to
+    ``permissions_path_for_agent(...)`` and ``opaque_path`` is replaced
+    by a symlink so the JWT minted for it keeps resolving.
+    """
+    opaque_path = new_opaque_permissions_path(tmp_path)
+    save_permissions(opaque_path, LatchkeyPermissionsConfig())
+
+    agent_id = AgentId()
+    agent_path = permissions_path_for_agent(tmp_path, agent_id)
+    assert not agent_path.exists()
+
+    link_opaque_permissions_to_agent(tmp_path, opaque_path, agent_id)
+
+    # The agent-keyed file now has the deny-all baseline.
+    assert agent_path.is_file()
+    assert not agent_path.is_symlink()
+    assert json.loads(agent_path.read_text()) == {"rules": []}
+    # The opaque path is a symlink to the agent path.
+    assert opaque_path.is_symlink()
+    assert opaque_path.resolve() == agent_path.resolve()
+    # Reading via the opaque path follows the symlink.
+    assert json.loads(opaque_path.read_text()) == {"rules": []}
+
+
+def test_link_opaque_permissions_preserves_existing_grants_on_recreation(tmp_path: Path) -> None:
+    """Re-creation case: ``agent_path`` already has prior grants; keep them."""
+    agent_id = AgentId()
+    agent_path = permissions_path_for_agent(tmp_path, agent_id)
+    # Pre-existing grants from a prior incarnation of this agent.
+    save_permissions(
+        agent_path,
+        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
+    )
+
+    opaque_path = new_opaque_permissions_path(tmp_path)
+    # Deny-all baseline -- this is what AgentCreator materializes before
+    # the canonical agent id is known.
+    save_permissions(opaque_path, LatchkeyPermissionsConfig())
+
+    link_opaque_permissions_to_agent(tmp_path, opaque_path, agent_id)
+
+    # Pre-existing grants are preserved (the deny-all baseline is discarded).
+    assert agent_path.is_file()
+    assert not agent_path.is_symlink()
+    assert json.loads(agent_path.read_text()) == {"rules": [{"slack-api": ["slack-read-all"]}]}
+    # Opaque path is a symlink and reads back the existing grants.
+    assert opaque_path.is_symlink()
+    assert json.loads(opaque_path.read_text()) == {"rules": [{"slack-api": ["slack-read-all"]}]}
+
+
+def test_link_opaque_permissions_survives_save_permissions_atomic_replace(tmp_path: Path) -> None:
+    """``save_permissions`` writes via tmp+rename; the symlink target name is unchanged so the link stays valid."""
+    opaque_path = new_opaque_permissions_path(tmp_path)
+    save_permissions(opaque_path, LatchkeyPermissionsConfig())
+    agent_id = AgentId()
+    link_opaque_permissions_to_agent(tmp_path, opaque_path, agent_id)
+    agent_path = permissions_path_for_agent(tmp_path, agent_id)
+
+    # Simulate a permission grant being persisted.
+    save_permissions(
+        agent_path,
+        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
+    )
+
+    # The symlink still resolves and the grant is visible through it.
+    assert opaque_path.is_symlink()
+    assert json.loads(opaque_path.read_text()) == {"rules": [{"slack-api": ["slack-read-all"]}]}
+
+
+def test_link_opaque_permissions_target_is_absolute(tmp_path: Path) -> None:
+    """Symlink target is absolute so it survives directory moves of the symlink itself."""
+    opaque_path = new_opaque_permissions_path(tmp_path)
+    save_permissions(opaque_path, LatchkeyPermissionsConfig())
+    agent_id = AgentId()
+    link_opaque_permissions_to_agent(tmp_path, opaque_path, agent_id)
+
+    target = os.readlink(opaque_path)
+    assert os.path.isabs(target)
 
 
 def test_delete_legacy_per_agent_gateway_records_preserves_other_files(tmp_path: Path) -> None:

@@ -103,6 +103,53 @@ def test_build_mngr_create_command_omits_latchkey_for_dev_mode() -> None:
     assert "LATCHKEY_GATEWAY" not in joined
 
 
+def test_build_mngr_create_command_injects_latchkey_password_when_supplied() -> None:
+    """Password is injected at create time so the agent's first
+    ``latchkey curl`` already authenticates to the password-protected
+    shared gateway -- no fragile post-create step required.
+    """
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.LOCAL,
+        agent_name=AgentName("hello"),
+        latchkey_gateway_password="sup3rs3cret",
+    )
+    assert "LATCHKEY_GATEWAY_PASSWORD=sup3rs3cret" in command
+
+
+def test_build_mngr_create_command_omits_latchkey_password_for_dev_mode() -> None:
+    """DEV mode skips all latchkey env injection (no tunnel, no gateway wiring)."""
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.DEV,
+        agent_name=AgentName("hello"),
+        latchkey_gateway_password="sup3rs3cret",
+    )
+    assert not any(arg.startswith("LATCHKEY_GATEWAY_PASSWORD=") for arg in command)
+
+
+def test_build_mngr_create_command_injects_latchkey_jwt_when_supplied() -> None:
+    """The permissions-override JWT is injected at create time so the
+    agent's env file has it from the very first service start. This is
+    what fixes the previous-design bug where post-create ``mngr provision
+    --env`` could silently fail and leave
+    ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` missing.
+    """
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.LOCAL,
+        agent_name=AgentName("hello"),
+        latchkey_permissions_override_jwt="eyJhbGc.fake.jwt",
+    )
+    assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=eyJhbGc.fake.jwt" in command
+
+
+def test_build_mngr_create_command_omits_latchkey_jwt_for_dev_mode() -> None:
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.DEV,
+        agent_name=AgentName("hello"),
+        latchkey_permissions_override_jwt="eyJhbGc.fake.jwt",
+    )
+    assert not any(arg.startswith("LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=") for arg in command)
+
+
 def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() -> None:
     command, api_key = _build_mngr_create_command(
         launch_mode=LaunchMode.LOCAL,

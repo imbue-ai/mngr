@@ -48,7 +48,9 @@ from imbue.minds.desktop_client.latchkey.core import Latchkey
 from imbue.minds.desktop_client.latchkey.core import LatchkeyError
 from imbue.minds.desktop_client.latchkey.core import LatchkeyJwtMintError
 from imbue.minds.desktop_client.latchkey.store import LatchkeyPermissionsConfig
-from imbue.minds.desktop_client.latchkey.store import permissions_path_for_agent
+from imbue.minds.desktop_client.latchkey.store import LatchkeyStoreError
+from imbue.minds.desktop_client.latchkey.store import link_opaque_permissions_to_agent
+from imbue.minds.desktop_client.latchkey.store import new_opaque_permissions_path
 from imbue.minds.desktop_client.latchkey.store import save_permissions
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.errors import GitCloneError
@@ -351,6 +353,7 @@ def _build_mngr_create_command(
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
     latchkey_gateway_password: str | None = None,
+    latchkey_permissions_override_jwt: str | None = None,
 ) -> tuple[list[str], str]:
     """Build the mngr create command and generate an API key for the agent.
 
@@ -395,11 +398,18 @@ def _build_mngr_create_command(
     When ``latchkey_gateway_password`` is supplied (and the launch mode is
     not DEV), it is also injected as ``LATCHKEY_GATEWAY_PASSWORD`` so the
     agent's ``latchkey`` CLI authenticates to the password-protected
-    shared gateway. The matching per-agent
-    ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` JWT is *not* injected here
-    because it depends on the canonical agent id which only becomes
-    available after ``mngr create`` returns -- ``AgentCreator`` injects
-    it post-create via ``mngr provision --env --no-restart``.
+    shared gateway.
+
+    When ``latchkey_permissions_override_jwt`` is supplied (and the
+    launch mode is not DEV), it is injected as
+    ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` so the gateway evaluates
+    this agent's requests against its own per-agent permissions file
+    instead of the gateway's deny-all default. The JWT references an
+    *opaque* path (``data_dir/latchkey/permissions/<uuid>.json``) that
+    ``AgentCreator`` materializes before this call; after ``mngr create``
+    returns the canonical agent id, ``AgentCreator`` replaces that
+    opaque file with a symlink to the canonical agent-keyed path so the
+    permission grant flow can keep writing to its conventional location.
     """
     match launch_mode:
         case LaunchMode.DEV:
@@ -435,6 +445,10 @@ def _build_mngr_create_command(
         latchkey_env_args = ["--env", f"LATCHKEY_GATEWAY=http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"]
         if latchkey_gateway_password is not None:
             latchkey_env_args.extend(["--env", f"LATCHKEY_GATEWAY_PASSWORD={latchkey_gateway_password}"])
+        if latchkey_permissions_override_jwt is not None:
+            latchkey_env_args.extend(
+                ["--env", f"LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE={latchkey_permissions_override_jwt}"]
+            )
 
     mngr_command: list[str] = [
         MNGR_BINARY,
@@ -643,6 +657,7 @@ def run_mngr_create(
     anthropic_base_url: str | None = None,
     gh_token: str | None = None,
     latchkey_gateway_password: str | None = None,
+    latchkey_permissions_override_jwt: str | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> tuple[str, AgentId]:
@@ -674,6 +689,7 @@ def run_mngr_create(
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
         latchkey_gateway_password=latchkey_gateway_password,
+        latchkey_permissions_override_jwt=latchkey_permissions_override_jwt,
     )
 
     # Build the subprocess env from the parent's env + any secrets we inject
@@ -1108,15 +1124,22 @@ class AgentCreator(MutableModel):
                 with self._lock:
                     self._statuses[cid_str] = AgentCreationStatus.CREATING
 
-                # Derive the shared latchkey gateway password (cached on the
-                # ``Latchkey`` instance) so we can inject it as
-                # ``LATCHKEY_GATEWAY_PASSWORD`` at ``mngr create`` time.
-                # Failures degrade gracefully: the agent still gets the
-                # ``LATCHKEY_GATEWAY=...`` URL but won't authenticate to a
-                # password-protected gateway. The matching
-                # ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` JWT is injected
-                # post-create (see ``_setup_per_agent_latchkey`` below).
+                # Pre-create the shared latchkey gateway password and a
+                # per-agent permissions-override JWT before invoking
+                # ``mngr create``. The JWT references an *opaque*
+                # UUID-named permissions handle that we materialize
+                # here with a deny-all baseline; after ``mngr create``
+                # returns the canonical agent id, ``_finalize_latchkey_permissions``
+                # replaces that handle with a symlink to the canonical
+                # ``permissions_path_for_agent`` location. This avoids
+                # the post-create ``mngr provision --env`` step (which
+                # was fragile and could silently leave
+                # ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` missing in
+                # the agent env).
                 latchkey_gateway_password = self._maybe_derive_gateway_password(log_queue)
+                latchkey_opaque_path, latchkey_permissions_jwt = self._maybe_prepare_latchkey_permissions_handle(
+                    log_queue
+                )
 
                 parsed_name = AgentName(agent_name)
                 log_queue.put("[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value))
@@ -1126,6 +1149,7 @@ class AgentCreator(MutableModel):
                     agent_name=parsed_name,
                     on_output=emit_log,
                     latchkey_gateway_password=latchkey_gateway_password,
+                    latchkey_permissions_override_jwt=latchkey_permissions_jwt,
                     imbue_cloud_account=account_email if launch_mode is LaunchMode.IMBUE_CLOUD else None,
                     # Don't constrain the lease on ``repo_url`` here:
                     # ``repo_source`` is whatever the user picked in the UI
@@ -1152,15 +1176,14 @@ class AgentCreator(MutableModel):
                 save_api_key_hash(self.paths.data_dir, canonical_id, key_hash)
                 log_queue.put("[minds] API key generated and hash stored.")
 
-                # Now that we know the canonical agent id, materialize the
-                # per-agent ``latchkey_permissions.json`` (deny-all
-                # baseline), mint a permissions-override JWT pointing at
-                # it, and inject the JWT into the agent's env so the
-                # shared gateway evaluates this agent's requests against
-                # its own ruleset. Skipped for DEV (no reverse tunnel,
-                # no gateway wiring) and when ``self.latchkey`` is None.
-                if launch_mode is not LaunchMode.DEV:
-                    self._setup_per_agent_latchkey(canonical_id, log_queue, emit_log)
+                # Now that we know the canonical agent id, point the
+                # opaque permissions handle (which the JWT references)
+                # at the canonical agent-keyed permissions file. After
+                # this, ``LatchkeyPermissionGrantHandler`` can write to
+                # the canonical path and the gateway will see the
+                # changes via the symlink.
+                if latchkey_opaque_path is not None:
+                    self._finalize_latchkey_permissions(canonical_id, latchkey_opaque_path, log_queue)
 
                 log_queue.put("[minds] Agent created successfully.")
 
@@ -1226,79 +1249,81 @@ class AgentCreator(MutableModel):
             log_queue.put(f"[minds] Warning: latchkey password injection skipped: {e}")
             return None
 
-    def _setup_per_agent_latchkey(
+    def _maybe_prepare_latchkey_permissions_handle(
         self,
-        agent_id: AgentId,
         log_queue: queue.Queue[str],
-        emit_log: OutputCallback,
-    ) -> None:
-        """Materialize the per-agent ``latchkey_permissions.json`` and inject the override JWT.
+    ) -> tuple[Path | None, str | None]:
+        """Allocate a fresh opaque permissions handle and mint a JWT for it.
 
-        Run after ``mngr create`` has returned the canonical agent id.
-        Three steps:
+        Returns ``(opaque_path, jwt)`` on success, or ``(None, None)`` on
+        failure or when no ``Latchkey`` instance is configured. The
+        opaque path lives at ``data_dir / "latchkey/permissions/<uuid>.json"``
+        and is materialized with a deny-all baseline so the gateway has
+        a valid (non-permissive) file to read from the moment the JWT
+        is honored.
 
-        1. Materialize ``permissions_path_for_agent(...)`` with empty
-           rules (deny-all) if it doesn't already exist. Latchkey treats
-           a missing file as ``allow all``, so we must always write the
-           baseline before the gateway sees a request that references it.
-           A pre-existing file is preserved so previously granted
-           permissions survive recreations.
+        ``_finalize_latchkey_permissions`` later replaces the opaque
+        file with a symlink to the canonical agent-keyed path; until
+        then, the JWT references the deny-all baseline directly.
 
-        2. Mint an HS256 JWT pointing at that path via
-           ``Latchkey.create_permissions_override_jwt``. The signing key
-           is derived from the user's Latchkey encryption key, so the
-           shared gateway accepts the JWT as authentic.
-
-        3. Inject the JWT into the agent's env file via
-           ``mngr provision <agent_id> --env LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=<jwt>``.
-           ``--no-restart`` is used so the agent's already-running
-           services aren't bounced; the next ``latchkey curl`` invoked
-           inside the agent picks up the env var on subprocess spawn.
-
-        Failures at any step degrade gracefully: a warning is logged and
-        a notice is queued for the creation log, but the agent stays up.
-        Without the JWT the agent's gateway requests fall back to the
-        gateway's deny-all default permissions config and so will be
-        rejected per-service rather than wholesale 401'd, which is the
-        right failure mode -- the agent itself still works.
+        Failures (no Latchkey configured, JWT mint failure) degrade
+        gracefully: the agent still gets ``LATCHKEY_GATEWAY=...`` and
+        ``LATCHKEY_GATEWAY_PASSWORD=...`` (so the gateway lets it past
+        password protection), but no per-agent override -- the gateway
+        evaluates its requests against the shared deny-all default and
+        rejects them per-service rather than wholesale 401'ing.
         """
         if self.latchkey is None:
-            return
-        permissions_path = permissions_path_for_agent(self.paths.data_dir, agent_id)
-        if not permissions_path.is_file():
-            save_permissions(permissions_path, LatchkeyPermissionsConfig())
+            return None, None
+        opaque_path = new_opaque_permissions_path(self.paths.data_dir)
+        save_permissions(opaque_path, LatchkeyPermissionsConfig())
         try:
-            jwt = self.latchkey.create_permissions_override_jwt(permissions_path)
+            jwt = self.latchkey.create_permissions_override_jwt(opaque_path)
         except (LatchkeyError, LatchkeyJwtMintError) as e:
-            logger.warning("Failed to mint latchkey permissions-override JWT for {}: {}", agent_id, e)
-            log_queue.put(f"[minds] Warning: latchkey JWT injection skipped: {e}")
-            return
-        log_queue.put("[minds] Injecting latchkey permissions-override JWT into agent env...")
-        cg = _make_child_cg("mngr-inject-latchkey-jwt", self.root_concurrency_group)
-        with cg:
-            result = cg.run_process_to_completion(
-                command=[
-                    MNGR_BINARY,
-                    "provision",
-                    str(agent_id),
-                    "--env",
-                    f"LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE={jwt}",
-                    "--no-restart",
-                ],
-                is_checked_after=False,
-                on_output=emit_log,
-            )
-        if result.returncode != 0:
-            stderr = result.stderr.strip() or result.stdout.strip()
-            logger.warning(
-                "mngr provision (latchkey JWT injection) for agent {} exited {}: {}",
-                agent_id,
-                result.returncode,
-                stderr,
-            )
+            logger.warning("Failed to mint latchkey permissions-override JWT: {}", e)
+            log_queue.put(f"[minds] Warning: latchkey JWT preparation skipped: {e}")
+            # Best-effort cleanup so we don't leave an orphan baseline
+            # file lying around for an agent that never got a JWT.
+            try:
+                opaque_path.unlink()
+            except OSError:
+                pass
+            return None, None
+        return opaque_path, jwt
+
+    def _finalize_latchkey_permissions(
+        self,
+        agent_id: AgentId,
+        opaque_path: Path,
+        log_queue: queue.Queue[str],
+    ) -> None:
+        """Point the opaque permissions handle at the canonical agent path.
+
+        Run once ``mngr create`` has returned the canonical agent id.
+        ``link_opaque_permissions_to_agent`` moves the deny-all baseline
+        to ``permissions_path_for_agent(data_dir, agent_id)`` (or keeps
+        a pre-existing file there from a prior incarnation of the same
+        agent) and replaces ``opaque_path`` with a symlink to that
+        canonical location. After this, ``LatchkeyPermissionGrantHandler``
+        writes to the canonical path via ``permissions_path_for_agent``
+        and the gateway sees the changes through the symlink without
+        any further indirection.
+
+        Failures here are logged but do not abort agent creation -- the
+        gateway will still find the deny-all baseline at ``opaque_path``
+        (since that file is what the JWT refers to and we created it
+        with empty rules), so the agent comes up with no service
+        permissions but otherwise works. The user can re-create the
+        agent to recover.
+        """
+        try:
+            link_opaque_permissions_to_agent(self.paths.data_dir, opaque_path, agent_id)
+        except LatchkeyStoreError as e:
+            logger.warning("Failed to link latchkey permissions handle for agent {}: {}", agent_id, e)
             log_queue.put(
-                "[minds] Warning: latchkey JWT injection failed (agent will hit deny-all default permissions): "
-                f"{stderr}"
+                "[minds] Warning: could not link latchkey permissions handle to canonical "
+                f"path for agent {agent_id}; permission grants will not take effect until "
+                f"the agent is re-created. Reason: {e}"
             )
 
     def _build_redirect_url(self, agent_id: AgentId) -> str:

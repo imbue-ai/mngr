@@ -15,12 +15,23 @@ Two kinds of files live here:
   whenever the user grants or revokes permissions. Only the subset of
   detent's file schema that minds actually produces is modeled.
 
+The gateway never reads the per-agent file directly via its agent-id
+path. Instead, an opaque ``{data_dir}/latchkey/permissions/<uuid>.json``
+file is created at agent-creation time (with empty rules), the JWT is
+minted for *that* path, and after ``mngr create`` returns the canonical
+agent id we replace the opaque file with a symlink pointing at the
+canonical agent-keyed path. This indirection lets us mint and inject the
+JWT before the agent id is known (no flaky post-create ``mngr
+provision`` step) while keeping the canonical permissions file at the
+agent-id path that ``LatchkeyPermissionGrantHandler`` already writes to.
+
 Both share the same atomic-write pattern (write to ``.tmp``, chmod,
 rename) where applicable.
 """
 
 import json
 import os
+import uuid
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +49,7 @@ _GATEWAY_LOG_FILENAME: Final[str] = "latchkey_gateway.log"
 _DEFAULT_PERMISSIONS_FILENAME: Final[str] = "latchkey_default_permissions.json"
 _PERMISSIONS_FILENAME: Final[str] = "latchkey_permissions.json"
 _AGENTS_DIR_NAME: Final[str] = "agents"
+_OPAQUE_PERMISSIONS_DIR_NAME: Final[str] = "latchkey/permissions"
 
 
 # -- Gateway info --------------------------------------------------------------
@@ -189,6 +201,89 @@ def default_permissions_path(data_dir: Path) -> Path:
     that escapes the JWT mechanism cannot reach any service.
     """
     return data_dir / _DEFAULT_PERMISSIONS_FILENAME
+
+
+def opaque_permissions_dir(data_dir: Path) -> Path:
+    """Return the directory that holds opaque-named per-agent permissions handles.
+
+    Each handle is a UUID-named file (or symlink) created at
+    agent-creation time. The JWT minted for the handle path is what gets
+    injected into the agent's environment, so the gateway only ever
+    reads through this opaque indirection -- the canonical agent-id
+    path lives behind the symlink, never directly referenced by the
+    JWT.
+    """
+    return data_dir / _OPAQUE_PERMISSIONS_DIR_NAME
+
+
+def new_opaque_permissions_path(data_dir: Path) -> Path:
+    """Return a fresh, unused opaque-named permissions handle path.
+
+    The caller is responsible for materializing the file (typically with
+    a deny-all baseline via ``save_permissions``) before using the path
+    in a JWT. Path collisions are astronomically unlikely with UUID4 but
+    we still spin until we find an unused name to be defensive against a
+    cosmic-ray-class accident.
+    """
+    parent = opaque_permissions_dir(data_dir)
+    parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        candidate = parent / f"{uuid.uuid4().hex}.json"
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+
+
+def link_opaque_permissions_to_agent(
+    data_dir: Path,
+    opaque_path: Path,
+    agent_id: AgentId,
+) -> None:
+    """Replace ``opaque_path`` with a symlink to the agent's canonical permissions file.
+
+    Called once after ``mngr create`` returns the canonical agent id.
+    The opaque file was created with deny-all baseline rules at
+    create time; this function moves those baseline rules into the
+    canonical ``permissions_path_for_agent`` location (or discards them
+    if a previous incarnation of the same agent already had a permissions
+    file there) and replaces the opaque path with a symlink to the
+    canonical path so the JWT minted for the opaque path keeps resolving.
+
+    The symlink target is *absolute* so renaming or moving the symlink
+    later doesn't break the redirection. ``LatchkeyPermissionGrantHandler``
+    writes via ``permissions_path_for_agent`` (the canonical path) using
+    save-tmp + atomic-rename, which leaves the canonical path's name
+    unchanged, so the symlink keeps resolving across grant edits.
+
+    Raises ``LatchkeyStoreError`` if the linking fails. Callers should
+    log the error rather than abort agent creation -- a missing symlink
+    only means the gateway will use the deny-all baseline contents that
+    are still inside ``opaque_path``; the agent itself is up either way.
+    """
+    agent_path = permissions_path_for_agent(data_dir, agent_id)
+    agent_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if agent_path.is_file() and not agent_path.is_symlink():
+            # Re-creation case: a previous incarnation of this agent
+            # already had a permissions file with prior grants. Keep
+            # them and discard the freshly-created baseline.
+            opaque_path.unlink()
+        else:
+            # First creation for this agent_id: promote the baseline to
+            # the canonical location.
+            os.replace(opaque_path, agent_path)
+        # Recreate ``opaque_path`` as a symlink. ``os.replace`` requires
+        # both paths to exist on the same filesystem, but that is
+        # guaranteed here: opaque_path and agent_path both live under
+        # ``data_dir``.
+        absolute_target = agent_path.resolve()
+        tmp_link = opaque_path.with_name(opaque_path.name + ".linktmp")
+        if tmp_link.exists() or tmp_link.is_symlink():
+            tmp_link.unlink()
+        tmp_link.symlink_to(absolute_target)
+        os.replace(tmp_link, opaque_path)
+    except OSError as e:
+        raise LatchkeyStoreError(f"Failed to link opaque permissions handle {opaque_path} to {agent_path}: {e}") from e
+    logger.debug("Linked opaque latchkey permissions handle {} -> {}", opaque_path, agent_path)
 
 
 def load_permissions(path: Path) -> LatchkeyPermissionsConfig:

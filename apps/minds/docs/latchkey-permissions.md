@@ -81,16 +81,24 @@ latchkey 2.8.0 features:
   way the password is stable across desktop-client restarts without
   minds having to persist it in plaintext anywhere.
 * **Per-agent permission overrides.** When an agent is created, minds
-  materializes
-  `~/.minds/agents/<agent_id>/latchkey_permissions.json` with empty
-  `rules` (deny-all baseline) and mints a permissions-override JWT
-  pointing at that file via `latchkey gateway create-jwt`. The JWT is
-  injected into the agent's environment as
-  `LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`, so every gateway request the
-  agent's `latchkey` CLI makes carries it in the
-  `X-Latchkey-Gateway-Permissions-Override` header. The gateway then
-  enforces that file's rules instead of its own default permissions
-  config.
+  allocates an opaque
+  `~/.minds/latchkey/permissions/<uuid>.json` handle, materializes it
+  with empty `rules` (deny-all baseline), and mints a
+  permissions-override JWT pointing at that path via
+  `latchkey gateway create-jwt`. The JWT is injected into the agent's
+  environment as `LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE` *at*
+  `mngr create` *time*, so the agent's first ever `latchkey` call
+  already carries it in the
+  `X-Latchkey-Gateway-Permissions-Override` header.
+
+  After `mngr create` returns the canonical agent id, minds replaces
+  the opaque file with a symlink pointing at
+  `~/.minds/agents/<agent_id>/latchkey_permissions.json`. The agent-id
+  path is the canonical location -- the desktop client's permission-grant
+  flow writes to it as before -- and the gateway reads through the
+  symlink to see those grants. This indirection lets minds mint and
+  inject the JWT before the agent id is known, eliminating a
+  previously-fragile post-create injection step.
 
 The gateway's *default* permissions config
 (`~/.minds/latchkey_default_permissions.json`) is materialized with
