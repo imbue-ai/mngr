@@ -21,6 +21,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
+exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "imbue/mngr_usage/resources/claude_statusline.sh" = "imbue/mngr_usage/resources/claude_statusline.sh"

@@ -16,17 +16,11 @@ CACHE_RELATIVE_PATH: Path = Path("usage") / "claude_rate_limits.json"
 class UsagePluginConfig(PluginConfig):
     """Configuration for the usage plugin."""
 
-    auto_refresh: bool = Field(
-        default=True,
-        description="When True, mngr usage automatically refreshes stale cache entries by spawning a brief claude -p call.",
-    )
     max_age_seconds: int = Field(
         default=300,
-        description="Cache freshness threshold in seconds. When the oldest window's updated_at is older than this, mngr usage triggers a refresh.",
-    )
-    refresh_model: str = Field(
-        default="haiku",
-        description="Claude model alias used for the refresh probe. Cheaper models like haiku reduce refresh cost.",
+        description="Cache freshness threshold in seconds. When the oldest window's updated_at "
+        "is older than this, `mngr usage` prints a stale-cache warning. (Reader-only -- "
+        "the plugin never writes to the cache itself; that's the per-agent statusline shim.)",
     )
 
     def merge_with(self, override: PluginConfig) -> UsagePluginConfig:
@@ -35,22 +29,23 @@ class UsagePluginConfig(PluginConfig):
             return self
         return UsagePluginConfig(
             enabled=override.enabled if override.enabled is not None else self.enabled,
-            auto_refresh=override.auto_refresh if override.auto_refresh is not None else self.auto_refresh,
             max_age_seconds=override.max_age_seconds if override.max_age_seconds is not None else self.max_age_seconds,
-            refresh_model=override.refresh_model if override.refresh_model is not None else self.refresh_model,
         )
 
 
 class WindowSnapshot(FrozenModel):
     """A single rate-limit window's cached state.
 
-    Per-window "last write wins". The statusline writer fills used_percentage and resets_at;
-    the SDK-event writer fills status, resets_at, and is_using_overage. Missing fields are None.
+    Populated by the per-agent statusline shim from the JSON Claude Code feeds
+    to its statusline command on every render. Status and is_using_overage
+    fields are reserved for forward compatibility -- they're not currently
+    emitted by any writer but the schema tolerates them so older cache files
+    deserialize cleanly.
     """
 
     used_percentage: float | None = Field(default=None)
     resets_at: int | None = Field(default=None, description="Unix timestamp when this window resets")
-    status: str | None = Field(default=None, description="Status from SDK rate_limit_event (e.g., 'rejected')")
+    status: str | None = Field(default=None)
     is_using_overage: bool | None = Field(default=None)
     source: str | None = Field(default=None, description="Which writer last wrote this entry")
     updated_at: int | None = Field(default=None, description="Unix timestamp when this entry was last written")

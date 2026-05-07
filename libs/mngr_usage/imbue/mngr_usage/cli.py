@@ -9,7 +9,6 @@ from typing import Any
 import click
 from loguru import logger
 
-from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.common_opts import add_common_options
@@ -29,10 +28,6 @@ from imbue.mngr_usage.data_types import UsagePluginConfig
 from imbue.mngr_usage.data_types import WINDOW_KEYS
 from imbue.mngr_usage.data_types import WindowSnapshot
 
-_REFRESH_PROBE_PROMPT = "ok"
-_REFRESH_PROBE_SYSTEM_PROMPT = "Respond with one word."
-_REFRESH_TIMEOUT_SECONDS = 60.0
-
 
 class UsageCliOptions(CommonCliOptions):
     """Options for the `mngr usage` command.
@@ -40,7 +35,6 @@ class UsageCliOptions(CommonCliOptions):
     Inherits common options (output_format, quiet, verbose, etc.) from CommonCliOptions.
     """
 
-    refresh: bool
     max_age: str | None
 
 
@@ -55,8 +49,11 @@ def _load_cache(path: Path) -> CacheDoc | None:
         return None
     try:
         raw = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as e:
+    except OSError as e:
         logger.debug("Failed to read rate-limit cache at {}: {}", path, e)
+        return None
+    except json.JSONDecodeError as e:
+        logger.warning("Rate-limit cache at {} is corrupt and will be ignored: {}", path, e)
         return None
     if not isinstance(raw, dict):
         return None
@@ -108,175 +105,6 @@ def _oldest_updated_at(cache: CacheDoc | None) -> int | None:
     return min(timestamps)
 
 
-def _should_refresh(
-    cache: CacheDoc | None,
-    plugin_config: UsagePluginConfig,
-    refresh_flag: bool,
-    max_age_override: int | None,
-    now: int,
-) -> bool:
-    """Decide whether to trigger a refresh.
-
-    - Explicit --refresh always wins.
-    - When cache is empty and auto_refresh is on, refresh once.
-    - When cache is populated, refresh if oldest updated_at is older than the resolved max-age.
-    """
-    if refresh_flag:
-        return True
-    if not plugin_config.auto_refresh:
-        return False
-    max_age = max_age_override if max_age_override is not None else plugin_config.max_age_seconds
-    oldest = _oldest_updated_at(cache)
-    if oldest is None:
-        return cache is None or not cache.windows
-    return (now - oldest) >= max_age
-
-
-def _build_refresh_command(plugin_config: UsagePluginConfig) -> list[str]:
-    """Build the argv for the refresh probe.
-
-    The --setting-sources "" arg is load-bearing: it suppresses inherited Stop hooks
-    that otherwise turn the probe into a recursive Claude session.
-    """
-    return [
-        "claude",
-        "-p",
-        "--output-format=stream-json",
-        "--verbose",
-        "--setting-sources",
-        "",
-        "--model",
-        plugin_config.refresh_model,
-        "--tools",
-        "",
-        "--system-prompt",
-        _REFRESH_PROBE_SYSTEM_PROMPT,
-        _REFRESH_PROBE_PROMPT,
-    ]
-
-
-def _run_refresh(mngr_ctx: MngrContext, plugin_config: UsagePluginConfig) -> None:
-    """Spawn `claude -p` to nudge a rate_limit_event into the cache.
-
-    The probe runs with --output-format=stream-json --verbose, and the
-    resulting stdout is parsed in Python by _ingest_refresh_stdout, which
-    folds any rate_limit_event lines into the cache (last-write-wins per
-    window). The shell-side merge writer (claude_rate_limits_writer.sh)
-    handles the parallel statusline path; the SDK path does not invoke it.
-    """
-    cmd = _build_refresh_command(plugin_config)
-    logger.info("Refreshing Claude rate-limit cache (cost ~$0.005)")
-    try:
-        result = mngr_ctx.concurrency_group.run_process_to_completion(
-            cmd,
-            timeout=_REFRESH_TIMEOUT_SECONDS,
-            is_checked_after=False,
-        )
-    except ProcessSetupError as e:
-        logger.warning("Failed to spawn claude refresh probe (binary missing or unable to start): {}", e)
-        return
-    if result.returncode != 0:
-        logger.warning("claude refresh probe exited {}; stderr: {}", result.returncode, result.stderr.strip())
-        return
-    _ingest_refresh_stdout(result.stdout, mngr_ctx)
-
-
-def _ingest_refresh_stdout(stdout: str, mngr_ctx: MngrContext) -> None:
-    """Parse rate_limit_event lines out of a `claude -p --output-format=stream-json --verbose` stream.
-
-    Each line is a JSON object; we look for ``type == "rate_limit_event"`` records and
-    fold them into the cache with last-write-wins semantics, matching the SDK-event
-    half of claude_rate_limits_writer.sh.
-    """
-    path = cache_path(mngr_ctx)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    cache = _load_cache(path) or CacheDoc()
-    windows = dict(cache.windows)
-    now = int(time.time())
-    updated = False
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        if event.get("type") != "rate_limit_event":
-            continue
-        info = event.get("rate_limit_info") or {}
-        if not isinstance(info, dict):
-            continue
-        window_key = _normalize_window_key(info.get("rateLimitType"))
-        if window_key is None:
-            continue
-        existing = windows.get(window_key, WindowSnapshot())
-        windows[window_key] = WindowSnapshot(
-            used_percentage=existing.used_percentage,
-            resets_at=_coerce_optional_int(info.get("resetsAt")),
-            status=info.get("status"),
-            is_using_overage=info.get("isUsingOverage"),
-            source="sdk",
-            updated_at=now,
-        )
-        updated = True
-    if updated:
-        _atomic_write_cache(path, CacheDoc(schema_version=CACHE_SCHEMA_VERSION, windows=windows))
-
-
-@pure
-def _normalize_window_key(raw: Any) -> str | None:
-    """Map an SDK rateLimitType value to one of WINDOW_KEYS, or None."""
-    if not isinstance(raw, str):
-        return None
-    lowered = raw.lower().replace("-", "_").replace(" ", "_")
-    aliases = {
-        "5h": "five_hour",
-        "five_hour": "five_hour",
-        "fivehour": "five_hour",
-        "7d": "seven_day",
-        "seven_day": "seven_day",
-        "sevenday": "seven_day",
-        "overage": "overage",
-    }
-    return aliases.get(lowered)
-
-
-@pure
-def _coerce_optional_int(value: Any) -> int | None:
-    """Best-effort cast to int; tolerate string timestamps."""
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _atomic_write_cache(path: Path, cache: CacheDoc) -> None:
-    """Write the cache atomically (temp + rename) to avoid partial reads."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    payload = cache.model_dump(mode="json")
-    tmp_path.write_text(json.dumps(payload))
-    tmp_path.replace(path)
-
-
-@pure
-def _has_statusline_data(cache: CacheDoc | None) -> bool:
-    """True if any cached window was last written by the statusline shim.
-
-    Used to detect the "shim has never fired" case: when only SDK refresh
-    probes have populated the cache, ``used_percentage`` is always None and
-    `mngr usage` falls back to displaying ``status=...`` instead.
-    """
-    if cache is None:
-        return False
-    return any(window.source == "statusline" for window in cache.windows.values())
-
-
 @pure
 def _format_duration(seconds: int) -> str:
     """Render seconds as a compact human duration: '1h 12m', '4d 3h', '45s'."""
@@ -300,8 +128,6 @@ def _format_human_line(window_label: str, window: WindowSnapshot, now: int) -> s
     parts = [f"{window_label}:"]
     if window.used_percentage is not None:
         parts.append(f"{window.used_percentage:.0f}% used,")
-    elif window.status is not None:
-        parts.append(f"status={window.status},")
     else:
         parts.append("no data,")
     if window.resets_at is not None:
@@ -324,8 +150,6 @@ def _window_to_template_values(window: WindowSnapshot, now: int) -> dict[str, st
     return {
         "used_percentage": used_percentage,
         "resets_at": "" if window.resets_at is None else str(window.resets_at),
-        "status": window.status or "",
-        "is_using_overage": "" if window.is_using_overage is None else str(window.is_using_overage).lower(),
         "source": window.source or "",
         "updated_at": "" if window.updated_at is None else str(window.updated_at),
         "seconds_until_reset": seconds_until,
@@ -400,6 +224,17 @@ def _flatten_for_template(model: _UsageRenderModel, now: int) -> dict[str, str]:
     return flat
 
 
+_NO_DATA_HINT = (
+    "No rate-limit data yet. The cache is populated by a per-agent statusline "
+    "shim that fires whenever an interactive Claude session renders. To get "
+    "data flowing: ensure imbue-mngr-usage is installed in whichever env runs "
+    "your `mngr` (so the plugin entry point is loaded), then run "
+    "`mngr create ... claude` and send the new agent any prompt. Existing "
+    "agents whose settings.json was generated before this plugin was active "
+    "won't have the shim until they're re-provisioned."
+)
+
+
 def _emit_output(
     model: _UsageRenderModel,
     output_format: OutputFormat,
@@ -416,39 +251,36 @@ def _emit_output(
             emit_final_json(_render_model_for_json(model, now))
         case OutputFormat.HUMAN:
             any_present = False
+            any_with_percentage = False
             for key, label in (("five_hour", "5h"), ("seven_day", "7d"), ("overage", "overage")):
                 snap = model.windows[key]
                 if snap.updated_at is None:
                     continue
                 write_human_line(_format_human_line(label, snap, now))
                 any_present = True
-            if not any_present:
-                write_human_line(
-                    "No rate-limit data yet -- re-run with --refresh or wait for an agent statusline tick."
-                )
-            if model.is_stale and any_present:
+                if snap.used_percentage is not None:
+                    any_with_percentage = True
+            has_usable_data = any_present and any_with_percentage
+            if not has_usable_data:
+                write_human_line(_NO_DATA_HINT)
+            if has_usable_data and model.is_stale:
                 logger.warning("Rate-limit cache is stale; values may not reflect latest API state.")
 
 
 @click.command("usage")
 @click.option(
-    "--refresh",
-    is_flag=True,
-    default=False,
-    help="Force a refresh probe even if the cache is fresh. Spawns `claude -p` (~$0.005).",
-)
-@click.option(
     "--max-age",
     default=None,
-    help="Override the freshness threshold (e.g. '300', '5m', '2h'). Default: from plugin config.",
+    help="Stale-warning threshold (e.g. '300', '5m', '2h'). Default: from plugin config.",
 )
 @add_common_options
 @click.pass_context
 def usage(ctx: click.Context, **kwargs: Any) -> None:
     """Show Claude Code rolling-window quota usage (5h, 7d, overage).
 
-    Reads from a shared cache populated by per-agent statusline shims; refreshes
-    via a brief `claude -p` call when the cache is stale.
+    Reads from a shared cache populated by per-agent statusline shims. The
+    shim ships rate-limit JSON to a small writer that atomically merges into
+    the cache; `mngr usage` is purely a reader.
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -465,24 +297,8 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
     cache = _load_cache(path)
     now = int(time.time())
 
-    if _should_refresh(cache, plugin_config, opts.refresh, max_age_override, now):
-        _run_refresh(mngr_ctx, plugin_config)
-        cache = _load_cache(path)
-        now = int(time.time())
-
     model = _build_render_model(cache, effective_max_age, now)
     _emit_output(model, output_opts.output_format, output_opts.format_template, now)
-
-    # If the cache has data but none of it came from the statusline shim, only
-    # the SDK refresh path has ever populated the cache. used_percentage will be
-    # None and the human output falls back to `status=...` strings. Tell the user
-    # how to wire up the shim so they get percentages.
-    if cache is not None and cache.windows and not _has_statusline_data(cache):
-        logger.warning(
-            "Statusline shim has never fired -- used_percentage is unavailable. "
-            "Start an interactive Claude agent (e.g. `mngr create ... claude`) "
-            "and send it any prompt; the next render will populate the cache."
-        )
 
 
 CommandHelpMetadata(
@@ -491,14 +307,14 @@ CommandHelpMetadata(
     synopsis="mngr usage [OPTIONS]",
     description="""Reports Claude Code's rolling 5-hour, 7-day, and overage quota windows.
 
-The data is sourced from response headers on every Claude Code API call and
-captured into a shared cache by per-agent statusline shims. When the cache is
-stale, `mngr usage` (by default) spawns a brief `claude -p` call to refresh it
-(approx $0.005 per refresh).""",
+The data is sourced from the JSON snapshot Claude Code feeds to its statusline
+on every render; a small shim installed in each per-agent settings.json
+captures it into a shared cache under your profile_dir. `mngr usage` is purely
+a reader -- the cache is populated by interactive Claude sessions as a side
+effect of normal use, with no API cost.""",
     examples=(
         ("Show current usage", "mngr usage"),
-        ("Force a refresh", "mngr usage --refresh"),
-        ("Treat the cache as stale after 60s", "mngr usage --max-age 60"),
+        ("Treat the cache as stale after 60s (warning only)", "mngr usage --max-age 60"),
         ("Machine-readable output", "mngr usage --format json"),
         ("Custom format template", "mngr usage --format '{five_hour.used_percentage}/{seven_day.used_percentage}'"),
     ),
