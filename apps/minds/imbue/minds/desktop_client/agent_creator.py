@@ -459,6 +459,8 @@ def _build_mngr_create_command(
             latchkey_env_args.extend(
                 ["--env", f"LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE={latchkey_permissions_override_jwt}"]
             )
+        # Suppress the per-workspace daily ping to avoid counting every agent as a separate user.
+        latchkey_env_args.extend(["--env", "LATCHKEY_DISABLE_COUNTING=1"])
 
     mngr_command: list[str] = [
         MNGR_BINARY,
