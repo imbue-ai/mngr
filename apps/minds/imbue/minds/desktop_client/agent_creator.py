@@ -352,64 +352,73 @@ def _build_mngr_create_command(
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
+    latchkey_gateway_url: str | None = None,
     latchkey_gateway_password: str | None = None,
     latchkey_permissions_override_jwt: str | None = None,
 ) -> tuple[list[str], str]:
     """Build the mngr create command and generate an API key for the agent.
 
-    Returns (command_list, api_key) where api_key is a UUID4 string injected
-    as MINDS_API_KEY into the agent's environment via --env. ``--format jsonl``
-    is appended so the caller can parse the canonical ``AgentId`` out of
-    the trailing ``"event": "created"`` line; minds no longer pre-generates
-    an id because for imbue_cloud the lease forces it back to the pool
-    host's pre-baked id anyway, and pre-generating one led to bugs (e.g.
-    keying gateway state under a fictional id).
+        Returns (command_list, api_key) where api_key is a UUID4 string injected
+        as MINDS_API_KEY into the agent's environment via --env. ``--format jsonl``
+        is appended so the caller can parse the canonical ``AgentId`` out of
+        the trailing ``"event": "created"`` line; minds no longer pre-generates
+        an id because for imbue_cloud the lease forces it back to the pool
+        host's pre-baked id anyway, and pre-generating one led to bugs (e.g.
+        keying gateway state under a fictional id).
 
-    DEV mode: --template main --template dev (runs in-place on local provider)
-    LOCAL mode: --template main --template docker (runs in Docker container)
-    LIMA mode: --template main --template lima (runs in Lima VM)
-    CLOUD mode: --template main --template vultr (runs in Docker on a Vultr VPS)
-    IMBUE_CLOUD mode: --new-host on the imbue_cloud_<slug> provider (the
-        plugin's create_host adopts the pool's pre-baked agent under
-        ``agent_name``); ``imbue_cloud_*`` arguments encode the lease
-        attributes (--build-arg).
+        DEV mode: --template main --template dev (runs in-place on local provider)
+        LOCAL mode: --template main --template docker (runs in Docker container)
+        LIMA mode: --template main --template lima (runs in Lima VM)
+        CLOUD mode: --template main --template vultr (runs in Docker on a Vultr VPS)
+        IMBUE_CLOUD mode: --new-host on the imbue_cloud_<slug> provider (the
+            plugin's create_host adopts the pool's pre-baked agent under
+            ``agent_name``); ``imbue_cloud_*`` arguments encode the lease
+            attributes (--build-arg).
 
-    For modes that create a separate host (LOCAL, LIMA, CLOUD, IMBUE_CLOUD),
-    the agent address uses ``agent_name@{agent_name}-host`` so hosts are
-    clearly attributable. ``--reuse`` and ``--update`` are passed for the
-    non-IMBUE_CLOUD modes so re-deploying resets the agent on the same
-    host instead of failing on a duplicate name (IMBUE_CLOUD's lease
-    flow is one-shot per pool host, so reuse is not meaningful there).
+        For modes that create a separate host (LOCAL, LIMA, CLOUD, IMBUE_CLOUD),
+        the agent address uses ``agent_name@{agent_name}-host`` so hosts are
+        clearly attributable. ``--reuse`` and ``--update`` are passed for the
+        non-IMBUE_CLOUD modes so re-deploying resets the agent on the same
+        host instead of failing on a duplicate name (IMBUE_CLOUD's lease
+        flow is one-shot per pool host, so reuse is not meaningful there).
 
-    Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``, ``GH_TOKEN``)
-    are forwarded by the FCT template's own ``pass_(host_)env`` declarations,
-    not by inline flags here -- ``run_mngr_create`` populates them in the
-    subprocess env when needed and the template-declared forwards pick
-    them up. Keeping the forwarding declaration in FCT means the same
-    template works for ``mngr create`` invocations from outside minds too.
+        Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``, ``GH_TOKEN``)
+        are forwarded by the FCT template's own ``pass_(host_)env`` declarations,
+        not by inline flags here -- ``run_mngr_create`` populates them in the
+        subprocess env when needed and the template-declared forwards pick
+        them up. Keeping the forwarding declaration in FCT means the same
+        template works for ``mngr create`` invocations from outside minds too.
 
-    For container/VM/VPS/leased modes, ``LATCHKEY_GATEWAY=http://127.0.0.1:<port>``
-    is injected unconditionally; the agent reaches that loopback URL via the
-    reverse tunnel that ``LatchkeyDiscoveryHandler`` sets up post-discovery.
-    DEV mode gets no injected ``LATCHKEY_GATEWAY`` -- DEV runs on the bare
-    host without a reverse tunnel, so any test that wants latchkey there
-    should set the env var itself.
+    For container/VM/VPS/leased modes, ``LATCHKEY_GATEWAY`` defaults to the
+        constant agent-side URL ``http://127.0.0.1:<AGENT_SIDE_LATCHKEY_PORT>``
+        (the loopback port that ``LatchkeyDiscoveryHandler`` reverse-tunnels
+        to the host-side gateway post-discovery), so containerized agents
+        always get a working URL without the caller having to know the live
+        gateway port. DEV mode runs on the bare host with no reverse tunnel,
+        so the constant agent-side URL is meaningless there -- callers that
+        want latchkey wiring for a DEV agent must pass
+        ``latchkey_gateway_url`` explicitly with the gateway's live host
+        address (typically ``http://127.0.0.1:<dynamic_host_port>``).
 
-    When ``latchkey_gateway_password`` is supplied (and the launch mode is
-    not DEV), it is also injected as ``LATCHKEY_GATEWAY_PASSWORD`` so the
-    agent's ``latchkey`` CLI authenticates to the password-protected
-    shared gateway.
+        Passing ``latchkey_gateway_url`` for *any* mode overrides the
+        default. Passing ``None`` for DEV opts out of latchkey wiring
+        entirely for that agent.
 
-    When ``latchkey_permissions_override_jwt`` is supplied (and the
-    launch mode is not DEV), it is injected as
-    ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` so the gateway evaluates
-    this agent's requests against its own per-agent permissions file
-    instead of the gateway's deny-all default. The JWT references an
-    *opaque* path (``data_dir/latchkey/permissions/<uuid>.json``) that
-    ``AgentCreator`` materializes before this call; after ``mngr create``
-    returns the canonical agent id, ``AgentCreator`` replaces that
-    opaque file with a symlink to the canonical agent-keyed path so the
-    permission grant flow can keep writing to its conventional location.
+        When ``latchkey_gateway_password`` is supplied (and the launch mode is
+        not DEV), it is also injected as ``LATCHKEY_GATEWAY_PASSWORD`` so the
+        agent's ``latchkey`` CLI authenticates to the password-protected
+        shared gateway.
+
+        When ``latchkey_permissions_override_jwt`` is supplied (and the
+        launch mode is not DEV), it is injected as
+        ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` so the gateway evaluates
+        this agent's requests against its own per-agent permissions file
+        instead of the gateway's deny-all default. The JWT references an
+        *opaque* path (``data_dir/latchkey/permissions/<uuid>.json``) that
+        ``AgentCreator`` materializes before this call; after ``mngr create``
+        returns the canonical agent id, ``AgentCreator`` replaces that
+        opaque file with a symlink to the canonical agent-keyed path so the
+        permission grant flow can keep writing to its conventional location.
     """
     match launch_mode:
         case LaunchMode.DEV:
@@ -440,9 +449,17 @@ def _build_mngr_create_command(
     # post-discovery, so the URL is always the constant agent-side port.
     # DEV mode runs the agent on the bare host with no tunnel; tests there
     # set ``LATCHKEY_GATEWAY`` themselves if they want one.
+    # Default the URL to the constant agent-side port for tunneled modes.
+    # DEV agents run on the bare host with no reverse tunnel and so have
+    # no constant URL to fall back on; callers that want latchkey wiring
+    # for DEV must compute and pass the live gateway URL explicitly.
+    effective_latchkey_url = latchkey_gateway_url
+    if effective_latchkey_url is None and launch_mode is not LaunchMode.DEV:
+        effective_latchkey_url = f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
+
     latchkey_env_args: list[str] = []
-    if launch_mode is not LaunchMode.DEV:
-        latchkey_env_args = ["--env", f"LATCHKEY_GATEWAY=http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"]
+    if effective_latchkey_url is not None:
+        latchkey_env_args = ["--env", f"LATCHKEY_GATEWAY={effective_latchkey_url}"]
         if latchkey_gateway_password is not None:
             latchkey_env_args.extend(["--env", f"LATCHKEY_GATEWAY_PASSWORD={latchkey_gateway_password}"])
         if latchkey_permissions_override_jwt is not None:
@@ -656,6 +673,7 @@ def run_mngr_create(
     anthropic_api_key: str | None = None,
     anthropic_base_url: str | None = None,
     gh_token: str | None = None,
+    latchkey_gateway_url: str | None = None,
     latchkey_gateway_password: str | None = None,
     latchkey_permissions_override_jwt: str | None = None,
     *,
@@ -688,6 +706,7 @@ def run_mngr_create(
         imbue_cloud_account=imbue_cloud_account,
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
+        latchkey_gateway_url=latchkey_gateway_url,
         latchkey_gateway_password=latchkey_gateway_password,
         latchkey_permissions_override_jwt=latchkey_permissions_override_jwt,
     )
@@ -1135,7 +1154,11 @@ class AgentCreator(MutableModel):
                 # the post-create ``mngr provision --env`` step (which
                 # was fragile and could silently leave
                 # ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` missing in
-                # the agent env).
+                # the agent env). For DEV mode we also compute the
+                # live gateway URL up front (no reverse tunnel exists
+                # for DEV, so the agent talks straight to the
+                # gateway's host port).
+                latchkey_gateway_url = self._maybe_compute_latchkey_gateway_url(launch_mode, log_queue)
                 latchkey_gateway_password = self._maybe_derive_gateway_password(log_queue)
                 latchkey_opaque_path, latchkey_permissions_jwt = self._maybe_prepare_latchkey_permissions_handle(
                     log_queue
@@ -1148,6 +1171,7 @@ class AgentCreator(MutableModel):
                     workspace_dir=workspace_dir,
                     agent_name=parsed_name,
                     on_output=emit_log,
+                    latchkey_gateway_url=latchkey_gateway_url,
                     latchkey_gateway_password=latchkey_gateway_password,
                     latchkey_permissions_override_jwt=latchkey_permissions_jwt,
                     imbue_cloud_account=account_email if launch_mode is LaunchMode.IMBUE_CLOUD else None,
@@ -1181,7 +1205,10 @@ class AgentCreator(MutableModel):
                 # at the canonical agent-keyed permissions file. After
                 # this, ``LatchkeyPermissionGrantHandler`` can write to
                 # the canonical path and the gateway will see the
-                # changes via the symlink.
+                # changes via the symlink. Same flow for every mode
+                # (DEV included): the symlink lives under ``data_dir``
+                # which both the desktop client and any in-process DEV
+                # agent can see.
                 if latchkey_opaque_path is not None:
                     self._finalize_latchkey_permissions(canonical_id, latchkey_opaque_path, log_queue)
 
@@ -1248,6 +1275,46 @@ class AgentCreator(MutableModel):
             logger.warning("Failed to derive latchkey gateway password: {}", e)
             log_queue.put(f"[minds] Warning: latchkey password injection skipped: {e}")
             return None
+
+    def _maybe_compute_latchkey_gateway_url(
+        self,
+        launch_mode: LaunchMode,
+        log_queue: queue.Queue[str],
+    ) -> str | None:
+        """Return the ``LATCHKEY_GATEWAY`` URL to inject for this agent, or ``None``.
+
+        For tunneled modes (LOCAL / LIMA / CLOUD / IMBUE_CLOUD) the URL is
+        the constant agent-side loopback (``127.0.0.1:<AGENT_SIDE_LATCHKEY_PORT>``)
+        which ``LatchkeyDiscoveryHandler`` reverse-tunnels to whatever
+        port the host-side gateway happens to be listening on. We return
+        ``None`` for those modes so ``_build_mngr_create_command``'s own
+        constant-fallback handles them; that keeps the constant URL in a
+        single place.
+
+        For DEV mode there is no reverse tunnel: the agent runs in
+        process on the bare host and talks directly to the gateway's
+        live host-side port. We must therefore ensure the gateway is
+        actually running and read its dynamic port out of the live
+        info. Returns ``None`` (and logs a warning) when ``Latchkey``
+        is not configured or the gateway can't be started -- the agent
+        will then have no ``LATCHKEY_GATEWAY`` set and its ``latchkey``
+        CLI will fall back to local mode (no gateway proxying), which
+        is the same behaviour DEV had before this change. Other
+        latchkey env vars (password / JWT) are skipped too in that
+        case via the standard ``effective_latchkey_url is None`` gate
+        in ``_build_mngr_create_command``.
+        """
+        if launch_mode is not LaunchMode.DEV:
+            return None
+        if self.latchkey is None:
+            return None
+        try:
+            info = self.latchkey.ensure_gateway_started()
+        except LatchkeyError as e:
+            logger.warning("Failed to start latchkey gateway for DEV agent: {}", e)
+            log_queue.put(f"[minds] Warning: latchkey wiring skipped for DEV agent: {e}")
+            return None
+        return f"http://{info.host}:{info.port}"
 
     def _maybe_prepare_latchkey_permissions_handle(
         self,

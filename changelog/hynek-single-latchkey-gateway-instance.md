@@ -21,6 +21,13 @@
   (`~/.minds/latchkey_default_permissions.json`) is materialized empty
   (deny-all) so requests that bypass the JWT mechanism cannot reach
   any service.
+- DEV-mode agents (which run in-process on the bare host with no SSH
+  reverse tunnel) now go through the same gateway as every other
+  launch mode. `AgentCreator` queries the gateway's live host port
+  and injects it as `LATCHKEY_GATEWAY=http://127.0.0.1:<dynamic_port>`
+  alongside the password and JWT. Previously DEV agents bypassed the
+  gateway entirely, which made the full latchkey flow impossible to
+  exercise from DEV.
 - The agent-side `latchkey` CLI version is pinned in
   `forever-claude-template`'s Dockerfile (`ARG LATCHKEY_VERSION=…`) and
   must be bumped to 2.8.0 in lockstep with this change. Agents booting

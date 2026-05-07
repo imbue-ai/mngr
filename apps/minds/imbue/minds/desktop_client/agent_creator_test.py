@@ -95,12 +95,47 @@ def test_build_mngr_create_command_injects_latchkey_for_non_dev_modes() -> None:
     assert expected in command
 
 
-def test_build_mngr_create_command_omits_latchkey_for_dev_mode() -> None:
-    """DEV runs the agent on the bare host with no reverse tunnel, so no
-    ``LATCHKEY_GATEWAY`` is injected. Tests that need one set it themselves."""
+def test_build_mngr_create_command_omits_latchkey_for_dev_mode_without_url() -> None:
+    """DEV with no explicit URL gets no latchkey wiring.
+
+    There's no constant agent-side URL to fall back on for DEV (no
+    reverse tunnel), so the caller is responsible for computing the
+    live gateway URL when it wants DEV agents to use latchkey.
+    """
     command, _ = _build_mngr_create_command(launch_mode=LaunchMode.DEV, agent_name=AgentName("hello"))
     joined = " ".join(command)
     assert "LATCHKEY_GATEWAY" not in joined
+
+
+def test_build_mngr_create_command_injects_latchkey_for_dev_mode_with_explicit_url() -> None:
+    """DEV with an explicit live gateway URL gets the full latchkey wiring.
+
+    The caller (``AgentCreator._maybe_compute_latchkey_gateway_url``)
+    queries the live gateway info for DEV, since DEV has no reverse
+    tunnel and must talk directly to the gateway's host port.
+    """
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.DEV,
+        agent_name=AgentName("hello"),
+        latchkey_gateway_url="http://127.0.0.1:54321",
+        latchkey_gateway_password="sup3rs3cret",
+        latchkey_permissions_override_jwt="eyJhbGc.fake.jwt",
+    )
+    assert "LATCHKEY_GATEWAY=http://127.0.0.1:54321" in command
+    assert "LATCHKEY_GATEWAY_PASSWORD=sup3rs3cret" in command
+    assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=eyJhbGc.fake.jwt" in command
+
+
+def test_build_mngr_create_command_explicit_url_overrides_constant_for_non_dev() -> None:
+    """Passing ``latchkey_gateway_url`` overrides the default for any mode."""
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.LOCAL,
+        agent_name=AgentName("hello"),
+        latchkey_gateway_url="http://127.0.0.1:9999",
+    )
+    assert "LATCHKEY_GATEWAY=http://127.0.0.1:9999" in command
+    # The constant agent-side URL is not also injected.
+    assert f"LATCHKEY_GATEWAY=http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}" not in command
 
 
 def test_build_mngr_create_command_injects_latchkey_password_when_supplied() -> None:
