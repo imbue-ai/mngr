@@ -222,36 +222,36 @@ def find_all_matching_agents(
 
 
 @pure
-def _resolve_host_components(
-    host_name: HostName | None,
+def _find_one_matching_host(
+    host_name_or_id: HostName | None,
     provider_name: ProviderInstanceName | None,
     all_hosts: Sequence[DiscoveredHost],
 ) -> DiscoveredHost | None:
-    """Resolve already-parsed host components to a single DiscoveredHost.
+    """Find the single host matching the given parsed components.
 
     Returns None when both arguments are None. Raises UserInputError when no
     host matches or when more than one matches.
     """
-    if host_name is None and provider_name is None:
+    if host_name_or_id is None and provider_name is None:
         return None
 
-    matches = _find_matching_hosts(host_name, provider_name, all_hosts)
+    matches = _find_matching_hosts(host_name_or_id, provider_name, all_hosts)
     if len(matches) == 0:
-        descriptor = _host_descriptor(host_name, provider_name)
+        descriptor = _host_descriptor(host_name_or_id, provider_name)
         raise UserInputError(f"Could not find host with ID or name: {descriptor}")
     if len(matches) > 1:
-        descriptor = _host_descriptor(host_name, provider_name)
+        descriptor = _host_descriptor(host_name_or_id, provider_name)
         raise UserInputError(f"Multiple hosts found with name: {descriptor}")
     return matches[0]
 
 
 @pure
-def _host_descriptor(host_name: HostName | None, provider_name: ProviderInstanceName | None) -> str:
+def _host_descriptor(host_name_or_id: HostName | None, provider_name: ProviderInstanceName | None) -> str:
     """Render parsed host components back into the user-facing `host.provider` form."""
-    if host_name is not None and provider_name is not None:
-        return f"{host_name}.{provider_name}"
-    if host_name is not None:
-        return str(host_name)
+    if host_name_or_id is not None and provider_name is not None:
+        return f"{host_name_or_id}.{provider_name}"
+    if host_name_or_id is not None:
+        return str(host_name_or_id)
     if provider_name is not None:
         return f".{provider_name}"
     return ""
@@ -271,7 +271,7 @@ def resolve_host_reference(
     if host_identifier is None:
         return None
     host_name, provider_name = parse_host_qualifier(host_identifier)
-    return _resolve_host_components(host_name, provider_name, all_hosts)
+    return _find_one_matching_host(host_name, provider_name, all_hosts)
 
 
 @pure
@@ -334,7 +334,7 @@ def resolve_source_location(
     # Resolve host and agent references from the parsed components
     all_hosts = list(agents_by_host.keys())
     with log_span("Resolving host reference"):
-        resolved_host = _resolve_host_components(parsed.host_name, parsed.provider_name, all_hosts)
+        resolved_host = _find_one_matching_host(parsed.host_name, parsed.provider_name, all_hosts)
     with log_span("Resolving agent reference"):
         agent_result = resolve_agent_reference(parsed.agent, resolved_host, agents_by_host)
 
