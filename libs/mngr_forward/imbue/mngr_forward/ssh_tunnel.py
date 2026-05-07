@@ -518,6 +518,12 @@ def _relay_step(sock: socket.socket, channel: paramiko.Channel) -> bool:
             if not data:
                 return False
             sock.sendall(data)
+        elif channel.eof_received or channel.closed:
+            # Paramiko marks the channel's fileno readable on EOF/close as well
+            # as on data arrival, but recv_ready() only goes True for data. Without
+            # this branch the relay loop would spin at ~1M iters/sec on a half-closed
+            # channel until something else tore it down.
+            return False
 
     return True
 
