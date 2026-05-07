@@ -27,6 +27,7 @@ _SECTION_ORDER: list[ReportSection] = [
     ReportSection.NON_IMPL_FIXES,
     ReportSection.IMPL_FIXES,
     ReportSection.BLOCKED,
+    ReportSection.FAILED,
     ReportSection.CLEAN_PASS,
     ReportSection.RUNNING,
 ]
@@ -35,6 +36,7 @@ _SECTION_LABELS: dict[ReportSection, str] = {
     ReportSection.NON_IMPL_FIXES: "Non-implementation fixes",
     ReportSection.IMPL_FIXES: "Implementation fixes",
     ReportSection.BLOCKED: "Blocked",
+    ReportSection.FAILED: "Failed",
     ReportSection.CLEAN_PASS: "Clean pass",
     ReportSection.RUNNING: "Running",
 }
@@ -43,6 +45,7 @@ _SECTION_COLORS: dict[ReportSection, str] = {
     ReportSection.NON_IMPL_FIXES: "rgb(33, 150, 243)",
     ReportSection.IMPL_FIXES: "rgb(76, 175, 80)",
     ReportSection.BLOCKED: "rgb(244, 67, 54)",
+    ReportSection.FAILED: "rgb(255, 152, 0)",
     ReportSection.CLEAN_PASS: "rgb(158, 158, 158)",
     ReportSection.RUNNING: "rgb(3, 169, 244)",
 }
@@ -53,9 +56,15 @@ _NON_IMPL_CHANGE_KINDS = frozenset({ChangeKind.FIX_TEST, ChangeKind.IMPROVE_TEST
 
 
 def report_section_of(result: TestMapReduceResult) -> ReportSection:
-    """Derive a report section from a result for report grouping/coloring."""
+    """Derive a report section from a result for report grouping/coloring.
+
+    ``errored=True`` indicates an infrastructure failure (launch failed,
+    agent timed out, details missing) and is rendered in the FAILED section.
+    The BLOCKED section is reserved for results where the coding agent
+    itself reported every change as BLOCKED.
+    """
     if result.errored:
-        return ReportSection.BLOCKED
+        return ReportSection.FAILED
     if result.tests_passing_before is None and result.tests_passing_after is None and not result.changes:
         return ReportSection.RUNNING
     if result.changes and all(c.status == ChangeStatus.BLOCKED for c in result.changes.values()):
