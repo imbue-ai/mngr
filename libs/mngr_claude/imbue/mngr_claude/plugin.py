@@ -460,10 +460,9 @@ def _build_settings_json(
     env block by the contributing plugin's hookimpl), and its ``env`` entries
     merge into ``settings.json``'s env block.
     """
-    source_settings = _read_source_claude_settings(source_claude_dir)
-
-    if sync_local and source_settings:
-        data: dict[str, Any] = dict(source_settings)
+    if sync_local:
+        source_settings = _read_source_claude_settings(source_claude_dir)
+        data: dict[str, Any] = dict(source_settings) if source_settings else _generate_claude_home_settings()
     else:
         data = _generate_claude_home_settings()
     data.update(compute_settings_json_flags(ctx))
