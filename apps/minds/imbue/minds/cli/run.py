@@ -66,7 +66,6 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.sharing_handler import SharingRequestHandler
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
@@ -154,8 +153,7 @@ def run(
     )
     imbue_cloud_cli = ImbueCloudCli(parent_concurrency_group=root_concurrency_group)
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
-    session_store = MultiAccountSessionStore(data_dir=data_directory)
-    sharing_request_handler = SharingRequestHandler(session_store=session_store)
+    session_store = MultiAccountSessionStore(data_dir=data_directory, cli=imbue_cloud_cli)
     response_events = load_response_events(data_directory)
     request_inbox = RequestInbox()
     for resp in response_events:
@@ -268,7 +266,7 @@ def run(
         session_store=session_store,
         minds_config=minds_config,
         request_inbox=request_inbox,
-        request_event_handlers=(latchkey_permission_handler, sharing_request_handler),
+        request_event_handlers=(latchkey_permission_handler,),
         server_port=port,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,

@@ -64,7 +64,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(11))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(10))
 
 
 # --- Import style ---

@@ -1,4 +1,5 @@
 import json
+import shlex
 from collections.abc import Mapping
 from typing import Any
 from typing import Final
@@ -7,13 +8,12 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import HostConfig
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
-from imbue.mngr_vps_docker.docker_over_ssh import ContainerSetupError
-from imbue.mngr_vps_docker.docker_over_ssh import DockerOverSsh
-from imbue.mngr_vps_docker.errors import VpsConnectionError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 # State container configuration
@@ -48,13 +48,33 @@ class VpsDockerHostRecord(FrozenModel):
     container_id: str | None = Field(default=None, description="Docker container ID")
 
 
+def _run_outer_command(outer: OuterHostInterface, command: str, *, label: str) -> str:
+    """Run a command on the outer host; raise MngrError on non-zero exit."""
+    result = outer.execute_idempotent_command(command)
+    if not result.success:
+        raise MngrError(
+            f"VPS outer command {label!r} failed: stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}"
+        )
+    return result.stdout
+
+
+def _container_is_running(outer: OuterHostInterface, container_name: str) -> bool:
+    """Check whether the named docker container is running on the outer."""
+    result = outer.execute_idempotent_command(
+        f"docker inspect --format '{{{{.State.Running}}}}' {shlex.quote(container_name)}"
+    )
+    if not result.success:
+        return False
+    return result.stdout.strip().lower() == "true"
+
+
 def ensure_state_container(
-    docker_ssh: DockerOverSsh,
+    outer: OuterHostInterface,
     prefix: str,
     user_id: str,
     provider_name: str,
 ) -> str:
-    """Ensure the singleton state container exists and is running on the VPS.
+    """Ensure the singleton state container exists and is running on the outer host.
 
     Creates a Docker named volume and a small Alpine container that mounts it.
     Returns the container name.
@@ -62,53 +82,61 @@ def ensure_state_container(
     container_name = f"{prefix}docker-state-{user_id}"
     volume_name = f"{prefix}docker-state-{user_id}"
 
-    logger.info(
-        "ensure_state_container: checking for {} on VPS {} (ssh_key={})",
-        container_name,
-        docker_ssh.vps_ip,
-        docker_ssh.ssh_key_path,
-    )
+    logger.info("ensure_state_container: checking for {} on outer {}", container_name, outer.get_name())
 
     # List all containers on the VPS for diagnostics
-    try:
-        all_containers = docker_ssh.run_ssh("docker ps -a --format '{{.Names}} {{.Status}} {{.ID}}'")
-        logger.info("ensure_state_container: existing containers on VPS:\n{}", all_containers.strip() or "(none)")
-    except (VpsConnectionError, ContainerSetupError) as e:
-        logger.warning("ensure_state_container: failed to list containers: {}", e)
+    diag = outer.execute_idempotent_command("docker ps -a --format '{{.Names}} {{.Status}} {{.ID}}'")
+    if diag.success:
+        logger.info("ensure_state_container: existing containers on outer:\n{}", diag.stdout.strip() or "(none)")
+    else:
+        logger.warning("ensure_state_container: failed to list containers: {}", diag.stderr.strip())
 
     # Check if already running
-    if docker_ssh.container_is_running(container_name):
+    if _container_is_running(outer, container_name):
         logger.info("ensure_state_container: {} is already running", container_name)
         return container_name
 
     # Try to start if it exists but is stopped
-    try:
-        docker_ssh.start_container(container_name)
+    start_result = outer.execute_idempotent_command(f"docker start {shlex.quote(container_name)}")
+    if start_result.success:
         logger.info("ensure_state_container: started existing stopped container {}", container_name)
         return container_name
-    except ContainerSetupError as e:
-        logger.info("ensure_state_container: {} does not exist yet, will create: {}", container_name, e)
+    logger.info(
+        "ensure_state_container: {} does not exist yet, will create: {}",
+        container_name,
+        start_result.stderr.strip(),
+    )
 
     # Create the volume and container
     logger.info(
-        "ensure_state_container: creating volume {} and container {} on VPS {}",
+        "ensure_state_container: creating volume {} and container {} on outer {}",
         volume_name,
         container_name,
-        docker_ssh.vps_ip,
+        outer.get_name(),
     )
-    docker_ssh.create_volume(volume_name)
-    docker_ssh.run_container(
-        image=STATE_CONTAINER_IMAGE,
-        name=container_name,
-        port_mappings={},
-        volumes=[f"{volume_name}:{STATE_VOLUME_MOUNT_PATH}:rw"],
-        labels={
-            "com.imbue.mngr.provider": provider_name,
-            "com.imbue.mngr.type": "state-container",
-        },
-        extra_args=["--restart", "unless-stopped"],
-        entrypoint_cmd=CONTAINER_ENTRYPOINT_CMD,
-    )
+    _run_outer_command(outer, f"docker volume create {shlex.quote(volume_name)}", label="docker-volume-create")
+
+    run_args = [
+        "docker",
+        "run",
+        "-d",
+        "--name",
+        shlex.quote(container_name),
+        "-v",
+        shlex.quote(f"{volume_name}:{STATE_VOLUME_MOUNT_PATH}:rw"),
+        "--label",
+        shlex.quote(f"com.imbue.mngr.provider={provider_name}"),
+        "--label",
+        "com.imbue.mngr.type=state-container",
+        "--restart",
+        "unless-stopped",
+        "--entrypoint",
+        "sh",
+        STATE_CONTAINER_IMAGE,
+        "-c",
+        shlex.quote(CONTAINER_ENTRYPOINT_CMD),
+    ]
+    _run_outer_command(outer, " ".join(run_args), label="docker-run-state")
     logger.info("ensure_state_container: successfully created {}", container_name)
     return container_name
 
@@ -116,11 +144,12 @@ def ensure_state_container(
 class VpsDockerHostStore:
     """Host record store backed by a state container on the VPS.
 
-    Mirrors DockerHostStore but operates over SSH via DockerOverSsh.
+    Mirrors DockerHostStore but operates over an OuterHostInterface (so all
+    docker commands run via SSH on the VPS root account).
     """
 
-    def __init__(self, docker_ssh: DockerOverSsh, state_container_name: str) -> None:
-        self._docker_ssh = docker_ssh
+    def __init__(self, outer: OuterHostInterface, state_container_name: str) -> None:
+        self._outer = outer
         self._state_container_name = state_container_name
         self._cache: dict[HostId, VpsDockerHostRecord] = {}
 
@@ -133,8 +162,10 @@ class VpsDockerHostStore:
     def _agent_data_path(self, host_id: HostId, agent_id: AgentId) -> str:
         return f"{STATE_VOLUME_MOUNT_PATH}/host_state/{host_id}/{agent_id}.json"
 
-    def _exec(self, command: str, timeout_seconds: float = 30.0) -> str:
-        return self._docker_ssh.exec_in_container(self._state_container_name, command, timeout_seconds=timeout_seconds)
+    def _exec_in_state_container(self, command: str) -> str:
+        """Run a shell command inside the state container via the outer host."""
+        full_command = f"docker exec {shlex.quote(self._state_container_name)} sh -c {shlex.quote(command)}"
+        return _run_outer_command(self._outer, full_command, label="state-container-exec")
 
     def write_host_record(self, host_record: VpsDockerHostRecord) -> None:
         """Write a host record to the state volume."""
@@ -143,7 +174,7 @@ class VpsDockerHostStore:
         data = host_record.model_dump_json(indent=2)
         # Ensure parent directory exists and write atomically
         parent_dir = path.rsplit("/", 1)[0]
-        self._exec(f"mkdir -p '{parent_dir}' && cat > '{path}' << 'MNGR_EOF'\n{data}\nMNGR_EOF")
+        self._exec_in_state_container(f"mkdir -p '{parent_dir}' && cat > '{path}' << 'MNGR_EOF'\n{data}\nMNGR_EOF")
         logger.trace("Wrote host record: {}", path)
         self._cache[host_id] = host_record
 
@@ -154,11 +185,11 @@ class VpsDockerHostStore:
 
         path = self._host_record_path(host_id)
         try:
-            data = self._exec(f"cat '{path}'")
+            data = self._exec_in_state_container(f"cat '{path}'")
             host_record = VpsDockerHostRecord.model_validate_json(data)
             self._cache[host_id] = host_record
             return host_record
-        except ContainerSetupError as e:
+        except MngrError as e:
             logger.debug("Host record {} not found on state volume: {}", host_id, e)
             return None
         except (json.JSONDecodeError, ValueError) as e:
@@ -169,14 +200,14 @@ class VpsDockerHostStore:
         """Delete a host record and associated agent data."""
         agent_dir = self._agent_data_dir(host_id)
         try:
-            self._exec(f"rm -rf '{agent_dir}'")
-        except ContainerSetupError as e:
+            self._exec_in_state_container(f"rm -rf '{agent_dir}'")
+        except MngrError as e:
             logger.trace("No agent data to clean up for {}: {}", host_id, e)
 
         path = self._host_record_path(host_id)
         try:
-            self._exec(f"rm -f '{path}'")
-        except ContainerSetupError as e:
+            self._exec_in_state_container(f"rm -f '{path}'")
+        except MngrError as e:
             logger.warning("Failed to delete host record {}: {}", host_id, e)
 
         self._cache.pop(host_id, None)
@@ -188,8 +219,8 @@ class VpsDockerHostStore:
             f'for f in \'{state_dir}\'/*.json; do [ -f "$f" ] || continue; echo \'{_FILE_SEP}\'"$f"; cat "$f"; done'
         )
         try:
-            output = self._exec(script)
-        except ContainerSetupError as e:
+            output = self._exec_in_state_container(script)
+        except MngrError as e:
             logger.debug("No host records found on state volume: {}", e)
             return []
 
@@ -205,7 +236,7 @@ class VpsDockerHostStore:
         path = self._agent_data_path(host_id, AgentId(str(agent_id_value)))
         data = json.dumps(dict(agent_data), indent=2)
         parent_dir = path.rsplit("/", 1)[0]
-        self._exec(f"mkdir -p '{parent_dir}' && cat > '{path}' << 'MNGR_EOF'\n{data}\nMNGR_EOF")
+        self._exec_in_state_container(f"mkdir -p '{parent_dir}' && cat > '{path}' << 'MNGR_EOF'\n{data}\nMNGR_EOF")
         logger.trace("Persisted agent data: {}", path)
 
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict[str, Any]]:
@@ -215,8 +246,8 @@ class VpsDockerHostStore:
             f'for f in \'{agent_dir}\'/*.json; do [ -f "$f" ] || continue; echo \'{_FILE_SEP}\'"$f"; cat "$f"; done'
         )
         try:
-            output = self._exec(script)
-        except ContainerSetupError as e:
+            output = self._exec_in_state_container(script)
+        except MngrError as e:
             logger.debug("No agent data found for host {}: {}", host_id, e)
             return []
 
@@ -226,8 +257,8 @@ class VpsDockerHostStore:
         """Remove persisted agent data."""
         path = self._agent_data_path(host_id, agent_id)
         try:
-            self._exec(f"rm -f '{path}'")
-        except ContainerSetupError as e:
+            self._exec_in_state_container(f"rm -f '{path}'")
+        except MngrError as e:
             logger.warning("Failed to remove agent data {}: {}", path, e)
 
     def list_all_host_records_with_agents(
@@ -247,8 +278,8 @@ class VpsDockerHostStore:
             f"done"
         )
         try:
-            output = self._exec(script)
-        except ContainerSetupError as e:
+            output = self._exec_in_state_container(script)
+        except MngrError as e:
             logger.debug("No records found on state volume: {}", e)
             return [], {}
 

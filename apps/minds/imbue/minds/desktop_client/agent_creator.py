@@ -48,6 +48,7 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
+from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import GitBranch
@@ -340,12 +341,9 @@ def _make_host_name(agent_name: AgentName) -> str:
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
     agent_name: AgentName,
-    host_env_file: Path | None = None,
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
-    imbue_cloud_anthropic_api_key: str | None = None,
-    imbue_cloud_anthropic_base_url: str | None = None,
 ) -> tuple[list[str], str]:
     """Build the mngr create command and generate an API key for the agent.
 
@@ -364,7 +362,7 @@ def _build_mngr_create_command(
     IMBUE_CLOUD mode: --new-host on the imbue_cloud_<slug> provider (the
         plugin's create_host adopts the pool's pre-baked agent under
         ``agent_name``); ``imbue_cloud_*`` arguments encode the lease
-        attributes (--build-arg) and ANTHROPIC_API_KEY/BASE_URL (--host-env).
+        attributes (--build-arg).
 
     For modes that create a separate host (LOCAL, LIMA, CLOUD, IMBUE_CLOUD),
     the agent address uses ``agent_name@{agent_name}-host`` so hosts are
@@ -373,9 +371,12 @@ def _build_mngr_create_command(
     host instead of failing on a duplicate name (IMBUE_CLOUD's lease
     flow is one-shot per pool host, so reuse is not meaningful there).
 
-    When ``host_env_file`` is supplied, its contents are loaded into the host
-    environment via ``--host-env-file`` so secrets from a local ``.env`` reach
-    the agent without being baked into the template.
+    Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``, ``GH_TOKEN``)
+    are forwarded by the FCT template's own ``pass_(host_)env`` declarations,
+    not by inline flags here -- ``run_mngr_create`` populates them in the
+    subprocess env when needed and the template-declared forwards pick
+    them up. Keeping the forwarding declaration in FCT means the same
+    template works for ``mngr create`` invocations from outside minds too.
 
     For container/VM/VPS/leased modes, ``LATCHKEY_GATEWAY=http://127.0.0.1:<port>``
     is injected unconditionally; the agent reaches that loopback URL via the
@@ -448,7 +449,7 @@ def _build_mngr_create_command(
     # ``--template main --template <mode>``; the per-mode template provides
     # the provider-specific knobs (idle_mode, pass_host_env, build_arg, ...)
     # while runtime-only knobs that vary per-invocation (``--new-host``,
-    # ``-b lease_attributes``, ``--host-env-file <path>``) stay inline.
+    # ``-b lease_attributes``) stay inline.
     match launch_mode:
         case LaunchMode.DEV:
             # Local (same-machine) mode: the agent inherits the bootstrap-set
@@ -469,10 +470,7 @@ def _build_mngr_create_command(
             # ``main`` + ``imbue_cloud`` templates set ``idle_mode = disabled``
             # + ``pass_host_env`` for the LiteLLM creds, and the runtime-only
             # lease-attribute ``-b`` flags stay inline because they vary per
-            # invocation. ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL (LiteLLM
-            # creds) are forwarded via the template's ``pass_host_env`` --
-            # ``run_mngr_create`` writes them into the subprocess env so the
-            # host actually has them when ``--pass-host-env`` reads.
+            # invocation.
             mngr_command.extend(["--new-host", "--template", "main", "--template", "imbue_cloud"])
             if imbue_cloud_repo_url:
                 mngr_command.extend(["-b", f"repo_url={imbue_cloud_repo_url}"])
@@ -480,9 +478,6 @@ def _build_mngr_create_command(
                 mngr_command.extend(["-b", f"repo_branch_or_tag={imbue_cloud_branch_or_tag}"])
         case _ as unreachable:
             assert_never(unreachable)
-
-    if host_env_file is not None:
-        mngr_command.extend(["--host-env-file", str(host_env_file)])
 
     return mngr_command, api_key
 
@@ -623,12 +618,12 @@ def run_mngr_create(
     workspace_dir: Path | None,
     agent_name: AgentName,
     on_output: OutputCallback | None = None,
-    host_env_file: Path | None = None,
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
-    imbue_cloud_anthropic_api_key: str | None = None,
-    imbue_cloud_anthropic_base_url: str | None = None,
+    anthropic_api_key: str | None = None,
+    anthropic_base_url: str | None = None,
+    gh_token: str | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> tuple[str, AgentId]:
@@ -641,6 +636,11 @@ def run_mngr_create(
     pool host has its own pre-baked ``.mngr/`` and the local repo is
     irrelevant.
 
+    ``anthropic_api_key`` / ``anthropic_base_url`` / ``gh_token`` are placed
+    into the subprocess env (not argv) so they don't show up in ``ps`` output;
+    the FCT template's own ``pass_(host_)env`` declarations cause mngr to
+    forward them onto the host (or the DEV agent) as appropriate.
+
     Returns ``(api_key, canonical_agent_id)``. The canonical id is parsed
     out of the ``"event": "created"`` JSONL line that ``mngr create``
     emits as its final stdout record.
@@ -651,26 +651,25 @@ def run_mngr_create(
     mngr_command, api_key = _build_mngr_create_command(
         launch_mode,
         agent_name,
-        host_env_file=host_env_file,
         imbue_cloud_account=imbue_cloud_account,
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
-        imbue_cloud_anthropic_api_key=imbue_cloud_anthropic_api_key,
-        imbue_cloud_anthropic_base_url=imbue_cloud_anthropic_base_url,
     )
 
-    # Build the subprocess env from the parent's env + any IMBUE_CLOUD
-    # secrets we inject for ``--pass-host-env`` to forward. Mutating
-    # ``os.environ`` directly would leak the LiteLLM key into the desktop
+    # Build the subprocess env from the parent's env + any secrets we inject
+    # for the matching ``--pass-(host-)env`` flag to forward. Mutating
+    # ``os.environ`` directly would leak the user's secrets into the desktop
     # client's other subprocesses, so we keep the override scoped to this
     # invocation.
     subprocess_env: dict[str, str] | None = None
-    if launch_mode is LaunchMode.IMBUE_CLOUD and (imbue_cloud_anthropic_api_key or imbue_cloud_anthropic_base_url):
+    if anthropic_api_key is not None or anthropic_base_url is not None or gh_token is not None:
         subprocess_env = dict(os.environ)
-        if imbue_cloud_anthropic_api_key:
-            subprocess_env["ANTHROPIC_API_KEY"] = imbue_cloud_anthropic_api_key
-        if imbue_cloud_anthropic_base_url:
-            subprocess_env["ANTHROPIC_BASE_URL"] = imbue_cloud_anthropic_base_url
+        if anthropic_api_key is not None:
+            subprocess_env["ANTHROPIC_API_KEY"] = anthropic_api_key
+        if anthropic_base_url is not None:
+            subprocess_env["ANTHROPIC_BASE_URL"] = anthropic_base_url
+        if gh_token is not None:
+            subprocess_env["GH_TOKEN"] = gh_token
 
     logger.info("Running: {}", " ".join(mngr_command))
 
@@ -808,26 +807,37 @@ class AgentCreator(MutableModel):
         agent_name: str = "",
         branch: str = "",
         launch_mode: LaunchMode = LaunchMode.LOCAL,
-        include_env_file: bool = False,
+        ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
         account_email: str = "",
         branch_or_tag: str = "",
+        anthropic_api_key: str = "",
+        gh_token: str = "",
         on_created: Callable[[AgentId], None] | None = None,
     ) -> CreationId:
         """Start creating an agent from a git URL or local path in a background thread.
 
-        When ``include_env_file`` is true and ``repo_source`` resolves to a local
-        directory containing a ``.env`` file, that file is passed to ``mngr create``
-        via ``--host-env-file`` so local secrets reach the new agent's host.
-        The flag is ignored for git URLs (since ``.env`` is gitignored).
+        ``ai_provider`` controls how the agent obtains its Anthropic
+        credentials, decoupled from the compute provider:
 
-        For ``LaunchMode.IMBUE_CLOUD``, the LiteLLM virtual key is minted via
-        ``imbue_cloud_cli.create_litellm_key`` and then ``mngr create`` is
-        invoked against the ``imbue_cloud_<account-slug>`` provider; the
-        plugin's ``ImbueCloudProvider.create_host`` runs the lease + SSH
-        bootstrap and the rest of mngr's create pipeline adopts the
-        pool host's pre-baked agent under the requested name. The plugin
-        owns the SuperTokens session, so minds only needs to know which
-        account to ask for.
+        - ``IMBUE_CLOUD`` -- mint a LiteLLM virtual key against
+          ``account_email`` and inject ``ANTHROPIC_API_KEY`` /
+          ``ANTHROPIC_BASE_URL`` so the agent talks to LiteLLM. Requires
+          an account.
+        - ``API_KEY`` -- inject ``anthropic_api_key`` directly so the agent
+          talks to the official Anthropic API.
+        - ``SUBSCRIPTION`` -- inject neither; the user signs in to Claude
+          interactively in the workspace.
+
+        ``gh_token`` is optional; when provided it's forwarded to the host
+        (or the agent in DEV mode) as ``GH_TOKEN``.
+
+        For ``LaunchMode.IMBUE_CLOUD``, the agent runs on a leased pool host
+        via the ``imbue_cloud_<account-slug>`` provider; the plugin's
+        ``ImbueCloudProvider.create_host`` runs the lease + SSH bootstrap
+        and the rest of mngr's create pipeline adopts the pool host's
+        pre-baked agent under the requested name. The plugin owns the
+        SuperTokens session, so minds only needs to know which account to
+        ask for.
 
         When ``on_created`` is provided, it is called with the canonical
         ``AgentId`` once ``mngr create`` returns (immediately before the
@@ -861,9 +871,11 @@ class AgentCreator(MutableModel):
                 effective_branch,
                 log_queue,
                 launch_mode,
-                include_env_file,
+                ai_provider,
                 account_email,
                 branch_or_tag,
+                anthropic_api_key,
+                gh_token,
                 on_created,
             ),
             daemon=True,
@@ -916,24 +928,31 @@ class AgentCreator(MutableModel):
         branch: str,
         log_queue: queue.Queue[str],
         launch_mode: LaunchMode,
-        include_env_file: bool,
+        ai_provider: AIProvider,
         account_email: str = "",
         branch_or_tag: str = "",
+        anthropic_api_key: str = "",
+        gh_token: str = "",
         on_created: Callable[[AgentId], None] | None = None,
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent.
 
-        IMBUE_CLOUD mode mints a LiteLLM key first (via the plugin CLI) and
-        passes it as ``ANTHROPIC_API_KEY``/``ANTHROPIC_BASE_URL`` host-env
-        flags on ``mngr create``. The plugin's provider backend handles the
-        lease + SSH bootstrap inside ``create_host``; the canonical agent
-        id is parsed from ``mngr create``'s JSONL ``"event": "created"``
-        line (no follow-up ``mngr list`` lookup -- which used to fail when
-        the SSH provider had stale dynamic_hosts entries).
+        For ``ai_provider == IMBUE_CLOUD``, mints a LiteLLM key (via the
+        plugin CLI) and forwards ``ANTHROPIC_API_KEY``/``ANTHROPIC_BASE_URL``
+        onto the host (or DEV agent) via the subprocess env + matching
+        ``--pass-(host-)env`` flags. For ``API_KEY``, forwards the
+        user-supplied key as ``ANTHROPIC_API_KEY``. For ``SUBSCRIPTION``,
+        injects neither.
+
+        For ``LaunchMode.IMBUE_CLOUD``, the plugin's provider backend
+        handles the lease + SSH bootstrap inside ``create_host``; the
+        canonical agent id is parsed from ``mngr create``'s JSONL
+        ``"event": "created"`` line (no follow-up ``mngr list`` lookup --
+        which used to fail when the SSH provider had stale dynamic_hosts
+        entries).
         """
         cid_str = str(creation_id)
         emit_log = make_log_callback(log_queue)
-        host_env_file: Path | None = None
         workspace_dir: Path | None = None
         try:
             with log_span(
@@ -957,15 +976,6 @@ class AgentCreator(MutableModel):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
                     if not resolved_path.is_dir():
                         raise MngrCommandError("Local path does not exist: {}".format(resolved_path))
-                    if include_env_file:
-                        candidate = resolved_path / ".env"
-                        if candidate.is_file():
-                            host_env_file = candidate
-                            log_queue.put("[minds] Including .env file: {}".format(candidate))
-                        else:
-                            log_queue.put(
-                                "[minds] No .env file found at {}; skipping --host-env-file".format(candidate)
-                            )
 
                     if _is_git_worktree(resolved_path):
                         # Worktrees have a .git file pointing to the parent repo's
@@ -1024,24 +1034,40 @@ class AgentCreator(MutableModel):
                         parent_cg=self.root_concurrency_group,
                     )
 
-                key_material: LiteLLMKeyMaterial | None = None
-                if launch_mode is LaunchMode.IMBUE_CLOUD:
-                    if self.imbue_cloud_cli is None:
-                        raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_cli to be configured")
-                    if not account_email:
-                        raise MngrCommandError("IMBUE_CLOUD mode requires an account_email to be supplied")
-                    log_queue.put(f"[minds] Minting LiteLLM virtual key for account {account_email}...")
-                    try:
-                        key_material = self.imbue_cloud_cli.create_litellm_key(
-                            account=account_email,
-                            alias=None,
-                            max_budget=100.0,
-                            budget_duration="1d",
-                            metadata={"agent_name": agent_name},
-                        )
-                    except ImbueCloudCliError as exc:
-                        raise MngrCommandError(f"Failed to create LiteLLM key: {exc}") from exc
-                    log_queue.put("[minds] LiteLLM key minted.")
+                # Resolve the Anthropic credentials according to the AI
+                # provider choice. IMBUE_CLOUD mints a fresh LiteLLM key;
+                # API_KEY uses the user-supplied key directly; SUBSCRIPTION
+                # injects nothing so the agent prompts the user to log in.
+                effective_anthropic_api_key: str | None = None
+                effective_anthropic_base_url: str | None = None
+                match ai_provider:
+                    case AIProvider.IMBUE_CLOUD:
+                        if self.imbue_cloud_cli is None:
+                            raise MngrCommandError("AI provider IMBUE_CLOUD requires imbue_cloud_cli to be configured")
+                        if not account_email:
+                            raise MngrCommandError("AI provider IMBUE_CLOUD requires an account_email to be supplied")
+                        log_queue.put(f"[minds] Minting LiteLLM virtual key for account {account_email}...")
+                        try:
+                            key_material: LiteLLMKeyMaterial = self.imbue_cloud_cli.create_litellm_key(
+                                account=account_email,
+                                alias=None,
+                                max_budget=100.0,
+                                budget_duration="1d",
+                                metadata={"agent_name": agent_name},
+                            )
+                        except ImbueCloudCliError as exc:
+                            raise MngrCommandError(f"Failed to create LiteLLM key: {exc}") from exc
+                        log_queue.put("[minds] LiteLLM key minted.")
+                        effective_anthropic_api_key = key_material.key.get_secret_value()
+                        effective_anthropic_base_url = str(key_material.base_url)
+                    case AIProvider.API_KEY:
+                        if not anthropic_api_key:
+                            raise MngrCommandError("AI provider API_KEY requires anthropic_api_key to be supplied")
+                        effective_anthropic_api_key = anthropic_api_key
+                    case AIProvider.SUBSCRIPTION:
+                        pass
+                    case _ as unreachable:
+                        assert_never(unreachable)
 
                 with self._lock:
                     self._statuses[cid_str] = AgentCreationStatus.CREATING
@@ -1053,7 +1079,6 @@ class AgentCreator(MutableModel):
                     workspace_dir=workspace_dir,
                     agent_name=parsed_name,
                     on_output=emit_log,
-                    host_env_file=host_env_file,
                     imbue_cloud_account=account_email if launch_mode is LaunchMode.IMBUE_CLOUD else None,
                     # Don't constrain the lease on ``repo_url`` here:
                     # ``repo_source`` is whatever the user picked in the UI
@@ -1068,10 +1093,9 @@ class AgentCreator(MutableModel):
                     imbue_cloud_branch_or_tag=(
                         branch_or_tag if launch_mode is LaunchMode.IMBUE_CLOUD and branch_or_tag else None
                     ),
-                    imbue_cloud_anthropic_api_key=(
-                        key_material.key.get_secret_value() if key_material is not None else None
-                    ),
-                    imbue_cloud_anthropic_base_url=(str(key_material.base_url) if key_material is not None else None),
+                    anthropic_api_key=effective_anthropic_api_key,
+                    anthropic_base_url=effective_anthropic_base_url,
+                    gh_token=gh_token if gh_token else None,
                     parent_cg=self.root_concurrency_group,
                 )
 

@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>] [--[no-]start]
+mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>] [--[no-]start] [--[no-]outer] [--missing-outer <MODE>]
 ```
 
 Execute a shell command on one or more agents' hosts.
@@ -59,6 +59,13 @@ mngr exec [OPTIONS] [AGENTS]... COMMAND
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--on-error` | choice (`abort` &#x7C; `continue`) | What to do when errors occur: abort (stop immediately) or continue (keep going) | `continue` |
+
+## Outer Host
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--outer`, `--no-outer` | boolean | Run the command on each agent's outer host (the underlying VPS / docker daemon host / local machine that hosts the container) instead of on the agent's own host. Targeted agents are deduped by outer host, so the command runs once per unique outer. | `False` |
+| `--missing-outer` | choice (`abort` &#x7C; `warn` &#x7C; `ignore`) | Behavior when an --outer target has no accessible outer host: abort (exit 1), warn (skip + warn), ignore (skip silently). | `warn` |
 
 ## Common
 
