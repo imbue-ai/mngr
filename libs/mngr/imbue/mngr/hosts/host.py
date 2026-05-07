@@ -1708,6 +1708,15 @@ class Host(BaseHost, OnlineHostInterface):
     ) -> None:
         """Push git repo from source to target, mirroring branches and tags."""
         self._warn_if_submodules_detected(source_host, source_path)
+
+        # When source and target are the same host, skip SSH entirely and push
+        # between two local paths on that host. Otherwise the SSH path below
+        # ends up shipping laptop-local key paths to a remote source host and
+        # failing with "Identity file ... not accessible".
+        if source_host.id == self.id:
+            self._git_push_to_target_same_host(source_host, source_path, target_path)
+            return
+
         target_ssh_info = self.get_ssh_connection_info()
 
         if target_ssh_info is None:
@@ -1780,6 +1789,23 @@ class Host(BaseHost, OnlineHostInterface):
                 if not result.success:
                     output = (result.stderr + "\n" + result.stdout).strip()
                     raise MngrError(f"Failed to push git repo from remote source: {output}")
+
+    def _git_push_to_target_same_host(
+        self,
+        host: OnlineHostInterface,
+        source_path: Path,
+        target_path: Path,
+    ) -> None:
+        """Mirror a git repo between two local paths on a single host (no SSH)."""
+        refspecs = " ".join(shlex.quote(r) for r in GIT_MIRROR_PUSH_REFSPECS)
+        git_url = shlex.quote(str(target_path / ".git"))
+        # Don't bother pushing LFS objects -- they can be transferred later as needed.
+        push_cmd = f"GIT_LFS_SKIP_PUSH=1 git push --no-verify --force --prune {git_url} {refspecs}"
+        with log_span("Pushing git repo to target on same host: {}", target_path):
+            result = host.execute_idempotent_command(push_cmd, cwd=source_path)
+            if not result.success:
+                output = (result.stderr + "\n" + result.stdout).strip()
+                raise MngrError(f"Failed to push git repo on same host: {output}")
 
     def _warn_if_submodules_detected(
         self,
