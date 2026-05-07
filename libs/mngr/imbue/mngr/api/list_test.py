@@ -67,7 +67,7 @@ from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.utils.cel_utils import TolerantMapType
 from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
-from imbue.mngr.utils.cel_utils import replace_paths_with_tolerant_map
+from imbue.mngr.utils.cel_utils import with_tolerant_paths
 from imbue.mngr.utils.testing import capture_loguru
 
 # =============================================================================
@@ -555,8 +555,10 @@ def test_apply_cel_filters_wraps_each_schemaless_path_with_tolerant_map(path: tu
     at each schemaless path; siblings stay strict.
     """
     agent = _make_agent_details("test-agent", _make_host_details())
-    cel_context = build_cel_context(agent_details_to_cel_context(agent))
-    replace_paths_with_tolerant_map(cel_context, _AGENT_SCHEMALESS_PATHS)
+    cel_context = with_tolerant_paths(
+        build_cel_context(agent_details_to_cel_context(agent)),
+        _AGENT_SCHEMALESS_PATHS,
+    )
 
     target: Any = cel_context
     for step in path:

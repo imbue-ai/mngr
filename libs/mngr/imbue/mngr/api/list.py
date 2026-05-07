@@ -38,7 +38,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
 from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
-from imbue.mngr.utils.cel_utils import replace_paths_with_tolerant_map
+from imbue.mngr.utils.cel_utils import with_tolerant_paths
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 # Paths in the agent CEL context whose missing-key access should evaluate to a
@@ -655,8 +655,10 @@ def _apply_cel_filters(
     Returns True if the agent should be included (matches all include filters
     and doesn't match any exclude filters).
     """
-    cel_context = build_cel_context(agent_details_to_cel_context(agent))
-    replace_paths_with_tolerant_map(cel_context, _AGENT_SCHEMALESS_PATHS)
+    cel_context = with_tolerant_paths(
+        build_cel_context(agent_details_to_cel_context(agent)),
+        _AGENT_SCHEMALESS_PATHS,
+    )
     return apply_compiled_cel_filters(
         cel_context=cel_context,
         include_filters=include_filters,

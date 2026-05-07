@@ -16,7 +16,7 @@ from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.cel_utils import compile_cel_sort_keys
 from imbue.mngr.utils.cel_utils import evaluate_cel_sort_key
 from imbue.mngr.utils.cel_utils import parse_cel_sort_spec
-from imbue.mngr.utils.cel_utils import replace_paths_with_tolerant_map
+from imbue.mngr.utils.cel_utils import with_tolerant_paths
 from imbue.mngr.utils.testing import capture_loguru
 
 
@@ -24,9 +24,7 @@ def _build_cel_context_with_tolerant_paths(
     raw_context: dict[str, Any], paths: tuple[tuple[str, ...], ...]
 ) -> dict[str, Any]:
     """Test helper: convert + apply tolerance, mirroring how production callers compose."""
-    cel_context = build_cel_context(raw_context)
-    replace_paths_with_tolerant_map(cel_context, paths)
-    return cel_context
+    return with_tolerant_paths(build_cel_context(raw_context), paths)
 
 
 def test_cel_string_contains_method() -> None:
@@ -304,7 +302,7 @@ def test_evaluate_cel_sort_key_returns_none_for_missing_field() -> None:
 
 
 # =============================================================================
-# Tests for TolerantMapType / replace_paths_with_tolerant_map
+# Tests for TolerantMapType / with_tolerant_paths
 # =============================================================================
 
 
@@ -412,12 +410,12 @@ def test_tolerant_map_has_macro_correctly_reports_presence() -> None:
     assert result_present is True
 
 
-def test_replace_paths_with_tolerant_map_at_nested_path() -> None:
+def test_with_tolerant_paths_at_nested_path() -> None:
     """A nested path target gets wrapped tolerantly; siblings stay strict."""
     raw_context = {"host": {"tags": {}, "name": "h1"}}
-    cel_context = build_cel_context(raw_context)
-    replace_paths_with_tolerant_map(cel_context, (("host", "tags"),))
-    host = cel_context["host"]
+    original = build_cel_context(raw_context)
+    new_context = with_tolerant_paths(original, (("host", "tags"),))
+    host = new_context["host"]
     assert isinstance(host, celpy.celtypes.MapType)
     assert not isinstance(host, TolerantMapType)
     tags = host[celpy.json_to_cel("tags")]
@@ -427,25 +425,43 @@ def test_replace_paths_with_tolerant_map_at_nested_path() -> None:
         _ = host[celpy.json_to_cel("missing")]
 
 
-def test_replace_paths_with_tolerant_map_multiple_paths() -> None:
+def test_with_tolerant_paths_does_not_mutate_input() -> None:
+    """The input cel_context is unchanged; tolerance is applied only on the returned copy."""
+    raw_context = {"host": {"tags": {}, "name": "h1"}, "labels": {}}
+    original = build_cel_context(raw_context)
+    new_context = with_tolerant_paths(original, (("labels",), ("host", "tags")))
+
+    # Top-level: original "labels" is still strict, new is tolerant.
+    assert not isinstance(original["labels"], TolerantMapType)
+    assert isinstance(new_context["labels"], TolerantMapType)
+    # Nested: original host.tags is still strict, new host.tags is tolerant.
+    original_tags = original["host"][celpy.json_to_cel("tags")]
+    new_tags = new_context["host"][celpy.json_to_cel("tags")]
+    assert not isinstance(original_tags, TolerantMapType)
+    assert isinstance(new_tags, TolerantMapType)
+
+
+def test_with_tolerant_paths_multiple_paths() -> None:
     """Multiple paths can be wrapped in one call; non-listed paths stay strict."""
     raw_context = {
         "labels": {"a": "1"},
         "plugin": {},
         "host": {"tags": {}, "name": "h1", "ssh": {"host": "h"}},
     }
-    cel_context = build_cel_context(raw_context)
-    replace_paths_with_tolerant_map(
-        cel_context,
+    original = build_cel_context(raw_context)
+    new_context = with_tolerant_paths(
+        original,
         (("labels",), ("plugin",), ("host", "tags")),
     )
-    assert isinstance(cel_context["labels"], TolerantMapType)
-    assert isinstance(cel_context["plugin"], TolerantMapType)
-    host = cel_context["host"]
+    assert isinstance(new_context["labels"], TolerantMapType)
+    assert isinstance(new_context["plugin"], TolerantMapType)
+    host = new_context["host"]
     assert isinstance(host, celpy.celtypes.MapType)
     assert not isinstance(host, TolerantMapType)
     assert isinstance(host[celpy.json_to_cel("tags")], TolerantMapType)
-    # Non-listed nested map (host.ssh) stays strict.
+    # Non-listed nested map (host.ssh) stays strict and is shared by reference
+    # with the original (since it doesn't lie on any tolerant path).
     ssh = host[celpy.json_to_cel("ssh")]
     assert isinstance(ssh, celpy.celtypes.MapType)
     assert not isinstance(ssh, TolerantMapType)
+    assert ssh is original["host"][celpy.json_to_cel("ssh")]

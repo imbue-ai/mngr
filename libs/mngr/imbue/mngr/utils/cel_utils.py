@@ -83,8 +83,8 @@ def _convert_to_cel_value(value: Any) -> Any:
     intact and produces strict `MapType` / `ListType`. Leaf types delegate to
     `celpy.json_to_cel` (which handles bool/int/float/str/datetime/None).
 
-    Tolerance for schemaless fields is *not* baked in here — apply
-    `replace_paths_with_tolerant_map` to a built context if you need it.
+    Tolerance for schemaless fields is not baked in here -- apply
+    `with_tolerant_paths` to a built context if you need it.
     """
     if isinstance(value, dict):
         return celpy.celtypes.MapType({celpy.json_to_cel(k): _convert_to_cel_value(v) for k, v in value.items()})
@@ -99,29 +99,62 @@ def build_cel_context(raw_context: dict[str, Any]) -> dict[str, Any]:
     return {k: _convert_to_cel_value(v) for k, v in raw_context.items()}
 
 
-def replace_paths_with_tolerant_map(
+def with_tolerant_paths(
     cel_context: dict[str, Any],
     paths: Sequence[Sequence[str]],
-) -> None:
-    """For each `path` in `paths`, replace cel_context[path[0]]...[path[-1]]
-    with a `TolerantMapType` wrapping the existing MapType at that location.
+) -> dict[str, Any]:
+    """Return a copy of `cel_context` where each `path` target is wrapped in
+    `TolerantMapType`. The input is unchanged.
 
-    Mutates `cel_context` in place. Each path navigates from the top of the
-    CEL context; the target at the end of the path must already be a `MapType`
-    (e.g. produced by `build_cel_context` from a raw dict). Use to opt specific
-    schemaless fields into tolerant missing-key behavior without affecting
-    sibling fields.
+    Each `path` navigates from the top of the CEL context; the target at the
+    end of the path must already be a `MapType` (e.g. produced by
+    `build_cel_context` from a raw dict). Use to opt specific schemaless
+    fields into tolerant missing-key behavior without affecting siblings.
+
+    Sharing: only dicts/MapTypes that lie on a requested path are copied
+    (shallow); other values are shared by reference with the input. The
+    cost is bounded by the depth and number of paths, not the size of the
+    CEL context.
 
     Top-level keys in `cel_context` are plain Python strings; nested MapType
     keys are CEL StringType. Both look up correctly with plain `str` because
     StringType is a `str` subclass with consistent hash/eq.
     """
-    for path in paths:
-        *prefix, last = path
-        parent: Any = cel_context
-        for step in prefix:
-            parent = parent[step]
-        parent[last] = TolerantMapType(parent[last])
+    if not paths:
+        return cel_context
+    return _wrap_paths_recursively(cel_context, [tuple(p) for p in paths])
+
+
+def _wrap_paths_recursively(node: Any, paths: Sequence[tuple[str, ...]]) -> Any:
+    """Return a copy of `node` with `TolerantMapType` applied at each `path`.
+
+    `paths` are remaining suffixes from the perspective of `node`; an empty
+    path means "wrap `node` itself." Recurses into children specified by the
+    first segment of any non-empty path; children not on any path are shared
+    by reference.
+    """
+    wrap_here = any(len(p) == 0 for p in paths)
+    descend = [p for p in paths if len(p) > 0]
+
+    if not isinstance(node, dict):
+        # Can't descend further; if the caller wanted to wrap a non-dict node
+        # tolerantly, that's a programming error -- return node unchanged.
+        return node
+
+    new_node: dict[Any, Any] = dict(node)
+    by_first: dict[str, list[tuple[str, ...]]] = {}
+    for path in descend:
+        first, *rest = path
+        by_first.setdefault(first, []).append(tuple(rest))
+    for key, sub_paths in by_first.items():
+        if key in new_node:
+            new_node[key] = _wrap_paths_recursively(new_node[key], sub_paths)
+
+    if wrap_here:
+        return TolerantMapType(new_node)
+    if isinstance(node, celpy.celtypes.MapType):
+        return celpy.celtypes.MapType(new_node)
+    return new_node
 
 
 def apply_compiled_cel_filters(
@@ -135,8 +168,8 @@ def apply_compiled_cel_filters(
 
     Returns True if the context should be included (matches all include filters
     and doesn't match any exclude filters). Use this when the caller wants to
-    customize the CEL context (e.g. via `replace_paths_with_tolerant_map`)
-    between conversion and filter evaluation; otherwise prefer
+    customize the CEL context (e.g. via `with_tolerant_paths`) between
+    conversion and filter evaluation; otherwise prefer
     `apply_cel_filters_to_context` which composes both steps.
     """
     for prgm in include_filters:
