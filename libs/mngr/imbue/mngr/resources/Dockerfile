@@ -1,13 +1,3 @@
-# Build stage: compile the offload binary so the final image can apply
-# thin diffs at sandbox-prepare time. Offload >=0.9.0 expects to invoke
-# `offload apply-diff` inside the sandbox image; without the binary present,
-# offload falls back to a full image rebuild on every run, defeating the
-# checkpoint cache. Keep this version pinned in sync with the offload
-# version pinned in .github/workflows/ci.yml.
-FROM rust:1-bookworm AS offload-builder
-ARG OFFLOAD_VERSION=0.9.2
-RUN cargo install offload@${OFFLOAD_VERSION} --locked --root /opt/offload
-
 FROM python:3.12-slim
 
 # Install system dependencies including tini for proper signal handling
@@ -74,10 +64,13 @@ ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 # without this, there are some annoying bugs on modal's side with snapshotting
 ENV UV_LINK_MODE=copy
 
-# offload binary, used by `offload apply-diff` during sandbox prepare to
-# layer thin diffs over the cached checkpoint image (see the offload-builder
-# stage above for the version pin and rationale).
-COPY --from=offload-builder /opt/offload/bin/offload /usr/local/bin/offload
+# Keep this version pinned in sync with .github/workflows/ci.yml.
+# Do not use ARG -- Modal's per-layer caching breaks ARG propagation.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
+    . /root/.cargo/env && \
+    cargo install offload@0.9.4 --locked --root /opt/offload && \
+    cp /opt/offload/bin/offload /usr/local/bin/offload && \
+    rm -rf /root/.cargo /root/.rustup /opt/offload
 
 # copy in all of our code (offload exports the repo tree as the build context;
 # mngr_schedule unpacks its packaged tarball producer-side via
@@ -137,12 +130,12 @@ RUN if [ -f /code/mngr/.git ]; then \
 # will copy project deploy files and where scheduled commands will run
 WORKDIR /code/mngr/
 
-# install python dependencies
-RUN unset UV_INDEX_URL && uv sync --all-packages && uv tool install -e /code/mngr/libs/mngr --with-editable /code/mngr/libs/mngr_modal --with-editable /code/mngr/libs/mngr_schedule --with-editable /code/mngr/libs/mngr_claude && uv tool install modal
+# === SOURCE-DEPENDENT SETUP ===
+# All setup that depends on repo file contents goes in post_file_setup.sh.
+# offload's post_patch_cmd runs the same script after thin-diff patches.
+# DO NOT add RUN lines after this -- add steps to post_file_setup.sh instead.
+COPY scripts/post_file_setup.sh /usr/local/bin/post_file_setup.sh
+RUN chmod +x /usr/local/bin/post_file_setup.sh && /usr/local/bin/post_file_setup.sh
 
-# Run idly forever while being responsive to SIGTERM.
-# PID 1 must explicitly install signal handlers in order to respect signals.
-# `tail -f /dev/null` does not do this.
-# Since `docker stop` issues a `SIGTERM`, we use an explicit `trap`.
-# In practice, this appears to enable rapid interactions using `docker stop`.
+# DO NOT add instructions between post_file_setup.sh above and CMD below.
 CMD ["sh", "-c", "trap 'exit 0' TERM; tail -f /dev/null & wait"]
