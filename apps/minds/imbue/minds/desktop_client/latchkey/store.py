@@ -219,11 +219,7 @@ def opaque_permissions_dir(data_dir: Path) -> Path:
 def new_opaque_permissions_path(data_dir: Path) -> Path:
     """Return a fresh, unused opaque-named permissions handle path.
 
-    The caller is responsible for materializing the file (typically with
-    a deny-all baseline via ``save_permissions``) before using the path
-    in a JWT. Path collisions are astronomically unlikely with UUID4 but
-    we still spin until we find an unused name to be defensive against a
-    cosmic-ray-class accident.
+    The caller is responsible for materializing the file.
     """
     parent = opaque_permissions_dir(data_dir)
     parent.mkdir(parents=True, exist_ok=True)
@@ -249,15 +245,9 @@ def link_opaque_permissions_to_agent(
     canonical path so the JWT minted for the opaque path keeps resolving.
 
     The symlink target is *absolute* so renaming or moving the symlink
-    later doesn't break the redirection. ``LatchkeyPermissionGrantHandler``
-    writes via ``permissions_path_for_agent`` (the canonical path) using
-    save-tmp + atomic-rename, which leaves the canonical path's name
-    unchanged, so the symlink keeps resolving across grant edits.
+    later doesn't break the redirection.
 
-    Raises ``LatchkeyStoreError`` if the linking fails. Callers should
-    log the error rather than abort agent creation -- a missing symlink
-    only means the gateway will use the deny-all baseline contents that
-    are still inside ``opaque_path``; the agent itself is up either way.
+    Raises ``LatchkeyStoreError`` if the linking fails.
     """
     agent_path = permissions_path_for_agent(data_dir, agent_id)
     agent_path.parent.mkdir(parents=True, exist_ok=True)

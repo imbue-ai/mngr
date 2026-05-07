@@ -358,67 +358,60 @@ def _build_mngr_create_command(
 ) -> tuple[list[str], str]:
     """Build the mngr create command and generate an API key for the agent.
 
-        Returns (command_list, api_key) where api_key is a UUID4 string injected
-        as MINDS_API_KEY into the agent's environment via --env. ``--format jsonl``
-        is appended so the caller can parse the canonical ``AgentId`` out of
-        the trailing ``"event": "created"`` line; minds no longer pre-generates
-        an id because for imbue_cloud the lease forces it back to the pool
-        host's pre-baked id anyway, and pre-generating one led to bugs (e.g.
-        keying gateway state under a fictional id).
+    Returns (command_list, api_key) where api_key is a UUID4 string injected
+    as MINDS_API_KEY into the agent's environment via --env. ``--format jsonl``
+    is appended so the caller can parse the canonical ``AgentId`` out of
+    the trailing ``"event": "created"`` line; minds no longer pre-generates
+    an id because for imbue_cloud the lease forces it back to the pool
+    host's pre-baked id anyway, and pre-generating one led to bugs (e.g.
+    keying gateway state under a fictional id).
 
-        DEV mode: --template main --template dev (runs in-place on local provider)
-        LOCAL mode: --template main --template docker (runs in Docker container)
-        LIMA mode: --template main --template lima (runs in Lima VM)
-        CLOUD mode: --template main --template vultr (runs in Docker on a Vultr VPS)
-        IMBUE_CLOUD mode: --new-host on the imbue_cloud_<slug> provider (the
-            plugin's create_host adopts the pool's pre-baked agent under
-            ``agent_name``); ``imbue_cloud_*`` arguments encode the lease
-            attributes (--build-arg).
+    DEV mode: --template main --template dev (runs in-place on local provider)
+    LOCAL mode: --template main --template docker (runs in Docker container)
+    LIMA mode: --template main --template lima (runs in Lima VM)
+    CLOUD mode: --template main --template vultr (runs in Docker on a Vultr VPS)
+    IMBUE_CLOUD mode: --new-host on the imbue_cloud_<slug> provider (the
+        plugin's create_host adopts the pool's pre-baked agent under
+        ``agent_name``); ``imbue_cloud_*`` arguments encode the lease
+        attributes (--build-arg).
 
-        For modes that create a separate host (LOCAL, LIMA, CLOUD, IMBUE_CLOUD),
-        the agent address uses ``agent_name@{agent_name}-host`` so hosts are
-        clearly attributable. ``--reuse`` and ``--update`` are passed for the
-        non-IMBUE_CLOUD modes so re-deploying resets the agent on the same
-        host instead of failing on a duplicate name (IMBUE_CLOUD's lease
-        flow is one-shot per pool host, so reuse is not meaningful there).
+    For modes that create a separate host (LOCAL, LIMA, CLOUD, IMBUE_CLOUD),
+    the agent address uses ``agent_name@{agent_name}-host`` so hosts are
+    clearly attributable. ``--reuse`` and ``--update`` are passed for the
+    non-IMBUE_CLOUD modes so re-deploying resets the agent on the same
+    host instead of failing on a duplicate name (IMBUE_CLOUD's lease
+    flow is one-shot per pool host, so reuse is not meaningful there).
 
-        Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``, ``GH_TOKEN``)
-        are forwarded by the FCT template's own ``pass_(host_)env`` declarations,
-        not by inline flags here -- ``run_mngr_create`` populates them in the
-        subprocess env when needed and the template-declared forwards pick
-        them up. Keeping the forwarding declaration in FCT means the same
-        template works for ``mngr create`` invocations from outside minds too.
+    Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``, ``GH_TOKEN``)
+    are forwarded by the FCT template's own ``pass_(host_)env`` declarations,
+    not by inline flags here -- ``run_mngr_create`` populates them in the
+    subprocess env when needed and the template-declared forwards pick
+    them up. Keeping the forwarding declaration in FCT means the same
+    template works for ``mngr create`` invocations from outside minds too.
 
     For container/VM/VPS/leased modes, ``LATCHKEY_GATEWAY`` defaults to the
-        constant agent-side URL ``http://127.0.0.1:<AGENT_SIDE_LATCHKEY_PORT>``
-        (the loopback port that ``LatchkeyDiscoveryHandler`` reverse-tunnels
-        to the host-side gateway post-discovery), so containerized agents
-        always get a working URL without the caller having to know the live
-        gateway port. DEV mode runs on the bare host with no reverse tunnel,
-        so the constant agent-side URL is meaningless there -- callers that
-        want latchkey wiring for a DEV agent must pass
-        ``latchkey_gateway_url`` explicitly with the gateway's live host
-        address (typically ``http://127.0.0.1:<dynamic_host_port>``).
+    constant agent-side URL ``http://127.0.0.1:<AGENT_SIDE_LATCHKEY_PORT>``
+    (the loopback port that ``LatchkeyDiscoveryHandler`` reverse-tunnels
+    to the host-side gateway post-discovery), so containerized agents
+    always get a working URL without the caller having to know the live
+    gateway port. DEV mode runs on the bare host with no reverse tunnel,
+    so the constant agent-side URL is meaningless there -- callers that
+    want latchkey wiring for a DEV agent must pass
+    ``latchkey_gateway_url`` explicitly with the gateway's live host
+    address (typically ``http://127.0.0.1:<dynamic_host_port>``).
 
-        Passing ``latchkey_gateway_url`` for *any* mode overrides the
-        default. Passing ``None`` for DEV opts out of latchkey wiring
-        entirely for that agent.
+    Passing ``latchkey_gateway_url`` for *any* mode overrides the
+    default. Passing ``None`` for DEV opts out of latchkey wiring
+    entirely for that agent.
 
-        When ``latchkey_gateway_password`` is supplied (and the launch mode is
-        not DEV), it is also injected as ``LATCHKEY_GATEWAY_PASSWORD`` so the
-        agent's ``latchkey`` CLI authenticates to the password-protected
-        shared gateway.
+    When ``latchkey_gateway_password`` is supplied, it is also injected as
+    ``LATCHKEY_GATEWAY_PASSWORD`` so the agent's ``latchkey`` CLI authenticates
+    to the password-protected shared gateway.
 
-        When ``latchkey_permissions_override_jwt`` is supplied (and the
-        launch mode is not DEV), it is injected as
-        ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` so the gateway evaluates
-        this agent's requests against its own per-agent permissions file
-        instead of the gateway's deny-all default. The JWT references an
-        *opaque* path (``data_dir/latchkey/permissions/<uuid>.json``) that
-        ``AgentCreator`` materializes before this call; after ``mngr create``
-        returns the canonical agent id, ``AgentCreator`` replaces that
-        opaque file with a symlink to the canonical agent-keyed path so the
-        permission grant flow can keep writing to its conventional location.
+    When ``latchkey_permissions_override_jwt`` is supplied, it is injected as
+    ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` so the gateway evaluates this
+    agent's requests against its own per-agent permissions file instead of the
+    gateway's deny-all default.
     """
     match launch_mode:
         case LaunchMode.DEV:
