@@ -4,6 +4,7 @@ max_parallel = 50
 test_timeout_secs = 300
 stream_output = true
 sandbox_project_root = "/code/mngr"
+post_patch_cmd = "/usr/local/bin/post_file_setup.sh"
 
 [provider]
 type = "modal"
