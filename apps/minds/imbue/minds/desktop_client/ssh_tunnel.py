@@ -342,8 +342,7 @@ class SSHTunnelManager(MutableModel):
             failures = failure_state.consecutive_failures
 
         logger.warning(
-            "Failed to re-establish reverse tunnel to {} (local {}): {} "
-            "(failure {}/{}, backoff {:.0f}s)",
+            "Failed to re-establish reverse tunnel to {} (local {}): {} (failure {}/{}, backoff {:.0f}s)",
             conn_key,
             tunnel_info.local_port,
             error,
@@ -382,11 +381,7 @@ class SSHTunnelManager(MutableModel):
         for ``agent_id`` exists (returns ``0``).
         """
         with self._lock:
-            keys = [
-                tunnel_key
-                for tunnel_key, info in self._reverse_tunnels.items()
-                if info.agent_id == agent_id
-            ]
+            keys = [tunnel_key for tunnel_key, info in self._reverse_tunnels.items() if info.agent_id == agent_id]
         return self._drop_tunnel_keys(tuple(keys))
 
     def _drop_tunnel_keys(self, tunnel_keys: tuple[tuple[str, int], ...]) -> int:
@@ -423,9 +418,7 @@ class SSHTunnelManager(MutableModel):
             # so we don't reach back into ``_connections`` after dropping the
             # lock (another thread could mutate the dict in the meantime).
             remaining_clients: dict[str, paramiko.SSHClient] = {
-                conn_key: client
-                for conn_key, client in self._connections.items()
-                if conn_key in affected_conn_keys
+                conn_key: client for conn_key, client in self._connections.items() if conn_key in affected_conn_keys
             }
 
         for tunnel_key, info in removed_infos:

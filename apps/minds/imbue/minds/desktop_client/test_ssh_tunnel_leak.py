@@ -237,10 +237,7 @@ def test_remove_reverse_tunnels_for_agent_actually_releases_resources(tmp_path: 
             # have been closed and forgotten so its transport thread exits.
             assert conn_key not in manager._connections
         # The previously-cached client itself must report inactive.
-        assert not (
-            client_before.get_transport() is not None
-            and client_before.get_transport().is_active()
-        )
+        assert not (client_before.get_transport() is not None and client_before.get_transport().is_active())
     finally:
         manager.cleanup()
         listener.close()
@@ -268,12 +265,8 @@ def test_remove_reverse_tunnels_for_agent_keeps_other_agents_intact(tmp_path: Pa
     manager = SSHTunnelManager()
     try:
         ssh_info = _ssh_info_for(template, server.port)
-        manager.setup_reverse_tunnel(
-            ssh_info=ssh_info, local_port=port_a, agent_id="agent-A"
-        )
-        manager.setup_reverse_tunnel(
-            ssh_info=ssh_info, local_port=port_b, agent_id="agent-B"
-        )
+        manager.setup_reverse_tunnel(ssh_info=ssh_info, local_port=port_a, agent_id="agent-A")
+        manager.setup_reverse_tunnel(ssh_info=ssh_info, local_port=port_b, agent_id="agent-B")
 
         conn_key = f"127.0.0.1:{server.port}"
         with manager._lock:
@@ -321,9 +314,7 @@ def test_check_and_repair_backs_off_and_drops_after_max_failures(tmp_path: Path)
     manager = SSHTunnelManager()
     try:
         ssh_info = _ssh_info_for(template, server.port)
-        manager.setup_reverse_tunnel(
-            ssh_info=ssh_info, local_port=local_port, agent_id="agent-A"
-        )
+        manager.setup_reverse_tunnel(ssh_info=ssh_info, local_port=local_port, agent_id="agent-A")
         conn_key = f"127.0.0.1:{server.port}"
         tunnel_key = (conn_key, local_port)
 
@@ -398,9 +389,7 @@ def test_successful_repair_resets_backoff(tmp_path: Path) -> None:
     manager = SSHTunnelManager()
     try:
         ssh_info = _ssh_info_for(template, server.port)
-        manager.setup_reverse_tunnel(
-            ssh_info=ssh_info, local_port=local_port, agent_id="agent-A"
-        )
+        manager.setup_reverse_tunnel(ssh_info=ssh_info, local_port=local_port, agent_id="agent-A")
         conn_key = f"127.0.0.1:{server.port}"
         tunnel_key = (conn_key, local_port)
 
