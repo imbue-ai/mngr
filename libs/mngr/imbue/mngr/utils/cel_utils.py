@@ -106,10 +106,15 @@ def with_tolerant_paths(
     """Return a copy of `cel_context` where each `path` target is wrapped in
     `TolerantMapType`. The input is unchanged.
 
-    Each `path` navigates from the top of the CEL context; the target at the
-    end of the path must already be a `MapType` (e.g. produced by
-    `build_cel_context` from a raw dict). Use to opt specific schemaless
-    fields into tolerant missing-key behavior without affecting siblings.
+    Each `path` navigates from the top of the CEL context; every segment of
+    the path must already exist, and the target at the end of the path must
+    already be a `MapType` (e.g. produced by `build_cel_context` from a raw
+    dict). Use to opt specific schemaless fields into tolerant missing-key
+    behavior without affecting siblings.
+
+    Raises TypeError on precondition violations (a path's segment is missing
+    or any segment's value is not a dict/MapType), so misconfigured paths
+    surface immediately rather than silently no-op.
 
     Sharing: only dicts/MapTypes that lie on a requested path are copied
     (shallow); other values are shared by reference with the input. The
@@ -134,8 +139,11 @@ def _wrap_paths_recursively(node: Any, paths: Sequence[tuple[str, ...]]) -> Any:
     by reference.
 
     Raises TypeError if a path's target (or any prefix segment) is not a
-    dict/MapType. This signals a programming error in the caller's `paths`
-    argument; the precondition is documented on `with_tolerant_paths`.
+    dict/MapType, or if a path's segment is missing entirely from its parent
+    dict. Both cases signal a programming error in the caller's `paths`
+    argument; the precondition is documented on `with_tolerant_paths`. We
+    fail loud rather than silent-no-op so misconfigured paths (e.g. a typoed
+    segment name) surface immediately.
     """
     wrap_here = any(len(p) == 0 for p in paths)
     descend = [p for p in paths if len(p) > 0]
@@ -153,8 +161,13 @@ def _wrap_paths_recursively(node: Any, paths: Sequence[tuple[str, ...]]) -> Any:
         first, *rest = path
         by_first.setdefault(first, []).append(tuple(rest))
     for key, sub_paths in by_first.items():
-        if key in new_node:
-            new_node[key] = _wrap_paths_recursively(new_node[key], sub_paths)
+        if key not in new_node:
+            raise TypeError(
+                f"with_tolerant_paths: path segment {key!r} is not present "
+                f"in node with keys {sorted(str(k) for k in new_node)!r}; "
+                f"check that every path targets a MapType in the CEL context"
+            )
+        new_node[key] = _wrap_paths_recursively(new_node[key], sub_paths)
 
     if wrap_here:
         return TolerantMapType(new_node)

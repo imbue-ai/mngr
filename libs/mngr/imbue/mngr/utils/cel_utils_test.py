@@ -455,6 +455,28 @@ def test_with_tolerant_paths_raises_type_error_when_target_is_not_dict() -> None
         _ = with_tolerant_paths(cel_context, (("name",),))
 
 
+def test_with_tolerant_paths_raises_when_path_segment_missing() -> None:
+    """A precondition violation (path's segment not present) raises TypeError.
+
+    Both "segment value is wrong type" and "segment is missing entirely"
+    represent caller misconfiguration; both must fail loud so a typoed path
+    name (e.g. "lables" instead of "labels") surfaces immediately rather
+    than silently producing a no-op tolerance wrap.
+    """
+    raw_context: dict[str, Any] = {"labels": {}}
+    cel_context = build_cel_context(raw_context)
+    with pytest.raises(TypeError):
+        _ = with_tolerant_paths(cel_context, (("nonexistent",),))
+
+
+def test_with_tolerant_paths_raises_when_nested_path_segment_missing() -> None:
+    """A nested-path precondition violation also raises TypeError loud-ly."""
+    raw_context: dict[str, Any] = {"host": {"tags": {}}}
+    cel_context = build_cel_context(raw_context)
+    with pytest.raises(TypeError):
+        _ = with_tolerant_paths(cel_context, (("host", "missing_subfield"),))
+
+
 def test_with_tolerant_paths_multiple_paths() -> None:
     """Multiple paths can be wrapped in one call; non-listed paths stay strict."""
     raw_context = {
