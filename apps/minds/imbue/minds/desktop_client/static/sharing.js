@@ -12,6 +12,9 @@
   var isRequest = config.isRequest;
   var requestId = config.requestId;
   var proposedEmails = config.initialEmails || [];
+  // ``mngr forward`` plugin's bare origin (e.g. ``http://localhost:8421``);
+  // the workspace link below targets the plugin's ``/goto/<agent>/`` route.
+  var mngrForwardOrigin = (document.body && document.body.dataset.mngrForwardOrigin) || '';
 
   function setHeading(isEnabled) {
     var h = document.getElementById('page-heading');
@@ -27,7 +30,7 @@
     h.appendChild(document.createTextNode(isEnabled ? ' shared in ' : ' in '));
 
     var link = document.createElement('a');
-    link.href = '/goto/' + agentId + '/';
+    link.href = mngrForwardOrigin + '/goto/' + agentId + '/';
     link.className = 'text-blue-600 hover:underline';
     link.textContent = wsName;
     h.appendChild(link);
@@ -165,35 +168,80 @@
     editor.style.pointerEvents = submitting ? 'none' : 'auto';
   }
 
+  // Render a server-side error inline above the action buttons. Called
+  // when the sharing endpoints return a non-2xx/non-3xx response with a
+  // JSON body of shape ``{"error": "..."}``. Without this the previous
+  // code redirected on any response (including 5xx soft failures), so
+  // a failed share appeared as "the emails just disappeared" with no
+  // indication that anything went wrong.
+  function showError(message) {
+    var existing = document.getElementById('sharing-error');
+    if (existing) existing.remove();
+    var box = document.createElement('div');
+    box.id = 'sharing-error';
+    box.className = 'mt-3 mb-1 px-3 py-2 rounded-md bg-red-50 border border-red-200 text-sm text-red-800';
+    box.textContent = message;
+    var actions = document.getElementById('action-buttons');
+    actions.parentNode.insertBefore(box, actions);
+  }
+
+  function clearError() {
+    var existing = document.getElementById('sharing-error');
+    if (existing) existing.remove();
+  }
+
+  // ``fetch`` only rejects on network failure -- a 4xx/5xx response is
+  // a successful Promise. Wrap it so callers can treat both transport
+  // errors and server-side errors uniformly.
+  function postWithErrorCheck(url, body) {
+    return fetch(url, { method: 'POST', body: body }).then(function (r) {
+      if (r.ok) return r;
+      return r.text().then(function (text) {
+        var detail = text;
+        try {
+          var parsed = JSON.parse(text);
+          if (parsed && typeof parsed.error === 'string') detail = parsed.error;
+          else if (parsed && typeof parsed.detail === 'string') detail = parsed.detail;
+        } catch (_) { /* leave detail as raw text */ }
+        var err = new Error(detail || ('HTTP ' + r.status));
+        err.httpStatus = r.status;
+        throw err;
+      });
+    });
+  }
+
   window.submitUpdate = function () {
+    clearError();
     setSubmitting(true);
     var form = new FormData();
     form.append('emails', JSON.stringify(getFinalEmails()));
     // Request-approval and direct-edit submissions go to different
     // endpoints: the request flow needs a GRANTED response event
     // appended (handled by /requests/{id}/grant -> SharingRequestHandler),
-    // while direct edits just change the Cloudflare config. Both end up
+    // while direct edits just change the connector config. Both end up
     // calling the same enable_sharing_via_cloudflare helper server-side.
     var url = isRequest
       ? '/requests/' + requestId + '/grant'
       : '/sharing/' + agentId + '/' + serviceName + '/enable';
-    fetch(url, { method: 'POST', body: form })
+    postWithErrorCheck(url, form)
       .then(function () { window.location.href = '/sharing/' + agentId + '/' + serviceName; })
-      .catch(function (err) { alert('Failed: ' + err.message); setSubmitting(false); });
+      .catch(function (err) { showError('Could not save sharing changes: ' + err.message); setSubmitting(false); });
   };
 
   window.submitDisable = function () {
+    clearError();
     setSubmitting(true);
-    fetch('/sharing/' + agentId + '/' + serviceName + '/disable', { method: 'POST' })
+    postWithErrorCheck('/sharing/' + agentId + '/' + serviceName + '/disable', null)
       .then(function () { window.location.href = '/sharing/' + agentId + '/' + serviceName; })
-      .catch(function (err) { alert('Failed: ' + err.message); setSubmitting(false); });
+      .catch(function (err) { showError('Could not disable sharing: ' + err.message); setSubmitting(false); });
   };
 
   window.submitDeny = function () {
+    clearError();
     setSubmitting(true);
-    fetch('/requests/' + requestId + '/deny', { method: 'POST' })
+    postWithErrorCheck('/requests/' + requestId + '/deny', null)
       .then(function () { window.location.href = '/'; })
-      .catch(function (err) { alert('Failed: ' + err.message); setSubmitting(false); });
+      .catch(function (err) { showError('Could not deny request: ' + err.message); setSubmitting(false); });
   };
 
   window.copyUrl = function () {
@@ -204,22 +252,33 @@
     setTimeout(function () { btn.textContent = 'Copy'; }, 2000);
   };
 
+  // The status endpoint emits the AuthPolicy shape from the imbue_cloud
+  // plugin: ``{"emails": [...], "email_domains": [...], "require_idp": ...}``.
+  function emailsFromPolicy(policy) {
+    if (!policy || !Array.isArray(policy.emails)) return [];
+    return policy.emails.slice();
+  }
+
   fetch('/api/sharing-status/' + agentId + '/' + serviceName)
-    .then(function (r) { return r.json(); })
+    .then(function (r) {
+      if (!r.ok) {
+        return r.text().then(function (text) {
+          var detail = text;
+          try {
+            var parsed = JSON.parse(text);
+            if (parsed && typeof parsed.error === 'string') detail = parsed.error;
+            else if (parsed && typeof parsed.detail === 'string') detail = parsed.detail;
+          } catch (_) { /* leave as raw */ }
+          throw new Error(detail || ('HTTP ' + r.status));
+        });
+      }
+      return r.json();
+    })
     .then(function (data) {
       document.getElementById('loading-state').classList.add('hidden');
       document.getElementById('editor-content').classList.remove('hidden');
 
-      var serverEmails = [];
-      if (data.auth_rules) {
-        data.auth_rules.forEach(function (rule) {
-          (rule.include || []).forEach(function (inc) {
-            if (inc.email && inc.email.email && serverEmails.indexOf(inc.email.email) < 0) {
-              serverEmails.push(inc.email.email);
-            }
-          });
-        });
-      }
+      var serverEmails = emailsFromPolicy(data.policy);
 
       if (data.enabled) {
         existing = serverEmails;
@@ -232,6 +291,8 @@
         var disableBtn = document.getElementById('disable-btn');
         if (disableBtn) disableBtn.classList.remove('hidden');
       } else {
+        // Treat the default policy (owner email) as the editor's
+        // initial draft so the user sees their own email pre-populated.
         serverEmails.forEach(function (e) {
           if (added.indexOf(e) < 0) added.push(e);
         });

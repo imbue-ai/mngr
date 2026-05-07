@@ -3,6 +3,7 @@ import os
 import re
 import shlex
 import subprocess
+import time
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -48,7 +49,49 @@ _SSH_BASE_OPTIONS: Final[tuple[str, ...]] = (
     "BatchMode=yes",
     "-o",
     "ConnectTimeout=15",
+    # Keepalives so a one-sided TCP drop (common in the first minute on a
+    # freshly-provisioned Vultr VPS) is detected within ~3 minutes instead
+    # of hanging until rsync's write blocks the kernel send buffer. The
+    # observed failure mode without these is ``client_loop: send disconnect:
+    # Broken pipe`` mid-rsync of the build context.
+    "-o",
+    "ServerAliveInterval=20",
+    "-o",
+    "ServerAliveCountMax=10",
 )
+
+# Absolute path on the VPS where rsync stashes partial files between
+# attempts. Lives outside the build context (``/tmp/mngr-build-<id>/``) so
+# partial-transfer state never gets included in the docker build context
+# or copied back to the local repo. Persists across retries so subsequent
+# attempts can resume rather than re-uploading completed bytes.
+_RSYNC_PARTIAL_DIR_REMOTE: Final[str] = "/tmp/mngr-rsync-partial"
+
+# How many times to retry a failed rsync upload before giving up.
+_UPLOAD_MAX_ATTEMPTS: Final[int] = 3
+# Backoff between attempts (entry N is the wait *before* attempt N+1).
+_UPLOAD_RETRY_BACKOFF_SECONDS: Final[tuple[float, ...]] = (5.0, 15.0)
+
+# Substrings in rsync stderr that indicate a transient connection-class
+# failure (broken pipe, dropped TCP, fresh-VPS networking flap). Rsync's
+# own catch-all exit 255 with these messages is what fresh Vultr VPSes
+# produce in the first 30-60s of life. Other rsync errors (permission,
+# protocol mismatch, vanished source) are non-transient and we fail fast.
+_RETRYABLE_RSYNC_PATTERNS: Final[tuple[str, ...]] = (
+    "Broken pipe",
+    "Connection reset by peer",
+    "Connection refused",
+    "Connection timed out",
+    "client_loop",
+    "ssh: connect to host",
+    "kex_exchange_identification",
+    "Network is unreachable",
+)
+
+
+def _is_retryable_rsync_error(stderr: str) -> bool:
+    """Return True iff ``stderr`` looks like a connection-class rsync failure."""
+    return any(pattern in stderr for pattern in _RETRYABLE_RSYNC_PATTERNS)
 
 
 class DockerOverSsh(MutableModel):
@@ -239,20 +282,33 @@ class DockerOverSsh(MutableModel):
             logger.debug("Docker not ready on VPS {}: {}", self.vps_ip, e)
             return False
 
-    def upload_directory(self, local_path: Path, remote_path: str, timeout_seconds: float = 300.0) -> None:
-        """Upload a local directory to the VPS via rsync over SSH."""
+    def upload_directory(self, local_path: Path, remote_path: str, timeout_seconds: float = 900.0) -> None:
+        """Upload a local directory to the VPS via rsync over SSH.
+
+        Retries connection-class failures (broken pipe, RST, ssh-disconnect)
+        up to ``_UPLOAD_MAX_ATTEMPTS`` with backoff, since fresh Vultr VPSes
+        routinely drop the first SSH connection in their first minute of
+        life. ``--partial-dir=_RSYNC_PARTIAL_DIR_REMOTE`` lets retries
+        resume rather than re-upload from scratch; that path lives outside
+        the build context so partial files never end up baked into the
+        docker image. Non-retryable rsync errors (permission, protocol
+        mismatch, etc.) fail fast on the first attempt.
+        """
         ssh_cmd = (
             f"ssh -i {shlex.quote(str(self.ssh_key_path))} "
             f"-o UserKnownHostsFile={shlex.quote(str(self.known_hosts_path))} "
             f"-o StrictHostKeyChecking=yes "
             f"-o BatchMode=yes "
-            f"-o ConnectTimeout=15"
+            f"-o ConnectTimeout=15 "
+            f"-o ServerAliveInterval=20 "
+            f"-o ServerAliveCountMax=10"
         )
         local_str = str(local_path).rstrip("/") + "/"
         cmd = [
             "rsync",
             "-az",
             "--delete",
+            f"--partial-dir={_RSYNC_PARTIAL_DIR_REMOTE}",
             "--exclude=__pycache__",
             "--exclude=.venv",
             "--exclude=node_modules",
@@ -268,12 +324,33 @@ class DockerOverSsh(MutableModel):
             f"{self.ssh_user}@{self.vps_ip}:{remote_path}/",
         ]
         logger.debug("Uploading {} to VPS {}:{}", local_path, self.vps_ip, remote_path)
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
-        except subprocess.TimeoutExpired as e:
-            raise VpsConnectionError(f"Upload timed out after {timeout_seconds}s") from e
-        if result.returncode != 0:
-            raise ContainerSetupError(f"Upload failed: {result.stderr.strip()}")
+
+        last_stderr = ""
+        for attempt in range(1, _UPLOAD_MAX_ATTEMPTS + 1):
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
+            except subprocess.TimeoutExpired as e:
+                # Whole-process timeout: don't retry (the next attempt would
+                # just hit the same timeout again, and we'd take 3x longer
+                # to surface a real "VPS is wedged" diagnosis).
+                raise VpsConnectionError(f"Upload timed out after {timeout_seconds}s") from e
+            if result.returncode == 0:
+                return
+            last_stderr = result.stderr.strip()
+            is_last_attempt = attempt == _UPLOAD_MAX_ATTEMPTS
+            if is_last_attempt or not _is_retryable_rsync_error(last_stderr):
+                break
+            backoff_seconds = _UPLOAD_RETRY_BACKOFF_SECONDS[attempt - 1]
+            logger.warning(
+                "Upload to {} attempt {}/{} failed; retrying in {:.0f}s. stderr={!r}",
+                self.vps_ip,
+                attempt,
+                _UPLOAD_MAX_ATTEMPTS,
+                backoff_seconds,
+                last_stderr,
+            )
+            time.sleep(backoff_seconds)
+        raise ContainerSetupError(f"Upload failed: {last_stderr}")
 
     def build_image(
         self,

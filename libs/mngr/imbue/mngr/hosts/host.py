@@ -2559,41 +2559,53 @@ class Host(BaseHost, OnlineHostInterface):
         """Validate and execute file transfers from the agent.
 
         First validates that all required files exist, then executes transfers.
+        Always emits a "Transferring agent files" log_span (with count=0 when
+        the agent declared no transfers) so timing is visible at -vv.
         """
-        if not transfers:
-            return
+        with log_span("Transferring agent files", count=len(transfers)):
+            if not transfers:
+                return
 
-        # Validate required files first
-        missing_required: list[Path] = []
-        for transfer in transfers:
-            if transfer.is_required and not transfer.local_path.exists():
-                missing_required.append(transfer.local_path)
+            # Validate required files first
+            missing_required: list[Path] = []
+            for transfer in transfers:
+                if transfer.is_required and not transfer.local_path.exists():
+                    missing_required.append(transfer.local_path)
 
-        if missing_required:
-            missing_str = ", ".join(str(p) for p in missing_required)
-            raise MngrError(f"Required files for provisioning not found: {missing_str}")
+            if missing_required:
+                missing_str = ", ".join(str(p) for p in missing_required)
+                raise MngrError(f"Required files for provisioning not found: {missing_str}")
 
-        # Execute transfers
-        for transfer in transfers:
-            if not transfer.local_path.exists():
-                # Optional file doesn't exist, skip it
-                logger.trace("Skipped optional file transfer (file not found): {}", transfer.local_path)
-                continue
+            for transfer in transfers:
+                if not transfer.local_path.exists():
+                    # Optional file doesn't exist, skip it
+                    logger.trace("Skipped optional file transfer (file not found): {}", transfer.local_path)
+                    continue
 
-            # Resolve relative remote paths to work_dir
-            remote_path = agent.work_dir / transfer.agent_path
+                # Resolve relative remote paths to work_dir
+                remote_path = agent.work_dir / transfer.agent_path
 
-            local_content = transfer.local_path.read_bytes()
-            self.write_file(remote_path, local_content)
-            logger.trace("Transferred agent file: {} -> {}", transfer.local_path, remote_path)
+                local_content = transfer.local_path.read_bytes()
+                self.write_file(remote_path, local_content)
+                logger.trace("Transferred agent file: {} -> {}", transfer.local_path, remote_path)
 
-    def rename_agent(self, agent: AgentInterface, new_name: AgentName) -> AgentInterface:
-        """Rename an agent and return the updated agent object.
+    def rename_agent(
+        self,
+        agent: AgentInterface,
+        new_name: AgentName,
+        labels_to_merge: Mapping[str, str] | None = None,
+    ) -> AgentInterface:
+        """Rename an agent (optionally merging labels) and return the updated object.
 
         The operation is idempotent: if interrupted mid-rename, re-running
         will complete it. This works because data.json (the "commit point")
         is updated last, while tmux and env changes are applied first and
         are safe to repeat.
+
+        When ``labels_to_merge`` is non-empty, those keys are merged into the
+        agent's existing labels as part of the same atomic data.json write, so
+        an external observer of the agent's state never sees the rename without
+        also seeing the new labels.
         """
         with log_span("Renaming agent", agent_id=str(agent.id), old_name=str(agent.name), new_name=str(new_name)):
             # Prevent same-host name collisions (the tmux session name is derived
@@ -2628,10 +2640,16 @@ class Host(BaseHost, OnlineHostInterface):
             except FileNotFoundError:
                 logger.debug("No env file found for agent {}, skipping env update", agent.id)
 
-            # Update data.json last (the "commit point" for the rename)
+            # Update data.json last (the "commit point" for the rename). Any
+            # provided labels are merged into the existing labels in the same
+            # atomic write so observers see the new name and the new labels
+            # together.
             content = self.read_text_file(data_path)
             data = json.loads(content)
             data["name"] = str(new_name)
+            if labels_to_merge:
+                current_labels = data.get("labels") or {}
+                data["labels"] = {**current_labels, **dict(labels_to_merge)}
             self.write_file(data_path, json.dumps(data, indent=2).encode(), is_atomic=True)
             self.save_agent_data(agent.id, data)
 

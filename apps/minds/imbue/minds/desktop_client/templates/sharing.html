@@ -7,7 +7,7 @@
   {% call ui.page_container() %}
     <h1 id="page-heading" class="text-2xl font-semibold text-zinc-900 leading-tight">
       Share <code class="bg-zinc-100 rounded px-1.5 py-0.5 font-mono text-[0.95em]">{{ service_name }}</code>
-      in <a href="/goto/{{ agent_id }}/" class="text-blue-600 hover:underline">{{ ws_name or agent_id }}</a>
+      in <a href="{{ mngr_forward_origin }}/goto/{{ agent_id }}/" class="text-blue-600 hover:underline">{{ ws_name or agent_id }}</a>
       {% if account_email %}(<a href="/accounts" class="text-blue-600 hover:underline">{{ account_email }}</a>){% endif %}?
     </h1>
 

@@ -325,7 +325,7 @@ def test_build_connection_options_maps_all_fields(
     """Test that all ConnectCliOptions fields are correctly mapped to ConnectionOptions."""
     opts = default_connect_cli_opts.model_copy_update(
         to_update(default_connect_cli_opts.field_ref().reconnect, False),
-        to_update(default_connect_cli_opts.field_ref().attach_command, "bash"),
+        to_update(default_connect_cli_opts.field_ref().session_command, "bash"),
         to_update(default_connect_cli_opts.field_ref().allow_unknown_host, True),
     )
 
@@ -334,7 +334,7 @@ def test_build_connection_options_maps_all_fields(
     assert connection_opts.is_reconnect is False
     assert connection_opts.retry_count == temp_mngr_ctx.config.retry.connect_retry_times
     assert connection_opts.retry_delay == temp_mngr_ctx.config.retry.connect_retry_delay
-    assert connection_opts.attach_command == "bash"
+    assert connection_opts.session_command == "bash"
     assert connection_opts.is_unknown_host_allowed is True
 
 

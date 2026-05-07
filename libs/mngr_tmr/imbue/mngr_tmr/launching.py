@@ -2,6 +2,7 @@
 
 import math
 import time
+from concurrent.futures import Future
 
 from loguru import logger
 
@@ -12,6 +13,7 @@ from imbue.mngr.api.create import resolve_target_host
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import HostLocation
@@ -27,6 +29,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr_tmr.data_types import TestAgentInfo
+from imbue.mngr_tmr.data_types import TestMapReduceResult
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
 from imbue.mngr_tmr.prompts import build_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
@@ -36,6 +39,37 @@ from imbue.mngr_tmr.utils import short_random_id
 from imbue.mngr_tmr.utils import transfer_mode_for_provider
 
 _AGENT_CREATION_TIMEOUT_SECONDS = 600.0
+
+
+def make_test_agent_identity(test_node_id: str) -> tuple[AgentName, str]:
+    """Generate (agent_name, branch_name) for a test agent.
+
+    Both share a fresh random short_id so they identify the same launch
+    attempt. Callers should generate these once per test and reuse them
+    for both the launch attempt and any failure reporting, so that a
+    failed-launch entry in the report carries the same name the agent
+    would have had if it had succeeded.
+    """
+    name_suffix = sanitize_test_name_for_agent(test_node_id)
+    short_id = short_random_id()
+    return AgentName(f"tmr-{name_suffix}-{short_id}"), f"mngr-tmr/{name_suffix}-{short_id}"
+
+
+def _make_launch_failure_result(test_node_id: str, agent_name: AgentName, error: object) -> TestMapReduceResult:
+    """Build a TestMapReduceResult marking that an agent failed to launch.
+
+    Used so launch failures still appear in the HTML report (as errored
+    entries in the FAILED section) instead of silently disappearing.
+    ``agent_name`` should be the name that was used for the launch
+    attempt, so the report row matches the host/tmux session if the
+    user retained it for debugging.
+    """
+    return TestMapReduceResult(
+        test_node_id=test_node_id,
+        agent_name=agent_name,
+        errored=True,
+        summary_markdown=f"Failed to launch agent: {error}",
+    )
 
 
 def _resolve_build_options(config: TmrLaunchConfig, mngr_ctx: MngrContext) -> NewHostBuildOptions:
@@ -91,11 +125,16 @@ def _create_tmr_agent(
 
     if existing_host is not None:
         target_host: OnlineHostInterface | NewHostOptions = existing_host
+    elif config.provider_name.lower() == LOCAL_PROVIDER_NAME:
+        # The local provider has a single fixed host ("localhost"); reuse the
+        # source_host (already the local host) instead of the new-host path.
+        # That path would call _generate_unique_host_name, which never finds
+        # a free name because the local provider's get_host_name always
+        # returns "localhost" and discover_hosts always reports it as taken.
+        target_host = config.source_host
     else:
         build = _resolve_build_options(config, mngr_ctx)
-        is_local = config.provider_name.lower() == LOCAL_PROVIDER_NAME
-        resolved_host_name = None if is_local else host_name
-        target_host = NewHostOptions(provider=config.provider_name, name=resolved_host_name, build=build)
+        target_host = NewHostOptions(provider=config.provider_name, name=host_name, build=build)
 
     return api_create(
         source_location=source_location,
@@ -107,6 +146,8 @@ def _create_tmr_agent(
 
 def launch_test_agent(
     test_node_id: str,
+    agent_name: AgentName,
+    branch_name: str,
     config: TmrLaunchConfig,
     mngr_ctx: MngrContext,
     pytest_flags: tuple[str, ...],
@@ -114,15 +155,16 @@ def launch_test_agent(
     existing_host: OnlineHostInterface | None = None,
     host_name: HostName | None = None,
 ) -> tuple[TestAgentInfo, OnlineHostInterface]:
-    """Launch a single agent to run and optionally fix one test."""
-    agent_name_suffix = sanitize_test_name_for_agent(test_node_id)
-    short_id = short_random_id()
-    agent_name = AgentName(f"tmr-{agent_name_suffix}-{short_id}")
+    """Launch a single agent to run and optionally fix one test.
 
+    ``agent_name`` and ``branch_name`` are passed in (rather than derived
+    from ``test_node_id`` here) so the caller can reuse the same identity
+    when reporting a launch failure.
+    """
     logger.info("Launching agent '{}' for test: {}", agent_name, test_node_id)
     create_result = _create_tmr_agent(
         agent_name=agent_name,
-        branch_name=f"mngr-tmr/{agent_name_suffix}-{short_id}",
+        branch_name=branch_name,
         config=config,
         mngr_ctx=mngr_ctx,
         initial_message=build_test_agent_prompt(test_node_id, pytest_flags, prompt_suffix),
@@ -130,14 +172,13 @@ def launch_test_agent(
         host_name=host_name,
     )
 
-    branch = f"mngr-tmr/{agent_name_suffix}-{short_id}"
     return (
         TestAgentInfo(
             test_node_id=test_node_id,
             agent_id=create_result.agent.id,
             agent_name=create_result.agent.name,
             work_dir=create_result.agent.work_dir,
-            branch_name=branch,
+            branch_name=branch_name,
             created_at=time.monotonic(),
         ),
         create_result.host,
@@ -218,6 +259,7 @@ def launch_all_test_agents(
     config: TmrLaunchConfig,
     mngr_ctx: MngrContext,
     pytest_flags: tuple[str, ...],
+    launch_failures: list[TestMapReduceResult],
     prompt_suffix: str = "",
     use_snapshot: bool = False,
     max_parallel: int = 4,
@@ -230,6 +272,9 @@ def launch_all_test_agents(
     For remote providers, agents_per_host controls how many agents share a single
     host. Hosts are pre-created in a pool and agents are assigned round-robin.
     For local providers, this setting is ignored (all agents share localhost).
+
+    Per-test launch failures are appended (in place) to ``launch_failures`` so
+    they can be surfaced in the report.
     """
     agents: list[TestAgentInfo] = []
     agent_hosts: dict[str, OnlineHostInterface] = {}
@@ -261,31 +306,39 @@ def launch_all_test_agents(
         name="tmr_launch",
         max_workers=max_parallel,
     ) as executor:
-        futures = []
+        futures: list[tuple[Future[tuple[TestAgentInfo, OnlineHostInterface]], str, AgentName]] = []
         for i, test_node_id in enumerate(test_node_ids):
             if i > 0 and launch_delay_seconds > 0:
                 time.sleep(launch_delay_seconds)
             existing_host = host_pool[i % len(host_pool)] if host_pool else None
             h_name = HostName(f"{run_name}-host-{i}") if not is_local and not host_pool else None
+            agent_name, branch_name = make_test_agent_identity(test_node_id)
             futures.append(
-                executor.submit(
-                    launch_test_agent,
+                (
+                    executor.submit(
+                        launch_test_agent,
+                        test_node_id,
+                        agent_name,
+                        branch_name,
+                        launch_config,
+                        mngr_ctx,
+                        pytest_flags,
+                        prompt_suffix,
+                        existing_host,
+                        h_name,
+                    ),
                     test_node_id,
-                    launch_config,
-                    mngr_ctx,
-                    pytest_flags,
-                    prompt_suffix,
-                    existing_host,
-                    h_name,
+                    agent_name,
                 )
             )
-        for future in futures:
+        for future, test_node_id, agent_name in futures:
             try:
                 info, host = future.result()
                 agents.append(info)
                 agent_hosts[str(info.agent_id)] = host
-            except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
-                logger.warning("Failed to launch agent: {}", exc)
+            except (MngrError, HostError, AgentError, OSError, BaseExceptionGroup) as exc:
+                logger.warning("Failed to launch agent for {}: {}", test_node_id, exc)
+                launch_failures.append(_make_launch_failure_result(test_node_id, agent_name, exc))
 
     logger.info("Launched {} agent(s)", len(agents))
     return agents, agent_hosts, launch_config.snapshot
@@ -293,6 +346,8 @@ def launch_all_test_agents(
 
 def launch_with_timeout(
     test_node_id: str,
+    agent_name: AgentName,
+    branch_name: str,
     config: TmrLaunchConfig,
     mngr_ctx: MngrContext,
     pytest_flags: tuple[str, ...],
@@ -300,7 +355,9 @@ def launch_with_timeout(
 ) -> tuple[TestAgentInfo, OnlineHostInterface]:
     """Launch a test agent with a timeout. Raises TimeoutError if creation takes too long."""
     with ConcurrencyGroupExecutor(mngr_ctx.concurrency_group, name="launch-agent", max_workers=1) as executor:
-        future = executor.submit(launch_test_agent, test_node_id, config, mngr_ctx, pytest_flags, prompt_suffix)
+        future = executor.submit(
+            launch_test_agent, test_node_id, agent_name, branch_name, config, mngr_ctx, pytest_flags, prompt_suffix
+        )
         return future.result(timeout=_AGENT_CREATION_TIMEOUT_SECONDS)
 
 
@@ -315,21 +372,33 @@ def launch_agents_up_to_limit(
     all_agents: list[TestAgentInfo],
     all_hosts: dict[str, OnlineHostInterface],
     agent_id_to_info: dict[str, TestAgentInfo],
+    launch_failures: list[TestMapReduceResult],
 ) -> None:
     """Launch agents from remaining_tests until we hit max_agents running.
 
     Mutates remaining_tests (pops from front), pending_ids, all_agents,
-    all_hosts, and agent_id_to_info in place.
+    all_hosts, agent_id_to_info, and launch_failures in place. Per-test
+    launch failures are appended to ``launch_failures`` so they can be
+    surfaced in the report.
     """
     while remaining_tests and (max_agents <= 0 or len(pending_ids) < max_agents):
         test_node_id = remaining_tests.pop(0)
+        agent_name, branch_name = make_test_agent_identity(test_node_id)
         try:
-            info, host = launch_with_timeout(test_node_id, config, mngr_ctx, pytest_flags, prompt_suffix)
+            info, host = launch_with_timeout(
+                test_node_id, agent_name, branch_name, config, mngr_ctx, pytest_flags, prompt_suffix
+            )
         except TimeoutError:
             logger.warning("Agent creation timed out after {}s for {}", _AGENT_CREATION_TIMEOUT_SECONDS, test_node_id)
+            launch_failures.append(
+                _make_launch_failure_result(
+                    test_node_id, agent_name, f"creation timed out after {_AGENT_CREATION_TIMEOUT_SECONDS}s"
+                )
+            )
             continue
-        except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
+        except (MngrError, HostError, AgentError, OSError, BaseExceptionGroup) as exc:
             logger.warning("Failed to launch agent for {}: {}", test_node_id, exc)
+            launch_failures.append(_make_launch_failure_result(test_node_id, agent_name, exc))
             continue
         all_agents.append(info)
         all_hosts[str(info.agent_id)] = host

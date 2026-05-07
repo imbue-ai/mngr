@@ -33,14 +33,12 @@ import pytest
 import uvicorn
 from loguru import logger
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.testing import clean_env
@@ -217,7 +215,6 @@ class DesktopClientFixture:
         self.tmp_dir = tmp_dir
         self._server: uvicorn.Server | None = None
         self._thread: threading.Thread | None = None
-        self._stream_manager: MngrStreamManager | None = None
 
     @property
     def base_url(self) -> str:
@@ -229,10 +226,10 @@ class DesktopClientFixture:
         auth_store.add_one_time_code(code=self.code)
 
         backend_resolver = MngrCliBackendResolver()
-        self._stream_manager = MngrStreamManager(resolver=backend_resolver)
         # ``AgentCreator.root_concurrency_group`` is required; this e2e harness
-        # runs the real ``start_desktop_client`` flow so an equivalent root CG
-        # is entered here and relied on by any creator operations.
+        # runs a slimmed minds-side server (no plugin subprocess) so the
+        # surviving resolver gets fed via direct test-harness writes rather
+        # than a real envelope stream.
         root_cg = ConcurrencyGroup(name="test-root")
         root_cg.__enter__()
         agent_creator = AgentCreator(
@@ -249,8 +246,6 @@ class DesktopClientFixture:
             http_client=None,
             agent_creator=agent_creator,
         )
-
-        self._stream_manager.start()
 
         config = uvicorn.Config(app, host=self.host, port=self.port, log_level="warning")
         self._server = uvicorn.Server(config)
@@ -269,12 +264,6 @@ class DesktopClientFixture:
         pytest.fail("Desktop client did not start within 5 seconds")
 
     def stop(self) -> None:
-        if self._stream_manager is not None:
-            try:
-                self._stream_manager.stop()
-            except ConcurrencyExceptionGroup:
-                # Stranded --follow processes may not terminate in time during teardown.
-                logger.debug("Stream manager stop raised (expected during teardown)")
         if self._server is not None:
             self._server.should_exit = True
         if self._thread is not None:

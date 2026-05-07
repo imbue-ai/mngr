@@ -52,7 +52,7 @@ Within each workspace's dockview UI, a Share action per service opens a modal th
 
 # Command line interface
 
-- `minds forward` (starts the local desktop client for accessing and creating workspaces)
+- `minds run` (starts the local desktop client for accessing and creating workspaces)
 
 # Deferred items
 

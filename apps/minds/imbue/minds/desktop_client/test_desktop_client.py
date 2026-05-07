@@ -28,13 +28,10 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import create_sharing_request_event
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
+from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.polling import wait_for
 
 
@@ -319,104 +316,6 @@ def test_mngr_cli_resolver_landing_page_lists_single_discovered_agent(tmp_path: 
     assert str(agent_id) in response.text
 
 
-# -- SSH tunnel error handling tests --
-
-
-class _FailingTunnelManager(SSHTunnelManager):
-    """Tunnel manager that raises SSHTunnelError on every tunnel request."""
-
-    def get_tunnel_socket_path(
-        self,
-        ssh_info: RemoteSSHInfo,
-        remote_host: str,
-        remote_port: int,
-    ) -> Path:
-        raise SSHTunnelError("SSH connection failed: test error")
-
-
-class _RemoteStaticBackendResolver(StaticBackendResolver):
-    """StaticBackendResolver that also returns SSH info for all known agents."""
-
-    ssh_info: RemoteSSHInfo
-
-    def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
-        if self.url_by_agent_and_service.get(str(agent_id)) is not None:
-            return self.ssh_info
-        return None
-
-
-_TEST_SSH_INFO: RemoteSSHInfo = RemoteSSHInfo(
-    user="root",
-    host="remote.example.com",
-    port=22,
-    key_path=Path("/tmp/fake_key"),
-)
-
-
-def _setup_failing_tunnel_server(
-    tmp_path: Path,
-) -> tuple[TestClient, FileAuthStore, AgentId]:
-    """Set up a desktop client with a tunnel manager that always fails."""
-    agent_id = AgentId()
-    backend_resolver = _RemoteStaticBackendResolver(
-        url_by_agent_and_service={str(agent_id): {"web": "http://127.0.0.1:9100"}},
-        ssh_info=_TEST_SSH_INFO,
-    )
-    auth_dir = tmp_path / "auth"
-    auth_store = FileAuthStore(data_directory=auth_dir)
-
-    app = create_desktop_client(
-        auth_store=auth_store,
-        backend_resolver=backend_resolver,
-        http_client=None,
-        tunnel_manager=_FailingTunnelManager(),
-    )
-    client = TestClient(app, base_url="http://localhost")
-    _authenticate_client(client=client, auth_store=auth_store)
-    return client, auth_store, agent_id
-
-
-# -- Backend not-yet-ready handling tests --
-
-
-class _DisconnectingTransport(httpx.AsyncBaseTransport):
-    """Transport that always raises RemoteProtocolError, simulating a backend
-    that accepted the TCP connection but hung up before sending any HTTP data.
-
-    This is what httpx surfaces when an SSH tunnel forwards to a port whose
-    server hasn't finished binding yet (e.g. uvicorn still starting up): the
-    SSH channel-open to the backend port fails and the tunnel relay closes
-    the local socket without writing anything.
-    """
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        raise httpx.RemoteProtocolError("Server disconnected without sending a response.", request=request)
-
-
-def _setup_disconnecting_backend_server(
-    tmp_path: Path,
-) -> tuple[TestClient, FileAuthStore, AgentId]:
-    """Set up a desktop client whose backend always raises RemoteProtocolError."""
-    agent_id = AgentId()
-    backend_resolver = StaticBackendResolver(
-        url_by_agent_and_service={str(agent_id): {str(DEFAULT_SERVICE_NAME): "http://test-backend"}},
-    )
-    http_client = httpx.AsyncClient(transport=_DisconnectingTransport(), base_url="http://test-backend")
-    client, auth_store = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=http_client,
-    )
-    _authenticate_client(client=client, auth_store=auth_store)
-    return client, auth_store, agent_id
-
-
-# -- Backend URL with query string tests --
-
-
-# -- Landing page agent creation tests --
-
-
 def test_landing_page_shows_discovering_when_initial_discovery_not_done(tmp_path: Path) -> None:
     """Before initial discovery completes, show discovering state with auto-refresh."""
     backend_resolver = MngrCliBackendResolver()
@@ -483,7 +382,10 @@ def test_creation_status_returns_404_for_unknown_agent(tmp_path: Path) -> None:
     """GET /api/create-agent/{id}/status returns 404 for unknown creation."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    unknown_id = AgentId()
+    # The URL handle is a ``CreationId`` (minds-internal in-flight handle),
+    # not a canonical mngr ``AgentId``; passing an AgentId-prefixed string
+    # would now fail to parse and never even reach the not-tracked check.
+    unknown_id = CreationId()
     response = client.get("/api/create-agent/{}/status".format(unknown_id))
     assert response.status_code == 404
 
@@ -683,7 +585,7 @@ def test_creating_page_returns_404_for_unknown(tmp_path: Path) -> None:
     """GET /creating/{agent_id} returns 404 for unknown agent creation."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    response = client.get("/creating/{}".format(AgentId()))
+    response = client.get("/creating/{}".format(CreationId()))
     assert response.status_code == 404
 
 
@@ -691,12 +593,16 @@ def test_creation_status_api_returns_status_for_tracked_agent(tmp_path: Path) ->
     """GET /api/create-agent/{id}/status returns a valid status for a tracked creation."""
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
-    agent_id = agent_creator.start_creation("file:///nonexistent-repo")
+    creation_id = agent_creator.start_creation("file:///nonexistent-repo")
 
-    response = client.get("/api/create-agent/{}/status".format(agent_id))
+    response = client.get("/api/create-agent/{}/status".format(creation_id))
     assert response.status_code == 200
     data = response.json()
-    assert data["agent_id"] == str(agent_id)
+    # The status response now reports both ``creation_id`` (always present)
+    # and ``agent_id`` (only once mngr create returns a canonical id). For
+    # this test the create runs against a nonexistent repo so it may never
+    # produce an agent_id; just check that the creation_id round-trips.
+    assert data["creation_id"] == str(creation_id)
     assert data["status"] in ("CLONING", "CREATING", "DONE", "FAILED")
     agent_creator.wait_for_all()
 
@@ -815,7 +721,7 @@ def test_creation_logs_sse_returns_404_for_unknown(tmp_path: Path) -> None:
     """GET /api/create-agent/{id}/logs returns 404 for unknown agent."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    response = client.get("/api/create-agent/{}/logs".format(AgentId()))
+    response = client.get("/api/create-agent/{}/logs".format(CreationId()))
     assert response.status_code == 404
 
 
@@ -1036,8 +942,6 @@ def test_accounts_page_shows_logged_in_accounts(tmp_path: Path) -> None:
 
     session_store = MultiAccountSessionStore(data_dir=tmp_path)
     session_store.add_or_update_session(
-        access_token="tok-123",
-        refresh_token=None,
         user_id="user-test-123",
         email="test@example.com",
     )
@@ -1163,6 +1067,10 @@ def test_auto_open_toggle(tmp_path: Path) -> None:
     assert config.get_auto_open_requests_panel() is False
 
 
+_TEST_PREAUTH_COOKIE = "test-preauth-cookie-value"
+_TEST_MNGR_FORWARD_PORT = 8421
+
+
 def _build_refresh_test_app(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
@@ -1190,13 +1098,17 @@ def _build_refresh_test_app(
         minds_config=MindsConfig(data_dir=tmp_path),
         request_inbox=RequestInbox(),
         paths=WorkspacePaths(data_dir=tmp_path),
+        mngr_forward_port=_TEST_MNGR_FORWARD_PORT,
+        mngr_forward_preauth_cookie=_TEST_PREAUTH_COOKIE,
     )
     return app, received
 
 
 def test_refresh_event_posts_to_system_interface_broadcast(tmp_path: Path) -> None:
-    """A refresh event on the mngr event stream triggers a POST to the agent's
-    workspace server broadcast endpoint with the correct service_name."""
+    """A refresh event on the mngr event stream triggers a POST to the
+    plugin's per-agent subdomain so the workspace server broadcasts. The URL
+    is on the plugin's port and the request carries the ``mngr_forward_session``
+    cookie (set to the preauth value minds wired in)."""
     agent_id = AgentId()
     service_name = "web"
 
@@ -1219,25 +1131,12 @@ def test_refresh_event_posts_to_system_interface_broadcast(tmp_path: Path) -> No
     assert len(received) == 1, f"expected one POST, got {len(received)}: {[str(r.url) for r in received]}"
     request = received[0]
     assert request.method == "POST"
-    assert str(request.url) == f"http://ws-backend:9000/api/refresh-service/{service_name}/broadcast"
-
-
-def test_refresh_event_without_system_interface_backend_is_noop(tmp_path: Path) -> None:
-    """A refresh event for an agent whose system_interface URL isn't known does nothing."""
-    agent_id = AgentId()
-
-    # Resolver knows about the agent but not a system_interface service.
-    resolver = make_resolver_with_data(agents_json=make_agents_json(agent_id))
-    app, received = _build_refresh_test_app(tmp_path, resolver)
-
-    with TestClient(app):
-        raw_line = json.dumps({"source": "refresh", "service_name": "web"})
-        resolver._fire_on_refresh(str(agent_id), raw_line)
-        # Give the reactor a moment to confirm nothing arrives. poll_until
-        # will run for the full timeout since the predicate never flips.
-        poll_until(lambda: len(received) > 0, timeout=0.2, poll_interval=0.02)
-
-    assert received == []
+    expected_url = (
+        f"http://{agent_id}.localhost:{_TEST_MNGR_FORWARD_PORT}/api/refresh-service/{service_name}/broadcast"
+    )
+    assert str(request.url) == expected_url
+    cookie_header = request.headers.get("cookie", "")
+    assert f"mngr_forward_session={_TEST_PREAUTH_COOKIE}" in cookie_header
 
 
 def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path) -> None:
@@ -1263,147 +1162,3 @@ def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path
     resolver._fire_on_refresh(str(agent_id), raw_line)
 
     assert received == []
-
-
-# -- Subdomain forwarding (agent-id.localhost) tests --
-
-
-def _make_workspace_stub_backend() -> FastAPI:
-    """A FastAPI app that pretends to be a minds_workspace_server."""
-    stub = FastAPI()
-
-    @stub.get("/", response_class=HTMLResponse)
-    def workspace_root() -> HTMLResponse:
-        return HTMLResponse("<html><body>workspace-root</body></html>")
-
-    @stub.get("/api/layout")
-    def workspace_layout() -> JSONResponse:
-        return JSONResponse({"layout": "stub"})
-
-    return stub
-
-
-def _create_subdomain_test_client(
-    tmp_path: Path,
-    agent_id: AgentId,
-    workspace_app: FastAPI | None = None,
-) -> tuple[TestClient, FileAuthStore]:
-    """Build a desktop client whose resolver routes the given agent to a stub backend.
-
-    If *workspace_app* is supplied it is used as the workspace backend; otherwise
-    ``_make_workspace_stub_backend()`` provides a default stub.
-    """
-    workspace_transport = httpx.ASGITransport(app=workspace_app or _make_workspace_stub_backend())
-
-    class _WorkspaceRoutingTransport(httpx.AsyncBaseTransport):
-        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-            host = request.url.host
-            if host == "workspace-backend":
-                return await workspace_transport.handle_async_request(request)
-            return httpx.Response(502, content=b"unknown host")
-
-    routing_client = httpx.AsyncClient(transport=_WorkspaceRoutingTransport(), follow_redirects=False, timeout=5.0)
-
-    auth_dir = tmp_path / "auth"
-    auth_store = FileAuthStore(data_directory=auth_dir)
-
-    discovered_agents = make_agents_json(agent_id)
-    resolver = make_resolver_with_data(
-        agents_json=discovered_agents,
-        service_logs={str(agent_id): make_service_log("system_interface", "http://workspace-backend")},
-    )
-
-    app = create_desktop_client(
-        auth_store=auth_store,
-        backend_resolver=resolver,
-        http_client=routing_client,
-    )
-    client = TestClient(app, base_url=f"http://{agent_id}.localhost")
-    return client, auth_store
-
-
-def test_subdomain_forward_unauth_html_redirects_to_landing(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    client, _ = _create_subdomain_test_client(tmp_path, agent_id)
-    response = client.get("/", headers={"accept": "text/html"}, follow_redirects=False)
-    assert response.status_code == 302
-    location = response.headers["location"]
-    assert location.startswith("http://localhost:")
-    # The redirect target must be the bare-origin landing route, not /login
-    # (which requires a one_time_code query param and would otherwise return
-    # 422 when the browser follows the redirect).
-    assert location.endswith("/")
-    assert "/login" not in location
-
-
-def test_subdomain_forward_unauth_non_html_is_403(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    client, _ = _create_subdomain_test_client(tmp_path, agent_id)
-    response = client.get("/api/layout", headers={"accept": "application/json"})
-    assert response.status_code == 403
-
-
-def test_subdomain_forward_auth_forwards_to_workspace_server(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    client, auth_store = _create_subdomain_test_client(tmp_path, agent_id)
-    _authenticate_client(client=client, auth_store=auth_store)
-    response = client.get("/")
-    assert response.status_code == 200
-    assert "workspace-root" in response.text
-
-
-def test_subdomain_forward_unknown_agent_returns_404(tmp_path: Path) -> None:
-    # agent_id is NOT registered in the resolver; the subdomain should 404.
-    # Create a client with a DIFFERENT agent registered and then visit agent_id's subdomain.
-    agent_id = AgentId()
-    other_id = AgentId()
-    client, auth_store = _create_subdomain_test_client(tmp_path, other_id)
-    _authenticate_client(client=client, auth_store=auth_store)
-    # Switch base_url to the unregistered agent
-    client.base_url = httpx.URL(f"http://{agent_id}.localhost")
-    response = client.get("/")
-    assert response.status_code == 404
-
-
-# -- Session cookie stripping tests --
-
-
-def _make_cookie_echo_backend() -> FastAPI:
-    """A workspace stub that echoes back the Cookie header it receives."""
-    stub = FastAPI()
-
-    @stub.get("/cookies")
-    def echo_cookies(request: FastAPIRequest) -> JSONResponse:
-        return JSONResponse({"cookie_header": request.headers.get("cookie")})
-
-    return stub
-
-
-def test_subdomain_forward_strips_session_cookie(tmp_path: Path) -> None:
-    """The proxy must strip the minds_session cookie so workspace servers
-    cannot extract and reuse it against other agents."""
-    agent_id = AgentId()
-    client, auth_store = _create_subdomain_test_client(tmp_path, agent_id, workspace_app=_make_cookie_echo_backend())
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.get("/cookies")
-    assert response.status_code == 200
-
-    received_cookie = response.json()["cookie_header"]
-    assert received_cookie is None or SESSION_COOKIE_NAME not in received_cookie
-
-
-def test_subdomain_forward_preserves_non_session_cookies(tmp_path: Path) -> None:
-    """The proxy must preserve cookies that are not the session cookie."""
-    agent_id = AgentId()
-    client, auth_store = _create_subdomain_test_client(tmp_path, agent_id, workspace_app=_make_cookie_echo_backend())
-    _authenticate_client(client=client, auth_store=auth_store)
-    client.cookies.set("app_preference", "dark-mode-92741", path="/")
-
-    response = client.get("/cookies")
-    assert response.status_code == 200
-
-    received_cookie = response.json()["cookie_header"]
-    assert received_cookie is not None
-    assert "app_preference=dark-mode-92741" in received_cookie
-    assert SESSION_COOKIE_NAME not in received_cookie

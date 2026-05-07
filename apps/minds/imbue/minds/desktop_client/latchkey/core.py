@@ -40,6 +40,7 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -658,7 +659,7 @@ class Latchkey(MutableModel):
 # -- mngr-stream discovery callbacks ------------------------------------------
 
 
-class LatchkeyDiscoveryHandler(FrozenModel):
+class LatchkeyDiscoveryHandler(MutableModel):
     """Discovery callback that spawns a Latchkey gateway for each agent and tunnels it in.
 
     Intended to be registered via ``MngrStreamManager.add_on_agent_discovered_callback``.
@@ -669,12 +670,25 @@ class LatchkeyDiscoveryHandler(FrozenModel):
     gateway on the agent's own ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``. DEV-mode
     agents run on the bare host and need no tunnel; their ``LATCHKEY_GATEWAY``
     env var points directly at the dynamic host port.
+
+    Tunnel setup is dispatched onto a worker thread via
+    ``concurrency_group`` so the ``MngrStreamManager`` discovery-stream
+    reader thread is never blocked on slow SSH I/O. Concurrent fires for
+    the same agent are coalesced via ``_pending_remote_agents`` -- the
+    underlying ``SSHTunnelManager.setup_reverse_tunnel`` is already
+    idempotent on ``(host:port, local_port)``, so a duplicate fire would
+    do no harm, but coalescing avoids spinning up a redundant worker
+    just to find an existing tunnel and exit.
     """
 
     latchkey: Latchkey = Field(description="Latchkey wrapper that owns the gateway subprocesses")
     tunnel_manager: SSHTunnelManager = Field(
         description="SSH tunnel manager used to reverse-forward the host-side gateway into remote agents"
     )
+    concurrency_group: ConcurrencyGroup = Field(description="CG used to dispatch off-thread tunnel setups")
+
+    _pending_remote_agents: set[str] = PrivateAttr(default_factory=set)
+    _pending_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def __call__(self, agent_id: AgentId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
         del provider_name
@@ -689,19 +703,47 @@ class LatchkeyDiscoveryHandler(FrozenModel):
             # directly on its dynamic host port, so no tunnel is needed.
             return
 
+        agent_id_str = str(agent_id)
+        with self._pending_lock:
+            if agent_id_str in self._pending_remote_agents:
+                logger.debug("Latchkey tunnel setup already in flight for agent {}; skipping duplicate fire", agent_id)
+                return
+            self._pending_remote_agents.add(agent_id_str)
+        try:
+            self.concurrency_group.start_new_thread(
+                target=self._run_remote_setup,
+                args=(agent_id, ssh_info, info.port),
+                name=f"latchkey-discovery-setup-{agent_id_str}",
+                is_checked=False,
+            )
+        except (ConcurrencyExceptionGroup, InvalidConcurrencyGroupStateError, RuntimeError):
+            # Roll back the pending flag so a later fire (after the CG
+            # is healthy again) isn't permanently coalesced away.
+            with self._pending_lock:
+                self._pending_remote_agents.discard(agent_id_str)
+            raise
+
+    def _run_remote_setup(self, agent_id: AgentId, ssh_info: RemoteSSHInfo, host_side_port: int) -> None:
+        """Worker-thread entry point. Always clears the pending flag in
+        ``finally`` so a crash inside the SSH tunnel setup doesn't
+        permanently block subsequent fires for this agent.
+        """
         try:
             self.tunnel_manager.setup_reverse_tunnel(
                 ssh_info=ssh_info,
-                local_port=info.port,
+                local_port=host_side_port,
                 remote_port=AGENT_SIDE_LATCHKEY_PORT,
             )
         except (SSHTunnelError, OSError, paramiko.SSHException) as e:
             logger.warning(
                 "Failed to set up Latchkey reverse tunnel for agent {} (host-side port {}): {}",
                 agent_id,
-                info.port,
+                host_side_port,
                 e,
             )
+        finally:
+            with self._pending_lock:
+                self._pending_remote_agents.discard(str(agent_id))
 
 
 class LatchkeyDestructionHandler(FrozenModel):

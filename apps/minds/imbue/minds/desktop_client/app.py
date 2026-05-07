@@ -4,58 +4,52 @@ import html
 import json
 import os
 import queue
-import re
-import socket as socket_module
 from collections.abc import AsyncGenerator
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
-from typing import Any
 from typing import Final
-from urllib.parse import quote
 
 import httpx
-import paramiko
-import websockets
-import websockets.asyncio.client
 from fastapi import Depends
 from fastapi import FastAPI
 from fastapi import Request
-from fastapi import WebSocket
-from fastapi import WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import Field
-from websockets import ClientConnection
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
-from imbue.minds.desktop_client.api_v1 import get_cf_client_with_auth
 from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.auth import AuthStoreInterface
-from imbue.minds.desktop_client.auth_backend_client import AuthBackendClient
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
-from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
-from imbue.minds.desktop_client.cookie_manager import create_subdomain_auth_token
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
-from imbue.minds.desktop_client.cookie_manager import verify_subdomain_auth_token
 from imbue.minds.desktop_client.deps import BackendResolverDep
-from imbue.minds.desktop_client.latchkey.core import Latchkey
+from imbue.minds.desktop_client.destroying import DestroyingStatus
+from imbue.minds.desktop_client.destroying import delete_destroying
+from imbue.minds.desktop_client.destroying import list_destroying
+from imbue.minds.desktop_client.destroying import lookup_host_id
+from imbue.minds.desktop_client.destroying import read_destroying
+from imbue.minds.desktop_client.destroying import read_log_chunk
+from imbue.minds.desktop_client.destroying import start_destroy
+from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
@@ -65,18 +59,17 @@ from imbue.minds.desktop_client.request_events import parse_request_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import find_handler_for_event
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.session_store import derive_user_id_prefix
+from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import enable_sharing_via_cloudflare
 from imbue.minds.desktop_client.sharing_handler import parse_emails_form_value
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
-from imbue.minds.desktop_client.ssh_tunnel import parse_url_host_port
+from imbue.minds.desktop_client.sharing_handler import resolve_account_email_for_workspace
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
+from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -85,7 +78,7 @@ from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import workspace_accent
-from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token as _save_tunnel_token
+from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
@@ -106,15 +99,6 @@ def _json_error(message: str, status_code: int) -> Response:
     )
 
 
-_EXCLUDED_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset(
-    {
-        "transfer-encoding",
-        "content-encoding",
-        "content-length",
-    }
-)
-
-
 # -- Dependency injection helpers --
 
 
@@ -123,6 +107,16 @@ def _get_auth_store(request: Request) -> AuthStoreInterface:
 
 
 AuthStoreDep = Annotated[AuthStoreInterface, Depends(_get_auth_store)]
+
+
+def _get_mngr_forward_origin(request: Request) -> str:
+    """Build the bare-origin URL of the ``mngr forward`` plugin.
+
+    Used by templates to construct ``/goto/<agent>/`` URLs that target the
+    plugin (which owns subdomain forwarding) rather than minds.
+    """
+    port = request.app.state.mngr_forward_port or 8421
+    return f"http://localhost:{port}"
 
 
 # -- Auth helpers --
@@ -145,63 +139,6 @@ def _is_authenticated(
     )
 
 
-# -- WebSocket forwarding helpers --
-
-
-async def _forward_client_to_backend(
-    client_websocket: WebSocket,
-    backend_ws: ClientConnection,
-) -> None:
-    """Forward messages from the client WebSocket to the backend.
-
-    Terminates via WebSocketDisconnect (client disconnects),
-    ConnectionClosed (backend disconnects), or RuntimeError (Starlette
-    raises this when receive() is called after a disconnect was already
-    delivered).
-    """
-    try:
-        while True:
-            data = await client_websocket.receive()
-            msg_type = data.get("type", "")
-            if msg_type == "websocket.disconnect":
-                break
-            if "text" in data:
-                await backend_ws.send(data["text"])
-            elif "bytes" in data:
-                await backend_ws.send(data["bytes"])
-            else:
-                logger.trace("Ignoring WebSocket message with no text or bytes: {}", msg_type)
-    except WebSocketDisconnect:
-        logger.trace("Client WebSocket disconnected")
-    except RuntimeError as e:
-        logger.trace("Client WebSocket receive error (likely post-disconnect): {}", e)
-    except websockets.exceptions.ConnectionClosed:
-        logger.debug("Backend WebSocket closed while forwarding client message")
-
-    try:
-        await backend_ws.close()
-    except websockets.exceptions.ConnectionClosed:
-        logger.trace("Backend WebSocket already closed during cleanup")
-
-
-async def _forward_backend_to_client(
-    client_websocket: WebSocket,
-    backend_ws: ClientConnection,
-    agent_id: AgentId,
-) -> None:
-    """Forward messages from the backend WebSocket to the client."""
-    try:
-        async for msg in backend_ws:
-            if isinstance(msg, str):
-                await client_websocket.send_text(msg)
-            else:
-                await client_websocket.send_bytes(msg)
-    except websockets.exceptions.ConnectionClosed:
-        logger.debug("Backend WebSocket closed for {}", agent_id)
-    except RuntimeError as e:
-        logger.trace("Client WebSocket send error (likely post-disconnect): {}", e)
-
-
 # -- Lifespan --
 
 
@@ -210,13 +147,20 @@ async def _managed_lifespan(
     inner_app: FastAPI,
     is_externally_managed_client: bool,
 ) -> AsyncGenerator[None, None]:
-    """Manage the httpx client and SSH tunnel lifecycles for the desktop client."""
+    """Manage the httpx client lifecycle and capture the running event loop.
+
+    Subprocess lifecycles (``mngr forward``, ``mngr observe`` / ``mngr event``
+    grandchildren) live in ``EnvelopeStreamConsumer`` and are torn down by
+    ``cli/run.py`` after ``uvicorn.run`` returns. SSH tunnels (forward + reverse)
+    live in ``cli/run.py``'s ``SSHTunnelManager``, which is solely used by the
+    surviving Latchkey discovery callback and is also cleaned up by
+    ``cli/run.py``.
+    """
     if not is_externally_managed_client:
         inner_app.state.http_client = httpx.AsyncClient(
             follow_redirects=False,
             timeout=_PROXY_TIMEOUT_SECONDS,
         )
-    inner_app.state.ssh_http_clients: dict[str, httpx.AsyncClient] = {}
     # Captured here so background callbacks (e.g. the mngr event refresh
     # dispatch) can schedule async work on the server's running loop via
     # asyncio.run_coroutine_threadsafe.
@@ -228,29 +172,9 @@ async def _managed_lifespan(
         # race with shutdown see None and drop their events instead of trying
         # to schedule on a loop that is about to close.
         inner_app.state.event_loop = None
-        for client in inner_app.state.ssh_http_clients.values():
-            await client.aclose()
-        inner_app.state.ssh_http_clients.clear()
         if not is_externally_managed_client:
             await inner_app.state.http_client.aclose()
-        # Stop mngr observe/events subprocesses before cleaning up tunnels.
-        # This runs inside uvicorn's lifespan shutdown, which happens BEFORE
-        # uvicorn re-raises the captured SIGTERM signal. A finally block
-        # around uvicorn.run() would never execute because uvicorn calls
-        # signal.raise_signal(SIGTERM) after shutdown, killing the process.
-        stream_manager: MngrStreamManager | None = inner_app.state.stream_manager
-        if stream_manager is not None:
-            logger.info("Stopping stream manager subprocesses...")
-            stream_manager.stop()
-            logger.info("Stream manager stopped.")
-        # Latchkey has no shutdown step: spawned ``latchkey gateway``
-        # subprocesses are detached and intentionally outlive the desktop
-        # client so in-flight container/VM agents keep working.
-        tunnel_manager: SSHTunnelManager | None = inner_app.state.tunnel_manager
-        if tunnel_manager is not None:
-            tunnel_manager.cleanup()
-        # Exit the root ConcurrencyGroup last, after every other manager has
-        # stopped its strands. ``__exit__`` waits up to
+        # Exit the root ConcurrencyGroup. ``__exit__`` waits up to
         # ``shutdown_timeout_seconds`` for any still-in-flight strands (e.g.
         # a detached tunnel-setup task) to finish.
         root_concurrency_group: ConcurrencyGroup | None = inner_app.state.root_concurrency_group
@@ -335,6 +259,8 @@ def _handle_landing_page(
         return HTMLResponse(content=html)
 
     all_agent_ids = backend_resolver.list_known_workspace_ids()
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, all_agent_ids)
 
     if all_agent_ids:
         telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
@@ -351,8 +277,10 @@ def _handle_landing_page(
                 agent_names[str(aid)] = info.agent_name if info else str(aid)
         html = render_landing_page(
             accessible_agent_ids=all_agent_ids,
+            mngr_forward_origin=_get_mngr_forward_origin(request),
             telegram_status_by_agent_id=telegram_status,
             agent_names=agent_names,
+            destroying_status_by_agent_id=destroying_status_by_agent_id,
         )
         return HTMLResponse(content=html)
 
@@ -361,7 +289,11 @@ def _handle_landing_page(
     # completed with no agents found, show the create form so the user can
     # create their first agent instead of polling forever.
     if not backend_resolver.has_completed_initial_discovery():
-        html = render_landing_page(accessible_agent_ids=(), is_discovering=True)
+        html = render_landing_page(
+            accessible_agent_ids=(),
+            mngr_forward_origin=_get_mngr_forward_origin(request),
+            is_discovering=True,
+        )
         return HTMLResponse(content=html)
 
     git_url = request.query_params.get("git_url", "")
@@ -379,446 +311,41 @@ def _handle_landing_page(
     return HTMLResponse(content=html)
 
 
-def _connect_backend_websocket(
-    ws_url: str,
-    subprotocols: list[str],
-    tunnel_socket_path: Path | None,
-) -> websockets.asyncio.client.connect:
-    """Create a websockets connect context manager, optionally through an SSH tunnel.
-
-    When tunnel_socket_path is provided, connects via a Unix domain socket that
-    tunnels through SSH to the remote backend. Otherwise, connects directly.
-    """
-    ws_subprotocols = [websockets.Subprotocol(s) for s in subprotocols] if subprotocols else None
-
-    if tunnel_socket_path is not None:
-        sock = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
-        try:
-            sock.connect(str(tunnel_socket_path))
-            sock.setblocking(False)
-        except OSError:
-            sock.close()
-            raise
-        return websockets.connect(ws_url, subprotocols=ws_subprotocols, sock=sock)
-
-    return websockets.connect(ws_url, subprotocols=ws_subprotocols)
-
-
-# -- SSH tunnel helpers --
-
-
-def _get_tunnel_socket_path(
-    tunnel_manager: SSHTunnelManager | None,
-    agent_id: AgentId,
-    backend_url: str,
-    backend_resolver: BackendResolverInterface,
-) -> Path | None:
-    """Get the Unix socket path for tunneling to a remote backend, or None for local."""
-    if tunnel_manager is None:
-        return None
-
-    ssh_info = backend_resolver.get_ssh_info(agent_id)
-    if ssh_info is None:
-        return None
-
-    remote_host, remote_port = parse_url_host_port(backend_url)
-    return tunnel_manager.get_tunnel_socket_path(
-        ssh_info=ssh_info,
-        remote_host=remote_host,
-        remote_port=remote_port,
-    )
-
-
-def _get_tunnel_http_client(
-    app: FastAPI,
-    agent_id: AgentId,
-    backend_url: str,
-    backend_resolver: BackendResolverInterface,
-) -> httpx.AsyncClient | None:
-    """Get an httpx client configured for SSH tunneling, or None for direct connection.
-
-    Creates a fresh client each time to avoid stale connections when SSH
-    tunnels are recreated after a broken pipe.
-    """
-    tunnel_manager: SSHTunnelManager | None = app.state.tunnel_manager
-    socket_path = _get_tunnel_socket_path(tunnel_manager, agent_id, backend_url, backend_resolver)
-    if socket_path is None:
-        return None
-
-    transport = httpx.AsyncHTTPTransport(uds=str(socket_path))
-    return httpx.AsyncClient(
-        transport=transport,
-        follow_redirects=False,
-        timeout=_PROXY_TIMEOUT_SECONDS,
-    )
-
-
-# -- Auth bridge: bare origin -> per-subdomain session cookie --
-
-
-def _handle_goto_workspace(
-    agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
-) -> Response:
-    """Redirect an authenticated user from the bare origin to a workspace subdomain,
-    carrying a short-lived signed token that sets the subdomain's session cookie
-    on first landing.
-
-    Flow:
-      1. Landing page click fetches ``/goto/<agent-id>/``.
-      2. This handler verifies the bare-origin session cookie (fails back to
-         ``/`` for unauth users).
-      3. Mints a short-lived token and 302s to
-         ``http://<agent-id>.localhost:PORT/_subdomain_auth?token=...&next=/``.
-      4. The subdomain's ``/_subdomain_auth`` handler sets the subdomain cookie.
-
-    We route through this bridge because ``Domain=localhost`` cookies don't
-    cross from ``localhost`` into ``<agent>.localhost`` (public-suffix rule).
-    """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=302, headers={"Location": "/"})
-
-    try:
-        parsed_id = AgentId(agent_id)
-    except ValueError:
-        return Response(status_code=404)
-
-    signing_key = auth_store.get_signing_key()
-    token = create_subdomain_auth_token(signing_key=signing_key, agent_id=str(parsed_id))
-
-    # Preserve the user's desired landing path on the subdomain.
-    next_url = request.query_params.get("next", "/")
-    if not next_url.startswith("/"):
-        next_url = "/"
-
-    host_header = request.headers.get("host", "")
-    port = host_header.split(":")[-1] if ":" in host_header else str(request.app.state.auth_server_port or 8420)
-
-    encoded_next = quote(next_url, safe="")
-    location = f"http://{parsed_id}.localhost:{port}{_SUBDOMAIN_AUTH_PATH}?token={token}&next={encoded_next}"
-    return Response(status_code=302, headers={"Location": location})
-
-
-# -- Subdomain forwarding to per-workspace minds_workspace_server --
-
-_WORKSPACE_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^(agent-[a-f0-9]+)\.(?:localhost|127\.0\.0\.1)(?::\d+)?$",
-    re.IGNORECASE,
-)
-_WORKSPACE_SERVER_SERVICE_NAME: Final[ServiceName] = ServiceName("system_interface")
-
-
-def _parse_workspace_subdomain(host_header: str) -> AgentId | None:
-    """Return the agent ID if ``host_header`` is ``<agent-id>.localhost(:port)``.
-
-    Returns None for bare ``localhost``, ``127.0.0.1``, or unparseable values;
-    those requests are served by the desktop client's own routes.
-    """
-    if not host_header:
-        return None
-    match = _WORKSPACE_SUBDOMAIN_PATTERN.match(host_header)
-    if match is None:
-        return None
-    try:
-        return AgentId(match.group(1))
-    except ValueError:
-        return None
-
-
-def _unauthenticated_subdomain_response(request: Request) -> Response:
-    """Redirect to the bare-origin landing page for HTML navigations; 403 otherwise.
-
-    The landing page (``/``) renders the login prompt for unauthenticated
-    users. We deliberately do not redirect to ``/login`` because that route
-    requires a ``one_time_code`` query parameter -- sending a browser there
-    without one yields a 422 validation error. Users get their OTP from the
-    terminal output of the desktop client, not from this redirect.
-    """
-    accept = request.headers.get("accept", "")
-    if "text/html" in accept:
-        auth_port = request.app.state.auth_server_port or 8420
-        location = f"http://localhost:{auth_port}/"
-        return Response(status_code=302, headers={"Location": location})
-    return Response(status_code=403, content="Not authenticated")
-
-
-async def _forward_workspace_http(
-    request: Request,
-    workspace_backend_url: str,
-    http_client: httpx.AsyncClient,
-) -> Response:
-    """Byte-forward an HTTP request to a workspace_server URL.
-
-    Streams SSE responses (detected by the client's ``accept: text/event-stream``),
-    buffers everything else. Does NOT rewrite body or headers: the workspace_server
-    already emits /service/<name>/ prefixed URLs, scoped cookies, and the SW shim.
-    """
-    base = workspace_backend_url.rstrip("/")
-    path = request.url.path.lstrip("/")
-    url = f"{base}/{path}" if path else base + "/"
-    if request.url.query:
-        url = f"{url}?{request.url.query}"
-
-    headers = dict(request.headers)
-    headers.pop("host", None)
-
-    # Strip the desktop client's session cookie so agent-controlled workspace
-    # servers cannot extract and reuse it against other agents.
-    raw_cookie = headers.get("cookie")
-    if raw_cookie is not None:
-        stripped = "; ".join(
-            c.strip() for c in raw_cookie.split(";") if not c.strip().startswith(SESSION_COOKIE_NAME + "=")
-        )
-        if stripped:
-            headers["cookie"] = stripped
-        else:
-            del headers["cookie"]
-
-    body = await request.body()
-
-    accept = request.headers.get("accept", "")
-    is_likely_sse = "text/event-stream" in accept
-
-    if is_likely_sse:
-        backend_request = http_client.build_request(method=request.method, url=url, headers=headers, content=body)
-        try:
-            backend_response = await http_client.send(backend_request, stream=True)
-        except httpx.ConnectError:
-            return Response(status_code=502, content="Workspace server connection refused")
-        except httpx.TimeoutException:
-            return Response(status_code=504, content="Workspace server stream timed out")
-
-        async def _stream() -> AsyncGenerator[bytes, None]:
-            try:
-                async for chunk in backend_response.aiter_bytes():
-                    yield chunk
-            except (httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
-                logger.warning("Workspace server SSE stream failed for {}: {}", request.url.path, e)
-            finally:
-                await backend_response.aclose()
-
-        media_type = backend_response.headers.get("content-type", "text/event-stream")
-        return StreamingResponse(
-            _stream(),
-            status_code=backend_response.status_code,
-            media_type=media_type,
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    try:
-        backend_response = await http_client.request(method=request.method, url=url, headers=headers, content=body)
-    except httpx.ConnectError:
-        return Response(status_code=502, content="Workspace server connection refused")
-    except httpx.ReadError:
-        return Response(status_code=502, content="Workspace server connection lost")
-    except httpx.RemoteProtocolError:
-        return Response(status_code=502, content="Workspace server disconnected without response")
-    except httpx.TimeoutException:
-        return Response(status_code=504, content="Workspace server timed out")
-
-    response = Response(content=backend_response.content, status_code=backend_response.status_code)
-    for header_key, header_value in backend_response.headers.multi_items():
-        if header_key.lower() in _EXCLUDED_RESPONSE_HEADERS:
-            continue
-        response.headers.append(header_key, header_value)
-    return response
-
-
-_SUBDOMAIN_AUTH_PATH: Final[str] = "/_subdomain_auth"
-
-
-def _handle_subdomain_auth_bridge(request: Request, agent_id: AgentId) -> Response:
-    """Validate an inbound ``/_subdomain_auth`` token and set a subdomain cookie.
-
-    The bare-origin ``/goto/{agent_id}/`` handler mints a short-lived signed
-    token and redirects the browser to ``http://<agent_id>.localhost:PORT/
-    _subdomain_auth?token=...&next=/...``. That's this handler. We verify the
-    token was issued for this specific agent, then set a host-only session
-    cookie on the subdomain and redirect to ``next``. Subsequent requests on
-    this subdomain carry the cookie and pass the normal auth check.
-
-    We do this dance because ``Domain=localhost`` cookies don't propagate to
-    subdomains in Chromium / curl (localhost is treated as a public suffix).
-    """
-    auth_store: AuthStoreInterface = request.app.state.auth_store
-    token = request.query_params.get("token", "")
-    next_url = request.query_params.get("next", "/")
-    if not next_url.startswith("/"):
-        next_url = "/"
-    signing_key = auth_store.get_signing_key()
-    if not verify_subdomain_auth_token(token=token, signing_key=signing_key, agent_id=str(agent_id)):
-        return Response(status_code=403, content="Invalid or expired subdomain auth token")
-
-    cookie_value = create_session_cookie(signing_key=signing_key)
-    response = Response(status_code=302, headers={"Location": next_url})
-    response.set_cookie(
-        key=SESSION_COOKIE_NAME,
-        value=cookie_value,
-        path="/",
-        httponly=True,
-        samesite="lax",
-    )
-    return response
-
-
-async def _handle_workspace_forward_http(request: Request) -> Response:
-    """Forward an HTTP request arriving at ``<agent-id>.localhost:8420`` to that
-    workspace's minds_workspace_server. Called from subdomain-routing middleware.
-    """
-    host_header = request.headers.get("host", "")
-    agent_id = _parse_workspace_subdomain(host_header)
-    if agent_id is None:
-        return Response(status_code=404)
-
-    # Auth-bridge: /_subdomain_auth?token=... sets the subdomain cookie. It
-    # must be handled BEFORE the auth check because there's no cookie yet.
-    if request.url.path == _SUBDOMAIN_AUTH_PATH:
-        return _handle_subdomain_auth_bridge(request, agent_id)
-
-    auth_store: AuthStoreInterface = request.app.state.auth_store
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return _unauthenticated_subdomain_response(request)
-
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-    if agent_id not in backend_resolver.list_known_workspace_ids():
-        return Response(status_code=404, content=f"Unknown workspace: {agent_id}")
-
-    workspace_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
-    if workspace_url is None:
-        if "text/html" in request.headers.get("accept", ""):
-            return HTMLResponse(
-                content=(
-                    "<!doctype html><html><head>"
-                    '<meta http-equiv="refresh" content="1">'
-                    "</head><body>"
-                    "<p>Workspace server not yet available. Retrying...</p>"
-                    "</body></html>"
-                )
-            )
-        return Response(status_code=503, content="Workspace server not yet available")
-
-    try:
-        tunnel_client = await asyncio.get_running_loop().run_in_executor(
-            None, _get_tunnel_http_client, request.app, agent_id, workspace_url, backend_resolver
-        )
-    except (SSHTunnelError, paramiko.SSHException, OSError) as e:
-        logger.warning("SSH tunnel setup failed for workspace {}: {}", agent_id, e)
-        return Response(status_code=502, content=f"SSH tunnel to remote workspace failed: {e}")
-
-    active_client = tunnel_client or request.app.state.http_client
-    return await _forward_workspace_http(
-        request=request, workspace_backend_url=workspace_url, http_client=active_client
-    )
-
-
-async def _handle_workspace_forward_websocket(websocket: WebSocket) -> None:
-    """Forward a WebSocket upgrade arriving at ``<agent-id>.localhost:8420`` to the
-    workspace's minds_workspace_server. Auth still honored via the session cookie.
-    """
-    host_header = websocket.headers.get("host", "")
-    agent_id = _parse_workspace_subdomain(host_header)
-    if agent_id is None:
-        await websocket.close(code=4004, reason="Unknown host")
-        return
-
-    auth_store: AuthStoreInterface = websocket.app.state.auth_store
-    if not _is_authenticated(cookies=websocket.cookies, auth_store=auth_store):
-        await websocket.close(code=4003, reason="Not authenticated")
-        return
-
-    backend_resolver: BackendResolverInterface = websocket.app.state.backend_resolver
-    if agent_id not in backend_resolver.list_known_workspace_ids():
-        await websocket.close(code=4004, reason=f"Unknown workspace: {agent_id}")
-        return
-
-    workspace_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
-    if workspace_url is None:
-        await websocket.close(code=1013, reason="Workspace server not yet available")
-        return
-
-    try:
-        tunnel_socket_path = await asyncio.get_running_loop().run_in_executor(
-            None,
-            _get_tunnel_socket_path,
-            websocket.app.state.tunnel_manager,
-            agent_id,
-            workspace_url,
-            backend_resolver,
-        )
-    except (SSHTunnelError, paramiko.SSHException, OSError) as e:
-        logger.debug("SSH tunnel setup failed for workspace WS {}: {}", agent_id, e)
-        try:
-            await websocket.close(code=1011, reason="SSH tunnel failed")
-        except RuntimeError:
-            pass
-        return
-
-    ws_backend = workspace_url.replace("http://", "ws://").replace("https://", "wss://").rstrip("/")
-    path = websocket.url.path.lstrip("/")
-    ws_url = f"{ws_backend}/{path}" if path else ws_backend + "/"
-    if websocket.url.query:
-        ws_url = f"{ws_url}?{websocket.url.query}"
-
-    client_subprotocol_header = websocket.headers.get("sec-websocket-protocol")
-    subprotocols: list[str] = []
-    if client_subprotocol_header:
-        subprotocols = [s.strip() for s in client_subprotocol_header.split(",")]
-
-    try:
-        backend_ws_conn = _connect_backend_websocket(
-            ws_url=ws_url, subprotocols=subprotocols, tunnel_socket_path=tunnel_socket_path
-        )
-        async with backend_ws_conn as backend_ws:
-            await websocket.accept(subprotocol=backend_ws.subprotocol)
-            await asyncio.gather(
-                _forward_client_to_backend(client_websocket=websocket, backend_ws=backend_ws),
-                _forward_backend_to_client(client_websocket=websocket, backend_ws=backend_ws, agent_id=agent_id),
-            )
-    except (ConnectionRefusedError, OSError, TimeoutError, SSHTunnelError, paramiko.SSHException) as connection_error:
-        logger.debug("Backend WebSocket connection failed for workspace {}: {}", agent_id, connection_error)
-        try:
-            await websocket.close(code=1011, reason="Backend connection failed")
-        except RuntimeError:
-            pass
-
-
 # -- Agent creation route handlers --
 
 
 def _run_tunnel_setup(
     agent_id: AgentId,
-    enriched_client: CloudflareClient,
-    paths: WorkspacePaths,
+    imbue_cloud_cli: ImbueCloudCli,
+    account_email: str,
     notification_dispatcher: NotificationDispatcher,
     agent_display_name: str,
 ) -> None:
-    """Create a Cloudflare tunnel and inject its token into the agent.
+    """Create a Cloudflare tunnel via the plugin and inject its token into the agent.
 
     Runs on a detached thread scheduled by ``_OnCreatedCallbackFactory`` on
     the desktop client's root ``ConcurrencyGroup``. Failures are logged via
-    loguru and surfaced to the user via ``notification_dispatcher`` -- every
-    failure dispatches one notification, no rate limit.
+    loguru and surfaced to the user via ``notification_dispatcher``.
 
-    ``create_tunnel`` returns ``(None, error_message)`` for every failure mode
-    (HTTP, bad response, etc.) rather than raising, so no defensive wrapper is
-    needed here; we just inspect the return value.
+    The plugin owns all tunnel state (token, services, auth policy);
+    minds keeps no local cache. ``create_tunnel`` is idempotent on the
+    connector side, so re-injecting on every agent (re)creation just
+    delivers the existing token rather than rotating.
     """
-    tunnel_token, message = enriched_client.create_tunnel(agent_id)
-    if tunnel_token is None:
-        logger.warning("Failed to create tunnel for {}: {}", agent_id, message)
+    try:
+        info = imbue_cloud_cli.create_tunnel(account=account_email, agent_id=str(agent_id))
+    except ImbueCloudCliError as exc:
+        logger.warning("Failed to create tunnel for {}: {}", agent_id, exc)
         _notify_tunnel_failure(
             notification_dispatcher=notification_dispatcher,
             agent_display_name=agent_display_name,
-            error_message=message,
+            error_message=str(exc),
         )
         return
-    _save_tunnel_token(paths.data_dir, agent_id, tunnel_token)
-    inject_tunnel_token_into_agent(agent_id, tunnel_token)
+    if info.token is None:
+        logger.warning("Tunnel created for {} but no token returned", agent_id)
+        return
+    inject_tunnel_token_into_agent(agent_id, info.token.get_secret_value())
     logger.debug("Injected tunnel token into agent {}", agent_id)
 
 
@@ -847,17 +374,27 @@ def _notify_tunnel_failure(
 
 
 class _OnCreatedCallbackFactory(MutableModel):
-    """Callable that schedules Cloudflare tunnel setup as a detached background task.
+    """Callable that records the workspace<->account association and schedules Cloudflare tunnel setup.
 
-    ``__call__`` returns immediately after spawning a thread on the root
-    ``ConcurrencyGroup``; the actual ``create_tunnel`` + token inject work runs
-    asynchronously. This keeps ``_setup_and_start_leased_agent`` and
-    ``_create_agent_background`` off the critical path for the user redirect.
+    ``__call__`` is the single hook that runs once the inner ``mngr create``
+    has returned the canonical ``AgentId`` -- before this refactor minds
+    pre-generated an id and associated it with the account synchronously
+    in the route handler, but for imbue_cloud agents that pre-generated
+    id is fictional (the lease forces it back to the pool host's pre-baked
+    id), so the association ended up keyed under a phantom row. We now
+    do the ``associate_workspace`` call here, where ``agent_id`` is
+    guaranteed canonical.
+
+    The tunnel-setup work is scheduled on a detached thread on the root
+    ``ConcurrencyGroup`` so the agent-creation thread can flip status to
+    ``DONE`` without waiting on a multi-second Cloudflare round-trip.
     """
 
     session_store: MultiAccountSessionStore = Field(frozen=True, description="Session store for account lookup")
-    cf_client: CloudflareClient = Field(frozen=True, description="Cloudflare client for tunnel creation")
-    paths: WorkspacePaths = Field(frozen=True, description="Workspace paths for tunnel token storage")
+    imbue_cloud_cli: ImbueCloudCli = Field(
+        frozen=True,
+        description="CLI wrapper for `mngr imbue_cloud tunnels create`.",
+    )
     root_concurrency_group: ConcurrencyGroup = Field(
         frozen=True,
         description="Root group on which the detached tunnel task is scheduled.",
@@ -866,20 +403,27 @@ class _OnCreatedCallbackFactory(MutableModel):
         frozen=True,
         description="Dispatcher for surfacing tunnel-setup failures as OS notifications.",
     )
+    account_id: str = Field(
+        frozen=True,
+        default="",
+        description=(
+            "Account that owns this workspace. Empty when no account is selected (private "
+            "workspace), in which case no association is recorded and no tunnel is set up."
+        ),
+    )
 
     def __call__(self, agent_id: AgentId) -> None:
+        if not self.account_id:
+            return
+        # Bind the workspace to the account using the canonical agent id --
+        # this is what later ``get_account_for_workspace`` lookups (e.g. for
+        # the destruction handler) expect to find.
+        self.session_store.associate_workspace(self.account_id, str(agent_id))
         account = self.session_store.get_account_for_workspace(str(agent_id))
         if account is None:
+            # The account vanished between selection and now (logout?). The
+            # association above is still in place; we just skip the tunnel.
             return
-        token = self.session_store.get_access_token(str(account.user_id))
-        if token is None:
-            return
-        enriched_client = type(self.cf_client)(
-            connector_url=self.cf_client.connector_url,
-            supertokens_token=token,
-            supertokens_user_id_prefix=str(derive_user_id_prefix(str(account.user_id))),
-            supertokens_email=account.email,
-        )
         # ``_build_on_created_callback`` doesn't have easy access to the
         # user-chosen name at this point (see ``backend_resolver``), so fall
         # back to the short form of the agent id for the notification copy.
@@ -888,8 +432,8 @@ class _OnCreatedCallbackFactory(MutableModel):
             target=_run_tunnel_setup,
             kwargs={
                 "agent_id": agent_id,
-                "enriched_client": enriched_client,
-                "paths": self.paths,
+                "imbue_cloud_cli": self.imbue_cloud_cli,
+                "account_email": str(account.email),
                 "notification_dispatcher": self.notification_dispatcher,
                 "agent_display_name": agent_display_name,
             },
@@ -913,19 +457,13 @@ def _build_on_created_callback(
         return None
 
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
-    cf_client: CloudflareClient | None = request.app.state.cloudflare_client
-    try:
-        paths: WorkspacePaths | None = request.app.state.api_v1_paths
-    except AttributeError:
-        paths = None
-
+    imbue_cloud_cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
     root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
     notification_dispatcher: NotificationDispatcher | None = request.app.state.notification_dispatcher
 
     if (
         session_store is None
-        or cf_client is None
-        or paths is None
+        or imbue_cloud_cli is None
         or root_concurrency_group is None
         or notification_dispatcher is None
     ):
@@ -933,10 +471,10 @@ def _build_on_created_callback(
 
     return _OnCreatedCallbackFactory(
         session_store=session_store,
-        cf_client=cf_client,
-        paths=paths,
+        imbue_cloud_cli=imbue_cloud_cli,
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
+        account_id=account_id,
     )
 
 
@@ -975,39 +513,41 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         )
         return HTMLResponse(content=html, status_code=400)
 
-    # Resolve access token and version for LEASED mode
-    access_token = ""
-    version = ""
-    if launch_mode is LaunchMode.LEASED:
-        session_store_for_token: MultiAccountSessionStore | None = request.app.state.session_store
-        if session_store_for_token and account_id:
-            token = session_store_for_token.get_access_token(account_id)
-            access_token = str(token) if token else ""
-        version = resolve_template_version(git_url, branch, parent_cg=agent_creator.root_concurrency_group)
+    # Resolve the account email for IMBUE_CLOUD mode. The mngr_imbue_cloud
+    # plugin owns the SuperTokens session and is responsible for fetching a
+    # fresh access token at the time of each subprocess invocation, so minds
+    # only needs to know which account to ask for.
+    account_email = ""
+    branch_or_tag = branch
+    if launch_mode is LaunchMode.IMBUE_CLOUD:
+        session_store_for_account: MultiAccountSessionStore | None = request.app.state.session_store
+        if session_store_for_account and account_id:
+            account_email = session_store_for_account.get_account_email(account_id) or ""
+        if not branch_or_tag:
+            branch_or_tag = resolve_template_version(git_url, branch, parent_cg=agent_creator.root_concurrency_group)
 
     # Build a post-creation callback that injects the tunnel token
     on_created = _build_on_created_callback(request, account_id)
 
-    agent_id = agent_creator.start_creation(
+    # ``start_creation`` returns a CreationId (minds-internal handle for
+    # tracking the in-flight create) -- the canonical AgentId only exists
+    # after ``mngr create`` returns. Workspace<->account association is now
+    # done from the on_created callback (which fires post-canonical-id) so
+    # the association is keyed under the right id.
+    creation_id = agent_creator.start_creation(
         git_url,
         agent_name=agent_name,
         branch=branch,
         launch_mode=launch_mode,
         include_env_file=include_env_file,
-        access_token=access_token,
-        version=version,
+        account_email=account_email,
+        branch_or_tag=branch_or_tag,
         on_created=on_created,
     )
 
-    # Associate the workspace with the selected account before creation completes
-    if account_id:
-        session_store_assoc: MultiAccountSessionStore | None = request.app.state.session_store
-        if session_store_assoc:
-            session_store_assoc.associate_workspace(account_id, str(agent_id))
-
-    creating_url = "/creating/{}".format(agent_id)
-    if launch_mode is LaunchMode.LEASED:
-        creating_url += "?mode=LEASED"
+    creating_url = "/creating/{}".format(creation_id)
+    if launch_mode is LaunchMode.IMBUE_CLOUD:
+        creating_url += "?mode=IMBUE_CLOUD"
     return Response(status_code=303, headers={"Location": creating_url})
 
 
@@ -1073,15 +613,19 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             media_type="application/json",
         )
 
-    agent_id = agent_creator.start_creation(
+    creation_id = agent_creator.start_creation(
         git_url,
         agent_name=agent_name,
         branch=branch,
         launch_mode=launch_mode,
         include_env_file=include_env_file,
     )
+    # API contract: the JSON field stays named ``agent_id`` for backwards
+    # compatibility with existing API clients, but the value is now a
+    # CreationId (minds-internal in-flight handle, distinct prefix from a
+    # canonical AgentId). The status-polling endpoints accept either.
     return Response(
-        content=json.dumps({"agent_id": str(agent_id), "status": "CLONING"}),
+        content=json.dumps({"agent_id": str(creation_id), "status": "CLONING"}),
         media_type="application/json",
     )
 
@@ -1099,8 +643,12 @@ def _handle_creation_status_api(
     if agent_creator is None:
         return Response(status_code=501, content="Agent creation not configured")
 
-    parsed_id = AgentId(agent_id)
-    info = agent_creator.get_creation_info(parsed_id)
+    # The URL parameter is named ``agent_id`` for legacy API compatibility
+    # but it actually carries a ``CreationId`` (minds-internal in-flight
+    # handle). The canonical mngr ``AgentId`` is reported back through
+    # ``info.agent_id`` once ``mngr create`` returns.
+    creation_id = CreationId(agent_id)
+    info = agent_creator.get_creation_info(creation_id)
     if info is None:
         return Response(
             status_code=404,
@@ -1108,7 +656,12 @@ def _handle_creation_status_api(
             media_type="application/json",
         )
 
-    result = {"agent_id": str(info.agent_id), "status": str(info.status)}
+    result: dict[str, str] = {
+        "creation_id": str(info.creation_id),
+        "status": str(info.status),
+    }
+    if info.agent_id is not None:
+        result["agent_id"] = str(info.agent_id)
     if info.redirect_url is not None:
         result["redirect_url"] = info.redirect_url
     if info.error is not None:
@@ -1129,8 +682,10 @@ def _handle_creating_page(
     if agent_creator is None:
         return Response(status_code=501, content="Agent creation not configured")
 
-    parsed_id = AgentId(agent_id)
-    info = agent_creator.get_creation_info(parsed_id)
+    # ``agent_id`` route param is actually a CreationId (see comment in
+    # ``_handle_creation_status_api``).
+    creation_id = CreationId(agent_id)
+    info = agent_creator.get_creation_info(creation_id)
     if info is None:
         return Response(status_code=404, content="Unknown agent creation")
 
@@ -1142,14 +697,14 @@ def _handle_creating_page(
         creating_launch_mode = LaunchMode(mode_param) if mode_param else LaunchMode.LOCAL
     except ValueError:
         creating_launch_mode = LaunchMode.LOCAL
-    html = render_creating_page(agent_id=parsed_id, info=info, launch_mode=creating_launch_mode)
+    html = render_creating_page(creation_id=creation_id, info=info, launch_mode=creating_launch_mode)
     return HTMLResponse(content=html)
 
 
 async def _stream_creation_logs(
     log_queue: queue.Queue[str],
     agent_creator: AgentCreator,
-    agent_id: AgentId,
+    creation_id: CreationId,
 ) -> AsyncGenerator[str, None]:
     """Async generator that yields SSE events from a creation log queue."""
     streaming = True
@@ -1162,7 +717,7 @@ async def _stream_creation_logs(
 
         if line == LOG_SENTINEL:
             streaming = False
-            info = agent_creator.get_creation_info(agent_id)
+            info = agent_creator.get_creation_info(creation_id)
             if info is not None:
                 result = {"status": str(info.status)}
                 if info.redirect_url is not None:
@@ -1191,13 +746,15 @@ async def _handle_creation_logs_sse(
     if agent_creator is None:
         return Response(status_code=501, content="Agent creation not configured")
 
-    parsed_id = AgentId(agent_id)
-    log_queue = agent_creator.get_log_queue(parsed_id)
+    # ``agent_id`` route param carries a CreationId (see comment in
+    # ``_handle_creation_status_api``).
+    creation_id = CreationId(agent_id)
+    log_queue = agent_creator.get_log_queue(creation_id)
     if log_queue is None:
         return Response(status_code=404, content="Unknown agent creation")
 
     return StreamingResponse(
-        _stream_creation_logs(log_queue, agent_creator, parsed_id),
+        _stream_creation_logs(log_queue, agent_creator, creation_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1210,65 +767,198 @@ async def _handle_creation_logs_sse(
 # -- Agent destruction route handlers --
 
 
+def _resolve_destroying_for_landing(
+    paths: WorkspacePaths | None,
+    all_agent_ids: tuple[AgentId, ...],
+) -> dict[str, str]:
+    """Walk ``<paths.data_dir>/destroying/``, delete DONE records, return marker map.
+
+    Returns ``{agent_id_str: "running" | "failed"}`` for any in-flight or
+    failed destroy whose agent_id is currently known to the resolver. DONE
+    records (pid dead AND agent missing from the resolver) are deleted on
+    the spot so the row vanishes naturally on the next refresh.
+
+    Returns an empty dict (and does no work) when ``paths`` is None --
+    that path is exercised by tests that build a minimal app without
+    a real data dir.
+    """
+    if paths is None:
+        return {}
+    in_resolver = frozenset(all_agent_ids)
+    records = list_destroying(paths, in_resolver)
+    marker: dict[str, str] = {}
+    for agent_id, record in records.items():
+        if record.status == DestroyingStatus.DONE:
+            delete_destroying(agent_id, paths)
+            continue
+        marker[str(agent_id)] = "running" if record.status == DestroyingStatus.RUNNING else "failed"
+    return marker
+
+
+def _agent_in_resolver(request: Request, agent_id: AgentId) -> bool:
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    return agent_id in backend_resolver.list_known_workspace_ids()
+
+
 async def _handle_destroy_agent_api(
     agent_id: str,
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """API endpoint for destroying an agent (POST /api/destroy-agent/{agent_id})."""
+    """POST /api/destroy-agent/<agent_id>: spawn a detached destroy.
+
+    Idempotent: if a destroy is already running for this agent, returns
+    200 with the existing record's status. Otherwise spawns the
+    detached subprocess and returns 202.
+
+    Always returns ``redirect_url: "/"`` so the settings-page JS can
+    immediately navigate to the landing page (where the destroying
+    marker is already visible).
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
 
-    agent_creator: AgentCreator | None = request.app.state.agent_creator
-    if agent_creator is None:
-        return Response(
-            status_code=501, content='{"error": "Agent management not configured"}', media_type="application/json"
-        )
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if paths is None:
+        return Response(status_code=501, content='{"error": "Destroy not configured"}', media_type="application/json")
 
     parsed_id = AgentId(agent_id)
 
-    # Get access token for releasing leased hosts
-    access_token = ""
+    # Disassociate the workspace from the session store synchronously.
+    # Tokens live in the plugin's session store; minds only owns the
+    # workspace<->account mapping, which we want broken before mngr
+    # destroy returns regardless of whether the destroy succeeds.
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     if session_store:
         account = session_store.get_account_for_workspace(agent_id)
         if account:
-            token = session_store.get_access_token(str(account.user_id))
-            access_token = str(token) if token else ""
             session_store.disassociate_workspace(str(account.user_id), agent_id)
 
-    agent_creator.start_destruction(parsed_id, access_token=access_token)
+    # Idempotent: short-circuit if a destroy is already running.
+    existing = read_destroying(parsed_id, paths, agent_in_resolver=_agent_in_resolver(request, parsed_id))
+    if existing is not None and existing.status == DestroyingStatus.RUNNING:
+        return Response(
+            status_code=200,
+            content=json.dumps({"agent_id": agent_id, "status": "running", "redirect_url": "/"}),
+            media_type="application/json",
+        )
+
+    host_id = lookup_host_id(parsed_id)
+    start_destroy(parsed_id, paths, host_id)
 
     return Response(
-        content=json.dumps({"agent_id": agent_id, "status": "destroying"}),
+        status_code=202,
+        content=json.dumps({"agent_id": agent_id, "status": "running", "redirect_url": "/"}),
         media_type="application/json",
     )
 
 
-def _handle_destroy_agent_status_api(
+def _handle_destroying_status_api(
     agent_id: str,
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Check destruction status for an agent."""
+    """GET /api/destroying/<agent_id>/status: live status of a destroy."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-
-    agent_creator: AgentCreator | None = request.app.state.agent_creator
-    if agent_creator is None:
-        return Response(
-            status_code=501, content='{"error": "Agent management not configured"}', media_type="application/json"
-        )
-
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if paths is None:
+        return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
     parsed_id = AgentId(agent_id)
-    info = agent_creator.get_destruction_info(parsed_id)
-    if info is None:
-        return Response(status_code=404, content='{"error": "Unknown destruction"}', media_type="application/json")
+    record = read_destroying(parsed_id, paths, agent_in_resolver=_agent_in_resolver(request, parsed_id))
+    if record is None:
+        return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
+    return Response(
+        content=json.dumps(
+            {
+                "agent_id": agent_id,
+                "pid": record.pid,
+                "pid_alive": record.pid_alive,
+                "agent_in_resolver": record.agent_in_resolver,
+                "status": str(record.status).lower(),
+            }
+        ),
+        media_type="application/json",
+    )
 
-    result: dict[str, object] = {"agent_id": agent_id, "status": str(info.status).lower()}
-    if info.error:
-        result["error"] = info.error
-    return Response(content=json.dumps(result), media_type="application/json")
+
+def _handle_destroying_log_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """GET /api/destroying/<agent_id>/log?after=<bytes>: tail the destroy log."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if paths is None:
+        return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
+    parsed_id = AgentId(agent_id)
+    after_str = request.query_params.get("after", "0")
+    try:
+        after = max(int(after_str), 0)
+    except ValueError:
+        after = 0
+    try:
+        content_bytes, next_offset = read_log_chunk(parsed_id, paths, after)
+    except FileNotFoundError:
+        return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
+    return Response(
+        content=json.dumps(
+            {
+                "bytes_read": len(content_bytes),
+                "next_offset": next_offset,
+                "content": content_bytes.decode("utf-8", errors="replace"),
+            }
+        ),
+        media_type="application/json",
+    )
+
+
+def _handle_destroying_dismiss_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """POST /api/destroying/<agent_id>/dismiss: remove the destroy record."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if paths is None:
+        return Response(status_code=200, content="{}", media_type="application/json")
+    parsed_id = AgentId(agent_id)
+    delete_destroying(parsed_id, paths)
+    return Response(status_code=200, content="{}", media_type="application/json")
+
+
+def _handle_destroying_page(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """GET /destroying/<agent_id>: the destroy detail / log-tail page."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if paths is None:
+        return Response(status_code=404, content="No record")
+    parsed_id = AgentId(agent_id)
+    in_resolver = parsed_id in backend_resolver.list_known_workspace_ids()
+    record = read_destroying(parsed_id, paths, agent_in_resolver=in_resolver)
+    if record is None:
+        return Response(status_code=404, content="No record")
+    workspace_name = backend_resolver.get_workspace_name(parsed_id)
+    if not workspace_name:
+        info = backend_resolver.get_agent_display_info(parsed_id)
+        workspace_name = info.agent_name if info else agent_id
+    html = render_destroying_page(
+        agent_id=parsed_id,
+        agent_name=workspace_name or agent_id,
+        pid=record.pid,
+        status=str(record.status).lower(),
+    )
+    return HTMLResponse(content=html)
 
 
 # -- Telegram setup route handlers --
@@ -1376,6 +1066,7 @@ def _handle_chrome_page(
     html = render_chrome_page(
         is_mac=is_mac,
         is_authenticated=authenticated,
+        mngr_forward_origin=_get_mngr_forward_origin(request),
         initial_workspaces=initial_workspaces,
     )
     return HTMLResponse(content=html)
@@ -1383,7 +1074,7 @@ def _handle_chrome_page(
 
 def _handle_chrome_sidebar(request: Request) -> Response:
     """Serve the standalone sidebar page for the Electron sidebar WebContentsView."""
-    html = render_sidebar_page()
+    html = render_sidebar_page(mngr_forward_origin=_get_mngr_forward_origin(request))
     return HTMLResponse(content=html)
 
 
@@ -1519,7 +1210,14 @@ def _handle_accounts_page(
     minds_config: MindsConfig | None = request.app.state.minds_config
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
-    html = render_accounts_page(accounts=accounts, default_account_id=default_account_id)
+    enabled_by_user_id = {
+        str(account.user_id): is_imbue_cloud_provider_enabled_for_account(str(account.email)) for account in accounts
+    }
+    html = render_accounts_page(
+        accounts=accounts,
+        default_account_id=default_account_id,
+        enabled_by_user_id=enabled_by_user_id,
+    )
     return HTMLResponse(content=html)
 
 
@@ -1614,19 +1312,22 @@ async def _handle_workspace_disassociate(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Disassociate a workspace from its account and tear down tunnels."""
+    """Disassociate a workspace from its account and tear down its tunnel."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
     if session_store:
         account = session_store.get_account_for_workspace(agent_id)
         if account:
-            # Tear down Cloudflare tunnel
-            cf_client, _ = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
-            if cf_client is not None:
+            # Tear down the Cloudflare tunnel for this agent (if any). The
+            # plugin owns tunnel state -- minds keeps no local cache.
+            if cli is not None:
                 try:
-                    cf_client.delete_tunnel(AgentId(agent_id))
-                except (httpx.HTTPError, ValueError, OSError) as e:
+                    tunnel = cli.find_tunnel_for_agent(account=str(account.email), agent_id=agent_id)
+                    if tunnel is not None:
+                        cli.delete_tunnel(account=str(account.email), tunnel_name=tunnel.tunnel_name)
+                except ImbueCloudCliError as e:
                     logger.warning("Failed to delete tunnel during disassociation: {}", e)
             session_store.disassociate_workspace(str(account.user_id), agent_id)
     return Response(status_code=303, headers={"Location": f"/workspace/{agent_id}/settings"})
@@ -1782,7 +1483,11 @@ def _handle_request_page(
             content=f"<p>No handler registered for request type {req_event.request_type!r}</p>",
             status_code=500,
         )
-    return handler.render_request_page(req_event=req_event, backend_resolver=backend_resolver)
+    return handler.render_request_page(
+        req_event=req_event,
+        backend_resolver=backend_resolver,
+        mngr_forward_origin=_get_mngr_forward_origin(request),
+    )
 
 
 def _handle_sharing_page(
@@ -1806,6 +1511,7 @@ def _handle_sharing_page(
         agent_id=agent_id,
         service_name=service_name,
         title=f"Sharing: {service_name}",
+        mngr_forward_origin=_get_mngr_forward_origin(request),
         is_request=False,
         has_account=has_account,
         accounts=accounts,
@@ -1830,19 +1536,31 @@ async def _handle_sharing_enable(
     :class:`SharingRequestHandler`); this route only services the
     workspace-settings sharing editor. Both paths funnel through
     :func:`enable_sharing_via_cloudflare` so they cannot drift.
+
+    On a soft failure (no signed-in account, plugin error, etc.) the
+    handler returns 502 with a JSON ``{"error": "..."}`` body. The
+    sharing editor JS surfaces that inline instead of silently
+    redirecting to a now-empty status page.
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
 
     form = await request.form()
     emails = parse_emails_form_value(str(form.get("emails", "[]")))
-    enable_sharing_via_cloudflare(
-        request=request,
-        agent_id=AgentId(agent_id),
-        service_name=ServiceName(service_name),
-        emails=emails,
-        backend_resolver=backend_resolver,
-    )
+    try:
+        enable_sharing_via_cloudflare(
+            request=request,
+            agent_id=AgentId(agent_id),
+            service_name=ServiceName(service_name),
+            emails=emails,
+            backend_resolver=backend_resolver,
+        )
+    except SharingError as exc:
+        return Response(
+            status_code=502,
+            content=json.dumps({"error": str(exc)}),
+            media_type="application/json",
+        )
     return Response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
 
 
@@ -1852,14 +1570,54 @@ async def _handle_sharing_disable(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Disable sharing for a server."""
+    """Disable sharing for a service via the imbue_cloud plugin.
+
+    Removes the service from its tunnel (DNS + Access app teardown
+    happen connector-side). The tunnel itself stays around so re-
+    enabling later doesn't re-issue a fresh token.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
 
-    cf_client, _ = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
-    if cf_client is not None:
-        cf_client.remove_service(AgentId(agent_id), service_name)
+    cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    if cli is None:
+        return Response(
+            status_code=502,
+            content=json.dumps({"error": "imbue_cloud CLI is not configured."}),
+            media_type="application/json",
+        )
+    parsed_id = AgentId(agent_id)
+    try:
+        account_email = resolve_account_email_for_workspace(session_store, parsed_id)
+    except SharingError as exc:
+        return Response(
+            status_code=502,
+            content=json.dumps({"error": str(exc)}),
+            media_type="application/json",
+        )
 
+    try:
+        tunnel = cli.find_tunnel_for_agent(account=account_email, agent_id=str(parsed_id))
+    except ImbueCloudCliError as exc:
+        return Response(
+            status_code=502,
+            content=json.dumps({"error": f"Failed to look up the tunnel: {exc}"}),
+            media_type="application/json",
+        )
+    if tunnel is None:
+        # No tunnel = nothing to disable. Treat as success so the JS
+        # redirect lands on the (already-disabled) status page.
+        return Response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
+
+    try:
+        cli.remove_service(account=account_email, tunnel_name=tunnel.tunnel_name, service_name=service_name)
+    except ImbueCloudCliError as exc:
+        return Response(
+            status_code=502,
+            content=json.dumps({"error": f"Failed to disable sharing: {exc}"}),
+            media_type="application/json",
+        )
     return Response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
 
 
@@ -1869,44 +1627,88 @@ def _handle_sharing_status_api(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """JSON API to get current sharing status for the editor JS."""
+    """JSON API to get current sharing status for the editor JS.
+
+    Reads tunnel + service + per-service auth from the imbue_cloud
+    plugin (the connector is the source of truth -- minds keeps no
+    local copy). The JS contract is::
+
+        {"enabled": bool, "url": str | null, "policy": {"emails": [str, ...], ...}}
+
+    ``policy`` is the AuthPolicy shape the plugin emits. Default policy
+    when sharing isn't yet enabled is the workspace's associated account
+    email.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
 
-    cf_client, error_response = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
-    if error_response is not None:
+    cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    if cli is None:
         return Response(
-            content=json.dumps({"enabled": False, "url": None, "auth_rules": []}),
-            media_type="application/json",
-        )
-    if cf_client is None:
-        return Response(
-            content=json.dumps({"enabled": False, "url": None, "auth_rules": []}),
+            content=json.dumps({"enabled": False, "url": None, "policy": {"emails": []}}),
             media_type="application/json",
         )
 
     parsed_id = AgentId(agent_id)
-    services = cf_client.list_services(parsed_id)
-    if services is None:
-        default_rules = cf_client.get_tunnel_auth(parsed_id) or []
+    try:
+        account_email = resolve_account_email_for_workspace(session_store, parsed_id)
+    except SharingError as exc:
+        # No associated account = no plugin call available; surface
+        # an empty default rather than 502 since the page itself
+        # already shows the "associate an account" affordance for
+        # this state.
+        logger.debug("Sharing status: {}", exc)
         return Response(
-            content=json.dumps({"enabled": False, "url": None, "auth_rules": default_rules}),
+            content=json.dumps({"enabled": False, "url": None, "policy": {"emails": []}}),
             media_type="application/json",
         )
 
-    hostname = services.get(service_name)
-    if hostname:
-        auth_rules = cf_client.get_service_auth(parsed_id, service_name)
-        if auth_rules is None:
-            auth_rules = cf_client.get_tunnel_auth(parsed_id) or []
+    default_policy = {"emails": [account_email]}
+    try:
+        tunnel = cli.find_tunnel_for_agent(account=account_email, agent_id=str(parsed_id))
+    except ImbueCloudCliError as exc:
+        logger.warning("Failed to list tunnels for {}: {}", parsed_id, exc)
         return Response(
-            content=json.dumps({"enabled": True, "url": f"https://{hostname}", "auth_rules": auth_rules}),
+            content=json.dumps({"enabled": False, "url": None, "policy": default_policy}),
+            media_type="application/json",
+        )
+    if tunnel is None or service_name not in tunnel.services:
+        return Response(
+            content=json.dumps({"enabled": False, "url": None, "policy": default_policy}),
             media_type="application/json",
         )
 
-    default_rules = cf_client.get_tunnel_auth(parsed_id) or []
+    try:
+        service_entries = cli.list_services(account_email, tunnel.tunnel_name)
+    except ImbueCloudCliError as exc:
+        logger.warning("Failed to list services for tunnel {}: {}", tunnel.tunnel_name, exc)
+        service_entries = []
+    hostname = next(
+        (entry.get("hostname") for entry in service_entries if entry.get("service_name") == service_name),
+        None,
+    )
+
+    try:
+        policy = cli.get_service_auth(account_email, tunnel.tunnel_name, service_name)
+    except ImbueCloudCliError:
+        try:
+            policy = cli.get_tunnel_auth(account_email, tunnel.tunnel_name)
+        except ImbueCloudCliError:
+            policy = default_policy
+    if not policy.get("emails") and not policy.get("email_domains"):
+        # Empty policy means "use tunnel default"; surface the owner's
+        # email so the editor doesn't render an empty ACL.
+        policy = default_policy
+
     return Response(
-        content=json.dumps({"enabled": False, "url": None, "auth_rules": default_rules}),
+        content=json.dumps(
+            {
+                "enabled": True,
+                "url": f"https://{hostname}" if hostname else None,
+                "policy": policy,
+            }
+        ),
         media_type="application/json",
     )
 
@@ -2020,41 +1822,29 @@ def _parse_refresh_service_name(raw_line: str) -> str | None:
 async def _dispatch_refresh_broadcast(app: FastAPI, agent_id: AgentId, service_name: str) -> None:
     """POST to the agent's workspace server so it emits a refresh_service WS broadcast.
 
-    Resolves the ``system_interface`` backend URL for the agent (going through
-    an SSH tunnel automatically for remote agents) and calls
-    ``/api/refresh-service/{service_name}/broadcast``. Errors are logged but
-    swallowed -- a missed refresh is never worth crashing on.
+    Routed through the ``mngr forward`` plugin's per-agent subdomain
+    (``<agent>.localhost:<plugin_port>``) so we reuse the plugin's existing
+    SSH tunnel to the agent rather than maintaining one in minds. Auth on
+    the plugin uses the same ``preauth_cookie`` value the plugin trusts for
+    the Electron-shell pre-set; minds knows that value because it minted it
+    in ``cli/run.py``. Errors are logged but swallowed -- a missed refresh
+    is never worth crashing on.
     """
-    backend_resolver: BackendResolverInterface = app.state.backend_resolver
-    backend_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
-    if backend_url is None:
-        logger.debug(
-            "No system_interface backend for agent {}; dropping refresh for service {}",
-            agent_id,
-            service_name,
-        )
+    plugin_port: int = app.state.mngr_forward_port or 8421
+    preauth_cookie: str | None = app.state.mngr_forward_preauth_cookie
+    if preauth_cookie is None:
+        logger.debug("Refresh broadcast skipped for {}/{}: no preauth cookie wired", agent_id, service_name)
         return
-
-    url = f"{backend_url.rstrip('/')}/api/refresh-service/{service_name}/broadcast"
-    # Tunnel setup performs a blocking SSH handshake for remote agents, so
-    # run it in a thread pool to avoid stalling the desktop client's event
-    # loop (mirrors the approach used by the HTTP proxy path).
+    url = f"http://{agent_id}.localhost:{plugin_port}/api/refresh-service/{service_name}/broadcast"
+    http_client: httpx.AsyncClient = app.state.http_client
     try:
-        tunnel_client = await asyncio.get_running_loop().run_in_executor(
-            None, _get_tunnel_http_client, app, agent_id, backend_url, backend_resolver
+        response = await http_client.post(
+            url,
+            cookies={"mngr_forward_session": preauth_cookie},
         )
-    except (SSHTunnelError, paramiko.SSHException, OSError) as e:
-        logger.warning("Refresh broadcast tunnel setup for {} failed: {}", url, e)
-        return
-    http_client = tunnel_client or app.state.http_client
-    try:
-        response = await http_client.post(url)
         response.raise_for_status()
     except httpx.HTTPError as e:
         logger.warning("Refresh broadcast POST to {} failed: {}", url, e)
-    finally:
-        if tunnel_client is not None:
-            await tunnel_client.aclose()
 
 
 def _log_refresh_dispatch_result(
@@ -2118,41 +1908,46 @@ def create_desktop_client(
     auth_store: AuthStoreInterface,
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
-    tunnel_manager: SSHTunnelManager | None = None,
-    latchkey: Latchkey | None = None,
     agent_creator: AgentCreator | None = None,
-    cloudflare_client: CloudflareClient | None = None,
+    imbue_cloud_cli: ImbueCloudCli | None = None,
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
     notification_dispatcher: NotificationDispatcher | None = None,
     paths: WorkspacePaths | None = None,
     minds_config: MindsConfig | None = None,
-    stream_manager: MngrStreamManager | None = None,
+    envelope_stream_consumer: EnvelopeStreamConsumer | None = None,
     session_store: MultiAccountSessionStore | None = None,
-    auth_backend_client: AuthBackendClient | None = None,
     request_inbox: RequestInbox | None = None,
     request_event_handlers: tuple[RequestEventHandler, ...] = (),
     server_port: int = 0,
+    mngr_forward_port: int = 0,
+    mngr_forward_preauth_cookie: str | None = None,
     output_format: OutputFormat | None = None,
     root_concurrency_group: ConcurrencyGroup | None = None,
 ) -> FastAPI:
-    """Create the desktop client FastAPI application.
+    """Create the bare-origin minds FastAPI application.
 
-    When tunnel_manager is provided, the server can proxy traffic to remote agents
-    by tunneling through SSH. Without it, only local agents are reachable.
+    The agent-subdomain forwarding lives in the ``mngr_forward`` plugin
+    (``libs/mngr_forward``) now; this app only serves minds-specific routes
+    on the bare origin (login, landing, accounts, workspace settings,
+    sharing, telegram, agent create / destroy). Workspace links go to
+    ``http://localhost:<mngr_forward_port>/goto/<agent>/`` instead of being
+    routed in-process.
 
-    When agent_creator is provided, the server can create new agents from git URLs
-    via the /create form and /api/create-agent API.
+    ``envelope_stream_consumer`` feeds discovery events into
+    ``backend_resolver`` and is also the bounce target for ``SIGHUP``-style
+    re-discovery after a SuperTokens signin writes a new provider entry.
 
-    When cloudflare_client is provided, the servers page shows global forwarding
-    URLs and toggle controls.
+    When ``agent_creator`` is provided, the server can create new agents
+    from git URLs via the /create form and /api/create-agent API.
 
-    When telegram_orchestrator is provided, the landing page shows Telegram setup
-    buttons and the /api/agents/{agent_id}/telegram/* endpoints are available.
+    When ``telegram_orchestrator`` is provided, the landing page shows
+    Telegram setup buttons and the /api/agents/{agent_id}/telegram/*
+    endpoints are available.
 
-    When paths is provided, the /api/v1/ REST API router is mounted with API
-    key authentication. The notification endpoint within the router additionally
-    requires notification_dispatcher to be provided; without it that endpoint
-    returns 501.
+    When ``paths`` is provided, the /api/v1/ REST API router is mounted with
+    API key authentication. The notification endpoint within the router
+    additionally requires ``notification_dispatcher`` to be provided;
+    without it that endpoint returns 501.
     """
     is_externally_managed_client = http_client is not None
 
@@ -2168,43 +1963,31 @@ def create_desktop_client(
         logger.opt(exception=exc).error("Unhandled exception on {} {}", request.method, request.url.path)
         return Response(status_code=500, content=f"Internal Server Error: {exc}")
 
-    @app.middleware("http")
-    async def _subdomain_forwarding_middleware(request: Request, call_next: Any) -> Response:
-        """Dispatch ``<agent-id>.localhost:PORT/*`` to the workspace_server byte-forward.
-
-        Bare ``localhost`` / ``127.0.0.1`` traffic falls through to the normal
-        desktop-client routes via ``call_next``. Unknown subdomains return 404.
-        """
-        host_header = request.headers.get("host", "")
-        agent_id = _parse_workspace_subdomain(host_header)
-        if agent_id is None:
-            return await call_next(request)
-        return await _handle_workspace_forward_http(request)
-
     app.state.auth_store = auth_store
     app.state.backend_resolver = backend_resolver
-    app.state.tunnel_manager = tunnel_manager
-    app.state.latchkey = latchkey
-    app.state.stream_manager = stream_manager
+    app.state.envelope_stream_consumer = envelope_stream_consumer
     app.state.agent_creator = agent_creator
-    app.state.cloudflare_client = cloudflare_client
+    app.state.imbue_cloud_cli = imbue_cloud_cli
     app.state.telegram_orchestrator = telegram_orchestrator
     app.state.notification_dispatcher = notification_dispatcher
     app.state.session_store = session_store
-    app.state.auth_backend_client = auth_backend_client
     app.state.minds_config = minds_config
     app.state.request_inbox = request_inbox
     app.state.request_event_handlers = request_event_handlers
     app.state.auth_server_port = server_port
+    app.state.mngr_forward_port = mngr_forward_port
+    app.state.mngr_forward_preauth_cookie = mngr_forward_preauth_cookie
     app.state.auth_output_format = output_format or OutputFormat.JSONL
     app.state.root_concurrency_group = root_concurrency_group
     # Populated with the running loop by _managed_lifespan on startup. Defined
     # up-front as None so background callbacks fired before startup (e.g. mngr
-    # events produced between stream_manager.start() and uvicorn.run()) see a
+    # events produced between consumer.start() and uvicorn.run()) see a
     # valid attribute and can choose to drop the event instead of crashing.
     app.state.event_loop = None
-    if paths is not None:
-        app.state.api_v1_paths = paths
+    # Always-set (possibly None) so consumers can read directly via
+    # ``app.state.api_v1_paths`` instead of using a defaulting attribute
+    # lookup -- the latter is flagged by the project ratchet.
+    app.state.api_v1_paths = paths
     if http_client is not None:
         app.state.http_client = http_client
 
@@ -2215,11 +1998,11 @@ def create_desktop_client(
         _refresh_event_apps[id(backend_resolver)] = app
         backend_resolver.add_on_refresh_callback(_handle_refresh_event_callback)
 
-    # Mount the auth routes (proxy to the remote_service_connector auth backend)
-    if session_store is not None and auth_backend_client is not None:
+    # Mount the auth routes (proxy to the mngr_imbue_cloud plugin's auth subcommands)
+    if session_store is not None and imbue_cloud_cli is not None:
         supertokens_router = create_supertokens_router(
             session_store=session_store,
-            auth_backend_client=auth_backend_client,
+            imbue_cloud_cli=imbue_cloud_cli,
             server_port=server_port,
             output_format=output_format or OutputFormat.JSONL,
         )
@@ -2249,10 +2032,6 @@ def create_desktop_client(
     app.get("/login")(_handle_login)
     app.get("/authenticate")(_handle_authenticate)
     app.get("/")(_handle_landing_page)
-
-    # Auth bridge: same-origin redirect to a workspace subdomain that
-    # installs a subdomain-scoped session cookie on first visit.
-    app.get("/goto/{agent_id}/")(_handle_goto_workspace)
 
     # Account management routes
     app.get("/accounts")(_handle_accounts_page)
@@ -2287,21 +2066,13 @@ def create_desktop_client(
 
     # Agent destruction routes
     app.post("/api/destroy-agent/{agent_id}")(_handle_destroy_agent_api)
-    app.get("/api/destroy-agent/{agent_id}/status")(_handle_destroy_agent_status_api)
+    app.get("/api/destroying/{agent_id}/status")(_handle_destroying_status_api)
+    app.get("/api/destroying/{agent_id}/log")(_handle_destroying_log_api)
+    app.post("/api/destroying/{agent_id}/dismiss")(_handle_destroying_dismiss_api)
+    app.get("/destroying/{agent_id}")(_handle_destroying_page)
 
     # Telegram setup routes
     app.post("/api/agents/{agent_id}/telegram/setup")(_handle_telegram_setup)
     app.get("/api/agents/{agent_id}/telegram/status")(_handle_telegram_status)
-
-    # Catch-all WebSocket route for ``<agent-id>.localhost:PORT/*``. For
-    # requests arriving on the bare-origin host, the handler closes the WS
-    # with a 4004 since those paths aren't routed by any other handler.
-    @app.websocket("/{path:path}")
-    async def subdomain_forwarding_websocket(websocket: WebSocket, path: str) -> None:
-        host_header = websocket.headers.get("host", "")
-        if _parse_workspace_subdomain(host_header) is None:
-            await websocket.close(code=4004, reason="Not found")
-            return
-        await _handle_workspace_forward_websocket(websocket)
 
     return app

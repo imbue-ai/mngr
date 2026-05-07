@@ -4,6 +4,10 @@
 (function () {
   var isElectron = !!window.minds;
 
+  // ``mngr forward`` plugin's bare origin (e.g. ``http://localhost:8421``).
+  // Workspace links (``/goto/<agent>/``) target the plugin, not minds.
+  var mngrForwardOrigin = (document.body && document.body.dataset.mngrForwardOrigin) || '';
+
   // -- Per-agent accent color ------------------------------------------------
   //
   // The shared `window.mindsAccent.get(agentId, cb)` helper (loaded from
@@ -41,7 +45,7 @@
   }
 
   function selectWorkspace(agentId) {
-    navigateContent('/goto/' + agentId + '/');
+    navigateContent(mngrForwardOrigin + '/goto/' + agentId + '/');
     if (isElectron) {
       sidebarOpen = false;
     } else {
