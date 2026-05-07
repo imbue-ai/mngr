@@ -10,21 +10,21 @@ import pytest
 from loguru import logger
 
 from imbue.mngr.primitives import AgentId
-from imbue.mngr_subagent_proxy import subagent_wait
-from imbue.mngr_subagent_proxy.subagent_wait import AgentLocation
-from imbue.mngr_subagent_proxy.subagent_wait import TailState
-from imbue.mngr_subagent_proxy.subagent_wait import _WaitRuntime
-from imbue.mngr_subagent_proxy.subagent_wait import _check_permissions_newly_waiting
-from imbue.mngr_subagent_proxy.subagent_wait import _delete_watermark_file
-from imbue.mngr_subagent_proxy.subagent_wait import _read_watermark_file
-from imbue.mngr_subagent_proxy.subagent_wait import _write_watermark_file
-from imbue.mngr_subagent_proxy.subagent_wait import extract_assistant_text
-from imbue.mngr_subagent_proxy.subagent_wait import is_api_error_event
-from imbue.mngr_subagent_proxy.subagent_wait import is_end_turn_event
-from imbue.mngr_subagent_proxy.subagent_wait import is_real_user_event
-from imbue.mngr_subagent_proxy.subagent_wait import read_new_jsonl_lines
-from imbue.mngr_subagent_proxy.subagent_wait import resolve_destroyed_result
-from imbue.mngr_subagent_proxy.subagent_wait import truncate_result_text
+from imbue.mngr_claude_subagent_proxy import subagent_wait
+from imbue.mngr_claude_subagent_proxy.subagent_wait import AgentLocation
+from imbue.mngr_claude_subagent_proxy.subagent_wait import TailState
+from imbue.mngr_claude_subagent_proxy.subagent_wait import _WaitRuntime
+from imbue.mngr_claude_subagent_proxy.subagent_wait import _check_permissions_newly_waiting
+from imbue.mngr_claude_subagent_proxy.subagent_wait import _delete_watermark_file
+from imbue.mngr_claude_subagent_proxy.subagent_wait import _read_watermark_file
+from imbue.mngr_claude_subagent_proxy.subagent_wait import _write_watermark_file
+from imbue.mngr_claude_subagent_proxy.subagent_wait import extract_assistant_text
+from imbue.mngr_claude_subagent_proxy.subagent_wait import is_api_error_event
+from imbue.mngr_claude_subagent_proxy.subagent_wait import is_end_turn_event
+from imbue.mngr_claude_subagent_proxy.subagent_wait import is_real_user_event
+from imbue.mngr_claude_subagent_proxy.subagent_wait import read_new_jsonl_lines
+from imbue.mngr_claude_subagent_proxy.subagent_wait import resolve_destroyed_result
+from imbue.mngr_claude_subagent_proxy.subagent_wait import truncate_result_text
 
 
 @contextmanager

@@ -1,4 +1,4 @@
-"""Test utilities for mngr_subagent_proxy: thin subclasses of the shared fakes."""
+"""Test utilities for mngr_claude_subagent_proxy: thin subclasses of the shared fakes."""
 
 import subprocess
 from collections.abc import Mapping

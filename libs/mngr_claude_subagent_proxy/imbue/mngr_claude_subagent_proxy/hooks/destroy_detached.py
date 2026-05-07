@@ -23,7 +23,7 @@ DestroyAgentDetachedCallable = Callable[[str, Path], None]
 def destroy_agent_detached(target_name: str, log_path: Path) -> None:
     """Fire-and-forget detached destroy using a child Python process.
 
-    Spawns a ``python -m imbue.mngr_subagent_proxy.hooks.destroy_worker``
+    Spawns a ``python -m imbue.mngr_claude_subagent_proxy.hooks.destroy_worker``
     child whose lifetime is independent of the caller. Stderr is appended
     to ``log_path``.
     """
@@ -34,7 +34,7 @@ def destroy_agent_detached(target_name: str, log_path: Path) -> None:
         logger.warning("destroy_agent_detached: failed to open log {}: {}", log_path, e)
     try:
         subprocess.Popen(
-            [sys.executable, "-m", "imbue.mngr_subagent_proxy.hooks.destroy_worker", target_name],
+            [sys.executable, "-m", "imbue.mngr_claude_subagent_proxy.hooks.destroy_worker", target_name],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=log_handle if log_handle is not None else subprocess.DEVNULL,

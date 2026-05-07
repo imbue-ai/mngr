@@ -1,4 +1,4 @@
-"""Real-Claude end-to-end release tests for the mngr_subagent_proxy plugin.
+"""Real-Claude end-to-end release tests for the mngr_claude_subagent_proxy plugin.
 
 These tests spawn an actual local Claude Code agent via the ``mngr create``
 CLI, send it a prompt that unambiguously triggers the ``Task`` tool, and
@@ -10,7 +10,7 @@ These are slow, environment-heavy tests. They are marked with
 ``@pytest.mark.release`` and are therefore NOT run in CI. Invoke manually:
 
     cd <repo_root>
-    just test libs/mngr_subagent_proxy/imbue/mngr_subagent_proxy/test_real_claude_subagent.py::test_task_tool_spawns_mngr_subagent
+    just test libs/mngr_claude_subagent_proxy/imbue/mngr_claude_subagent_proxy/test_real_claude_subagent.py::test_task_tool_spawns_mngr_subagent
 
 Prerequisites to actually execute (the tests skip gracefully when absent):
 - ``claude`` binary on PATH (Claude Code CLI, v2.x).
@@ -71,7 +71,7 @@ _GOLDEN_PATH_PROMPT: Final[str] = (
 
 # For the depth-limit test we set MNGR_SUBAGENT_DEPTH>=MNGR_MAX_SUBAGENT_DEPTH
 # so the PreToolUse:Agent depth-limit guard in
-# imbue.mngr_subagent_proxy.hooks.spawn triggers immediately on the
+# imbue.mngr_claude_subagent_proxy.hooks.spawn triggers immediately on the
 # parent's first Task call.
 _DEPTH_LIMIT_PROMPT: Final[str] = (
     "Use the Task tool exactly once with subagent_type 'general-purpose' "

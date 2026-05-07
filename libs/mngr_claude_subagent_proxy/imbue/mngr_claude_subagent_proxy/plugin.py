@@ -25,14 +25,14 @@ from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
-from imbue.mngr_subagent_proxy import hookimpl
-from imbue.mngr_subagent_proxy import resources as _subagent_proxy_resources
-from imbue.mngr_subagent_proxy._stop_hook_guard import MNGR_MANAGED_HOOK_MARKERS
-from imbue.mngr_subagent_proxy._stop_hook_guard import PROXY_CHILD_GUARD_PREFIX
-from imbue.mngr_subagent_proxy._stop_hook_guard import guard_user_stop_hooks_against_proxy_children
-from imbue.mngr_subagent_proxy._stop_hook_guard import iter_user_stop_hook_commands
-from imbue.mngr_subagent_proxy.hooks.destroy_detached import DestroyAgentDetachedCallable
-from imbue.mngr_subagent_proxy.hooks.destroy_detached import destroy_agent_detached
+from imbue.mngr_claude_subagent_proxy import hookimpl
+from imbue.mngr_claude_subagent_proxy import resources as _subagent_proxy_resources
+from imbue.mngr_claude_subagent_proxy._stop_hook_guard import MNGR_MANAGED_HOOK_MARKERS
+from imbue.mngr_claude_subagent_proxy._stop_hook_guard import PROXY_CHILD_GUARD_PREFIX
+from imbue.mngr_claude_subagent_proxy._stop_hook_guard import guard_user_stop_hooks_against_proxy_children
+from imbue.mngr_claude_subagent_proxy._stop_hook_guard import iter_user_stop_hook_commands
+from imbue.mngr_claude_subagent_proxy.hooks.destroy_detached import DestroyAgentDetachedCallable
+from imbue.mngr_claude_subagent_proxy.hooks.destroy_detached import destroy_agent_detached
 
 SUBAGENT_PROXY_CHILD_AGENT_TYPE: Final[str] = "mngr-proxy-child"
 
@@ -47,7 +47,7 @@ class SubagentProxyChildConfig(ClaudeAgentConfig):
 
     Plugin-installed Stop hooks are also auto-guarded by the
     on_after_provisioning hookimpl below (env-conditional wrap on
-    ``MNGR_SUBAGENT_PROXY_CHILD``), so the user-installed Stop-hook
+    ``MNGR_CLAUDE_SUBAGENT_PROXY_CHILD``), so the user-installed Stop-hook
     orchestrator does not re-prompt the spawned subagent into
     autofix/verify cycles.
     """
@@ -82,9 +82,9 @@ def register_agent_type() -> tuple[str, type[AgentInterface], type[AgentTypeConf
 
 _AGENT_DEFINITION: Final[str] = "mngr-proxy.agent.md"
 
-_SPAWN_MODULE: Final[str] = "imbue.mngr_subagent_proxy.hooks.spawn"
-_CLEANUP_MODULE: Final[str] = "imbue.mngr_subagent_proxy.hooks.cleanup"
-_REAP_MODULE: Final[str] = "imbue.mngr_subagent_proxy.hooks.reap"
+_SPAWN_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.spawn"
+_CLEANUP_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.cleanup"
+_REAP_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.reap"
 
 
 def _load_resource(filename: str) -> str:
@@ -161,13 +161,13 @@ def _merge_subagent_proxy_hooks(host: OnlineHostInterface, work_dir: Path) -> No
     """Merge the subagent-proxy hooks into the agent's .claude/settings.local.json.
 
     Also rewrites every existing user-defined Stop/SubagentStop command
-    in that file to no-op when MNGR_SUBAGENT_PROXY_CHILD=1 is set in the
+    in that file to no-op when MNGR_CLAUDE_SUBAGENT_PROXY_CHILD=1 is set in the
     env. This is what stops user-installed Stop hooks (imbue-code-guardian's
     stop_hook_orchestrator.sh, project-specific cleanup hooks, etc.) from
     re-prompting spawned subagents into autofix/verify cycles.
 
     The wrap is env-conditional so it is safe for the parent agent too:
-    the parent's MNGR_SUBAGENT_PROXY_CHILD is unset, the guard falls
+    the parent's MNGR_CLAUDE_SUBAGENT_PROXY_CHILD is unset, the guard falls
     through, and the original command runs normally. Only the spawned
     proxy children, which we explicitly set the env var on at create
     time, see the no-op.
@@ -228,7 +228,7 @@ def _guard_stop_hooks_in_file(host: OnlineHostInterface, path: Path) -> None:
         return
     if not guard_user_stop_hooks_against_proxy_children(data):
         return
-    logger.info("Wrapped Stop hooks in {} with MNGR_SUBAGENT_PROXY_CHILD guard", path)
+    logger.info("Wrapped Stop hooks in {} with MNGR_CLAUDE_SUBAGENT_PROXY_CHILD guard", path)
     host.write_text_file(path, json.dumps(data, indent=2) + "\n")
 
 
@@ -334,7 +334,7 @@ def _check_subagent_hooks_compat(host: OnlineHostInterface, agent: AgentInterfac
             raise UnsupportedSubagentHookError(
                 f"Spawned mngr subagent {agent.name!r} inherits {len(unsafe)} "
                 f"{event_name} hook(s) whose top-level-vs-subagent semantics "
-                f"are ambiguous. mngr_subagent_proxy does not yet know how "
+                f"are ambiguous. mngr_claude_subagent_proxy does not yet know how "
                 f"to translate these between the parent's scope and a "
                 f"spawned subagent's scope. Review each hook: if it should "
                 f"fire per subagent turn, install it there directly; if it "
@@ -343,7 +343,7 @@ def _check_subagent_hooks_compat(host: OnlineHostInterface, agent: AgentInterfac
             )
 
 
-_OPT_OUT_PROJECT_STOP_CHECK_ENV: Final[str] = "MNGR_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS"
+_OPT_OUT_PROJECT_STOP_CHECK_ENV: Final[str] = "MNGR_CLAUDE_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS"
 
 
 def _check_project_settings_stop_hooks_guarded(host: OnlineHostInterface, work_dir: Path) -> None:
@@ -355,7 +355,7 @@ def _check_project_settings_stop_hooks_guarded(host: OnlineHostInterface, work_d
     inside spawned proxy subagents and turn them into runaway autofix
     loops.
 
-    Bypass with the ``MNGR_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS``
+    Bypass with the ``MNGR_CLAUDE_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS``
     env var (``=1``) when you know what you're doing. Intended as a
     temporary escape hatch.
     """
@@ -389,10 +389,10 @@ def _check_project_settings_stop_hooks_guarded(host: OnlineHostInterface, work_d
         f"These would fire inside spawned mngr-proxy subagents and likely cause runaway loops. "
         f"Either prepend the env-conditional guard to each command:\n"
         f"\n"
-        f'  [ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; <original>\n'
+        f'  [ -n "$MNGR_CLAUDE_SUBAGENT_PROXY_CHILD" ] && exit 0; <original>\n'
         f"\n"
         f"...or set {_OPT_OUT_PROJECT_STOP_CHECK_ENV}=1 in the env to bypass this check "
-        f"(temporary escape hatch; see mngr_subagent_proxy README).\n"
+        f"(temporary escape hatch; see mngr_claude_subagent_proxy README).\n"
         f"\n"
         f"Offending commands:\n  - {listing}"
     )

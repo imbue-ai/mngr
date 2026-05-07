@@ -1,4 +1,4 @@
-"""Unit tests for the mngr_subagent_proxy plugin provisioning hooks."""
+"""Unit tests for the mngr_claude_subagent_proxy plugin provisioning hooks."""
 
 from __future__ import annotations
 
@@ -11,14 +11,14 @@ import pytest
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
-from imbue.mngr_subagent_proxy.plugin import SubagentProxyChildConfig
-from imbue.mngr_subagent_proxy.plugin import UnguardedProjectStopHookError
-from imbue.mngr_subagent_proxy.plugin import UnsupportedSubagentHookError
-from imbue.mngr_subagent_proxy.plugin import cascade_destroy_recorded_children
-from imbue.mngr_subagent_proxy.plugin import on_after_provisioning
-from imbue.mngr_subagent_proxy.plugin import on_before_agent_destroy
-from imbue.mngr_subagent_proxy.testing import FakeAgent
-from imbue.mngr_subagent_proxy.testing import FakeHost
+from imbue.mngr_claude_subagent_proxy.plugin import SubagentProxyChildConfig
+from imbue.mngr_claude_subagent_proxy.plugin import UnguardedProjectStopHookError
+from imbue.mngr_claude_subagent_proxy.plugin import UnsupportedSubagentHookError
+from imbue.mngr_claude_subagent_proxy.plugin import cascade_destroy_recorded_children
+from imbue.mngr_claude_subagent_proxy.plugin import on_after_provisioning
+from imbue.mngr_claude_subagent_proxy.plugin import on_before_agent_destroy
+from imbue.mngr_claude_subagent_proxy.testing import FakeAgent
+from imbue.mngr_claude_subagent_proxy.testing import FakeHost
 
 # on_after_provisioning declares its third parameter as MngrContext but
 # immediately ``del``-s it. Tests pass through an untyped wrapper so the
@@ -74,7 +74,7 @@ def test_plugin_hooks_register_on_claude_agent(work_dir: Path, fake_host: FakeHo
     proxy_content = proxy_md.read_text()
     assert "model: haiku" in proxy_content
 
-    python_prefix = "uv run python -m imbue.mngr_subagent_proxy.hooks."
+    python_prefix = "uv run python -m imbue.mngr_claude_subagent_proxy.hooks."
     pre_cmd = hooks["PreToolUse"][0]["hooks"][0]["command"]
     post_cmd = hooks["PostToolUse"][0]["hooks"][0]["command"]
     session_cmd = hooks["SessionStart"][0]["hooks"][0]["command"]
@@ -202,7 +202,7 @@ def test_plugin_raises_on_unguarded_project_stop_hook(
     work_dir: Path, fake_host: FakeHost, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An un-guarded Stop hook in .claude/settings.json blocks provisioning."""
-    monkeypatch.delenv("MNGR_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS", raising=False)
+    monkeypatch.delenv("MNGR_CLAUDE_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS", raising=False)
     _seed_project_settings_with_unguarded_stop(work_dir)
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
 
@@ -223,7 +223,7 @@ def test_plugin_allows_guarded_project_stop_hook(work_dir: Path, fake_host: Fake
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": '[ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; echo project-stop',
+                                    "command": '[ -n "$MNGR_CLAUDE_SUBAGENT_PROXY_CHILD" ] && exit 0; echo project-stop',
                                 }
                             ]
                         }
@@ -243,7 +243,7 @@ def test_plugin_project_stop_hook_check_can_be_bypassed_via_env(
     work_dir: Path, fake_host: FakeHost, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Setting the opt-out env var bypasses the un-guarded check."""
-    monkeypatch.setenv("MNGR_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS", "1")
+    monkeypatch.setenv("MNGR_CLAUDE_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS", "1")
     _seed_project_settings_with_unguarded_stop(work_dir)
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
 

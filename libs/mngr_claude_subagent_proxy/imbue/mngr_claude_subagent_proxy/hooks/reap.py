@@ -18,11 +18,11 @@ from loguru import logger
 
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentLifecycleState
-from imbue.mngr_subagent_proxy._stop_hook_guard import guard_per_agent_plugin_cache
-from imbue.mngr_subagent_proxy.hooks.destroy_detached import DestroyAgentDetachedCallable
-from imbue.mngr_subagent_proxy.hooks.destroy_detached import destroy_agent_detached
-from imbue.mngr_subagent_proxy.hooks.mngr_api import ListAgentsByNameCallable
-from imbue.mngr_subagent_proxy.hooks.mngr_api import list_agents_by_name
+from imbue.mngr_claude_subagent_proxy._stop_hook_guard import guard_per_agent_plugin_cache
+from imbue.mngr_claude_subagent_proxy.hooks.destroy_detached import DestroyAgentDetachedCallable
+from imbue.mngr_claude_subagent_proxy.hooks.destroy_detached import destroy_agent_detached
+from imbue.mngr_claude_subagent_proxy.hooks.mngr_api import ListAgentsByNameCallable
+from imbue.mngr_claude_subagent_proxy.hooks.mngr_api import list_agents_by_name
 
 _TERMINAL_STATES: frozenset[AgentLifecycleState] = frozenset({AgentLifecycleState.DONE, AgentLifecycleState.STOPPED})
 
@@ -119,7 +119,7 @@ def spawn_background_reaper() -> None:
     env["MNGR_SUBAGENT_REAP_BACKGROUND"] = "1"
     try:
         subprocess.Popen(
-            [sys.executable, "-m", "imbue.mngr_subagent_proxy.hooks.reap"],
+            [sys.executable, "-m", "imbue.mngr_claude_subagent_proxy.hooks.reap"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

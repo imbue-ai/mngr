@@ -23,7 +23,7 @@ from typing import TextIO
 
 from loguru import logger
 
-from imbue.mngr_subagent_proxy.mngr_binary import get_mngr_command_shell_form
+from imbue.mngr_claude_subagent_proxy.mngr_binary import get_mngr_command_shell_form
 
 _DEFAULT_MAX_DEPTH: Final[int] = 3
 _PASS_THROUGH_RESPONSE: Final[dict[str, Any]] = {
@@ -47,7 +47,7 @@ def _emit_pass_through(stdout: TextIO) -> None:
 def _emit_depth_limit_deny(stdout: TextIO, depth: int, max_depth: int) -> None:
     """Emit a deny decision with an explanatory reason (depth limit reached)."""
     reason = (
-        f"mngr_subagent_proxy: subagent depth limit ({depth}/{max_depth}) reached. "
+        f"mngr_claude_subagent_proxy: subagent depth limit ({depth}/{max_depth}) reached. "
         "Cannot spawn nested Task tools beyond this depth."
     )
     _emit(
@@ -187,7 +187,7 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
         # `mngr list --include 'labels.X == "Y"'` without reading the
         # parent's subagent_map/. Setting any of these labels also
         # implicitly identifies the agent as a subagent (a top-level
-        # agent has no parent, so labels.mngr_subagent_proxy_parent_name
+        # agent has no parent, so labels.mngr_claude_subagent_proxy_parent_name
         # would be unset). Tool_use_id is included so a parent that
         # spawned multiple children can disambiguate them.
         f'    {mngr_cmd} create "$TARGET_NAME:$PARENT_CWD" \\\n'
@@ -198,10 +198,10 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
         "        --reuse \\\n"
         '        --env-file "$ENV_FILE" \\\n'
         '        --message-file "$PROMPT_FILE" \\\n'
-        '        --label "mngr_subagent_proxy_parent_name=${MNGR_AGENT_NAME:-}" \\\n'
-        '        --label "mngr_subagent_proxy_parent_id=${MNGR_AGENT_ID:-}" \\\n'
-        f"        --label mngr_subagent_proxy_tool_use_id={q_tid} \\\n"
-        "        --env MNGR_SUBAGENT_PROXY_CHILD=1 \\\n"
+        '        --label "mngr_claude_subagent_proxy_parent_name=${MNGR_AGENT_NAME:-}" \\\n'
+        '        --label "mngr_claude_subagent_proxy_parent_id=${MNGR_AGENT_ID:-}" \\\n'
+        f"        --label mngr_claude_subagent_proxy_tool_use_id={q_tid} \\\n"
+        "        --env MNGR_CLAUDE_SUBAGENT_PROXY_CHILD=1 \\\n"
         "        --env MNGR_SUBAGENT_DEPTH=$((${MNGR_SUBAGENT_DEPTH:-0}+1))\n"
         '    shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\n'
         "    trap - EXIT\n"
@@ -221,7 +221,7 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
         # invocation. Haiku just re-runs the same Bash command on
         # NEED_PERMISSION; the script's idempotence + watermark file
         # together prevent re-firing on the same pending dialog.
-        "output=$(uv run python -m imbue.mngr_subagent_proxy.subagent_wait "
+        "output=$(uv run python -m imbue.mngr_claude_subagent_proxy.subagent_wait "
         '"$TARGET_NAME" --watermark-file "$WATERMARK_FILE")\n'
         'case "$output" in\n'
         "    END_TURN:*)\n"
@@ -375,7 +375,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
             f"After it returns (regardless of stdout), reply with EXACTLY this text "
             f"and nothing else, then end your turn:\n"
             f"\n"
-            f"mngr_subagent_proxy: background subagent spawned\n"
+            f"mngr_claude_subagent_proxy: background subagent spawned\n"
             f"  name: {target_name}\n"
             f"  tail live output: mngr transcript {target_name}\n"
             f"  interact:        mngr connect {target_name}\n"
@@ -423,7 +423,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
     # Claude session so the user can `mngr connect <name>` or
     # `mngr transcript <name>` while it's running.
     system_message = (
-        f"mngr_subagent_proxy: spawned mngr-managed subagent {target_name!r}. "
+        f"mngr_claude_subagent_proxy: spawned mngr-managed subagent {target_name!r}. "
         f"To inspect or interact while it runs: `mngr connect {target_name}`. "
         f"To see its transcript: `mngr transcript {target_name}`."
     )
