@@ -1,6 +1,6 @@
 """Request and response event types for the minds request inbox.
 
-Agents write request events (sharing, permissions) to
+Agents write request events (permissions, latchkey-permission) to
 ``$MNGR_AGENT_STATE_DIR/events/requests/events.jsonl``. The desktop
 client watches these and presents them in an inbox panel. Response
 events (grant/deny) are written by the desktop client to
@@ -39,7 +39,6 @@ _RESPONSE_EVENTS_FILENAME: Final[str] = "events.jsonl"
 class RequestType(UpperCaseStrEnum):
     """Type of request an agent can make."""
 
-    SHARING = auto()
     PERMISSIONS = auto()
     LATCHKEY_PERMISSION = auto()
 
@@ -59,35 +58,15 @@ def _now_iso() -> IsoTimestamp:
     return IsoTimestamp(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
 
 
-class SharingStatusSnapshot(FrozenModel):
-    """Snapshot of the current sharing status, included in a sharing request event."""
-
-    enabled: bool = Field(description="Whether sharing is currently enabled")
-    url: str | None = Field(default=None, description="Current shared URL if enabled")
-    auth_rules: list[dict[str, object]] = Field(
-        default_factory=list, description="Current Cloudflare Access auth policy rules"
-    )
-
-
 class RequestEvent(EventEnvelope):
     """Base class for all request events written by agents."""
 
     agent_id: str = Field(description="Agent ID that made the request")
-    request_type: str = Field(description="Type of request (e.g. 'SHARING', 'PERMISSIONS')")
+    request_type: str = Field(description="Type of request (e.g. 'PERMISSIONS', 'LATCHKEY_PERMISSION')")
     is_user_requested: bool = Field(
         default=False,
         description="If true, desktop client auto-navigates to the request page",
     )
-
-
-class SharingRequestEvent(RequestEvent):
-    """A request to modify sharing settings for a service."""
-
-    service_name: str = Field(description="Name of the service to share")
-    current_status: SharingStatusSnapshot | None = Field(
-        default=None, description="Current sharing state for pre-populating the form"
-    )
-    suggested_emails: list[str] = Field(default_factory=list, description="Suggested email addresses to share with")
 
 
 class PermissionsRequestEvent(RequestEvent):
@@ -116,7 +95,10 @@ class RequestResponseEvent(EventEnvelope):
     request_event_id: str = Field(description="event_id of the original request")
     status: str = Field(description="Resolution status: 'GRANTED' or 'DENIED'")
     agent_id: str = Field(description="Agent ID the request was for")
-    service_name: str | None = Field(default=None, description="Service name (for sharing requests)")
+    service_name: str | None = Field(
+        default=None,
+        description="Service name (for request types that scope to a service, e.g. latchkey-permission)",
+    )
     request_type: str = Field(description="Type of request that was responded to")
 
 
@@ -137,28 +119,6 @@ def create_latchkey_permission_request_event(
         is_user_requested=is_user_requested,
         service_name=service_name,
         rationale=rationale,
-    )
-
-
-def create_sharing_request_event(
-    agent_id: str,
-    service_name: str,
-    is_user_requested: bool = False,
-    current_status: SharingStatusSnapshot | None = None,
-    suggested_emails: list[str] | None = None,
-) -> SharingRequestEvent:
-    """Create a new sharing request event with auto-generated metadata."""
-    return SharingRequestEvent(
-        timestamp=_now_iso(),
-        type=EventType("sharing_request"),
-        event_id=_generate_event_id(),
-        source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
-        agent_id=agent_id,
-        request_type=str(RequestType.SHARING),
-        is_user_requested=is_user_requested,
-        service_name=service_name,
-        current_status=current_status,
-        suggested_emails=suggested_emails or [],
     )
 
 
@@ -185,15 +145,10 @@ def create_request_response_event(
 
 def _dedup_key(event: RequestEvent | RequestResponseEvent) -> tuple[str, str | None, str]:
     """Compute the deduplication key for a request or response event."""
-    service_name: str | None = None
-    if isinstance(event, SharingRequestEvent):
-        service_name = event.service_name
-    elif isinstance(event, LatchkeyPermissionRequestEvent):
-        service_name = event.service_name
-    elif isinstance(event, RequestResponseEvent):
+    if isinstance(event, (LatchkeyPermissionRequestEvent, RequestResponseEvent)):
         service_name = event.service_name
     else:
-        pass
+        service_name = None
     return (event.agent_id, service_name, event.request_type)
 
 
@@ -260,9 +215,7 @@ def parse_request_event(line: str) -> RequestEvent | None:
         if not isinstance(data, dict):
             return None
         request_type = data.get("request_type", "")
-        if request_type == str(RequestType.SHARING):
-            return SharingRequestEvent.model_validate(data)
-        elif request_type == str(RequestType.PERMISSIONS):
+        if request_type == str(RequestType.PERMISSIONS):
             return PermissionsRequestEvent.model_validate(data)
         elif request_type == str(RequestType.LATCHKEY_PERMISSION):
             return LatchkeyPermissionRequestEvent.model_validate(data)

@@ -7,29 +7,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
-import paramiko
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
-from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.config.data_types import MNGR_BINARY
-from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.primitives import ServiceName
-from imbue.mngr.api.discovery_events import AgentDestroyedEvent
-from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
-from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
-from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
-from imbue.mngr.api.discovery_events import HostDestroyedEvent
-from imbue.mngr.api.discovery_events import HostSSHInfoEvent
-from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 
@@ -421,8 +406,12 @@ class MngrCliBackendResolver(BackendResolverInterface):
             except ValueError:
                 pass
 
-    def _fire_on_request(self, agent_id_str: str, raw_line: str) -> None:
-        """Invoke all registered request event callbacks."""
+    def fire_on_request(self, agent_id_str: str, raw_line: str) -> None:
+        """Invoke all registered request event callbacks.
+
+        Public dispatch entry point used by both the legacy in-process
+        ``MngrStreamManager`` and the new ``EnvelopeStreamConsumer``.
+        """
         with self._lock:
             callbacks = list(self._on_request_callbacks)
         for callback in callbacks:
@@ -430,6 +419,10 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 callback(agent_id_str, raw_line)
             except (OSError, RuntimeError) as e:
                 logger.warning("Request event callback failed: {}", e)
+
+    def _fire_on_request(self, agent_id_str: str, raw_line: str) -> None:
+        """Internal alias for ``fire_on_request`` retained for backward compatibility."""
+        self.fire_on_request(agent_id_str, raw_line)
 
     def add_on_refresh_callback(self, callback: Callable[[str, str], None]) -> None:
         """Register a callback invoked when a refresh event arrives.
@@ -448,8 +441,12 @@ class MngrCliBackendResolver(BackendResolverInterface):
             except ValueError:
                 pass
 
-    def _fire_on_refresh(self, agent_id_str: str, raw_line: str) -> None:
-        """Invoke all registered refresh event callbacks."""
+    def fire_on_refresh(self, agent_id_str: str, raw_line: str) -> None:
+        """Invoke all registered refresh event callbacks.
+
+        Public dispatch entry point used by both the legacy in-process
+        ``MngrStreamManager`` and the new ``EnvelopeStreamConsumer``.
+        """
         with self._lock:
             callbacks = list(self._on_refresh_callbacks)
         for callback in callbacks:
@@ -458,455 +455,6 @@ class MngrCliBackendResolver(BackendResolverInterface):
             except (OSError, RuntimeError) as e:
                 logger.warning("Refresh event callback failed: {}", e)
 
-
-# -- MngrStreamManager --
-
-
-class MngrStreamManager(MutableModel):
-    """Manages background streaming subprocesses that feed data to a MngrCliBackendResolver.
-
-    Runs two types of long-lived subprocesses via ConcurrencyGroup:
-    1. `mngr observe --discovery-only --quiet` to discover agents and hosts.
-       Handles the following discovery event types:
-       - DISCOVERY_FULL: replaces the entire agent list and agent-to-host mapping
-       - HOST_SSH_INFO: updates SSH connection details for a specific host
-       - AGENT_DISCOVERED: incrementally adds or updates a single agent
-       - AGENT_DESTROYED: incrementally removes a single agent
-       - HOST_DESTROYED: removes all agents on a destroyed host
-    2. `mngr event <agent-id> servers --follow --quiet` (one per workspace agent)
-       to discover each agent's servers.
-
-    Only agents with the ``workspace`` label get events streams -- other agents
-    are tracked in the resolver for completeness but their server events are
-    not streamed.
-    """
-
-    resolver: MngrCliBackendResolver = Field(frozen=True, description="Backend resolver to update with streaming data")
-    mngr_binary: str = Field(default=MNGR_BINARY, frozen=True, description="Path to mngr binary")
-    notification_dispatcher: NotificationDispatcher | None = Field(
-        default=None, frozen=True, description="Optional notification dispatcher for error alerts"
-    )
-
-    _cg: ConcurrencyGroup = PrivateAttr(default_factory=lambda: ConcurrencyGroup(name="mngr-stream-manager"))
-    _has_notified_error: bool = PrivateAttr(default=False)
-    _known_agent_ids: set[str] = PrivateAttr(default_factory=set)
-    _agent_host_map: dict[str, str] = PrivateAttr(default_factory=dict)
-    _discovered_agents: tuple[DiscoveredAgent, ...] = PrivateAttr(default=())
-    _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
-    _events_services: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
-    _observe_process: RunningProcess | None = PrivateAttr(default=None)
-    _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
-    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _on_agent_discovered_callbacks: list[Callable[[AgentId, RemoteSSHInfo | None, str], None]] = PrivateAttr(
-        default_factory=list
-    )
-    _on_agent_destroyed_callbacks: list[Callable[[AgentId], None]] = PrivateAttr(default_factory=list)
-
-    def add_on_agent_discovered_callback(
-        self,
-        callback: Callable[[AgentId, RemoteSSHInfo | None, str], None],
-    ) -> None:
-        """Register a callback invoked when an agent is discovered.
-
-        The callback receives the agent ID, SSH info (None for local agents),
-        and the provider name (e.g. "docker", "local").
-        """
-        self._on_agent_discovered_callbacks.append(callback)
-
-    def add_on_agent_destroyed_callback(self, callback: Callable[[AgentId], None]) -> None:
-        """Register a callback invoked when an agent is destroyed (directly or with its host)."""
-        self._on_agent_destroyed_callbacks.append(callback)
-
-    def start(self) -> None:
-        """Start the streaming subprocess for continuous agent discovery."""
-        self._cg.__enter__()
-        # Run from $HOME so mngr uses its global config, not any project-specific
-        # .mngr/settings.toml that might restrict behavior (e.g. is_allowed_in_pytest).
-        self._observe_process = self._cg.run_process_in_background(
-            command=[self.mngr_binary, "observe", "--discovery-only", "--quiet"],
-            on_output=self._on_discovery_stream_output,
-            cwd=Path.home(),
-        )
-        self._watch_process_exit(self._observe_process, "mngr observe")
-
-    def stop(self) -> None:
-        """Stop all streaming subprocesses.
-
-        Terminates the mngr observe and mngr event processes first so
-        that the threads reading their output unblock immediately, then
-        exits the ConcurrencyGroup (which joins the threads).
-        """
-        for process in self._all_managed_processes():
-            process.terminate()
-        self._cg.__exit__(None, None, None)
-
-    def _all_managed_processes(self) -> list[RunningProcess]:
-        """Return all managed subprocess handles (observe + per-agent events)."""
-        result: list[RunningProcess] = []
-        if self._observe_process is not None:
-            result.append(self._observe_process)
-        result.extend(self._events_processes.values())
-        return result
-
-    def _on_discovery_stream_output(self, line: str, is_stdout: bool) -> None:
-        """Handle a line of output from mngr observe --discovery-only."""
-        if not is_stdout:
-            stripped = line.strip()
-            if stripped:
-                logger.debug("mngr observe stderr: {}", stripped)
-            return
-        stripped = line.strip()
-        if not stripped:
-            return
-        self._handle_discovery_line(stripped)
-
-    def _handle_discovery_line(self, line: str) -> None:
-        """Parse a discovery event line and update state.
-
-        Handles the following event types:
-        - DISCOVERY_FULL: replaces the entire agent list and agent-to-host mapping
-        - HOST_SSH_INFO: updates SSH info for a specific host
-        - AGENT_DISCOVERED: incrementally adds or updates a single agent
-        - AGENT_DESTROYED: incrementally removes a single agent
-        - HOST_DESTROYED: removes all agents that were on the destroyed host
-        """
-        event = parse_discovery_event_line(line)
-
-        if isinstance(event, FullDiscoverySnapshotEvent):
-            self._handle_full_snapshot(event)
-        elif isinstance(event, HostSSHInfoEvent):
-            self._handle_host_ssh_info(event)
-        elif isinstance(event, AgentDiscoveryEvent):
-            self._handle_agent_discovered(event)
-        elif isinstance(event, AgentDestroyedEvent):
-            self._handle_agent_destroyed(event)
-        elif isinstance(event, HostDestroyedEvent):
-            self._handle_host_destroyed(event)
-        elif isinstance(event, DiscoveryErrorEvent):
-            self._handle_discovery_error(event)
-        # FIXME: make the match exhaustive so that we have to think about what to do when there are new types
-        else:
-            logger.trace("Ignoring discovery event: {}", type(event).__name__)
-
-    @staticmethod
-    def _is_workspace_agent(agent: DiscoveredAgent) -> bool:
-        """Check whether a discovered agent has the ``workspace`` label."""
-        return "workspace" in agent.labels
-
-    def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
-        """Update agent list and agent-to-host mapping from a full snapshot."""
-        agent_ids: list[AgentId] = []
-        agent_host_map: dict[str, str] = {}
-        for agent in event.agents:
-            agent_ids.append(agent.agent_id)
-            agent_host_map[str(agent.agent_id)] = str(agent.host_id)
-
-        workspace_names = [str(a.agent_name) for a in event.agents if self._is_workspace_agent(a)]
-        logger.debug(
-            "Processing DISCOVERY_FULL: {} agents total, {} workspace agents: {}",
-            len(event.agents),
-            len(workspace_names),
-            workspace_names,
-        )
-
-        with self._lock:
-            self._agent_host_map = agent_host_map
-
-        self._update_resolver(tuple(agent_ids), event.agents)
-
-        workspace_ids = {str(agent.agent_id) for agent in event.agents if self._is_workspace_agent(agent)}
-        self._sync_events_streams(workspace_ids)
-
-        # Notify callbacks for all discovered agents
-        for agent in event.agents:
-            ssh_info = self._get_ssh_info_for_agent(agent.agent_id)
-            self._fire_agent_discovered_callbacks(agent.agent_id, ssh_info, str(agent.provider_name))
-
-    def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
-        """Update SSH info for a host and refresh the resolver."""
-        ssh_info = RemoteSSHInfo(
-            user=event.ssh.user,
-            host=event.ssh.host,
-            port=event.ssh.port,
-            key_path=event.ssh.key_path,
-        )
-        host_id_str = str(event.host_id)
-        with self._lock:
-            self._ssh_by_host_id[host_id_str] = ssh_info
-            agent_ids = tuple(AgentId(agent_id) for agent_id in self._agent_host_map)
-            # Find agents on this host so we can notify discovery callbacks with SSH info
-            agents_on_host = tuple(AgentId(aid) for aid, hid in self._agent_host_map.items() if hid == host_id_str)
-
-        self._update_resolver(agent_ids)
-
-        # Re-fire callbacks for agents on this host now that SSH info is available.
-        # This handles the case where agent discovery fires before SSH info arrives.
-        for agent_id in agents_on_host:
-            provider = self._get_provider_name_for_agent(agent_id)
-            self._fire_agent_discovered_callbacks(agent_id, ssh_info, provider)
-
-    def _handle_agent_discovered(self, event: AgentDiscoveryEvent) -> None:
-        """Incrementally add or update a single agent in the resolver."""
-        agent = event.agent
-        aid_str = str(agent.agent_id)
-        is_workspace = self._is_workspace_agent(agent)
-        logger.debug(
-            "AGENT_DISCOVERED: {} (workspace={}, labels={})",
-            agent.agent_name,
-            is_workspace,
-            list(agent.labels.keys()),
-        )
-
-        with self._lock:
-            self._agent_host_map[aid_str] = str(agent.host_id)
-            # Replace existing entry or append
-            updated_agents = [a for a in self._discovered_agents if str(a.agent_id) != aid_str]
-            updated_agents.append(agent)
-            self._discovered_agents = tuple(updated_agents)
-            # Start events stream if this is a newly discovered workspace agent
-            is_new = aid_str not in self._known_agent_ids
-            if is_new and self._is_workspace_agent(agent):
-                self._known_agent_ids.add(aid_str)
-                self._start_events_stream(agent.agent_id)
-            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
-            discovered_agents = self._discovered_agents
-
-        self._update_resolver(agent_ids, discovered_agents)
-
-        # Notify callbacks
-        ssh_info = self._get_ssh_info_for_agent(agent.agent_id)
-        self._fire_agent_discovered_callbacks(agent.agent_id, ssh_info, str(agent.provider_name))
-
-    def _handle_agent_destroyed(self, event: AgentDestroyedEvent) -> None:
-        """Remove a destroyed agent from the resolver and stop its events stream."""
-        aid_str = str(event.agent_id)
-
-        with self._lock:
-            self._agent_host_map.pop(aid_str, None)
-            self._discovered_agents = tuple(a for a in self._discovered_agents if str(a.agent_id) != aid_str)
-            self._known_agent_ids.discard(aid_str)
-            process = self._events_processes.pop(aid_str, None)
-            if process is not None:
-                process.terminate()
-            self._events_services.pop(aid_str, None)
-            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
-            discovered_agents = self._discovered_agents
-
-        self._update_resolver(agent_ids, discovered_agents)
-        self.resolver.update_services(event.agent_id, {})
-        self._fire_agent_destroyed_callbacks(event.agent_id)
-
-    def _handle_host_destroyed(self, event: HostDestroyedEvent) -> None:
-        """Remove all agents on a destroyed host from the resolver."""
-        destroyed_ids = {str(agent_id) for agent_id in event.agent_ids}
-
-        with self._lock:
-            for aid_str in destroyed_ids:
-                self._agent_host_map.pop(aid_str, None)
-                self._known_agent_ids.discard(aid_str)
-                process = self._events_processes.pop(aid_str, None)
-                if process is not None:
-                    process.terminate()
-                self._events_services.pop(aid_str, None)
-            self._discovered_agents = tuple(a for a in self._discovered_agents if str(a.agent_id) not in destroyed_ids)
-            self._ssh_by_host_id.pop(str(event.host_id), None)
-            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
-            discovered_agents = self._discovered_agents
-
-        self._update_resolver(agent_ids, discovered_agents)
-        for agent_id in event.agent_ids:
-            self.resolver.update_services(agent_id, {})
-            self._fire_agent_destroyed_callbacks(agent_id)
-
-    def _handle_discovery_error(self, event: DiscoveryErrorEvent) -> None:
-        """Handle a discovery error event from the observe stream."""
-        logger.error(
-            "Discovery error from {}: {} ({})",
-            event.source_name,
-            event.error_message,
-            event.error_type,
-        )
-        self._on_subprocess_error(event.source_name, event.error_message)
-
-    def _on_subprocess_error(self, name: str, message: str) -> None:
-        """Handle a subprocess error by logging and optionally notifying the user."""
-        logger.error("Subprocess {} failed: {}", name, message)
-        if not self._has_notified_error and self.notification_dispatcher is not None:
-            self._has_notified_error = True
-            self.notification_dispatcher.dispatch(
-                NotificationRequest(
-                    title="Minds encountered an error",
-                    message=(
-                        f"A background process ({name}) failed. You may want to restart the app. Error: {message}"
-                    ),
-                ),
-                agent_display_name="Minds",
-            )
-
-    def _watch_process_exit(self, process: RunningProcess, name: str) -> None:
-        """Start a daemon thread that waits for a process to exit, then fires an error callback."""
-        thread = threading.Thread(
-            target=self._wait_for_process_and_notify,
-            args=(process, name),
-            daemon=True,
-            name=f"watch-{name}",
-        )
-        thread.start()
-
-    def _wait_for_process_and_notify(self, process: RunningProcess, name: str) -> None:
-        """Wait for a process to exit and fire an error callback if it exits with non-zero code."""
-        exit_code = process.wait()
-        if exit_code != 0:
-            self._on_subprocess_error(name, f"process exited with code {exit_code}")
-
-    def _get_provider_name_for_agent(self, agent_id: AgentId) -> str:
-        """Look up the provider name for an agent. Returns 'unknown' if not found."""
-        with self._lock:
-            for agent in self._discovered_agents:
-                if agent.agent_id == agent_id:
-                    return str(agent.provider_name)
-        return "unknown"
-
-    def _get_ssh_info_for_agent(self, agent_id: AgentId) -> RemoteSSHInfo | None:
-        """Look up SSH info for an agent from the host mapping."""
-        with self._lock:
-            host_id = self._agent_host_map.get(str(agent_id))
-            if host_id is None:
-                return None
-            return self._ssh_by_host_id.get(host_id)
-
-    def _fire_agent_discovered_callbacks(
-        self,
-        agent_id: AgentId,
-        ssh_info: RemoteSSHInfo | None,
-        provider_name: str,
-    ) -> None:
-        """Invoke all registered on_agent_discovered callbacks."""
-        for callback in self._on_agent_discovered_callbacks:
-            try:
-                callback(agent_id, ssh_info, provider_name)
-            except (OSError, ValueError, RuntimeError, paramiko.SSHException, SSHTunnelError) as e:
-                logger.warning("Agent discovery callback failed for {}: {}", agent_id, e)
-
-    def _fire_agent_destroyed_callbacks(self, agent_id: AgentId) -> None:
-        """Invoke all registered on_agent_destroyed callbacks."""
-        for callback in self._on_agent_destroyed_callbacks:
-            try:
-                callback(agent_id)
-            except (OSError, ValueError, RuntimeError) as e:
-                logger.warning("Agent destruction callback failed for {}: {}", agent_id, e)
-
-    def _update_resolver(
-        self,
-        agent_ids: tuple[AgentId, ...],
-        discovered_agents: tuple[DiscoveredAgent, ...] | None = None,
-    ) -> None:
-        """Rebuild and push the ParsedAgentsResult to the resolver."""
-        with self._lock:
-            ssh_info_by_agent_id: dict[str, RemoteSSHInfo] = {}
-            for aid_str, host_id_str in self._agent_host_map.items():
-                ssh = self._ssh_by_host_id.get(host_id_str)
-                if ssh is not None:
-                    ssh_info_by_agent_id[aid_str] = ssh
-            if discovered_agents is not None:
-                self._discovered_agents = discovered_agents
-            agents = self._discovered_agents
-
-        self.resolver.update_agents(
-            ParsedAgentsResult(
-                agent_ids=agent_ids,
-                discovered_agents=agents,
-                ssh_info_by_agent_id=ssh_info_by_agent_id,
-            )
-        )
-
-    def _sync_events_streams(self, new_agent_ids: set[str]) -> None:
-        """Start events streams for new agents and stop streams for removed agents."""
-        with self._lock:
-            previously_known = set(self._known_agent_ids)
-            self._known_agent_ids = new_agent_ids
-
-            removed = previously_known - new_agent_ids
-            added = new_agent_ids - previously_known
-            if removed or added:
-                logger.info("Syncing events streams: added={}, removed={}", added, removed)
-
-            # Stop streams for agents that are no longer present
-            for aid_str in removed:
-                process = self._events_processes.pop(aid_str, None)
-                if process is not None:
-                    logger.info("Stopping events stream for removed agent {}", aid_str)
-                    process.terminate()
-                self._events_services.pop(aid_str, None)
-
-            # Start streams for newly discovered agents
-            for aid_str in added:
-                self._start_events_stream(AgentId(aid_str))
-
-    def _on_events_stream_output(self, line: str, is_stdout: bool, agent_id: AgentId) -> None:
-        """Handle a line of output from mngr event --follow for a specific agent.
-
-        Dispatches based on the ``source`` field in the event envelope:
-        service events update the resolver's service map, request events are
-        forwarded to registered request callbacks, and refresh events are
-        forwarded to registered refresh callbacks.
-        """
-        if not is_stdout:
-            stripped = line.strip()
-            if stripped:
-                logger.debug("mngr event stderr for {}: {}", agent_id, stripped)
-            return
-        stripped = line.strip()
-        if not stripped:
-            return
-        aid_str = str(agent_id)
-        try:
-            raw = json.loads(stripped)
-            source = raw.get("source", "")
-            if source == REQUESTS_EVENT_SOURCE_NAME:
-                self.resolver._fire_on_request(aid_str, stripped)
-                return
-            if source == REFRESH_EVENT_SOURCE_NAME:
-                self.resolver._fire_on_refresh(aid_str, stripped)
-                return
-            record = parse_service_log_record(raw)
-            services = self._events_services.get(aid_str)
-            if services is None:
-                return
-            if isinstance(record, ServiceDeregisteredRecord):
-                services.pop(str(record.service), None)
-            else:
-                services[str(record.service)] = record.url
-            self.resolver.update_services(agent_id, dict(services))
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.opt(exception=e).error("Failed to parse event line for {} (line: {})", agent_id, stripped[:200])
-
-    def _start_events_stream(self, agent_id: AgentId) -> None:
-        """Start mngr event <agent-id> services requests refresh --follow for a workspace agent."""
-        if self._cg.is_shutting_down():
-            logger.debug("Skipping events stream for {} -- shutting down", agent_id)
-            return
-
-        aid_str = str(agent_id)
-        self._events_services[aid_str] = {}
-
-        logger.info("Starting events stream for agent {}", aid_str)
-        try:
-            process = self._cg.run_process_in_background(
-                command=[
-                    self.mngr_binary,
-                    "event",
-                    aid_str,
-                    SERVICES_EVENT_SOURCE_NAME,
-                    REQUESTS_EVENT_SOURCE_NAME,
-                    REFRESH_EVENT_SOURCE_NAME,
-                    "--follow",
-                    "--quiet",
-                ],
-                on_output=lambda line, is_stdout: self._on_events_stream_output(line, is_stdout, agent_id),
-                cwd=Path.home(),
-            )
-            self._events_processes[aid_str] = process
-            self._watch_process_exit(process, f"mngr events {aid_str}")
-        except InvalidConcurrencyGroupStateError:
-            logger.debug("Cannot start events stream for {} -- concurrency group is no longer active", agent_id)
+    def _fire_on_refresh(self, agent_id_str: str, raw_line: str) -> None:
+        """Internal alias for ``fire_on_refresh`` retained for backward compatibility."""
+        self.fire_on_refresh(agent_id_str, raw_line)

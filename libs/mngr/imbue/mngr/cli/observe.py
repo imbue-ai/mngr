@@ -14,7 +14,6 @@ from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
-from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.utils.parent_process import start_parent_death_watcher
 
 
@@ -23,7 +22,6 @@ class ObserveCliOptions(CommonCliOptions):
 
     events_dir: Path | None = None
     discovery_only: bool = False
-    on_error: str = "abort"
     daemonize: bool = False
 
 
@@ -41,12 +39,6 @@ class ObserveCliOptions(CommonCliOptions):
     "Outputs a full snapshot, then tails the event file for updates. "
     "Periodically re-polls to catch any missed changes. "
     "Does not start activity streams or emit agent state events.",
-)
-@click.option(
-    "--on-error",
-    type=click.Choice(["abort", "continue"], case_sensitive=False),
-    default="abort",
-    help="What to do when errors occur: abort (stop immediately) or continue (keep going)",
 )
 @click.option(
     "--daemonize/--no-daemonize",
@@ -74,11 +66,7 @@ def observe(ctx: click.Context, **kwargs: Any) -> None:
         events_base_dir = get_default_events_base_dir(mngr_ctx.config)
 
     if opts.discovery_only:
-        error_behavior = ErrorBehavior(opts.on_error.upper())
-        run_discovery_stream(
-            mngr_ctx=mngr_ctx,
-            error_behavior=error_behavior,
-        )
+        run_discovery_stream(mngr_ctx=mngr_ctx)
         return
 
     # Acquire an exclusive lock per output directory

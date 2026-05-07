@@ -196,6 +196,22 @@ class ProviderUnavailableError(ProviderError):
         )
 
 
+class ProviderDiscoveryError(ProviderError):
+    """Wraps an exception raised inside a single provider's discovery so
+    callers can attribute the failure to the offending provider instance.
+
+    The wrapped exception is preserved in ``__cause__``; ``provider_name``
+    carries the ``ProviderInstanceName`` of the failing instance so error
+    handlers (e.g. minds' auto-disable on auth failure) don't have to
+    pattern-match the message string.
+    """
+
+    def __init__(self, provider_name: ProviderInstanceName, cause: BaseException) -> None:
+        self.provider_name = provider_name
+        self.cause = cause
+        super().__init__(f"Discovery failed for provider '{provider_name}': {cause}")
+
+
 class ProviderInstanceNotFoundError(ProviderError):
     """No provider instance with this name exists."""
 

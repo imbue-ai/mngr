@@ -58,9 +58,9 @@ test-offload args="":
     : "${MODAL_TOKEN_SECRET:?must be set}"
     just _generate-dockerignore
     trap "rm -f .dockerignore" EXIT
-    # offload 0.8.1 manages build context + image caching via git notes; no
-    # tarballs, patches, or local cache-key files needed.
-    offload -c offload-modal.toml {{args}} run || [[ $? -eq 2 ]]
+    offload -c offload-modal.toml run --trace \
+        --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
+        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
 
     # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
     MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
@@ -78,9 +78,11 @@ test-offload-acceptance args="":
     just _generate-dockerignore
     trap "rm -f .dockerignore" EXIT
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
-    MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-acceptance.toml {{args}} run \
+    MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-acceptance.toml run --trace \
         --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" \
-        --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" || [[ $? -eq 2 ]]
+        --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" \
+        --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
+        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
 
 # Run release tests on Modal via Offload (with Docker-in-Docker)
 test-offload-release args="":
@@ -97,11 +99,13 @@ test-offload-release args="":
     trap "rm -f .dockerignore" EXIT
 
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
-    MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-release.toml {{args}} run \
+    MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-release.toml run --trace \
         --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" \
         --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" \
         --env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" \
-        --env "IS_RELEASE=1" || [[ $? -eq 2 ]]
+        --env "IS_RELEASE=1" \
+        --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
+        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
 
     # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
     MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
@@ -200,3 +204,191 @@ sync-vendor-mngr fct="$HOME/project/forever-claude-template":
     fi
     git commit -m "Sync vendor/mngr to ${branch} (${short})" -m "Tracks ${full} in mngr."
     echo "Synced vendor/mngr to ${branch} (${short}). To publish: (cd $fct && git push origin ${branch})"
+
+
+# === Modal deploy / minds iteration helpers ===
+#
+# All of these read per-env config from .minds/<env>/ (gitignored). The
+# `<env>` name is whatever directory you have under .minds/ -- e.g.
+# `production`, `staging`. The matching templates live in .minds/template/.
+
+# Validate that .minds/<env>/*.sh files declare every key the templates
+# declare, and print the modal-secret commands that `push-secrets` would
+# run. Does NOT touch Modal. Run this first when you change a template
+# or add a new per-env file.
+push-secrets-dry-run env="production":
+    uv run scripts/push_modal_secrets.py {{env}} --dry-run
+
+# Upsert every per-env Modal secret declared in .minds/template/ for the
+# given env. Reads .minds/<env>/<service>.sh and writes <service>-<env>
+# secrets to Modal. Idempotent (uses --force).
+push-secrets env="production":
+    uv run scripts/push_modal_secrets.py {{env}}
+
+# Deploy the remote_service_connector Modal app for the given env.
+# Does NOT push secrets first -- run `just push-secrets <env>` if any
+# .minds/<env>/*.sh files have changed since the last deploy.
+deploy-connector env="production":
+    bash scripts/deploy_remote_service_connector.sh {{env}}
+
+# Deploy the modal_litellm proxy Modal app for the given env.
+# Does NOT push secrets first -- run `just push-secrets <env>` if
+# .minds/<env>/litellm.sh has changed since the last deploy.
+deploy-litellm env="production":
+    bash scripts/deploy_litellm.sh {{env}}
+
+# Push every per-env secret then deploy every Modal app for the given
+# env. Equivalent to push-secrets + deploy-connector + deploy-litellm.
+deploy-all env="production": (push-secrets env) (deploy-connector env) (deploy-litellm env)
+
+# Start the minds desktop client (electron) in dev mode.
+# Sources .env (for ANTHROPIC_API_KEY etc.) and sets MINDS_WORKSPACE_*
+# env vars so the create-form auto-fills "repository", "name", and
+# "branch":
+#   MINDS_WORKSPACE_GIT_URL = .external_worktrees/forever-claude-template/
+#       (REQUIRED -- recipe fails if missing; create the worktree with
+#       `git -C ~/project/forever-claude-template worktree add` before
+#       running minds-start).
+#   MINDS_WORKSPACE_BRANCH  = the FCT worktree's current branch.
+#   MINDS_WORKSPACE_NAME    = "mindtest".
+# Override agent_name / branch via positional args:
+#   just minds-start agent_name=foo branch=some-branch
+# Refuses to start if another minds-start is already running in this
+# worktree (PID file under /tmp keyed by worktree path). Use `just
+# minds-stop` to kill the running instance first.
+minds-start agent_name="mindtest" branch="":
+    #!/bin/bash
+    set -ueo pipefail
+    if [ -z "${MINDS_ROOT_NAME:-}" ]; then
+        echo "error: MINDS_ROOT_NAME is not set." >&2
+        echo "       Add \`export MINDS_ROOT_NAME=devminds\` (or your chosen root name) to your ~/.bashrc" >&2
+        echo "       so that minds bootstrap can derive MNGR_HOST_DIR / MNGR_PREFIX correctly." >&2
+        echo "       Without an explicit MINDS_ROOT_NAME, an inherited MNGR_HOST_DIR from the parent" >&2
+        echo "       shell wins and minds reads a different mngr settings.toml than its bootstrap writes." >&2
+        exit 2
+    fi
+    pid_file="/tmp/minds-start-$(echo -n "$PWD" | sha1sum | cut -c1-12).pid"
+    if [ -f "$pid_file" ]; then
+        existing=$(cat "$pid_file" 2>/dev/null || echo "")
+        if [ -n "$existing" ] && kill -0 "$existing" 2>/dev/null; then
+            echo "error: minds-start is already running in this worktree (pid=$existing)" >&2
+            echo "       run \`just minds-stop\` first." >&2
+            exit 2
+        fi
+        rm -f "$pid_file"
+    fi
+    fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
+    if [ ! -e "$fct_wt/.git" ]; then
+        echo "error: no FCT worktree at $fct_wt" >&2
+        echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
+        echo "       (e.g. base = josh/start-minds) before re-running minds-start." >&2
+        exit 2
+    fi
+    if [ -f .env ]; then
+        set -a
+        . .env
+        set +a
+    fi
+    export MINDS_WORKSPACE_GIT_URL="$fct_wt"
+    if [ -n "{{branch}}" ]; then
+        export MINDS_WORKSPACE_BRANCH="{{branch}}"
+    else
+        export MINDS_WORKSPACE_BRANCH="$(git -C "$fct_wt" rev-parse --abbrev-ref HEAD)"
+    fi
+    export MINDS_WORKSPACE_NAME="{{agent_name}}"
+    echo "MINDS_WORKSPACE_GIT_URL=$MINDS_WORKSPACE_GIT_URL"
+    echo "MINDS_WORKSPACE_NAME=$MINDS_WORKSPACE_NAME"
+    echo "MINDS_WORKSPACE_BRANCH=$MINDS_WORKSPACE_BRANCH"
+    echo "$$" > "$pid_file"
+    trap 'rm -f "$pid_file"' EXIT
+    cd apps/minds && pnpm start
+
+# Stop the minds desktop client started in this worktree by `just minds-start`.
+# Reads the PID file written by minds-start and SIGTERMs the recipe shell;
+# pnpm and electron follow on cascade. Idempotent (no-op if nothing running).
+minds-stop:
+    #!/bin/bash
+    set -ueo pipefail
+    pid_file="/tmp/minds-start-$(echo -n "$PWD" | sha1sum | cut -c1-12).pid"
+    if [ ! -f "$pid_file" ]; then
+        echo "no PID file at $pid_file -- nothing to stop"
+        exit 0
+    fi
+    pid=$(cat "$pid_file")
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        echo "PID $pid in $pid_file is not running -- removing stale file"
+        rm -f "$pid_file"
+        exit 0
+    fi
+    echo "Stopping minds-start (pid=$pid)"
+    kill "$pid"
+    # Wait up to 10s for graceful shutdown, then SIGKILL.
+    for i in $(seq 1 10); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$pid_file"
+            exit 0
+        fi
+        sleep 1
+    done
+    echo "minds-start (pid=$pid) did not exit after SIGTERM; sending SIGKILL"
+    kill -9 "$pid" 2>/dev/null || true
+    rm -f "$pid_file"
+
+# Build the minds desktop client distributable (slow; uses todesktop).
+minds-build:
+    cd apps/minds && pnpm build
+
+# Sync this repo's mngr changes (and the FCT worktree's template state)
+# into a running Docker agent's container, then restart the agent and the
+# desktop client. Wraps apps/minds/scripts/propagate_changes by auto-
+# discovering the agent's Docker SSH port (via `docker port`) and the
+# minds-side SSH key (under MNGR_HOST_DIR's profiles/.../docker/.../keys/).
+# Defaults MNGR_HOST_DIR to ~/.minds/mngr (production minds); pass
+# mngr_host_dir=$HOME/.devminds/mngr if you're on a dev profile.
+propagate-changes agent_name mngr_host_dir="$HOME/.minds/mngr":
+    #!/bin/bash
+    set -ueo pipefail
+    agent_name="{{agent_name}}"
+    mngr_host_dir="{{mngr_host_dir}}"
+    container_name="mngr-${agent_name}-host"
+    if ! docker inspect "$container_name" >/dev/null 2>&1; then
+        echo "error: no docker container named '$container_name'" >&2
+        echo "       run \`docker ps\` to see running containers" >&2
+        exit 2
+    fi
+    port_mapping=$(docker port "$container_name" 22/tcp 2>/dev/null | head -1)
+    if [ -z "$port_mapping" ]; then
+        echo "error: container $container_name has no host port mapping for 22/tcp" >&2
+        exit 2
+    fi
+    port="${port_mapping##*:}"
+    keys=$(find "$mngr_host_dir/profiles" -path "*/docker/*/keys/docker_ssh_key" 2>/dev/null || true)
+    if [ -z "$keys" ]; then
+        echo "error: no docker_ssh_key found under $mngr_host_dir/profiles" >&2
+        echo "       try mngr_host_dir=\$HOME/.devminds/mngr if you're on a dev profile," >&2
+        echo "       or pass mngr_host_dir=<custom path>." >&2
+        exit 2
+    fi
+    key_count=$(echo "$keys" | wc -l)
+    if [ "$key_count" -gt 1 ]; then
+        echo "error: multiple docker_ssh_key files found under $mngr_host_dir/profiles:" >&2
+        echo "$keys" >&2
+        echo "       narrow with mngr_host_dir=<more specific path>." >&2
+        exit 2
+    fi
+    key="$keys"
+    echo "Propagating changes to $agent_name (container=$container_name, port=$port, key=$key)"
+    apps/minds/scripts/propagate_changes \
+        --agent "$agent_name" \
+        --user root --host 127.0.0.1 --port "$port" --key "$key"
+
+# Destroy and remove every host in the pool with status='released'.
+# Sources .minds/<env>/neon.sh for DATABASE_URL.
+cleanup-pool-hosts env="production":
+    #!/bin/bash
+    set -ueo pipefail
+    set -a
+    . .minds/{{env}}/neon.sh
+    set +a
+    uv run python apps/remote_service_connector/scripts/cleanup_released_hosts.py \
+        --database-url "$DATABASE_URL"

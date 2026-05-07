@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Authentication failed</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #f5f5f5; color: #1c1c1c; }
+    .card { background: #fff; border: 1px solid #d4d4d4; border-radius: 12px; padding: 2rem; max-width: 460px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+    h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
+    p { line-height: 1.5; color: #404040; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Authentication failed</h1>
+    <p>{{ message }}</p>
+    <p>Each login URL can only be used once. Use the URL printed in the terminal where <code>mngr forward</code> is running, or restart it to generate a new one.</p>
+  </div>
+</body>
+</html>

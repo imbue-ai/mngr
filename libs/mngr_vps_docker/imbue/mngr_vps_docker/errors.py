@@ -9,18 +9,6 @@ class VpsProvisioningError(VpsDockerError):
     """Failed to provision a VPS instance."""
 
 
-class VpsConnectionError(VpsDockerError, ConnectionError):
-    """Failed to connect to the VPS via SSH."""
-
-
-class DockerNotReadyError(VpsDockerError):
-    """Docker is not installed or not running on the VPS."""
-
-
-class ContainerSetupError(VpsDockerError):
-    """Failed to set up the Docker container on the VPS."""
-
-
 class VpsApiError(VpsDockerError):
     """Error from the VPS provider API."""
 

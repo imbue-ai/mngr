@@ -538,7 +538,11 @@ def _render_dialog_html(handler: LatchkeyPermissionGrantHandler) -> str:
         rationale="need slack access",
     )
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    response = handler.render_request_page(req_event=request, backend_resolver=backend_resolver)
+    response = handler.render_request_page(
+        req_event=request,
+        backend_resolver=backend_resolver,
+        mngr_forward_origin="http://localhost:8421",
+    )
     assert isinstance(response, HTMLResponse)
     # ``Response.body`` is typed ``bytes | memoryview[int]``; ``bytes()``
     # round-trips both into a plain ``bytes`` we can decode.
