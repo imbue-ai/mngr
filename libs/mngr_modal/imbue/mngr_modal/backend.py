@@ -36,8 +36,6 @@ from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.instance import ModalProviderApp
 from imbue.mngr_modal.instance import ModalProviderInstance
-from imbue.mngr_modal.log_utils import ModalLoguruWriter
-from imbue.mngr_modal.log_utils import enable_modal_output_capture
 from imbue.modal_proxy.direct import DirectModalInterface
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyError
@@ -45,6 +43,7 @@ from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ModalInterface
 from imbue.modal_proxy.interface import VolumeInterface
+from imbue.modal_proxy.log_utils import ModalLoguruWriter
 
 MODAL_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("modal")
 STATE_VOLUME_SUFFIX: Final[str] = "-state"
@@ -251,22 +250,18 @@ class ModalProviderBackend(ProviderBackendInterface):
     ) -> tuple[AppInterface, ModalAppContextHandle]:
         """Get or create a Modal app with output capture.
 
-        Creates an ephemeral app with modal_interface.app_create(name) and enters its run()
-        context via the generator interface. The app is cached in the class-level registry
-        by name, so multiple calls with the same app_name will return the same app.
+        Creates an ephemeral app via ``modal_interface.app_create(name)`` and
+        enters its ``run()`` context. Apps are cached in the class-level
+        registry by name, so repeated calls return the same app. Output
+        capture comes from ``modal_interface.enable_output_capture()`` so the
+        same body works against any ``ModalInterface`` implementation.
 
-        Modal output is captured via enable_modal_output_capture(), which routes
-        all Modal logs to both a StringIO buffer (for inspection) and to loguru
-        (for mngr's logging system).
+        ``environment_name`` scopes all Modal resources (apps, volumes,
+        sandboxes) to a user, isolating between mngr installations sharing
+        a Modal account. The state-volume name is prepared here but the
+        volume is created lazily by ``get_volume_for_app()``.
 
-        Also prepares the volume name for state storage. The volume is created
-        lazily when first accessed via get_volume_for_app().
-
-        The environment_name is used to scope all Modal resources (apps, volumes,
-        sandboxes) to a specific user, enabling isolation between different mngr
-        installations sharing the same Modal account.
-
-        Raises ModalProxyAuthError if Modal credentials are not configured.
+        Raises ``ModalProxyAuthError`` if Modal credentials are missing.
         """
         if app_name in cls._app_registry:
             return cls._app_registry[app_name]
@@ -274,7 +269,7 @@ class ModalProviderBackend(ProviderBackendInterface):
         with log_span("Creating ephemeral Modal app with output capture: {} (env: {})", app_name, environment_name):
             with log_span("Enabling Modal output capture"):
                 output_capture_context: AbstractContextManager[tuple[StringIO, ModalLoguruWriter | None]] = (
-                    enable_modal_output_capture(is_logging_to_loguru=True)
+                    modal_interface.enable_output_capture(is_logging_to_loguru=True)
                 )
                 output_buffer, loguru_writer = output_capture_context.__enter__()
 
@@ -452,6 +447,27 @@ Supported build arguments for the modal provider:
                 )
             case _ as unreachable:
                 assert_never(unreachable)
+
+        return ModalProviderBackend._construct_modal_provider(name, config, mngr_ctx, modal_interface)
+
+    @staticmethod
+    def _construct_modal_provider(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+        modal_interface: ModalInterface,
+    ) -> ProviderInstanceInterface:
+        """Build a ``ModalProviderInstance`` against the given ``ModalInterface``.
+
+        Production calls via ``build_provider_instance`` (which selects a
+        ``DirectModalInterface`` per ``ModalMode.DIRECT``); tests call via
+        ``mngr_modal.testing.make_testing_provider`` (which passes a
+        ``TestingModalInterface``). Output capture is yielded off
+        ``modal_interface.enable_output_capture(...)`` so this function has
+        no per-implementation branches.
+        """
+        if not isinstance(config, ModalProviderConfig):
+            raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
 
         environment_name, app_name, host_dir = ModalProviderBackend._derive_modal_names(name, config, mngr_ctx)
 
