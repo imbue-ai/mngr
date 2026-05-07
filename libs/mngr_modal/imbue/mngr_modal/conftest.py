@@ -274,12 +274,19 @@ def modal_test_session_cleanup(
     modal_test_session_env_name: str,
     modal_test_session_user_id: UserId,
 ) -> Generator[None, None, None]:
-    """Session-scoped fixture that cleans up the Modal environment at session end."""
-    yield
+    """Session-scoped fixture that cleans up the Modal environment at session end.
+
+    The session env is registered with ``register_modal_test_environment`` before
+    yielding, so the autouse session-end leak detector
+    (``modal_session_cleanup``) will catch silent failures of the per-session
+    deletes below and raise ``AssertionError`` rather than leak the env.
+    """
     prefix = f"{modal_test_session_env_name}-"
     environment_name = f"{prefix}{modal_test_session_user_id}"
     if len(environment_name) > 64:
         environment_name = environment_name[:64]
+    register_modal_test_environment(environment_name)
+    yield
     delete_modal_apps_in_environment(environment_name)
     delete_modal_volumes_in_environment(environment_name)
     delete_modal_environment(environment_name)
