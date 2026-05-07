@@ -78,3 +78,22 @@ uv tool install -e "$CODE_DIR/libs/mngr" \
     --with-editable "$CODE_DIR/libs/mngr_schedule" \
     --with-editable "$CODE_DIR/libs/mngr_claude"
 uv tool install modal
+
+# Step 6: rebuild the minds_workspace_server frontend, but only if node
+# is installed and the project is present.
+#
+# This step is a no-op for the base mngr Dockerfile (which does not
+# install node). For Dockerfile.release (generated from Dockerfile +
+# Dockerfile.release.extras), node is installed *after* the Dockerfile
+# RUN that invokes this script -- so the from-scratch release build
+# still relies on Dockerfile.release.extras's own `npm ci && npm run
+# build` RUN. The value of running it here is for offload's
+# post_patch_cmd path: when offload patches a release-checkpoint
+# image, node is already baked in, the guard succeeds, and the
+# frontend is rebuilt against the just-patched source. Without this,
+# release tests can drift against a stale frontend.
+FRONTEND_DIR="$CODE_DIR/apps/minds_workspace_server/frontend"
+if command -v npm >/dev/null 2>&1 && [ -f "$FRONTEND_DIR/package-lock.json" ]; then
+    echo "Rebuilding minds_workspace_server frontend"
+    (cd "$FRONTEND_DIR" && npm ci && npm run build)
+fi
