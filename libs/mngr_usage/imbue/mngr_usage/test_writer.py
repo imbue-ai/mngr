@@ -1,8 +1,7 @@
 """Integration tests for the claude_rate_limits_writer.sh writer.
 
-We exercise the bash writer directly via subprocess to ensure both modes
-(statusline / sdk) merge into the cache correctly with last-write-wins
-per-window semantics.
+We exercise the bash writer directly via subprocess to ensure it merges
+statusline payloads into the cache atomically and tolerates concurrent writes.
 """
 
 from __future__ import annotations
@@ -44,10 +43,10 @@ def _has_jq() -> bool:
 pytestmark = pytest.mark.skipif(not _has_jq(), reason="jq not installed; required by claude_rate_limits_writer.sh")
 
 
-def _run_writer(writer_path: Path, mode: str, stdin: str, cache_path: Path) -> subprocess.CompletedProcess[str]:
+def _run_writer(writer_path: Path, stdin: str, cache_path: Path) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "MNGR_RATE_LIMITS_CACHE": str(cache_path)}
     return subprocess.run(
-        [str(writer_path), mode],
+        [str(writer_path)],
         input=stdin,
         capture_output=True,
         text=True,
@@ -56,7 +55,7 @@ def _run_writer(writer_path: Path, mode: str, stdin: str, cache_path: Path) -> s
     )
 
 
-def test_writer_statusline_creates_cache(writer_path: Path, cache_path: Path) -> None:
+def test_writer_creates_cache(writer_path: Path, cache_path: Path) -> None:
     payload = json.dumps(
         {
             "rate_limits": {
@@ -65,7 +64,7 @@ def test_writer_statusline_creates_cache(writer_path: Path, cache_path: Path) ->
             }
         }
     )
-    result = _run_writer(writer_path, "statusline", payload, cache_path)
+    result = _run_writer(writer_path, payload, cache_path)
     assert result.returncode == 0, result.stderr
 
     data = json.loads(cache_path.read_text())
@@ -76,51 +75,44 @@ def test_writer_statusline_creates_cache(writer_path: Path, cache_path: Path) ->
     assert data["windows"]["seven_day"]["used_percentage"] == 41.0
 
 
-def test_writer_sdk_merges_per_window_last_write_wins(writer_path: Path, cache_path: Path) -> None:
-    statusline_payload = json.dumps(
-        {
-            "rate_limits": {
-                "five_hour": {"used_percentage": 50.0, "resets_at": 1700000000},
-            }
-        }
-    )
-    r1 = _run_writer(writer_path, "statusline", statusline_payload, cache_path)
-    assert r1.returncode == 0, r1.stderr
-
-    sdk_payload = "\n".join(
-        [
-            json.dumps(
-                {
-                    "type": "rate_limit_event",
-                    "rate_limit_info": {
-                        "rateLimitType": "5h",
+def test_writer_preserves_unknown_fields(writer_path: Path, cache_path: Path) -> None:
+    """The writer only updates statusline-known fields. Other fields written by
+    a different code path (e.g. mngr usage --refresh) must survive the merge."""
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "windows": {
+                    "five_hour": {
+                        "used_percentage": 10.0,
+                        "resets_at": 1,
                         "status": "rejected",
-                        "resetsAt": 1700001234,
-                        "isUsingOverage": True,
-                    },
-                }
-            )
-        ]
+                        "is_using_overage": True,
+                        "source": "sdk",
+                        "updated_at": 100,
+                    }
+                },
+            }
+        )
     )
-    r2 = _run_writer(writer_path, "sdk", sdk_payload, cache_path)
-    assert r2.returncode == 0, r2.stderr
 
-    data = json.loads(cache_path.read_text())
-    five_hour = data["windows"]["five_hour"]
-    # Statusline-set fields are preserved (per-window last-write-wins is
-    # actually per-field merge in the spec; missing fields stay nulled but
-    # already-set ones are not destroyed unless the new writer overwrites them).
+    payload = json.dumps({"rate_limits": {"five_hour": {"used_percentage": 50.0, "resets_at": 1700000000}}})
+    result = _run_writer(writer_path, payload, cache_path)
+    assert result.returncode == 0, result.stderr
+
+    five_hour = json.loads(cache_path.read_text())["windows"]["five_hour"]
+    # Statusline-known fields are overwritten:
     assert five_hour["used_percentage"] == 50.0
-    # SDK-set fields are present
+    assert five_hour["resets_at"] == 1700000000
+    assert five_hour["source"] == "statusline"
+    # Unknown-to-statusline fields are preserved:
     assert five_hour["status"] == "rejected"
-    assert five_hour["resets_at"] == 1700001234
     assert five_hour["is_using_overage"] is True
-    assert five_hour["source"] == "sdk"
 
 
 def test_writer_handles_missing_fields_gracefully(writer_path: Path, cache_path: Path) -> None:
     payload = json.dumps({"rate_limits": {"five_hour": {}}})
-    result = _run_writer(writer_path, "statusline", payload, cache_path)
+    result = _run_writer(writer_path, payload, cache_path)
     assert result.returncode == 0, result.stderr
     data = json.loads(cache_path.read_text())
     assert data["windows"]["five_hour"]["used_percentage"] is None
@@ -128,26 +120,14 @@ def test_writer_handles_missing_fields_gracefully(writer_path: Path, cache_path:
     assert data["windows"]["five_hour"]["source"] == "statusline"
 
 
-def test_writer_ignores_unknown_event_types(writer_path: Path, cache_path: Path) -> None:
-    payload = "\n".join(
-        [
-            json.dumps({"type": "system", "subtype": "init"}),
-            json.dumps({"type": "rate_limit_event", "rate_limit_info": {"rateLimitType": "unknown"}}),
-        ]
-    )
-    result = _run_writer(writer_path, "sdk", payload, cache_path)
+def test_writer_resets_corrupt_cache(writer_path: Path, cache_path: Path) -> None:
+    """A corrupt cache file should be replaced rather than failing the writer."""
+    cache_path.write_text("not json")
+    payload = json.dumps({"rate_limits": {"five_hour": {"used_percentage": 1.0, "resets_at": 1}}})
+    result = _run_writer(writer_path, payload, cache_path)
     assert result.returncode == 0, result.stderr
-    # No file should be created since no known windows were updated, but writer
-    # always writes a cache file (even if empty windows). Tolerate either.
-    if cache_path.exists():
-        data = json.loads(cache_path.read_text())
-        assert data.get("windows", {}) == {} or "unknown" not in data["windows"]
-
-
-def test_writer_unknown_mode_errors(writer_path: Path, cache_path: Path) -> None:
-    result = _run_writer(writer_path, "bogus", "{}", cache_path)
-    assert result.returncode == 64
-    assert "unknown mode" in result.stderr or "expected" in result.stderr
+    data = json.loads(cache_path.read_text())
+    assert data["windows"]["five_hour"]["used_percentage"] == 1.0
 
 
 def test_writer_handles_concurrent_writes(writer_path: Path, cache_path: Path) -> None:
@@ -161,7 +141,7 @@ def test_writer_handles_concurrent_writes(writer_path: Path, cache_path: Path) -
         for i in range(20)
     ]
     with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = [pool.submit(_run_writer, writer_path, "statusline", payload, cache_path) for payload in payloads]
+        futures = [pool.submit(_run_writer, writer_path, payload, cache_path) for payload in payloads]
         for f in futures:
             r = f.result()
             assert r.returncode == 0, r.stderr

@@ -19,7 +19,7 @@ payload=$(cat)
 # Writer is best-effort: a failure here (jq missing, malformed payload, flock
 # contention, etc.) must not break the user's pre-existing statusline.
 if [ -n "${MNGR_RATE_LIMITS_WRITER:-}" ] && [ -x "$MNGR_RATE_LIMITS_WRITER" ]; then
-  printf '%s' "$payload" | "$MNGR_RATE_LIMITS_WRITER" statusline || true
+  printf '%s' "$payload" | "$MNGR_RATE_LIMITS_WRITER" || true
 fi
 
 # User command is best-effort: keep the shim's exit clean even if the user's
