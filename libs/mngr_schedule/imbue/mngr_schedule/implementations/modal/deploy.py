@@ -346,13 +346,14 @@ def _build_package_mode_dockerfile(mngr_dockerfile_content: str) -> str:
             continue
 
         # Skip lines until we pass the last monorepo-specific install command.
-        # The sentinel is any RUN line containing "uv tool install" (which may
-        # be combined with other commands on the same line via &&).
+        # The sentinel is a RUN line that invokes post_file_setup.sh (the
+        # shared dependency-install script) or contains "uv tool install"
+        # (legacy layout).
         if is_in_install_section:
-            if stripped.startswith("RUN") and "uv tool install" in stripped:
+            if stripped.startswith("RUN") and ("post_file_setup.sh" in stripped or "uv tool install" in stripped):
                 is_in_install_section = False
                 continue
-            # Also skip WORKDIR, RUN uv sync, and the tarball extraction lines
+            # Also skip WORKDIR, COPY, RUN uv sync, and git normalization lines
             continue
 
         result_lines.append(line)
@@ -360,7 +361,8 @@ def _build_package_mode_dockerfile(mngr_dockerfile_content: str) -> str:
     if is_in_install_section:
         raise ScheduleDeployError(
             "Failed to generate PACKAGE mode Dockerfile: could not find the end of the monorepo "
-            "install section (expected a 'RUN uv tool install' line after 'COPY . /code/'). "
+            "install section (expected a RUN line containing 'post_file_setup.sh' or "
+            "'uv tool install' after 'COPY . /code/'). "
             "The mngr Dockerfile structure may have changed."
         )
 
