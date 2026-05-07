@@ -42,6 +42,10 @@ def relay_step(sock: socket.socket, channel: paramiko.Channel) -> bool:
             # this branch the relay loop would spin at ~1M iters/sec on a half-closed
             # channel until something else tore it down.
             return False
+        else:
+            # select woke us for a non-data channel event (e.g. window-adjust);
+            # keep looping so the next iteration re-checks for data or EOF.
+            pass
 
     return True
 
