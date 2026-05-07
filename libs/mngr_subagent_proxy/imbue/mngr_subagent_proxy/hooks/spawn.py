@@ -182,6 +182,14 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
         # agent and (re-)deliver the message. Without this flag, a
         # SendMessageError mid-create wedges the proxy permanently because
         # Haiku has no path to recover.
+        # Labels carry the parent linkage so the user can reason about
+        # parent <-> child relationships via `mngr list --format json` /
+        # `mngr list --include 'labels.X == "Y"'` without reading the
+        # parent's subagent_map/. Setting any of these labels also
+        # implicitly identifies the agent as a subagent (a top-level
+        # agent has no parent, so labels.mngr_subagent_proxy_parent_name
+        # would be unset). Tool_use_id is included so a parent that
+        # spawned multiple children can disambiguate them.
         f'    {mngr_cmd} create "$TARGET_NAME:$PARENT_CWD" \\\n'
         "        --type mngr-proxy-child \\\n"
         "        --transfer=none \\\n"
@@ -190,7 +198,9 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
         "        --reuse \\\n"
         '        --env-file "$ENV_FILE" \\\n'
         '        --message-file "$PROMPT_FILE" \\\n'
-        "        --label mngr_subagent_proxy=child \\\n"
+        '        --label "mngr_subagent_proxy_parent_name=${MNGR_AGENT_NAME:-}" \\\n'
+        '        --label "mngr_subagent_proxy_parent_id=${MNGR_AGENT_ID:-}" \\\n'
+        f"        --label mngr_subagent_proxy_tool_use_id={q_tid} \\\n"
         "        --env MNGR_SUBAGENT_PROXY_CHILD=1 \\\n"
         "        --env MNGR_SUBAGENT_DEPTH=$((${MNGR_SUBAGENT_DEPTH:-0}+1))\n"
         '    shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\n'

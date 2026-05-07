@@ -164,22 +164,39 @@ correctness; the child IS doing useful work. This lives in
 mngr_claude's readiness-hook semantics, not this plugin, and is not
 on the roadmap to fix.
 
-## Hiding proxy children from `mngr list`
+## Labels and `mngr list` queries
 
-Spawned proxy children are tagged with the label
-`mngr_subagent_proxy=child`. To suppress them from listings:
+Spawned proxy children are tagged with three labels at create time:
 
-    uv run mngr list --exclude 'labels.mngr_subagent_proxy == "child"'
+| Label | Value |
+|---|---|
+| `mngr_subagent_proxy_parent_name` | The parent agent's `MNGR_AGENT_NAME` |
+| `mngr_subagent_proxy_parent_id` | The parent agent's `MNGR_AGENT_ID` |
+| `mngr_subagent_proxy_tool_use_id` | The originating Claude Code `tool_use_id` |
 
-The inverse — show only proxy children — is useful for debugging:
+Top-level agents have none of these labels, so the presence of
+`mngr_subagent_proxy_parent_name` (or `_parent_id`) is the
+authoritative signal "this is a proxy child".
 
-    uv run mngr list --include 'labels.mngr_subagent_proxy == "child"'
+Useful queries (`mngr list` accepts CEL `--include` / `--exclude`):
 
-Combine with other filters as usual, e.g. only top-level agents that
-are currently running:
+    # Hide proxy children from listings.
+    uv run mngr list --exclude 'has(labels.mngr_subagent_proxy_parent_name)'
 
+    # Show ONLY proxy children.
+    uv run mngr list --include 'has(labels.mngr_subagent_proxy_parent_name)'
+
+    # All children of a specific parent.
+    uv run mngr list --include 'labels.mngr_subagent_proxy_parent_name == "my-parent"'
+
+    # Orphaned children whose parent is gone -- combine the labels
+    # query with `mngr list` of all current names to subtract:
+    uv run mngr list --include 'has(labels.mngr_subagent_proxy_parent_name)' --format json \
+        | jq '.agents[] | .labels.mngr_subagent_proxy_parent_name' | sort -u
+
+    # Combine with other filters, e.g. running top-level agents only:
     uv run mngr list \
-        --exclude 'labels.mngr_subagent_proxy == "child"' \
+        --exclude 'has(labels.mngr_subagent_proxy_parent_name)' \
         --include 'state == "RUNNING"'
 
 ## Depth limit

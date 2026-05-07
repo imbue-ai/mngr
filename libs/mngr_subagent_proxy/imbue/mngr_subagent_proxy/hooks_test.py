@@ -131,7 +131,16 @@ def test_spawn_rewrites_input(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> 
     assert script_contents.startswith("#!/usr/bin/env bash")
     assert "uv run mngr create" in script_contents
     assert "--type mngr-proxy-child" in script_contents
-    assert "--label mngr_subagent_proxy=child" in script_contents
+    # Parent linkage and tool_use_id are persisted as labels so the user
+    # (or operator scripts) can query parent <-> child relationships via
+    # `mngr list --format json` / CEL filters without reading subagent_map/.
+    assert '--label "mngr_subagent_proxy_parent_name=${MNGR_AGENT_NAME:-}"' in script_contents
+    assert '--label "mngr_subagent_proxy_parent_id=${MNGR_AGENT_ID:-}"' in script_contents
+    assert "--label mngr_subagent_proxy_tool_use_id=" in script_contents
+    # Legacy `mngr_subagent_proxy=child` label was redundant once the
+    # parent_name/parent_id labels exist (top-level agents have no
+    # parent_name label, so its presence already identifies a subagent).
+    assert "--label mngr_subagent_proxy=child" not in script_contents
     # --reuse so partial-create failures are recoverable on retry.
     assert "--reuse" in script_contents
     assert "uv run python -m imbue.mngr_subagent_proxy.subagent_wait" in script_contents
