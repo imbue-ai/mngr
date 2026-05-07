@@ -1,6 +1,11 @@
-"""Acceptance reproduction for the reverse-tunnel CPU leak in mngr_forward.
+"""Acceptance reproduction for the reverse-tunnel CPU leak in the minds desktop client.
 
-The original symptom is a runaway ``forward`` subprocess pinning a CPU after
+The subject under test is ``imbue.minds.desktop_client.ssh_tunnel.SSHTunnelManager``,
+which the ``minds run`` parent process uses to maintain Latchkey reverse
+tunnels. (The separate ``imbue.mngr_forward.ssh_tunnel.SSHTunnelManager``
+used by the ``mngr forward`` plugin subprocess is *not* covered here.)
+
+The original symptom is the ``minds run`` process pinning a CPU after
 agents/hosts come and go: ``SSHTunnelManager._reverse_tunnels`` is never
 pruned, so every 30s health-check tick re-handshakes against ports that no
 longer exist, leaking paramiko transport threads each time.
