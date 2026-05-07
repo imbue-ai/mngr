@@ -2039,12 +2039,24 @@ class Host(BaseHost, OnlineHostInterface):
     ) -> None:
         """Run rsync to transfer files from source to target.
 
-        - If both are local, run rsync locally
-        - If source is local, push to target via SSH
-        - If target is local, pull from source via SSH
-        - If both are remote, sync via a local temp directory as intermediary
-          (pull from source, then push to target)
+        - If source and target are the same host, run rsync on that host
+          between two local paths (no SSH, no laptop intermediary)
+        - If source is local and target is remote, push to target via SSH
+        - If target is local and source is remote, pull from source via SSH
+        - If source and target are different remote hosts, sync via a local
+          temp directory as intermediary (pull from source, then push to target)
         """
+        # Same-host short-circuit -- runs rsync in a single shell on that host.
+        # This covers both local-to-local and same-remote-to-same-remote.
+        if source_host.id == self.id:
+            self._rsync_files_same_host(
+                source_path,
+                target_path,
+                extra_args=extra_args,
+                files_from=files_from,
+                exclude_git=exclude_git,
+            )
+            return
 
         # Build rsync arguments
         rsync_args = ["rsync", "-rlpt"]
@@ -2137,6 +2149,52 @@ class Host(BaseHost, OnlineHostInterface):
             except ProcessError as e:
                 raise MngrError(f"rsync failed: {e.stderr}") from e
             logger.trace("Ran rsync command: {}", " ".join(rsync_args))
+
+    def _rsync_files_same_host(
+        self,
+        source_path: Path,
+        target_path: Path,
+        *,
+        extra_args: str | None,
+        files_from: Path | None,
+        exclude_git: bool,
+    ) -> None:
+        """Run rsync between two local paths on this single host.
+
+        ``files_from`` is read from the laptop and the path list is piped to
+        rsync's stdin via ``--files-from=-`` (using ``printf``), so the file
+        does not need to exist on the host.
+        """
+        rsync_args = ["rsync", "-rlpt"]
+        if exclude_git:
+            rsync_args.extend(["--exclude", ".git"])
+        if extra_args:
+            rsync_args.extend(shlex.split(extra_args))
+        if files_from is not None:
+            rsync_args.append("--files-from=-")
+
+        source_path_str = str(source_path).rstrip("/") + "/"
+        target_path_str = str(target_path).rstrip("/") + "/"
+        rsync_args.extend([source_path_str, target_path_str])
+
+        rsync_cmd = " ".join(shlex.quote(a) for a in rsync_args)
+
+        if files_from is not None:
+            paths = [p for p in files_from.read_text().splitlines() if p]
+            if not paths:
+                # Nothing to transfer; skip the rsync entirely rather than
+                # invoking it with an empty file list.
+                return
+            quoted_paths = " ".join(shlex.quote(p) for p in paths)
+            cmd = f"printf '%s\\n' {quoted_paths} | {rsync_cmd}"
+        else:
+            cmd = rsync_cmd
+
+        with log_span("rsync: same-host {} -> {}", source_path, target_path):
+            result = self.execute_idempotent_command(cmd)
+            if not result.success:
+                raise MngrError(f"rsync failed (same-host): {result.stderr}")
+            logger.trace("Ran rsync command (same-host): {}", cmd)
 
     def _create_work_dir_as_git_worktree(
         self,

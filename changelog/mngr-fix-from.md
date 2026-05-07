@@ -15,3 +15,8 @@ between two local paths (no SSH), and `--transfer=git-worktree` is allowed
 whenever source and target are on the same host -- previously it was
 restricted to local-only agents. The default transfer mode for same-host
 remote git sources is now `git-worktree` instead of `git-mirror`.
+
+The internal rsync helper used for `work_dir_extra_paths` and the rsync
+transfer mode also short-circuits when source and target are on the same
+host, running a single rsync between two local paths on that host instead
+of routing through a laptop temp directory.
