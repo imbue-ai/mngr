@@ -9,6 +9,7 @@ from typing import Any
 
 import pluggy
 import pytest
+from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -23,6 +24,7 @@ from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import HostErrorInfo
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.api.list import ProviderErrorInfo
+from imbue.mngr.api.list import WarningInfo
 from imbue.mngr.api.list import _ListAgentsParams
 from imbue.mngr.api.list import _apply_cel_filters
 from imbue.mngr.api.list import _collect_and_emit_details_for_host
@@ -30,6 +32,7 @@ from imbue.mngr.api.list import _construct_discover_and_emit_for_provider
 from imbue.mngr.api.list import _handle_listing_error
 from imbue.mngr.api.list import _maybe_write_full_discovery_snapshot
 from imbue.mngr.api.list import _process_host_with_error_handling
+from imbue.mngr.api.list import _register_warning_capture_sink
 from imbue.mngr.api.list import agent_details_to_cel_context
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrContext
@@ -1255,6 +1258,7 @@ def _make_list_params(
     error_behavior: ErrorBehavior = ErrorBehavior.CONTINUE,
     on_error: Any = None,
     on_agent: Any = None,
+    on_warning: Any = None,
     include_filters: tuple[str, ...] = (),
     exclude_filters: tuple[str, ...] = (),
 ) -> _ListAgentsParams:
@@ -1269,6 +1273,7 @@ def _make_list_params(
         error_behavior=error_behavior,
         on_agent=on_agent,
         on_error=on_error,
+        on_warning=on_warning,
     )
 
 
@@ -2010,3 +2015,82 @@ def test_process_host_with_error_handling_abort_mode_propagates_error(
         )
 
     assert result.errors == []
+
+
+# =============================================================================
+# WarningInfo capture: _register_warning_capture_sink + result.warnings plumbing
+# =============================================================================
+
+
+@pytest.mark.allow_warnings(match=r"captured-warning-test")
+def test_register_warning_capture_sink_captures_warning_into_result_warnings() -> None:
+    """The per-call sink installs a loguru handler that records WARNING messages
+    into result.warnings. Providers continue to call logger.warning(...) as today;
+    the existing stderr and file sinks remain unaffected.
+    """
+    result = ListResult()
+    lock = Lock()
+    sink_id = _register_warning_capture_sink(result, lock, on_warning=None)
+    try:
+        logger.warning("captured-warning-test message")
+    finally:
+        logger.remove(sink_id)
+
+    assert len(result.warnings) == 1
+    assert isinstance(result.warnings[0], WarningInfo)
+    assert result.warnings[0].message == "captured-warning-test message"
+
+
+@pytest.mark.allow_warnings(match=r"captured-warning-test")
+def test_register_warning_capture_sink_invokes_on_warning_callback() -> None:
+    """The sink fires on_warning for each captured warning, parallel to on_error."""
+    result = ListResult()
+    lock = Lock()
+    captured: list[WarningInfo] = []
+    sink_id = _register_warning_capture_sink(result, lock, on_warning=captured.append)
+    try:
+        logger.warning("captured-warning-test from callback")
+    finally:
+        logger.remove(sink_id)
+
+    assert len(captured) == 1
+    assert captured[0].message == "captured-warning-test from callback"
+    # Callback fires alongside the structured collection -- not instead of it.
+    assert len(result.warnings) == 1
+    assert captured[0] is result.warnings[0]
+
+
+@pytest.mark.allow_warnings(match=r"unrelated-error-marker")
+def test_register_warning_capture_sink_filters_to_exactly_warning_level() -> None:
+    """Only WARNING-level records reach result.warnings.
+
+    INFO/DEBUG/TRACE are below the threshold; ERROR/CRITICAL are above. ERROR
+    must be filtered explicitly because loguru's `level=` is a minimum: without
+    the strict filter, ERROR records (which are already represented as
+    ProviderErrorInfo via the per-provider catch path) would duplicate into
+    result.warnings.
+    """
+    result = ListResult()
+    lock = Lock()
+    sink_id = _register_warning_capture_sink(result, lock, on_warning=None)
+    try:
+        logger.info("info should not be captured")
+        logger.debug("debug should not be captured")
+        logger.trace("trace should not be captured")
+        logger.error("unrelated-error-marker should not be captured into warnings")
+    finally:
+        logger.remove(sink_id)
+
+    assert result.warnings == []
+
+
+def test_list_agents_returns_empty_warnings_when_none_emitted(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """list_agents returns a ListResult with the warnings field present (default empty).
+
+    Smoke test that the field is wired through the public API; populated-warnings
+    behavior is covered by the sink-helper tests above.
+    """
+    result = list_agents(mngr_ctx=temp_mngr_ctx, is_streaming=False)
+    assert result.warnings == []

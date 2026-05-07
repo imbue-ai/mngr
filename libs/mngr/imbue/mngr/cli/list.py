@@ -19,6 +19,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.api.list import ErrorInfo
+from imbue.mngr.api.list import WarningInfo
 from imbue.mngr.api.list import agent_details_to_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
 from imbue.mngr.cli.common_opts import add_common_options
@@ -374,6 +375,7 @@ def _list_jsonl(
         error_behavior=error_behavior,
         on_agent=limited_callback,
         on_error=_emit_jsonl_error,
+        on_warning=_emit_jsonl_warning,
         is_streaming=False,
     )
     # Exit with non-zero code if there were errors (per error_handling.md spec)
@@ -728,7 +730,7 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
     elif params.output_opts.output_format == OutputFormat.HUMAN:
         _emit_human_output(agents_to_display, params.fields, params.custom_headers)
     elif params.output_opts.output_format == OutputFormat.JSON:
-        _emit_json_output(agents_to_display, result.errors)
+        _emit_json_output(agents_to_display, result.errors, result.warnings)
     else:
         # JSONL is handled above with streaming, so this should be unreachable
         raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")
@@ -738,13 +740,15 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
         ctx.exit(1)
 
 
-def _emit_json_output(agents: list[AgentDetails], errors: list[ErrorInfo]) -> None:
-    """Emit JSON output with all agents."""
+def _emit_json_output(agents: list[AgentDetails], errors: list[ErrorInfo], warnings: list[WarningInfo]) -> None:
+    """Emit JSON output with all agents, errors, and warnings."""
     agents_data = [agent.model_dump(mode="json") for agent in agents]
     errors_data = [error.model_dump(mode="json") for error in errors]
+    warnings_data = [warning.model_dump(mode="json") for warning in warnings]
     output_data = {
         "agents": agents_data,
         "errors": errors_data,
+        "warnings": warnings_data,
     }
     emit_final_json(output_data)
 
@@ -759,6 +763,12 @@ def _emit_jsonl_error(error: ErrorInfo) -> None:
     """Emit a single error as a JSONL line (streaming callback)."""
     error_data = {"event": "error", **error.model_dump(mode="json")}
     emit_final_json(error_data)
+
+
+def _emit_jsonl_warning(warning: WarningInfo) -> None:
+    """Emit a single warning as a JSONL line (streaming callback)."""
+    warning_data = {"event": "warning", **warning.model_dump(mode="json")}
+    emit_final_json(warning_data)
 
 
 def _emit_human_output(

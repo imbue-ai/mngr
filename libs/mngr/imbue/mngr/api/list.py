@@ -5,6 +5,7 @@ from datetime import datetime
 from datetime import timezone
 from threading import Lock
 from typing import Any
+from typing import cast
 
 from loguru import logger
 from pydantic import Field
@@ -100,11 +101,26 @@ class AgentErrorInfo(ErrorInfo):
         )
 
 
+class WarningInfo(FrozenModel):
+    """Information about a non-fatal warning encountered during listing.
+
+    Captured from `logger.warning(...)` calls (typically from providers reporting
+    "not configured" / "unavailable" states) via a per-call loguru sink, and
+    surfaced through the structured output channels (jsonl / json) so
+    programmatic consumers can see what humans see on stderr.
+    """
+
+    message: str = Field(description="The warning message as logged")
+
+
 class ListResult(MutableModel):
     """Result of listing agents."""
 
     agents: list[AgentDetails] = Field(default_factory=list, description="List of agents with their full information")
     errors: list[ErrorInfo] = Field(default_factory=list, description="Errors encountered while listing")
+    warnings: list[WarningInfo] = Field(
+        default_factory=list, description="Non-fatal warnings logged during listing (e.g. provider not configured)"
+    )
 
 
 class _ListAgentsParams(FrozenModel):
@@ -116,6 +132,7 @@ class _ListAgentsParams(FrozenModel):
     error_behavior: ErrorBehavior
     on_agent: Callable[[AgentDetails], None] | None
     on_error: Callable[[ErrorInfo], None] | None
+    on_warning: Callable[[WarningInfo], None] | None
     field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = Field(
         default_factory=dict,
     )
@@ -139,6 +156,8 @@ def list_agents(
     on_agent: Callable[[AgentDetails], None] | None = None,
     # Optional callback invoked immediately when each error is encountered (for streaming)
     on_error: Callable[[ErrorInfo], None] | None = None,
+    # Optional callback invoked immediately when each warning is captured (for streaming)
+    on_warning: Callable[[WarningInfo], None] | None = None,
     # whether to force the providers to refresh their caches and get new data. Only needed if calling this multiple
     # times within the same process
     reset_caches: bool = False,
@@ -169,31 +188,40 @@ def list_agents(
             error_behavior=error_behavior,
             on_agent=on_agent,
             on_error=on_error,
+            on_warning=on_warning,
             field_generators=field_generators,
         )
 
-        if is_streaming:
-            # Streaming mode: each provider loads hosts, gets agent refs, and processes
-            # hosts immediately -- so fast providers fire on_agent callbacks while slow
-            # providers are still loading
-            _list_agents_streaming(
-                mngr_ctx=mngr_ctx,
-                provider_names=provider_names,
-                params=params,
-                result=result,
-                results_lock=results_lock,
-                reset_caches=reset_caches,
-            )
-        else:
-            # Batch mode: load all agents first, then process
-            _list_agents_batch(
-                mngr_ctx=mngr_ctx,
-                provider_names=provider_names,
-                params=params,
-                result=result,
-                results_lock=results_lock,
-                reset_caches=reset_caches,
-            )
+        # Capture WARNING-level loguru records into result.warnings so structured
+        # consumers (--format json/jsonl) see what stderr already shows. Providers
+        # call `logger.warning(...)` as today; the existing stderr and file sinks
+        # are unaffected -- this just adds a third receiver scoped to this call.
+        warning_handler_id = _register_warning_capture_sink(result, results_lock, on_warning)
+        try:
+            if is_streaming:
+                # Streaming mode: each provider loads hosts, gets agent refs, and processes
+                # hosts immediately -- so fast providers fire on_agent callbacks while slow
+                # providers are still loading
+                _list_agents_streaming(
+                    mngr_ctx=mngr_ctx,
+                    provider_names=provider_names,
+                    params=params,
+                    result=result,
+                    results_lock=results_lock,
+                    reset_caches=reset_caches,
+                )
+            else:
+                # Batch mode: load all agents first, then process
+                _list_agents_batch(
+                    mngr_ctx=mngr_ctx,
+                    provider_names=provider_names,
+                    params=params,
+                    result=result,
+                    results_lock=results_lock,
+                    reset_caches=reset_caches,
+                )
+        finally:
+            logger.remove(warning_handler_id)
 
     except MngrError as e:
         if error_behavior == ErrorBehavior.ABORT:
@@ -205,6 +233,61 @@ def list_agents(
 
     _maybe_write_full_discovery_snapshot(mngr_ctx, result, provider_names, include_filters, exclude_filters)
     return result
+
+
+class _WarningCaptureSink(MutableModel):
+    """Callable loguru sink that records WARNING messages into result.warnings.
+
+    Mirrors the callable-state pattern used by _LimitedJsonlEmitter et al. in
+    cli/list.py: holds the captured state (result, shared lock, optional
+    callback) on the instance and exposes __call__ as the loguru sink. Stores
+    the raw `record["message"]` (unformatted producer text) rather than
+    loguru's stringified output so consumers see exactly what the producer
+    wrote.
+    """
+
+    model_config = {"arbitrary_types_allowed": True}
+    result: ListResult
+    results_lock: Lock
+    on_warning: Callable[[WarningInfo], None] | None
+
+    def __call__(self, message: Any) -> None:
+        warning_info = WarningInfo(message=message.record["message"])
+        with self.results_lock:
+            self.result.warnings.append(warning_info)
+        if self.on_warning:
+            self.on_warning(warning_info)
+
+
+def _register_warning_capture_sink(
+    result: ListResult,
+    results_lock: Lock,
+    on_warning: Callable[[WarningInfo], None] | None,
+) -> int:
+    """Register a per-call loguru sink that captures WARNING records into result.warnings.
+
+    Returns the handler ID so the caller can `logger.remove(...)` it in a finally block.
+    The sink fires from whichever thread emitted the log; result.warnings.append is
+    serialized via results_lock to match the rest of the listing pipeline.
+
+    Filters to exactly WARNING level (not "WARNING and above") so ERROR records don't
+    duplicate into result.warnings -- those are already represented in result.errors
+    via the per-provider catch path.
+    """
+    sink = _WarningCaptureSink(result=result, results_lock=results_lock, on_warning=on_warning)
+    # Cast: loguru.add expects Callable[[loguru.Message], None]; the type checker
+    # doesn't auto-detect a pydantic-model __call__ as a Callable, so we widen
+    # explicitly. Runtime call dispatch is unaffected.
+    return logger.add(cast(Any, sink), level="WARNING", filter=_is_warning_level, format="{message}")
+
+
+def _is_warning_level(record: Any) -> bool:
+    """Loguru filter: keep only records at exactly WARNING level.
+
+    Typed as Any because loguru's Record type isn't exposed at runtime;
+    the field shape (record["level"].name) is the documented public API.
+    """
+    return record["level"].name == "WARNING"
 
 
 def _maybe_write_full_discovery_snapshot(
