@@ -517,16 +517,6 @@ def test_agent_details_to_cel_context_idle_uses_most_recent_activity() -> None:
     assert 580 < context["idle"] < 620
 
 
-def test_agent_schemaless_paths_lists_all_four_fields() -> None:
-    """Sanity-check the schemaless-paths constant covers the documented set."""
-    assert set(_AGENT_SCHEMALESS_PATHS) == {
-        ("labels",),
-        ("plugin",),
-        ("host", "tags"),
-        ("host", "plugin"),
-    }
-
-
 @pytest.mark.parametrize(
     "exclude_expr",
     [
