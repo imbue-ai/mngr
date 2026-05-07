@@ -166,8 +166,9 @@ def _resolve_agent_type_name(
 ) -> str:
     """Resolve the agent type name from CLI options.
 
-    Shared logic for both the early headless detection path and the full
-    _parse_agent_opts path.
+    Called once from create() before headless detection; the resolved
+    value is then forwarded to _parse_agent_opts so both paths agree on
+    a single agent type.
 
     Precedence: explicit --type flag > positional argument > --type default ("claude").
     """
