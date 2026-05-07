@@ -77,11 +77,12 @@ class ReverseTunnelInfo(FrozenModel):
     agent_id: str | None = Field(
         default=None,
         description=(
-            "Stringified ID of the agent that owns this tunnel, when known. Set by callers that "
-            "want lifecycle hooks (e.g. ``LatchkeyDestructionHandler``) to be able to ask the "
-            "manager to tear down all tunnels belonging to a destroyed agent via "
-            "``remove_reverse_tunnels_for_agent``. ``None`` when the caller does not associate "
-            "the tunnel with a specific agent."
+            "Stringified ID of the agent that owns this tunnel, when known. Tagged by the caller "
+            "of ``setup_reverse_tunnel`` (currently ``LatchkeyDiscoveryHandler``) and read by "
+            "``remove_reverse_tunnels_for_agent`` (currently invoked from "
+            "``LatchkeyDestructionHandler``) so all tunnels belonging to a destroyed agent can be "
+            "torn down together. ``None`` when the caller does not associate the tunnel with a "
+            "specific agent."
         ),
     )
 
