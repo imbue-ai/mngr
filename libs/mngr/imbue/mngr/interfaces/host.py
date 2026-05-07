@@ -853,7 +853,7 @@ class CreateAgentOptions(FrozenModel):
     )
     worktree_base_folder: Path | None = Field(
         default=None,
-        description="Base folder for git worktrees (overrides default ~/.mngr/worktrees/)",
+        description="Base folder for git worktrees (overrides the default <host_dir>/worktrees)",
     )
     transfer_mode: TransferMode = Field(
         default=TransferMode.NONE,

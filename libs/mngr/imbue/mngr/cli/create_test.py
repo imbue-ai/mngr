@@ -786,6 +786,18 @@ def test_resolve_agent_type_name_default() -> None:
     assert _resolve_agent_type_name("claude", False, None) == "claude"
 
 
+def test_resolve_agent_type_name_positional_beats_config_supplied_type() -> None:
+    """A positional agent type beats a config/template-supplied --type value.
+
+    Config defaults applied via apply_config_defaults / apply_create_template
+    update opts.type but do NOT change the click parameter source, so
+    is_type_explicit stays False. The positional argument is therefore the
+    only command-line signal and wins, matching the general "CLI > config"
+    precedence used elsewhere in the create flow.
+    """
+    assert _resolve_agent_type_name("from_config", False, "from_positional") == "from_positional"
+
+
 # =============================================================================
 # Tests for _resolve_initial_message_content (shared between headless + non-headless)
 # =============================================================================
