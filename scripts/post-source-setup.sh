@@ -37,21 +37,19 @@ fi
 # Step 2: normalize .git so downstream tooling (git rev-parse, ratchet
 # tests, mngr CLI repo discovery) finds a real in-image git directory.
 # Three input shapes:
-#   (a) .git is a *file* (worktree pointer): drop it and re-init.
-#       Worktree pointers reference paths on the host that don't exist
-#       inside the sandbox.
+#   (a) .git is a *file* (worktree pointer): drop the pointer; the
+#       fresh-init branch below picks up from there. Worktree pointers
+#       reference paths on the host that don't exist inside the sandbox.
 #   (b) .git is missing entirely (e.g. tarball produced by `git archive`,
 #       or offload's export_tree which does git init + fetch but
 #       skipped here): init a fresh repo and commit.
 #   (c) .git is already a directory: leave alone.
 if [ -f .git ]; then
-    echo "Normalizing worktree-style .git -> fresh in-image .git"
+    echo "Stripping worktree-style .git pointer"
     rm .git
-    git init -q .
-    git add -A
-    git -c user.email=ci@local -c user.name=ci commit -q -m 'sandbox-init'
-elif [ ! -d .git ]; then
-    echo "No .git at all -> fresh in-image .git"
+fi
+if [ ! -d .git ]; then
+    echo "No .git directory -> fresh in-image .git"
     git init -q .
     git add -A
     git -c user.email=ci@local -c user.name=ci commit -q -m 'sandbox-init'
