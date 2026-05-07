@@ -1100,13 +1100,6 @@ def _resolve_plugins_dir_sentinel(host: OnlineHostInterface) -> None:
             known_marketplaces_path.write_text(rewritten)
 
 
-def _load_claude_resource_script(filename: str) -> str:
-    """Load a resource script from the mngr_claude resources package."""
-    resource_files = importlib.resources.files(_claude_resources)
-    script_path = resource_files.joinpath(filename)
-    return script_path.read_text()
-
-
 def _load_resource_script_from_module(module: types.ModuleType, filename: str) -> str:
     """Load a resource script from any plugin's resource module."""
     resource_files = importlib.resources.files(module)
