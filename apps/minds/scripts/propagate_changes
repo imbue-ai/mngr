@@ -168,9 +168,7 @@ agent_update() {
         return 1
     fi
 
-    # .claude/settings.local.json is generated per-agent at create time and
-    # holds mngr's UserPromptSubmit hook; without protection, --delete removes
-    # it and send_message then hangs the 90s submission-signal timeout.
+    # .claude/settings.local.json holds mngr's per-agent UserPromptSubmit hook.
     echo "[3/4] Syncing template into agent work_dir..."
     if [[ "${MODE}" == "remote" ]]; then
         rsync -avz --delete \
