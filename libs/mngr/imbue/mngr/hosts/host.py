@@ -1661,17 +1661,28 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     ) -> None:
         """Run rsync between two local paths on this single host.
 
-        ``files_from`` is read from the laptop and the path list is piped to
-        rsync's stdin via ``--files-from=-`` (using ``printf``), so the file
-        does not need to exist on the host.
+        ``files_from`` (a path on the laptop) is mirrored to a temp file on the
+        host so rsync can read it as ``--files-from=<host-path>``.
         """
         rsync_args = ["rsync", "-rlpt"]
         if exclude_git:
             rsync_args.extend(["--exclude", ".git"])
         if extra_args:
             rsync_args.extend(shlex.split(extra_args))
+
+        host_files_from: Path | None = None
         if files_from is not None:
-            rsync_args.append("--files-from=-")
+            paths = [p for p in files_from.read_text().splitlines() if p]
+            if not paths:
+                # Nothing to transfer; skip the rsync entirely rather than
+                # invoking it with an empty file list.
+                return
+            host_files_from = self.host_dir / "tmp" / f"rsync-files-from-{uuid4().hex}.txt"
+            self.execute_idempotent_command(
+                f"mkdir -p {shlex.quote(str(host_files_from.parent))}", timeout_seconds=5.0
+            )
+            self.write_file(host_files_from, ("\n".join(paths) + "\n").encode())
+            rsync_args.extend(["--files-from", str(host_files_from)])
 
         source_path_str = str(source_path).rstrip("/") + "/"
         target_path_str = str(target_path).rstrip("/") + "/"
@@ -1679,22 +1690,15 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
         rsync_cmd = " ".join(shlex.quote(a) for a in rsync_args)
 
-        if files_from is not None:
-            paths = [p for p in files_from.read_text().splitlines() if p]
-            if not paths:
-                # Nothing to transfer; skip the rsync entirely rather than
-                # invoking it with an empty file list.
-                return
-            quoted_paths = " ".join(shlex.quote(p) for p in paths)
-            cmd = f"printf '%s\\n' {quoted_paths} | {rsync_cmd}"
-        else:
-            cmd = rsync_cmd
-
         with log_span("rsync: same-host {} -> {}", source_path, target_path):
-            result = self.execute_idempotent_command(cmd)
-            if not result.success:
-                raise MngrError(f"rsync failed (same-host): {result.stderr}")
-            logger.trace("Ran rsync command (same-host): {}", cmd)
+            try:
+                result = self.execute_idempotent_command(rsync_cmd)
+                if not result.success:
+                    raise MngrError(f"rsync failed (same-host): {result.stderr}")
+                logger.trace("Ran rsync command (same-host): {}", rsync_cmd)
+            finally:
+                if host_files_from is not None:
+                    self.execute_idempotent_command(f"rm -f {shlex.quote(str(host_files_from))}", timeout_seconds=5.0)
 
     def _create_work_dir_as_git_worktree(
         self,
