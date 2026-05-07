@@ -46,6 +46,22 @@ FOLLOW_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 SOURCE_SCAN_INTERVAL_SECONDS: Final[float] = 10.0
 ONLINE_CHECK_INTERVAL_SECONDS: Final[float] = 30.0
 _EVENTS_JSONL_FILENAME: Final[str] = "events.jsonl"
+# Sentinel suffix appended to ``cat`` output so we can recover the
+# file's true trailing-newline state through pyinfra's stdout pipeline.
+# Pyinfra's ``CommandOutput.stdout`` is constructed as ``"\n".join(lines)``
+# after each line is ``rstrip("\n")``-ed, which means a file that ends
+# with ``\n`` and one that does not produce identical ``stdout`` strings.
+# That ambiguity breaks the tail loop's ``split_complete_lines`` partial
+# write guard: it always treats the most recent line as in-flight and
+# holds it back forever, producing a perpetual one-event lag.
+#
+# By appending a known sentinel after ``cat``, we force pyinfra to emit
+# the trailing newline (if any) as a real ``\n`` between the file's last
+# line and the sentinel line. Stripping the sentinel back off recovers
+# the file's exact byte tail. The marker contains a non-newline,
+# non-printable byte (\xff) so it cannot be confused with anything that
+# could legitimately appear in a JSONL events file.
+_EVENTS_READ_SENTINEL: Final[str] = "__MNGR_EVENTS_READ_SENTINEL_8b2e6f31_\xff__"
 
 
 # =============================================================================
@@ -291,16 +307,50 @@ def _read_event_content_via_host(
     event_file_name: str,
     display_name: str,
 ) -> str:
-    """Read event content by executing cat on the online host."""
+    """Read event content by executing cat on the online host.
+
+    Wraps the ``cat`` invocation as ``{ cat <file> && printf '%s' <sentinel>; }``
+    so the file's true trailing-newline state survives pyinfra's
+    line-rejoin pipeline. Without the sentinel, a file ending in ``\n``
+    and one not ending in ``\n`` produce identical ``CommandOutput.stdout``
+    strings -- the trailing newline is lost. That ambiguity makes the
+    follow-mode tail loop's ``split_complete_lines`` partial-write guard
+    misclassify the most recent line as in-flight (because there is no
+    visible terminating ``\n`` after it) and hold it back until a later
+    line forces it out, producing a perpetual one-event lag visible to
+    minds users as "the first permission request never arrives -- I
+    have to ask the agent to re-send before any prompt appears".
+
+    ``&&`` ensures the sentinel is only emitted if ``cat`` succeeded,
+    so a truncated read (cat exiting non-zero) is detected by the
+    absent sentinel rather than masquerading as a successfully-read
+    empty file.
+    """
     logger.trace("Reading event file '{}' for {} via host", event_file_name, display_name)
     file_path = events_path / event_file_name
     result = online_host.execute_idempotent_command(
-        f"cat {shlex.quote(str(file_path))}",
+        "{{ cat {file} && printf '%s' {sentinel}; }}".format(
+            file=shlex.quote(str(file_path)),
+            sentinel=shlex.quote(_EVENTS_READ_SENTINEL),
+        ),
         timeout_seconds=30.0,
     )
     if not result.success:
         raise MngrError(f"Failed to read event file '{event_file_name}': {result.stderr}")
-    return result.stdout
+    if not result.stdout.endswith(_EVENTS_READ_SENTINEL):
+        # ``cat`` exited 0 but the sentinel is missing -- output was
+        # truncated, the shell substituted ``cat`` for something else,
+        # or some pyinfra quirk dropped the printf line. In any case
+        # we cannot safely advance the byte offset on a truncated read,
+        # so surface as an error instead of returning what we have.
+        raise MngrError(
+            "Event file {!r} read did not include the EOF sentinel; output was "
+            "truncated or pyinfra mangled the trailing line. Last 200 chars: {!r}".format(
+                event_file_name,
+                result.stdout[-200:],
+            )
+        )
+    return result.stdout.removesuffix(_EVENTS_READ_SENTINEL)
 
 
 # =============================================================================
