@@ -278,13 +278,16 @@ class SSHTunnelManager(MutableModel):
 
             is_alive = client is not None and _ssh_connection_is_active(client)
             if is_alive:
-                # Tunnel recovered (either via our own ``setup_reverse_tunnel``
-                # repair path, which already clears failure_state, or via some
-                # other caller re-establishing the connection out from under
-                # us). Either way, drop any lingering backoff bookkeeping so
-                # the next failure starts a fresh schedule -- otherwise the
-                # MAX_FAILURES drop trigger could fire prematurely on a tunnel
-                # that has effectively been healthy in the interim.
+                # Underlying SSH connection is alive again. The most likely
+                # path here is that a *sibling* tunnel sharing the same
+                # conn_key got repaired in this very loop (or earlier),
+                # which recreated the SSH client. ``setup_reverse_tunnel``
+                # clears failure_state only for the specific tunnel_key it
+                # just set up, so siblings observing is_alive=True would
+                # otherwise carry stale failure_state into the next break
+                # and could hit ``_REVERSE_TUNNEL_MAX_REPAIR_FAILURES``
+                # prematurely. Drop any lingering bookkeeping so this
+                # tunnel's next failure starts a fresh schedule.
                 if failure_state is not None:
                     with self._lock:
                         self._failure_state.pop(tunnel_key, None)
