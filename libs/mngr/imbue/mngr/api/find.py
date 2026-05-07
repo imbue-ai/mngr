@@ -148,32 +148,32 @@ def determine_resolved_path(
 
 
 @pure
-def find_matching_hosts(
-    host_name: HostName | None,
+def _find_matching_hosts(
+    host_name_or_id: HostName | None,
     provider_name: ProviderInstanceName | None,
     all_hosts: Sequence[DiscoveredHost],
 ) -> list[DiscoveredHost]:
     """Find hosts matching the given parsed components.
 
-    ``host_name`` may be either a host name or a HostId-shaped string; if it
-    parses as a HostId, the lookup matches by ID and ignores ``provider_name``
-    (IDs are globally unique). Otherwise, both fields filter the result.
+    ``host_name_or_id`` may be either a host name or a HostId-shaped string;
+    when it parses as a HostId, the lookup matches by ID, otherwise by name.
+    ``provider_name`` filters in either case -- e.g. a host ID with a
+    non-matching ``.PROVIDER`` qualifier deliberately yields no match.
     Returns ``all_hosts`` unchanged if both arguments are None.
     """
-    if host_name is None and provider_name is None:
+    if host_name_or_id is None and provider_name is None:
         return list(all_hosts)
 
-    if host_name is not None:
+    matches = list(all_hosts)
+    if host_name_or_id is not None:
         try:
-            host_id = HostId(str(host_name))
+            host_id = HostId(str(host_name_or_id))
         except ValueError:
             host_id = None
         if host_id is not None:
-            return [h for h in all_hosts if h.host_id == host_id]
-
-    matches = list(all_hosts)
-    if host_name is not None:
-        matches = [h for h in matches if h.host_name == host_name]
+            matches = [h for h in matches if h.host_id == host_id]
+        else:
+            matches = [h for h in matches if h.host_name == host_name_or_id]
     if provider_name is not None:
         matches = [h for h in matches if h.provider_name == provider_name]
     return matches
@@ -191,7 +191,7 @@ def find_all_matching_hosts(
     real host names do not contain dots in this DSL.
     """
     host_name, provider_name = parse_host_qualifier(identifier)
-    return find_matching_hosts(host_name, provider_name, all_hosts)
+    return _find_matching_hosts(host_name, provider_name, all_hosts)
 
 
 @pure
@@ -235,7 +235,7 @@ def _resolve_host_components(
     if host_name is None and provider_name is None:
         return None
 
-    matches = find_matching_hosts(host_name, provider_name, all_hosts)
+    matches = _find_matching_hosts(host_name, provider_name, all_hosts)
     if len(matches) == 0:
         descriptor = _host_descriptor(host_name, provider_name)
         raise UserInputError(f"Could not find host with ID or name: {descriptor}")
