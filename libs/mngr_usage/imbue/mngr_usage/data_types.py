@@ -37,10 +37,10 @@ class WindowSnapshot(FrozenModel):
     """A single rate-limit window's cached state.
 
     Populated by the per-agent statusline shim from the JSON Claude Code feeds
-    to its statusline command on every render. Status and is_using_overage
-    fields are reserved for forward compatibility -- they're not currently
-    emitted by any writer but the schema tolerates them so older cache files
-    deserialize cleanly.
+    to its statusline command on every render. ``status`` and
+    ``is_using_overage`` are declared as optional fields defaulting to None;
+    no current writer emits them, but a future writer can populate them
+    without a schema change.
     """
 
     used_percentage: float | None = Field(default=None)
