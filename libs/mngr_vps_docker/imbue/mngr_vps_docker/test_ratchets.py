@@ -32,6 +32,7 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
+    # 2 = wait_for_cloud_init poll loop and rsync-retry backoff in instance.py.
     rc.check_time_sleep(_DIR, snapshot(2))
 
 
@@ -62,6 +63,10 @@ def test_prevent_base_exception_catch() -> None:
 
 def test_prevent_builtin_exception_raises() -> None:
     rc.check_builtin_exception_raises(_DIR, snapshot(0))
+
+
+def test_prevent_silent_decode_error_catches() -> None:
+    rc.check_silent_decode_error_catches(_DIR, snapshot(0))
 
 
 # --- Import style ---

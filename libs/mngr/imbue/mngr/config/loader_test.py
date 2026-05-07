@@ -223,6 +223,7 @@ def test_parse_providers_raises_on_unknown_fields() -> None:
         _parse_providers(raw, disabled_plugins=frozenset())
 
 
+@pytest.mark.allow_warnings(match=r"Unknown fields in providers\.my-local.*typo_field")
 def test_parse_providers_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
     """_parse_providers with strict=False should warn about unknown fields and not apply them to the model."""
     raw = {"my-local": {"backend": "local", "typo_field": "value"}}
@@ -326,6 +327,7 @@ def test_parse_agent_types_raises_on_unknown_fields() -> None:
         _parse_agent_types(raw, disabled_plugins=frozenset())
 
 
+@pytest.mark.allow_warnings(match=r"Unknown fields in agent_types\.claude.*bogus_option")
 def test_parse_agent_types_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
     """_parse_agent_types with strict=False should warn about unknown fields and not apply them to the model."""
     raw = {"claude": {"cli_args": "--verbose", "bogus_option": True}}
@@ -453,6 +455,7 @@ def test_parse_plugins_raises_on_unknown_fields() -> None:
         _parse_plugins(raw)
 
 
+@pytest.mark.allow_warnings(match=r"Unknown fields in plugins\.my-plugin.*nonexistent_setting")
 def test_parse_plugins_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
     """_parse_plugins with strict=False should warn about unknown fields and not apply them to the model."""
     raw = {"my-plugin": {"enabled": True, "nonexistent_setting": "abc"}}
@@ -548,6 +551,7 @@ def test_parse_logging_config_raises_on_unknown_fields() -> None:
         _parse_logging_config(raw)
 
 
+@pytest.mark.allow_warnings(match=r"Unknown fields in logging.*unknown_log_option")
 def test_parse_logging_config_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
     """_parse_logging_config with strict=False should warn about unknown fields and not apply them to the model."""
     raw = {"file_level": "DEBUG", "unknown_log_option": 42}
@@ -670,6 +674,7 @@ def test_parse_config_raises_on_unknown_top_level_field() -> None:
         parse_config(raw, disabled_plugins=frozenset())
 
 
+@pytest.mark.allow_warnings(match=r"^Unknown configuration fields: \['nonexistent_top_level'\]")
 def test_parse_config_warns_on_unknown_top_level_field_when_not_strict(log_warnings: list[str]) -> None:
     """parse_config with strict=False should warn about unknown top-level fields."""
     raw = {"prefix": "test-", "nonexistent_top_level": "value"}
@@ -687,6 +692,7 @@ def test_parse_config_raises_on_unknown_nested_field() -> None:
         parse_config(raw, disabled_plugins=frozenset())
 
 
+@pytest.mark.allow_warnings(match=r"Unknown fields in logging.*bad_field")
 def test_parse_config_warns_on_unknown_nested_field_when_not_strict(log_warnings: list[str]) -> None:
     """parse_config with strict=False should warn about unknown nested fields."""
     raw = {
@@ -1172,6 +1178,7 @@ def test_load_config_rejects_unknown_fields_by_default(
         load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
 
 
+@pytest.mark.allow_warnings(match=r"^Unknown configuration fields: \['future_field'\]")
 def test_load_config_allows_unknown_fields_with_env_var(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

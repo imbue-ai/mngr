@@ -60,9 +60,10 @@ def test_load_existing_channels_updated_overrides_created(temp_output_dir: Path)
 
 
 def test_load_existing_message_state_returns_empty_when_missing(temp_output_dir: Path) -> None:
-    state, keys = load_existing_message_state(temp_output_dir)
+    state, keys, latest_by_key = load_existing_message_state(temp_output_dir)
     assert state == {}
     assert keys == set()
+    assert latest_by_key == {}
 
 
 def test_load_existing_message_state_tracks_latest_timestamp(temp_output_dir: Path) -> None:
@@ -70,11 +71,28 @@ def test_load_existing_message_state_tracks_latest_timestamp(temp_output_dir: Pa
     msg2 = make_message_event(ts="1700000000.000009")
     save_message_events(temp_output_dir, StreamType.CREATED, [msg1, msg2])
 
-    state, keys = load_existing_message_state(temp_output_dir)
+    state, keys, latest_by_key = load_existing_message_state(temp_output_dir)
 
     assert SlackChannelId("C123") in state
     assert state[SlackChannelId("C123")].latest_message_timestamp == SlackMessageTimestamp("1700000000.000009")
     assert len(keys) == 2
+    assert len(latest_by_key) == 2
+
+
+def test_load_existing_message_state_latest_by_key_prefers_updated_stream(temp_output_dir: Path) -> None:
+    ts = "1700000000.000001"
+    created = make_message_event(ts=ts, raw={"ts": ts, "text": "parent", "reply_count": 0})
+    later = make_message_event(
+        ts=ts,
+        raw={"ts": ts, "text": "parent", "reply_count": 2, "latest_reply": "1700000000.000005"},
+    )
+    save_message_events(temp_output_dir, StreamType.CREATED, [created])
+    save_message_events(temp_output_dir, StreamType.UPDATED, [created, later])
+
+    _, _, latest_by_key = load_existing_message_state(temp_output_dir)
+    stored = latest_by_key[(SlackChannelId("C123"), SlackMessageTimestamp(ts))]
+    assert stored.raw.get("reply_count") == 2
+    assert stored.raw.get("latest_reply") == "1700000000.000005"
 
 
 def test_load_existing_users_returns_empty_when_missing(temp_output_dir: Path) -> None:

@@ -98,7 +98,7 @@ This ensures that `vendor/mngr/` in the template on disk always reflects the cur
 * Source: `${TEMPLATE_DIR}/` (trailing slash = copy contents)
 * Destination: `/code/` (remote) or `${TARGET}/` (local)
 * Flags: `-a --delete` (add `-vz` for remote)
-* Exclusions: same as above, plus `--filter='protect runtime/'` and `--filter='protect .mngr/'` to prevent `--delete` from removing container runtime state
+* Exclusions: same as above, plus `--filter='protect runtime/'`, `--filter='protect .mngr/'`, and `--filter='protect .claude/settings.local.json'` to prevent `--delete` from removing container runtime state and the per-agent UserPromptSubmit hook config
 
 ## Implementation Phases
 
