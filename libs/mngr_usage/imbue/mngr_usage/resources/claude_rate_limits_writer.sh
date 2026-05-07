@@ -4,9 +4,9 @@
 # Reads a Claude Code statusline JSON object from stdin; extracts
 # .rate_limits.{five_hour,seven_day,overage} and folds each window into the
 # cache (used_percentage, resets_at, source=statusline). Per-window field-level
-# merge: only the fields this writer knows about are touched, so other writers
-# (currently the Python `mngr usage --refresh` path) can fill in the remaining
-# fields without their values being clobbered.
+# merge: only the fields this writer knows about are touched. This is purely
+# defensive -- it preserves any extra fields present in older cache files (or
+# any future writer's fields) so a schema bump never silently drops data.
 #
 # Concurrency: flock on a sibling .lock file guards the read-modify-write.
 # Atomic: writes via temp + mv.
