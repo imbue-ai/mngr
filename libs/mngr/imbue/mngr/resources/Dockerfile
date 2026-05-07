@@ -1,13 +1,7 @@
-# Build stage: compile the offload binary so the final image can apply
-# thin diffs at sandbox-prepare time. Offload >=0.9.0 expects to invoke
-# `offload apply-diff` inside the sandbox image; without the binary present,
-# offload falls back to a full image rebuild on every run, defeating the
-# checkpoint cache. Keep this version pinned in sync with the offload
-# version pinned in .github/workflows/ci.yml.
-FROM rust:1-bookworm AS offload-builder
-ARG OFFLOAD_VERSION=0.9.4
-RUN cargo install offload@${OFFLOAD_VERSION} --locked --root /opt/offload
-
+# Single-stage Dockerfile. mngr's Modal image builder rejects multi-stage
+# Dockerfiles (libs/mngr_modal/imbue/mngr_modal/instance.py: assert not
+# dfp.is_multistage), so the offload binary is built inside this stage
+# rather than COPY'd from a separate builder stage.
 FROM python:3.12-slim
 
 # Install system dependencies including tini for proper signal handling
@@ -74,10 +68,25 @@ ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 # without this, there are some annoying bugs on modal's side with snapshotting
 ENV UV_LINK_MODE=copy
 
-# offload binary, used by `offload apply-diff` during sandbox prepare to
-# layer thin diffs over the cached checkpoint image (see the offload-builder
-# stage above for the version pin and rationale).
-COPY --from=offload-builder /opt/offload/bin/offload /usr/local/bin/offload
+# Install the offload binary in the final image. Offload >=0.9.0 expects
+# to invoke `offload apply-diff` inside the sandbox image; without the
+# binary present, offload falls back to a full image rebuild on every run,
+# defeating the checkpoint cache. Keep OFFLOAD_VERSION in sync with the
+# offload version pinned in .github/workflows/ci.yml.
+#
+# rustup is fetched, used once for `cargo install offload`, and the
+# cargo registry cache is purged afterwards. The rustup-managed
+# toolchain itself is left in place for any future cargo-installed
+# tools; remove rustup + ~/.rustup if image size becomes a concern.
+ARG OFFLOAD_VERSION=0.9.4
+ENV CARGO_HOME=/root/.cargo
+ENV RUSTUP_HOME=/root/.rustup
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
+    && cargo install offload@${OFFLOAD_VERSION} --locked --root /opt/offload \
+    && cp /opt/offload/bin/offload /usr/local/bin/offload \
+    && rm -rf /opt/offload /root/.cargo/registry /root/.cargo/git
 
 # copy in all of our code (offload exports the repo tree as the build context;
 # mngr_schedule unpacks its packaged tarball producer-side via
