@@ -272,8 +272,15 @@ def test_prevent_code_in_init_files() -> None:
     rc.check_code_in_init_files(_DIR, snapshot(0))
 
 
+@pytest.mark.timeout(15)
 def test_no_type_errors() -> None:
-    """Ensure the codebase has zero type errors."""
+    """Ensure the codebase has zero type errors.
+
+    Per-test timeout bumped from the 10s default: ty's analysis is normally
+    well under 5s, but cold-start CI runs with cache misses occasionally
+    cross the 10s line. 15s gives headroom without changing the global
+    timeout used by all other tests.
+    """
     check_no_type_errors(_DIR)
 
 
