@@ -1,5 +1,20 @@
 # Workspace-Account Association and Request Inbox
 
+> **Status (2026-05-06):** the sharing-request half of this spec has been
+> reverted. The "Share" button in a workspace now opens a static
+> informational modal pointing the user at the desktop app's workspace
+> settings page; agents no longer write `SharingRequestEvent`s back to
+> minds. The sharing-request types (`SharingRequestEvent`,
+> `SharingRequestHandler`, `RequestType.SHARING`,
+> `SharingStatusSnapshot`, `create_sharing_request_event`,
+> `write_sharing_request`) and the workspace-server `/api/sharing/...`
+> endpoints / `sharing_proxy.py` module have all been deleted. Direct
+> sharing editing from the desktop client (the
+> `/sharing/<agent>/<service>` editor + `/api/sharing` desktop-client
+> routes) is unchanged. The multi-account / workspace-association /
+> permissions-inbox parts of this spec remain accurate; treat the
+> sharing-request sections below as historical.
+
 ## Overview
 
 * The minds app currently has a single global SuperTokens session (`~/.minds/supertokens/supertokens_session.json`). Sharing (Cloudflare tunnels) uses that single account. This creates two problems: (1) there is no way to associate different workspaces with different accounts, and (2) sharing/permissions logic lives inside the `minds_workspace_server` (the wrong abstraction layer).

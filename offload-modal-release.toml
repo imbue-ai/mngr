@@ -55,6 +55,9 @@ retry_count = 4
 # intermittent container networking). Non-docker release tests run here.
 filters = "-m 'release and not docker and not docker_sdk'"
 
+[history]
+path = "offload-history-modal-release.jsonl"
+
 [report]
 output_dir = "test-results"
 junit = true

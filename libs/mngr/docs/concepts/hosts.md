@@ -29,6 +29,37 @@ Local agents are fast and easy to set up, but `mngr` cannot snapshot local hosts
 
 Remote hosts may be run in the cloud (Modal), a Docker container (which can be local or remote), or somewhere else. Remote hosts are *always* accessed via SSH.
 
+## Outer Hosts
+
+Most container-based hosts have an "outer" machine: the underlying VPS, the local box, or the SSH-reachable docker daemon machine that hosts the container/sandbox. `mngr` exposes this via an optional accessor on `OnlineHostInterface` and `ProviderInstanceInterface`:
+
+```python
+with host.outer_host() as outer:
+    if outer is None:
+        # No outer host accessible (e.g. modal sandboxes, local provider, ssh provider, docker over tcp).
+        ...
+    else:
+        # outer is an OuterHostInterface — supports execute_command, read_file, write_file, etc.
+        outer.execute_idempotent_command("apt-get install -y nginx")
+```
+
+Outer hosts have a strictly smaller surface than mngr-managed hosts: just the safe primitives (file I/O, command execution, SSH info, name, disconnect). They have no agents, no host_dir, no lifecycle/state tracking, no snapshots, no tags. A regular `Host` is also an `OuterHostInterface`, so providers whose outer is itself an mngr-managed machine can return that `Host` directly.
+
+Whether an outer host is accessible per provider:
+
+| Provider | Outer host |
+|---|---|
+| `local` | None (no outer concept) |
+| `ssh` | None |
+| `mngr_modal` | None (Sandboxes have no accessible outer) |
+| `docker` (local socket / `unix://...`) | the local machine |
+| `docker` (`ssh://user@host`) | the SSH-reachable VM (credentials from your `~/.ssh/config` + ssh-agent) |
+| `docker` (`tcp://...`) | None |
+| `mngr_vps_docker` / `mngr_vultr` | the VPS (`root@vps_ip:22`, per-provider SSH key) |
+| `mngr_imbue_cloud` | the leased VPS (`root@vps_ip:22`, per-host SSH key) |
+
+Outer hosts are exposed on the CLI via `mngr exec --outer` (see [exec](../commands/primary/exec.md)).
+
 ## Lifecycle
 
 The rough state diagram looks like this:

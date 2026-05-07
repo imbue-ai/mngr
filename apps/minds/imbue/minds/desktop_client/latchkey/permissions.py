@@ -409,6 +409,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         self,
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
+        mngr_forward_origin: str,
     ) -> Response:
         """Render the dialog HTML for a latchkey permission request.
 
@@ -450,6 +451,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             service=service_info,
             checked_permissions=pre_checked,
             will_open_browser=will_open_browser,
+            mngr_forward_origin=mngr_forward_origin,
         )
         return HTMLResponse(content=rendered)
 

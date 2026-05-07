@@ -84,9 +84,7 @@ def _resolve_field_alias(field: str) -> str:
 
 
 @pure
-def _is_streaming_eligible(
-    is_sort_explicit: bool,
-) -> bool:
+def _is_streaming_eligible(is_sort_explicit: bool) -> bool:
     """Whether the general conditions for streaming mode are met.
 
     Streaming requires no explicit sort (needs all results before sorting). A limit is
@@ -97,10 +95,7 @@ def _is_streaming_eligible(
 
 
 @pure
-def _should_use_streaming_mode(
-    output_format: OutputFormat,
-    is_sort_explicit: bool,
-) -> bool:
+def _should_use_streaming_mode(output_format: OutputFormat, is_sort_explicit: bool) -> bool:
     """Determine whether to use streaming mode for human list output."""
     return output_format == OutputFormat.HUMAN and _is_streaming_eligible(is_sort_explicit=is_sort_explicit)
 

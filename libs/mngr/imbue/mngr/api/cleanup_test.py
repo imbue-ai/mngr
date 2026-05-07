@@ -635,14 +635,9 @@ def test_execute_cleanup_stop_unknown_provider_with_abort_stops_processing(
 def test_run_post_cleanup_gc_provider_error_is_recorded_in_result(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """When get_all_provider_instances raises MngrError, _run_post_cleanup_gc
-    catches it and appends a descriptive error to the result.
-
+    """When get_all_provider_instances raises MngrError (the default ABORT behavior),
+    _run_post_cleanup_gc catches it and appends a descriptive error to the result.
     """
-    # Inject a provider config with a non-existent backend.  When
-    # get_all_provider_instances() iterates configured providers and tries to
-    # build this instance, it calls get_backend("nonexistent-gc-backend") which
-    # raises UnknownBackendError (a MngrError).
     bad_providers = {
         ProviderInstanceName("bad-gc-provider"): ProviderInstanceConfig(
             backend=ProviderBackendName("nonexistent-gc-backend"),

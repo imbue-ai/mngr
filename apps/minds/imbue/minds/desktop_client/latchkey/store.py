@@ -1,23 +1,37 @@
 """On-disk persistence for the latchkey package.
 
-Two kinds of per-agent files live here:
+Two kinds of files live here:
 
-* ``LatchkeyGatewayInfo`` -- metadata identifying the running ``latchkey
-  gateway`` subprocess for an agent (host, port, pid, started_at). Used so
-  the next desktop-client launch can adopt or drop existing gateways.
+* ``LatchkeyGatewayInfo`` -- metadata identifying the single shared
+  ``latchkey gateway`` subprocess minds runs (host, port, pid,
+  started_at). Used so the next desktop-client launch can adopt or drop
+  the existing gateway. Stored at ``{data_dir}/latchkey_gateway.json``.
 * ``LatchkeyPermissionsConfig`` -- the contents of latchkey's permissions
-  config for an agent, in detent's rule format. Stored on disk as
-  ``latchkey_permissions.json``. Latchkey reads this file at every
-  request via ``LATCHKEY_PERMISSIONS_CONFIG``; minds rewrites it
+  config for an agent, in detent's rule format. Stored on disk per-agent
+  as ``{data_dir}/agents/{agent_id}/latchkey_permissions.json``. The
+  shared gateway consults this file via the
+  ``X-Latchkey-Gateway-Permissions-Override`` header injected through
+  the JWT minted at agent-creation time. Minds rewrites the file
   whenever the user grants or revokes permissions. Only the subset of
   detent's file schema that minds actually produces is modeled.
 
-Both share the ``{data_dir}/agents/{agent_id}/...`` layout and the same
-atomic-write pattern (write to ``.tmp``, chmod, rename).
+The gateway never reads the per-agent file directly via its agent-id
+path. Instead, an opaque ``{data_dir}/latchkey/permissions/<uuid>.json``
+file is created at agent-creation time (with empty rules), the JWT is
+minted for *that* path, and after ``mngr create`` returns the canonical
+agent id we replace the opaque file with a symlink pointing at the
+canonical agent-keyed path. This indirection lets us mint and inject the
+JWT before the agent id is known (no flaky post-create ``mngr
+provision`` step) while keeping the canonical permissions file at the
+agent-id path that ``LatchkeyPermissionGrantHandler`` already writes to.
+
+Both share the same atomic-write pattern (write to ``.tmp``, chmod,
+rename) where applicable.
 """
 
 import json
 import os
+import uuid
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -31,42 +45,41 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.primitives import AgentId
 
 _GATEWAY_RECORD_FILENAME: Final[str] = "latchkey_gateway.json"
+_GATEWAY_LOG_FILENAME: Final[str] = "latchkey_gateway.log"
+_DEFAULT_PERMISSIONS_FILENAME: Final[str] = "latchkey_default_permissions.json"
 _PERMISSIONS_FILENAME: Final[str] = "latchkey_permissions.json"
 _AGENTS_DIR_NAME: Final[str] = "agents"
+_OPAQUE_PERMISSIONS_DIR_NAME: Final[str] = "latchkey/permissions"
 
 
 # -- Gateway info --------------------------------------------------------------
 
 
 class LatchkeyGatewayInfo(FrozenModel):
-    """Metadata identifying a running Latchkey gateway subprocess.
+    """Metadata identifying the running shared Latchkey gateway subprocess."""
 
-    Used both as the return type of manager methods and as the on-disk
-    representation (one file per agent).
-    """
-
-    agent_id: AgentId = Field(description="The agent this gateway is dedicated to")
     host: str = Field(description="Host the gateway is listening on (typically 127.0.0.1)")
     port: int = Field(description="Port the gateway is listening on")
     pid: int = Field(description="PID of the ``latchkey gateway`` process")
     started_at: datetime = Field(description="UTC timestamp when the gateway was started")
 
 
-def _gateway_info_path(data_dir: Path, agent_id: AgentId) -> Path:
-    return data_dir / _AGENTS_DIR_NAME / str(agent_id) / _GATEWAY_RECORD_FILENAME
+def gateway_info_path(data_dir: Path) -> Path:
+    """Return the path to the shared gateway info record."""
+    return data_dir / _GATEWAY_RECORD_FILENAME
 
 
 def save_gateway_info(data_dir: Path, info: LatchkeyGatewayInfo) -> None:
-    """Write a gateway info record for an agent, overwriting any existing one."""
-    path = _gateway_info_path(data_dir, info.agent_id)
+    """Write the gateway info record, overwriting any existing one."""
+    path = gateway_info_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(info.model_dump_json(indent=2))
-    logger.debug("Saved latchkey gateway info for agent {} at {}", info.agent_id, path)
+    logger.debug("Saved latchkey gateway info at {}", path)
 
 
-def load_gateway_info(data_dir: Path, agent_id: AgentId) -> LatchkeyGatewayInfo | None:
-    """Read the gateway info for an agent, or None if missing or malformed."""
-    path = _gateway_info_path(data_dir, agent_id)
+def load_gateway_info(data_dir: Path) -> LatchkeyGatewayInfo | None:
+    """Read the gateway info, or None if missing or malformed."""
+    path = gateway_info_path(data_dir)
     if not path.is_file():
         return None
     try:
@@ -81,44 +94,20 @@ def load_gateway_info(data_dir: Path, agent_id: AgentId) -> LatchkeyGatewayInfo 
         return None
 
 
-def delete_gateway_info(data_dir: Path, agent_id: AgentId) -> None:
-    """Remove the stored gateway info for an agent (no-op if absent)."""
-    path = _gateway_info_path(data_dir, agent_id)
+def delete_gateway_info(data_dir: Path) -> None:
+    """Remove the stored gateway info (no-op if absent)."""
+    path = gateway_info_path(data_dir)
     if path.is_file():
         try:
             path.unlink()
-            logger.debug("Deleted latchkey gateway info for agent {}", agent_id)
+            logger.debug("Deleted latchkey gateway info at {}", path)
         except OSError as e:
             logger.warning("Failed to delete latchkey gateway info at {}: {}", path, e)
 
 
-def list_gateway_infos(data_dir: Path) -> list[LatchkeyGatewayInfo]:
-    """Return all persisted gateway infos under ``data_dir``.
-
-    Malformed records are logged and skipped rather than aborting the scan.
-    """
-    agents_dir = data_dir / _AGENTS_DIR_NAME
-    if not agents_dir.is_dir():
-        return []
-    infos: list[LatchkeyGatewayInfo] = []
-    for entry in agents_dir.iterdir():
-        if not entry.is_dir():
-            continue
-        path = entry / _GATEWAY_RECORD_FILENAME
-        if not path.is_file():
-            continue
-        try:
-            info = LatchkeyGatewayInfo.model_validate_json(path.read_text())
-        except (OSError, ValueError) as e:
-            logger.warning("Skipping malformed latchkey gateway info at {}: {}", path, e)
-            continue
-        infos.append(info)
-    return infos
-
-
-def gateway_log_path(data_dir: Path, agent_id: AgentId) -> Path:
-    """Return the log file path for an agent's gateway subprocess."""
-    return data_dir / _AGENTS_DIR_NAME / str(agent_id) / "latchkey_gateway.log"
+def gateway_log_path(data_dir: Path) -> Path:
+    """Return the log file path for the shared gateway subprocess."""
+    return data_dir / _GATEWAY_LOG_FILENAME
 
 
 def ensure_browser_log_path(data_dir: Path) -> Path:
@@ -129,6 +118,41 @@ def ensure_browser_log_path(data_dir: Path) -> Path:
     latchkey credential directory, run at most once per minds session.
     """
     return data_dir / "latchkey_ensure_browser.log"
+
+
+def delete_legacy_per_agent_gateway_records(data_dir: Path) -> list[AgentId]:
+    """Remove per-agent gateway records left over from older minds versions.
+
+    Pre-2.8.0-latchkey minds spawned one ``latchkey gateway`` subprocess
+    per agent and persisted the record at
+    ``{data_dir}/agents/{agent_id}/latchkey_gateway.json``. Newer minds
+    runs a single shared gateway, so any of those records are obsolete.
+    Returns the list of agent ids whose stale record was removed so the
+    caller can also try to terminate the recorded PID. Malformed records
+    are deleted silently.
+    """
+    agents_dir = data_dir / _AGENTS_DIR_NAME
+    if not agents_dir.is_dir():
+        return []
+    removed: list[AgentId] = []
+    for entry in agents_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        path = entry / _GATEWAY_RECORD_FILENAME
+        if not path.is_file():
+            continue
+        try:
+            agent_id = AgentId(entry.name)
+        except ValueError:
+            logger.warning("Skipping non-agent dir while cleaning up legacy latchkey records: {}", entry)
+            continue
+        try:
+            path.unlink()
+            removed.append(agent_id)
+            logger.debug("Removed legacy per-agent latchkey gateway record at {}", path)
+        except OSError as e:
+            logger.warning("Failed to remove legacy per-agent latchkey gateway record at {}: {}", path, e)
+    return removed
 
 
 # -- Permissions config (latchkey_permissions.json) ---------------------------
@@ -166,6 +190,90 @@ class LatchkeyPermissionsConfig(FrozenModel):
 def permissions_path_for_agent(data_dir: Path, agent_id: AgentId) -> Path:
     """Return the path to the per-agent permissions file."""
     return data_dir / _AGENTS_DIR_NAME / str(agent_id) / _PERMISSIONS_FILENAME
+
+
+def default_permissions_path(data_dir: Path) -> Path:
+    """Return the path to the shared gateway's default (deny-all) permissions file.
+
+    The shared ``latchkey gateway`` consults this file when an incoming
+    request does not carry a valid ``X-Latchkey-Gateway-Permissions-Override``
+    JWT. Minds materializes it with empty rules (deny-all) so an agent
+    that escapes the JWT mechanism cannot reach any service.
+    """
+    return data_dir / _DEFAULT_PERMISSIONS_FILENAME
+
+
+def opaque_permissions_dir(data_dir: Path) -> Path:
+    """Return the directory that holds opaque-named per-agent permissions handles.
+
+    Each handle is a UUID-named file (or symlink) created at
+    agent-creation time. The JWT minted for the handle path is what gets
+    injected into the agent's environment, so the gateway only ever
+    reads through this opaque indirection -- the canonical agent-id
+    path lives behind the symlink, never directly referenced by the
+    JWT.
+    """
+    return data_dir / _OPAQUE_PERMISSIONS_DIR_NAME
+
+
+def new_opaque_permissions_path(data_dir: Path) -> Path:
+    """Return a fresh, unused opaque-named permissions handle path.
+
+    The caller is responsible for materializing the file.
+    """
+    parent = opaque_permissions_dir(data_dir)
+    parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        candidate = parent / f"{uuid.uuid4().hex}.json"
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+
+
+def link_opaque_permissions_to_agent(
+    data_dir: Path,
+    opaque_path: Path,
+    agent_id: AgentId,
+) -> None:
+    """Replace ``opaque_path`` with a symlink to the agent's canonical permissions file.
+
+    Called once after ``mngr create`` returns the canonical agent id.
+    The opaque file was created with deny-all baseline rules at
+    create time; this function moves those baseline rules into the
+    canonical ``permissions_path_for_agent`` location (or discards them
+    if a previous incarnation of the same agent already had a permissions
+    file there) and replaces the opaque path with a symlink to the
+    canonical path so the JWT minted for the opaque path keeps resolving.
+
+    The symlink target is *absolute* so renaming or moving the symlink
+    later doesn't break the redirection.
+
+    Raises ``LatchkeyStoreError`` if the linking fails.
+    """
+    agent_path = permissions_path_for_agent(data_dir, agent_id)
+    agent_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if agent_path.is_file() and not agent_path.is_symlink():
+            # Re-creation case: a previous incarnation of this agent
+            # already had a permissions file with prior grants. Keep
+            # them and discard the freshly-created baseline.
+            opaque_path.unlink()
+        else:
+            # First creation for this agent_id: promote the baseline to
+            # the canonical location.
+            os.replace(opaque_path, agent_path)
+        # Recreate ``opaque_path`` as a symlink. ``os.replace`` requires
+        # both paths to exist on the same filesystem, but that is
+        # guaranteed here: opaque_path and agent_path both live under
+        # ``data_dir``.
+        absolute_target = agent_path.resolve()
+        tmp_link = opaque_path.with_name(opaque_path.name + ".linktmp")
+        if tmp_link.exists() or tmp_link.is_symlink():
+            tmp_link.unlink()
+        tmp_link.symlink_to(absolute_target)
+        os.replace(tmp_link, opaque_path)
+    except OSError as e:
+        raise LatchkeyStoreError(f"Failed to link opaque permissions handle {opaque_path} to {agent_path}: {e}") from e
+    logger.debug("Linked opaque latchkey permissions handle {} -> {}", opaque_path, agent_path)
 
 
 def load_permissions(path: Path) -> LatchkeyPermissionsConfig:

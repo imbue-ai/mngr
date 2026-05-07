@@ -41,7 +41,7 @@
     </h1>
     <p class="text-sm text-zinc-600 mt-1">
       Workspace:
-      <a href="/goto/{{ agent_id }}/" class="text-blue-600 hover:underline">{{ ws_name or agent_id }}</a>
+      <a href="{{ mngr_forward_origin }}/goto/{{ agent_id }}/" class="text-blue-600 hover:underline">{{ ws_name or agent_id }}</a>
     </p>
 
     {% call ui.card(extra='mt-6') %}

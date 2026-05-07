@@ -1533,7 +1533,7 @@ def test_get_file_wraps_ssh_exception_in_host_connection_error(
             self,
             remote_filename: str,
             filename_or_io: str | IO[bytes],
-            remote_temp_filename: str | None,
+            remote_temp_filename: str | None = None,
         ) -> bool:
             raise SSHException("connection lost")
 

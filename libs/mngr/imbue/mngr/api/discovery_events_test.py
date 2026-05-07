@@ -9,6 +9,7 @@ import pytest
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
+from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import DiscoveryEventType
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
@@ -26,6 +27,7 @@ from imbue.mngr.api.discovery_events import discovered_agent_from_agent_details
 from imbue.mngr.api.discovery_events import discovered_host_from_agent_details
 from imbue.mngr.api.discovery_events import emit_agent_destroyed
 from imbue.mngr.api.discovery_events import emit_agent_discovered
+from imbue.mngr.api.discovery_events import emit_discovery_error_event
 from imbue.mngr.api.discovery_events import emit_host_destroyed
 from imbue.mngr.api.discovery_events import emit_host_discovered
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
@@ -202,6 +204,45 @@ def test_append_discovery_event_creates_dirs_and_writes(temp_config: MngrConfig)
     assert len(lines) == 1
     data = json.loads(lines[0])
     assert data["type"] == DiscoveryEventType.AGENT_DISCOVERED
+
+
+def test_emit_discovery_error_event_round_trips_provider_name(temp_config: MngrConfig) -> None:
+    """Provider-attributable errors must carry the offending provider name through.
+
+    Minds' auto-disable wiring keys off this field; without it the
+    consumer would have to pattern-match the error message to figure out
+    which ``[providers.imbue_cloud_<slug>]`` block to disable.
+    """
+    emit_discovery_error_event(
+        temp_config,
+        error_type="ImbueCloudAuthError",
+        error_message="token theft detected",
+        source_name="discovery_poll",
+        provider_name="imbue_cloud_alice-example-com",
+    )
+    events_path = get_discovery_events_path(temp_config)
+    lines = events_path.read_text().splitlines()
+    assert len(lines) == 1
+    parsed = parse_discovery_event_line(lines[0])
+    assert isinstance(parsed, DiscoveryErrorEvent)
+    assert parsed.provider_name == "imbue_cloud_alice-example-com"
+    assert parsed.error_type == "ImbueCloudAuthError"
+
+
+def test_emit_discovery_error_event_provider_name_defaults_to_none(temp_config: MngrConfig) -> None:
+    """Errors not attributable to a single provider (e.g. snapshot-level
+    failures) leave ``provider_name`` unset.
+    """
+    emit_discovery_error_event(
+        temp_config,
+        error_type="RuntimeError",
+        error_message="something else broke",
+        source_name="discovery_snapshot",
+    )
+    events_path = get_discovery_events_path(temp_config)
+    parsed = parse_discovery_event_line(events_path.read_text().splitlines()[0])
+    assert isinstance(parsed, DiscoveryErrorEvent)
+    assert parsed.provider_name is None
 
 
 def test_append_discovery_event_appends_multiple_events(temp_config: MngrConfig) -> None:
