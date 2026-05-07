@@ -101,11 +101,24 @@ class HostDestroyedEvent(EventEnvelope):
 
 
 class FullDiscoverySnapshotEvent(EventEnvelope):
-    """A full snapshot of all agents and hosts from a complete discovery scan."""
+    """A full snapshot of all agents and hosts from a discovery scan.
+
+    When ``is_partial`` is False, this represents the complete state at scan
+    time -- consumers can treat agents/hosts here as authoritative. When True,
+    the producing listing encountered per-provider errors and the agents/hosts
+    here represent only the providers that succeeded; consumers should NOT
+    treat a partial snapshot as authoritative (the missing providers may still
+    have agents/hosts not represented). Correlate with adjacent DISCOVERY_ERROR
+    events to identify which providers were skipped.
+    """
 
     type: Literal[DiscoveryEventType.DISCOVERY_FULL] = DiscoveryEventType.DISCOVERY_FULL
     agents: tuple[DiscoveredAgent, ...] = Field(description="All discovered agents")
     hosts: tuple[DiscoveredHost, ...] = Field(description="All discovered hosts")
+    is_partial: bool = Field(
+        default=False,
+        description="True if the producing listing had per-provider errors -- agents/hosts represent only successful providers",
+    )
 
 
 class HostSSHInfoEvent(EventEnvelope):
@@ -261,8 +274,13 @@ def make_host_discovery_event(host: DiscoveredHost) -> HostDiscoveryEvent:
 def make_full_discovery_snapshot_event(
     agents: Sequence[DiscoveredAgent],
     hosts: Sequence[DiscoveredHost],
+    is_partial: bool = False,
 ) -> FullDiscoverySnapshotEvent:
-    """Build a full discovery snapshot event."""
+    """Build a full discovery snapshot event.
+
+    Pass `is_partial=True` when the producing listing had per-provider errors
+    so the captured agents/hosts represent only successful providers.
+    """
     timestamp, event_id = _make_envelope_fields()
     return FullDiscoverySnapshotEvent(
         timestamp=timestamp,
@@ -270,6 +288,7 @@ def make_full_discovery_snapshot_event(
         source=DISCOVERY_EVENT_SOURCE,
         agents=tuple(agents),
         hosts=tuple(hosts),
+        is_partial=is_partial,
     )
 
 
@@ -451,9 +470,14 @@ def write_full_discovery_snapshot(
     config: MngrConfig,
     agents: Sequence[DiscoveredAgent],
     hosts: Sequence[DiscoveredHost],
+    is_partial: bool = False,
 ) -> FullDiscoverySnapshotEvent:
-    """Build and append a full discovery snapshot event. Returns the event."""
-    event = make_full_discovery_snapshot_event(agents, hosts)
+    """Build and append a full discovery snapshot event. Returns the event.
+
+    Pass `is_partial=True` when the producing listing had per-provider errors
+    so consumers know the captured state is incomplete.
+    """
+    event = make_full_discovery_snapshot_event(agents, hosts, is_partial=is_partial)
     append_discovery_event(config, event)
     logger.trace(
         "Emitted discovery_full event with {} agent(s) and {} host(s)",

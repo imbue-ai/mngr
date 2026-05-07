@@ -216,20 +216,23 @@ def _maybe_write_full_discovery_snapshot(
 ) -> None:
     """Write a full discovery snapshot when this listing represents all known agents.
 
-    A snapshot is written only when the listing is complete and error-free:
-    - All providers were queried (no provider_names filter)
-    - No CEL filters were applied (the result contains every agent)
-    - No errors occurred during listing (otherwise we may be missing agents)
+    Skips when the listing is filtered (CEL filters or provider_names) since
+    the result intentionally doesn't represent every agent.
+
+    For unfiltered listings: always writes the snapshot, even when per-provider
+    errors occurred. The snapshot is marked `is_partial=True` in the error case
+    so consumers (e.g. mngr observe --discovery-only tail consumers) know the
+    captured state is incomplete and shouldn't be treated as authoritative.
+    Without this, partial-failure listings produced no snapshot at all and
+    consumers were stuck reading whatever stale snapshot existed before.
     """
     is_full_listing = provider_names is None and not include_filters and not exclude_filters
     if not is_full_listing:
         return
-    if result.errors:
-        logger.trace("Skipping full discovery snapshot: {} error(s) during listing", len(result.errors))
-        return
+    is_partial = bool(result.errors)
     try:
         discovered_agents, discovered_hosts, host_ssh_infos = extract_agents_and_hosts_from_full_listing(result.agents)
-        write_full_discovery_snapshot(mngr_ctx.config, discovered_agents, discovered_hosts)
+        write_full_discovery_snapshot(mngr_ctx.config, discovered_agents, discovered_hosts, is_partial=is_partial)
         for host_id, ssh_info in host_ssh_infos:
             emit_host_ssh_info(mngr_ctx.config, host_id, ssh_info)
     except (MngrError, OSError) as e:

@@ -17,7 +17,10 @@ from imbue.mngr import hookimpl
 from imbue.mngr.api.discover import _all_identifiers_found
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
+from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
+from imbue.mngr.api.discovery_events import find_latest_full_snapshot_offset
 from imbue.mngr.api.discovery_events import get_discovery_events_path
+from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.list import AgentErrorInfo
 from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import HostErrorInfo
@@ -586,7 +589,11 @@ def test_apply_cel_filters_no_filters_includes_all() -> None:
 def test_maybe_write_full_discovery_snapshot_writes_when_unfiltered_and_error_free(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_maybe_write_full_discovery_snapshot writes a snapshot when the listing is complete and error-free."""
+    """_maybe_write_full_discovery_snapshot writes a snapshot when the listing is complete and error-free.
+
+    Asserts the snapshot is marked is_partial=False so consumers know to trust
+    the captured state as authoritative.
+    """
     host_details = _make_host_details()
     agent = _make_agent_details("snapshot-agent", host_details)
     result = ListResult()
@@ -606,11 +613,24 @@ def test_maybe_write_full_discovery_snapshot_writes_when_unfiltered_and_error_fr
     assert "DISCOVERY_FULL" in content
     assert "snapshot-agent" in content
 
+    snapshot_offset = find_latest_full_snapshot_offset(events_path)
+    snapshot_line = events_path.read_text()[snapshot_offset:].splitlines()[0]
+    snapshot = parse_discovery_event_line(snapshot_line)
+    assert isinstance(snapshot, FullDiscoverySnapshotEvent)
+    assert snapshot.is_partial is False
 
-def test_maybe_write_full_discovery_snapshot_skips_when_errors_present(
+
+def test_maybe_write_full_discovery_snapshot_writes_partial_when_errors_present(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_maybe_write_full_discovery_snapshot does not write when errors are present."""
+    """_maybe_write_full_discovery_snapshot writes a partial snapshot when errors are present.
+
+    Per the spec, mngr observe --discovery-only consumers should still see the
+    agents from providers that succeeded -- previously this produced no snapshot
+    at all, leaving consumers stuck on whatever stale snapshot existed before.
+    The snapshot must be marked is_partial=True so consumers know not to treat
+    the captured state as authoritative.
+    """
     host_details = _make_host_details()
     agent = _make_agent_details("error-agent", host_details)
     result = ListResult()
@@ -626,7 +646,14 @@ def test_maybe_write_full_discovery_snapshot_skips_when_errors_present(
     )
 
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
-    assert not events_path.exists()
+    assert events_path.exists()
+    snapshot_offset = find_latest_full_snapshot_offset(events_path)
+    snapshot_line = events_path.read_text()[snapshot_offset:].splitlines()[0]
+    snapshot = parse_discovery_event_line(snapshot_line)
+    assert isinstance(snapshot, FullDiscoverySnapshotEvent)
+    assert snapshot.is_partial is True
+    assert len(snapshot.agents) == 1
+    assert snapshot.agents[0].agent_name == agent.name
 
 
 def test_maybe_write_full_discovery_snapshot_skips_when_provider_filter_set(
