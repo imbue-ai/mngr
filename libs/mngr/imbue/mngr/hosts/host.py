@@ -1311,21 +1311,16 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     ) -> None:
         """Mirror a git repo between two local paths on a single host (no SSH).
 
-        Subsumes the previous local-to-local case from `_git_push_to_target`,
-        which used `concurrency_group.run_process_to_completion` directly. On a
-        local host we explicitly merge `os.environ` into the env so we keep
-        inheriting the user's git config / ssh agent / PATH (matching the
-        previous subprocess call); for a remote host the laptop env is not
-        relevant and we only set the LFS opt-out.
+        Pushes the source's branches and tags into the bare repo at
+        ``target_path / ".git"`` via a single ``git push`` invocation on
+        ``host``. ``GIT_LFS_SKIP_PUSH=1`` skips LFS objects (they can be
+        fetched on demand later, and pushing them can be very slow).
         """
         refspecs = " ".join(shlex.quote(r) for r in GIT_MIRROR_PUSH_REFSPECS)
         git_url = shlex.quote(str(target_path / ".git"))
         push_cmd = f"git push --no-verify --force --prune {git_url} {refspecs}"
-        env: dict[str, str] = {"GIT_LFS_SKIP_PUSH": "1"}
-        if host.is_local:
-            env = {**os.environ, **env}
         with log_span("Pushing git repo to target on same host: {}", target_path):
-            result = host.execute_idempotent_command(push_cmd, cwd=source_path, env=env)
+            result = host.execute_idempotent_command(push_cmd, cwd=source_path, env={"GIT_LFS_SKIP_PUSH": "1"})
             if not result.success:
                 output = (result.stderr + "\n" + result.stdout).strip()
                 raise MngrError(f"Failed to push git repo on same host: {output}")
@@ -1686,14 +1681,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     ) -> None:
         """Run rsync between two local paths on this single host.
 
-        ``files_from`` (a path on the laptop) is mirrored to a temp file on the
-        host so rsync can read it as ``--files-from=<host-path>``.
-
-        Subsumes the previous local-to-local case from `_rsync_files`, which
-        used `concurrency_group.run_process_to_completion`. On a local host we
-        explicitly merge `os.environ` so we keep inheriting the user's PATH /
-        ssh agent / etc. (matching the previous subprocess call); for a remote
-        host the laptop env is irrelevant.
+        When a ``files_from`` path is given (a temp file on the laptop), its
+        contents are written to a per-call temp file under ``host_dir/tmp/``
+        on the host so rsync can read it as ``--files-from=<host-path>``. The
+        host-side temp file is removed in a ``finally`` block. An empty file
+        list short-circuits before invoking rsync.
         """
         rsync_args = ["rsync", "-rlpt"]
         if exclude_git:
@@ -1705,8 +1697,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         if files_from is not None:
             paths = [p for p in files_from.read_text().splitlines() if p]
             if not paths:
-                # Nothing to transfer; skip the rsync entirely rather than
-                # invoking it with an empty file list.
                 return
             host_files_from = self.host_dir / "tmp" / f"rsync-files-from-{uuid4().hex}.txt"
             # write_file creates parent directories as needed.
@@ -1718,11 +1708,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         rsync_args.extend([source_path_str, target_path_str])
 
         rsync_cmd = " ".join(shlex.quote(a) for a in rsync_args)
-        env: Mapping[str, str] | None = dict(os.environ) if self.is_local else None
 
         with log_span("rsync: same-host {} -> {}", source_path, target_path):
             try:
-                result = self.execute_idempotent_command(rsync_cmd, env=env)
+                result = self.execute_idempotent_command(rsync_cmd)
                 if not result.success:
                     raise MngrError(f"rsync failed (same-host): {result.stderr}")
                 logger.trace("Ran rsync command (same-host): {}", rsync_cmd)
