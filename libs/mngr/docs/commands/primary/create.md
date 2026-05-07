@@ -37,9 +37,10 @@ like headless_command and headless_claude) require the --foreground flag.
 The agent streams its output to stdout and is destroyed when done instead
 of being connected to.
 
-For local agents in git repos, mngr creates a git worktree that shares objects
-with your original repository. For remote agents, the repo is transferred
-by pushing all local branches and tags via git. Use --transfer to override the default.
+When the source and the agent are on the same host (local or a single remote
+provider host), mngr creates a git worktree that shares objects with the source
+repository. When they are on different hosts, the repo is transferred by
+pushing all local branches and tags via git. Use --transfer to override the default.
 
 Alias: c
 
@@ -111,7 +112,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--target-path` | text | Directory to mount source inside agent host (alternative to :PATH in address). Incompatible with --transfer=none | None |
-| `--transfer` | choice (`none` &#x7C; `rsync` &#x7C; `git-mirror` &#x7C; `git-worktree`) | How to transfer the project into the agent. none: run in-place (no transfer). rsync: copy via rsync (non-git projects). git-mirror: push all local branches and tags via git (git projects). git-worktree: create a git worktree (git projects, local only). [default: git-worktree for local git repos, git-mirror for remote git repos, rsync for non-git] | None |
+| `--transfer` | choice (`none` &#x7C; `rsync` &#x7C; `git-mirror` &#x7C; `git-worktree`) | How to transfer the project into the agent. none: run in-place (no transfer). rsync: copy via rsync (non-git projects). git-mirror: push all local branches and tags via git (git projects). git-worktree: create a git worktree (git projects; source and target must be on the same host). [default: git-worktree when source and target are on the same host (local or remote), git-mirror for cross-host git repos, rsync for non-git] | None |
 
 ## Git Configuration
 
