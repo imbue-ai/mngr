@@ -45,7 +45,7 @@ from imbue.mngr.utils.thread_cleanup import mngr_executor
 # clean False (and let `has()` report absence) rather than warn per agent.
 # Each is a schemaless dict on AgentDetails / HostDetails; their contents are
 # user- or plugin-supplied, so different agents legitimately have different
-# keys. See `replace_paths_with_tolerant_map` in cel_utils.
+# keys. See `with_tolerant_paths` in cel_utils.
 _AGENT_SCHEMALESS_PATHS: tuple[tuple[str, ...], ...] = (
     ("labels",),
     ("plugin",),
