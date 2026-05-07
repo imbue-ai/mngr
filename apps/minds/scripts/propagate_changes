@@ -168,12 +168,16 @@ agent_update() {
         return 1
     fi
 
+    # .claude/settings.local.json is generated per-agent at create time and
+    # holds mngr's UserPromptSubmit hook; without protection, --delete removes
+    # it and send_message then hangs the 90s submission-signal timeout.
     echo "[3/4] Syncing template into agent work_dir..."
     if [[ "${MODE}" == "remote" ]]; then
         rsync -avz --delete \
             "${RSYNC_EXCLUDES[@]}" \
             --filter='protect runtime/' \
             --filter='protect .mngr/' \
+            --filter='protect .claude/settings.local.json' \
             -e "ssh -p ${SSH_PORT} -i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
             "${TEMPLATE_DIR}/" "${SSH_USER}@${SSH_HOST}:/code/"
     else
@@ -181,6 +185,7 @@ agent_update() {
             "${RSYNC_EXCLUDES[@]}" \
             --filter='protect runtime/' \
             --filter='protect .mngr/' \
+            --filter='protect .claude/settings.local.json' \
             "${TEMPLATE_DIR}/" "${LOCAL_TARGET}/"
     fi
     echo "      Done."

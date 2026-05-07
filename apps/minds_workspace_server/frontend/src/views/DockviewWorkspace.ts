@@ -91,7 +91,6 @@ let dockview: DockviewComponent | null = null;
 let dockviewContainer: HTMLElement | null = null;
 const panelParams = new Map<string, PanelParams>();
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
-let _layoutChangeDisposable: { dispose: () => void } | null = null;
 let _refreshServiceListener: RefreshServiceListener | null = null;
 let initialized = false;
 
@@ -457,6 +456,14 @@ function addChatPanel(chatAgentId: string, chatAgentName: string): void {
   });
 }
 
+function openPrimaryAgentChat(): void {
+  const primaryId = getPrimaryAgentId();
+  if (!primaryId) return;
+  const agent = getAgentById(primaryId);
+  const agentName = agent?.name ?? "Chat";
+  addChatPanel(primaryId, agentName);
+}
+
 function openIframeTab(url: string, title: string, panelType: PanelType = "iframe", serviceName?: string): void {
   if (!dockview) return;
   const primaryId = getPrimaryAgentId();
@@ -678,13 +685,29 @@ function initializeDockview(parentElement: HTMLElement): void {
   dockview = dv;
 
   // Listen for layout changes and auto-save
-  _layoutChangeDisposable = dv.api.onDidLayoutChange(() => {
+  dv.api.onDidLayoutChange(() => {
     scheduleSave();
   });
 
-  // Listen for panel removal to clean up params
+  // Listen for panel removal to clean up params. If the user closes the
+  // last remaining tab the dockview would otherwise be a blank screen with
+  // no recovery path, so reopen the primary agent's chat tab.
+  //
+  // The re-add is deferred to a microtask: when the user closes the primary
+  // chat itself, adding a panel with the same id synchronously inside the
+  // remove listener races with dockview's own teardown of the just-removed
+  // panel and produces a tab that appears to "stay open" but with a blank
+  // (white) content area. Deferring lets dockview finish disposing before we
+  // add the replacement.
   dv.api.onDidRemovePanel((panel) => {
     panelParams.delete(panel.id);
+    if (dv.panels.length === 0) {
+      queueMicrotask(() => {
+        if (dv.panels.length === 0) {
+          openPrimaryAgentChat();
+        }
+      });
+    }
   });
 
   // Agent-triggered refresh: reload every open iframe tab whose
@@ -704,18 +727,15 @@ function initializeDockview(parentElement: HTMLElement): void {
       }
       try {
         dv.fromJSON(saved.dockview);
-        return;
       } catch {
         panelParams.clear();
       }
     }
 
-    // Default: open primary agent's chat tab
-    const primaryId = getPrimaryAgentId();
-    if (primaryId) {
-      const agent = getAgentById(primaryId);
-      const agentName = agent?.name ?? "Chat";
-      addChatPanel(primaryId, agentName);
+    // Open primary agent's chat tab if no panels were restored (no saved
+    // layout, restore failed, or the saved layout was empty).
+    if (dv.panels.length === 0) {
+      openPrimaryAgentChat();
     }
   });
 }

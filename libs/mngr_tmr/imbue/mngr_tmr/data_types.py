@@ -42,11 +42,19 @@ class Change(FrozenModel):
 
 
 class ReportSection(UpperCaseStrEnum):
-    """Derived section for HTML report grouping and coloring."""
+    """Derived section for HTML report grouping and coloring.
+
+    BLOCKED is reserved for results where the coding agent itself decided
+    the work was too complex (i.e. produced changes whose status is BLOCKED).
+    FAILED is reserved for infrastructure failures: launch failures, agent
+    timeouts, missing details, etc. -- cases where the agent never had a
+    chance to produce a real verdict.
+    """
 
     NON_IMPL_FIXES = auto()
     IMPL_FIXES = auto()
     BLOCKED = auto()
+    FAILED = auto()
     CLEAN_PASS = auto()
     RUNNING = auto()
 

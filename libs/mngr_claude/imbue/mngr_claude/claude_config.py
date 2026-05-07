@@ -2,6 +2,7 @@ import copy
 import fcntl
 import json
 import os
+import re
 import shutil
 from collections.abc import Generator
 from collections.abc import Mapping
@@ -452,15 +453,26 @@ def find_project_config(projects: Mapping[str, Any], path: Path) -> dict[str, An
 # Project Directory Encoding
 # =============================================================================
 
+# Matches every character that Claude Code's project-dir encoder maps to '-'
+# (i.e. everything that is not an ASCII alphanumeric or literal '-').
+_NON_DASH_ALNUM_ASCII: Final = re.compile(r"[^A-Za-z0-9-]")
+
 
 @pure
 def encode_claude_project_dir_name(path: Path) -> str:
     """Encode a filesystem path into Claude Code's project directory name.
 
     Claude Code stores per-project data in ~/.claude/projects/<encoded-path>/.
-    The encoding replaces '/' and '.' with '-'.
+    The encoding keeps only ASCII alphanumerics and ``-``, mapping every
+    other character (``/``, ``.``, ``_``, space, ``@``, ``+``, accented
+    letters, CJK, etc.) to ``-`` -- per the algorithm documented in
+    anthropics/claude-code#19972. If this encoder diverges from Claude
+    Code's, ``on_after_provisioning`` writes the adopted JSONL to a
+    project subdir Claude Code never reads on resume, the find guard in
+    ``assemble_command`` returns no match, and ``--adopt-session``
+    silently spawns a fresh session via the ``||`` fallback.
     """
-    return str(path).replace("/", "-").replace(".", "-")
+    return _NON_DASH_ALNUM_ASCII.sub("-", str(path))
 
 
 # =============================================================================

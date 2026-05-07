@@ -1,6 +1,8 @@
 from collections.abc import Sequence
+from typing import Literal
 
 from pydantic import Field
+from pydantic import TypeAdapter
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import MngrContext
@@ -21,11 +23,15 @@ class LabelColumnConfig(FrozenModel):
 class _ColoredStringField(FieldValue):
     """String field with an optional color from a color map."""
 
+    kind: Literal["colored_string"] = Field(default="colored_string", description="Discriminator tag")
     value: str = Field(description="The string value")
     color: str | None = Field(default=None, description="Optional urwid color name")
 
     def display(self) -> CellDisplay:
         return CellDisplay(text=self.value, color=self.color)
+
+
+_COLORED_STRING_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(_ColoredStringField)
 
 
 class LabelsDataSource(FrozenModel):
@@ -51,8 +57,8 @@ class LabelsDataSource(FrozenModel):
         return {self.field_key: self.config.header}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        return {self.field_key: _ColoredStringField}
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
+        return {self.field_key: _COLORED_STRING_ADAPTER}
 
     def compute(
         self,

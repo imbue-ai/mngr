@@ -27,6 +27,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
+exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
 
 [tool.uv.sources]
 imbue-common = { workspace = true }
