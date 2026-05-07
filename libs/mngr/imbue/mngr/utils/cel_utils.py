@@ -100,9 +100,10 @@ def _convert_to_cel_value(value: Any) -> Any:
     """Convert a raw Python value to a CEL-compatible value.
 
     Container types (dict, list, tuple) are walked here so that `_TolerantDict`
-    markers nested at any depth produce `TolerantMapType` (missing keys evaluate
-    to None). Plain dicts produce strict `MapType`. Leaf types delegate to
-    `celpy.json_to_cel` (which handles bool/int/float/str/datetime/None).
+    markers nested at any depth produce `TolerantMapType` (missing keys yield a
+    `CELEvalError` value rather than raising). Plain dicts produce strict
+    `MapType`. Leaf types delegate to `celpy.json_to_cel` (which handles
+    bool/int/float/str/datetime/None).
     """
     if isinstance(value, _TolerantDict):
         return TolerantMapType({celpy.json_to_cel(k): _convert_to_cel_value(v) for k, v in value.items()})
