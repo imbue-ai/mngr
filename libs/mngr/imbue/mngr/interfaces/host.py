@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from typing import Callable
 from typing import Final
 from typing import Iterator
 from typing import Mapping
@@ -189,14 +190,29 @@ class HostInterface(MutableModel, ABC):
         """
 
 
-class OnlineHostInterface(HostInterface, ABC):
-    """Interface for hosts that are currently online and accessible for operations."""
+class OuterHostInterface(MutableModel, ABC):
+    """Minimal interface for the "outer" machine that hosts a container/sandbox.
 
+    Outer hosts have a strictly smaller surface than mngr-managed hosts: just the
+    safe primitives (file I/O, command execution, SSH info, name, disconnect).
+    They have no agents, no host_dir, no lifecycle/state tracking, no snapshots,
+    no tags. A regular Host (which IS an OuterHostInterface) can be returned as
+    an outer when the outer is itself an mngr-managed machine.
+    """
+
+    id: HostId = Field(frozen=True, description="Unique identifier for this host")
     connector: PyinfraConnector = Field(frozen=True, description="Pyinfra connector for host operations")
 
-    # =========================================================================
-    # Core Primitives
-    # =========================================================================
+    @property
+    @abstractmethod
+    def is_local(self) -> bool:
+        """Return True if this host is the local machine, False for remote hosts."""
+        ...
+
+    @abstractmethod
+    def get_name(self) -> HostName:
+        """Return the human-readable name of this host."""
+        ...
 
     @abstractmethod
     def execute_idempotent_command(
@@ -225,6 +241,33 @@ class OnlineHostInterface(HostInterface, ABC):
         Prefer to use execute_idempotent_command whenever possible, as it is a much simpler abstraction and more robust.
         This is really here if you *must* do something which cannot be made idempotent.
         It automatically handles making the command idempotent, but it's much slower and more complex.
+        """
+        ...
+
+    @abstractmethod
+    def execute_streaming_command(
+        self,
+        command: str,
+        on_line: Callable[[str], None],
+        *,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        """Execute a command, calling ``on_line`` for each output line as it arrives.
+
+        Useful for long-running commands where progress visibility matters
+        (e.g. ``docker build``). The callback is invoked once per line of
+        stdout or stderr in the order the bytes arrive on each stream. The
+        trailing newline is stripped before calling ``on_line``.
+
+        Returns a ``CommandResult`` with the merged stdout / stderr / exit
+        code once the command finishes.
+
+        The command is treated as **idempotent**: implementations may retry
+        it on transient SSH errors. When a retry happens, ``on_line`` will
+        be re-called with the new attempt's output -- callers should expect
+        and tolerate duplicate lines on retry. Use this for commands like
+        ``docker build`` where re-running is safe.
         """
         ...
 
@@ -265,6 +308,32 @@ class OnlineHostInterface(HostInterface, ABC):
     def get_file_mtime(self, path: Path) -> datetime | None:
         """Return the modification time of a file, or None if the file doesn't exist."""
         ...
+
+    @abstractmethod
+    def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
+        """Get SSH connection info for this host if it's remote.
+
+        Returns (user, hostname, port, private_key_path) if remote, None if local.
+        """
+        ...
+
+    def disconnect(self) -> None:
+        """Disconnect from this host, releasing any held connections.
+
+        Implementations that hold network connections should override this to
+        close them. The default is a no-op.
+        """
+
+
+class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
+    """Interface for hosts that are currently online and accessible for operations.
+
+    Extends both HostInterface (mngr-managed metadata, agents, lifecycle) and
+    OuterHostInterface (the minimal safe API for command/file primitives). A
+    Host that implements OnlineHostInterface is automatically also an
+    OuterHostInterface, so it can be returned as the outer host of another host
+    when the outer is itself mngr-managed.
+    """
 
     # =========================================================================
     # Activity Times (aggregated across all agents on this host)
@@ -393,14 +462,6 @@ class OnlineHostInterface(HostInterface, ABC):
     # =========================================================================
     # Provider-Derived Information
     # =========================================================================
-
-    @abstractmethod
-    def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
-        """Get SSH connection info for this host if it's remote.
-
-        Returns (user, hostname, port, private_key_path) if remote, None if local.
-        """
-        ...
 
     @abstractmethod
     def get_boot_time(self) -> datetime | None:
@@ -539,6 +600,29 @@ class OnlineHostInterface(HostInterface, ABC):
         persistent agent state (like Modal) will sync this to their storage.
         """
         ...
+
+    # =========================================================================
+    # Outer Host Access
+    # =========================================================================
+
+    @contextmanager
+    def outer_host(self) -> Iterator[OuterHostInterface | None]:
+        """Open the outer host (the underlying machine that hosts this container/sandbox).
+
+        Yields an ``OuterHostInterface`` for running commands and moving files
+        on the outer machine, or ``None`` when no outer host is accessible
+        (e.g. for the local provider, the ssh provider, modal sandboxes, or
+        docker-over-tcp daemons).
+
+        Each ``with`` entry produces a fresh outer-host instance and a fresh
+        SSH connection (when applicable); the connection is closed on exit.
+        Outer-host construction is delegated to
+        ``self.provider_instance.outer_host_for(self.id)``.
+
+        The default implementation here yields ``None``. Concrete ``Host``
+        subclasses override this to delegate to the provider.
+        """
+        yield None
 
 
 class CreateWorkDirResult(FrozenModel):

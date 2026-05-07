@@ -220,42 +220,44 @@ def apply_bootstrap() -> None:
 def _reconcile_imbue_cloud_providers_from_sessions(root_name: str) -> None:
     """Re-register ``[providers.imbue_cloud_<slug>]`` for every active session.
 
-    minds' SuperTokens session is persistent: the auth cookie + the entry
-    in ``<minds_data_dir>/sessions.json`` outlive any individual minds
-    process. The mngr-side provider-instance registration in settings.toml
-    isn't persistent the same way -- it's only written by the signin
-    *event*, which doesn't fire on cookie-resumed startups. So it's
-    possible (and was observed) for the on-disk state to drift to "user
-    is signed in per sessions.json, but settings.toml has no
-    [providers.imbue_cloud_<email-slug>] block", at which point
-    ``mngr create mindtest@<host>.imbue_cloud_<slug>`` fails with
+    The mngr_imbue_cloud plugin owns the SuperTokens session list -- emails
+    live in ``<host_dir>/profiles/<profile>/providers/imbue_cloud/sessions/accounts.json``,
+    which mngr writes on every signin/signup/oauth and on signout. The
+    mngr-side provider-instance registration in settings.toml isn't
+    persistent the same way -- it's only written by the signin *event*,
+    which doesn't fire on cookie-resumed startups. So it's possible (and
+    was observed) for the on-disk state to drift to "user is signed in
+    per the plugin, but settings.toml has no
+    ``[providers.imbue_cloud_<email-slug>]`` block", at which point
+    ``mngr create my-agent@<host>.imbue_cloud_<slug>`` fails with
     ``Unknown provider backend``.
 
-    Walking sessions.json on every minds startup and ensuring each email
-    has a registered provider entry costs essentially nothing
-    (``set_imbue_cloud_provider_for_account`` is a no-op when the entry
-    already matches) and makes the bootstrap idempotent over arbitrary
-    settings.toml drift.
+    Walking the plugin's ``accounts.json`` on every minds startup and
+    ensuring each email has a registered provider entry costs essentially
+    nothing (``set_imbue_cloud_provider_for_account`` is a no-op when the
+    entry already matches) and makes the bootstrap idempotent over
+    arbitrary settings.toml drift.
 
-    No-op when sessions.json doesn't exist yet (e.g. a fresh install
-    where the user hasn't signed in at all).
+    No-op when the accounts file doesn't exist yet (fresh install with no
+    signins).
     """
-    sessions_path = minds_data_dir_for(root_name) / "sessions.json"
-    if not sessions_path.is_file():
+    accounts_path = _imbue_cloud_accounts_path(root_name)
+    if accounts_path is None or not accounts_path.is_file():
         return
     try:
-        raw = sessions_path.read_text()
+        raw = accounts_path.read_text()
     except OSError as e:
-        logger.warning("Could not read minds sessions file {}: {}", sessions_path, e)
+        logger.warning("Could not read imbue_cloud accounts index {}: {}", accounts_path, e)
         return
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
-        logger.warning("Malformed minds sessions file {}: {}", sessions_path, e)
+        logger.warning("Malformed imbue_cloud accounts index {}: {}", accounts_path, e)
         return
-    if not isinstance(data, dict):
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
         return
-    for entry in data.values():
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
         email = entry.get("email")
@@ -272,6 +274,31 @@ def _reconcile_imbue_cloud_providers_from_sessions(root_name: str) -> None:
             # single corrupt session entry doesn't block reconciliation
             # for the others.
             logger.warning("Skipping imbue_cloud provider registration for {!r}: {}", email, e)
+
+
+def _imbue_cloud_accounts_path(root_name: str) -> Path | None:
+    """Return the path to the plugin's ``accounts.json``, or None if no profile is set.
+
+    Mirrors ``mngr_imbue_cloud.config.get_sessions_dir`` /
+    ``get_active_profile_dir``: the active profile id lives in
+    ``<host_dir>/config.toml`` and the accounts index lives at
+    ``<host_dir>/profiles/<profile>/providers/imbue_cloud/sessions/accounts.json``.
+    Inlined here so bootstrap stays free of the ``imbue.mngr_imbue_cloud``
+    import (which transitively pulls in mngr).
+    """
+    host_dir = mngr_host_dir_for(root_name)
+    config_path = host_dir / "config.toml"
+    if not config_path.is_file():
+        return None
+    try:
+        config_data = tomllib.loads(config_path.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        logger.warning("Could not read mngr config {}: {}", config_path, e)
+        return None
+    profile_id = config_data.get("profile")
+    if not isinstance(profile_id, str) or not profile_id:
+        return None
+    return host_dir / "profiles" / profile_id / "providers" / "imbue_cloud" / "sessions" / "accounts.json"
 
 
 _IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"

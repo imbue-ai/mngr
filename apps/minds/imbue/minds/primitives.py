@@ -42,6 +42,28 @@ class LaunchMode(UpperCaseStrEnum):
     IMBUE_CLOUD = auto()
 
 
+class AIProvider(UpperCaseStrEnum):
+    """How the workspace agent should obtain its Anthropic credentials.
+
+    Decoupled from the compute provider so any combination is valid: e.g.
+    a user can run on a local container while still using an imbue_cloud-
+    minted LiteLLM key for inference.
+
+    - ``IMBUE_CLOUD`` -- mint a LiteLLM virtual key against the selected
+      account and inject it as ``ANTHROPIC_API_KEY`` (with the matching
+      ``ANTHROPIC_BASE_URL``). Requires a selected account.
+    - ``API_KEY`` -- use a user-supplied Anthropic API key directly; no
+      ``ANTHROPIC_BASE_URL`` is set so the agent talks to the official
+      Anthropic API.
+    - ``SUBSCRIPTION`` -- inject neither key nor base URL; the user will
+      sign in to Claude interactively once the workspace starts.
+    """
+
+    IMBUE_CLOUD = auto()
+    API_KEY = auto()
+    SUBSCRIPTION = auto()
+
+
 class AgentName(NonEmptyStr):
     """User-chosen name for an agent."""
 

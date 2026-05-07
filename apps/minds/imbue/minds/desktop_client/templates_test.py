@@ -8,6 +8,7 @@ from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_sidebar_page
+from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
@@ -98,6 +99,32 @@ def test_render_create_form_selects_specified_launch_mode() -> None:
     html = render_create_form(launch_mode=LaunchMode.DEV)
     assert 'value="DEV" selected' in html
     assert 'value="LOCAL" selected' not in html
+
+
+def test_render_create_form_contains_ai_provider_options() -> None:
+    html = render_create_form()
+    for provider in AIProvider:
+        assert f'value="{provider.value}"' in html
+
+
+def test_render_create_form_defaults_ai_provider_to_subscription_without_account() -> None:
+    html = render_create_form()
+    assert 'value="SUBSCRIPTION" selected' in html
+
+
+def test_render_create_form_omits_env_file_checkbox() -> None:
+    html = render_create_form()
+    assert "include_env_file" not in html
+
+
+def test_render_create_form_includes_gh_token_field() -> None:
+    html = render_create_form()
+    assert 'name="gh_token"' in html
+
+
+def test_render_create_form_shows_error_message_when_supplied() -> None:
+    html = render_create_form(error_message="Imbue cloud requires an account.")
+    assert "Imbue cloud requires an account." in html
 
 
 def test_render_login_page_shows_prompt() -> None:

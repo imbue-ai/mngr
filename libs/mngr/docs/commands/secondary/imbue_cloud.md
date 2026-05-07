@@ -70,6 +70,16 @@ mngr imbue_cloud auth signout [OPTIONS]
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud auth list
+
+**Usage:**
+
+```text
+mngr imbue_cloud auth list [OPTIONS]
+```
+**Options:**
+
+
 ## mngr imbue_cloud auth status
 
 **Usage:**

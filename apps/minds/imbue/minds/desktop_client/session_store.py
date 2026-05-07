@@ -1,13 +1,18 @@
-"""Multi-account session-mirror for the minds desktop client.
+"""Workspace<->account association store for the minds desktop client.
 
-Records the *identity* of every account the user has signed into, and the
-mapping from each account to the workspace agent ids it owns. The ``mngr_imbue_cloud``
-plugin holds the SuperTokens tokens themselves -- minds never copies them
-into its own file. Anything that needs an authenticated request to the
-connector goes through ``mngr imbue_cloud …`` (which transparently refreshes
-near-expiry tokens before each call), so the only state minds keeps is what
-the UI needs to render: the account's email, display name, user_id, and the
-list of workspaces associated with it.
+The mngr_imbue_cloud plugin owns the SuperTokens session state on disk
+(tokens, the email -> user_id index, and the active-account marker).
+Minds keeps only one piece of state the plugin can't know about: the
+association between a workspace agent_id and the user_id of the account
+that owns it.
+
+When callers need account *identity* (email, display_name) the store
+fetches it on demand from the plugin via
+``ImbueCloudCli.auth_list()``. Results are cached in memory so the
+chrome SSE / workspace list rendering paths don't fan out into
+subprocesses on every poll. Sign-in / sign-out flows must call
+:meth:`invalidate_identity_cache` so the cache stays in sync with the
+plugin's view of who is signed in.
 """
 
 import json
@@ -19,11 +24,14 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthAccount
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 
-_SESSIONS_FILENAME = "sessions.json"
+_WORKSPACE_ASSOCIATIONS_FILENAME = "workspace_associations.json"
+_LEGACY_SESSIONS_FILENAME = "sessions.json"
 _USER_ID_PREFIX_LENGTH = 16
 
 
@@ -40,13 +48,12 @@ class UserIdPrefix(NonEmptyStr):
 
 
 class AccountSession(FrozenModel):
-    """Identity of one account the user has signed into.
+    """Identity of one signed-in account joined with its workspace_ids.
 
-    No token material is stored here -- the ``mngr_imbue_cloud`` plugin owns
-    the SuperTokens session on disk and refreshes tokens transparently each
-    time minds invokes ``mngr imbue_cloud …``. This record exists only so the
-    desktop UI can render account chips and so workspace<->account
-    associations survive across desktop client restarts.
+    Built on demand by :class:`MultiAccountSessionStore` from
+    ``ImbueCloudCli.auth_list()`` (identity: ``user_id`` / ``email`` /
+    ``display_name``) and the local on-disk associations file
+    (``workspace_ids``).
     """
 
     user_id: SuperTokensUserId = Field(description="SuperTokens user ID")
@@ -74,164 +81,208 @@ def derive_user_id_prefix(user_id: str) -> UserIdPrefix:
 
 
 class MultiAccountSessionStore(MutableModel):
-    """Persists the user's signed-in account identities (no token material).
+    """Joins plugin-owned auth identity with minds-local workspace associations.
 
-    Thread-safe: all read/write operations are protected by a single lock.
-    Sessions are stored in a single JSON file mapping user IDs to
-    ``AccountSession`` data.
+    Disk layout: ``<data_dir>/workspace_associations.json`` mapping
+    ``user_id -> [agent_id, ...]``. No identity fields are stored.
+
+    Identity is sourced from ``ImbueCloudCli.auth_list()`` and cached in
+    memory; sign-in / sign-out callers must invoke
+    :meth:`invalidate_identity_cache` so the cache stays consistent
+    with the plugin's view.
     """
 
     data_dir: Path = Field(frozen=True, description="Root data directory (e.g. ~/.minds)")
-    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    cli: ImbueCloudCli = Field(frozen=True, description="Plugin CLI used to source account identity")
+    _disk_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _cache_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _identity_cache: dict[str, ImbueCloudAuthAccount] | None = PrivateAttr(default=None)
 
     @property
-    def _sessions_path(self) -> Path:
-        return self.data_dir / _SESSIONS_FILENAME
+    def _associations_path(self) -> Path:
+        return self.data_dir / _WORKSPACE_ASSOCIATIONS_FILENAME
 
-    def _read_all(self) -> dict[str, AccountSession]:
-        """Read all sessions from disk. Returns empty dict on missing/corrupt file."""
-        path = self._sessions_path
-        if not path.exists():
-            return {}
-        try:
-            raw = json.loads(path.read_text())
+    @property
+    def _legacy_sessions_path(self) -> Path:
+        return self.data_dir / _LEGACY_SESSIONS_FILENAME
+
+    # -- Disk: workspace associations ---------------------------------------
+
+    def _read_associations_unlocked(self) -> dict[str, list[str]]:
+        """Read ``user_id -> [agent_id, ...]`` from disk.
+
+        Falls back to the legacy ``sessions.json`` (which used to store
+        full identity records) when ``workspace_associations.json``
+        doesn't yet exist, extracting just the ``workspace_ids`` field
+        from each entry. Returns an empty dict on missing / corrupt
+        files so a brand-new install starts clean.
+        """
+        path = self._associations_path
+        if path.exists():
+            try:
+                raw = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as e:
+                logger.warning("Failed to load workspace associations: {}", e)
+                return {}
             if not isinstance(raw, dict):
                 return {}
-            result: dict[str, AccountSession] = {}
-            for user_id, data in raw.items():
-                try:
-                    result[user_id] = AccountSession.model_validate(data)
-                except (ValueError, TypeError) as e:
-                    logger.warning("Skipping corrupt session for user {}: {}", user_id, e)
+            result: dict[str, list[str]] = {}
+            for user_id, value in raw.items():
+                if not isinstance(value, list):
+                    continue
+                result[user_id] = [str(v) for v in value if isinstance(v, str)]
             return result
-        except (OSError, json.JSONDecodeError) as e:
-            logger.warning("Failed to load sessions: {}", e)
-            return {}
 
-    def _write_all(self, sessions: dict[str, AccountSession]) -> None:
-        """Write all sessions to disk atomically."""
+        legacy = self._legacy_sessions_path
+        if not legacy.exists():
+            return {}
+        try:
+            raw = json.loads(legacy.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("Failed to load legacy sessions file: {}", e)
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        result_legacy: dict[str, list[str]] = {}
+        for user_id, data in raw.items():
+            if not isinstance(data, dict):
+                continue
+            workspace_ids = data.get("workspace_ids", [])
+            if isinstance(workspace_ids, list):
+                result_legacy[user_id] = [str(v) for v in workspace_ids if isinstance(v, str)]
+        return result_legacy
+
+    def _write_associations_unlocked(self, associations: dict[str, list[str]]) -> None:
+        """Persist ``user_id -> [agent_id, ...]`` atomically."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        path = self._sessions_path
-        serialized = {uid: sess.model_dump(mode="json") for uid, sess in sessions.items()}
+        path = self._associations_path
         tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(serialized, indent=2))
+        tmp_path.write_text(json.dumps(associations, indent=2))
         tmp_path.chmod(0o600)
         tmp_path.rename(path)
 
-    def add_or_update_session(
-        self,
-        user_id: str,
-        email: str,
-        display_name: str | None = None,
-    ) -> None:
-        """Record a signed-in account (or update an existing one's display fields).
+    # -- Identity cache (sourced from the plugin) ---------------------------
 
-        Preserves ``workspace_ids`` if the user is already known.
+    def invalidate_identity_cache(self) -> None:
+        """Drop the cached ``auth list`` result.
+
+        Callers must invoke this whenever a sign-in / sign-out / oauth
+        flow successfully runs, so the cache reflects the plugin's view
+        on the next read.
         """
-        with self._lock:
-            sessions = self._read_all()
-            existing = sessions.get(user_id)
-            workspace_ids = existing.workspace_ids if existing is not None else []
-            sessions[user_id] = AccountSession(
-                user_id=SuperTokensUserId(user_id),
-                email=email,
-                display_name=display_name,
-                workspace_ids=workspace_ids,
-            )
-            self._write_all(sessions)
-            logger.info("Stored session for user {} ({})", email, user_id[:8])
+        with self._cache_lock:
+            self._identity_cache = None
 
-    def remove_session(self, user_id: str) -> None:
-        """Remove an account record (log out). Does NOT disassociate workspaces."""
-        with self._lock:
-            sessions = self._read_all()
-            if user_id in sessions:
-                email = sessions[user_id].email
-                del sessions[user_id]
-                self._write_all(sessions)
-                logger.info("Removed session for user {} ({})", email, user_id[:8])
+    def _identity_by_user_id(self, refresh: bool = False) -> dict[str, ImbueCloudAuthAccount]:
+        with self._cache_lock:
+            if not refresh and self._identity_cache is not None:
+                # Return a shallow copy so that an ``invalidate_identity_cache``
+                # call from another thread can't swap the underlying dict
+                # while a caller iterates over it.
+                return dict(self._identity_cache)
+            try:
+                accounts = self.cli.auth_list()
+            except ImbueCloudCliError as exc:
+                logger.warning("Failed to list imbue_cloud accounts: {}", exc)
+                # Don't poison the cache with the empty fallback: a
+                # transient subprocess failure would otherwise stick
+                # ``no accounts`` until the next sign-in / sign-out
+                # invalidates the cache. Return an empty mapping for
+                # this call only and let the next read retry.
+                return {}
+            self._identity_cache = {account.user_id: account for account in accounts}
+            return dict(self._identity_cache)
 
-    def load_all_sessions(self) -> dict[str, AccountSession]:
-        """Load all sessions from disk."""
-        with self._lock:
-            return self._read_all()
-
-    def get_session(self, user_id: str) -> AccountSession | None:
-        """Load a specific account session by user ID."""
-        with self._lock:
-            sessions = self._read_all()
-            return sessions.get(user_id)
-
-    def associate_workspace(self, user_id: str, agent_id: str) -> None:
-        """Associate a workspace with an account."""
-        with self._lock:
-            sessions = self._read_all()
-            session = sessions.get(user_id)
-            if session is None:
-                logger.warning("Cannot associate workspace {}: user {} not found", agent_id, user_id[:8])
-                return
-            if agent_id not in session.workspace_ids:
-                updated_ids = [*session.workspace_ids, agent_id]
-                sessions[user_id] = session.model_copy_update(
-                    to_update(session.field_ref().workspace_ids, updated_ids),
-                )
-                self._write_all(sessions)
-                logger.info("Associated workspace {} with user {}", agent_id, user_id[:8])
-
-    def disassociate_workspace(self, user_id: str, agent_id: str) -> None:
-        """Disassociate a workspace from an account."""
-        with self._lock:
-            sessions = self._read_all()
-            session = sessions.get(user_id)
-            if session is None:
-                return
-            if agent_id in session.workspace_ids:
-                updated_ids = [wid for wid in session.workspace_ids if wid != agent_id]
-                sessions[user_id] = session.model_copy_update(
-                    to_update(session.field_ref().workspace_ids, updated_ids),
-                )
-                self._write_all(sessions)
-                logger.info("Disassociated workspace {} from user {}", agent_id, user_id[:8])
-
-    def get_account_for_workspace(self, agent_id: str) -> AccountSession | None:
-        """Find the account associated with a workspace, or None if private."""
-        with self._lock:
-            sessions = self._read_all()
-            for session in sessions.values():
-                if agent_id in session.workspace_ids:
-                    return session
-            return None
+    # -- Public read API ----------------------------------------------------
 
     def list_accounts(self) -> list[AccountSession]:
-        """Return all logged-in accounts."""
-        with self._lock:
-            sessions = self._read_all()
-            return list(sessions.values())
+        """Return every signed-in account, joined with any workspaces it owns."""
+        identity = self._identity_by_user_id()
+        with self._disk_lock:
+            associations = self._read_associations_unlocked()
+        return [_build_session(account, associations.get(user_id, [])) for user_id, account in identity.items()]
+
+    def get_session(self, user_id: str) -> AccountSession | None:
+        """Return ``user_id``'s session record, or None if not signed in."""
+        identity = self._identity_by_user_id()
+        account = identity.get(user_id)
+        if account is None:
+            return None
+        with self._disk_lock:
+            associations = self._read_associations_unlocked()
+        return _build_session(account, associations.get(user_id, []))
 
     def get_account_email(self, user_id: str) -> str | None:
-        """Return the email for a user_id, or None if the account isn't known."""
-        session = self.get_session(user_id)
-        if session is None:
-            return None
-        return str(session.email)
+        """Return the email for ``user_id``, or None if not signed in."""
+        identity = self._identity_by_user_id()
+        account = identity.get(user_id)
+        return None if account is None else account.email
 
     def get_user_info(self, user_id: str) -> UserInfo | None:
-        """Return user info for a specific account, or None if not logged in."""
-        session = self.get_session(user_id)
-        if session is None:
+        """Return the UI-side ``UserInfo`` for ``user_id``, or None."""
+        identity = self._identity_by_user_id()
+        account = identity.get(user_id)
+        if account is None:
             return None
         return UserInfo(
-            user_id=session.user_id,
-            email=session.email,
-            display_name=session.display_name,
-            user_id_prefix=derive_user_id_prefix(str(session.user_id)),
+            user_id=SuperTokensUserId(account.user_id),
+            email=account.email,
+            display_name=account.display_name,
+            user_id_prefix=derive_user_id_prefix(account.user_id),
         )
 
+    def get_account_for_workspace(self, agent_id: str) -> AccountSession | None:
+        """Find the account that owns ``agent_id`` (or None if private)."""
+        with self._disk_lock:
+            associations = self._read_associations_unlocked()
+        for user_id, workspace_ids in associations.items():
+            if agent_id in workspace_ids:
+                identity = self._identity_by_user_id()
+                account = identity.get(user_id)
+                if account is None:
+                    return None
+                return _build_session(account, workspace_ids)
+        return None
+
     def is_any_signed_in(self) -> bool:
-        """Check if any account is currently signed in."""
-        with self._lock:
-            return bool(self._read_all())
+        """Whether at least one account is currently signed in (per the plugin)."""
+        return bool(self._identity_by_user_id())
 
     def has_signed_in_before(self) -> bool:
-        """Check if sessions.json exists (user has ever signed in)."""
-        return self._sessions_path.exists()
+        """Whether the user has ever signed in (associations file or plugin reports anything)."""
+        if self._associations_path.exists() or self._legacy_sessions_path.exists():
+            return True
+        return self.is_any_signed_in()
+
+    # -- Public write API (workspace associations) -------------------------
+
+    def associate_workspace(self, user_id: str, agent_id: str) -> None:
+        """Bind ``agent_id`` to ``user_id`` on disk."""
+        with self._disk_lock:
+            associations = self._read_associations_unlocked()
+            existing = associations.get(user_id, [])
+            if agent_id in existing:
+                return
+            associations[user_id] = [*existing, agent_id]
+            self._write_associations_unlocked(associations)
+            logger.info("Associated workspace {} with user {}", agent_id, user_id[:8])
+
+    def disassociate_workspace(self, user_id: str, agent_id: str) -> None:
+        """Remove ``agent_id`` from ``user_id``'s workspace list."""
+        with self._disk_lock:
+            associations = self._read_associations_unlocked()
+            existing = associations.get(user_id, [])
+            if agent_id not in existing:
+                return
+            associations[user_id] = [wid for wid in existing if wid != agent_id]
+            self._write_associations_unlocked(associations)
+            logger.info("Disassociated workspace {} from user {}", agent_id, user_id[:8])
+
+
+def _build_session(account: ImbueCloudAuthAccount, workspace_ids: list[str]) -> AccountSession:
+    return AccountSession(
+        user_id=SuperTokensUserId(account.user_id),
+        email=account.email,
+        display_name=account.display_name,
+        workspace_ids=list(workspace_ids),
+    )

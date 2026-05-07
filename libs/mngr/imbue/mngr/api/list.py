@@ -15,7 +15,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
-from imbue.mngr.api.discovery_events import emit_discovery_error_to_stdout
+from imbue.mngr.api.discovery_events import emit_discovery_error_event
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
 from imbue.mngr.api.discovery_events import extract_agents_and_hosts_from_full_listing
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
@@ -263,10 +263,12 @@ def _construct_and_discover_for_provider(
                 raise
             raise MngrError(str(e)) from e
         logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
-        emit_discovery_error_to_stdout(
+        emit_discovery_error_event(
+            mngr_ctx.config,
             error_type=type(e).__name__,
             error_message=str(e),
             source_name=str(provider_name),
+            provider_name=str(provider_name),
         )
         error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
         with results_lock:
@@ -478,10 +480,12 @@ def _construct_discover_and_emit_for_provider(
                 raise
             raise MngrError(str(e)) from e
         logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
-        emit_discovery_error_to_stdout(
+        emit_discovery_error_event(
+            mngr_ctx.config,
             error_type=type(e).__name__,
             error_message=str(e),
             source_name=str(provider_name),
+            provider_name=str(provider_name),
         )
         error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
         with results_lock:
@@ -564,10 +568,12 @@ def _process_host_with_error_handling(
                 raise
             raise MngrError(str(e)) from e
         logger.opt(exception=e).error("Error processing host {}", host_ref.host_id)
-        emit_discovery_error_to_stdout(
+        emit_discovery_error_event(
+            provider.mngr_ctx.config,
             error_type=type(e).__name__,
             error_message=str(e),
             source_name=str(host_ref.host_id),
+            provider_name=str(provider.name),
         )
         error_info = HostErrorInfo.build_for_host(e, host_ref.host_id)
         with results_lock:

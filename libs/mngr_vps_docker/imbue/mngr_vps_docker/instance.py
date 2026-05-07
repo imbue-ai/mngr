@@ -1,11 +1,15 @@
 import json
 import os
+import re
+import shlex
 import shutil
 import tempfile
 import time
 from collections.abc import Callable
+from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -33,6 +37,7 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import derive_offline_host_state
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
+from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -46,12 +51,14 @@ from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -77,10 +84,6 @@ from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr_vps_docker.cloud_init import generate_cloud_init_user_data
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
-from imbue.mngr_vps_docker.docker_over_ssh import DockerOverSsh
-from imbue.mngr_vps_docker.errors import ContainerSetupError
-from imbue.mngr_vps_docker.errors import DockerNotReadyError
-from imbue.mngr_vps_docker.errors import VpsConnectionError
 from imbue.mngr_vps_docker.host_store import CONTAINER_ENTRYPOINT_CMD
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsDockerHostStore
@@ -209,6 +212,329 @@ DEFAULT_IMAGE: Final[str] = "debian:bookworm-slim"
 # Host volume mount path inside the container
 HOST_VOLUME_MOUNT_PATH: Final[str] = "/mngr-vol"
 
+# Idempotent install: skip if depot already on PATH, otherwise download to
+# /usr/local/bin via depot.dev's official installer. Run once per build (cheap
+# no-op when already present); avoids needing a separate provisioning step.
+_DEPOT_INSTALL_CMD: Final[str] = "command -v depot >/dev/null 2>&1 || curl -fsSL https://depot.dev/install-cli.sh | sh"
+
+# Env-var assignments whose values are secrets and must be redacted before any
+# remote command string ends up in logs or exception messages.
+_SECRET_ENV_VARS: Final[tuple[str, ...]] = ("DEPOT_TOKEN",)
+_SECRET_ENV_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b(" + "|".join(_SECRET_ENV_VARS) + r")=(?:'[^']*'|\S+)")
+
+# Absolute path on the VPS where rsync stashes partial files between
+# attempts. Lives outside the build context (``/tmp/mngr-build-<id>/``) so
+# partial-transfer state never gets included in the docker build context
+# or copied back to the local repo. Persists across retries so subsequent
+# attempts can resume rather than re-uploading completed bytes.
+_RSYNC_PARTIAL_DIR_REMOTE: Final[str] = "/tmp/mngr-rsync-partial"
+
+# How many times to retry a failed rsync upload before giving up.
+_UPLOAD_MAX_ATTEMPTS: Final[int] = 3
+# Backoff between attempts (entry N is the wait *before* attempt N+1).
+_UPLOAD_RETRY_BACKOFF_SECONDS: Final[tuple[float, ...]] = (5.0, 15.0)
+
+# Substrings in rsync stderr that indicate a transient connection-class
+# failure (broken pipe, dropped TCP, fresh-VPS networking flap). Rsync's
+# own catch-all exit 255 with these messages is what fresh Vultr VPSes
+# produce in the first 30-60s of life. Other rsync errors (permission,
+# protocol mismatch, vanished source) are non-transient and we fail fast.
+_RETRYABLE_RSYNC_PATTERNS: Final[tuple[str, ...]] = (
+    "Broken pipe",
+    "Connection reset by peer",
+    "Connection refused",
+    "Connection timed out",
+    "client_loop",
+    "ssh: connect to host",
+    "kex_exchange_identification",
+    "Network is unreachable",
+)
+
+
+def _redact_secret_env(remote_command: str) -> str:
+    """Return remote_command with values of known-secret env-var assignments replaced."""
+    return _SECRET_ENV_PATTERN.sub(r"\1=<redacted>", remote_command)
+
+
+def _is_retryable_rsync_error(stderr: str) -> bool:
+    """Return True iff stderr looks like a connection-class rsync failure."""
+    return any(pattern in stderr for pattern in _RETRYABLE_RSYNC_PATTERNS)
+
+
+def _docker_inspect_running(outer: OuterHostInterface, container_name: str) -> bool:
+    """Return True iff a container with the given name is running on outer."""
+    result = outer.execute_idempotent_command(
+        f"docker inspect --format '{{{{.State.Running}}}}' {shlex.quote(container_name)}"
+    )
+    if not result.success:
+        return False
+    return result.stdout.strip().lower() == "true"
+
+
+def _check_file_exists_on_outer(outer: OuterHostInterface, path: str) -> bool:
+    """Return True iff a file exists on outer."""
+    result = outer.execute_idempotent_command(f"test -f {shlex.quote(path)}", timeout_seconds=10.0)
+    return result.success
+
+
+def _exec_in_container(
+    outer: OuterHostInterface,
+    container_name: str,
+    command: str,
+    timeout_seconds: float = 300.0,
+) -> str:
+    """Execute a shell command inside a running container on outer. Returns stdout.
+
+    Raises MngrError if the command exits non-zero.
+    """
+    remote = f"docker exec {shlex.quote(container_name)} sh -c {shlex.quote(command)}"
+    result = outer.execute_idempotent_command(remote, timeout_seconds=timeout_seconds)
+    if not result.success:
+        raise MngrError(f"docker exec in {container_name} failed: {result.stderr.strip() or result.stdout.strip()}")
+    return result.stdout
+
+
+def _run_docker(
+    outer: OuterHostInterface,
+    docker_args: Sequence[str],
+    timeout_seconds: float = 60.0,
+) -> str:
+    """Run a docker subcommand on outer and return stdout.
+
+    Raises MngrError if the command exits non-zero.
+    """
+    remote = "docker " + " ".join(shlex.quote(a) for a in docker_args)
+    result = outer.execute_idempotent_command(remote, timeout_seconds=timeout_seconds)
+    if not result.success:
+        raise MngrError(f"docker {' '.join(docker_args[:2])} failed: {result.stderr.strip() or result.stdout.strip()}")
+    return result.stdout
+
+
+def _commit_container(outer: OuterHostInterface, container_name: str, image_tag: str) -> str:
+    """Commit a container to an image. Returns the image ID."""
+    return _run_docker(outer, ["commit", container_name, image_tag]).strip()
+
+
+def _stop_container(outer: OuterHostInterface, container_name: str, timeout_seconds: int = 10) -> None:
+    """Stop a running container."""
+    _run_docker(outer, ["stop", "-t", str(timeout_seconds), container_name])
+
+
+def _start_container(outer: OuterHostInterface, container_name: str) -> None:
+    """Start a stopped container."""
+    _run_docker(outer, ["start", container_name])
+
+
+def _remove_container(outer: OuterHostInterface, container_name: str, force: bool = False) -> None:
+    """Remove a container. If force=True, kill running containers first."""
+    args: list[str] = ["rm"]
+    if force:
+        args.append("-f")
+    args.append(container_name)
+    _run_docker(outer, args)
+
+
+def _create_volume(outer: OuterHostInterface, volume_name: str) -> None:
+    """Create a Docker named volume."""
+    _run_docker(outer, ["volume", "create", volume_name])
+
+
+def _remove_volume(outer: OuterHostInterface, volume_name: str) -> None:
+    """Remove a Docker named volume (force)."""
+    _run_docker(outer, ["volume", "rm", "-f", volume_name])
+
+
+def _pull_image(outer: OuterHostInterface, image: str, timeout_seconds: float = 300.0) -> None:
+    """Pull a Docker image."""
+    _run_docker(outer, ["pull", image], timeout_seconds=timeout_seconds)
+
+
+def _run_container(
+    outer: OuterHostInterface,
+    *,
+    image: str,
+    name: str,
+    port_mappings: Mapping[str, str],
+    volumes: Sequence[str],
+    labels: Mapping[str, str],
+    extra_args: Sequence[str],
+    entrypoint_cmd: str,
+) -> str:
+    """Run a detached docker container on outer. Returns the container id."""
+    args: list[str] = ["run", "-d", "--name", name]
+    for host_bind, container_port in port_mappings.items():
+        args.extend(["-p", f"{host_bind}:{container_port}"])
+    for vol in volumes:
+        args.extend(["-v", vol])
+    for key, value in labels.items():
+        args.extend(["--label", f"{key}={value}"])
+    args.extend(extra_args)
+    args.extend(["--entrypoint", "sh", image, "-c", entrypoint_cmd])
+    output = _run_docker(outer, args, timeout_seconds=120.0)
+    container_id = output.strip()
+    logger.debug("Started container {} ({})", name, container_id[:12])
+    return container_id
+
+
+def _build_ssh_transport_for_outer(outer: OuterHostInterface) -> tuple[str, str, str, int, str]:
+    """Build the rsync ssh-transport command and key fields for the given outer.
+
+    Returns (ssh_command, ssh_user, hostname, port, ssh_key_path_str). Raises
+    MngrError if outer has no SSH connection info (i.e. is local).
+    """
+    info = outer.get_ssh_connection_info()
+    if info is None:
+        raise MngrError("Cannot upload directory to a local outer host")
+    user, hostname, port, key_path = info
+    # Mirror docker_over_ssh._SSH_BASE_OPTIONS plus the outer host's known_hosts
+    # so rsync's ssh subprocess uses the same trust store as the outer host.
+    host_data = outer.connector.host.data
+    known_hosts = host_data.get("ssh_known_hosts_file", "")
+    ssh_cmd = (
+        f"ssh -i {shlex.quote(str(key_path))} "
+        f"-o UserKnownHostsFile={shlex.quote(str(known_hosts))} "
+        f"-o StrictHostKeyChecking=yes "
+        f"-o BatchMode=yes "
+        f"-o ConnectTimeout=15 "
+        f"-o ServerAliveInterval=20 "
+        f"-o ServerAliveCountMax=10"
+    )
+    return ssh_cmd, user, hostname, port, str(key_path)
+
+
+def _upload_directory_to_outer(
+    outer: OuterHostInterface,
+    cg: ConcurrencyGroup,
+    local_path: Path,
+    remote_path: str,
+    timeout_seconds: float = 900.0,
+) -> None:
+    """Upload a local directory to outer via rsync over SSH.
+
+    Mirrors the behavior of the legacy ``DockerOverSsh.upload_directory``:
+    retries connection-class failures (broken pipe, RST, ssh-disconnect) up
+    to ``_UPLOAD_MAX_ATTEMPTS`` with backoff, since fresh Vultr VPSes
+    routinely drop the first SSH connection in their first minute of life.
+    ``--partial-dir`` lets retries resume rather than re-upload from
+    scratch; that path lives outside the build context so partial files
+    never end up baked into the docker image. Non-retryable rsync errors
+    fail fast on the first attempt.
+    """
+    ssh_cmd, user, hostname, _port, _key_path = _build_ssh_transport_for_outer(outer)
+    local_str = str(local_path).rstrip("/") + "/"
+    cmd = [
+        "rsync",
+        "-az",
+        "--delete",
+        f"--partial-dir={_RSYNC_PARTIAL_DIR_REMOTE}",
+        "--exclude=__pycache__",
+        "--exclude=.venv",
+        "--exclude=node_modules",
+        "--exclude=.mypy_cache",
+        "--exclude=.ruff_cache",
+        "--exclude=.pytest_cache",
+        "--exclude=.test_output",
+        "--exclude=htmlcov",
+        "--exclude=.test_durations",
+        "-e",
+        ssh_cmd,
+        local_str,
+        f"{user}@{hostname}:{remote_path}/",
+    ]
+    logger.debug("Uploading {} to {}@{}:{}", local_path, user, hostname, remote_path)
+
+    last_stderr = ""
+    for attempt in range(1, _UPLOAD_MAX_ATTEMPTS + 1):
+        finished = cg.run_process_to_completion(
+            command=cmd,
+            is_checked_after=False,
+            timeout=timeout_seconds,
+        )
+        if finished.is_timed_out:
+            # Whole-process timeout: don't retry (the next attempt would
+            # just hit the same timeout again, and we'd take 3x longer
+            # to surface a real "VPS is wedged" diagnosis).
+            raise MngrError(f"Upload timed out after {timeout_seconds}s")
+        if finished.returncode == 0:
+            return
+        last_stderr = finished.stderr.strip()
+        is_last_attempt = attempt == _UPLOAD_MAX_ATTEMPTS
+        if is_last_attempt or not _is_retryable_rsync_error(last_stderr):
+            break
+        backoff_seconds = _UPLOAD_RETRY_BACKOFF_SECONDS[attempt - 1]
+        logger.warning(
+            "Upload to {} attempt {}/{} failed; retrying in {:.0f}s. stderr={!r}",
+            hostname,
+            attempt,
+            _UPLOAD_MAX_ATTEMPTS,
+            backoff_seconds,
+            last_stderr,
+        )
+        time.sleep(backoff_seconds)
+    raise MngrError(f"Upload failed: {last_stderr}")
+
+
+def _noop_line_sink(_line: str) -> None:
+    """No-op line sink for ``execute_streaming_command`` callers that don't care about output."""
+
+
+def _build_image_on_outer(
+    outer: OuterHostInterface,
+    *,
+    tag: str,
+    build_context_path: str,
+    docker_build_args: Sequence[str],
+    timeout_seconds: float,
+    on_output: Callable[[str], None] | None,
+    builder: DockerBuilder,
+) -> str:
+    """Build a Docker image on outer from a remote build context. Returns the tag.
+
+    When ``builder`` is DEPOT, ensures the depot CLI is installed on outer,
+    forwards DEPOT_TOKEN (required) from the agent's environment, optionally
+    forwards DEPOT_PROJECT_ID when set, and runs ``depot build --load``.
+    """
+    if builder is DockerBuilder.DEPOT:
+        depot_token = os.environ.get("DEPOT_TOKEN", "")
+        depot_project_id = os.environ.get("DEPOT_PROJECT_ID", "")
+        if not depot_token:
+            raise MngrError(
+                "builder=DEPOT requires DEPOT_TOKEN in the agent's environment. "
+                "Set DEPOT_TOKEN (and DEPOT_PROJECT_ID if no depot.json is on the VPS), "
+                "or set builder=DOCKER."
+            )
+        args = ["build", "--load", "-t", tag] + list(docker_build_args) + [build_context_path]
+        quoted = " ".join(shlex.quote(a) for a in args)
+        env: dict[str, str] = {"DEPOT_TOKEN": depot_token}
+        if depot_project_id:
+            env["DEPOT_PROJECT_ID"] = depot_project_id
+        remote_cmd = f"{_DEPOT_INSTALL_CMD} && depot {quoted}"
+        run_env: Mapping[str, str] | None = env
+    else:
+        args = ["build", "-t", tag] + list(docker_build_args) + [build_context_path]
+        remote_cmd = "docker " + " ".join(shlex.quote(a) for a in args)
+        run_env = None
+
+    safe_remote_cmd = _redact_secret_env(remote_cmd)
+    logger.trace("docker build remote command: {}", safe_remote_cmd)
+
+    # Stream build output line-by-line so the user sees progress during long
+    # docker builds. execute_streaming_command treats the command as
+    # idempotent and retries transient SSH errors with backoff -- on retry
+    # on_output will be re-invoked with the new attempt's output (duplicates
+    # are expected and acceptable for docker build).
+    line_callback: Callable[[str], None] = on_output if on_output is not None else _noop_line_sink
+    result = outer.execute_streaming_command(
+        remote_cmd,
+        line_callback,
+        env=run_env,
+        timeout_seconds=timeout_seconds,
+    )
+    if not result.success:
+        tail = "\n".join((result.stdout + "\n" + result.stderr).splitlines()[-50:])
+        raise MngrError(f"Remote docker build failed: {tail}")
+    return tag
+
 
 class VpsDockerProvider(BaseProviderInstance):
     """Provider that runs agents in Docker containers on VPS instances.
@@ -281,18 +607,33 @@ class VpsDockerProvider(BaseProviderInstance):
         return self._key_dir() / "container_known_hosts"
 
     # =========================================================================
-    # Docker-over-SSH helper
+    # Outer host helper
     # =========================================================================
 
-    def _make_docker_ssh(self, vps_ip: str) -> DockerOverSsh:
-        """Create a DockerOverSsh instance for the given VPS IP."""
+    @contextmanager
+    def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
+        """Open an outer host targeting root@vps_ip:22 via the provider's VPS SSH key.
+
+        Use this during create_host (when host_id is not yet known); use
+        ``outer_host_for(host_id)`` once a host record exists.
+        """
         vps_key_path, _pub = self._get_vps_ssh_keypair()
-        return DockerOverSsh(
-            vps_ip=vps_ip,
-            ssh_user="root",
-            ssh_key_path=vps_key_path,
+        pyinfra_host = create_pyinfra_host(
+            hostname=vps_ip,
+            port=22,
+            private_key_path=vps_key_path,
             known_hosts_path=self._vps_known_hosts_path(),
+            ssh_user="root",
         )
+        outer = OuterHost(
+            id=HostId.generate(),
+            connector=PyinfraConnector(pyinfra_host),
+            mngr_ctx=self.mngr_ctx,
+        )
+        try:
+            yield outer
+        finally:
+            outer.disconnect()
 
     # =========================================================================
     # Host Store
@@ -302,7 +643,7 @@ class VpsDockerProvider(BaseProviderInstance):
         """Return the expected state container name for this provider/user."""
         return f"{self.mngr_ctx.config.prefix}docker-state-{self.mngr_ctx.get_profile_user_id()}"
 
-    def _get_host_store(self, docker_ssh: DockerOverSsh) -> VpsDockerHostStore:
+    def _get_host_store(self, outer: OuterHostInterface) -> VpsDockerHostStore:
         """Get or create the host store on the VPS.
 
         Creates the state container if it does not exist. Use
@@ -310,17 +651,17 @@ class VpsDockerProvider(BaseProviderInstance):
         the container (e.g., during discovery).
         """
         state_container_name = ensure_state_container(
-            docker_ssh=docker_ssh,
+            outer=outer,
             prefix=self.mngr_ctx.config.prefix,
             user_id=str(self.mngr_ctx.get_profile_user_id()),
             provider_name=str(self.name),
         )
         return VpsDockerHostStore(
-            docker_ssh=docker_ssh,
+            outer=outer,
             state_container_name=state_container_name,
         )
 
-    def _get_existing_host_store(self, docker_ssh: DockerOverSsh) -> VpsDockerHostStore | None:
+    def _get_existing_host_store(self, outer: OuterHostInterface) -> VpsDockerHostStore | None:
         """Get a handle to an existing host store on the VPS.
 
         Returns None if the state container does not exist or is not running.
@@ -328,10 +669,10 @@ class VpsDockerProvider(BaseProviderInstance):
         only _setup_container_on_vps should do that.
         """
         container_name = self._state_container_name()
-        if not docker_ssh.container_is_running(container_name):
+        if not _docker_inspect_running(outer, container_name):
             return None
         return VpsDockerHostStore(
-            docker_ssh=docker_ssh,
+            outer=outer,
             state_container_name=container_name,
         )
 
@@ -343,7 +684,6 @@ class VpsDockerProvider(BaseProviderInstance):
         self,
         host_id: HostId,
         vps_ip: str,
-        docker_ssh: DockerOverSsh,
     ) -> Host:
         """Create a Host object with direct SSH to the container via the VPS's exposed port."""
         container_key_path, _container_pub = self._get_container_ssh_keypair()
@@ -392,35 +732,35 @@ class VpsDockerProvider(BaseProviderInstance):
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData, vps_ip: str) -> None:
         """Callback when host data.json is updated -- sync to state volume."""
         try:
-            docker_ssh = self._make_docker_ssh(vps_ip)
-            host_store = self._get_existing_host_store(docker_ssh)
-            if host_store is None:
-                logger.warning(
-                    "State container not found on VPS {} -- cannot sync certified data for {}", vps_ip, host_id
-                )
-                return
-            existing = host_store.read_host_record(host_id)
-            if existing is not None:
-                updated = existing.model_copy(update={"certified_host_data": certified_data})
-                host_store.write_host_record(updated)
-        except (VpsConnectionError, ContainerSetupError) as e:
+            with self._make_outer_for_vps_ip(vps_ip) as outer:
+                host_store = self._get_existing_host_store(outer)
+                if host_store is None:
+                    logger.warning(
+                        "State container not found on VPS {} -- cannot sync certified data for {}", vps_ip, host_id
+                    )
+                    return
+                existing = host_store.read_host_record(host_id)
+                if existing is not None:
+                    updated = existing.model_copy(update={"certified_host_data": certified_data})
+                    host_store.write_host_record(updated)
+        except (HostConnectionError, MngrError) as e:
             logger.warning("Failed to sync certified data to VPS state volume: {}", e)
 
     # =========================================================================
     # VPS Provisioning
     # =========================================================================
 
-    def _wait_for_cloud_init(self, docker_ssh: DockerOverSsh, timeout_seconds: float) -> None:
+    def _wait_for_cloud_init(self, outer: OuterHostInterface, timeout_seconds: float) -> None:
         """Wait for cloud-init to finish (Docker installed, marker file present)."""
         start = time.monotonic()
         while time.monotonic() - start < timeout_seconds:
-            if docker_ssh.check_file_exists("/var/run/mngr-ready"):
+            if _check_file_exists_on_outer(outer, "/var/run/mngr-ready"):
                 elapsed = time.monotonic() - start
                 if elapsed > 30.0:
                     logger.warning("Cloud-init took {:.1f}s (threshold: 30s)", elapsed)
                 return
             time.sleep(5.0)
-        raise DockerNotReadyError(
+        raise MngrError(
             f"Cloud-init did not complete within {timeout_seconds}s. Docker may not be installed on the VPS."
         )
 
@@ -434,7 +774,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
     def _setup_container_ssh(
         self,
-        docker_ssh: DockerOverSsh,
+        outer: OuterHostInterface,
         container_name: str,
         host_volume_mount_path: str | None,
         known_hosts_entries: tuple[str, ...],
@@ -451,7 +791,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 mngr_host_dir=str(self.host_dir),
                 host_volume_mount_path=host_volume_mount_path,
             )
-            docker_ssh.exec_in_container(container_name, install_cmd, timeout_seconds=300.0)
+            _exec_in_container(outer, container_name, install_cmd, timeout_seconds=300.0)
 
         # Configure SSH keys
         with log_span("Configuring SSH in container"):
@@ -461,21 +801,22 @@ class VpsDockerProvider(BaseProviderInstance):
                 host_private_key=container_host_private_key,
                 host_public_key=container_host_public_key,
             )
-            docker_ssh.exec_in_container(container_name, ssh_cmd)
+            _exec_in_container(outer, container_name, ssh_cmd)
 
         # Add known_hosts entries
         known_hosts_cmd = build_add_known_hosts_command("root", known_hosts_entries)
         if known_hosts_cmd is not None:
-            docker_ssh.exec_in_container(container_name, known_hosts_cmd)
+            _exec_in_container(outer, container_name, known_hosts_cmd)
 
         # Add authorized_keys entries
         auth_keys_cmd = build_add_authorized_keys_command("root", authorized_keys_entries)
         if auth_keys_cmd is not None:
-            docker_ssh.exec_in_container(container_name, auth_keys_cmd)
+            _exec_in_container(outer, container_name, auth_keys_cmd)
 
         # Start sshd
         with log_span("Starting sshd in container"):
-            docker_ssh.exec_in_container(
+            _exec_in_container(
+                outer,
                 container_name,
                 "/usr/sbin/sshd -D -o MaxSessions=100 &",
             )
@@ -520,7 +861,7 @@ class VpsDockerProvider(BaseProviderInstance):
         vps_instance_id: VpsInstanceId | None = None
         vps_ip: str | None = None
         try:
-            vps_instance_id, vps_ip, docker_ssh = self._provision_vps(
+            vps_instance_id, vps_ip = self._provision_vps(
                 host_id=host_id,
                 name=name,
                 region=region,
@@ -531,39 +872,40 @@ class VpsDockerProvider(BaseProviderInstance):
                 vps_ssh_key_id=vps_ssh_key_id,
             )
 
-            container_name, container_id, volume_name = self._setup_container_on_vps(
-                docker_ssh=docker_ssh,
-                host_id=host_id,
-                name=name,
-                vps_ip=vps_ip,
-                base_image=base_image,
-                effective_start_args=effective_start_args,
-                docker_build_args=docker_build_args,
-                git_depth=parsed.git_depth,
-                tags=tags,
-                known_hosts=known_hosts,
-                authorized_keys=authorized_keys,
-            )
+            with self._make_outer_for_vps_ip(vps_ip) as outer:
+                container_name, container_id, volume_name = self._setup_container_on_vps(
+                    outer=outer,
+                    host_id=host_id,
+                    name=name,
+                    vps_ip=vps_ip,
+                    base_image=base_image,
+                    effective_start_args=effective_start_args,
+                    docker_build_args=docker_build_args,
+                    git_depth=parsed.git_depth,
+                    tags=tags,
+                    known_hosts=known_hosts,
+                    authorized_keys=authorized_keys,
+                )
 
-            host = self._finalize_host_creation(
-                host_id=host_id,
-                name=name,
-                vps_ip=vps_ip,
-                docker_ssh=docker_ssh,
-                container_name=container_name,
-                container_id=container_id,
-                volume_name=volume_name,
-                base_image=base_image,
-                effective_start_args=effective_start_args,
-                tags=tags,
-                lifecycle=lifecycle,
-                region=region,
-                plan=plan,
-                os_id=os_id,
-                vps_instance_id=vps_instance_id,
-                vps_ssh_key_id=vps_ssh_key_id,
-                vps_host_public_key=vps_host_public_key,
-            )
+                host = self._finalize_host_creation(
+                    host_id=host_id,
+                    name=name,
+                    vps_ip=vps_ip,
+                    outer=outer,
+                    container_name=container_name,
+                    container_id=container_id,
+                    volume_name=volume_name,
+                    base_image=base_image,
+                    effective_start_args=effective_start_args,
+                    tags=tags,
+                    lifecycle=lifecycle,
+                    region=region,
+                    plan=plan,
+                    os_id=os_id,
+                    vps_instance_id=vps_instance_id,
+                    vps_ssh_key_id=vps_ssh_key_id,
+                    vps_host_public_key=vps_host_public_key,
+                )
 
             logger.info("VPS Docker host {} created successfully (VPS: {}, IP: {})", name, vps_instance_id, vps_ip)
             return host
@@ -600,10 +942,10 @@ class VpsDockerProvider(BaseProviderInstance):
         vps_host_key_path: Path,
         vps_host_public_key: str,
         vps_ssh_key_id: str,
-    ) -> tuple[VpsInstanceId, str, DockerOverSsh]:
+    ) -> tuple[VpsInstanceId, str]:
         """Provision a VPS, wait for it to boot, and wait for Docker to install.
 
-        Returns (vps_instance_id, vps_ip, docker_ssh).
+        Returns (vps_instance_id, vps_ip).
         """
         vps_host_private_key = vps_host_key_path.read_text()
         user_data = generate_cloud_init_user_data(
@@ -643,18 +985,17 @@ class VpsDockerProvider(BaseProviderInstance):
         with log_span("Waiting for VPS SSH"):
             self._wait_for_sshd_on_vps(vps_ip, timeout_seconds=self.config.ssh_connect_timeout)
 
-        docker_ssh = self._make_docker_ssh(vps_ip)
-
         logger.log(LogLevel.BUILD.value, "Waiting for cloud-init to complete (Docker installation)...", source="vps")
         with log_span("Waiting for cloud-init (Docker install)"):
-            self._wait_for_cloud_init(docker_ssh, timeout_seconds=self.config.docker_install_timeout)
+            with self._make_outer_for_vps_ip(vps_ip) as outer:
+                self._wait_for_cloud_init(outer, timeout_seconds=self.config.docker_install_timeout)
         logger.log(LogLevel.BUILD.value, "Cloud-init complete, Docker is ready", source="vps")
 
-        return vps_instance_id, vps_ip, docker_ssh
+        return vps_instance_id, vps_ip
 
     def _setup_container_on_vps(
         self,
-        docker_ssh: DockerOverSsh,
+        outer: OuterHostInterface,
         host_id: HostId,
         name: HostName,
         vps_ip: str,
@@ -674,18 +1015,18 @@ class VpsDockerProvider(BaseProviderInstance):
         Returns (container_name, container_id, volume_name).
         """
         with log_span("Setting up state container on VPS"):
-            self._get_host_store(docker_ssh)
+            self._get_host_store(outer)
 
         volume_name = f"mngr-host-vol-{host_id.get_uuid().hex}"
         with log_span("Creating host volume"):
-            docker_ssh.create_volume(volume_name)
+            _create_volume(outer, volume_name)
 
         if docker_build_args:
-            base_image = self._build_image_on_vps(docker_ssh, host_id, base_image, docker_build_args, git_depth)
+            base_image = self._build_image_on_vps(outer, host_id, base_image, docker_build_args, git_depth)
         else:
             logger.log(LogLevel.BUILD.value, "Pulling Docker image {} on VPS...", base_image, source="vps")
             with log_span("Pulling Docker image on VPS"):
-                docker_ssh.pull_image(base_image, timeout_seconds=300.0)
+                _pull_image(outer, base_image, timeout_seconds=300.0)
 
         container_name = f"{self.mngr_ctx.config.prefix}{name}"
         labels = {
@@ -696,7 +1037,8 @@ class VpsDockerProvider(BaseProviderInstance):
         }
         logger.log(LogLevel.BUILD.value, "Starting Docker container on VPS...", source="vps")
         with log_span("Starting Docker container"):
-            container_id = docker_ssh.run_container(
+            container_id = _run_container(
+                outer,
                 image=base_image,
                 name=container_name,
                 port_mappings={f"0.0.0.0:{self.config.container_ssh_port}": "22"},
@@ -709,7 +1051,7 @@ class VpsDockerProvider(BaseProviderInstance):
         logger.log(LogLevel.BUILD.value, "Setting up SSH in container...", source="vps")
         with log_span("Setting up SSH in container"):
             self._setup_container_ssh(
-                docker_ssh=docker_ssh,
+                outer=outer,
                 container_name=container_name,
                 host_volume_mount_path=HOST_VOLUME_MOUNT_PATH,
                 known_hosts_entries=tuple(known_hosts or ()),
@@ -735,7 +1077,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host_id: HostId,
         name: HostName,
         vps_ip: str,
-        docker_ssh: DockerOverSsh,
+        outer: OuterHostInterface,
         container_name: str,
         container_id: str,
         volume_name: str,
@@ -751,7 +1093,7 @@ class VpsDockerProvider(BaseProviderInstance):
         vps_host_public_key: str,
     ) -> Host:
         """Create the Host object, configure activity watching, and persist state."""
-        host = self._create_host_object(host_id, vps_ip, docker_ssh)
+        host = self._create_host_object(host_id, vps_ip)
 
         lifecycle_options = lifecycle if lifecycle is not None else HostLifecycleOptions()
         activity_config = lifecycle_options.to_activity_config(
@@ -777,7 +1119,7 @@ class VpsDockerProvider(BaseProviderInstance):
         self._create_shutdown_script(host)
         with log_span("Starting activity watcher"):
             start_watcher_cmd = build_start_activity_watcher_command(str(self.host_dir))
-            docker_ssh.exec_in_container(container_name, start_watcher_cmd)
+            _exec_in_container(outer, container_name, start_watcher_cmd)
 
         host_record = VpsDockerHostRecord(
             certified_host_data=host_data,
@@ -797,10 +1139,10 @@ class VpsDockerProvider(BaseProviderInstance):
             ),
             container_id=container_id,
         )
-        host_store = self._get_existing_host_store(docker_ssh)
+        host_store = self._get_existing_host_store(outer)
         if host_store is None:
-            raise ContainerSetupError(
-                f"State container not found on VPS {docker_ssh.vps_ip} during host finalization -- "
+            raise MngrError(
+                f"State container not found on VPS {vps_ip} during host finalization -- "
                 "it should have been created by _setup_container_on_vps"
             )
         host_store.write_host_record(host_record)
@@ -822,7 +1164,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
     def _build_image_on_vps(
         self,
-        docker_ssh: DockerOverSsh,
+        outer: OuterHostInterface,
         host_id: HostId,
         base_image: str,
         docker_build_args: tuple[str, ...],
@@ -881,7 +1223,7 @@ class VpsDockerProvider(BaseProviderInstance):
                         timeout=120.0,
                     )
                 if clone_result.returncode != 0:
-                    raise ContainerSetupError(f"Failed to clone build context: {clone_result.stderr.strip()}")
+                    raise MngrError(f"Failed to clone build context: {clone_result.stderr.strip()}")
                 context_args[-1] = str(local_clone_dir / "repo")
 
         try:
@@ -894,8 +1236,14 @@ class VpsDockerProvider(BaseProviderInstance):
                 upload_context = Path(context_args[-1])
                 logger.log(LogLevel.BUILD.value, "Uploading build context to VPS...", source="vps")
                 with log_span("Uploading build context to VPS"):
-                    docker_ssh.run_ssh(f"mkdir -p {remote_build_dir}")
-                    docker_ssh.upload_directory(upload_context, remote_build_dir)
+                    mkdir_result = outer.execute_idempotent_command(f"mkdir -p {shlex.quote(remote_build_dir)}")
+                    if not mkdir_result.success:
+                        raise MngrError(
+                            f"Failed to create remote build dir {remote_build_dir}: {mkdir_result.stderr.strip()}"
+                        )
+                    upload_cg = ConcurrencyGroup(name="rsync-build-context")
+                    with upload_cg:
+                        _upload_directory_to_outer(outer, upload_cg, upload_context, remote_build_dir)
 
                 # Rewrite --file/--dockerfile paths to absolute paths on the VPS.
                 # These are relative to the local build context, but on the VPS
@@ -903,7 +1251,8 @@ class VpsDockerProvider(BaseProviderInstance):
                 resolved_build_args = _resolve_dockerfile_paths(non_context_args, remote_build_dir)
 
                 with log_span("Building Docker image on VPS"):
-                    docker_ssh.build_image(
+                    _build_image_on_outer(
+                        outer,
                         tag=build_tag,
                         build_context_path=remote_build_dir,
                         docker_build_args=tuple(resolved_build_args),
@@ -913,9 +1262,14 @@ class VpsDockerProvider(BaseProviderInstance):
                     )
             else:
                 # No local context -- pass all args to docker build with a minimal context
-                docker_ssh.run_ssh(f"mkdir -p {remote_build_dir}")
+                mkdir_result = outer.execute_idempotent_command(f"mkdir -p {shlex.quote(remote_build_dir)}")
+                if not mkdir_result.success:
+                    raise MngrError(
+                        f"Failed to create remote build dir {remote_build_dir}: {mkdir_result.stderr.strip()}"
+                    )
                 with log_span("Building Docker image on VPS"):
-                    docker_ssh.build_image(
+                    _build_image_on_outer(
+                        outer,
                         tag=build_tag,
                         build_context_path=remote_build_dir,
                         docker_build_args=tuple(docker_build_args),
@@ -929,10 +1283,9 @@ class VpsDockerProvider(BaseProviderInstance):
                 shutil.rmtree(local_clone_dir, ignore_errors=True)
 
         # Clean up remote build directory
-        try:
-            docker_ssh.run_ssh(f"rm -rf {remote_build_dir}")
-        except (VpsConnectionError, ContainerSetupError) as e:
-            logger.debug("Failed to clean up remote build dir: {}", e)
+        cleanup_result = outer.execute_idempotent_command(f"rm -rf {shlex.quote(remote_build_dir)}")
+        if not cleanup_result.success:
+            logger.debug("Failed to clean up remote build dir: {}", cleanup_result.stderr.strip())
 
         return build_tag
 
@@ -968,8 +1321,6 @@ class VpsDockerProvider(BaseProviderInstance):
         if host_record is None or host_record.config is None or host_record.vps_ip is None:
             raise HostNotFoundError(host_id)
 
-        docker_ssh = self._make_docker_ssh(host_record.vps_ip)
-
         if create_snapshot:
             try:
                 self.create_snapshot(host_id)
@@ -982,16 +1333,17 @@ class VpsDockerProvider(BaseProviderInstance):
             host.disconnect()
         self._evict_cached_host(host_id)
 
-        with log_span("Stopping container on VPS"):
-            docker_ssh.stop_container(host_record.config.container_name, timeout_seconds=int(timeout_seconds))
+        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+            with log_span("Stopping container on VPS"):
+                _stop_container(outer, host_record.config.container_name, timeout_seconds=int(timeout_seconds))
 
-        # Update host record
-        host_store = self._get_existing_host_store(docker_ssh)
-        if host_store is not None:
-            now = datetime.now(timezone.utc)
-            updated_data = host_record.certified_host_data.model_copy(update={"updated_at": now})
-            updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
-            host_store.write_host_record(updated_record)
+            # Update host record
+            host_store = self._get_existing_host_store(outer)
+            if host_store is not None:
+                now = datetime.now(timezone.utc)
+                updated_data = host_record.certified_host_data.model_copy(update={"updated_at": now})
+                updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
+                host_store.write_host_record(updated_record)
 
         logger.info("Host {} stopped", host_id)
 
@@ -1009,16 +1361,15 @@ class VpsDockerProvider(BaseProviderInstance):
         if host_record is None or host_record.config is None or host_record.vps_ip is None:
             raise HostNotFoundError(host_id)
 
-        docker_ssh = self._make_docker_ssh(host_record.vps_ip)
-
-        with log_span("Starting container on VPS"):
-            docker_ssh.start_container(host_record.config.container_name)
+        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+            with log_span("Starting container on VPS"):
+                _start_container(outer, host_record.config.container_name)
 
         # Wait for sshd in container
         with log_span("Waiting for container SSH"):
             self._wait_for_container_sshd(host_record.vps_ip)
 
-        host_obj = self._create_host_object(host_id, host_record.vps_ip, docker_ssh)
+        host_obj = self._create_host_object(host_id, host_record.vps_ip)
         logger.info("Host {} started", host_id)
         return host_obj
 
@@ -1043,27 +1394,26 @@ class VpsDockerProvider(BaseProviderInstance):
         vps_ip = host_record.vps_ip
 
         if vps_ip is not None:
-            docker_ssh = self._make_docker_ssh(vps_ip)
+            with self._make_outer_for_vps_ip(vps_ip) as outer:
+                # Stop and remove container
+                try:
+                    _remove_container(outer, vps_config.container_name, force=True)
+                except (HostConnectionError, MngrError) as e:
+                    logger.warning("Failed to remove container: {}", e)
 
-            # Stop and remove container
-            try:
-                docker_ssh.remove_container(vps_config.container_name, force=True)
-            except (VpsConnectionError, ContainerSetupError) as e:
-                logger.warning("Failed to remove container: {}", e)
+                # Remove host volume
+                try:
+                    _remove_volume(outer, vps_config.volume_name)
+                except (HostConnectionError, MngrError) as e:
+                    logger.warning("Failed to remove host volume: {}", e)
 
-            # Remove host volume
-            try:
-                docker_ssh.remove_volume(vps_config.volume_name)
-            except (VpsConnectionError, ContainerSetupError) as e:
-                logger.warning("Failed to remove host volume: {}", e)
-
-            # Delete host record from state volume
-            try:
-                host_store = self._get_existing_host_store(docker_ssh)
-                if host_store is not None:
-                    host_store.delete_host_record(host_id)
-            except (VpsConnectionError, ContainerSetupError) as e:
-                logger.warning("Failed to delete host record from state volume: {}", e)
+                # Delete host record from state volume
+                try:
+                    host_store = self._get_existing_host_store(outer)
+                    if host_store is not None:
+                        host_store.delete_host_record(host_id)
+                except (HostConnectionError, MngrError) as e:
+                    logger.warning("Failed to delete host record from state volume: {}", e)
 
         # Destroy the VPS instance
         with log_span("Destroying VPS instance"):
@@ -1101,6 +1451,28 @@ class VpsDockerProvider(BaseProviderInstance):
     def on_connection_error(self, host_id: HostId) -> None:
         self._evict_cached_host(host_id)
 
+    def outer_host_id_for(self, host_id: HostId) -> str | None:
+        """Stable id for the outer (the VPS) of host_id, keyed by VPS IP."""
+        host_record = self._find_host_record(host_id)
+        if host_record is None:
+            raise HostNotFoundError(host_id)
+        if host_record.vps_ip is None:
+            return None
+        return f"outer:{self.name}:{host_record.vps_ip}"
+
+    @contextmanager
+    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+        """Open the outer host (the VPS itself, root@vps_ip:22).
+
+        Uses this provider's per-instance VPS SSH key (the one cloud-init
+        injected on VPS provisioning).
+        """
+        host_record = self._find_host_record(host_id)
+        if host_record is None or host_record.vps_ip is None:
+            raise HostNotFoundError(host_id)
+        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+            yield outer
+
     # =========================================================================
     # Discovery
     # =========================================================================
@@ -1119,10 +1491,10 @@ class VpsDockerProvider(BaseProviderInstance):
         vps_ip = host_record.vps_ip
 
         if vps_ip is not None and host_record.config is not None:
-            docker_ssh = self._make_docker_ssh(vps_ip)
-            # Check if container is running
-            if docker_ssh.container_is_running(host_record.config.container_name):
-                return self._create_host_object(host_id, vps_ip, docker_ssh)
+            with self._make_outer_for_vps_ip(vps_ip) as outer:
+                # Check if container is running
+                if _docker_inspect_running(outer, host_record.config.container_name):
+                    return self._create_host_object(host_id, vps_ip)
 
         return self._create_offline_host(host_record)
 
@@ -1159,11 +1531,11 @@ class VpsDockerProvider(BaseProviderInstance):
             )
             # Cache the host object
             if record.vps_ip is not None and record.config is not None:
-                docker_ssh = self._make_docker_ssh(record.vps_ip)
-                if docker_ssh.container_is_running(record.config.container_name):
-                    self._create_host_object(host_id, record.vps_ip, docker_ssh)
-                else:
-                    self._create_offline_host(record)
+                with self._make_outer_for_vps_ip(record.vps_ip) as outer:
+                    if _docker_inspect_running(outer, record.config.container_name):
+                        self._create_host_object(host_id, record.vps_ip)
+                    else:
+                        self._create_offline_host(record)
             else:
                 self._create_offline_host(record)
 
@@ -1193,12 +1565,11 @@ class VpsDockerProvider(BaseProviderInstance):
 
             # Determine host state from container running status
             is_running = False
-            docker_ssh = None
             if record.vps_ip is not None and record.config is not None:
-                docker_ssh = self._make_docker_ssh(record.vps_ip)
                 container_name = record.config.container_name
                 if container_name not in self._container_running_cache:
-                    self._container_running_cache[container_name] = docker_ssh.container_is_running(container_name)
+                    with self._make_outer_for_vps_ip(record.vps_ip) as outer:
+                        self._container_running_cache[container_name] = _docker_inspect_running(outer, container_name)
                 is_running = self._container_running_cache[container_name]
 
             has_snapshots = len(record.certified_host_data.snapshots) > 0
@@ -1207,9 +1578,9 @@ class VpsDockerProvider(BaseProviderInstance):
             if not is_running and not is_failed and not has_snapshots and not include_destroyed:
                 continue
 
-            if is_running and docker_ssh is not None and record.vps_ip is not None:
+            if is_running and record.vps_ip is not None:
                 host_state = HostState.RUNNING
-                self._create_host_object(host_id, record.vps_ip, docker_ssh)
+                self._create_host_object(host_id, record.vps_ip)
             else:
                 host_state = derive_offline_host_state(
                     certified_data=record.certified_host_data,
@@ -1301,15 +1672,16 @@ class VpsDockerProvider(BaseProviderInstance):
                 return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
 
             # Collect all data in one SSH command
-            docker_ssh = self._make_docker_ssh(host_record.vps_ip)
             script = build_listing_collection_script(str(self.host_dir), self.mngr_ctx.config.prefix)
 
-            with log_span("Collecting listing data via single SSH command"):
-                raw_output = docker_ssh.exec_in_container(
-                    host_record.config.container_name,
-                    script,
-                    timeout_seconds=30.0,
-                )
+            with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+                with log_span("Collecting listing data via single SSH command"):
+                    raw_output = _exec_in_container(
+                        outer,
+                        host_record.config.container_name,
+                        script,
+                        timeout_seconds=30.0,
+                    )
 
             raw = parse_listing_collection_output(raw_output)
 
@@ -1523,34 +1895,34 @@ class VpsDockerProvider(BaseProviderInstance):
         if host_record is None or host_record.config is None or host_record.vps_ip is None:
             raise HostNotFoundError(host_id)
 
-        docker_ssh = self._make_docker_ssh(host_record.vps_ip)
         snapshot_name = name or SnapshotName(f"mngr-snapshot-{host_id}-{int(time.time())}")
         image_tag = f"mngr-snapshot-{host_id.get_uuid().hex}-{int(time.time())}"
 
-        with log_span("Creating Docker snapshot"):
-            image_id = docker_ssh.commit_container(host_record.config.container_name, image_tag)
+        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+            with log_span("Creating Docker snapshot"):
+                image_id = _commit_container(outer, host_record.config.container_name, image_tag)
 
-        # Store snapshot record in host data
-        snapshot_record = SnapshotRecord(
-            id=image_id,
-            name=str(snapshot_name),
-            created_at=datetime.now(timezone.utc).isoformat(),
-        )
-
-        # Update certified data with new snapshot
-        existing_snapshots = host_record.certified_host_data.snapshots
-        updated_snapshots = list(existing_snapshots) + [snapshot_record]
-        updated_data = host_record.certified_host_data.model_copy(
-            update={"snapshots": updated_snapshots, "updated_at": datetime.now(timezone.utc)}
-        )
-        updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
-
-        host_store = self._get_existing_host_store(docker_ssh)
-        if host_store is None:
-            raise ContainerSetupError(
-                f"State container not found on VPS {docker_ssh.vps_ip} -- cannot save snapshot record"
+            # Store snapshot record in host data
+            snapshot_record = SnapshotRecord(
+                id=image_id,
+                name=str(snapshot_name),
+                created_at=datetime.now(timezone.utc).isoformat(),
             )
-        host_store.write_host_record(updated_record)
+
+            # Update certified data with new snapshot
+            existing_snapshots = host_record.certified_host_data.snapshots
+            updated_snapshots = list(existing_snapshots) + [snapshot_record]
+            updated_data = host_record.certified_host_data.model_copy(
+                update={"snapshots": updated_snapshots, "updated_at": datetime.now(timezone.utc)}
+            )
+            updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
+
+            host_store = self._get_existing_host_store(outer)
+            if host_store is None:
+                raise MngrError(
+                    f"State container not found on VPS {host_record.vps_ip} -- cannot save snapshot record"
+                )
+            host_store.write_host_record(updated_record)
 
         logger.info("Created snapshot {} for host {}", snapshot_name, host_id)
         return SnapshotId(image_id)
@@ -1577,11 +1949,11 @@ class VpsDockerProvider(BaseProviderInstance):
         if host_record is None or host_record.vps_ip is None:
             raise HostNotFoundError(host_id)
 
-        docker_ssh = self._make_docker_ssh(host_record.vps_ip)
-        try:
-            docker_ssh.run_docker(["rmi", str(snapshot_id)])
-        except ContainerSetupError as e:
-            logger.warning("Failed to delete snapshot image: {}", e)
+        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+            try:
+                _run_docker(outer, ["rmi", str(snapshot_id)])
+            except MngrError as e:
+                logger.warning("Failed to delete snapshot image: {}", e)
 
     # =========================================================================
     # Tags
@@ -1615,13 +1987,11 @@ class VpsDockerProvider(BaseProviderInstance):
         updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
 
         if host_record.vps_ip is not None:
-            docker_ssh = self._make_docker_ssh(host_record.vps_ip)
-            host_store = self._get_existing_host_store(docker_ssh)
-            if host_store is None:
-                raise ContainerSetupError(
-                    f"State container not found on VPS {host_record.vps_ip} -- cannot rename host"
-                )
-            host_store.write_host_record(updated_record)
+            with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+                host_store = self._get_existing_host_store(outer)
+                if host_store is None:
+                    raise MngrError(f"State container not found on VPS {host_record.vps_ip} -- cannot rename host")
+                host_store.write_host_record(updated_record)
 
         return self.get_host(host_id)
 
@@ -1666,30 +2036,30 @@ class VpsDockerProvider(BaseProviderInstance):
         if host_record is None or host_record.vps_ip is None:
             raise HostNotFoundError(host_id)
 
-        docker_ssh = self._make_docker_ssh(host_record.vps_ip)
-        host_store = self._get_existing_host_store(docker_ssh)
-        if host_store is None:
-            raise ContainerSetupError(f"State container not found on VPS {host_record.vps_ip}")
-        return host_store.list_persisted_agent_data_for_host(host_id)
+        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+            host_store = self._get_existing_host_store(outer)
+            if host_store is None:
+                raise MngrError(f"State container not found on VPS {host_record.vps_ip}")
+            return host_store.list_persisted_agent_data_for_host(host_id)
 
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.vps_ip is None:
             raise HostNotFoundError(host_id)
 
-        docker_ssh = self._make_docker_ssh(host_record.vps_ip)
-        host_store = self._get_existing_host_store(docker_ssh)
-        if host_store is None:
-            raise ContainerSetupError(f"State container not found on VPS {host_record.vps_ip}")
-        host_store.persist_agent_data(host_id, agent_data)
+        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+            host_store = self._get_existing_host_store(outer)
+            if host_store is None:
+                raise MngrError(f"State container not found on VPS {host_record.vps_ip}")
+            host_store.persist_agent_data(host_id, agent_data)
 
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.vps_ip is None:
             raise HostNotFoundError(host_id)
 
-        docker_ssh = self._make_docker_ssh(host_record.vps_ip)
-        host_store = self._get_existing_host_store(docker_ssh)
-        if host_store is None:
-            raise ContainerSetupError(f"State container not found on VPS {host_record.vps_ip}")
-        host_store.remove_persisted_agent_data(host_id, agent_id)
+        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+            host_store = self._get_existing_host_store(outer)
+            if host_store is None:
+                raise MngrError(f"State container not found on VPS {host_record.vps_ip}")
+            host_store.remove_persisted_agent_data(host_id, agent_id)

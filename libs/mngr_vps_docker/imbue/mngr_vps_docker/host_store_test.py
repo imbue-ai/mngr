@@ -3,17 +3,29 @@
 import json
 from datetime import datetime
 from datetime import timezone
-from pathlib import Path
+from typing import Any
+from typing import cast
 
 import pytest
 
 from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr_vps_docker.docker_over_ssh import DockerOverSsh
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsDockerHostStore
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
 from imbue.mngr_vps_docker.host_store import _FILE_SEP
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
+
+
+class _StubOuterHost:
+    """Minimal stub satisfying OuterHostInterface for parse-method tests.
+
+    Records the last command but never connects -- used only for the
+    pure-Python parse helpers on VpsDockerHostStore.
+    """
+
+    def execute_idempotent_command(self, command: str, **_kwargs: Any) -> Any:
+        raise NotImplementedError("StubOuterHost: execute should not be reached in parse tests")
 
 
 def _make_certified_data(host_id: str = "test-host-123", host_name: str = "test-host") -> CertifiedHostData:
@@ -131,14 +143,9 @@ def test_vps_docker_host_record_model_copy() -> None:
 
 
 def _make_store() -> VpsDockerHostStore:
-    """Create a VpsDockerHostStore with a dummy DockerOverSsh for testing parse methods."""
-    dummy_ssh = DockerOverSsh(
-        vps_ip="127.0.0.1",
-        ssh_key_path=Path("/dev/null"),
-        known_hosts_path=Path("/dev/null"),
-    )
+    """Create a VpsDockerHostStore with a stub outer for testing parse methods."""
     return VpsDockerHostStore(
-        docker_ssh=dummy_ssh,
+        outer=cast(OuterHostInterface, _StubOuterHost()),
         state_container_name="test-state",
     )
 
