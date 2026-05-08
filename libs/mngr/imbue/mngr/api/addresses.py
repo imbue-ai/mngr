@@ -1,25 +1,16 @@
-"""Parsed address types and parsers shared across mngr.
+"""Parsers that produce the typed address shapes shared across mngr.
 
-This module defines the four kinds of address strings that appear in mngr CLI
-arguments and configuration, along with the parsers that produce them. Every
-CLI entry point that takes a host- or agent-shaped argument routes through
-these parsers (typically via the Click ParamTypes in ``cli/address_params.py``)
-so the API layer below operates on parsed types, not raw strings.
+The four typed shapes -- :class:`HostAddress`, :class:`AgentAddress`,
+:class:`NewAgentLocation`, :class:`SourceLocation` -- live in
+:mod:`imbue.mngr.primitives` so the lower-layer ``config`` package can reference
+them in CLI option dataclasses. The parsers are kept here in the api layer
+because they raise :class:`UserInputError` (in the ``errors`` module, which
+the primitives layer cannot depend on).
 
-The four address shapes are:
-
-- :class:`HostAddress` — ``HOST[.PROVIDER]`` or ``.PROVIDER``. References a host
-  (or, in the bare ``.PROVIDER`` form, hints at a new host on a provider). At
-  least one of host/provider is set.
-- :class:`AgentAddress` — ``NAME[@HOST[.PROVIDER]]``. A required agent
-  name-or-id plus an optional host address.
-- :class:`NewAgentLocation` — ``[NAME][@[HOST][.PROVIDER]][:PATH]``. The
-  positional argument of ``mngr create``: name is optional (auto-generated when
-  omitted) and a path can be appended for the agent's work directory.
-- :class:`SourceLocation` — ``[NAME[@HOST[.PROVIDER]]][:PATH]`` or a bare path.
-  The argument of ``mngr create --from``: any combination of agent / host /
-  path is allowed (a fully empty location resolves to ``$cwd`` on the local
-  host downstream).
+Every CLI entry point that takes a host- or agent-shaped argument routes
+through these parsers (typically via the Click ParamTypes in
+``cli/address_params.py``) so the API layer below operates on parsed types,
+not raw strings.
 
 Parsing rules (uniform across all four shapes):
 
@@ -33,20 +24,20 @@ Parsing rules (uniform across all four shapes):
 from collections.abc import Sequence
 from pathlib import Path
 
-from pydantic import Field
-from pydantic import model_validator
-
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameOrId
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameOrId
 from imbue.mngr.primitives import InvalidName
+from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import SourceLocation
 
 # === Atomic parsers ===
 
@@ -94,93 +85,6 @@ def _parse_provider_name(s: str) -> ProviderInstanceName:
         raise UserInputError(f"Not a valid provider name: '{s}' ({e})") from e
 
 
-# === Address types ===
-
-
-class HostAddress(FrozenModel):
-    """A parsed ``HOST[.PROVIDER]`` (or bare ``.PROVIDER``) string.
-
-    At least one of ``host`` or ``provider`` is set. The bare ``.PROVIDER``
-    form (host omitted) is only meaningful in contexts that allow creating a
-    new host -- for example, ``mngr create NAME@.modal``. Most other contexts
-    require ``host`` to be set; they should validate that explicitly.
-    """
-
-    host: HostNameOrId | None = Field(default=None, description="Host name or ID")
-    provider: ProviderInstanceName | None = Field(
-        default=None, description="Provider instance name (the ``.PROVIDER`` qualifier)"
-    )
-
-    @model_validator(mode="after")
-    def _at_least_one_component(self) -> "HostAddress":
-        if self.host is None and self.provider is None:
-            raise UserInputError("Host address must specify at least a host or a provider")
-        return self
-
-    def __str__(self) -> str:
-        if self.host is not None and self.provider is not None:
-            return f"{self.host}.{self.provider}"
-        if self.host is not None:
-            return str(self.host)
-        return f".{self.provider}"
-
-
-class AgentAddress(FrozenModel):
-    """A parsed ``NAME[@HOST[.PROVIDER]]`` string.
-
-    The agent component is required; without it, this is not an agent address.
-    Use :class:`HostAddress` for ``@HOST.PROVIDER`` (no agent) or
-    :class:`SourceLocation` for ``--from`` syntax.
-    """
-
-    agent: AgentNameOrId = Field(description="Agent name or ID (required)")
-    host: HostAddress | None = Field(default=None, description="Optional host disambiguator")
-
-    def __str__(self) -> str:
-        if self.host is None:
-            return str(self.agent)
-        return f"{self.agent}@{self.host}"
-
-
-class NewAgentLocation(FrozenModel):
-    """A parsed ``[NAME][@[HOST][.PROVIDER]][:PATH]`` string.
-
-    Used as the positional argument of ``mngr create``. The agent name is
-    optional (omitted means "auto-generate"); the host part can refer to an
-    existing host (``HOST[.PROVIDER]``) or hint at creating a new host on a
-    provider (bare ``.PROVIDER``). The trailing ``:PATH`` overrides the agent's
-    default work-directory location.
-
-    Note that ``name`` is :class:`AgentName`, not :class:`AgentNameOrId` --
-    the agent doesn't yet exist when ``mngr create`` runs, so referring to it
-    by ID is meaningless.
-    """
-
-    name: AgentName | None = Field(default=None, description="Optional explicit agent name")
-    host: HostAddress | None = Field(default=None, description="Optional host disambiguator or new-host hint")
-    path: Path | None = Field(default=None, description="Optional explicit work-directory path inside the host")
-
-
-class SourceLocation(FrozenModel):
-    """A parsed ``--from`` argument: ``[NAME[@HOST[.PROVIDER]]][:PATH]`` or a bare path.
-
-    Every component is optional. The four meaningful shapes (in addition to a
-    bare path string) are:
-
-    - ``AGENT`` -> agent's host + agent's work_dir
-    - ``AGENT:PATH`` -> agent's host + explicit ``PATH``
-    - ``@HOST[.PROVIDER]:PATH`` -> explicit host + ``PATH``
-    - ``:PATH`` -> local path
-
-    A bare path string starting with ``/``, ``./``, ``~/``, or ``../`` is also
-    parsed directly into ``path`` as a convenience.
-    """
-
-    agent: AgentNameOrId | None = Field(default=None, description="Optional source agent name or ID")
-    host: HostAddress | None = Field(default=None, description="Optional source host")
-    path: Path | None = Field(default=None, description="Optional source path")
-
-
 # === Composite parsers ===
 
 
@@ -196,6 +100,8 @@ def parse_host_address(s: str) -> HostAddress:
     host_part, provider_part = _split_host_part(s)
     host = parse_host_name_or_id(host_part) if host_part else None
     provider = _parse_provider_name(provider_part) if provider_part else None
+    if host is None and provider is None:
+        raise UserInputError(f"Host address must specify at least a host or a provider: '{s}'")
     return HostAddress(host=host, provider=provider)
 
 

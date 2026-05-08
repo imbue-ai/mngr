@@ -9,6 +9,7 @@ from typing import Self
 
 from pydantic import Field
 from pydantic import GetCoreSchemaHandler
+from pydantic import model_validator
 from pydantic_core import CoreSchema
 from pydantic_core import core_schema
 
@@ -322,6 +323,99 @@ class HostName(SafeName):
 # type when validating string inputs that already match an ID prefix.
 AgentNameOrId = AgentId | AgentName
 HostNameOrId = HostId | HostName
+
+
+# === Parsed address types ===
+#
+# These FrozenModel shapes are produced by the parsers in
+# ``api/addresses.py`` and consumed across the codebase, including by
+# ``config/data_types.py``. They live here in ``primitives`` because the
+# config layer needs to type its CLI option fields with them, and the import
+# layering does not allow ``config`` to depend on ``api``.
+
+
+class HostAddress(FrozenModel):
+    """A parsed ``HOST[.PROVIDER]`` (or bare ``.PROVIDER``) string.
+
+    At least one of ``host`` or ``provider`` is set. The bare ``.PROVIDER``
+    form (host omitted) is only meaningful in contexts that allow creating a
+    new host -- for example, ``mngr create NAME@.modal``. Most other contexts
+    require ``host`` to be set; they should validate that explicitly.
+    """
+
+    host: HostNameOrId | None = Field(default=None, description="Host name or ID")
+    provider: ProviderInstanceName | None = Field(
+        default=None, description="Provider instance name (the ``.PROVIDER`` qualifier)"
+    )
+
+    @model_validator(mode="after")
+    def _at_least_one_component(self) -> "HostAddress":
+        if self.host is None and self.provider is None:
+            raise ValueError("Host address must specify at least a host or a provider")
+        return self
+
+    def __str__(self) -> str:
+        if self.host is not None and self.provider is not None:
+            return f"{self.host}.{self.provider}"
+        if self.host is not None:
+            return str(self.host)
+        return f".{self.provider}"
+
+
+class AgentAddress(FrozenModel):
+    """A parsed ``NAME[@HOST[.PROVIDER]]`` string.
+
+    The agent component is required; without it, this is not an agent address.
+    Use :class:`HostAddress` for ``@HOST.PROVIDER`` (no agent) or
+    :class:`SourceLocation` for ``--from`` syntax.
+    """
+
+    agent: AgentNameOrId = Field(description="Agent name or ID (required)")
+    host: HostAddress | None = Field(default=None, description="Optional host disambiguator")
+
+    def __str__(self) -> str:
+        if self.host is None:
+            return str(self.agent)
+        return f"{self.agent}@{self.host}"
+
+
+class NewAgentLocation(FrozenModel):
+    """A parsed ``[NAME][@[HOST][.PROVIDER]][:PATH]`` string.
+
+    Used as the positional argument of ``mngr create``. The agent name is
+    optional (omitted means "auto-generate"); the host part can refer to an
+    existing host (``HOST[.PROVIDER]``) or hint at creating a new host on a
+    provider (bare ``.PROVIDER``). The trailing ``:PATH`` overrides the agent's
+    default work-directory location.
+
+    Note that ``name`` is :class:`AgentName`, not :class:`AgentNameOrId` --
+    the agent doesn't yet exist when ``mngr create`` runs, so referring to it
+    by ID is meaningless.
+    """
+
+    name: AgentName | None = Field(default=None, description="Optional explicit agent name")
+    host: HostAddress | None = Field(default=None, description="Optional host disambiguator or new-host hint")
+    path: Path | None = Field(default=None, description="Optional explicit work-directory path inside the host")
+
+
+class SourceLocation(FrozenModel):
+    """A parsed ``--from`` argument: ``[NAME[@HOST[.PROVIDER]]][:PATH]`` or a bare path.
+
+    Every component is optional. The four meaningful shapes (in addition to a
+    bare path string) are:
+
+    - ``AGENT`` -> agent's host + agent's work_dir
+    - ``AGENT:PATH`` -> agent's host + explicit ``PATH``
+    - ``@HOST[.PROVIDER]:PATH`` -> explicit host + ``PATH``
+    - ``:PATH`` -> local path
+
+    A bare path string starting with ``/``, ``./``, ``~/``, or ``../`` is also
+    parsed directly into ``path`` as a convenience.
+    """
+
+    agent: AgentNameOrId | None = Field(default=None, description="Optional source agent name or ID")
+    host: HostAddress | None = Field(default=None, description="Optional source host")
+    path: Path | None = Field(default=None, description="Optional source path")
 
 
 class AgentTypeName(SafeName):
