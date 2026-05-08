@@ -174,7 +174,7 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 | `--message` | text | Initial message to send after the agent starts | None |
 | `--message-file` | path | File containing initial message to send | None |
 | `--edit-message` | boolean | Open an editor to compose the initial message (uses $EDITOR). Editor runs in parallel with agent creation. If --message or --message-file is provided, their content is used as initial editor content. | `False` |
-| `--attach-command` | text | Command to run instead of attaching to main session | None |
+| `--session-command` | text | Command to run instead of attaching to main session | None |
 | `--connect-command` | text | Command to run instead of the builtin connect. MNGR_AGENT_NAME and MNGR_SESSION_NAME env vars are set. | None |
 
 ## Automation
@@ -204,6 +204,10 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 Provider: docker
   Build args are passed directly to 'docker build'. Run 'docker build --help' for details.
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
+
+Provider: imbue_cloud
+  Build args constrain which pool host the connector leases for this `mngr create`. Recognized keys (see LeaseAttributes): repo_url, repo_branch_or_tag, cpus, memory_gb, gpu_count. Unknown keys are rejected. Example: `mngr create my-agent@my-host.imbue_cloud_alice --new-host -b cpus=4 -b repo_branch_or_tag=v1.2.3`.
+  Start args are not used by the imbue_cloud provider.
 
 Provider: lima
   Supported build arguments for the lima provider:

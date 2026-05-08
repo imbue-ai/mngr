@@ -1,6 +1,7 @@
 """Tests for the FastAPI server."""
 
 import json
+import queue
 from pathlib import Path
 from typing import Generator
 from unittest.mock import patch
@@ -413,6 +414,36 @@ def test_get_events_seeds_pending_tool_state(tmp_path: Path, monkeypatch: pytest
             assert manager._activity_state_by_agent[agent_id] == ActivityState.TOOL_RUNNING
     finally:
         manager.stop()
+
+
+@pytest.mark.timeout(5)
+def test_proto_agent_logs_endpoint_not_found_sends_error_and_closes(client: TestClient) -> None:
+    """When the proto-agent is missing, the endpoint sends a structured not-found message and closes."""
+    with client.websocket_connect("/api/proto-agents/missing-agent/logs") as ws:
+        payload = json.loads(ws.receive_text())
+    assert payload == {"done": True, "success": False, "error": "Proto-agent not found"}
+
+
+@pytest.mark.timeout(5)
+def test_proto_agent_logs_endpoint_streams_messages_until_sentinel(app: FastAPI) -> None:
+    """The endpoint forwards real log lines and closes when the queue yields ``None``."""
+    log_queue: queue.Queue[str | None] = queue.Queue()
+    log_queue.put(json.dumps({"line": "starting"}))
+    log_queue.put(json.dumps({"line": "still going"}))
+    log_queue.put(None)
+
+    with TestClient(app) as test_client:
+        # The TestClient context manager triggers the lifespan startup that
+        # populates ``app.state.agent_manager``; inject the queue afterwards.
+        agent_manager: AgentManager = app.state.agent_manager
+        agent_manager._log_queues["proto-1"] = log_queue
+
+        with test_client.websocket_connect("/api/proto-agents/proto-1/logs") as ws:
+            first = json.loads(ws.receive_text())
+            second = json.loads(ws.receive_text())
+
+    assert first == {"line": "starting"}
+    assert second == {"line": "still going"}
 
 
 def test_request_event_endpoint_writes_latchkey_permission_event(

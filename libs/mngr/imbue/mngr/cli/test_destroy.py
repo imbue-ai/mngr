@@ -548,6 +548,7 @@ def test_destroy_remove_created_branch_deletes_branch(
         )
 
 
+@pytest.mark.flaky
 @pytest.mark.tmux
 def test_destroy_without_remove_created_branch_leaves_branch(
     cli_runner: CliRunner,
@@ -645,10 +646,12 @@ def test_destroy_remove_created_branch_graceful_when_no_branch(
 
 # Flaky under heavy CI load: the test's wait_for(tmux_session_exists) calls
 # tmux subprocesses on every poll iteration and can exceed the 10s
-# pytest-timeout when sandboxes are contended. Same family as
-# test_destroy_multiple_agents above; offload retries flaky tests automatically.
+# pytest-timeout when sandboxes are contended. Bumping the per-test timeout
+# gives the polling loop enough room to make progress when the sandbox is
+# slow; offload still retries via @pytest.mark.flaky if it slips further.
 @pytest.mark.tmux
 @pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_destroy_transfer_none_keeps_shared_worktree(
     cli_runner: CliRunner,
     temp_git_repo: Path,

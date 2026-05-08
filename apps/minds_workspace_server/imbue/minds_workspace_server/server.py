@@ -53,9 +53,6 @@ from imbue.minds_workspace_server.request_writer import write_refresh_request
 from imbue.minds_workspace_server.request_writer import write_request_event
 from imbue.minds_workspace_server.service_dispatcher import register_service_routes
 from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
-from imbue.minds_workspace_server.sharing_proxy import SharingProxyError
-from imbue.minds_workspace_server.sharing_proxy import get_sharing_status
-from imbue.minds_workspace_server.sharing_proxy import request_sharing_edit
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 
 _LOOPBACK_CLIENT_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
@@ -583,7 +580,28 @@ async def _ws_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     agent_manager: AgentManager = websocket.app.state.agent_manager
     ws_broadcaster: WebSocketBroadcaster = websocket.app.state.broadcaster
+    await _run_ws_broadcast_loop(
+        websocket=websocket,
+        agent_manager=agent_manager,
+        ws_broadcaster=ws_broadcaster,
+    )
 
+
+async def _run_ws_broadcast_loop(
+    websocket: WebSocket,
+    agent_manager: AgentManager,
+    ws_broadcaster: WebSocketBroadcaster,
+) -> None:
+    """Stream broadcaster messages to ``websocket`` until the client disconnects.
+
+    A wedged ``websocket.send_text`` (eg. a half-dead TCP connection) is freed
+    by the broadcaster: ``register`` captures the current asyncio Task and
+    loop, and when this client's queue racks up enough consecutive overflow
+    broadcasts the broadcaster cancels the task via
+    ``loop.call_soon_threadsafe``. ``CancelledError`` propagates into the
+    blocked send and unwinds through the ``finally`` below, which unregisters
+    the queue. There is no per-send wall-clock timeout.
+    """
     client_queue = ws_broadcaster.register()
     try:
         await websocket.send_text(
@@ -610,12 +628,12 @@ async def _ws_endpoint(websocket: WebSocket) -> None:
         while not shutdown:
             try:
                 message = await run_in_threadpool(client_queue.get, timeout=1.0)
-                if message is None:
-                    shutdown = True
-                else:
-                    await websocket.send_text(message)
             except queue.Empty:
                 continue
+            if message is None:
+                shutdown = True
+            else:
+                await websocket.send_text(message)
     except WebSocketDisconnect:
         pass
     finally:
@@ -627,8 +645,26 @@ async def _proto_agent_logs_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     agent_manager: AgentManager = websocket.app.state.agent_manager
     agent_id = websocket.path_params.get("agent_id", "")
-
     log_queue = agent_manager.get_log_queue(agent_id)
+    await _run_proto_agent_logs_loop(
+        websocket=websocket,
+        log_queue=log_queue,
+    )
+
+
+async def _run_proto_agent_logs_loop(
+    websocket: WebSocket,
+    log_queue: queue.Queue[str | None] | None,
+) -> None:
+    """Stream ``log_queue`` messages to ``websocket`` until the proto-agent finishes.
+
+    If ``log_queue`` is ``None`` the proto-agent does not exist; send a
+    structured not-found error and close the socket. Unlike ``_ws_endpoint``
+    this path has no broadcaster behind it, so a half-dead TCP connection can
+    keep ``send_text`` parked forever -- accepted as a much narrower failure
+    surface than the original broadcaster flood (one stuck task per stuck
+    creation, capped by the bounded log queue).
+    """
     if log_queue is None:
         await websocket.send_text(json.dumps({"done": True, "success": False, "error": "Proto-agent not found"}))
         await websocket.close()
@@ -639,12 +675,12 @@ async def _proto_agent_logs_endpoint(websocket: WebSocket) -> None:
         while not finished:
             try:
                 message = await run_in_threadpool(log_queue.get, timeout=1.0)
-                if message is None:
-                    finished = True
-                else:
-                    await websocket.send_text(message)
             except queue.Empty:
                 continue
+            if message is None:
+                finished = True
+            else:
+                await websocket.send_text(message)
     except WebSocketDisconnect:
         pass
 
@@ -680,30 +716,6 @@ async def _destroy_agent(agent_id: str, request: Request) -> JSONResponse:
     agent_manager.remove_agent(agent_id)
 
     return JSONResponse(content=DestroyAgentResponse(status="ok").model_dump())
-
-
-async def _get_sharing_status_endpoint(service_name: str) -> JSONResponse:
-    """Get the Cloudflare forwarding status for a server."""
-    try:
-        status = await run_in_threadpool(get_sharing_status, service_name)
-        return JSONResponse(content=status.model_dump())
-    except SharingProxyError as e:
-        error = ErrorResponse(detail=str(e))
-        return JSONResponse(content=error.model_dump(), status_code=502)
-
-
-async def _request_sharing_edit_endpoint(service_name: str) -> JSONResponse:
-    """Create a sharing request event for editing sharing settings.
-
-    Writes a request event to requests/events.jsonl so the desktop client
-    can handle the actual sharing changes. Returns success immediately.
-    """
-    try:
-        await run_in_threadpool(request_sharing_edit, service_name, True)
-        return JSONResponse(content={"ok": True, "message": "Sharing request sent"})
-    except (SharingProxyError, RuntimeError) as e:
-        error = ErrorResponse(detail=str(e))
-        return JSONResponse(content=error.model_dump(), status_code=502)
 
 
 async def _request_event_endpoint(request: Request) -> JSONResponse:
@@ -843,8 +855,6 @@ def create_application(
     application.add_api_route("/api/layout", _save_layout, methods=["POST"])
     application.add_api_route("/api/agents/{agent_id}/screen", _get_screen_capture, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/destroy", _destroy_agent, methods=["POST"])
-    application.add_api_route("/api/sharing/{service_name}", _get_sharing_status_endpoint, methods=["GET"])
-    application.add_api_route("/api/sharing/{service_name}/request", _request_sharing_edit_endpoint, methods=["POST"])
     application.add_api_route("/api/permissions/request", _request_event_endpoint, methods=["POST"])
     application.add_api_route(
         "/api/refresh-service/{service_name}", _refresh_service_request_endpoint, methods=["POST"]

@@ -1,9 +1,6 @@
 # offload configuration for running mngr tests on Modal
 [offload]
 max_parallel = 50
-# Per-batch timeout; 0.8.1 strictly enforces this (0.7.x was laxer). 60s
-# wasn't enough for a handful of slower unit/integration batches under
-# Modal sandbox cold-start, so give them 5 minutes of headroom.
 test_timeout_secs = 300
 stream_output = true
 sandbox_project_root = "/code/mngr"
@@ -51,6 +48,9 @@ filters = "-m 'not acceptance and not release and not flaky'"
 [groups.flaky]
 retry_count = 4
 filters = "-m 'flaky and not acceptance and not release'"
+
+[history]
+path = "offload-history-modal.jsonl"
 
 [report]
 output_dir = "test-results"

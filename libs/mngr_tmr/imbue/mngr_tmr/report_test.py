@@ -23,7 +23,7 @@ from imbue.mngr_tmr.testing import make_test_result
 
 
 def test_report_section_errored() -> None:
-    assert report_section_of(make_test_result(errored=True)) == ReportSection.BLOCKED
+    assert report_section_of(make_test_result(errored=True)) == ReportSection.FAILED
 
 
 def test_report_section_running() -> None:
@@ -332,6 +332,7 @@ def test_generate_html_report_all_report_sections(tmp_path: Path) -> None:
             ReportSection.NON_IMPL_FIXES: "Non-implementation fixes",
             ReportSection.IMPL_FIXES: "Implementation fixes",
             ReportSection.BLOCKED: "Blocked",
+            ReportSection.FAILED: "Failed",
             ReportSection.CLEAN_PASS: "Clean pass",
             ReportSection.RUNNING: "Running",
         }[sec]

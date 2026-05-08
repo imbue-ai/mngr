@@ -41,6 +41,25 @@ def write_human_line(message: str, *args: Any) -> None:
     sys.stdout.flush()
 
 
+def write_command_stdout_and_stderr(stdout: str, stderr: str) -> None:
+    """Write a captured command's stdout and stderr to the user's stdout/stderr.
+
+    Used by ``mngr exec`` and friends to forward raw command output to the
+    invoking shell. Adds a trailing newline if the captured output didn't end
+    with one (so subsequent prompts/output don't get glued onto the last line).
+    """
+    if stdout:
+        sys.stdout.write(stdout)
+        if not stdout.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+    if stderr:
+        sys.stderr.write(stderr)
+        if not stderr.endswith("\n"):
+            sys.stderr.write("\n")
+        sys.stderr.flush()
+
+
 @pure
 def format_size(size_bytes: int) -> str:
     """Format bytes into a human-readable size string."""

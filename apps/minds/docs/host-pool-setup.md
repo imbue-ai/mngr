@@ -1,6 +1,6 @@
 # Host Pool Setup
 
-How to set up the infrastructure for LEASED mode (pre-provisioned Vultr host pool).
+How to set up the infrastructure for the imbue-cloud-leased pool host flow.
 
 ## Prerequisites
 
@@ -8,7 +8,7 @@ How to set up the infrastructure for LEASED mode (pre-provisioned Vultr host poo
 - Vultr API key (for provisioning VPS instances)
 - Modal account (for deploying the remote_service_connector)
 
-## Step 1: Create the database table
+## Step 1: Create the database schema
 
 Use the **direct** (non-pooled) Neon connection string for schema migrations:
 
@@ -25,12 +25,14 @@ CREATE TABLE pool_hosts (
     ssh_user TEXT NOT NULL,
     container_ssh_port INTEGER NOT NULL,
     status TEXT NOT NULL,
-    version TEXT NOT NULL,
+    attributes JSONB NOT NULL DEFAULT '{}'::jsonb,
     leased_to_user TEXT,
     leased_at TIMESTAMPTZ,
     released_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL
 );
+
+CREATE INDEX pool_hosts_attributes_gin ON pool_hosts USING GIN (attributes);
 ```
 
 Run via:
@@ -38,24 +40,26 @@ Run via:
 psql "$NEON_DB_DIRECT" -c "<SQL above>"
 ```
 
+The `attributes` JSONB column carries whatever shape the operator wants to match leases against (`repo_branch_or_tag`, `cpus`, `memory_gb`, `gpu_count`, etc.); the connector's `/hosts/lease` endpoint matches `attributes @> request_attributes`.
+
 ## Step 2: Generate the management SSH keypair
 
-This keypair is used by the remote_service_connector to SSH into pool hosts and inject user public keys when a host is leased.
+Used by the remote_service_connector to inject lease-time user public keys into pool hosts:
 
 ```bash
 mkdir -p .minds/production/pool_management_key
 ssh-keygen -t ed25519 -f .minds/production/pool_management_key/id_ed25519 -N ""
 ```
 
-The private key goes into the `pool-ssh-production` Modal secret. The public key is passed to `create_pool_hosts.py` when provisioning hosts.
+The private key goes into the `pool-ssh-production` Modal secret. The public key path is passed to the bake command in step 5.
 
 ## Step 3: Create the Modal secrets
 
-Two new secrets are needed (in addition to the existing `cloudflare-production` and `supertokens-production`):
+Two secrets in addition to the existing `cloudflare-production` and `supertokens-production`:
 
 ### neon-production
 
-Contains the **pooled** Neon connection string:
+The **pooled** Neon connection string:
 
 ```bash
 # .minds/production/neon.sh
@@ -64,7 +68,7 @@ export DATABASE_URL=postgresql://user:pass@host-pooler.neon.tech/db?sslmode=requ
 
 ### pool-ssh-production
 
-Contains the management private key:
+The management private key:
 
 ```bash
 # .minds/production/pool-ssh.sh
@@ -85,49 +89,62 @@ uv run scripts/push_modal_secrets.py production
 MNGR_DEPLOY_ENV=production modal deploy apps/remote_service_connector/imbue/remote_service_connector/app.py
 ```
 
-## Step 5: Create pool hosts
+## Step 5: Bake one or more pool hosts
 
-Provision one or more Vultr VPS instances, stop their agents, install the management SSH key, and register them in the database:
+Provision a Vultr VPS, run the FCT template's `mngr create --template main --template vultr` to bake the agent state, install the management SSH key on both the VPS and the container, then write a `pool_hosts` row:
 
 ```bash
-uv run python apps/remote_service_connector/scripts/create_pool_hosts.py \
+set -a
+. .env                          # VULTR_API_KEY, ANTHROPIC_API_KEY
+. .minds/production/neon.sh     # DATABASE_URL
+. .minds/production/pool-ssh.sh # POOL_SSH_PRIVATE_KEY (only needed if you also push secrets)
+set +a
+
+uv run mngr imbue_cloud admin pool create \
     --count 1 \
-    --version <version-tag> \
+    --attributes '{"repo_branch_or_tag": "<branch-or-tag>"}' \
+    --workspace-dir ~/project/forever-claude-template \
     --management-public-key-file .minds/production/pool_management_key/id_ed25519.pub \
-    --database-url "$NEON_DB_DIRECT"
+    --database-url "$DATABASE_URL"
 ```
 
-The `--version` must match what the minds app will request when leasing:
-- In production: the latest semver tag from the template repo (e.g., `v1.2.3`)
-- During development: the branch name (e.g., `mngr/minds-onboarding`)
+The `--attributes` JSON describes what the row will match against. The minds desktop client always sends `repo_branch_or_tag` in its lease request (the resolved FCT branch in dev, or the latest semver tag in production), so that key needs to be present on every row that should ever be leased. Other dimensions (`cpus`, `memory_gb`, `gpu_count`) can be set if you want a more constrained pool generation; they're only required on the row when the lease request also includes them.
+
+To rsync the local mngr working tree into the FCT worktree's `vendor/mngr/` for the duration of the bake (dev-loop pattern), pass `--mngr-source <monorepo-root>`. The bake resets `vendor/mngr/` to HEAD when it finishes, so the worktree stays clean wrt mngr churn.
+
+List the rows:
+
+```bash
+uv run mngr imbue_cloud admin pool list --database-url "$DATABASE_URL"
+```
 
 ## Step 6: Verify
 
-Check the pool has available hosts:
-
 ```bash
-psql "$NEON_DB_DIRECT" -c "SELECT id, vps_ip, status, version FROM pool_hosts"
+psql "$NEON_DB_DIRECT" -c "SELECT id, vps_ip, status, attributes FROM pool_hosts ORDER BY created_at DESC"
 ```
 
 ## Cleanup
 
-Released hosts (after a user destroys a workspace) can be cleaned up with:
+Released hosts (after a user destroys their lease) can be cleaned up with:
 
 ```bash
 uv run python apps/remote_service_connector/scripts/cleanup_released_hosts.py \
     --database-url "$NEON_DB_DIRECT"
 ```
 
-This destroys the Vultr VPS and removes the database row.
+This destroys the underlying Vultr VPS and removes the database row.
 
 ## Development workflow
 
-During development, set `MINDS_WORKSPACE_BRANCH` to your branch name. The minds app uses the branch name as the version string, so pool hosts must be provisioned with the same version:
+During development, set `MINDS_WORKSPACE_BRANCH` to your branch name. The minds app uses that branch as the lease request's `repo_branch_or_tag`, so the pool host's `attributes.repo_branch_or_tag` must match:
 
 ```bash
-uv run python apps/remote_service_connector/scripts/create_pool_hosts.py \
+uv run mngr imbue_cloud admin pool create \
     --count 1 \
-    --version mngr/minds-onboarding \
+    --attributes "{\"repo_branch_or_tag\": \"$(git rev-parse --abbrev-ref HEAD)\"}" \
+    --workspace-dir "$PWD/.external_worktrees/forever-claude-template" \
     --management-public-key-file .minds/production/pool_management_key/id_ed25519.pub \
-    --database-url "$NEON_DB_DIRECT"
+    --database-url "$DATABASE_URL" \
+    --mngr-source "$PWD"
 ```

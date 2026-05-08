@@ -1,1218 +1,597 @@
-import queue as queue_mod
-import threading
-import tomllib
-from datetime import datetime
-from datetime import timezone
-from pathlib import Path
-from uuid import UUID
+"""Unit tests for agent_creator.
 
-import pytest
+IMBUE_CLOUD-mode lease/rename/env-injection no longer happens in this
+module: it runs inside ``ImbueCloudProvider.create_host``, reached
+through the standard ``mngr create`` invocation. The plugin's own test
+suite (``libs/mngr_imbue_cloud``) covers the lease + adopt path; this
+file covers minds' command-building and helpers.
+"""
+
+import queue
+import threading
+import time
+from collections.abc import Mapping
+from http.server import BaseHTTPRequestHandler
+from http.server import HTTPServer
+from pathlib import Path
+
+from pydantic import AnyUrl
+from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
-from imbue.minds.desktop_client.agent_creator import PLACEHOLDER_ANTHROPIC_API_KEY
-from imbue.minds.desktop_client.agent_creator import _RedactingOutputCallback
-from imbue.minds.desktop_client.agent_creator import _build_inject_anthropic_command
-from imbue.minds.desktop_client.agent_creator import _build_latchkey_gateway_url
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
-from imbue.minds.desktop_client.agent_creator import _build_patch_claude_config_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
-from imbue.minds.desktop_client.agent_creator import _leased_agent_address
-from imbue.minds.desktop_client.agent_creator import _load_lease_info
-from imbue.minds.desktop_client.agent_creator import _load_or_create_leased_host_keypair
 from imbue.minds.desktop_client.agent_creator import _make_host_name
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
-from imbue.minds.desktop_client.agent_creator import _remove_dynamic_host_entry
-from imbue.minds.desktop_client.agent_creator import _remove_lease_info
-from imbue.minds.desktop_client.agent_creator import _save_lease_info
-from imbue.minds.desktop_client.agent_creator import _write_dynamic_host_entry
-from imbue.minds.desktop_client.agent_creator import checkout_branch
-from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
-from imbue.minds.desktop_client.agent_creator import make_log_callback
-from imbue.minds.desktop_client.agent_creator import run_mngr_create
-from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
-from imbue.minds.desktop_client.host_pool_client import HostPoolClient
+from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
+from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.latchkey.core import AGENT_SIDE_LATCHKEY_PORT
-from imbue.minds.desktop_client.latchkey.core import Latchkey
-from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
-from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyClient
 from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.errors import GitCloneError
-from imbue.minds.errors import GitOperationError
-from imbue.minds.errors import MngrCommandError
+from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import AgentName
-from imbue.minds.primitives import GitBranch
-from imbue.minds.primitives import GitUrl
+from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
-from imbue.minds.testing import add_and_commit_git_repo
-from imbue.minds.testing import init_and_commit_git_repo
 from imbue.mngr.primitives import AgentId
 
 
-def test_extract_repo_name_from_https_url() -> None:
-    assert extract_repo_name("https://github.com/user/my-repo.git") == "my-repo"
-
-
-def test_extract_repo_name_from_ssh_url() -> None:
-    assert extract_repo_name("git@github.com:user/my-repo.git") == "my-repo"
-
-
-def test_extract_repo_name_strips_trailing_slash() -> None:
-    assert extract_repo_name("https://github.com/user/my-repo/") == "my-repo"
-
-
-def test_extract_repo_name_without_git_suffix() -> None:
-    assert extract_repo_name("https://github.com/user/my-repo") == "my-repo"
-
-
-def test_extract_repo_name_replaces_special_chars() -> None:
-    assert extract_repo_name("https://github.com/user/my repo!test") == "my-repo-test"
+def test_extract_repo_name_strips_dot_git_and_trailing_slash() -> None:
+    assert extract_repo_name("https://github.com/user/repo.git") == "repo"
+    assert extract_repo_name("https://github.com/user/repo/") == "repo"
+    assert extract_repo_name("https://github.com/user/Some-Repo_Name") == "Some-Repo_Name"
 
 
 def test_extract_repo_name_falls_back_to_workspace() -> None:
-    assert extract_repo_name("") == "workspace"
     assert extract_repo_name("/") == "workspace"
-    assert extract_repo_name(".git") == "workspace"
+    assert extract_repo_name("///") == "workspace"
 
 
-def test_extract_repo_name_from_local_path() -> None:
-    assert extract_repo_name("/home/user/my-template") == "my-template"
-    assert extract_repo_name("~/project/forever-claude") == "forever-claude"
+def test_is_local_path_recognises_relative_and_absolute_paths() -> None:
+    assert _is_local_path("/tmp/foo")
+    assert _is_local_path("./foo")
+    assert _is_local_path("../foo")
+    assert _is_local_path("~/foo")
+    assert not _is_local_path("https://example.com/foo")
+    assert not _is_local_path("git@github.com:user/repo.git")
 
 
-# -- _is_local_path tests --
+def test_redact_url_credentials_strips_userinfo_for_schemed_urls() -> None:
+    assert _redact_url_credentials("https://x-access-token:tok@github.com/user/repo") == "https://github.com/user/repo"
+    assert _redact_url_credentials("https://github.com/user/repo") == "https://github.com/user/repo"
 
 
-def test_is_local_path_absolute() -> None:
-    assert _is_local_path("/home/user/repo") is True
-
-
-def test_is_local_path_relative() -> None:
-    assert _is_local_path("./my-repo") is True
-
-
-def test_is_local_path_tilde() -> None:
-    assert _is_local_path("~/project/repo") is True
-
-
-def test_is_local_path_url() -> None:
-    assert _is_local_path("https://github.com/user/repo.git") is False
-    assert _is_local_path("git@github.com:user/repo.git") is False
-
-
-# -- _redact_url_credentials tests --
-
-
-def test_redact_url_credentials_strips_user_password() -> None:
-    assert (
-        _redact_url_credentials("https://x-access-token:ghp_secret@github.com/user/repo.git")
-        == "https://github.com/user/repo.git"
-    )
-
-
-def test_redact_url_credentials_leaves_plain_url_untouched() -> None:
-    assert _redact_url_credentials("https://github.com/user/repo.git") == "https://github.com/user/repo.git"
-
-
-def test_redact_url_credentials_leaves_ssh_url_untouched() -> None:
-    # SSH-style URLs (git@host:path) have no scheme, so urlsplit returns an
-    # empty netloc. The function must pass them through unchanged.
-    assert _redact_url_credentials("git@github.com:user/repo.git") == "git@github.com:user/repo.git"
-
-
-def test_redact_url_credentials_leaves_local_path_untouched() -> None:
-    assert _redact_url_credentials("/home/user/my-template") == "/home/user/my-template"
-
-
-# -- _redact_url_credentials_in_text tests --
-
-
-def test_redact_url_credentials_in_text_strips_embedded_url() -> None:
-    # Typical git stderr on auth failure -- we must scrub the token but keep
-    # the rest of the message for debuggability.
-    line = "fatal: unable to access 'https://x-access-token:ghp_secret@github.com/user/repo.git/': 403"
-    assert _redact_url_credentials_in_text(line) == "fatal: unable to access 'https://github.com/user/repo.git/': 403"
-
-
-def test_redact_url_credentials_in_text_leaves_plain_text_untouched() -> None:
-    assert _redact_url_credentials_in_text("no URLs here") == "no URLs here"
-    assert _redact_url_credentials_in_text("Cloning into 'my-repo'...") == "Cloning into 'my-repo'..."
-
-
-def test_redact_url_credentials_in_text_strips_multiple_urls() -> None:
-    text = "a https://u:p@host1/x and b https://user@host2/y"
-    assert _redact_url_credentials_in_text(text) == "a https://host1/x and b https://host2/y"
-
-
-def test_redact_url_credentials_in_text_leaves_bare_scp_url_untouched() -> None:
-    # SCP-style SSH URLs don't have a scheme, so the regex won't match and
-    # the user@host prefix (not a secret) is preserved.
-    assert (
-        _redact_url_credentials_in_text("cloning from git@github.com:user/repo.git")
-        == "cloning from git@github.com:user/repo.git"
-    )
-
-
-@pytest.mark.timeout(30)
-def test_clone_git_repo_redacts_credentials_in_error(tmp_path: Path) -> None:
-    """GitCloneError must not leak embedded credentials from git's stderr."""
-    # Point at a clearly-bogus credentialed URL; git will fail and echo the
-    # URL in its stderr. The raised error must have the token stripped.
-    # Bound the run time: git's default connect behaviour is unspecified and
-    # a restrictive-firewall configuration could otherwise let this hang.
-    dest = tmp_path / "dest"
-    secret_token = "ghp_thisshouldneverappear"
-    bad_url = f"https://x-access-token:{secret_token}@127.0.0.1:1/does-not-exist.git"
-    with pytest.raises(GitCloneError) as excinfo:
-        clone_git_repo(GitUrl(bad_url), dest)
-    assert secret_token not in str(excinfo.value)
-
-
-# -- _RedactingOutputCallback tests --
-
-
-def test_redacting_output_callback_redacts_and_forwards_is_stdout_flag() -> None:
-    """The wrapper must scrub credentials and pass the is_stdout flag through."""
-    received: list[tuple[str, bool]] = []
-
-    def inner(line: str, is_stdout: bool) -> None:
-        received.append((line, is_stdout))
-
-    wrapper = _RedactingOutputCallback(inner=inner)
-    # A line with an embedded credentialed URL -- userinfo must be stripped,
-    # and the is_stdout flag must be forwarded verbatim.
-    wrapper("fatal: unable to access 'https://x-access-token:ghp_secret@github.com/u/r.git/'", False)
-    # A line with no URL -- must pass through unchanged, with is_stdout=True preserved.
-    wrapper("Cloning into 'my-repo'...", True)
-    assert received == [
-        ("fatal: unable to access 'https://github.com/u/r.git/'", False),
-        ("Cloning into 'my-repo'...", True),
-    ]
-
-
-# -- _build_mngr_create_command tests --
-
-
-def test_leased_agent_address_uses_ssh_provider_and_leased_host_name() -> None:
-    """The explicit address matches the SSH provider + host-name pattern that
-    ``imbue.minds.bootstrap._ensure_mngr_settings`` sets up, so mngr discovery
-    only hits the SSH provider and skips ID lookup entirely."""
-    agent_id = AgentId()
-    address = _leased_agent_address(agent_id)
-    assert address == f"{agent_id}@leased-{agent_id}.ssh"
-
-
-def test_make_host_name() -> None:
-    assert _make_host_name(AgentName("my-mind")) == "my-mind-host"
-
-
-def test_build_mngr_create_command_dev_mode() -> None:
-    cmd, api_key = _build_mngr_create_command(
-        launch_mode=LaunchMode.DEV,
-        agent_name=AgentName("test-agent"),
-        agent_id=AgentId(),
-    )
-    assert "--template" in cmd
-    assert "dev" in cmd
-    assert "main" in cmd
-    assert "--no-connect" in cmd
-    assert "--reuse" in cmd
-    assert "--update" in cmd
-    assert "docker" not in cmd
-    # DEV mode: address is just the agent name (no host suffix)
-    assert cmd[2] == "test-agent"
-    # API key is injected via --env
-    assert "--env" in cmd
-    env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--env"]
-    assert any(v.startswith("MINDS_API_KEY=") for v in env_values)
-    assert len(api_key) > 0
-    # DEV mode runs on localhost: no host-env flags (the agent inherits the
-    # local bootstrap-set env directly).
-    assert "--host-env" not in cmd
-    assert "--pass-host-env" not in cmd
-
-
-def test_build_mngr_create_command_local_mode() -> None:
-    cmd, _api_key = _build_mngr_create_command(
-        launch_mode=LaunchMode.LOCAL,
-        agent_name=AgentName("test-agent"),
-        agent_id=AgentId(),
-    )
-    assert "--template" in cmd
-    assert "docker" in cmd
-    assert "main" in cmd
-    assert "--reuse" in cmd
-    assert "--update" in cmd
-    assert "--new-host" in cmd
-    assert "--idle-mode" in cmd
-    assert cmd[cmd.index("--idle-mode") + 1] == "disabled"
-    # LOCAL mode: address includes host name with docker provider suffix
-    assert cmd[2] == "test-agent@test-agent-host.docker"
-    # Remote host: MNGR_HOST_DIR forced to /mngr (container convention),
-    # MNGR_PREFIX forwarded from the local shell for naming consistency.
-    host_env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--host-env"]
-    assert "MNGR_HOST_DIR=/mngr" in host_env_values
-    pass_host_env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--pass-host-env"]
-    assert "MNGR_PREFIX" in pass_host_env_values
-    # We do NOT forward the local MNGR_HOST_DIR -- that's a local filesystem
-    # path that doesn't exist inside the container.
-    assert "MNGR_HOST_DIR" not in pass_host_env_values
-
-
-def test_build_mngr_create_command_lima_mode() -> None:
-    cmd, _api_key = _build_mngr_create_command(
-        launch_mode=LaunchMode.LIMA,
-        agent_name=AgentName("test-agent"),
-        agent_id=AgentId(),
-    )
-    assert "--template" in cmd
-    assert "lima" in cmd
-    assert "main" in cmd
-    assert "--reuse" in cmd
-    assert "--update" in cmd
-    assert "--new-host" in cmd
-    assert "--idle-mode" in cmd
-    assert cmd[cmd.index("--idle-mode") + 1] == "disabled"
-    # LIMA mode: address includes host name with lima provider suffix
-    assert cmd[2] == "test-agent@test-agent-host.lima"
-    host_env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--host-env"]
-    assert "MNGR_HOST_DIR=/mngr" in host_env_values
-    assert "MNGR_PREFIX" in [cmd[i + 1] for i, v in enumerate(cmd) if v == "--pass-host-env"]
-
-
-def test_build_mngr_create_command_adds_welcome_initial_message() -> None:
-    cmd, _api_key = _build_mngr_create_command(
-        launch_mode=LaunchMode.DEV,
-        agent_name=AgentName("test-agent"),
-        agent_id=AgentId(),
-    )
-    assert "--message" in cmd
-    # The welcome message is sent as the very first user prompt so a /welcome
-    # skill can produce a greeting without any other user interaction.
-    assert cmd[cmd.index("--message") + 1] == "/welcome"
-
-
-def test_build_mngr_create_command_with_host_env_file(tmp_path: Path) -> None:
-    env_path = tmp_path / ".env"
-    env_path.write_text("FOO=bar\n")
-    cmd, _api_key = _build_mngr_create_command(
-        launch_mode=LaunchMode.LOCAL,
-        agent_name=AgentName("test-agent"),
-        agent_id=AgentId(),
-        host_env_file=env_path,
-    )
-    assert "--host-env-file" in cmd
-    assert cmd[cmd.index("--host-env-file") + 1] == str(env_path)
-
-
-def test_build_mngr_create_command_omits_host_env_file_by_default() -> None:
-    cmd, _api_key = _build_mngr_create_command(
-        launch_mode=LaunchMode.LOCAL,
-        agent_name=AgentName("test-agent"),
-        agent_id=AgentId(),
-    )
-    assert "--host-env-file" not in cmd
-
-
-def test_build_mngr_create_command_cloud_mode() -> None:
-    cmd, _api_key = _build_mngr_create_command(
-        launch_mode=LaunchMode.CLOUD,
-        agent_name=AgentName("test-agent"),
-        agent_id=AgentId(),
-    )
-    assert "--template" in cmd
-    assert "vultr" in cmd
-    assert "main" in cmd
-    assert "--reuse" in cmd
-    assert "--update" in cmd
-    assert "--new-host" in cmd
-    assert "--idle-mode" in cmd
-    assert cmd[cmd.index("--idle-mode") + 1] == "disabled"
-    # CLOUD mode: address includes host name with vultr provider suffix
-    assert cmd[2] == "test-agent@test-agent-host.vultr"
-    host_env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--host-env"]
-    assert "MNGR_HOST_DIR=/mngr" in host_env_values
-    assert "MNGR_PREFIX" in [cmd[i + 1] for i, v in enumerate(cmd) if v == "--pass-host-env"]
-
-
-# -- clone_git_repo tests --
-
-
-def test_clone_git_repo_clones_local_repo(tmp_path: Path) -> None:
-    """Verify clone_git_repo can clone a local git repo."""
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "hello.txt").write_text("hello")
-    init_and_commit_git_repo(source, tmp_path)
-
-    dest = tmp_path / "dest"
-    clone_git_repo(GitUrl(str(source)), dest)
-
-    assert dest.exists()
-    assert (dest / "hello.txt").read_text() == "hello"
-
-
-def test_clone_git_repo_raises_on_bad_url(tmp_path: Path) -> None:
-    dest = tmp_path / "dest"
-    with pytest.raises(GitCloneError, match="git clone failed"):
-        clone_git_repo(GitUrl("/nonexistent/path"), dest)
-
-
-# -- checkout_branch tests --
-
-
-def test_checkout_branch_switches_to_existing_branch(tmp_path: Path) -> None:
-    """Verify checkout_branch can switch to an existing branch in a cloned repo."""
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "hello.txt").write_text("hello")
-    init_and_commit_git_repo(source, tmp_path)
-
-    # Create a branch in the source repo with a unique file
-    cg_create = ConcurrencyGroup(name="test-branch-create")
-    with cg_create:
-        cg_create.run_process_to_completion(command=["git", "checkout", "-b", "test/feature-branch-84923"], cwd=source)
-    (source / "feature.txt").write_text("feature")
-    add_and_commit_git_repo(source, tmp_path, message="add feature")
-
-    # Switch back to the default branch so that clone doesn't land on the feature branch
-    cg_switch = ConcurrencyGroup(name="test-branch-switch")
-    with cg_switch:
-        cg_switch.run_process_to_completion(
-            command=["git", "checkout", "-"],
-            cwd=source,
-        )
-
-    # Clone and checkout the branch
-    dest = tmp_path / "dest"
-    clone_git_repo(GitUrl(str(source)), dest)
-
-    # The feature file should NOT be present on the default branch
-    assert not (dest / "feature.txt").exists()
-
-    checkout_branch(dest, GitBranch("test/feature-branch-84923"))
-
-    # After checkout, the feature file should be present
-    assert (dest / "feature.txt").read_text() == "feature"
-
-
-def test_checkout_branch_raises_on_nonexistent_branch(tmp_path: Path) -> None:
-    """Verify checkout_branch raises GitOperationError for a missing branch."""
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "hello.txt").write_text("hello")
-    init_and_commit_git_repo(source, tmp_path)
-
-    dest = tmp_path / "dest"
-    clone_git_repo(GitUrl(str(source)), dest)
-
-    with pytest.raises(GitOperationError, match="git checkout failed"):
-        checkout_branch(dest, GitBranch("nonexistent/branch-72391"))
-
-
-# -- AgentCreator tests --
-
-
-def test_agent_creator_get_creation_info_returns_none_for_unknown(
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=Path("/tmp/test")),
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-    assert creator.get_creation_info(AgentId()) is None
-
-
-def test_agent_creator_start_creation_returns_agent_id_and_tracks_status(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    """Verify start_creation returns an agent ID and sets initial CLONING status.
-
-    The actual background thread will fail (since the git URL is invalid),
-    but the initial status should be immediately available.
-    """
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-
-    agent_id = creator.start_creation("file:///nonexistent-repo")
-    info = creator.get_creation_info(agent_id)
-
-    assert info is not None
-    assert info.agent_id == agent_id
-    assert info.status == AgentCreationStatus.CLONING
-    creator.wait_for_all()
-
-
-def test_agent_creator_start_creation_with_custom_name(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    """Verify start_creation accepts a custom agent name."""
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-    agent_id = creator.start_creation("file:///nonexistent-repo", agent_name="my-agent")
-    info = creator.get_creation_info(agent_id)
-    assert info is not None
-    creator.wait_for_all()
-
-
-def test_agent_creator_get_log_queue_returns_none_for_unknown(
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=Path("/tmp/test")),
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-    assert creator.get_log_queue(AgentId()) is None
-
-
-def test_agent_creator_get_log_queue_returns_queue_for_tracked(
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=Path("/tmp/test")),
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-    agent_id = creator.start_creation("file:///nonexistent-repo")
-    q = creator.get_log_queue(agent_id)
-    assert q is not None
-    creator.wait_for_all()
-
-
-def test_agent_creator_start_creation_with_local_path(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    """Verify start_creation with a nonexistent local path eventually reaches FAILED status."""
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-    agent_id = creator.start_creation("/nonexistent/local/path", agent_name="local-test")
-    # The background thread runs immediately and fails because the path doesn't exist.
-    # Wait for it to finish.
-    for _ in range(50):
-        info = creator.get_creation_info(agent_id)
-        if info is not None and info.status == AgentCreationStatus.FAILED:
-            break
-        threading.Event().wait(0.1)
-    info = creator.get_creation_info(agent_id)
-    assert info is not None
-    assert info.status == AgentCreationStatus.FAILED
-
-
-@pytest.mark.timeout(30)
-def test_run_mngr_create_raises_on_failure(tmp_path: Path) -> None:
-    """Verify run_mngr_create raises MngrCommandError when mngr create fails."""
-    with pytest.raises(MngrCommandError, match="mngr create failed"):
-        run_mngr_create(
-            launch_mode=LaunchMode.DEV,
-            workspace_dir=tmp_path,
-            agent_name=AgentName("test"),
-            agent_id=AgentId(),
-        )
-
-
-def test_make_log_callback_puts_lines_into_queue() -> None:
-    log_queue: queue_mod.Queue[str] = queue_mod.Queue()
-    callback = make_log_callback(log_queue)
-    callback("hello\n", True)
-    callback("world\n", False)
-    assert log_queue.get_nowait() == "hello"
-    assert log_queue.get_nowait() == "world"
-
-
-def test_agent_creator_accepts_server_port(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    """AgentCreator exposes its configured server_port for redirect-URL construction.
-
-    Regression guard: the happy-path redirect URL for a newly-created agent is
-    built as ``http://<agent-id>.localhost:<server_port>/`` inside the creation
-    thread. Earlier iterations of this branch emitted ``/forwarding/<id>/`` which
-    404'd after the legacy forwarding routes were deleted.
-    """
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-        server_port=12345,
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-    assert creator.server_port == 12345
-
-
-def test_agent_creator_server_port_defaults_to_zero(
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    """AgentCreator.server_port defaults to 0 for legacy test callers.
-
-    Tests that don't exercise the happy-path redirect can construct an
-    AgentCreator without explicitly passing a port.
-    """
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=Path("/tmp/test")),
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-    assert creator.server_port == 0
-
-
-# -- LEASED mode tests --
-
-
-def test_build_mngr_create_command_raises_for_leased_mode() -> None:
-    """LEASED mode should not use mngr create and must raise."""
-    with pytest.raises(MngrCommandError, match="LEASED mode does not use mngr create"):
-        _build_mngr_create_command(
-            launch_mode=LaunchMode.LEASED,
-            agent_name=AgentName("test-agent"),
-            agent_id=AgentId(),
-        )
-
-
-# -- _load_or_create_leased_host_keypair tests --
-
-
-def test_load_or_create_leased_host_keypair_generates_new_key(tmp_path: Path) -> None:
-    """First call should generate a new ed25519 keypair."""
-    private_key_path, public_key = _load_or_create_leased_host_keypair(tmp_path)
-
-    assert private_key_path.exists()
-    assert private_key_path.parent == tmp_path / "ssh" / "keys" / "leased_host"
-    assert private_key_path.name == "id_ed25519"
-    assert (private_key_path.parent / "id_ed25519.pub").exists()
-    assert public_key.startswith("ssh-ed25519 ")
-
-
-def test_load_or_create_leased_host_keypair_reuses_existing_key(tmp_path: Path) -> None:
-    """Second call should return the same keypair without regenerating."""
-    private_key_path_1, public_key_1 = _load_or_create_leased_host_keypair(tmp_path)
-    private_key_path_2, public_key_2 = _load_or_create_leased_host_keypair(tmp_path)
-
-    assert private_key_path_1 == private_key_path_2
-    assert public_key_1 == public_key_2
-
-
-# -- _write_dynamic_host_entry tests --
-
-
-def test_write_dynamic_host_entry_creates_valid_toml(tmp_path: Path) -> None:
-    """Writing a host entry should produce a valid TOML file."""
-    hosts_file = tmp_path / "dynamic_hosts.toml"
-    _write_dynamic_host_entry(
-        dynamic_hosts_file=hosts_file,
-        host_name="test-host",
-        address="10.0.0.1",
-        port=2222,
-        user="root",
-        key_file=Path("/home/user/.ssh/id_ed25519"),
-    )
-
-    content = tomllib.loads(hosts_file.read_text())
-    assert "test-host" in content
-    assert content["test-host"]["address"] == "10.0.0.1"
-    assert content["test-host"]["port"] == 2222
-    assert content["test-host"]["user"] == "root"
-    assert content["test-host"]["key_file"] == "/home/user/.ssh/id_ed25519"
-
-
-def test_write_dynamic_host_entry_appends_to_existing(tmp_path: Path) -> None:
-    """Writing a second host entry should preserve the first."""
-    hosts_file = tmp_path / "dynamic_hosts.toml"
-    _write_dynamic_host_entry(
-        dynamic_hosts_file=hosts_file,
-        host_name="host-a",
-        address="10.0.0.1",
-        port=22,
-        user="root",
-        key_file=Path("/key1"),
-    )
-    _write_dynamic_host_entry(
-        dynamic_hosts_file=hosts_file,
-        host_name="host-b",
-        address="10.0.0.2",
-        port=2222,
-        user="ubuntu",
-        key_file=Path("/key2"),
-    )
-
-    content = tomllib.loads(hosts_file.read_text())
-    assert "host-a" in content
-    assert "host-b" in content
-    assert content["host-a"]["address"] == "10.0.0.1"
-    assert content["host-b"]["address"] == "10.0.0.2"
-
-
-def test_write_dynamic_host_entry_creates_parent_directories(tmp_path: Path) -> None:
-    """The function should create parent directories if they do not exist."""
-    hosts_file = tmp_path / "nested" / "dir" / "dynamic_hosts.toml"
-    _write_dynamic_host_entry(
-        dynamic_hosts_file=hosts_file,
-        host_name="test-host",
-        address="10.0.0.1",
-        port=22,
-        user="root",
-        key_file=Path("/key"),
-    )
-    assert hosts_file.exists()
-
-
-# -- _remove_dynamic_host_entry tests --
-
-
-def test_remove_dynamic_host_entry_removes_section(tmp_path: Path) -> None:
-    """Removing a host entry should delete its section from the TOML file."""
-    hosts_file = tmp_path / "dynamic_hosts.toml"
-    _write_dynamic_host_entry(
-        dynamic_hosts_file=hosts_file,
-        host_name="host-a",
-        address="10.0.0.1",
-        port=22,
-        user="root",
-        key_file=Path("/key1"),
-    )
-    _write_dynamic_host_entry(
-        dynamic_hosts_file=hosts_file,
-        host_name="host-b",
-        address="10.0.0.2",
-        port=2222,
-        user="ubuntu",
-        key_file=Path("/key2"),
-    )
-
-    _remove_dynamic_host_entry(hosts_file, "host-a")
-
-    content = tomllib.loads(hosts_file.read_text())
-    assert "host-a" not in content
-    assert "host-b" in content
-
-
-def test_remove_dynamic_host_entry_noop_for_missing_file(tmp_path: Path) -> None:
-    """Removing from a nonexistent file should be a no-op."""
-    hosts_file = tmp_path / "nonexistent.toml"
-    _remove_dynamic_host_entry(hosts_file, "host-a")
-    assert not hosts_file.exists()
-
-
-def test_remove_dynamic_host_entry_noop_for_missing_section(tmp_path: Path) -> None:
-    """Removing a nonexistent section should be a no-op."""
-    hosts_file = tmp_path / "dynamic_hosts.toml"
-    _write_dynamic_host_entry(
-        dynamic_hosts_file=hosts_file,
-        host_name="host-a",
-        address="10.0.0.1",
-        port=22,
-        user="root",
-        key_file=Path("/key"),
-    )
-
-    _remove_dynamic_host_entry(hosts_file, "host-b")
-
-    content = tomllib.loads(hosts_file.read_text())
-    assert "host-a" in content
-
-
-# -- _save_lease_info / _load_lease_info / _remove_lease_info tests --
-
-
-def test_save_and_load_lease_info(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    test_uuid = UUID("a1b2c3d4-0000-0000-0000-000000000001")
-    _save_lease_info(tmp_path, agent_id, test_uuid)
-    loaded = _load_lease_info(tmp_path, agent_id)
-    assert loaded == test_uuid
-
-
-def test_load_lease_info_returns_none_for_missing(tmp_path: Path) -> None:
-    result = _load_lease_info(tmp_path, AgentId())
-    assert result is None
-
-
-def test_remove_lease_info_deletes_file(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    _save_lease_info(tmp_path, agent_id, UUID("e5f60000-0000-0000-0000-000000000002"))
-    _remove_lease_info(tmp_path, agent_id)
-    assert _load_lease_info(tmp_path, agent_id) is None
-
-
-def test_remove_lease_info_noop_for_missing(tmp_path: Path) -> None:
-    _remove_lease_info(tmp_path, AgentId())
-
-
-# -- release_leased_host tests --
-
-
-def test_release_leased_host_with_pool_client(
-    tmp_path: Path,
-    fake_pool_server: HostPoolClient,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    """release_leased_host removes the dynamic host entry, calls release, and removes lease info."""
-    paths = WorkspacePaths(data_dir=tmp_path)
-    agent_id = AgentId()
-    creator = AgentCreator(
-        paths=paths,
-        host_pool_client=fake_pool_server,
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-
-    # Set up state: lease info and a dynamic host entry
-    _save_lease_info(tmp_path, agent_id, UUID("00000000-0000-0000-0000-000000000007"))
-    dynamic_hosts_file = tmp_path / "ssh" / "dynamic_hosts.toml"
-    host_name = "leased-{}".format(agent_id)
-    _write_dynamic_host_entry(
-        dynamic_hosts_file=dynamic_hosts_file,
-        host_name=host_name,
-        address="10.0.0.1",
-        port=2222,
-        user="root",
-        key_file=Path("/tmp/key"),
-    )
-
-    creator.release_leased_host(agent_id, access_token="test-token")
-
-    # Lease info should be removed
-    assert _load_lease_info(tmp_path, agent_id) is None
-    # Dynamic host entry should be removed
-    content = tomllib.loads(dynamic_hosts_file.read_text())
-    assert host_name not in content
-
-
-def test_release_leased_host_noop_when_no_lease_info(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    """release_leased_host is a no-op when there is no lease info for the agent."""
-    paths = WorkspacePaths(data_dir=tmp_path)
-    creator = AgentCreator(
-        paths=paths,
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-    creator.release_leased_host(AgentId(), access_token="test-token")
-
-
-def test_release_leased_host_without_pool_client(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    """release_leased_host logs a warning but does not crash when host_pool_client is None."""
-    paths = WorkspacePaths(data_dir=tmp_path)
-    agent_id = AgentId()
-    creator = AgentCreator(
-        paths=paths,
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-
-    test_uuid = UUID("00000000-0000-0000-0000-000000000007")
-    _save_lease_info(tmp_path, agent_id, test_uuid)
-    creator.release_leased_host(agent_id, access_token="test-token")
-
-    # Lease info should NOT be removed (release was not successful)
-    assert _load_lease_info(tmp_path, agent_id) == test_uuid
-
-
-def test_agent_creator_has_host_pool_client_field(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    """AgentCreator accepts an optional host_pool_client field."""
-    paths = WorkspacePaths(data_dir=tmp_path)
-    creator_without = AgentCreator(
-        paths=paths,
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-    assert creator_without.host_pool_client is None
-
-    client = HostPoolClient(connector_url=RemoteServiceConnectorUrl("http://example.com"))
-    creator_with = AgentCreator(
-        paths=paths,
-        host_pool_client=client,
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-    assert creator_with.host_pool_client is not None
-
-
-def test_start_creation_leased_raises_without_pool_client(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    """start_creation with LEASED mode raises immediately if no host_pool_client."""
-    paths = WorkspacePaths(data_dir=tmp_path)
-    creator = AgentCreator(
-        paths=paths,
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-    with pytest.raises(MngrCommandError, match="host_pool_client"):
-        creator.start_creation(
-            repo_source="https://example.com/repo.git",
-            agent_name="test",
-            launch_mode=LaunchMode.LEASED,
-            access_token="test-token",
-            version="v0.1.0",
-        )
-
-
-def test_create_leased_agent_fails_without_access_token(
-    tmp_path: Path,
-    fake_pool_server: HostPoolClient,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    """start_creation raises synchronously when access_token is empty for LEASED mode."""
-    paths = WorkspacePaths(data_dir=tmp_path)
-    creator = AgentCreator(
-        paths=paths,
-        host_pool_client=fake_pool_server,
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-    with pytest.raises(MngrCommandError, match="access_token"):
-        creator.start_creation(
-            repo_source="https://example.com/repo.git",
-            agent_name="test",
-            launch_mode=LaunchMode.LEASED,
-            access_token="",
-            version="v0.1.0",
-        )
-
-
-def test_create_leased_agent_fails_without_version(
-    tmp_path: Path,
-    fake_pool_server: HostPoolClient,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    """start_creation raises synchronously when version is empty for LEASED mode."""
-    paths = WorkspacePaths(data_dir=tmp_path)
-    creator = AgentCreator(
-        paths=paths,
-        host_pool_client=fake_pool_server,
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-    with pytest.raises(MngrCommandError, match="version"):
-        creator.start_creation(
-            repo_source="https://example.com/repo.git",
-            agent_name="test",
-            launch_mode=LaunchMode.LEASED,
-            access_token="test-token",
-            version="",
-        )
-
-
-def test_create_leased_agent_leases_and_writes_dynamic_host(
-    tmp_path: Path,
-    fake_pool_server: HostPoolClient,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    """_create_leased_agent leases a host, writes dynamic host entry and lease info.
-
-    The mngr rename/start will fail (no real mngr), but the lease and
-    setup steps should complete, and cleanup should release the host.
-    """
-    paths = WorkspacePaths(data_dir=tmp_path)
-    creator = AgentCreator(
-        paths=paths,
-        host_pool_client=fake_pool_server,
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-    agent_id = creator.start_creation(
-        repo_source="https://example.com/repo.git",
-        agent_name="test-workspace",
-        launch_mode=LaunchMode.LEASED,
-        access_token="test-token",
-        version="v0.1.0",
-    )
-    creator.wait_for_all(timeout=10.0)
-    info = creator.get_creation_info(agent_id)
-    assert info is not None
-    # Will fail on mngr rename (not installed), but the lease should have been
-    # attempted and then cleaned up
-    assert info.status == AgentCreationStatus.FAILED
-
-
-def test_cleanup_failed_lease(
-    tmp_path: Path,
-    fake_pool_server: HostPoolClient,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    """_cleanup_failed_lease removes dynamic host entry, releases host, and removes lease info."""
-    paths = WorkspacePaths(data_dir=tmp_path)
-    creator = AgentCreator(
-        paths=paths,
-        host_pool_client=fake_pool_server,
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-    agent_id = AgentId()
-    dynamic_hosts_file = tmp_path / "ssh" / "dynamic_hosts.toml"
-    host_entry_name = "leased-{}".format(agent_id)
-
-    # Set up state as if a lease succeeded but setup failed
-    cleanup_uuid = UUID("00000000-0000-0000-0000-000000000099")
-    _save_lease_info(tmp_path, agent_id, cleanup_uuid)
-    _write_dynamic_host_entry(
-        dynamic_hosts_file=dynamic_hosts_file,
-        host_name=host_entry_name,
-        address="10.0.0.1",
-        port=2222,
-        user="root",
-        key_file=Path("/tmp/key"),
-    )
-
-    log_queue: queue_mod.Queue[str] = queue_mod.Queue()
-    creator._cleanup_failed_lease(
-        agent_id=agent_id,
-        host_db_id=cleanup_uuid,
-        access_token="test-token",
-        dynamic_hosts_file=dynamic_hosts_file,
-        host_entry_name=host_entry_name,
-        log_queue=log_queue,
-    )
-
-    # Dynamic host entry should be removed
-    content = tomllib.loads(dynamic_hosts_file.read_text())
-    assert host_entry_name not in content
-    # Lease info should be removed
-    assert _load_lease_info(tmp_path, agent_id) is None
-
-
-# -- Latchkey gateway env plumbing --
-
-
-def _sample_gateway_info(port: int) -> LatchkeyGatewayInfo:
-    return LatchkeyGatewayInfo(
-        agent_id=AgentId(),
-        host="127.0.0.1",
-        port=port,
-        pid=99999,
-        started_at=datetime.now(timezone.utc),
-    )
-
-
-def test_build_latchkey_gateway_url_dev_uses_dynamic_host_port() -> None:
-    url = _build_latchkey_gateway_url(LaunchMode.DEV, _sample_gateway_info(port=54321))
-    assert url == "http://127.0.0.1:54321"
-
-
-@pytest.mark.parametrize("launch_mode", [LaunchMode.LOCAL, LaunchMode.LIMA, LaunchMode.CLOUD])
-def test_build_latchkey_gateway_url_containerized_uses_fixed_agent_side_port(launch_mode: LaunchMode) -> None:
-    # Containerized / VM / VPS agents see the gateway on a reverse-tunneled
-    # fixed port inside their own 127.0.0.1 -- regardless of the dynamic
-    # host-side port the gateway is actually listening on.
-    url = _build_latchkey_gateway_url(launch_mode, _sample_gateway_info(port=54321))
-    assert url == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
-
-
-def test_build_mngr_create_command_injects_latchkey_gateway_env() -> None:
-    cmd, _api_key = _build_mngr_create_command(
-        launch_mode=LaunchMode.DEV,
-        agent_name=AgentName("test-agent"),
-        agent_id=AgentId(),
-        latchkey_gateway_url="http://127.0.0.1:5050",
-    )
-    env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--env"]
-    assert "LATCHKEY_GATEWAY=http://127.0.0.1:5050" in env_values
-
-
-def test_build_mngr_create_command_omits_latchkey_gateway_env_by_default() -> None:
-    cmd, _api_key = _build_mngr_create_command(
-        launch_mode=LaunchMode.DEV,
-        agent_name=AgentName("test-agent"),
-        agent_id=AgentId(),
-    )
-    env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--env"]
-    assert not any(v.startswith("LATCHKEY_GATEWAY=") for v in env_values)
-
-
-@pytest.mark.timeout(30)
-def test_agent_creator_cleans_up_pre_spawned_latchkey_gateway_on_failure(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    """When mngr create fails, any latchkey gateway pre-spawned for the agent must be torn down.
-
-    Uses a fake ``latchkey`` binary so this test does not require a real
-    Latchkey install. The agent creation itself fails because the "local
-    path" does not exist, which is the shortest path to exercising the
-    failure-cleanup branch.
-    """
-    fake_binary = tmp_path / "latchkey"
-    fake_binary.write_text(
-        "#!/usr/bin/env python3\n"
-        "import os, socket, signal, sys\n"
-        "host = os.environ['LATCHKEY_GATEWAY_LISTEN_HOST']\n"
-        "port = int(os.environ['LATCHKEY_GATEWAY_LISTEN_PORT'])\n"
-        "sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
-        "sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
-        "sock.bind((host, port))\n"
-        "sock.listen(128)\n"
-        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
-        "signal.pause()\n"
-    )
-    fake_binary.chmod(0o755)
-
-    latchkey = Latchkey(latchkey_binary=str(fake_binary))
-    latchkey.initialize(data_dir=tmp_path / "gateway-data")
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-        latchkey=latchkey,
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-    )
-    # "Local path" that does not exist -- mngr create will not even get
-    # the chance to fail; _create_agent_background aborts with MngrCommandError.
-    agent_id = creator.start_creation("/definitely/not/here", launch_mode=LaunchMode.DEV)
-
-    for _ in range(100):
-        info = creator.get_creation_info(agent_id)
-        if info is not None and info.status == AgentCreationStatus.FAILED:
-            break
-        threading.Event().wait(0.05)
-    info = creator.get_creation_info(agent_id)
-    assert info is not None
-    assert info.status == AgentCreationStatus.FAILED
-    creator.wait_for_all()
-
-    # No lingering gateway or record for this agent.
-    assert latchkey.get_gateway_info(agent_id) is None
-
-
-def test_is_git_worktree_returns_false_for_normal_repo(tmp_path: Path) -> None:
-    git_dir = tmp_path / ".git"
-    git_dir.mkdir()
-    assert _is_git_worktree(tmp_path) is False
-
-
-def test_is_git_worktree_returns_true_for_worktree(tmp_path: Path) -> None:
-    git_file = tmp_path / ".git"
-    git_file.write_text("gitdir: /some/other/path/.git/worktrees/foo")
-    assert _is_git_worktree(tmp_path) is True
-
-
-def test_is_git_worktree_returns_false_when_no_git(tmp_path: Path) -> None:
-    assert _is_git_worktree(tmp_path) is False
+def test_redact_url_credentials_in_text_strips_embedded_userinfo() -> None:
+    msg = "fatal: unable to access 'https://user:secret@github.com/x/y': bad"
+    assert _redact_url_credentials_in_text(msg) == "fatal: unable to access 'https://github.com/x/y': bad"
 
 
 def test_make_host_name_appends_host_suffix() -> None:
-    result = _make_host_name(AgentName("my-agent"))
-    assert result == "my-agent-host"
+    assert _make_host_name(AgentName("alpha")) == "alpha-host"
 
 
-def test_placeholder_anthropic_api_key_has_correct_prefix() -> None:
-    assert PLACEHOLDER_ANTHROPIC_API_KEY.startswith("sk-ant-api03-")
+def test_build_mngr_create_command_injects_latchkey_for_non_dev_modes() -> None:
+    """Container/VM/VPS/leased modes get the constant agent-side LATCHKEY_GATEWAY URL.
+
+    The reverse tunnel that ``LatchkeyDiscoveryHandler`` sets up post-discovery bridges
+    the agent's loopback at ``AGENT_SIDE_LATCHKEY_PORT`` to whichever host-side gateway
+    port the discovery handler picked, so the URL is the same constant every time.
+    """
+    expected = f"LATCHKEY_GATEWAY=http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
+    for mode in (LaunchMode.LOCAL, LaunchMode.LIMA, LaunchMode.CLOUD):
+        command, _ = _build_mngr_create_command(launch_mode=mode, agent_name=AgentName("hello"))
+        assert expected in command, f"{mode} command missing latchkey env: {command}"
+    # IMBUE_CLOUD requires an account to build the address; pass one and check the env var.
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        agent_name=AgentName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+    )
+    assert expected in command
 
 
-def test_placeholder_anthropic_api_key_has_realistic_length() -> None:
-    assert len(PLACEHOLDER_ANTHROPIC_API_KEY) >= 100
+def test_build_mngr_create_command_omits_latchkey_for_dev_mode_without_url() -> None:
+    """DEV with no explicit URL gets no latchkey wiring.
+
+    There's no constant agent-side URL to fall back on for DEV (no
+    reverse tunnel), so the caller is responsible for computing the
+    live gateway URL when it wants DEV agents to use latchkey.
+    """
+    command, _ = _build_mngr_create_command(launch_mode=LaunchMode.DEV, agent_name=AgentName("hello"))
+    joined = " ".join(command)
+    assert "LATCHKEY_GATEWAY" not in joined
+    # ``LATCHKEY_DISABLE_COUNTING`` is part of the latchkey wiring, so it's
+    # also absent when latchkey is not wired (DEV without explicit URL).
+    assert "LATCHKEY_DISABLE_COUNTING" not in joined
 
 
-def test_agent_creator_accepts_litellm_key_client(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    client = LiteLLMKeyClient(connector_url=RemoteServiceConnectorUrl("http://127.0.0.1:1"))
-    creator = AgentCreator(
+def test_build_mngr_create_command_disables_latchkey_counting_when_wired() -> None:
+    """Whenever latchkey is wired into the workspace, the workspace-side
+    ``latchkey`` CLI runs in client mode against the host-side gateway.
+    The gateway already counts as one active user, so the workspace must
+    set ``LATCHKEY_DISABLE_COUNTING=1`` to avoid double-counting every
+    agent as a separate goatcounter.com user.
+    """
+    # Non-DEV mode: gets the constant agent-side URL by default, so latchkey is wired.
+    for mode in (LaunchMode.LOCAL, LaunchMode.LIMA, LaunchMode.CLOUD):
+        command, _ = _build_mngr_create_command(launch_mode=mode, agent_name=AgentName("hello"))
+        assert "LATCHKEY_DISABLE_COUNTING=1" in command, f"{mode} command missing disable-counting env: {command}"
+    # DEV with explicit URL: latchkey is wired, so disable-counting is too.
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.DEV,
+        agent_name=AgentName("hello"),
+        latchkey_gateway_url="http://127.0.0.1:54321",
+    )
+    assert "LATCHKEY_DISABLE_COUNTING=1" in command
+
+
+def test_build_mngr_create_command_injects_latchkey_for_dev_mode_with_explicit_url() -> None:
+    """DEV with an explicit live gateway URL gets the full latchkey wiring.
+
+    The caller (``AgentCreator._maybe_compute_latchkey_gateway_url``)
+    queries the live gateway info for DEV, since DEV has no reverse
+    tunnel and must talk directly to the gateway's host port.
+    """
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.DEV,
+        agent_name=AgentName("hello"),
+        latchkey_gateway_url="http://127.0.0.1:54321",
+        latchkey_gateway_password="sup3rs3cret",
+        latchkey_permissions_override_jwt="eyJhbGc.fake.jwt",
+    )
+    assert "LATCHKEY_GATEWAY=http://127.0.0.1:54321" in command
+    assert "LATCHKEY_GATEWAY_PASSWORD=sup3rs3cret" in command
+    assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=eyJhbGc.fake.jwt" in command
+
+
+def test_build_mngr_create_command_explicit_url_overrides_constant_for_non_dev() -> None:
+    """Passing ``latchkey_gateway_url`` overrides the default for any mode."""
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.LOCAL,
+        agent_name=AgentName("hello"),
+        latchkey_gateway_url="http://127.0.0.1:9999",
+    )
+    assert "LATCHKEY_GATEWAY=http://127.0.0.1:9999" in command
+    # The constant agent-side URL is not also injected.
+    assert f"LATCHKEY_GATEWAY=http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}" not in command
+
+
+def test_build_mngr_create_command_injects_latchkey_password_when_supplied() -> None:
+    """Password is injected at create time so the agent's first
+    ``latchkey curl`` already authenticates to the password-protected
+    shared gateway -- no fragile post-create step required.
+    """
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.LOCAL,
+        agent_name=AgentName("hello"),
+        latchkey_gateway_password="sup3rs3cret",
+    )
+    assert "LATCHKEY_GATEWAY_PASSWORD=sup3rs3cret" in command
+
+
+def test_build_mngr_create_command_omits_latchkey_password_for_dev_mode() -> None:
+    """DEV mode skips all latchkey env injection (no tunnel, no gateway wiring)."""
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.DEV,
+        agent_name=AgentName("hello"),
+        latchkey_gateway_password="sup3rs3cret",
+    )
+    assert not any(arg.startswith("LATCHKEY_GATEWAY_PASSWORD=") for arg in command)
+
+
+def test_build_mngr_create_command_injects_latchkey_jwt_when_supplied() -> None:
+    """The permissions-override JWT is injected at create time so the
+    agent's env file has it from the very first service start. This is
+    what fixes the previous-design bug where post-create ``mngr provision
+    --env`` could silently fail and leave
+    ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` missing.
+    """
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.LOCAL,
+        agent_name=AgentName("hello"),
+        latchkey_permissions_override_jwt="eyJhbGc.fake.jwt",
+    )
+    assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=eyJhbGc.fake.jwt" in command
+
+
+def test_build_mngr_create_command_omits_latchkey_jwt_for_dev_mode() -> None:
+    command, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.DEV,
+        agent_name=AgentName("hello"),
+        latchkey_permissions_override_jwt="eyJhbGc.fake.jwt",
+    )
+    assert not any(arg.startswith("LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=") for arg in command)
+
+
+def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() -> None:
+    command, api_key = _build_mngr_create_command(
+        launch_mode=LaunchMode.LOCAL,
+        agent_name=AgentName("hello"),
+    )
+    assert "--template" in command
+    assert "main" in command
+    # The /welcome message now lives in forever-claude-template's
+    # [create_templates.main] section, so the explicit --message arg is gone.
+    assert "--message" not in command
+    assert api_key
+    # minds no longer pre-generates an agent id; mngr generates one and we
+    # parse it out of the JSONL ``created`` event in run_mngr_create.
+    assert "--id" not in command
+    # ``--reuse --update`` keeps re-deploys of the same workspace name
+    # idempotent on local-host modes.
+    assert "--reuse" in command
+    assert "--update" in command
+    # We always emit JSONL so the canonical agent id can be parsed from the
+    # trailing ``"event": "created"`` line.
+    assert "--format" in command
+    assert "jsonl" in command
+
+
+def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> None:
+    command, api_key = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        agent_name=AgentName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+        imbue_cloud_repo_url="https://github.com/imbue-ai/forever-claude-template",
+        imbue_cloud_branch_or_tag="v1.2.3",
+    )
+    joined = " ".join(command)
+    # Address points at the imbue_cloud_<slug> provider so mngr routes
+    # create_host to ImbueCloudProvider.
+    assert "@hello-host.imbue_cloud_alice-imbue-com" in joined
+    # IMBUE_CLOUD does not pass --reuse / --update (each lease is one-shot)
+    # nor --id (the canonical id is parsed from the JSONL ``created`` event).
+    assert "--id" not in command
+    assert "--reuse" not in command
+    assert "--update" not in command
+    assert api_key
+    # Lease attributes flow through --build-arg.
+    assert "-b" in command
+    assert "repo_url=https://github.com/imbue-ai/forever-claude-template" in command
+    assert "repo_branch_or_tag=v1.2.3" in command
+    # No secret env vars in argv: forwarding is declared by the FCT
+    # ``imbue_cloud`` template's own ``pass_host_env`` and the values live
+    # in the subprocess env ``run_mngr_create`` populates.
+    assert "ANTHROPIC_API_KEY" not in joined
+    assert "ANTHROPIC_BASE_URL" not in joined
+    assert "GH_TOKEN" not in joined
+    assert "--pass-host-env" not in command
+    # IMBUE_CLOUD now uses the symmetric ``--template main --template imbue_cloud``
+    # shape (mirroring how DEV/LOCAL/LIMA/CLOUD use ``--template main --template <provider>``).
+    # The provider-specific knobs (idle_mode, pass_host_env) live in the
+    # ``imbue_cloud`` template instead of being inlined here.
+    assert "--template" in command
+    template_args = [command[i + 1] for i, arg in enumerate(command) if arg == "--template" and i + 1 < len(command)]
+    assert "main" in template_args
+    assert "imbue_cloud" in template_args
+    # ``--idle-mode disabled`` also moved into the template.
+    assert "--idle-mode" not in command
+    assert api_key
+
+
+def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
+    """Secret forwarding lives in FCT, not minds. The command line never carries
+    ``--pass-(host-)env`` flags or secret values for any compute mode."""
+    for mode, account in (
+        (LaunchMode.DEV, None),
+        (LaunchMode.LOCAL, None),
+        (LaunchMode.LIMA, None),
+        (LaunchMode.CLOUD, None),
+        (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
+    ):
+        command, _ = _build_mngr_create_command(
+            launch_mode=mode,
+            agent_name=AgentName("hello"),
+            imbue_cloud_account=account,
+        )
+        joined = " ".join(command)
+        assert "--pass-env" not in command, f"{mode} should not inline --pass-env"
+        # IMBUE_CLOUD compute *does* still get _remote_host_env_flags() which
+        # uses --pass-host-env MNGR_PREFIX -- that one is unrelated to the
+        # secrets we moved into FCT, so we only forbid the secret names here.
+        assert "ANTHROPIC_API_KEY" not in joined, f"{mode} leaked ANTHROPIC_API_KEY"
+        assert "ANTHROPIC_BASE_URL" not in joined, f"{mode} leaked ANTHROPIC_BASE_URL"
+        assert "GH_TOKEN" not in joined, f"{mode} leaked GH_TOKEN"
+
+
+def test_is_git_worktree_returns_false_for_nonexistent_path(tmp_path) -> None:
+    assert not _is_git_worktree(tmp_path / "no-such-dir")
+
+
+def _make_test_creator(
+    tmp_path,
+    *,
+    mngr_forward_port: int = 0,
+    preauth_cookie: str = "",
+    timeout_seconds: float = 1.0,
+    poll_interval_seconds: float = 0.05,
+    probe_timeout_seconds: float = 0.5,
+) -> AgentCreator:
+    paths = WorkspacePaths(data_dir=tmp_path)
+    cg = ConcurrencyGroup(name="agent-creator-test")
+    cg.__enter__()
+    return AgentCreator(
+        paths=paths,
+        root_concurrency_group=cg,
+        notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
+        mngr_forward_port=mngr_forward_port,
+        mngr_forward_preauth_cookie=preauth_cookie,
+        workspace_ready_timeout_seconds=timeout_seconds,
+        workspace_ready_poll_interval_seconds=poll_interval_seconds,
+        workspace_ready_probe_timeout_seconds=probe_timeout_seconds,
+    )
+
+
+class _ScriptedRequestHandler(BaseHTTPRequestHandler):
+    """Returns 503 for the first ``not_ready_count`` requests, then 200."""
+
+    not_ready_count: int = 0
+    request_count: int = 0
+    lock: threading.Lock = threading.Lock()
+
+    def do_GET(self) -> None:
+        with type(self).lock:
+            type(self).request_count += 1
+            attempt = type(self).request_count
+        if attempt <= type(self).not_ready_count:
+            self.send_response(503)
+            self.end_headers()
+            self.wfile.write(b"not yet")
+        else:
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
+
+
+def _start_scripted_server(not_ready_count: int) -> tuple[HTTPServer, threading.Thread, int]:
+    handler_cls = type(
+        "_ScopedHandler",
+        (_ScriptedRequestHandler,),
+        {"not_ready_count": not_ready_count, "request_count": 0, "lock": threading.Lock()},
+    )
+    server = HTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    return server, thread, port
+
+
+def test_wait_for_workspace_ready_short_circuits_when_disabled(tmp_path) -> None:
+    """Default construction (``mngr_forward_port=0``) skips the probe entirely."""
+    creator = _make_test_creator(tmp_path, mngr_forward_port=0, preauth_cookie="anything")
+    log_q: queue.Queue[str] = queue.Queue()
+    aid = AgentId.generate()
+    started = time.monotonic()
+    creator._wait_for_workspace_ready(aid, log_q)
+    # Returns immediately -- no network calls, no log lines.
+    assert time.monotonic() - started < 0.1
+    assert log_q.empty()
+
+
+def test_wait_for_workspace_ready_short_circuits_when_no_preauth(tmp_path) -> None:
+    """Empty preauth cookie also disables the probe (the plugin requires auth)."""
+    creator = _make_test_creator(tmp_path, mngr_forward_port=8421, preauth_cookie="")
+    log_q: queue.Queue[str] = queue.Queue()
+    aid = AgentId.generate()
+    started = time.monotonic()
+    creator._wait_for_workspace_ready(aid, log_q)
+    assert time.monotonic() - started < 0.1
+    assert log_q.empty()
+
+
+def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
+    """The probe stops as soon as the (subdomain) endpoint returns 200."""
+    server, _thread, port = _start_scripted_server(not_ready_count=2)
+    try:
+        creator = _make_test_creator(
+            tmp_path,
+            mngr_forward_port=port,
+            preauth_cookie="any-preauth",
+            timeout_seconds=2.0,
+            poll_interval_seconds=0.02,
+            probe_timeout_seconds=0.5,
+        )
+        log_q: queue.Queue[str] = queue.Queue()
+        # Use a localhost URL that resolves to the same server. Subdomains
+        # of localhost all resolve to 127.0.0.1, so an http.server bound to
+        # 127.0.0.1 answers regardless of the Host header. Construct a
+        # plausible-looking AgentId so the probe URL is well-formed.
+        aid = AgentId.generate()
+        creator._wait_for_workspace_ready(aid, log_q)
+    finally:
+        server.shutdown()
+    drained: list[str] = []
+    while not log_q.empty():
+        drained.append(log_q.get_nowait())
+    assert any("Waiting for workspace" in line for line in drained)
+    assert any("ready" in line.lower() for line in drained)
+
+
+def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
+    """If the probe times out, we still return so the caller can publish the redirect."""
+    server, _thread, port = _start_scripted_server(not_ready_count=10**6)
+    try:
+        creator = _make_test_creator(
+            tmp_path,
+            mngr_forward_port=port,
+            preauth_cookie="any-preauth",
+            timeout_seconds=0.3,
+            poll_interval_seconds=0.05,
+            probe_timeout_seconds=0.2,
+        )
+        log_q: queue.Queue[str] = queue.Queue()
+        aid = AgentId.generate()
+        started = time.monotonic()
+        creator._wait_for_workspace_ready(aid, log_q)
+        elapsed = time.monotonic() - started
+    finally:
+        server.shutdown()
+    # The probe should give up around the timeout; allow a generous margin
+    # so we don't flake under load.
+    assert 0.2 <= elapsed <= 1.5
+    drained: list[str] = []
+    while not log_q.empty():
+        drained.append(log_q.get_nowait())
+    assert any("did not become ready" in line for line in drained)
+
+
+# ---------------------------------------------------------------------------
+# AI provider dispatch tests
+#
+# These exercise the new ``ai_provider`` match in ``_create_agent_background``
+# end-to-end via ``start_creation`` -- the ``mngr create`` subprocess fails
+# (we point at a nonexistent local path) but by then we've already gone
+# through the AI-provider dispatch, so the recorded calls on the fake CLI
+# tell us whether the right branch ran. The branch goal explicitly created
+# the new combination "AIProvider.IMBUE_CLOUD with launch_mode != IMBUE_CLOUD",
+# which we cover here.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingImbueCloudCli(FakeImbueCloudCli):
+    """``FakeImbueCloudCli`` that records ``create_litellm_key`` calls.
+
+    Returns a stub :class:`LiteLLMKeyMaterial` instead of spawning the real
+    ``mngr imbue_cloud keys litellm create`` subprocess so the test can run
+    fully offline.
+    """
+
+    create_calls: list[dict[str, object]] = Field(default_factory=list)
+
+    def create_litellm_key(
+        self,
+        *,
+        account: str,
+        alias: str | None = None,
+        max_budget: float | None = None,
+        budget_duration: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> LiteLLMKeyMaterial:
+        self.create_calls.append(
+            {
+                "account": account,
+                "alias": alias,
+                "max_budget": max_budget,
+                "budget_duration": budget_duration,
+                "metadata": dict(metadata) if metadata is not None else None,
+            }
+        )
+        return LiteLLMKeyMaterial(
+            key=SecretStr("sk-fake-litellm-key"),
+            base_url=AnyUrl("https://litellm.example.com"),
+        )
+
+
+def _make_fake_repo(tmp_path: Path) -> Path:
+    """Create a directory that ``_create_agent_background`` will accept as a local
+    repo (it just needs to exist and not look like a git worktree)."""
+    repo_dir = tmp_path / "fake-repo"
+    repo_dir.mkdir()
+    return repo_dir
+
+
+def _make_creator_with_cli(tmp_path: Path, cli: _RecordingImbueCloudCli) -> AgentCreator:
+    cg = ConcurrencyGroup(name="agent-creator-test")
+    cg.__enter__()
+    return AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path),
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-        litellm_key_client=client,
+        root_concurrency_group=cg,
+        notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
+        imbue_cloud_cli=cli,
     )
-    assert creator.litellm_key_client is client
 
 
-def test_agent_creator_litellm_key_client_defaults_to_none(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path),
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
+def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadline_seconds: float = 10.0) -> None:
+    """Poll ``get_creation_info`` until status is DONE or FAILED, then return."""
+    deadline = time.monotonic() + deadline_seconds
+    while time.monotonic() < deadline:
+        info = creator.get_creation_info(creation_id)
+        if info is not None and info.status in (AgentCreationStatus.DONE, AgentCreationStatus.FAILED):
+            return
+        threading.Event().wait(0.05)
+    raise AssertionError(f"creation {creation_id} did not finish within {deadline_seconds}s")
+
+
+def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_path: Path) -> None:
+    """The AIProvider.IMBUE_CLOUD branch must mint a LiteLLM key even when the compute
+    provider is not IMBUE_CLOUD. The actual ``mngr create`` invocation will fail (no
+    real binary / no real repo) but the key-mint must happen first."""
+    cli = _RecordingImbueCloudCli(parent_concurrency_group=ConcurrencyGroup(name="recording-cli"))
+    creator = _make_creator_with_cli(tmp_path, cli)
+
+    creation_id = creator.start_creation(
+        repo_source=str(_make_fake_repo(tmp_path)),
+        agent_name="my-agent",
+        launch_mode=LaunchMode.LOCAL,
+        ai_provider=AIProvider.IMBUE_CLOUD,
+        account_email="alice@imbue.com",
     )
-    assert creator.litellm_key_client is None
+    _wait_until_finished(creator, creation_id)
+
+    assert len(cli.create_calls) == 1
+    assert cli.create_calls[0]["account"] == "alice@imbue.com"
+    assert cli.create_calls[0]["metadata"] == {"agent_name": "my-agent"}
 
 
-def test_build_inject_anthropic_command_sets_key_and_base_url() -> None:
-    cmd = _build_inject_anthropic_command(
-        litellm_key="sk-litellm-real-key-abc123",
-        litellm_base_url="https://proxy.modal.run/anthropic",
-        env_path="/mngr/agents/test-id/env",
+def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
+    """The API_KEY branch uses the user-supplied key directly and must never call
+    ``create_litellm_key``."""
+    cli = _RecordingImbueCloudCli(parent_concurrency_group=ConcurrencyGroup(name="recording-cli"))
+    creator = _make_creator_with_cli(tmp_path, cli)
+
+    creation_id = creator.start_creation(
+        repo_source=str(_make_fake_repo(tmp_path)),
+        agent_name="my-agent",
+        launch_mode=LaunchMode.LOCAL,
+        ai_provider=AIProvider.API_KEY,
+        anthropic_api_key="sk-ant-user-supplied",
     )
-    assert "ANTHROPIC_API_KEY=sk-litellm-real-key-abc123" in cmd
-    assert "ANTHROPIC_BASE_URL=https://proxy.modal.run/anthropic" in cmd
-    assert "/mngr/agents/test-id/env" in cmd
+    _wait_until_finished(creator, creation_id)
+
+    assert cli.create_calls == []
 
 
-def test_build_inject_anthropic_command_removes_old_values_first() -> None:
-    cmd = _build_inject_anthropic_command(
-        litellm_key="sk-test",
-        litellm_base_url="https://example.com/anthropic",
-        env_path="/tmp/env",
+def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
+    """The SUBSCRIPTION branch injects no Anthropic creds and must never call
+    ``create_litellm_key``."""
+    cli = _RecordingImbueCloudCli(parent_concurrency_group=ConcurrencyGroup(name="recording-cli"))
+    creator = _make_creator_with_cli(tmp_path, cli)
+
+    creation_id = creator.start_creation(
+        repo_source=str(_make_fake_repo(tmp_path)),
+        agent_name="my-agent",
+        launch_mode=LaunchMode.LOCAL,
+        ai_provider=AIProvider.SUBSCRIPTION,
     )
-    assert "sed -i '/^ANTHROPIC_API_KEY=/d'" in cmd
-    assert "sed -i '/^ANTHROPIC_BASE_URL=/d'" in cmd
+    _wait_until_finished(creator, creation_id)
+
+    assert cli.create_calls == []
 
 
-def test_build_patch_claude_config_command_targets_correct_path() -> None:
-    agent_id = AgentId()
-    cmd = _build_patch_claude_config_command(
-        litellm_key="sk-litellm-real-key-xyz",
-        agent_id=agent_id,
+def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path: Path) -> None:
+    """The API_KEY branch must reject an empty key with a specific error rather than
+    silently falling through to mngr create with no key set."""
+    cli = _RecordingImbueCloudCli(parent_concurrency_group=ConcurrencyGroup(name="recording-cli"))
+    creator = _make_creator_with_cli(tmp_path, cli)
+
+    creation_id = creator.start_creation(
+        repo_source=str(_make_fake_repo(tmp_path)),
+        agent_name="my-agent",
+        launch_mode=LaunchMode.LOCAL,
+        ai_provider=AIProvider.API_KEY,
+        anthropic_api_key="",
     )
-    expected_path = "/mngr/agents/{}/plugin/claude/anthropic/.claude.json".format(agent_id)
-    assert expected_path in cmd
-    assert "sk-litellm-real-key-xyz" in cmd
+    _wait_until_finished(creator, creation_id)
 
-
-def test_build_patch_claude_config_command_uses_python_json() -> None:
-    cmd = _build_patch_claude_config_command(
-        litellm_key="sk-test-key-0123456789",
-        agent_id=AgentId(),
-    )
-    assert "python3" in cmd
-    assert "primaryApiKey" in cmd
-    assert "customApiKeyResponses" in cmd
-    assert "sk-test-key-0123456789"[-20:] in cmd
+    info = creator.get_creation_info(creation_id)
+    assert info is not None
+    assert info.status is AgentCreationStatus.FAILED
+    assert info.error is not None and "API_KEY" in info.error

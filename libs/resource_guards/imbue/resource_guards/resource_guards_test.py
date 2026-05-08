@@ -596,12 +596,15 @@ def test_create_sdk_method_guard_async(
     monkeypatch.setenv("_PYTEST_GUARD_PHASE", "call")
     monkeypatch.setenv("_PYTEST_GUARD_TEST_ASYNC", "block")
     monkeypatch.setenv("_PYTEST_GUARD_TRACKING_DIR", str(tmp_path))
+    # asyncio.get_event_loop() is deprecated and now raises RuntimeError in
+    # CI when there's no running loop; use asyncio.run() which manages a
+    # fresh loop per call.
     with pytest.raises(ResourceGuardViolation):
-        asyncio.get_event_loop().run_until_complete(Client().call(5))
+        asyncio.run(Client().call(5))
 
     # Guard allows
     monkeypatch.setenv("_PYTEST_GUARD_TEST_ASYNC", "allow")
-    result = asyncio.get_event_loop().run_until_complete(Client().call(5))
+    result = asyncio.run(Client().call(5))
     assert result == 10
 
     # Cleanup restores
@@ -635,7 +638,7 @@ def test_create_sdk_method_guard_async_gen(
             pass
 
     with pytest.raises(ResourceGuardViolation):
-        asyncio.get_event_loop().run_until_complete(collect_blocked())
+        asyncio.run(collect_blocked())
 
     # Guard allows
     monkeypatch.setenv("_PYTEST_GUARD_TEST_AGEN", "allow")
@@ -646,7 +649,7 @@ def test_create_sdk_method_guard_async_gen(
             results.append(item)
         return results
 
-    results = asyncio.get_event_loop().run_until_complete(collect_allowed())
+    results = asyncio.run(collect_allowed())
     assert results == [1, 2]
 
     # Cleanup restores

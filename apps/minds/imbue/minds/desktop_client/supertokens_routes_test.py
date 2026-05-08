@@ -1,45 +1,53 @@
 """Unit tests for the minds desktop client's supertokens_routes helpers.
 
-End-to-end flow through the FastAPI app is covered by
-``test_supertokens_auth_e2e.py``; these tests isolate the non-HTTP helpers
-(OAuth CSRF state tracking, etc.) so they run fast and without external deps.
+The OAuth flow now lives entirely inside ``mngr imbue_cloud auth oauth``;
+the desktop server only spawns that subprocess and tracks per-flow status
+so the frontend can show "waiting" / "done" without blocking on the
+subprocess. These tests cover that small status registry.
 """
 
-from imbue.minds.desktop_client.supertokens_routes import _consume_oauth_state
-from imbue.minds.desktop_client.supertokens_routes import _extract_state_from_auth_url
-from imbue.minds.desktop_client.supertokens_routes import _remember_oauth_state
+import time
+
+from imbue.minds.desktop_client.supertokens_routes import _OAuthFlowStatus
+from imbue.minds.desktop_client.supertokens_routes import _read_oauth_status
+from imbue.minds.desktop_client.supertokens_routes import _record_oauth_status
 
 
-def test_extract_state_returns_state_when_present() -> None:
-    url = "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=X&state=abc123&redirect_uri=Y"
-    assert _extract_state_from_auth_url(url) == "abc123"
+def test_record_then_read_returns_same_status() -> None:
+    status = _OAuthFlowStatus(state="running", deadline=time.monotonic() + 60)
+    _record_oauth_status("flow-aaa", status)
+    fetched = _read_oauth_status("flow-aaa")
+    assert fetched is not None
+    assert fetched.state == "running"
 
 
-def test_extract_state_returns_none_when_absent() -> None:
-    url = "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=X"
-    assert _extract_state_from_auth_url(url) is None
+def test_read_unknown_flow_returns_none() -> None:
+    assert _read_oauth_status("never-recorded") is None
 
 
-def test_remember_then_consume_returns_state() -> None:
-    _remember_oauth_state("google", "state-token-42")
-    assert _consume_oauth_state("google") == "state-token-42"
+def test_record_overwrites_previous_status_for_same_flow() -> None:
+    deadline = time.monotonic() + 60
+    _record_oauth_status("flow-bbb", _OAuthFlowStatus(state="running", deadline=deadline))
+    _record_oauth_status(
+        "flow-bbb",
+        _OAuthFlowStatus(
+            state="done",
+            user_id="user-xyz",
+            email="alice@example.com",
+            deadline=deadline,
+        ),
+    )
+    fetched = _read_oauth_status("flow-bbb")
+    assert fetched is not None
+    assert fetched.state == "done"
+    assert fetched.email == "alice@example.com"
 
 
-def test_consume_is_single_use() -> None:
-    """A consumed state is removed so a replay of the callback fails."""
-    _remember_oauth_state("github", "state-replay-target")
-    first = _consume_oauth_state("github")
-    second = _consume_oauth_state("github")
-    assert first == "state-replay-target"
-    assert second is None
-
-
-def test_consume_without_prior_remember_returns_none() -> None:
-    assert _consume_oauth_state("provider-never-seen") is None
-
-
-def test_remember_replaces_previous_state_for_same_provider() -> None:
-    """Only the most recent OAuth attempt's state is remembered per provider."""
-    _remember_oauth_state("google", "first")
-    _remember_oauth_state("google", "second")
-    assert _consume_oauth_state("google") == "second"
+def test_expired_flows_are_pruned_on_next_read() -> None:
+    """A flow whose deadline has passed is dropped on the next access."""
+    expired_deadline = time.monotonic() - 1
+    _record_oauth_status("flow-ccc", _OAuthFlowStatus(state="done", deadline=expired_deadline))
+    # Recording another flow triggers pruning of the expired one.
+    _record_oauth_status("flow-ddd", _OAuthFlowStatus(state="running", deadline=time.monotonic() + 60))
+    assert _read_oauth_status("flow-ccc") is None
+    assert _read_oauth_status("flow-ddd") is not None

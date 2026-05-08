@@ -51,7 +51,7 @@ class ConnectCliOptions(AgentFilterCliOptions, CommonCliOptions):
     agent: str | None
     start: bool
     reconnect: bool
-    attach_command: str | None
+    session_command: str | None
     allow_unknown_host: bool
 
 
@@ -328,7 +328,7 @@ def _build_connection_options(opts: ConnectCliOptions, mngr_ctx: MngrContext) ->
         is_reconnect=opts.reconnect,
         retry_count=mngr_ctx.config.retry.connect_retry_times,
         retry_delay=mngr_ctx.config.retry.connect_retry_delay,
-        attach_command=opts.attach_command,
+        session_command=opts.session_command,
         is_unknown_host_allowed=opts.allow_unknown_host,
     )
 
@@ -350,7 +350,7 @@ def _build_connection_options(opts: ConnectCliOptions, mngr_ctx: MngrContext) ->
     show_default=True,
     help="Automatically reconnect if dropped [future]",
 )
-@optgroup.option("--attach-command", help="Command to run instead of attaching to main session [future]")
+@optgroup.option("--session-command", help="Command to run instead of attaching to main session [future]")
 @optgroup.option(
     "--allow-unknown-host/--no-allow-unknown-host",
     "allow_unknown_host",
@@ -370,8 +370,8 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
 
     # Run this command instead of the default tmux attach
     # Useful for running a different shell or command in the agent's environment
-    if opts.attach_command is not None:
-        raise NotImplementedError("--attach-command is not implemented yet")
+    if opts.session_command is not None:
+        raise NotImplementedError("--session-command is not implemented yet")
 
     # Disable automatic reconnection if the connection is dropped
     # Default behavior (--reconnect) should automatically reconnect

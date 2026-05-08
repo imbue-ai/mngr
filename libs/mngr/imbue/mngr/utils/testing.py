@@ -496,6 +496,31 @@ def _get_descendant_pids(pid: str) -> list[str]:
     return descendants
 
 
+_TMUX_CLEANUP_SUBPROCESS_TIMEOUT_SECONDS: float = 5.0
+
+
+def _run_with_timeout(*args: str) -> "subprocess.CompletedProcess[bytes]":
+    """Run a subprocess command with a hard timeout, swallowing TimeoutExpired.
+
+    Test cleanup runs inside the test's ``pytest-timeout`` window (because
+    ``timeout_func_only = true`` counts ``ExitStack`` teardown as test-body
+    time). A hung ``tmux`` or ``pkill`` here would block the test indefinitely
+    -- even though the next cleanup steps (SIGTERM/SIGKILL via os.kill) do
+    not depend on the previous tmux call having returned. Capping every
+    subprocess.run lets cleanup keep making forward progress instead of
+    stalling on a single stuck step.
+    """
+    try:
+        return subprocess.run(
+            list(args),
+            capture_output=True,
+            timeout=_TMUX_CLEANUP_SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        # Empty placeholder so callers checking returncode don't crash.
+        return subprocess.CompletedProcess(args=list(args), returncode=-1)
+
+
 def cleanup_tmux_session(session_name: str) -> None:
     """Clean up a tmux session, all its processes, and any associated activity monitors.
 
@@ -510,14 +535,14 @@ def cleanup_tmux_session(session_name: str) -> None:
     3. Kills the tmux session itself
     4. Sends SIGKILL to any processes that survived
     5. Kills any orphaned activity monitors for this session
+
+    Every ``subprocess.run`` is bounded by ``_TMUX_CLEANUP_SUBPROCESS_TIMEOUT_SECONDS``;
+    a hung ``tmux`` step can't block the rest of the cleanup.
     """
     # Collect all pane PIDs and their descendants before killing the session.
     # Guard with has-session first: list-panes -s does not support the = prefix for
     # exact matching, so it would prefix-match a different session if this one is gone.
-    has_result = subprocess.run(
-        ["tmux", "has-session", "-t", f"={session_name}"],
-        capture_output=True,
-    )
+    has_result = _run_with_timeout("tmux", "has-session", "-t", f"={session_name}")
     all_pids: list[str] = []
     if has_result.returncode == 0:
         # Session exists -- safe to list panes (no risk of prefix-matching a different session).
@@ -526,6 +551,8 @@ def cleanup_tmux_session(session_name: str) -> None:
             ["tmux", "list-panes", "-s", "-t", session_name, "-F", "#{pane_pid}"],
             capture_output=True,
             text=True,
+            timeout=_TMUX_CLEANUP_SUBPROCESS_TIMEOUT_SECONDS,
+            check=False,
         )
         if result.returncode == 0 and result.stdout.strip():
             for pane_pid in result.stdout.strip().split("\n"):
@@ -541,10 +568,7 @@ def cleanup_tmux_session(session_name: str) -> None:
             pass
 
     # Kill the tmux session (sends SIGHUP to remaining pane processes)
-    subprocess.run(
-        ["tmux", "kill-session", "-t", f"={session_name}"],
-        capture_output=True,
-    )
+    _run_with_timeout("tmux", "kill-session", "-t", f"={session_name}")
 
     # SIGKILL any survivors
     for pid in all_pids:
@@ -554,10 +578,7 @@ def cleanup_tmux_session(session_name: str) -> None:
             pass
 
     # Kill any orphaned activity monitors for this session (started with nohup, detached)
-    subprocess.run(
-        ["pkill", "-9", "-f", f"list-panes -t {session_name}"],
-        capture_output=True,
-    )
+    _run_with_timeout("pkill", "-9", "-f", f"list-panes -t {session_name}")
 
 
 @contextmanager
