@@ -10,7 +10,9 @@ import subprocess
 import tempfile
 from collections.abc import Callable
 from collections.abc import Generator
+from contextlib import AbstractContextManager
 from functools import wraps
+from io import StringIO
 from pathlib import Path
 from typing import Any
 from typing import Mapping
@@ -54,6 +56,8 @@ from imbue.modal_proxy.interface import ModalInterface
 from imbue.modal_proxy.interface import SandboxInterface
 from imbue.modal_proxy.interface import SecretInterface
 from imbue.modal_proxy.interface import VolumeInterface
+from imbue.modal_proxy.log_utils import ModalLoguruWriter
+from imbue.modal_proxy.log_utils import enable_modal_output_capture
 
 # ---------------------------------------------------------------------------
 # Exception translation
@@ -608,3 +612,9 @@ class DirectModalInterface(ModalInterface):
         if result.returncode != 0:
             output = (result.stdout + "\n" + result.stderr).strip()
             raise ModalProxyError(f"Failed to deploy {script_path}: {output}")
+
+    def enable_output_capture(
+        self, is_logging_to_loguru: bool = True
+    ) -> AbstractContextManager[tuple[StringIO, ModalLoguruWriter | None]]:
+        """Tee Modal SDK output into the yielded StringIO and optionally into loguru."""
+        return enable_modal_output_capture(is_logging_to_loguru=is_logging_to_loguru)

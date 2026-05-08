@@ -6,6 +6,9 @@ Modal credentials or SSH connections.
 """
 
 import contextlib
+import json
+import subprocess
+import sys
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -40,6 +43,7 @@ from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
 from imbue.mngr_modal.backend import ModalAppContextHandle
 from imbue.mngr_modal.backend import ModalProviderBackend
+from imbue.mngr_modal.backend import STATE_VOLUME_SUFFIX
 from imbue.mngr_modal.backend import _create_environment
 from imbue.mngr_modal.backend import _enter_ephemeral_app_context_with_env_retry
 from imbue.mngr_modal.backend import _exit_modal_app_context
@@ -970,6 +974,78 @@ def test_derive_modal_names_truncates_long_app_name(
     )
     # App name must leave room for the state-volume suffix.
     assert len(app_name) <= MODAL_NAME_MAX_LENGTH
+
+
+def test_construct_modal_provider_accepts_injected_modal_interface(
+    temp_mngr_ctx: MngrContext,
+    testing_modal: TestingModalInterface,
+) -> None:
+    """``ModalProviderBackend._construct_modal_provider`` builds a working
+    ``ModalProviderInstance`` against an injected ``TestingModalInterface``.
+    Locks in that the factory has no implementation-specific branches: any
+    code path that bypasses ``modal_interface.enable_output_capture(...)``
+    (e.g. by calling a Modal-SDK-specific function directly) would crash
+    the fake here.
+    """
+    config = ModalProviderConfig(
+        app_name="di-injected",
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        is_persistent=False,
+        is_snapshotted_after_create=False,
+    )
+    apps_before = len(testing_modal._apps)
+    instance = ModalProviderBackend._construct_modal_provider(
+        ProviderInstanceName("test"),
+        config,
+        temp_mngr_ctx,
+        testing_modal,
+    )
+    assert isinstance(instance, ModalProviderInstance)
+    assert instance.app_name == "di-injected"
+    # Behavioral check: the factory created a new app on the *injected* fake
+    # (proving the dependency actually flowed through, rather than the factory
+    # silently constructing its own DirectModalInterface and ignoring us).
+    assert len(testing_modal._apps) > apps_before
+    # Look up the state volume through the public interface to confirm it
+    # was created on the same fake (would raise NotFoundError if absent).
+    testing_modal.volume_from_name(
+        f"di-injected{STATE_VOLUME_SUFFIX}",
+        create_if_missing=False,
+        environment_name=instance.environment_name,
+    )
+
+
+def test_production_import_does_not_load_modal_proxy_testing() -> None:
+    """Importing ``mngr_modal.backend`` must not pull
+    ``imbue.modal_proxy.testing`` into ``sys.modules``.
+
+    The wheel build excludes ``**/testing.py`` -- a production-side import
+    of it would crash packaged consumers with ``ModuleNotFoundError``.
+    Runs in a fresh subprocess so prior tests' imports don't pollute
+    state. If this fails, find the top-level
+    ``from imbue.modal_proxy.testing import ...`` somewhere in the
+    transitive import graph of ``mngr_modal.backend``.
+    """
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import imbue.mngr_modal.backend as _; "
+            "import sys, json; "
+            "print(json.dumps('imbue.modal_proxy.testing' in sys.modules))",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    loaded = json.loads(completed.stdout.strip())
+    assert loaded is False, (
+        "imbue.mngr_modal.backend pulled imbue.modal_proxy.testing into the "
+        "production import graph. modal_proxy/testing.py is excluded from the "
+        "modal_proxy wheel, so this would crash any packaged consumer at "
+        "module load. Find and remove the top-level "
+        "`from imbue.modal_proxy.testing import ...`."
+    )
 
 
 # ---------------------------------------------------------------------------
