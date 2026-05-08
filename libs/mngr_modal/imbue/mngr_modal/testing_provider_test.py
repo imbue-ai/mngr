@@ -45,7 +45,6 @@ from imbue.mngr_modal.backend import _enter_ephemeral_app_context_with_env_retry
 from imbue.mngr_modal.backend import _exit_modal_app_context
 from imbue.mngr_modal.backend import _lookup_persistent_app_with_env_retry
 from imbue.mngr_modal.backend import register_provider_backend
-from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
@@ -926,80 +925,51 @@ def test_on_connection_error_clears_caches(
 
 
 # ---------------------------------------------------------------------------
-# Build Provider Instance Tests
+# Modal Name Derivation Tests
 # ---------------------------------------------------------------------------
 
 
-def test_build_provider_instance_testing_mode(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    config = ModalProviderConfig(
-        mode=ModalMode.TESTING,
-        app_name="build-test",
-        host_dir=temp_mngr_ctx.config.default_host_dir,
-    )
-    instance = ModalProviderBackend.build_provider_instance(
-        name=ProviderInstanceName("test"),
-        config=config,
-        mngr_ctx=temp_mngr_ctx,
-    )
-    assert isinstance(instance, ModalProviderInstance)
-    assert instance.app_name == "build-test"
-
-    # Clean up the app registry
-    ModalProviderBackend.close_app("build-test")
-
-
-def test_build_provider_instance_environment_name_derived_from_prefix(
+def test_derive_modal_names_environment_name_derived_from_prefix(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """Verify that the Modal environment name is prefix + user_id.
 
-    This test is trivial but necessary for the validity of the prefix check in
-    make_modal_provider_real (conftest.py): we validate the prefix against
-    TEST_ENV_PATTERN as a proxy for the Modal environment name. That proxy is
-    only valid if environment_name == f"{prefix}{user_id}" remains the formula
-    in build_provider_instance. If this test breaks, the prefix check no longer
+    Necessary for the validity of the prefix check in make_modal_provider_real
+    (conftest.py): we validate the prefix against TEST_ENV_PATTERN as a proxy
+    for the Modal environment name. That proxy is only valid if
+    ``environment_name == f"{prefix}{user_id}"`` remains the formula in
+    ``_derive_modal_names``. If this test breaks, the prefix check no longer
     guarantees correct environment naming.
     """
     config = ModalProviderConfig(
-        mode=ModalMode.TESTING,
         app_name="env-name-test",
         host_dir=temp_mngr_ctx.config.default_host_dir,
     )
-    instance = ModalProviderBackend.build_provider_instance(
-        name=ProviderInstanceName("test"),
-        config=config,
-        mngr_ctx=temp_mngr_ctx,
+    environment_name, _, _ = ModalProviderBackend._derive_modal_names(
+        ProviderInstanceName("test"),
+        config,
+        temp_mngr_ctx,
     )
-    assert isinstance(instance, ModalProviderInstance)
-
-    expected_env_name = f"{temp_mngr_ctx.config.prefix}{temp_mngr_ctx.get_profile_user_id()}"
-    if len(expected_env_name) > MODAL_NAME_MAX_LENGTH:
-        expected_env_name = expected_env_name[:MODAL_NAME_MAX_LENGTH]
-    assert instance.environment_name == expected_env_name
-
-    ModalProviderBackend.close_app("env-name-test")
+    expected = f"{temp_mngr_ctx.config.prefix}{temp_mngr_ctx.get_profile_user_id()}"
+    if len(expected) > MODAL_NAME_MAX_LENGTH:
+        expected = expected[:MODAL_NAME_MAX_LENGTH]
+    assert environment_name == expected
 
 
-def test_build_provider_instance_truncates_long_names(
+def test_derive_modal_names_truncates_long_app_name(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     config = ModalProviderConfig(
-        mode=ModalMode.TESTING,
         app_name="a" * 100,
         host_dir=temp_mngr_ctx.config.default_host_dir,
     )
-    instance = ModalProviderBackend.build_provider_instance(
-        name=ProviderInstanceName("test"),
-        config=config,
-        mngr_ctx=temp_mngr_ctx,
+    _, app_name, _ = ModalProviderBackend._derive_modal_names(
+        ProviderInstanceName("test"),
+        config,
+        temp_mngr_ctx,
     )
-    assert isinstance(instance, ModalProviderInstance)
-    # App name should be truncated to max_app_name_length
-    assert len(instance.app_name) <= 64
-
-    ModalProviderBackend.close_app(instance.app_name)
+    # App name must leave room for the state-volume suffix.
+    assert len(app_name) <= MODAL_NAME_MAX_LENGTH
 
 
 # ---------------------------------------------------------------------------

@@ -45,7 +45,6 @@ from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ModalInterface
 from imbue.modal_proxy.interface import VolumeInterface
-from imbue.modal_proxy.testing import TestingModalInterface
 
 MODAL_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("modal")
 STATE_VOLUME_SUFFIX: Final[str] = "-state"
@@ -249,7 +248,6 @@ class ModalProviderBackend(ProviderBackendInterface):
         environment_name: str,
         is_persistent: bool,
         modal_interface: ModalInterface,
-        is_testing: bool = False,
     ) -> tuple[AppInterface, ModalAppContextHandle]:
         """Get or create a Modal app with output capture.
 
@@ -274,18 +272,11 @@ class ModalProviderBackend(ProviderBackendInterface):
             return cls._app_registry[app_name]
 
         with log_span("Creating ephemeral Modal app with output capture: {} (env: {})", app_name, environment_name):
-            # Testing mode uses a null context instead of Modal output capture,
-            # which requires Modal SDK internals not available in testing.
-            if is_testing:
-                output_buffer = StringIO()
-                loguru_writer: ModalLoguruWriter | None = None
+            with log_span("Enabling Modal output capture"):
                 output_capture_context: AbstractContextManager[tuple[StringIO, ModalLoguruWriter | None]] = (
-                    contextlib.nullcontext((output_buffer, loguru_writer))
+                    enable_modal_output_capture(is_logging_to_loguru=True)
                 )
-            else:
-                with log_span("Enabling Modal output capture"):
-                    output_capture_context = enable_modal_output_capture(is_logging_to_loguru=True)
-                    output_buffer, loguru_writer = output_capture_context.__enter__()
+                output_buffer, loguru_writer = output_capture_context.__enter__()
 
             if is_persistent:
                 with log_span("Looking up persistent Modal app: {}", app_name):
@@ -452,43 +443,17 @@ Supported build arguments for the modal provider:
         if not isinstance(config, ModalProviderConfig):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
 
-        # Create the ModalInterface based on the configured mode
         match config.mode:
             case ModalMode.DIRECT:
                 modal_interface: ModalInterface = DirectModalInterface()
-            case ModalMode.TESTING:
-                testing_root = mngr_ctx.profile_dir / "modal_testing"
-                testing_root.mkdir(parents=True, exist_ok=True)
-                modal_interface = TestingModalInterface(
-                    root_dir=testing_root,
-                    concurrency_group=mngr_ctx.concurrency_group,
+            case ModalMode.PROXIED:
+                raise NotImplementedError(
+                    "ModalMode.PROXIED (routing through imbue_cloud gateway) is not yet implemented.",
                 )
             case _ as unreachable:
                 assert_never(unreachable)
 
-        # Use prefix + user_id for the environment name, ensuring isolation
-        # between different mngr installations sharing the same Modal account.
-        # The app name is just prefix + name (no user_id).
-        # The provider config can override the profile's user_id to allow sharing
-        # Modal resources across different profiles or installations.
-        prefix = mngr_ctx.config.prefix
-        user_id = config.user_id if config.user_id is not None else mngr_ctx.get_profile_user_id()
-        environment_name = f"{prefix}{user_id}"
-        default_app_name = f"{prefix}{name}"
-
-        if len(environment_name) > MODAL_NAME_MAX_LENGTH:
-            logger.warning(
-                "Truncating Modal environment name to {} characters: {}", MODAL_NAME_MAX_LENGTH, environment_name
-            )
-        environment_name = truncate_modal_name(environment_name, max_length=MODAL_NAME_MAX_LENGTH)
-
-        app_name = config.app_name if config.app_name is not None else default_app_name
-        host_dir = config.host_dir if config.host_dir is not None else Path("/mngr")
-
-        max_app_name_length = MODAL_NAME_MAX_LENGTH - len(STATE_VOLUME_SUFFIX)
-        if len(app_name) > max_app_name_length:
-            logger.warning("Truncating Modal app name to {} characters: {}", max_app_name_length, app_name)
-        app_name = truncate_modal_name(app_name, max_length=max_app_name_length)
+        environment_name, app_name, host_dir = ModalProviderBackend._derive_modal_names(name, config, mngr_ctx)
 
         # Create the ModalProviderApp that manages the Modal app and its resources
         try:
@@ -497,7 +462,6 @@ Supported build arguments for the modal provider:
                 environment_name,
                 config.is_persistent,
                 modal_interface,
-                is_testing=config.mode == ModalMode.TESTING,
             )
             volume = ModalProviderBackend.get_volume_for_app(app_name, modal_interface)
 
@@ -525,6 +489,47 @@ Supported build arguments for the modal provider:
             config=config,
             modal_app=modal_app,
         )
+
+    @staticmethod
+    def _derive_modal_names(
+        name: ProviderInstanceName,
+        config: ModalProviderConfig,
+        mngr_ctx: MngrContext,
+    ) -> tuple[str, str, Path]:
+        """Compute the ``(environment_name, app_name, host_dir)`` triple for a Modal provider.
+
+        Pure function (no Modal SDK calls, no filesystem mutation) so the naming
+        rules can be unit-tested without instantiating a ModalInterface.
+
+        Conventions:
+        - ``environment_name`` = ``f"{prefix}{user_id}"``, truncated to ``MODAL_NAME_MAX_LENGTH``.
+          The provider config can override the profile's user_id to allow sharing
+          Modal resources across different mngr profiles or installations.
+        - ``app_name`` = ``config.app_name`` if set, else ``f"{prefix}{name}"``,
+          truncated to leave room for the state-volume suffix.
+        - ``host_dir`` = ``config.host_dir`` if set, else ``Path("/mngr")``.
+
+        Logs a warning when truncation actually shortens a name.
+        """
+        prefix = mngr_ctx.config.prefix
+        user_id = config.user_id if config.user_id is not None else mngr_ctx.get_profile_user_id()
+
+        environment_name = f"{prefix}{user_id}"
+        if len(environment_name) > MODAL_NAME_MAX_LENGTH:
+            logger.warning(
+                "Truncating Modal environment name to {} characters: {}", MODAL_NAME_MAX_LENGTH, environment_name
+            )
+        environment_name = truncate_modal_name(environment_name, max_length=MODAL_NAME_MAX_LENGTH)
+
+        default_app_name = f"{prefix}{name}"
+        app_name = config.app_name if config.app_name is not None else default_app_name
+        max_app_name_length = MODAL_NAME_MAX_LENGTH - len(STATE_VOLUME_SUFFIX)
+        if len(app_name) > max_app_name_length:
+            logger.warning("Truncating Modal app name to {} characters: {}", max_app_name_length, app_name)
+        app_name = truncate_modal_name(app_name, max_length=max_app_name_length)
+
+        host_dir = config.host_dir if config.host_dir is not None else Path("/mngr")
+        return environment_name, app_name, host_dir
 
 
 # SSH key and host key file names stored in the modal provider's profile directory.
