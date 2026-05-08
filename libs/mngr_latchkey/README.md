@@ -11,7 +11,7 @@ the same gateway and the same permissions store.
 ## CLI
 
 ```bash
-mngr latchkey ensure-gateway [--latchkey-dir PATH]
+mngr latchkey ensure-gateway [--latchkey-dir PATH] [--latchkey-binary PATH]
 ```
 
 Idempotent. Starts the shared `latchkey gateway` if it is not already
@@ -20,6 +20,17 @@ the supplied directory (default: `<profile>/latchkey` inside the active
 mngr profile directory) so subsequent in-process API users on the same
 machine see the same gateway. The same directory is also used as the
 spawned subprocess's `LATCHKEY_DIRECTORY` (credential / config store).
+
+The `latchkey` CLI binary is looked up in this order:
+
+1. `--latchkey-binary <path>` flag.
+2. `MNGR_LATCHKEY_BINARY` env var.
+3. `latchkey` on `PATH`.
+
+The env var lets a wrapping process (e.g. an Electron app that ships
+its own latchkey copy) point both the in-process `Latchkey` API and
+this CLI at the same bundled binary without having to pass a flag on
+every invocation.
 
 ## Python API
 

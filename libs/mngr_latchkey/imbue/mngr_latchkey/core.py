@@ -58,6 +58,36 @@ from imbue.mngr_latchkey.store import save_permissions
 
 LATCHKEY_BINARY: Final[str] = "latchkey"
 
+# Env var consulted by :func:`resolve_latchkey_binary` when no explicit
+# override is supplied. Lets a wrapping process (e.g. the minds Electron
+# shell, which bundles its own copy of latchkey) point both the
+# in-process :class:`Latchkey` API and the ``mngr latchkey`` CLI at the
+# same non-PATH binary without needing a flag on every invocation.
+ENV_LATCHKEY_BINARY: Final[str] = "MNGR_LATCHKEY_BINARY"
+
+
+def resolve_latchkey_binary(override: str | None = None) -> str:
+    """Pick the path to use for the upstream ``latchkey`` CLI.
+
+    Resolution order:
+
+    1. Explicit ``override`` argument (e.g. a CLI flag).
+    2. ``MNGR_LATCHKEY_BINARY`` env var.
+    3. ``"latchkey"`` (looked up on ``PATH`` by every spawn site via
+       :func:`shutil.which` / direct ``execvp``).
+
+    Used at every entry point that constructs a :class:`Latchkey`
+    (the plugin's CLI, minds' ``_build_latchkey``, plus future callers)
+    so they all agree on which binary they're talking to.
+    """
+    if override is not None:
+        return override
+    env_value = os.environ.get(ENV_LATCHKEY_BINARY)
+    if env_value:
+        return env_value
+    return LATCHKEY_BINARY
+
+
 _DEFAULT_LISTEN_HOST: Final[str] = "127.0.0.1"
 
 _LIVENESS_CONNECT_TIMEOUT_SECONDS: Final[float] = 1.0

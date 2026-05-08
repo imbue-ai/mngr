@@ -165,7 +165,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_ROOT_NAME: mindsRootName,
           MNGR_HOST_DIR: mngrHostDir,
           MNGR_PREFIX: mngrPrefix,
-          MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
+          MNGR_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
         };
       } else {
@@ -197,7 +197,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_ROOT_NAME: mindsRootName,
           MNGR_HOST_DIR: mngrHostDir,
           MNGR_PREFIX: mngrPrefix,
-          MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
+          MNGR_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
           // Tell the packaged latchkey shim which Electron binary to use as Node.
           MINDS_ELECTRON_EXEC_PATH: process.execPath,

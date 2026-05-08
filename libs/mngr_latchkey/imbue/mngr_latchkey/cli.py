@@ -22,9 +22,10 @@ from imbue.mngr.cli.help_formatter import show_help_with_pager
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr_latchkey.core import LATCHKEY_BINARY
+from imbue.mngr_latchkey.core import ENV_LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.core import resolve_latchkey_binary
 
 # Sub-directory name used inside the active profile when no ``--latchkey-dir``
 # is supplied. Centralized as a constant so the click option help text, the
@@ -43,6 +44,13 @@ class EnsureGatewayCliOptions(CommonCliOptions):
             f"Directory for the gateway record, the deny-all default permissions file, "
             f"per-agent permissions handles, and the upstream ``LATCHKEY_DIRECTORY`` "
             f"credential / config store. Defaults to ``{_DEFAULT_LATCHKEY_DIR_DISPLAY}``."
+        ),
+    )
+    latchkey_binary: str | None = Field(
+        default=None,
+        description=(
+            f"Path to the upstream ``latchkey`` CLI binary. Falls back to the "
+            f"``{ENV_LATCHKEY_BINARY}`` env var, then to ``latchkey`` on ``PATH``."
         ),
     )
 
@@ -92,6 +100,16 @@ def latchkey(ctx: click.Context, **kwargs: Any) -> None:
         f"upstream LATCHKEY_DIRECTORY (defaults to {_DEFAULT_LATCHKEY_DIR_DISPLAY})."
     ),
 )
+@click.option(
+    "--latchkey-binary",
+    "latchkey_binary",
+    type=click.Path(dir_okay=False, path_type=str),
+    default=None,
+    help=(
+        "Path to the upstream latchkey CLI binary. Falls back to the "
+        f"{ENV_LATCHKEY_BINARY} env var, then to ``latchkey`` on PATH."
+    ),
+)
 @add_common_options
 @click.pass_context
 def ensure_gateway(ctx: click.Context, **kwargs: Any) -> None:
@@ -107,8 +125,9 @@ def ensure_gateway(ctx: click.Context, **kwargs: Any) -> None:
         command_class=EnsureGatewayCliOptions,
     )
     latchkey_dir = _resolve_latchkey_dir(mngr_ctx, opts.latchkey_dir)
+    latchkey_binary = resolve_latchkey_binary(opts.latchkey_binary)
 
-    instance = Latchkey(latchkey_binary=LATCHKEY_BINARY, latchkey_directory=latchkey_dir)
+    instance = Latchkey(latchkey_binary=latchkey_binary, latchkey_directory=latchkey_dir)
     instance.initialize(data_dir=latchkey_dir)
 
     try:
