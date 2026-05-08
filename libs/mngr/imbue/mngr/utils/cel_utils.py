@@ -11,6 +11,18 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
 
 
+class TolerantPathError(TypeError):
+    """Raised by `with_tolerant_paths` when a path is misconfigured.
+
+    Indicates a programming error in the caller's `paths` argument: a path
+    segment is missing from its parent dict, or an ancestor/target is not a
+    dict-like (e.g. a MapType). Subclasses TypeError so existing callers
+    that catch TypeError still see it; the named subclass exists so call
+    sites can distinguish a tolerant-paths setup error from any other
+    TypeError flowing through the same code path.
+    """
+
+
 class TolerantMapType(celpy.celtypes.MapType):
     """A CEL MapType whose missing-key access yields a CELEvalError value
     instead of raising, so that boolean expressions short-circuit cleanly.
@@ -129,33 +141,33 @@ def with_tolerant_paths(
         parent: Any = new_context
         for step in prefix:
             if not isinstance(parent, dict):
-                raise TypeError(
+                raise TolerantPathError(
                     f"with_tolerant_paths: cannot descend through non-dict node "
                     f"of type {type(parent).__name__} at path step {step!r}; check "
                     f"that every path targets a MapType in the CEL context"
                 )
             if step not in parent:
-                raise TypeError(
+                raise TolerantPathError(
                     f"with_tolerant_paths: path segment {step!r} is not present "
                     f"in node with keys {sorted(str(k) for k in parent)!r}; "
                     f"check `paths` for a typo or unsupported path"
                 )
             parent = parent[step]
         if not isinstance(parent, dict):
-            raise TypeError(
+            raise TolerantPathError(
                 f"with_tolerant_paths: cannot wrap non-dict node of type "
                 f"{type(parent).__name__} at path target {last!r}; check that "
                 f"every path targets a MapType in the CEL context"
             )
         if last not in parent:
-            raise TypeError(
+            raise TolerantPathError(
                 f"with_tolerant_paths: path target {last!r} is not present in "
                 f"node with keys {sorted(str(k) for k in parent)!r}; check "
                 f"`paths` for a typo or unsupported path"
             )
         target = parent[last]
         if not isinstance(target, dict):
-            raise TypeError(
+            raise TolerantPathError(
                 f"with_tolerant_paths: target at path-final segment {last!r} is "
                 f"a {type(target).__name__}, not a MapType; tolerance only "
                 f"applies to dict-like CEL values"

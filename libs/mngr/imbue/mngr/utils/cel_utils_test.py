@@ -9,6 +9,7 @@ from celpy.evaluation import CELEvalError
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.cel_utils import TolerantMapType
+from imbue.mngr.utils.cel_utils import TolerantPathError
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
 from imbue.mngr.utils.cel_utils import build_cel_context
@@ -451,7 +452,7 @@ def test_with_tolerant_paths_raises_type_error_when_target_is_not_dict() -> None
     """
     raw_context = {"name": "h1"}
     cel_context = build_cel_context(raw_context)
-    with pytest.raises(TypeError):
+    with pytest.raises(TolerantPathError):
         _ = with_tolerant_paths(cel_context, (("name",),))
 
 
@@ -465,7 +466,7 @@ def test_with_tolerant_paths_raises_when_path_segment_missing() -> None:
     """
     raw_context: dict[str, Any] = {"labels": {}}
     cel_context = build_cel_context(raw_context)
-    with pytest.raises(TypeError):
+    with pytest.raises(TolerantPathError):
         _ = with_tolerant_paths(cel_context, (("nonexistent",),))
 
 
@@ -473,7 +474,7 @@ def test_with_tolerant_paths_raises_when_nested_path_segment_missing() -> None:
     """A nested-path precondition violation also raises TypeError loud-ly."""
     raw_context: dict[str, Any] = {"host": {"tags": {}}}
     cel_context = build_cel_context(raw_context)
-    with pytest.raises(TypeError):
+    with pytest.raises(TolerantPathError):
         _ = with_tolerant_paths(cel_context, (("host", "missing_subfield"),))
 
 
