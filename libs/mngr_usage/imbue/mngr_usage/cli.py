@@ -405,12 +405,12 @@ def _human_label_for(window_key: str) -> str:
     return _DEFAULT_WINDOW_LABELS.get(window_key, window_key)
 
 
-def _write_source_section(model: _UsageRenderModel, now: int, header: str | None) -> bool:
-    """Render one source's window lines (with optional header). Returns True if any
-    window with a percentage was rendered (drives the catch-all hint downstream).
+def _write_source_section(model: _UsageRenderModel, now: int, header: str) -> bool:
+    """Render one source's window lines (always preceded by a ``[source]`` header).
+    Returns True if any window with a percentage was rendered (drives the
+    catch-all hint downstream).
     """
-    if header is not None:
-        write_human_line(header)
+    write_human_line(header)
     any_with_percentage = False
     ordered_keys = [k for k in WINDOW_KEYS if k in model.windows] + [k for k in model.windows if k not in WINDOW_KEYS]
     for key in ordered_keys:
@@ -471,33 +471,23 @@ def _emit_output(
         case OutputFormat.HUMAN:
             if not snapshots_with_models:
                 return
-            multi_source = len(snapshots_with_models) > 1
             any_with_percentage_anywhere = False
             stale_sources: list[tuple[str, int]] = []
             for index, (_, model) in enumerate(snapshots_with_models):
-                header: str | None = None
-                if multi_source:
-                    if index > 0:
-                        write_human_line("")
-                    header = f"[{model.source_name}]"
-                section_had_percentage = _write_source_section(model, now, header)
+                if index > 0:
+                    write_human_line("")
+                section_had_percentage = _write_source_section(model, now, f"[{model.source_name}]")
                 any_with_percentage_anywhere = any_with_percentage_anywhere or section_had_percentage
                 if section_had_percentage and model.is_stale and model.snapshot_updated_at is not None:
                     stale_sources.append((model.source_name, max(0, now - model.snapshot_updated_at)))
             if not any_with_percentage_anywhere:
                 logger.warning(_NO_DATA_HINT)
             for source_name, age_seconds in stale_sources:
-                if multi_source:
-                    logger.warning(
-                        "[{}] snapshot last updated {} ago",
-                        source_name,
-                        _format_duration(age_seconds),
-                    )
-                else:
-                    logger.warning(
-                        "Snapshot last updated {} ago",
-                        _format_duration(age_seconds),
-                    )
+                logger.warning(
+                    "[{}] snapshot last updated {} ago",
+                    source_name,
+                    _format_duration(age_seconds),
+                )
         case _ as unreachable:
             assert_never(unreachable)
 
