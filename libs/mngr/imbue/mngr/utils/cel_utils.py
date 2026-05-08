@@ -8,18 +8,21 @@ from celpy.evaluation import CELEvalError
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
+from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
 
 
-class TolerantPathError(TypeError):
+class TolerantPathError(BaseMngrError, TypeError):
     """Raised by `with_tolerant_paths` when a path is misconfigured.
 
     Indicates a programming error in the caller's `paths` argument: a path
     segment is missing from its parent dict, or an ancestor/target is not a
-    dict-like (e.g. a MapType). Subclasses TypeError so existing callers
-    that catch TypeError still see it; the named subclass exists so call
-    sites can distinguish a tolerant-paths setup error from any other
-    TypeError flowing through the same code path.
+    dict-like (e.g. a MapType). Subclasses both `BaseMngrError` (the
+    library's package-base, per the project's exception-hierarchy style)
+    and `TypeError` (so existing callers that catch TypeError still see
+    it); the named subclass exists so call sites can distinguish a
+    tolerant-paths setup error from any other TypeError flowing through
+    the same code path.
     """
 
 
