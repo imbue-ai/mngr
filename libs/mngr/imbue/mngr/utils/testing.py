@@ -1057,10 +1057,7 @@ def find_old_test_environments(
 def delete_modal_apps_in_environment(environment_name: str) -> None:
     """Stop all Modal apps in the specified environment.
 
-    Best-effort: per-item failures (non-zero CLI exits, transient subprocess
-    errors) are logged as warnings, not raised. The session-end leak detector
-    (``modal_session_cleanup``) is the loud safety net for any orphan that
-    survives this best-effort sweep.
+    This is robust to concurrent deletion - failures result in warnings, not errors.
     """
     try:
         result = subprocess.run(
@@ -1104,10 +1101,7 @@ def delete_modal_apps_in_environment(environment_name: str) -> None:
 def delete_modal_volumes_in_environment(environment_name: str) -> None:
     """Delete all Modal volumes in the specified environment.
 
-    Best-effort: per-item failures (non-zero CLI exits, transient subprocess
-    errors) are logged as warnings, not raised. The session-end leak detector
-    (``modal_session_cleanup``) is the loud safety net for any orphan that
-    survives this best-effort sweep.
+    This is robust to concurrent deletion - failures result in warnings, not errors.
     """
     try:
         result = subprocess.run(
@@ -1152,10 +1146,7 @@ def delete_modal_volumes_in_environment(environment_name: str) -> None:
 def delete_modal_environment(environment_name: str) -> None:
     """Delete a Modal environment.
 
-    Best-effort: non-zero CLI exits and transient subprocess errors are logged
-    as warnings, not raised. The session-end leak detector
-    (``modal_session_cleanup``) is the loud safety net for any orphan that
-    survives this best-effort sweep.
+    This is robust to concurrent deletion - failures result in warnings, not errors.
     """
     try:
         result = subprocess.run(
