@@ -78,6 +78,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.env_utils import build_source_env_shell_commands
@@ -242,9 +243,21 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     provider_instance: ProviderInstanceInterface = Field(
         frozen=True, description="The provider instance managing this host"
     )
+    host_name: HostName = Field(
+        frozen=True,
+        description=(
+            "User-facing name of the host. Stored explicitly because the SSH "
+            "connector's name may be a connection target (e.g. an IP for "
+            "local-docker hosts) rather than a HostName-shaped value."
+        ),
+    )
 
-    # is_local, get_name, _ensure_connected, _close_paramiko_client,
-    # disconnect, and __del__ are inherited unchanged from OuterHost.
+    def get_name(self) -> HostName:
+        """Return the user-facing host name (overrides ``OuterHost.get_name``)."""
+        return self.host_name
+
+    # is_local, _ensure_connected, _close_paramiko_client, disconnect, and
+    # __del__ are inherited unchanged from OuterHost.
 
     def model_copy_update(self, *updates: Any) -> "Host":
         """Create a copy of this Host with updated fields.
@@ -630,7 +643,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             #  Annoyingly we'll need to understand the difference (by checking to see if, eg, this host is locked)
             return CertifiedHostData(
                 host_id=str(self.id),
-                host_name=str(self.get_name()),
+                host_name=str(self.host_name),
                 created_at=now,
                 updated_at=now,
             )

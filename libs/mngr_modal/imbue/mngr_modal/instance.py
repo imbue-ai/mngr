@@ -1119,6 +1119,7 @@ class ModalProviderInstance(BaseProviderInstance):
                 # Create the Host object with callback for future certified data updates
                 host = Host(
                     id=host_id,
+                    host_name=host_name,
                     connector=connector,
                     provider_instance=self,
                     mngr_ctx=self.mngr_ctx,
@@ -1602,6 +1603,7 @@ log "=== Shutdown script completed ==="
 
             return Host(
                 id=host_id,
+                host_name=HostName(host_record.certified_host_data.host_name),
                 connector=connector,
                 provider_instance=self,
                 mngr_ctx=self.mngr_ctx,

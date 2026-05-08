@@ -1468,6 +1468,7 @@ def _make_erroring_host(provider: LocalProviderInstance, host_cls: type[Host]) -
     connector = PyinfraConnector(pyinfra_host)
     return host_cls(
         id=provider.host_id,
+        host_name=HostName("test"),
         connector=connector,
         provider_instance=provider,
         mngr_ctx=provider.mngr_ctx,
@@ -2295,6 +2296,7 @@ def _make_remote_host(
     )
     return host_cls(
         id=host_id,
+        host_name=HostName("remote-test-host"),
         connector=connector,
         provider_instance=provider,
         mngr_ctx=provider.mngr_ctx,
