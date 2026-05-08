@@ -14,10 +14,11 @@ Show Claude Code rolling-window quota usage (5h, 7d, overage).
 Reports Claude Code's rolling 5-hour, 7-day, and overage quota windows.
 
 The data is sourced from the JSON snapshot Claude Code feeds to its statusline
-on every render; a small shim installed in each per-agent settings.json
-captures it into a shared cache under your profile_dir. `mngr usage` is purely
-a reader -- the cache is populated by interactive Claude sessions as a side
-effect of normal use, with no API cost.
+on every render; a small shim installed at each agent's
+<work_dir>/.claude/settings.local.json captures it into a shared cache under
+your profile_dir. `mngr usage` is purely a reader -- the cache is populated by
+interactive Claude sessions as a side effect of normal use, with no API
+cost.
 
 **Usage:**
 
