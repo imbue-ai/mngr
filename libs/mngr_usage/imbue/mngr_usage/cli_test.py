@@ -1,9 +1,10 @@
-"""Unit tests for mngr_usage.cli."""
+"""Unit tests for mngr_usage.cli (agent-agnostic CLI + walk-by-convention discovery)."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import click
 import pluggy
@@ -11,25 +12,48 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_usage.cli import _build_render_model
 from imbue.mngr_usage.cli import _flatten_for_template
 from imbue.mngr_usage.cli import _format_duration
 from imbue.mngr_usage.cli import _format_human_line
 from imbue.mngr_usage.cli import _format_reset_phrase
-from imbue.mngr_usage.cli import _load_cache
-from imbue.mngr_usage.cli import _oldest_updated_at
+from imbue.mngr_usage.cli import _gather_snapshots
 from imbue.mngr_usage.cli import _parse_max_age
-from imbue.mngr_usage.cli import cache_path
+from imbue.mngr_usage.cli import _pick_freshest
+from imbue.mngr_usage.cli import _read_last_event
+from imbue.mngr_usage.cli import _snapshot_from_event
 from imbue.mngr_usage.cli import usage
-from imbue.mngr_usage.data_types import CacheDoc
+from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
 
 
-def _write_cache(path: Path, cache: CacheDoc) -> None:
-    """Test helper: write a CacheDoc to disk in the canonical on-disk shape."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(cache.model_dump(mode="json")))
+def _write_event(events_file: Path, event: dict[str, Any]) -> None:
+    """Append a JSONL event line to ``events_file``, creating parents as needed."""
+    events_file.parent.mkdir(parents=True, exist_ok=True)
+    with events_file.open("a") as f:
+        f.write(json.dumps(event) + "\n")
+
+
+def _make_event(
+    timestamp: str,
+    used_percentage: float | None = 11.0,
+    resets_at: int | None = 1778280000,
+) -> dict:
+    """Construct an event matching the writer's emitted shape."""
+    return {
+        "source": "claude/rate_limits",
+        "type": "rate_limit_snapshot",
+        "event_id": "evt-test123",
+        "timestamp": timestamp,
+        "rate_limits": {
+            "five_hour": {"used_percentage": used_percentage, "resets_at": resets_at},
+        },
+    }
+
+
+# =============================================================================
+# Pure helpers
+# =============================================================================
 
 
 def test_parse_max_age_accepts_units() -> None:
@@ -59,102 +83,6 @@ def test_format_duration_hits_each_branch() -> None:
     assert _format_duration(360000) == "4d 4h"
 
 
-def test_oldest_updated_at_picks_min() -> None:
-    cache = CacheDoc(
-        windows={
-            "five_hour": WindowSnapshot(updated_at=100),
-            "seven_day": WindowSnapshot(updated_at=200),
-            "overage": WindowSnapshot(),
-        }
-    )
-    assert _oldest_updated_at(cache) == 100
-    assert _oldest_updated_at(None) is None
-    assert _oldest_updated_at(CacheDoc()) is None
-
-
-def test_load_cache_returns_none_for_missing_file(tmp_path: Path) -> None:
-    assert _load_cache(tmp_path / "missing.json") is None
-
-
-def test_load_cache_returns_none_for_corrupt_file(tmp_path: Path) -> None:
-    p = tmp_path / "corrupt.json"
-    p.write_text("not json")
-    assert _load_cache(p) is None
-
-
-def test_load_cache_returns_none_for_non_utf8_bytes(tmp_path: Path) -> None:
-    """A cache file with non-UTF-8 bytes should be treated as corrupt, not crash."""
-    p = tmp_path / "binary.json"
-    p.write_bytes(b"\xff\xfe\x00\x01\x02\x03")
-    assert _load_cache(p) is None
-
-
-def test_load_cache_round_trips(tmp_path: Path) -> None:
-    p = tmp_path / "cache.json"
-    cache = CacheDoc(
-        windows={
-            "five_hour": WindowSnapshot(used_percentage=73.4, resets_at=1777673400, source="statusline", updated_at=1),
-            "seven_day": WindowSnapshot(used_percentage=41.0, resets_at=1778000000, source="statusline", updated_at=2),
-        }
-    )
-    _write_cache(p, cache)
-    loaded = _load_cache(p)
-    assert loaded is not None
-    assert loaded.windows["five_hour"].used_percentage == 73.4
-    assert loaded.windows["seven_day"].resets_at == 1778000000
-
-
-def test_load_cache_drops_invalid_entries(tmp_path: Path) -> None:
-    p = tmp_path / "mixed.json"
-    p.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "windows": {
-                    "five_hour": {"used_percentage": 50.0, "updated_at": 100},
-                    "seven_day": "not a dict",
-                    "bogus": {"used_percentage": 99},
-                },
-            }
-        )
-    )
-    loaded = _load_cache(p)
-    assert loaded is not None
-    assert "five_hour" in loaded.windows
-    assert "seven_day" not in loaded.windows
-    assert "bogus" in loaded.windows
-
-
-def test_render_model_marks_empty_cache_as_stale() -> None:
-    model = _build_render_model(None, max_age=300, now=1000)
-    assert model.is_stale is True
-    assert all(model.windows[k].updated_at is None for k in ("five_hour", "seven_day", "overage"))
-
-
-def test_render_model_marks_past_reset_as_stale() -> None:
-    """A populated window whose resets_at is now in the past must trigger is_stale,
-    because the cached used_percentage is from before the reset and no longer reflects
-    current usage. Even if updated_at itself is recent."""
-    cache = CacheDoc(
-        windows={
-            "five_hour": WindowSnapshot(used_percentage=11.0, resets_at=900, updated_at=999, source="statusline"),
-        }
-    )
-    # updated_at=999 is fresh (1s ago) but resets_at=900 is 100s in the past.
-    model = _build_render_model(cache, max_age=300, now=1000)
-    assert model.is_stale is True
-
-
-def test_render_model_fresh_when_reset_future_and_updated_recent() -> None:
-    cache = CacheDoc(
-        windows={
-            "five_hour": WindowSnapshot(used_percentage=11.0, resets_at=2000, updated_at=950, source="statusline"),
-        }
-    )
-    model = _build_render_model(cache, max_age=300, now=1000)
-    assert model.is_stale is False
-
-
 def test_format_reset_phrase_handles_past_present_future() -> None:
     assert _format_reset_phrase(resets_at=1500, now=1000) == "resets in 8m 20s"
     assert _format_reset_phrase(resets_at=1000, now=1000) == "just reset"
@@ -163,23 +91,187 @@ def test_format_reset_phrase_handles_past_present_future() -> None:
 
 
 def test_format_human_line_uses_past_tense_after_reset() -> None:
-    """Regression: previously rendered "resets in now" via max(0, ...) clamp,
-    which obscured the fact that the cached percentage is from the prior window."""
-    snap = WindowSnapshot(used_percentage=11.0, resets_at=970, updated_at=999, source="statusline")
+    snap = WindowSnapshot(used_percentage=11.0, resets_at=970)
     assert _format_human_line("5h", snap, now=1000) == "5h: 11% used, reset 30s ago"
 
 
-def test_format_human_line_no_data_does_not_say_just_reset() -> None:
-    """Even when reset is at exactly `now`, the no-data branch wins and we render
-    the bare 'no data' line instead of trying to attach a reset phrase."""
-    snap = WindowSnapshot(used_percentage=None, resets_at=1000, updated_at=999)
+def test_format_human_line_no_data_drops_reset_suffix() -> None:
+    snap = WindowSnapshot(used_percentage=None, resets_at=1000)
     assert _format_human_line("5h", snap, now=1000) == "5h: no data"
 
 
-def test_render_model_computes_seconds_until_reset() -> None:
-    cache = CacheDoc(windows={"five_hour": WindowSnapshot(used_percentage=42.0, resets_at=1500, updated_at=900)})
-    model = _build_render_model(cache, max_age=300, now=1000)
+# =============================================================================
+# Event reading + snapshot building
+# =============================================================================
+
+
+def test_read_last_event_picks_last_valid_line(tmp_path: Path) -> None:
+    """A truncated/garbage trailing line is skipped; the previous valid line wins."""
+    events_file = tmp_path / "events.jsonl"
+    events_file.write_text(
+        json.dumps(_make_event("2026-05-08T10:00:00.000000000Z"))
+        + "\n"
+        + json.dumps(_make_event("2026-05-08T11:00:00.000000000Z"))
+        + "\n"
+        + "{not valid json"
+    )
+    event = _read_last_event(events_file)
+    assert event is not None
+    assert event["timestamp"] == "2026-05-08T11:00:00.000000000Z"
+
+
+def test_read_last_event_returns_none_when_no_valid_lines(tmp_path: Path) -> None:
+    events_file = tmp_path / "events.jsonl"
+    events_file.write_text("garbage\nstill garbage\n")
+    assert _read_last_event(events_file) is None
+
+
+def test_read_last_event_returns_none_when_missing(tmp_path: Path) -> None:
+    assert _read_last_event(tmp_path / "missing.jsonl") is None
+
+
+def test_snapshot_from_event_drops_events_without_rate_limits() -> None:
+    """An event line without a rate_limits field can't make a useful snapshot."""
+    event = {
+        "source": "claude/rate_limits",
+        "timestamp": "2026-05-08T10:00:00.000000000Z",
+        "type": "rate_limit_snapshot",
+        # no rate_limits field
+    }
+    assert _snapshot_from_event(event, source_name="claude") is None
+
+
+def test_snapshot_from_event_drops_unparseable_timestamps() -> None:
+    event = _make_event("not-a-timestamp")
+    assert _snapshot_from_event(event, source_name="claude") is None
+
+
+def test_snapshot_from_event_round_trips_window_data() -> None:
+    event = _make_event("2026-05-08T10:00:00.000000000Z", used_percentage=42.5, resets_at=1778280000)
+    snap = _snapshot_from_event(event, source_name="claude")
+    assert snap is not None
+    assert snap.source_name == "claude"
+    assert snap.windows["five_hour"].used_percentage == 42.5
+    assert snap.windows["five_hour"].resets_at == 1778280000
+
+
+def test_gather_snapshots_walks_per_agent_event_files(tmp_path: Path) -> None:
+    """Should find rate_limits events under agents/<id>/events/<source>/rate_limits/events.jsonl."""
+    host_dir = tmp_path / "host"
+    # Two agents, each with a rate_limits events file at the conventional path.
+    _write_event(
+        host_dir / "agents" / "agent-aaa" / "events" / "claude" / "rate_limits" / "events.jsonl",
+        _make_event("2026-05-08T10:00:00.000000000Z", used_percentage=10.0),
+    )
+    _write_event(
+        host_dir / "agents" / "agent-bbb" / "events" / "claude" / "rate_limits" / "events.jsonl",
+        _make_event("2026-05-08T11:00:00.000000000Z", used_percentage=99.0),
+    )
+    snapshots = _gather_snapshots(host_dir)
+    assert len(snapshots) == 2
+    # Both have source_name="claude" since both events files live under events/claude/
+    assert {s.source_name for s in snapshots} == {"claude"}
+
+
+def test_gather_snapshots_handles_missing_dirs(tmp_path: Path) -> None:
+    """Missing agents dir, missing events dir, missing rate_limits subdir: all yield nothing."""
+    assert _gather_snapshots(tmp_path / "no_such_dir") == []
+
+    host_dir = tmp_path / "host"
+    (host_dir / "agents").mkdir(parents=True)
+    # No agents
+    assert _gather_snapshots(host_dir) == []
+
+    # Agent has no events dir
+    (host_dir / "agents" / "agent-aaa").mkdir()
+    assert _gather_snapshots(host_dir) == []
+
+    # Events dir is empty
+    (host_dir / "agents" / "agent-aaa" / "events").mkdir()
+    assert _gather_snapshots(host_dir) == []
+
+
+def test_gather_snapshots_picks_up_alternate_source_segments(tmp_path: Path) -> None:
+    """The segment after events/ is the source name -- non-claude sources work too."""
+    host_dir = tmp_path / "host"
+    _write_event(
+        host_dir / "agents" / "agent-x" / "events" / "opencode" / "rate_limits" / "events.jsonl",
+        _make_event("2026-05-08T10:00:00.000000000Z"),
+    )
+    snapshots = _gather_snapshots(host_dir)
+    assert len(snapshots) == 1
+    assert snapshots[0].source_name == "opencode"
+
+
+# =============================================================================
+# Snapshot picking + render model
+# =============================================================================
+
+
+def _snap(name: str = "x", at: int = 1000, percentage: float | None = 50.0) -> UsageSnapshot:
+    return UsageSnapshot(
+        source_name=name,
+        updated_at=at,
+        windows={"five_hour": WindowSnapshot(used_percentage=percentage, resets_at=at + 3600)},
+    )
+
+
+def test_pick_freshest_returns_none_for_empty() -> None:
+    assert _pick_freshest([]) is None
+
+
+def test_pick_freshest_picks_largest_updated_at() -> None:
+    a = _snap(name="a", at=1000)
+    b = _snap(name="b", at=2000)
+    assert _pick_freshest([a, b]) == b
+    assert _pick_freshest([b, a]) == b
+
+
+def test_pick_freshest_tiebreaks_by_source_name() -> None:
+    a = _snap(name="a", at=1000)
+    z = _snap(name="z", at=1000)
+    assert _pick_freshest([a, z]) == z
+
+
+def test_render_model_marks_past_reset_as_stale() -> None:
+    snapshot = UsageSnapshot(
+        source_name="claude",
+        updated_at=999,
+        windows={"five_hour": WindowSnapshot(used_percentage=11.0, resets_at=900)},
+    )
+    model = _build_render_model(snapshot, max_age=300, now=1000)
+    assert model.is_stale is True
+
+
+def test_render_model_age_stale() -> None:
+    snapshot = UsageSnapshot(
+        source_name="claude",
+        updated_at=500,
+        windows={"five_hour": WindowSnapshot(used_percentage=11.0, resets_at=2000)},
+    )
+    model = _build_render_model(snapshot, max_age=300, now=1000)
+    assert model.is_stale is True
+
+
+def test_render_model_fresh() -> None:
+    snapshot = UsageSnapshot(
+        source_name="claude",
+        updated_at=950,
+        windows={"five_hour": WindowSnapshot(used_percentage=11.0, resets_at=2000)},
+    )
+    model = _build_render_model(snapshot, max_age=300, now=1000)
+    assert model.is_stale is False
+
+
+def test_flatten_for_template_uses_window_keys() -> None:
+    snapshot = UsageSnapshot(
+        source_name="claude",
+        updated_at=900,
+        windows={"five_hour": WindowSnapshot(used_percentage=42.0, resets_at=1500)},
+    )
+    model = _build_render_model(snapshot, max_age=300, now=1000)
     flat = _flatten_for_template(model, now=1000)
+    assert flat["source"] == "claude"
     assert flat["five_hour.used_percentage"] == "42.00"
     assert flat["five_hour.resets_at"] == "1500"
     assert flat["five_hour.seconds_until_reset"] == "500"
@@ -187,35 +279,44 @@ def test_render_model_computes_seconds_until_reset() -> None:
     assert flat["seven_day.is_present"] == "false"
 
 
+# =============================================================================
+# CLI integration: plant events.jsonl files under the test's host_dir
+# =============================================================================
+
+
 @pytest.fixture
 def cli_profile_dir(temp_host_dir: Path, temp_profile_dir: Path) -> Path:
-    """Pin the CLI's auto-resolved profile_dir to match temp_profile_dir.
-
-    The CLI's load_config calls get_or_create_profile_dir(host_dir), which reads
-    host_dir/config.toml's `profile = "<id>"` to pick which profile to use. Without
-    this fixture the CLI would create a fresh profile each time, so writes via
-    temp_mngr_ctx.profile_dir would not be visible to the CLI invocation.
-    """
+    """Pin the CLI's auto-resolved profile_dir so writes via temp_host_dir reach the CLI."""
     config_path = temp_host_dir / ROOT_CONFIG_FILENAME
     config_path.write_text(f'profile = "{temp_profile_dir.name}"\n')
     return temp_profile_dir
 
 
+def _plant_event(host_dir: Path, agent_id: str, event: dict[str, Any], source: str = "claude") -> None:
+    events_file = host_dir / "agents" / agent_id / "events" / source / "rate_limits" / "events.jsonl"
+    _write_event(events_file, event)
+
+
 def test_usage_command_human_format(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
-    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
     cli_profile_dir: Path,
 ) -> None:
-    cache = CacheDoc(
-        windows={
-            "five_hour": WindowSnapshot(
-                used_percentage=73.4, resets_at=999_999_999_999, source="statusline", updated_at=999_999_999_999
-            ),
-        }
+    _plant_event(
+        temp_host_dir,
+        "agent-aaa",
+        {
+            "source": "claude/rate_limits",
+            "type": "rate_limit_snapshot",
+            "event_id": "evt-1",
+            # Timestamp in the future so the snapshot won't be stale-by-age in the test
+            "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "rate_limits": {
+                "five_hour": {"used_percentage": 73.4, "resets_at": 9_999_999_999_999},
+            },
+        },
     )
-    _write_cache(cache_path(temp_mngr_ctx), cache)
-
     result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
     assert "5h:" in result.output
@@ -225,24 +326,26 @@ def test_usage_command_human_format(
 def test_usage_command_json_format(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
-    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
     cli_profile_dir: Path,
 ) -> None:
-    cache = CacheDoc(
-        windows={
-            "five_hour": WindowSnapshot(
-                used_percentage=12.3, resets_at=999_999_999_999, source="statusline", updated_at=999_999_999_999
-            ),
-        }
+    _plant_event(
+        temp_host_dir,
+        "agent-aaa",
+        {
+            "source": "claude/rate_limits",
+            "type": "rate_limit_snapshot",
+            "event_id": "evt-1",
+            "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "rate_limits": {"five_hour": {"used_percentage": 12.3, "resets_at": 9_999_999_999_999}},
+        },
     )
-    _write_cache(cache_path(temp_mngr_ctx), cache)
-
     result = cli_runner.invoke(
         usage, ["--format", "json", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output.strip())
-    assert payload["schema_version"] == 1
+    assert payload["source"] == "claude"
     assert payload["five_hour"]["used_percentage"] == 12.3
     assert payload["five_hour"]["is_present"] is True
     assert payload["seven_day"]["is_present"] is False
@@ -251,21 +354,23 @@ def test_usage_command_json_format(
 def test_usage_command_format_template(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
-    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
     cli_profile_dir: Path,
 ) -> None:
-    cache = CacheDoc(
-        windows={
-            "five_hour": WindowSnapshot(
-                used_percentage=88.0, resets_at=999_999_999_999, source="statusline", updated_at=999_999_999_999
-            ),
-            "seven_day": WindowSnapshot(
-                used_percentage=44.0, resets_at=999_999_999_999, source="statusline", updated_at=999_999_999_999
-            ),
-        }
+    _plant_event(
+        temp_host_dir,
+        "agent-aaa",
+        {
+            "source": "claude/rate_limits",
+            "type": "rate_limit_snapshot",
+            "event_id": "evt-1",
+            "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "rate_limits": {
+                "five_hour": {"used_percentage": 88.0, "resets_at": 9_999_999_999_999},
+                "seven_day": {"used_percentage": 44.0, "resets_at": 9_999_999_999_999},
+            },
+        },
     )
-    _write_cache(cache_path(temp_mngr_ctx), cache)
-
     result = cli_runner.invoke(
         usage,
         ["--format", "5h:{five_hour.used_percentage}/7d:{seven_day.used_percentage}", "--max-age", "300"],
@@ -276,15 +381,50 @@ def test_usage_command_format_template(
     assert "5h:88.00/7d:44.00" in result.output
 
 
-def test_usage_command_no_data_message(
+def test_usage_command_no_data_when_no_events(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
-    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
     cli_profile_dir: Path,
 ) -> None:
-    """Empty cache prints the wire-up hint."""
+    """No agents on the host means no events files; render the no-data hint."""
     result = cli_runner.invoke(usage, [], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
     assert "No rate-limit data yet" in result.output
-    assert "provision" in result.output
-    assert "mngr create" in result.output
+
+
+def test_usage_command_picks_freshest_across_agents(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_host_dir: Path,
+    cli_profile_dir: Path,
+) -> None:
+    """Two agents, two events, the most-recent timestamp wins."""
+    _plant_event(
+        temp_host_dir,
+        "agent-old",
+        {
+            "source": "claude/rate_limits",
+            "type": "rate_limit_snapshot",
+            "event_id": "evt-old",
+            "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "rate_limits": {"five_hour": {"used_percentage": 10.0, "resets_at": 9_999_999_999_999}},
+        },
+    )
+    _plant_event(
+        temp_host_dir,
+        "agent-new",
+        {
+            "source": "claude/rate_limits",
+            "type": "rate_limit_snapshot",
+            "event_id": "evt-new",
+            "timestamp": "2056-05-08T11:00:00.000000000Z",
+            "rate_limits": {"five_hour": {"used_percentage": 99.0, "resets_at": 9_999_999_999_999}},
+        },
+    )
+    result = cli_runner.invoke(
+        usage, ["--format", "json", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip())
+    assert payload["five_hour"]["used_percentage"] == 99.0

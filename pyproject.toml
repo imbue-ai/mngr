@@ -69,6 +69,7 @@ addopts = [
   "--cov=imbue.mngr_tutor",
   "--cov=imbue.mngr_kanpan",
   "--cov=imbue.mngr_usage",
+  "--cov=imbue.mngr_claude_usage",
   "--cov=imbue.mngr_recursive",
   "--cov=imbue.mngr_notifications",
   "--cov=imbue.mngr_file",

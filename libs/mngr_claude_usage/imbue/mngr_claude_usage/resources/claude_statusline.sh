@@ -1,12 +1,13 @@
 #!/bin/bash
-# Statusline shim provisioned by mngr_usage's claude_extra_per_agent_settings hookimpl.
+# Statusline shim provisioned by mngr_claude_usage's claude_extra_per_agent_settings hookimpl.
 #
 # Claude Code calls statusLine.command (defined in <work_dir>/.claude/settings.local.json)
 # on every render. After the first successful API response of the session, the
 # JSON snapshot piped to stdin includes a `rate_limits` field with five_hour /
 # seven_day / overage windows (Claude.ai subscriptions only). We:
 #   1. Capture stdin once into a variable (the user's downstream command also reads stdin).
-#   2. Forward the payload to the rate-limits writer to update the shared cache.
+#   2. Forward the payload to the rate-limits writer, which appends one
+#      JSONL event per render to $MNGR_AGENT_STATE_DIR/events/claude/rate_limits/events.jsonl.
 #   3. Replay the payload to MNGR_USER_STATUSLINE_CMD if set, so any pre-existing
 #      user statusline (caveman, starship, etc.) keeps working unchanged.
 #
@@ -17,8 +18,8 @@ set -euo pipefail
 
 payload=$(cat)
 
-# Writer is best-effort: a failure here (jq missing, malformed payload, flock
-# contention, etc.) must not break the user's pre-existing statusline.
+# Writer is best-effort: a failure here (jq missing, malformed payload, etc.)
+# must not break the user's pre-existing statusline.
 if [ -n "${MNGR_RATE_LIMITS_WRITER:-}" ] && [ -x "$MNGR_RATE_LIMITS_WRITER" ]; then
   printf '%s' "$payload" | "$MNGR_RATE_LIMITS_WRITER" || true
 fi
