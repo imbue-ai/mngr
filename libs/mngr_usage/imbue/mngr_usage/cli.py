@@ -5,6 +5,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
+from typing import assert_never
 
 import click
 from loguru import logger
@@ -277,6 +278,8 @@ def _emit_output(
                 write_human_line(_NO_DATA_HINT)
             if any_present and any_with_percentage and model.is_stale:
                 logger.warning("Rate-limit cache is stale; values may not reflect latest API state.")
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 @click.command("usage")
