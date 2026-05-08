@@ -83,9 +83,6 @@ from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.env_utils import build_source_env_shell_commands
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
-from imbue.mngr.utils.git_utils import get_current_git_branch
-from imbue.mngr.utils.git_utils import get_git_author_info
-from imbue.mngr.utils.git_utils import get_git_remote_url
 from imbue.mngr.utils.name_generator import GENERIC_AGENT_NAME_HINT
 from imbue.mngr.utils.polling import wait_for
 
@@ -194,6 +191,30 @@ def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
 def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
     """Compute the state directory path for an agent given the host directory and agent ID."""
     return host_dir / "agents" / str(agent_id)
+
+
+def _git_command_stdout(host: OnlineHostInterface, command: str, cwd: Path) -> str | None:
+    """Run a git command on a host and return its stripped stdout, or None if it failed or was empty.
+
+    Used to read git metadata (current branch, user.name, origin URL, etc.) without
+    branching on whether the host is local or remote.
+    """
+    result = host.execute_idempotent_command(command, cwd=cwd)
+    if not result.success:
+        return None
+    return result.stdout.strip() or None
+
+
+@pure
+def _is_same_machine(a: OnlineHostInterface, b: OnlineHostInterface) -> bool:
+    """Whether ``a`` and ``b`` share a filesystem so file ops do not need SSH.
+
+    True when the two hosts share a ``host_id``, or when both are local
+    (any two local hosts share the laptop's filesystem regardless of id).
+    """
+    if a.id == b.id:
+        return True
+    return a.is_local and b.is_local
 
 
 class HostLocation(FrozenModel):
@@ -1083,32 +1104,15 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         new_branch_name = options.git.new_branch_name if options.git else None
         if options.git and options.git.base_branch:
             base_branch_name = options.git.base_branch
-        elif source_host.is_local:
-            base_branch_name = get_current_git_branch(source_path, self.mngr_ctx.concurrency_group) or "main"
         else:
-            result = source_host.execute_idempotent_command(
-                "git rev-parse --abbrev-ref HEAD",
-                cwd=source_path,
+            base_branch_name = (
+                _git_command_stdout(source_host, "git rev-parse --abbrev-ref HEAD", source_path) or "main"
             )
-            base_branch_name = result.stdout.strip() if result.success else "main"
 
         # Get git author info and origin remote URL from source repo
-        if source_host.is_local:
-            git_author_name, git_author_email = get_git_author_info(source_path, self.mngr_ctx.concurrency_group)
-            origin_url = get_git_remote_url(source_path, "origin", self.mngr_ctx.concurrency_group)
-        else:
-            name_result = source_host.execute_idempotent_command("git config user.name", cwd=source_path)
-            email_result = source_host.execute_idempotent_command("git config user.email", cwd=source_path)
-            git_author_name = (
-                name_result.stdout.strip() if name_result.success and name_result.stdout.strip() else None
-            )
-            git_author_email = (
-                email_result.stdout.strip() if email_result.success and email_result.stdout.strip() else None
-            )
-            origin_result = source_host.execute_idempotent_command("git remote get-url origin", cwd=source_path)
-            origin_url = (
-                origin_result.stdout.strip() if origin_result.success and origin_result.stdout.strip() else None
-            )
+        git_author_name = _git_command_stdout(source_host, "git config user.name", source_path)
+        git_author_email = _git_command_stdout(source_host, "git config user.email", source_path)
+        origin_url = _git_command_stdout(source_host, "git remote get-url origin", source_path)
 
         with info_span(
             "Transferring git repository...",
@@ -1216,29 +1220,32 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     ) -> None:
         """Push git repo from source to target, mirroring branches and tags."""
         self._warn_if_submodules_detected(source_host, source_path)
+        same_machine = _is_same_machine(source_host, self)
         target_ssh_info = self.get_ssh_connection_info()
 
-        if target_ssh_info is None:
-            if source_host.is_local:
-                git_url = str(target_path / ".git")
-            else:
-                source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
-                if source_ssh_info is None:
-                    raise MngrError("Cannot determine SSH connection info for remote source host")
-                user, hostname, port, key_path = source_ssh_info
-                source_known_hosts = get_ssh_known_hosts_file(source_host)
-                with log_span("Fetching from remote source to local target"):
-                    git_ssh_cmd = build_ssh_transport_command(key_path, port, source_known_hosts)
-                    env = {"GIT_SSH_COMMAND": git_ssh_cmd}
-                    remote_url = f"ssh://{user}@{hostname}:{port}{source_path}/.git"
-                    try:
-                        self.mngr_ctx.concurrency_group.run_process_to_completion(
-                            ["git", "clone", "--mirror", remote_url, str(target_path / ".git")],
-                            env={**os.environ, **env},
-                        )
-                    except ProcessError as e:
-                        raise MngrError(f"Failed to clone from remote source: {e}") from e
-                    return
+        # Same-machine push uses a bare local-on-host URL with no SSH
+        # transport (covers both local-laptop-to-itself and
+        # remote-host-to-itself).
+        if same_machine:
+            git_url = str(target_path / ".git")
+        elif target_ssh_info is None:
+            source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
+            if source_ssh_info is None:
+                raise MngrError("Cannot determine SSH connection info for remote source host")
+            user, hostname, port, key_path = source_ssh_info
+            source_known_hosts = get_ssh_known_hosts_file(source_host)
+            with log_span("Fetching from remote source to local target"):
+                git_ssh_cmd = build_ssh_transport_command(key_path, port, source_known_hosts)
+                env = {"GIT_SSH_COMMAND": git_ssh_cmd}
+                remote_url = f"ssh://{user}@{hostname}:{port}{source_path}/.git"
+                try:
+                    self.mngr_ctx.concurrency_group.run_process_to_completion(
+                        ["git", "clone", "--mirror", remote_url, str(target_path / ".git")],
+                        env={**os.environ, **env},
+                    )
+                except ProcessError as e:
+                    raise MngrError(f"Failed to clone from remote source: {e}") from e
+                return
         else:
             user, hostname, port, key_path = target_ssh_info
             git_url = f"ssh://{user}@{hostname}:{port}{target_path}/.git"
@@ -1249,7 +1256,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         # errors on git 2.45+ due to symbolic refs like refs/remotes/origin/HEAD.
         # --no-verify skips hooks, since they can sometimes fail on mirror pushes.
         env: dict[str, str] = {}
-        if target_ssh_info is not None:
+        if target_ssh_info is not None and not same_machine:
             user, hostname, port, key_path = target_ssh_info
             target_known_hosts = get_ssh_known_hosts_file(self)
             git_ssh_cmd = build_ssh_transport_command(key_path, port, target_known_hosts)
@@ -1260,7 +1267,15 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         env["GIT_LFS_SKIP_PUSH"] = "1"
 
         with log_span("Pushing git repo to target: {}", git_url):
-            if source_host.is_local:
+            if same_machine:
+                # Run the push on the shared machine via the host interface.
+                refspecs = " ".join(shlex.quote(r) for r in GIT_MIRROR_PUSH_REFSPECS)
+                push_cmd = f"git push --no-verify --force --prune {shlex.quote(git_url)} {refspecs}"
+                result = source_host.execute_idempotent_command(push_cmd, cwd=source_path, env=env)
+                if not result.success:
+                    output = (result.stderr + "\n" + result.stdout).strip()
+                    raise MngrError(f"Failed to push git repo on same host: {output}")
+            elif source_host.is_local:
                 command_args = [
                     "git",
                     "-C",
@@ -1521,12 +1536,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     ) -> None:
         """Run rsync to transfer files from source to target.
 
-        - If both are local, run rsync locally
-        - If source is local, push to target via SSH
-        - If target is local, pull from source via SSH
-        - If both are remote, sync via a local temp directory as intermediary
-          (pull from source, then push to target)
+        - If source and target are on the same machine, run rsync on that
+          machine between two local paths (no SSH)
+        - If source is local and target is remote, push to target via SSH
+        - If target is local and source is remote, pull from source via SSH
+        - If source and target are different remote hosts, sync via a local
+          temp directory as intermediary (pull from source, then push to target)
         """
+        same_machine = _is_same_machine(source_host, self)
 
         # Build rsync arguments
         rsync_args = ["rsync", "-rlpt"]
@@ -1534,17 +1551,46 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             rsync_args.extend(["--exclude", ".git"])
         if extra_args:
             rsync_args.extend(shlex.split(extra_args))
+
+        # files_from points at a temp file on the laptop. For cross-host
+        # rsync (which always runs on the laptop) we can pass that path
+        # directly. For same-machine rsync we mirror it onto the host first
+        # so rsync running on the host can read it.
+        host_files_from: Path | None = None
         if files_from is not None:
-            rsync_args.extend(["--files-from", str(files_from)])
+            if same_machine:
+                paths = [p for p in files_from.read_text().splitlines() if p]
+                if not paths:
+                    return
+                host_files_from = self.host_dir / "tmp" / f"rsync-files-from-{uuid4().hex}.txt"
+                # write_file creates parent directories as needed.
+                self.write_file(host_files_from, ("\n".join(paths) + "\n").encode())
+                rsync_args.extend(["--files-from", str(host_files_from)])
+            else:
+                rsync_args.extend(["--files-from", str(files_from)])
 
         source_path_str = str(source_path).rstrip("/") + "/"
         target_path_str = str(target_path).rstrip("/") + "/"
 
-        if source_host.is_local and self.is_local:
-            # Local to local
+        # Same-machine rsync runs between two local paths on the shared
+        # machine via the host interface (no SSH, no laptop intermediary).
+        if same_machine:
             rsync_args.extend([source_path_str, target_path_str])
-            rsync_description = "rsync: local to local"
-        elif source_host.is_local and not self.is_local:
+            rsync_cmd = " ".join(shlex.quote(a) for a in rsync_args)
+            with log_span("rsync: same-host {} -> {}", source_path, target_path):
+                try:
+                    result = self.execute_idempotent_command(rsync_cmd)
+                    if not result.success:
+                        raise MngrError(f"rsync failed (same-host): {result.stderr}")
+                    logger.trace("Ran rsync command (same-host): {}", rsync_cmd)
+                finally:
+                    if host_files_from is not None:
+                        self.execute_idempotent_command(
+                            f"rm -f {shlex.quote(str(host_files_from))}", timeout_seconds=5.0
+                        )
+            return
+
+        if source_host.is_local and not self.is_local:
             # Local to remote
             target_ssh_info = self.get_ssh_connection_info()
             assert target_ssh_info is not None

@@ -7,6 +7,7 @@ from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import find_agents_by_identifiers_or_state
 from imbue.mngr.api.find import find_and_maybe_start_agent_by_name_or_id
+from imbue.mngr.api.find import parse_address_part
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import UserInputError
@@ -50,9 +51,6 @@ def parse_agent_address(address_str: str) -> AgentAddress:
 
     Format: [AGENT_NAME][@[HOST_NAME][.PROVIDER_NAME]]
 
-    The host part (after @) may contain at most one dot separating the host name
-    from the provider name. Additional dots are not allowed.
-
     Examples:
       - "" -> everything None (auto-generate name, local host)
       - "foo" -> agent_name="foo"
@@ -61,41 +59,11 @@ def parse_agent_address(address_str: str) -> AgentAddress:
       - "foo@.modal" -> agent_name="foo", provider_name="modal" (implies new host)
       - "@myhost.modal" -> host_name="myhost", provider_name="modal" (auto-generate name)
     """
-    if not address_str:
-        return AgentAddress()
-
-    if "@" not in address_str:
-        # Simple agent name with no host component
-        try:
-            return AgentAddress(agent_name=AgentName(address_str))
-        except InvalidName as e:
-            raise UserInputError(str(e)) from e
-
-    agent_part, host_part = address_str.split("@", 1)
+    name_str, host_name, provider_name = parse_address_part(address_str)
     try:
-        agent_name = AgentName(agent_part) if agent_part else None
+        agent_name = AgentName(name_str) if name_str is not None else None
     except InvalidName as e:
         raise UserInputError(str(e)) from e
-
-    if not host_part:
-        # "foo@" -> just agent name, no host component
-        return AgentAddress(agent_name=agent_name)
-
-    dot_count = host_part.count(".")
-    if dot_count > 1:
-        raise UserInputError(
-            f"Invalid agent address: host part '{host_part}' contains more than one dot. "
-            "Expected format: [NAME][@[HOST][.PROVIDER]]"
-        )
-
-    if dot_count == 1:
-        host_str, provider_str = host_part.split(".", 1)
-        host_name = HostName(host_str) if host_str else None
-        provider_name = ProviderInstanceName(provider_str) if provider_str else None
-    else:
-        host_name = HostName(host_part)
-        provider_name = None
-
     return AgentAddress(agent_name=agent_name, host_name=host_name, provider_name=provider_name)
 
 
