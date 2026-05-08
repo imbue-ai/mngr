@@ -25,8 +25,11 @@ def test_extract_user_statusline_command_handles_missing() -> None:
 def test_format_statusline_command_quotes_state_dir(tmp_path: Path) -> None:
     state_dir = tmp_path / "state with spaces"
     cmd = _format_statusline_command(state_dir)
-    assert "MNGR_AGENT_STATE_DIR=" in cmd
+    # shlex.quote should wrap the path so spaces don't break the shell parse
+    assert "'" in cmd or '"' in cmd
     assert "claude_statusline.sh" in cmd
+    # No leftover env-var prefix; env is set via the settings.json env block.
+    assert "=" not in cmd
 
 
 def test_claude_extra_per_agent_settings_wraps_existing_command(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
