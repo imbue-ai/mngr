@@ -22,10 +22,11 @@ class ClaudeExtraSettingsContribution(FrozenModel):
       ``<work_dir>/.claude/settings.local.json`` (the highest user-controllable
       precedence tier in Claude Code's settings stack), so it wins over any
       project-level ``.claude/settings.json``. The hookimpl is expected to read
-      ``source_settings.statusLine.command`` (the project-level command, if
-      any) out of the hook's ``source_settings`` argument and weave it into
-      its own command (e.g. capture it into an env var for a wrapping shim
-      to chain to), so we wrap rather than replace.
+      ``source_settings.statusLine.command`` (the user's existing command from
+      whichever tier currently wins, if any) out of the hook's
+      ``source_settings`` argument and weave it into its own command (e.g.
+      capture it into an env var for a wrapping shim to chain to), so we wrap
+      rather than replace.
     - export env vars into the agent's *process* environment (via
       ``ClaudeAgent.modify_env_vars``). These are visible to Claude Code and
       any subprocess it spawns, including the statusline command and hooks.
@@ -74,10 +75,14 @@ def claude_extra_per_agent_settings(
     """Contribute statusline / env / scripts to a Claude agent's per-agent config.
 
     Called once per agent during provisioning. Plugins may inspect
-    ``source_settings`` -- the parsed contents of the project-level
-    ``<work_dir>/.claude/settings.json`` (the file that would otherwise win
-    Claude Code's settings precedence at the project tier) -- to capture e.g.
-    an existing ``statusLine.command`` so it can be wrapped or forwarded.
+    ``source_settings`` -- a shallow merge of ``<work_dir>/.claude/settings.json``
+    (project tier) and ``<work_dir>/.claude/settings.local.json`` (local tier),
+    with local-tier fields overriding project-tier ones, mirroring Claude Code's
+    own precedence between those two files -- to capture e.g. an existing
+    ``statusLine.command`` so it can be wrapped or forwarded. Plugins that
+    install at the local tier and re-run provisioning will see their own
+    previously-installed value here, and should guard against capturing it
+    recursively.
 
     ``work_dir`` is the agent's working directory. The hookimpl's
     ``statusline_command`` is installed at
