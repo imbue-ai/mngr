@@ -12,7 +12,7 @@ This skill sets up and manages the development iteration loop for testing the mi
 The minds stack has four components that need to stay in sync:
 
 1. **minds desktop client** (`apps/minds/`) -- Electron app + FastAPI backend that runs locally, proxies to agent web servers
-2. **minds_workspace_server** (`apps/minds_workspace_server/`) -- FastAPI + web UI that runs INSIDE the agent's Docker container as a background service
+2. **system_interface workspace server** (lives in `forever-claude-template/apps/system_interface/`, distributed as the `minds-workspace-server` CLI) -- FastAPI + web UI that runs INSIDE the agent's Docker container as a background service
 3. **mngr core** (`libs/mngr/`) -- the agent management CLI
 4. **forever-claude-template** -- the template repo that defines the Docker container (Dockerfile, services.toml, skills, scripts)
 
@@ -67,7 +67,7 @@ After the create-form is filled in and you've created an agent, see [Iterating o
 
 ## Iterating on a running agent
 
-After making changes to any component (mngr, minds_workspace_server, the template, etc.), sync them into a running agent's container:
+After making changes to any component (mngr, the template's system_interface workspace server, the template, etc.), sync them into a running agent's container:
 
 ```bash
 apps/minds/scripts/propagate_changes \
@@ -156,7 +156,7 @@ Both `mngr imbue_cloud admin pool create --mngr-source ...` (mngr-working-tree -
 
 ### Editable installs
 
-The Dockerfile uses `uv tool install -e` for mngr and minds_workspace_server, so Python code changes in `vendor/mngr/` are picked up immediately after rsync. Frontend changes require the `npm run build` step (done automatically by `propagate_changes`).
+The Dockerfile uses `uv tool install -e` for mngr (vendored under `vendor/mngr/`) and for the system_interface workspace server (at `apps/system_interface/`), so Python code changes in either location are picked up immediately after rsync. Frontend changes require the `npm run build` step (done automatically by `propagate_changes`).
 
 ### Template settings
 

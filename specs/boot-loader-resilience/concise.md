@@ -1,4 +1,5 @@
 # Boot Loader Resilience
+> Note: minds_workspace_server has since been moved out of mngr to `forever-claude-template/apps/system_interface/`. Path references to `apps/minds_workspace_server/...` describe state at the time this spec was written.
 
 Make the minds workspace boot process more robust by ensuring the user always has a recovery path when the web server fails to start or begins misbehaving.
 
