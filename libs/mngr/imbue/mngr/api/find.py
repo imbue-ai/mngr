@@ -39,26 +39,55 @@ class ParsedSourceLocation(FrozenModel):
     Produced by parse_source_string(); consumed by resolve_source_location().
     """
 
-    agent: str | None = Field(description="Agent ID or name")
-    host: str | None = Field(description="Host ID or name (may include .PROVIDER suffix)")
-    path: str | None = Field(description="File path")
+    agent: str | None = Field(default=None, description="Agent ID or name")
+    host_name: HostName | None = Field(default=None, description="Host ID or name; never includes a .PROVIDER suffix")
+    provider_name: ProviderInstanceName | None = Field(
+        default=None, description="Provider name when explicitly qualified with .PROVIDER"
+    )
+    path: str | None = Field(default=None, description="File path")
 
 
 @pure
-def _parse_address_part(address_str: str) -> tuple[str | None, str | None]:
-    """Parse agent address portion of a source string into (agent, host) components.
+def parse_host_qualifier(host_part: str) -> tuple[HostName | None, ProviderInstanceName | None]:
+    """Parse a `[HOST][.PROVIDER]` string into (host_name, provider_name).
 
-    Handles the NAME[@[HOST][.PROVIDER]] format. Returns (agent_str, host_str) where
-    host_str includes the provider suffix if present (e.g. "myhost.docker").
+    Empty input returns (None, None). The dot is treated as a deterministic
+    separator: real host names do not contain dots in this DSL, so any dot is
+    interpreted as the start of a `.PROVIDER` qualifier. More than one dot is
+    rejected.
     """
-    if "@" not in address_str:
-        # No @ means just an agent name
-        return (address_str or None, None)
+    if not host_part:
+        return (None, None)
+    dot_count = host_part.count(".")
+    if dot_count > 1:
+        raise UserInputError(
+            f"Invalid host qualifier '{host_part}': contains more than one dot. Expected format: [HOST][.PROVIDER]"
+        )
+    if dot_count == 0:
+        return (HostName(host_part), None)
+    host_str, provider_str = host_part.split(".", 1)
+    host_name = HostName(host_str) if host_str else None
+    provider_name = ProviderInstanceName(provider_str) if provider_str else None
+    return (host_name, provider_name)
 
-    agent_part, host_part = address_str.split("@", 1)
-    agent = agent_part or None
-    host = host_part or None
-    return (agent, host)
+
+@pure
+def parse_address_part(
+    address_part: str,
+) -> tuple[str | None, HostName | None, ProviderInstanceName | None]:
+    """Parse a `[NAME][@[HOST][.PROVIDER]]` string into (name_str, host_name, provider_name).
+
+    The name part is returned as a raw string so callers may further validate it
+    according to their own rules (as AgentName, AgentId, HostId, etc.). The host
+    and provider parts are deterministically split on a single dot.
+    """
+    if not address_part:
+        return (None, None, None)
+    if "@" not in address_part:
+        return (address_part, None, None)
+    name_part, host_part = address_part.split("@", 1)
+    host_name, provider_name = parse_host_qualifier(host_part)
+    return (name_part or None, host_name, provider_name)
 
 
 @pure
@@ -72,27 +101,19 @@ def parse_source_string(source: str) -> ParsedSourceLocation:
       3. @HOST[.PROVIDER]:PATH  explicit host + PATH (@ without agent name)
       4. :PATH                  local path
 
-    where AGENT_ADDR is NAME[@HOST[.PROVIDER]].
+    where AGENT_ADDR is NAME[@HOST[.PROVIDER]]. The host and provider are split
+    deterministically on a single dot; real host names are assumed not to contain
+    dots in this DSL.
 
     Paths starting with /, ./, ~/, or ../ are also recognized directly
     (i.e. --from /abs/path works without requiring the : prefix).
 
     Note: a bare name like "foo" refers to agent "foo", not a directory.
     Use ":foo" to specify a relative directory named foo.
-
-    Examples:
-      - "my-agent"                  -> agent="my-agent"
-      - "my-agent@my-host"          -> agent="my-agent", host="my-host"
-      - "my-agent@my-host.modal"    -> agent="my-agent", host="my-host.modal"
-      - "my-agent:path"             -> agent="my-agent", path="path"
-      - "my-agent@my-host:/path"    -> agent="my-agent", host="my-host", path="/path"
-      - "@my-host:/path"            -> host="my-host", path="/path"
-      - ":/path/to/dir"             -> path="/path/to/dir"
-      - "/path/to/dir"              -> path="/path/to/dir"
     """
     # Recognize unambiguous path prefixes as a convenience
     if source.startswith(("/", "./", "~/", "../")):
-        return ParsedSourceLocation(agent=None, host=None, path=source)
+        return ParsedSourceLocation(path=source)
 
     # Split on first : to separate address from path
     if ":" in source:
@@ -102,14 +123,8 @@ def parse_source_string(source: str) -> ParsedSourceLocation:
         address_part = source
         path = None
 
-    # Empty address means local path (variant 4: ":path")
-    if not address_part:
-        return ParsedSourceLocation(agent=None, host=None, path=path)
-
-    # Parse the address part (variants 1-3)
-    agent, host = _parse_address_part(address_part)
-
-    return ParsedSourceLocation(agent=agent, host=host, path=path)
+    name_str, host_name, provider_name = parse_address_part(address_part)
+    return ParsedSourceLocation(agent=name_str, host_name=host_name, provider_name=provider_name, path=path)
 
 
 @pure
@@ -133,26 +148,50 @@ def determine_resolved_path(
 
 
 @pure
+def _find_matching_hosts(
+    host_name_or_id: HostName | None,
+    provider_name: ProviderInstanceName | None,
+    all_hosts: Sequence[DiscoveredHost],
+) -> list[DiscoveredHost]:
+    """Find hosts matching the given parsed components.
+
+    ``host_name_or_id`` may be either a host name or a HostId-shaped string;
+    when it parses as a HostId, the lookup matches by ID, otherwise by name.
+    ``provider_name`` filters in either case -- e.g. a host ID with a
+    non-matching ``.PROVIDER`` qualifier deliberately yields no match.
+    Returns ``all_hosts`` unchanged if both arguments are None.
+    """
+    if host_name_or_id is None and provider_name is None:
+        return list(all_hosts)
+
+    matches = list(all_hosts)
+    if host_name_or_id is not None:
+        try:
+            host_id = HostId(str(host_name_or_id))
+        except ValueError:
+            host_id = None
+        if host_id is not None:
+            matches = [h for h in matches if h.host_id == host_id]
+        else:
+            matches = [h for h in matches if h.host_name == host_name_or_id]
+    if provider_name is not None:
+        matches = [h for h in matches if h.provider_name == provider_name]
+    return matches
+
+
+@pure
 def find_all_matching_hosts(
     identifier: str,
     all_hosts: Sequence[DiscoveredHost],
 ) -> list[DiscoveredHost]:
-    """Find all hosts matching the given identifier (by ID or name)."""
-    # Try as ID first
-    try:
-        host_id = HostId(identifier)
-        matches = [h for h in all_hosts if h.host_id == host_id]
-        if matches:
-            return matches
-    except ValueError:
-        pass
+    """Find all hosts matching a raw identifier string.
 
-    # Try as name
-    try:
-        host_name = HostName(identifier)
-    except ValueError:
-        return []
-    return [h for h in all_hosts if h.host_name == host_name]
+    The identifier may be a HostId, a HostName, or a ``host.provider`` form.
+    Dots are treated as the deterministic ``.PROVIDER`` separator; this assumes
+    real host names do not contain dots in this DSL.
+    """
+    host_name, provider_name = parse_host_qualifier(identifier)
+    return _find_matching_hosts(host_name, provider_name, all_hosts)
 
 
 @pure
@@ -183,26 +222,56 @@ def find_all_matching_agents(
 
 
 @pure
+def _find_one_matching_host(
+    host_name_or_id: HostName | None,
+    provider_name: ProviderInstanceName | None,
+    all_hosts: Sequence[DiscoveredHost],
+) -> DiscoveredHost | None:
+    """Find the single host matching the given parsed components.
+
+    Returns None when both arguments are None. Raises UserInputError when no
+    host matches or when more than one matches.
+    """
+    if host_name_or_id is None and provider_name is None:
+        return None
+
+    matches = _find_matching_hosts(host_name_or_id, provider_name, all_hosts)
+    if len(matches) == 0:
+        descriptor = _host_descriptor(host_name_or_id, provider_name)
+        raise UserInputError(f"Could not find host with ID or name: {descriptor}")
+    if len(matches) > 1:
+        descriptor = _host_descriptor(host_name_or_id, provider_name)
+        raise UserInputError(f"Multiple hosts found with name: {descriptor}")
+    return matches[0]
+
+
+@pure
+def _host_descriptor(host_name_or_id: HostName | None, provider_name: ProviderInstanceName | None) -> str:
+    """Render parsed host components back into the user-facing `host.provider` form."""
+    if host_name_or_id is not None and provider_name is not None:
+        return f"{host_name_or_id}.{provider_name}"
+    if host_name_or_id is not None:
+        return str(host_name_or_id)
+    if provider_name is not None:
+        return f".{provider_name}"
+    return ""
+
+
+@pure
 def resolve_host_reference(
     host_identifier: str | None,
     all_hosts: Sequence[DiscoveredHost],
 ) -> DiscoveredHost | None:
-    """Resolve a host identifier (ID or name) to a DiscoveredHost.
+    """Resolve a raw host identifier string to a DiscoveredHost.
 
-    Returns None if host_identifier is None.
-    Raises UserInputError if host cannot be found or multiple hosts match the name.
+    Returns None if host_identifier is None. Accepts a HostId, a HostName, or a
+    ``host.provider`` form. Raises UserInputError if no host matches or if more
+    than one matches.
     """
     if host_identifier is None:
         return None
-
-    matches = find_all_matching_hosts(host_identifier, all_hosts)
-
-    if len(matches) == 0:
-        raise UserInputError(f"Could not find host with ID or name: {host_identifier}")
-    elif len(matches) > 1:
-        raise UserInputError(f"Multiple hosts found with name: {host_identifier}")
-    else:
-        return matches[0]
+    host_name, provider_name = parse_host_qualifier(host_identifier)
+    return _find_one_matching_host(host_name, provider_name, all_hosts)
 
 
 @pure
@@ -254,12 +323,18 @@ def resolve_source_location(
     If the resolved host is offline, it will be started if is_start_desired is True (the default).
     If is_start_desired is False and the host is offline, raises UserInputError.
     """
-    logger.trace("Resolving source: agent={} host={} path={}", parsed.agent, parsed.host, parsed.path)
+    logger.trace(
+        "Resolving source: agent={} host_name={} provider_name={} path={}",
+        parsed.agent,
+        parsed.host_name,
+        parsed.provider_name,
+        parsed.path,
+    )
 
     # Resolve host and agent references from the parsed components
     all_hosts = list(agents_by_host.keys())
     with log_span("Resolving host reference"):
-        resolved_host = resolve_host_reference(parsed.host, all_hosts)
+        resolved_host = _find_one_matching_host(parsed.host_name, parsed.provider_name, all_hosts)
     with log_span("Resolving agent reference"):
         agent_result = resolve_agent_reference(parsed.agent, resolved_host, agents_by_host)
 
