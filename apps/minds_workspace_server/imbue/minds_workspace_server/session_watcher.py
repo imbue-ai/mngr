@@ -373,11 +373,22 @@ class AgentSessionWatcher:
                 with open(state.file_path, "rb") as f:
                     f.seek(state.byte_offset)
                     new_data = f.read()
-                state.byte_offset = state.byte_offset + len(new_data)
             except OSError:
                 continue
 
-            new_lines = new_data.decode("utf-8", errors="replace").splitlines()
+            # Only consume complete, newline-terminated lines. A trailing
+            # partial line means we caught the file mid-write (Claude may
+            # split a single JSONL record across multiple flushes that the
+            # poll picks up between). Leaving the partial bytes unread keeps
+            # byte_offset aligned with line boundaries so the next poll
+            # reparses the full line once it lands.
+            last_newline = new_data.rfind(b"\n")
+            if last_newline == -1:
+                continue
+            complete_data = new_data[: last_newline + 1]
+            state.byte_offset = state.byte_offset + len(complete_data)
+
+            new_lines = complete_data.decode("utf-8", errors="replace").splitlines()
             if not new_lines:
                 continue
 

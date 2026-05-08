@@ -34,7 +34,12 @@ def test_prevent_while_true() -> None:
 
 def test_prevent_time_sleep() -> None:
     # +1 for service_dispatcher_test._wait_for_port's TCP-ready poll loop.
-    rc.check_time_sleep(_DIR, snapshot(7))
+    # +3 for session_watcher_test.test_watcher_does_not_lose_events_on_partial_writes:
+    # the test must let the watchdog observer thread initialize, sleep between two
+    # halves of a partial-flushed JSONL line, and poll for delivery. There is no
+    # observable signal to await -- the bug being verified is that the poll silently
+    # drops bytes -- so real wall-clock waits are the only way to drive the scenario.
+    rc.check_time_sleep(_DIR, snapshot(10))
 
 
 def test_prevent_global_keyword() -> None:

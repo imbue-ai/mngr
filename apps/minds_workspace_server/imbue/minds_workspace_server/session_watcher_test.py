@@ -181,6 +181,69 @@ def test_watcher_detects_new_events(tmp_path: Path) -> None:
         watcher.stop()
 
 
+def test_watcher_does_not_lose_events_on_partial_writes(tmp_path: Path) -> None:
+    """A JSONL line written across two flushes must still be delivered.
+
+    Regression: ``_poll_for_changes`` previously advanced ``byte_offset`` by
+    the full length of every read, even when the trailing bytes were a
+    partial line. The next poll then started mid-record, the parser silently
+    skipped the malformed lines, and the activity-state cache stayed pinned
+    to the prior turn's tail (e.g. ``tool_result`` -> indicator stuck on
+    ``Thinking...`` after the agent finished).
+    """
+    agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [])
+    session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
+    collected: list[tuple[str, list[dict[str, Any]]]] = []
+
+    watcher = AgentSessionWatcher(
+        agent_id="test-agent",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+        on_events=lambda aid, evts: collected.append((aid, evts)),
+    )
+    watcher.start()
+    time.sleep(2.0)
+
+    try:
+        long_text = "x" * 3000
+        assistant_event = {
+            "type": "assistant",
+            "uuid": "uuid-1",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-6",
+                "content": [{"type": "text", "text": long_text}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        }
+        line = json.dumps(assistant_event) + "\n"
+        midpoint = len(line) // 2
+
+        # Simulate a partial flush: write the first half, let the watcher
+        # poll, then write the rest.
+        with open(session_file, "ab") as f:
+            f.write(line[:midpoint].encode())
+        time.sleep(1.5)
+
+        with open(session_file, "ab") as f:
+            f.write(line[midpoint:].encode())
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if any("assistant_message" == e["type"] for _, evts in collected for e in evts):
+                break
+            time.sleep(0.2)
+
+        delivered = [e for _, evts in collected for e in evts]
+        assert any(e["type"] == "assistant_message" for e in delivered), (
+            f"assistant_message dropped after partial write; delivered: {[e['type'] for e in delivered]}"
+        )
+    finally:
+        watcher.stop()
+
+
 def test_watcher_handles_missing_history_file(tmp_path: Path) -> None:
     agent_state_dir = tmp_path / "agent_state"
     agent_state_dir.mkdir()
