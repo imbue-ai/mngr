@@ -1,0 +1,1 @@
+`mngr list --format json/jsonl --on-error abort` now emits a valid (partial) document when a provider fails: the captured error is included alongside any agents discovered before the abort, and the command exits non-zero. Previously the abort propagated as a raise and stdout was empty, leaving callers without parseable output.

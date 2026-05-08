@@ -9,6 +9,7 @@ from typing import Any
 from loguru import logger
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
@@ -246,15 +247,41 @@ def list_agents(
             )
 
     except MngrError as e:
-        if error_behavior == ErrorBehavior.ABORT:
-            raise
-        error_info = ErrorInfo.build(e)
-        result.errors.append(error_info)
-        if on_error:
-            on_error(error_info)
+        # Both ABORT and CONTINUE capture the error into the structured result so
+        # callers (in particular `mngr list --format json/jsonl`) can render a
+        # valid partial document rather than empty stdout. ABORT vs CONTINUE
+        # differs only at the per-provider catch level: ABORT stops further work
+        # at the first failure (the orchestrator re-raises); CONTINUE keeps every
+        # provider going. Either way, the caller learns success/failure from the
+        # populated `result.errors` and the exit code, not from a raise.
+        _record_error(result, e, on_error)
+    except ConcurrencyExceptionGroup as eg:
+        # ABORT-mode raises that originate inside a `with mngr_executor` block
+        # bubble up wrapped by the executor's __exit__. Unwrap and capture each
+        # MngrError; let any non-MngrError inner exception propagate so
+        # programming bugs aren't silently buried in result.errors.
+        domain_errors: list[MngrError] = []
+        for exc in eg.exceptions:
+            if not isinstance(exc, MngrError):
+                raise
+            domain_errors.append(exc)
+        for inner in domain_errors:
+            _record_error(result, inner, on_error)
 
     _maybe_write_full_discovery_snapshot(mngr_ctx, result, provider_names, include_filters, exclude_filters)
     return result
+
+
+def _record_error(
+    result: ListResult,
+    exception: MngrError,
+    on_error: Callable[[ErrorInfo], None] | None,
+) -> None:
+    """Append an ErrorInfo derived from `exception` to result.errors and fire on_error."""
+    error_info = ErrorInfo.build(exception)
+    result.errors.append(error_info)
+    if on_error:
+        on_error(error_info)
 
 
 def _maybe_write_full_discovery_snapshot(

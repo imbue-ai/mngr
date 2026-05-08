@@ -12,6 +12,7 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.cli.list import _StreamingHumanRenderer
 from imbue.mngr.cli.list import _StreamingTemplateEmitter
@@ -1242,26 +1243,35 @@ class FakeApiListAgents:
     """Replacement for api_list_agents that returns pre-built agents.
 
     When the list command calls api_list_agents, this callable returns a
-    ListResult containing the pre-configured agents. If the caller passes
-    an on_agent callback (streaming mode), agents are delivered via that
-    callback as well.
+    ListResult containing the pre-configured agents and errors. If the
+    caller passes an on_agent or on_error callback, items are delivered
+    via that callback as well.
     """
 
-    def __init__(self, agents: list[AgentDetails]) -> None:
+    def __init__(self, agents: list[AgentDetails], errors: list[ErrorInfo] | None = None) -> None:
         self.agents = agents
+        self.errors = errors or []
 
     def __call__(self, **kwargs: Any) -> ListResult:
-        result = ListResult(agents=list(self.agents))
+        result = ListResult(agents=list(self.agents), errors=list(self.errors))
         on_agent: Callable[[AgentDetails], None] | None = kwargs.get("on_agent")
         if on_agent is not None:
             for agent in self.agents:
                 on_agent(agent)
+        on_error: Callable[[ErrorInfo], None] | None = kwargs.get("on_error")
+        if on_error is not None:
+            for error in self.errors:
+                on_error(error)
         return result
 
 
-def _patch_list_agents(monkeypatch: pytest.MonkeyPatch, agents: list[AgentDetails]) -> None:
-    """Replace api_list_agents with a fake that returns the given agents."""
-    monkeypatch.setattr("imbue.mngr.cli.list.api_list_agents", FakeApiListAgents(agents))
+def _patch_list_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    agents: list[AgentDetails],
+    errors: list[ErrorInfo] | None = None,
+) -> None:
+    """Replace api_list_agents with a fake that returns the given agents (and optional errors)."""
+    monkeypatch.setattr("imbue.mngr.cli.list.api_list_agents", FakeApiListAgents(agents, errors=errors))
 
 
 # =============================================================================
@@ -1591,6 +1601,89 @@ def test_list_command_json_format_no_agents(
     assert result.exit_code == 0
     data = json.loads(result.stdout.strip())
     assert data["agents"] == []
+
+
+def test_list_command_json_format_with_errors_only(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format json must emit a valid JSON document when only errors are present.
+
+    Covers the empty-agents path: JSON output is `{"agents": [], "errors": [...]}`
+    rather than empty stdout (the regression that PR-C addresses for
+    `mngr list --format json --on-error abort` against a failing provider).
+    Exit code is non-zero because errors are present.
+    """
+    errors = [ErrorInfo(exception_type="MngrError", message="failed to load provider")]
+    _patch_list_agents(monkeypatch, [], errors=errors)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "json", "--on-error", "abort"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 1
+    json_line = next(line for line in result.output.splitlines() if line.strip().startswith("{"))
+    data = json.loads(json_line)
+    assert data["agents"] == []
+    assert len(data["errors"]) == 1
+    assert data["errors"][0]["exception_type"] == "MngrError"
+    assert data["errors"][0]["message"] == "failed to load provider"
+
+
+def test_list_command_json_format_with_partial_agents_and_errors(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format json emits both partial agents and the captured errors.
+
+    The non-empty agents path also serializes errors so callers can see what
+    failed alongside the partial result set.
+    """
+    agents = [make_test_agent_details(name="alpha", state=AgentLifecycleState.RUNNING)]
+    errors = [ErrorInfo(exception_type="MngrError", message="provider X failed")]
+    _patch_list_agents(monkeypatch, agents, errors=errors)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "json", "--sort", "name", "--on-error", "abort"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 1
+    # Extract the JSON document from output, which may also contain loguru warnings.
+    output_after_warnings = result.output[result.output.find("{") :]
+    data = json.loads(output_after_warnings)
+    assert len(data["agents"]) == 1
+    assert data["agents"][0]["name"] == "alpha"
+    assert len(data["errors"]) == 1
+    assert data["errors"][0]["message"] == "provider X failed"
+
+
+def test_list_command_jsonl_format_with_errors_only(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format jsonl with only errors must emit one valid JSON line per error."""
+    errors = [ErrorInfo(exception_type="MngrError", message="failed to load provider")]
+    _patch_list_agents(monkeypatch, [], errors=errors)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "jsonl", "--on-error", "abort"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 1
+    json_lines = [line for line in result.output.splitlines() if line.strip().startswith("{")]
+    assert len(json_lines) == 1
+    parsed = json.loads(json_lines[0])
+    assert parsed["event"] == "error"
+    assert parsed["message"] == "failed to load provider"
 
 
 def test_list_command_format_template_no_agents(
