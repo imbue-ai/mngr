@@ -11,14 +11,15 @@ the same gateway and the same permissions store.
 ## CLI
 
 ```bash
-mngr latchkey ensure-gateway [--data-dir PATH]
+mngr latchkey ensure-gateway [--latchkey-dir PATH]
 ```
 
 Idempotent. Starts the shared `latchkey gateway` if it is not already
 running; otherwise adopts the existing one. Persists its record under
-the supplied data directory (default: `<profile>/latchkey` inside the
-active mngr profile directory) so subsequent in-process API users on
-the same machine see the same gateway.
+the supplied directory (default: `<profile>/latchkey` inside the active
+mngr profile directory) so subsequent in-process API users on the same
+machine see the same gateway. The same directory is also used as the
+spawned subprocess's `LATCHKEY_DIRECTORY` (credential / config store).
 
 ## Python API
 

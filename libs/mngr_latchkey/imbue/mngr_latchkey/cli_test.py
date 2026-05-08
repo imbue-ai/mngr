@@ -10,29 +10,17 @@ don't need a subprocess: data-dir resolution.
 from pathlib import Path
 
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr_latchkey.cli import _resolve_data_dir
-from imbue.mngr_latchkey.cli import _resolve_latchkey_directory
+from imbue.mngr_latchkey.cli import DEFAULT_LATCHKEY_DIR_NAME
+from imbue.mngr_latchkey.cli import _resolve_latchkey_dir
 
 
-def test_resolve_data_dir_defaults_to_profile_subdir(temp_mngr_ctx: MngrContext) -> None:
-    """Without an override the data dir lives next to the profile."""
-    resolved = _resolve_data_dir(temp_mngr_ctx, override=None)
-    assert resolved == temp_mngr_ctx.profile_dir / "latchkey"
+def test_resolve_latchkey_dir_defaults_to_profile_subdir(temp_mngr_ctx: MngrContext) -> None:
+    """Without an override the dir lives at ``<profile>/latchkey``."""
+    resolved = _resolve_latchkey_dir(temp_mngr_ctx, override=None)
+    assert resolved == temp_mngr_ctx.profile_dir / DEFAULT_LATCHKEY_DIR_NAME
 
 
-def test_resolve_data_dir_honors_override(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+def test_resolve_latchkey_dir_honors_override(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
     custom = tmp_path / "custom-latchkey"
-    resolved = _resolve_data_dir(temp_mngr_ctx, override=str(custom))
-    assert resolved == custom
-
-
-def test_resolve_latchkey_directory_defaults_under_data_dir(tmp_path: Path) -> None:
-    """Defaults to ``<data_dir>/latchkey-credentials`` -- separated from plugin metadata."""
-    resolved = _resolve_latchkey_directory(tmp_path / "data", override=None)
-    assert resolved == tmp_path / "data" / "latchkey-credentials"
-
-
-def test_resolve_latchkey_directory_honors_override(tmp_path: Path) -> None:
-    custom = tmp_path / "share"
-    resolved = _resolve_latchkey_directory(tmp_path / "data", override=str(custom))
+    resolved = _resolve_latchkey_dir(temp_mngr_ctx, override=str(custom))
     assert resolved == custom
