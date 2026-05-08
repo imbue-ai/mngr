@@ -44,7 +44,7 @@ with the failing step number and error detail in `notes`.
    immediately above any prior date sections (so dates remain in
    reverse-chronological order). Preserve the existing file header.
 
-6. Configure git: `git config user.email "dev@imbue.com"`,
+6. Configure git: `git config user.email "bot@imbue.com"`,
    `git config user.name "Changelog Bot"`, `gh auth setup-git`.
 
 7. `git add -A` and `git commit -m "Consolidate changelog entries for <date>"`,
