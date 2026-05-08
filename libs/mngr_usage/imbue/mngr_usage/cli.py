@@ -489,13 +489,13 @@ def _emit_output(
             for source_name, age_seconds in stale_sources:
                 if multi_source:
                     logger.warning(
-                        "[{}] snapshot is stale (last updated {} ago); values may not reflect latest API state.",
+                        "[{}] snapshot last updated {} ago",
                         source_name,
                         _format_duration(age_seconds),
                     )
                 else:
                     logger.warning(
-                        "Snapshot is stale (last updated {} ago); values may not reflect latest API state.",
+                        "Snapshot last updated {} ago",
                         _format_duration(age_seconds),
                     )
         case _ as unreachable:
