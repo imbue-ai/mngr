@@ -9,6 +9,10 @@
   schemaless fields, and is shown in the `mngr list --help` examples.
   Note: `labels.foo != null` does NOT work as a presence check on
   tolerant fields -- use `has(...)` or a direct comparison.
-- Filters against typoed strict fields (e.g. `host.providr` instead
-  of `host.provider`) still surface a warning so users can see the
-  typo.
+- Filters that cel-python cannot fold to a clean boolean on a missing
+  strict field (e.g. method calls like `host.providr.contains("x")`,
+  or ordered comparisons like `host.providr > 5`) still surface a
+  warning so users can see the typo. Note: simple `==` / `!=` checks
+  on a missing strict field (e.g. `host.providr == "local"`) silently
+  evaluate to false because cel-python carries the missing-key error
+  through equality operators without raising.
