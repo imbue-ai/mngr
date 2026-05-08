@@ -528,9 +528,11 @@ def test_agent_details_to_cel_context_idle_uses_most_recent_activity() -> None:
 def test_apply_cel_filters_no_warning_for_missing_key_on_schemaless_field(exclude_expr: str) -> None:
     """Filtering on a missing key under any schemaless field must not warn.
 
-    Reproduces the bug where `--exclude 'labels.X == "Y"'` warned for every
-    agent without that label. labels, plugin, host.tags, host.plugin are all
-    schemaless and `_apply_cel_filters` must apply tolerance to all of them.
+    `labels`, `plugin`, `host.tags`, `host.plugin` are all schemaless dicts,
+    and `_apply_cel_filters` must apply tolerance uniformly across all of
+    them so that an `--exclude 'labels.X == "Y"'`-style filter quietly
+    evaluates to false on agents without that key, rather than logging a
+    per-agent warning.
     """
     agent = _make_agent_details("test-agent", _make_host_details())
     # All four schemaless fields default to empty dict, so the missing key
