@@ -15,12 +15,30 @@ set -euo pipefail
 # Modal logs, no separate state-volume artifact needed.
 #
 # Usage:
-#   ./scripts/setup_changelog_agent.sh
+#   ./scripts/setup_changelog_agent.sh                    # first-time deploy
+#   CHANGELOG_REPLACE=1 ./scripts/setup_changelog_agent.sh # redeploy (clobbers)
 #
-# Environment:
-#   CHANGELOG_PROVIDER  - Provider to use (default: "modal").
-#   CHANGELOG_VERIFY    - Verification mode (default: "none"). Set to "quick"
-#                         or "full" to run the agent once during deploy.
+# Required environment:
+#   GH_TOKEN          - the bot account's token, NOT a personal `gh auth token`.
+#                       The bot's GitHub-verified email is bot@imbue.com, which
+#                       the consolidation prompt's git config commands match,
+#                       so commit attribution lines up. Using a personal token
+#                       pushes commits + PRs as the deployer's account.
+#   ANTHROPIC_API_KEY - used by claude inside the cron container.
+#
+# Optional environment:
+#   CHANGELOG_PROVIDER - Provider to use (default: "modal").
+#   CHANGELOG_VERIFY   - Verification mode (default: "none"). Set to "quick"
+#                        or "full" to run the agent once during deploy.
+#
+# To trigger a fire on demand and read its JSON outcome (status / pr_url / notes):
+#   env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME=mngr-changelog-schedule \
+#     uv run mngr schedule run changelog-consolidation --provider modal $DISABLE_PLUGIN_ARGS
+# (claude's final assistant message is the structured outcome; see also Modal app logs)
+#
+# If a previous deploy left a stale image-cache checkpoint that conflicts:
+#   rm -f ~/.mngr-changelog-schedule/build/*/mngr_build/*.checkpoint \
+#         ~/.mngr-changelog-schedule/build/*/mngr_build/current.tar.gz
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

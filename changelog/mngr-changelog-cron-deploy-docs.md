@@ -1,0 +1,1 @@
+- Expanded the header docstring of `scripts/setup_changelog_agent.sh` to document the deploy/trigger procedure inline: which token to set as `GH_TOKEN` (bot, not personal), `CHANGELOG_REPLACE=1` for redeploy, the on-demand trigger command, and the image-cache-clear command for stale checkpoints.
