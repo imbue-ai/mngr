@@ -32,7 +32,6 @@ from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
-
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import AgentName

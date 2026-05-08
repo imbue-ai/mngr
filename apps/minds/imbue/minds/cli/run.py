@@ -61,18 +61,18 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.mngr_latchkey.core import LATCHKEY_BINARY
-from imbue.mngr_latchkey.core import Latchkey
-from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo as MindsRemoteSSHInfo
-from imbue.mngr.primitives import AgentId
-from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo as LatchkeyRemoteSSHInfo
-from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.output import emit_event
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
+from imbue.mngr_latchkey.core import LATCHKEY_BINARY
+from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
+from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo as LatchkeyRemoteSSHInfo
+from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
 
 _DEFAULT_MNGR_FORWARD_PORT: Final[int] = 8421
 _AUTH_ERROR_TYPE: Final[str] = "ImbueCloudAuthError"

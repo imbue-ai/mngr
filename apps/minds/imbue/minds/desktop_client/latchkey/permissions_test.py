@@ -6,18 +6,18 @@ import pytest
 from starlette.responses import HTMLResponse
 
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
-from imbue.mngr_latchkey.core import Latchkey
 from imbue.minds.desktop_client.latchkey.permissions import GrantOutcome
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionFlowError
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-from imbue.mngr_latchkey.store import load_permissions
-from imbue.mngr_latchkey.store import permissions_path_for_agent
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.store import load_permissions
+from imbue.mngr_latchkey.store import permissions_path_for_agent
 
 
 def _make_recording_binary(tmp_path: Path, name: str, *, exit_code: int = 0, stderr: str = "") -> Path:

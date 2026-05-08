@@ -45,16 +45,6 @@ from imbue.minds.desktop_client.latchkey.services_catalog import IMPLICIT_DEFAUL
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import get_service_info
 from imbue.minds.desktop_client.latchkey.templates import render_latchkey_permission_dialog
-from imbue.mngr_latchkey.core import CredentialStatus
-from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
-from imbue.mngr_latchkey.core import Latchkey
-from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
-from imbue.mngr_latchkey.store import LatchkeyStoreError
-from imbue.mngr_latchkey.store import granted_permissions_for_scope
-from imbue.mngr_latchkey.store import load_permissions
-from imbue.mngr_latchkey.store import permissions_path_for_agent
-from imbue.mngr_latchkey.store import save_permissions
-from imbue.mngr_latchkey.store import set_permissions_for_scope
 from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -65,6 +55,16 @@ from imbue.minds.desktop_client.request_events import append_response_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_latchkey.core import CredentialStatus
+from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
+from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import granted_permissions_for_scope
+from imbue.mngr_latchkey.store import load_permissions
+from imbue.mngr_latchkey.store import permissions_path_for_agent
+from imbue.mngr_latchkey.store import save_permissions
+from imbue.mngr_latchkey.store import set_permissions_for_scope
 
 _MNGR_MESSAGE_TIMEOUT_SECONDS: Final[float] = 30.0
 

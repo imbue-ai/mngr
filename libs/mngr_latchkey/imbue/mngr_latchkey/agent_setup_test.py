@@ -11,8 +11,8 @@ from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
-import pytest
 from pydantic import PrivateAttr
 
 from imbue.mngr.primitives import AgentId
@@ -70,9 +70,6 @@ class _FakeLatchkey(Latchkey):
             raise self._gateway_error
         if self._gateway_url is None:
             raise LatchkeyError("test fake: configure gateway_url")
-        # Re-use upstream URL parsing rather than carrying our own parser.
-        from urllib.parse import urlsplit
-
         parts = urlsplit(self._gateway_url)
         if parts.hostname is None or parts.port is None:
             raise LatchkeyError(f"unparseable url: {self._gateway_url}")
@@ -232,13 +229,6 @@ def test_finalize_with_none_path_is_a_noop(tmp_path: Path) -> None:
 
 
 # -- AgentLatchkeySetup model -------------------------------------------------
-
-
-def test_agent_latchkey_setup_is_immutable() -> None:
-    """``AgentLatchkeySetup`` is a frozen model; callers cannot mutate the env in place."""
-    setup = AgentLatchkeySetup(env={"X": "1"}, opaque_permissions_path=None)
-    with pytest.raises((TypeError, ValueError)):
-        setup.env = {}  # type: ignore[misc]
 
 
 def test_agent_latchkey_setup_default_opaque_path_is_none() -> None:

@@ -216,17 +216,29 @@ def opaque_permissions_dir(data_dir: Path) -> Path:
     return data_dir / _OPAQUE_PERMISSIONS_DIR_NAME
 
 
+_OPAQUE_PERMISSIONS_PATH_MAX_ATTEMPTS: Final[int] = 16
+
+
 def new_opaque_permissions_path(data_dir: Path) -> Path:
     """Return a fresh, unused opaque-named permissions handle path.
 
     The caller is responsible for materializing the file.
+
+    UUIDv4 collisions are astronomically rare, but we bound the retry
+    loop just in case the underlying directory has somehow been seeded
+    with every UUID we ever generate (e.g. a misconfigured test) so the
+    function cannot loop forever.
     """
     parent = opaque_permissions_dir(data_dir)
     parent.mkdir(parents=True, exist_ok=True)
-    while True:
+    for _ in range(_OPAQUE_PERMISSIONS_PATH_MAX_ATTEMPTS):
         candidate = parent / f"{uuid.uuid4().hex}.json"
         if not candidate.exists() and not candidate.is_symlink():
             return candidate
+    raise LatchkeyStoreError(
+        f"Could not allocate a fresh opaque permissions path under {parent} after "
+        f"{_OPAQUE_PERMISSIONS_PATH_MAX_ATTEMPTS} attempts"
+    )
 
 
 def link_opaque_permissions_to_agent(

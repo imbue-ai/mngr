@@ -44,10 +44,6 @@ from imbue.minds.desktop_client.api_key_store import save_api_key_hash
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
-from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
-from imbue.mngr_latchkey.agent_setup import finalize_agent_permissions
-from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
-from imbue.mngr_latchkey.core import Latchkey
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
@@ -59,6 +55,10 @@ from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
+from imbue.mngr_latchkey.agent_setup import finalize_agent_permissions
+from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
+from imbue.mngr_latchkey.core import Latchkey
 
 # Inlined to avoid pulling the ``imbue-mngr-forward`` package into minds'
 # import graph -- minds spawns the plugin as a subprocess and otherwise has

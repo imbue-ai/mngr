@@ -26,16 +26,12 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
-from imbue.mngr_latchkey.core import Latchkey
 from imbue.minds.desktop_client.latchkey.permissions import GrantOutcome
 from imbue.minds.desktop_client.latchkey.permissions import GrantResult
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import load_services_catalog
-from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
-from imbue.mngr_latchkey.store import permissions_path_for_agent
-from imbue.mngr_latchkey.store import save_permissions
 from imbue.minds.desktop_client.request_events import REQUESTS_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -46,6 +42,10 @@ from imbue.minds.desktop_client.request_events import create_latchkey_permission
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import permissions_path_for_agent
+from imbue.mngr_latchkey.store import save_permissions
 
 _OTHER_REQUEST_TYPE = "OTHER"
 

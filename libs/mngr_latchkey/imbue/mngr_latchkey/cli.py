@@ -132,7 +132,11 @@ def ensure_gateway(ctx: click.Context, **kwargs: Any) -> None:
         "data_dir": str(data_dir),
         "latchkey_directory": str(latchkey_directory),
     }
-    click.echo(json.dumps(payload))
+    # Output the gateway info as a single JSON line so callers can pipe
+    # it directly into ``jq``. ``write_human_line`` is the project's
+    # standard way to write to stdout from a CLI command; the JSON
+    # serialization happens to also be human-readable.
+    write_human_line(json.dumps(payload))
 
 
 CommandHelpMetadata(
