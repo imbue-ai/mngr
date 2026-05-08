@@ -13,7 +13,7 @@ from click.testing import CliRunner
 
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr_usage.cli import _build_render_model
-from imbue.mngr_usage.cli import _flatten_for_template
+from imbue.mngr_usage.cli import _flatten_primary_for_template
 from imbue.mngr_usage.cli import _format_duration
 from imbue.mngr_usage.cli import _format_human_line
 from imbue.mngr_usage.cli import _format_reset_phrase
@@ -270,7 +270,7 @@ def test_flatten_for_template_uses_window_keys() -> None:
         windows={"five_hour": WindowSnapshot(used_percentage=42.0, resets_at=1500)},
     )
     model = _build_render_model(snapshot, max_age=300, now=1000)
-    flat = _flatten_for_template(model, now=1000)
+    flat = _flatten_primary_for_template(model, now=1000)
     assert flat["source"] == "claude"
     assert flat["five_hour.used_percentage"] == "42.00"
     assert flat["five_hour.resets_at"] == "1500"
@@ -345,10 +345,10 @@ def test_usage_command_json_format(
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output.strip())
-    assert payload["source"] == "claude"
-    assert payload["five_hour"]["used_percentage"] == 12.3
-    assert payload["five_hour"]["is_present"] is True
-    assert payload["seven_day"]["is_present"] is False
+    assert payload["sources"][0]["source"] == "claude"
+    assert payload["sources"][0]["five_hour"]["used_percentage"] == 12.3
+    assert payload["sources"][0]["five_hour"]["is_present"] is True
+    assert payload["sources"][0]["seven_day"]["is_present"] is False
 
 
 def test_usage_command_format_template(
@@ -390,7 +390,7 @@ def test_usage_command_no_data_when_no_events(
     """No agents on the host means no events files; render the no-data hint."""
     result = cli_runner.invoke(usage, [], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
-    assert "No rate-limit data yet" in result.output
+    assert "No usage data yet" in result.output
 
 
 def test_usage_command_picks_freshest_across_agents(
@@ -427,4 +427,50 @@ def test_usage_command_picks_freshest_across_agents(
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output.strip())
-    assert payload["five_hour"]["used_percentage"] == 99.0
+    # Both events share source_name="claude" since they live under .../events/claude/...
+    # so the sources list collapses to two entries with the same source name. The
+    # freshest-first sort puts the newer event's data first.
+    assert payload["sources"][0]["five_hour"]["used_percentage"] == 99.0
+
+
+def test_usage_command_human_format_multi_source(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_host_dir: Path,
+    cli_profile_dir: Path,
+) -> None:
+    """When two distinct sources contribute, render each as its own [source] section."""
+    _plant_event(
+        temp_host_dir,
+        "agent-aaa",
+        {
+            "source": "claude/rate_limits",
+            "type": "rate_limit_snapshot",
+            "event_id": "evt-claude",
+            "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "rate_limits": {"five_hour": {"used_percentage": 11.0, "resets_at": 9_999_999_999_999}},
+        },
+        source="claude",
+    )
+    _plant_event(
+        temp_host_dir,
+        "agent-bbb",
+        {
+            "source": "opencode/rate_limits",
+            "type": "rate_limit_snapshot",
+            "event_id": "evt-opencode",
+            "timestamp": "2056-05-08T11:00:00.000000000Z",
+            "rate_limits": {"five_hour": {"used_percentage": 22.0, "resets_at": 9_999_999_999_999}},
+        },
+        source="opencode",
+    )
+    result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    # Both source headers present
+    assert "[claude]" in result.output
+    assert "[opencode]" in result.output
+    # Both percentages rendered (somewhere)
+    assert "11% used" in result.output
+    assert "22% used" in result.output
+    # Freshest first: opencode's section should appear before claude's
+    assert result.output.index("[opencode]") < result.output.index("[claude]")

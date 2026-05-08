@@ -45,14 +45,9 @@ _DEFAULT_WINDOW_LABELS: dict[str, str] = {
 }
 
 _NO_DATA_HINT = (
-    "No rate-limit data yet. `mngr usage` reads from per-agent events files at "
-    "<agent_state_dir>/events/<source>/rate_limits/events.jsonl, written by an "
-    "agent-specific plugin (e.g. `imbue-mngr-claude-usage` for Claude). To get "
-    "data flowing: ensure that plugin is installed in whichever env runs your "
-    "`mngr` (so the per-agent statusline shim gets provisioned), then run "
-    "`mngr create ... claude` and send the new agent any prompt. Existing "
-    "agents whose settings predate the plugin won't capture data until "
-    "they're re-provisioned."
+    "No usage data yet. Run an interactive agent (e.g. `mngr create ... claude` then send a "
+    "prompt). Pre-existing agents need re-provisioning. Requires the matching writer plugin "
+    "(e.g. imbue-mngr-claude-usage) installed in the env that runs `mngr`."
 )
 
 
@@ -362,13 +357,12 @@ def _window_render_dict(snap: WindowSnapshot, now: int) -> dict[str, Any]:
     }
 
 
-def _render_model_for_json(model: _UsageRenderModel, now: int) -> dict[str, Any]:
-    """Convert the render model to a JSON-friendly dict (stable shape for scripts)."""
+def _render_one_source_for_json(model: _UsageRenderModel, now: int) -> dict[str, Any]:
+    """JSON shape for a single source's snapshot."""
     out: dict[str, Any] = {
         "source": model.source_name,
-        "now": now,
-        "is_stale": model.is_stale,
         "updated_at": model.snapshot_updated_at,
+        "is_stale": model.is_stale,
     }
     for key in WINDOW_KEYS:
         out[key] = _window_render_dict(model.windows.get(key, WindowSnapshot()), now)
@@ -378,8 +372,13 @@ def _render_model_for_json(model: _UsageRenderModel, now: int) -> dict[str, Any]
     return out
 
 
-def _flatten_for_template(model: _UsageRenderModel, now: int) -> dict[str, str]:
-    """Flatten the render model into dot-keyed string fields for format-template substitution."""
+def _flatten_primary_for_template(model: _UsageRenderModel, now: int) -> dict[str, str]:
+    """Flatten the freshest source's render model for format-template substitution.
+
+    The format-template surface is intentionally simple: it always reflects the
+    primary (freshest) source's windows at top level. Multi-source consumers
+    should use ``--format json``, which exposes every source separately.
+    """
     flat: dict[str, str] = {
         "source": model.source_name,
         "now": str(now),
@@ -399,15 +398,36 @@ def _human_label_for(window_key: str) -> str:
     return _DEFAULT_WINDOW_LABELS.get(window_key, window_key)
 
 
+def _write_source_section(model: _UsageRenderModel, now: int, header: str | None) -> bool:
+    """Render one source's window lines (with optional header). Returns True if any
+    window with a percentage was rendered (drives the catch-all hint downstream).
+    """
+    if header is not None:
+        write_human_line(header)
+    any_with_percentage = False
+    ordered_keys = [k for k in WINDOW_KEYS if k in model.windows] + [k for k in model.windows if k not in WINDOW_KEYS]
+    for key in ordered_keys:
+        snap = model.windows[key]
+        if snap.used_percentage is None and snap.resets_at is None:
+            continue
+        write_human_line(_format_human_line(_human_label_for(key), snap, now))
+        if snap.used_percentage is not None:
+            any_with_percentage = True
+    return any_with_percentage
+
+
 def _emit_output(
-    model: _UsageRenderModel | None,
+    snapshots_with_models: list[tuple[UsageSnapshot, _UsageRenderModel]],
     output_format: OutputFormat,
     format_template: str | None,
     now: int,
 ) -> None:
-    """Write output in the requested format. ``model`` is None when no event was found."""
+    """Write output for zero or more sources, freshest-first."""
     if format_template is not None:
-        if model is None:
+        # Format templates always reference the primary (freshest) source's
+        # windows at top level for ergonomics; multi-source consumers should
+        # use --format json. With no sources at all, all fields are empty.
+        if not snapshots_with_models:
             empty = _UsageRenderModel(
                 source_name="",
                 now=now,
@@ -415,40 +435,51 @@ def _emit_output(
                 snapshot_updated_at=None,
                 windows={},
             )
-            line = render_format_template(format_template, _flatten_for_template(empty, now))
+            line = render_format_template(format_template, _flatten_primary_for_template(empty, now))
         else:
-            line = render_format_template(format_template, _flatten_for_template(model, now))
+            _, primary_model = snapshots_with_models[0]
+            line = render_format_template(format_template, _flatten_primary_for_template(primary_model, now))
         write_human_line(line)
         return
+
     match output_format:
         case OutputFormat.JSON | OutputFormat.JSONL:
-            if model is None:
-                emit_final_json({"source": None, "now": now, "is_stale": True, "updated_at": None})
-            else:
-                emit_final_json(_render_model_for_json(model, now))
+            payload: dict[str, Any] = {
+                "now": now,
+                "sources": [_render_one_source_for_json(model, now) for _, model in snapshots_with_models],
+            }
+            emit_final_json(payload)
         case OutputFormat.HUMAN:
-            if model is None:
+            if not snapshots_with_models:
                 write_human_line(_NO_DATA_HINT)
                 return
-            any_with_percentage = False
-            ordered_keys = [k for k in WINDOW_KEYS if k in model.windows] + [
-                k for k in model.windows if k not in WINDOW_KEYS
-            ]
-            for key in ordered_keys:
-                snap = model.windows[key]
-                if snap.used_percentage is None and snap.resets_at is None:
-                    continue
-                write_human_line(_format_human_line(_human_label_for(key), snap, now))
-                if snap.used_percentage is not None:
-                    any_with_percentage = True
-            if not any_with_percentage:
+            multi_source = len(snapshots_with_models) > 1
+            any_with_percentage_anywhere = False
+            stale_sources: list[tuple[str, int]] = []
+            for index, (_, model) in enumerate(snapshots_with_models):
+                header: str | None = None
+                if multi_source:
+                    if index > 0:
+                        write_human_line("")
+                    header = f"[{model.source_name}]"
+                section_had_percentage = _write_source_section(model, now, header)
+                any_with_percentage_anywhere = any_with_percentage_anywhere or section_had_percentage
+                if section_had_percentage and model.is_stale and model.snapshot_updated_at is not None:
+                    stale_sources.append((model.source_name, max(0, now - model.snapshot_updated_at)))
+            if not any_with_percentage_anywhere:
                 write_human_line(_NO_DATA_HINT)
-            if any_with_percentage and model.is_stale and model.snapshot_updated_at is not None:
-                age = max(0, now - model.snapshot_updated_at)
-                logger.warning(
-                    "Rate-limit snapshot is stale (last updated {} ago); values may not reflect latest API state.",
-                    _format_duration(age),
-                )
+            for source_name, age_seconds in stale_sources:
+                if multi_source:
+                    logger.warning(
+                        "[{}] snapshot is stale (last updated {} ago); values may not reflect latest API state.",
+                        source_name,
+                        _format_duration(age_seconds),
+                    )
+                else:
+                    logger.warning(
+                        "Snapshot is stale (last updated {} ago); values may not reflect latest API state.",
+                        _format_duration(age_seconds),
+                    )
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -481,11 +512,16 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
     effective_max_age = max_age_override if max_age_override is not None else plugin_config.max_age_seconds
 
     snapshots = _gather_snapshots(mngr_ctx.config.default_host_dir)
-    snapshot = _pick_freshest(snapshots)
     now = int(time.time())
 
-    model = _build_render_model(snapshot, effective_max_age, now) if snapshot is not None else None
-    _emit_output(model, output_opts.output_format, output_opts.format_template, now)
+    # Multi-source: build a render model per source, sort freshest-first.
+    # Tiebreak by source_name so the order is stable in tests.
+    snapshots_with_models = sorted(
+        ((s, _build_render_model(s, effective_max_age, now)) for s in snapshots),
+        key=lambda sm: (sm[0].updated_at, sm[0].source_name),
+        reverse=True,
+    )
+    _emit_output(snapshots_with_models, output_opts.output_format, output_opts.format_template, now)
 
 
 CommandHelpMetadata(
