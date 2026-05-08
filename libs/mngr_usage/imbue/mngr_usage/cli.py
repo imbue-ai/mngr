@@ -107,6 +107,24 @@ def _oldest_updated_at(cache: CacheDoc | None) -> int | None:
 
 
 @pure
+def _newest_updated_at(cache: CacheDoc | None) -> int | None:
+    """Return the largest updated_at across all windows, or None if no entries.
+
+    Used as the cache-age timestamp for the stale-warning message: "we got
+    fresh data this recently, even if some other window is older". The
+    statusline writer typically updates all windows together, so the value
+    is usually equal to ``_oldest_updated_at`` -- the divergence matters in
+    edge cases like a window being absent from a payload.
+    """
+    if cache is None or not cache.windows:
+        return None
+    timestamps = [w.updated_at for w in cache.windows.values() if w.updated_at is not None]
+    if not timestamps:
+        return None
+    return max(timestamps)
+
+
+@pure
 def _format_duration(seconds: int) -> str:
     """Render seconds as a compact human duration: '1h 12m', '4d 3h', '45s'."""
     if seconds <= 0:
@@ -124,20 +142,38 @@ def _format_duration(seconds: int) -> str:
 
 
 @pure
+def _format_reset_phrase(resets_at: int, now: int) -> str:
+    """Render the reset timestamp in past or future tense.
+
+    "resets in 1h 12m" when the reset is upcoming; "reset 30m ago" when it
+    has already passed. The past-tense form is meaningful: when a cached
+    snapshot's reset has elapsed, the cached used_percentage is
+    necessarily stale (the limit refreshed and we never observed a
+    post-reset render), so the user needs to see the time-since-reset to
+    know how out-of-date the percentage is.
+    """
+    delta = resets_at - now
+    if delta > 0:
+        return f"resets in {_format_duration(delta)}"
+    if delta < 0:
+        return f"reset {_format_duration(-delta)} ago"
+    return "just reset"
+
+
+@pure
 def _format_human_line(window_label: str, window: WindowSnapshot, now: int) -> str:
     """Render one window's status as a single human-readable line.
 
     When ``used_percentage`` is missing the "resets in ..." suffix would
     render as misleading filler (the reset timestamp on its own is not
-    actionable without a usage number, and "resets in now" is just noise),
-    so we collapse the line to a bare "no data" instead.
+    actionable without a usage number), so we collapse the line to a bare
+    "no data" instead.
     """
     if window.used_percentage is None:
         return f"{window_label}: no data"
     parts = [f"{window_label}: {window.used_percentage:.0f}% used,"]
     if window.resets_at is not None:
-        seconds_until = max(0, window.resets_at - now)
-        parts.append(f"resets in {_format_duration(seconds_until)}")
+        parts.append(_format_reset_phrase(window.resets_at, now))
     else:
         parts.append("reset time unknown")
     return " ".join(parts)
@@ -186,7 +222,15 @@ def _window_render_dict(snap: WindowSnapshot, now: int) -> dict[str, Any]:
 
 
 def _build_render_model(cache: CacheDoc | None, max_age: int, now: int) -> _UsageRenderModel:
-    """Assemble the renderable view for a cache snapshot."""
+    """Assemble the renderable view for a cache snapshot.
+
+    A cache is considered stale if either:
+    - the oldest ``updated_at`` is older than ``max_age`` seconds (no fresh
+      statusline render has happened recently), OR
+    - any populated window's ``resets_at`` is now in the past (the limit
+      refreshed; the cached used_percentage is from the previous window
+      and no longer reflects current usage).
+    """
     windows: dict[str, WindowSnapshot] = {}
     if cache is not None:
         for key in WINDOW_KEYS:
@@ -196,7 +240,12 @@ def _build_render_model(cache: CacheDoc | None, max_age: int, now: int) -> _Usag
             windows[key] = WindowSnapshot()
 
     oldest = _oldest_updated_at(cache)
-    is_stale = oldest is None or (now - oldest) > max_age
+    age_stale = oldest is None or (now - oldest) > max_age
+    reset_stale = any(
+        snap.resets_at is not None and snap.updated_at is not None and snap.resets_at < now
+        for snap in windows.values()
+    )
+    is_stale = age_stale or reset_stale
 
     return _UsageRenderModel(
         schema_version=cache.schema_version if cache is not None else CACHE_SCHEMA_VERSION,
@@ -281,7 +330,23 @@ def _emit_output(
             if not any_present:
                 write_human_line(_NO_DATA_HINT)
             if any_present and any_with_percentage and model.is_stale:
-                logger.warning("Rate-limit cache is stale; values may not reflect latest API state.")
+                # Pull the freshest updated_at across windows so the warning
+                # tells the user how recent the cache is. "How long ago" is
+                # the actionable signal; whether it crosses max_age vs
+                # crossed a reset is implicit from the per-window lines
+                # above (which already say "reset 30s ago" / "resets in ...").
+                newest = max(
+                    (snap.updated_at for snap in model.windows.values() if snap.updated_at is not None),
+                    default=None,
+                )
+                if newest is None:
+                    logger.warning("Rate-limit cache is stale; values may not reflect latest API state.")
+                else:
+                    age = max(0, now - newest)
+                    logger.warning(
+                        "Rate-limit cache is stale (last updated {} ago); values may not reflect latest API state.",
+                        _format_duration(age),
+                    )
         case _ as unreachable:
             assert_never(unreachable)
 

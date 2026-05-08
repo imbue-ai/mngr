@@ -15,6 +15,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_usage.cli import _build_render_model
 from imbue.mngr_usage.cli import _flatten_for_template
 from imbue.mngr_usage.cli import _format_duration
+from imbue.mngr_usage.cli import _format_human_line
+from imbue.mngr_usage.cli import _format_reset_phrase
 from imbue.mngr_usage.cli import _load_cache
 from imbue.mngr_usage.cli import _oldest_updated_at
 from imbue.mngr_usage.cli import _parse_max_age
@@ -127,6 +129,51 @@ def test_render_model_marks_empty_cache_as_stale() -> None:
     model = _build_render_model(None, max_age=300, now=1000)
     assert model.is_stale is True
     assert all(model.windows[k].updated_at is None for k in ("five_hour", "seven_day", "overage"))
+
+
+def test_render_model_marks_past_reset_as_stale() -> None:
+    """A populated window whose resets_at is now in the past must trigger is_stale,
+    because the cached used_percentage is from before the reset and no longer reflects
+    current usage. Even if updated_at itself is recent."""
+    cache = CacheDoc(
+        windows={
+            "five_hour": WindowSnapshot(used_percentage=11.0, resets_at=900, updated_at=999, source="statusline"),
+        }
+    )
+    # updated_at=999 is fresh (1s ago) but resets_at=900 is 100s in the past.
+    model = _build_render_model(cache, max_age=300, now=1000)
+    assert model.is_stale is True
+
+
+def test_render_model_fresh_when_reset_future_and_updated_recent() -> None:
+    cache = CacheDoc(
+        windows={
+            "five_hour": WindowSnapshot(used_percentage=11.0, resets_at=2000, updated_at=950, source="statusline"),
+        }
+    )
+    model = _build_render_model(cache, max_age=300, now=1000)
+    assert model.is_stale is False
+
+
+def test_format_reset_phrase_handles_past_present_future() -> None:
+    assert _format_reset_phrase(resets_at=1500, now=1000) == "resets in 8m 20s"
+    assert _format_reset_phrase(resets_at=1000, now=1000) == "just reset"
+    assert _format_reset_phrase(resets_at=970, now=1000) == "reset 30s ago"
+    assert _format_reset_phrase(resets_at=400, now=1000) == "reset 10m ago"
+
+
+def test_format_human_line_uses_past_tense_after_reset() -> None:
+    """Regression: previously rendered "resets in now" via max(0, ...) clamp,
+    which obscured the fact that the cached percentage is from the prior window."""
+    snap = WindowSnapshot(used_percentage=11.0, resets_at=970, updated_at=999, source="statusline")
+    assert _format_human_line("5h", snap, now=1000) == "5h: 11% used, reset 30s ago"
+
+
+def test_format_human_line_no_data_does_not_say_just_reset() -> None:
+    """Even when reset is at exactly `now`, the no-data branch wins and we render
+    the bare 'no data' line instead of trying to attach a reset phrase."""
+    snap = WindowSnapshot(used_percentage=None, resets_at=1000, updated_at=999)
+    assert _format_human_line("5h", snap, now=1000) == "5h: no data"
 
 
 def test_render_model_computes_seconds_until_reset() -> None:
