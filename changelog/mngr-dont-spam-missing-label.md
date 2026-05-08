@@ -8,7 +8,7 @@
   `host.plugin`) is now the recommended presence-check idiom for those
   schemaless fields, and is shown in the `mngr list --help` examples.
   Note: `labels.foo != null` does NOT work as a presence check on
-  tolerant fields -- use `has(...)` or a direct comparison.
+  tolerant fields -- use `has(...)`.
 - Filters that cel-python cannot fold to a clean boolean on a missing
   strict field (e.g. method calls like `host.providr.contains("x")`,
   or ordered comparisons like `host.providr > 5`) still surface a
