@@ -324,12 +324,6 @@ def temp_source_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture(autouse=True)
 def _reset_modal_app_registry() -> Generator[None, None, None]:
-    # Required for test isolation: ``ModalProviderBackend._app_registry`` is
-    # class-level, and ``_get_or_create_app_with_capture`` short-circuits on
-    # it before calling ``modal_interface.app_create(...)``. Without this
-    # reset, the second test in a worker reuses the first test's cached app,
-    # so the per-test ``testing_modal._apps`` is never populated and
-    # ``make_sandbox_with_tags`` raises ``IndexError``.
     yield
     ModalProviderBackend.reset_app_registry()
 
