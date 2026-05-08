@@ -442,7 +442,7 @@ def test_with_tolerant_paths_does_not_mutate_input() -> None:
     assert isinstance(new_tags, TolerantMapType)
 
 
-def test_with_tolerant_paths_raises_type_error_when_target_is_not_dict() -> None:
+def test_with_tolerant_paths_raises_tolerant_path_error_when_target_is_not_dict() -> None:
     """A precondition violation (path target is not a MapType) raises TypeError.
 
     Regression guard: the previous mutating implementation crashed loudly on
