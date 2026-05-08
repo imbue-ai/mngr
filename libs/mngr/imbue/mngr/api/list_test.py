@@ -32,6 +32,7 @@ from imbue.mngr.api.list import _handle_listing_error
 from imbue.mngr.api.list import _maybe_write_full_discovery_snapshot
 from imbue.mngr.api.list import _process_host_with_error_handling
 from imbue.mngr.api.list import agent_details_to_cel_context
+from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -65,9 +66,7 @@ from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
 from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.utils.cel_utils import TolerantMapType
-from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
-from imbue.mngr.utils.cel_utils import with_tolerant_paths
 from imbue.mngr.utils.testing import capture_loguru
 
 # =============================================================================
@@ -551,14 +550,11 @@ def test_apply_cel_filters_no_warning_for_missing_key_on_schemaless_field(exclud
 
 @pytest.mark.parametrize("path", list(_AGENT_SCHEMALESS_PATHS))
 def test_apply_cel_filters_wraps_each_schemaless_path_with_tolerant_map(path: tuple[str, ...]) -> None:
-    """The agent CEL context after the production composition has TolerantMapType
+    """The agent CEL context built by `build_agent_cel_context` has TolerantMapType
     at each schemaless path; siblings stay strict.
     """
     agent = _make_agent_details("test-agent", _make_host_details())
-    cel_context = with_tolerant_paths(
-        build_cel_context(agent_details_to_cel_context(agent)),
-        _AGENT_SCHEMALESS_PATHS,
-    )
+    cel_context = build_agent_cel_context(agent)
 
     target: Any = cel_context
     for step in path:
