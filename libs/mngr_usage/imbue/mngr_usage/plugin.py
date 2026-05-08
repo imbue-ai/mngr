@@ -23,12 +23,12 @@ _STATUSLINE_SHIM_SCRIPT = "claude_statusline.sh"
 
 
 def _format_statusline_command(agent_state_dir: Path) -> str:
-    """Build the shell snippet that Claude Code's statusLine.command runs.
+    """Return the shell-quoted statusline shim path for settings.json's statusLine.command.
 
-    Returns the absolute path to the statusline shim. All env vars the shim
-    needs (MNGR_RATE_LIMITS_WRITER, MNGR_RATE_LIMITS_CACHE, MNGR_PROFILE_DIR,
-    MNGR_USER_STATUSLINE_CMD) are populated through settings.json's `env`
-    block, so the command itself does not need an inline env prefix.
+    All env vars the shim needs (MNGR_RATE_LIMITS_WRITER, MNGR_RATE_LIMITS_CACHE,
+    MNGR_PROFILE_DIR, MNGR_USER_STATUSLINE_CMD) are populated through
+    settings.json's `env` block, so the command itself is just the shim path
+    (no inline env prefix, no chained commands).
     """
     state_dir = shlex.quote(str(agent_state_dir))
     return f"{state_dir}/commands/{_STATUSLINE_SHIM_SCRIPT}"
