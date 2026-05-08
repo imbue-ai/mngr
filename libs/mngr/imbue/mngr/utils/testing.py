@@ -1055,7 +1055,7 @@ def find_old_test_environments(
 
 
 def delete_modal_apps_in_environment(environment_name: str) -> None:
-    """Delete all Modal apps in the specified environment.
+    """Stop all Modal apps in the specified environment.
 
     This is robust to concurrent deletion - failures result in warnings, not errors.
     """
@@ -1077,12 +1077,21 @@ def delete_modal_apps_in_environment(environment_name: str) -> None:
             app_name = app.get("Description", "")
             if app_id:
                 try:
-                    subprocess.run(
+                    stop_result = subprocess.run(
                         ["uv", "run", "modal", "app", "stop", app_id],
                         capture_output=True,
+                        text=True,
                         timeout=30,
                     )
-                    logger.debug("Stopped Modal app {} ({})", app_name, app_id)
+                    if stop_result.returncode != 0:
+                        logger.warning(
+                            "Modal app stop returned non-zero for {} ({}): {}",
+                            app_name,
+                            app_id,
+                            stop_result.stderr or stop_result.stdout,
+                        )
+                    else:
+                        logger.debug("Stopped Modal app {} ({})", app_name, app_id)
                 except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
                     logger.warning("Failed to stop Modal app {} ({}): {}", app_name, app_id, e)
     except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError, json.JSONDecodeError) as e:
@@ -1111,12 +1120,21 @@ def delete_modal_volumes_in_environment(environment_name: str) -> None:
             volume_name = volume.get("Name", "")
             if volume_name:
                 try:
-                    subprocess.run(
+                    del_result = subprocess.run(
                         ["uv", "run", "modal", "volume", "delete", volume_name, "--env", environment_name, "--yes"],
                         capture_output=True,
+                        text=True,
                         timeout=30,
                     )
-                    logger.debug("Deleted Modal volume {} in environment {}", volume_name, environment_name)
+                    if del_result.returncode != 0:
+                        logger.warning(
+                            "Modal volume delete returned non-zero for {} in env {}: {}",
+                            volume_name,
+                            environment_name,
+                            del_result.stderr or del_result.stdout,
+                        )
+                    else:
+                        logger.debug("Deleted Modal volume {} in environment {}", volume_name, environment_name)
                 except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
                     logger.warning(
                         "Failed to delete Modal volume {} in environment {}: {}", volume_name, environment_name, e
@@ -1131,12 +1149,20 @@ def delete_modal_environment(environment_name: str) -> None:
     This is robust to concurrent deletion - failures result in warnings, not errors.
     """
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["uv", "run", "modal", "environment", "delete", environment_name, "--yes"],
             capture_output=True,
+            text=True,
             timeout=30,
         )
-        logger.debug("Deleted Modal environment {}", environment_name)
+        if result.returncode != 0:
+            logger.warning(
+                "Modal environment delete returned non-zero for {}: {}",
+                environment_name,
+                result.stderr or result.stdout,
+            )
+        else:
+            logger.debug("Deleted Modal environment {}", environment_name)
     except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
         logger.warning("Failed to delete Modal environment {}: {}", environment_name, e)
 

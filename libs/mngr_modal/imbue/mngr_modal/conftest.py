@@ -275,11 +275,12 @@ def modal_test_session_cleanup(
     modal_test_session_user_id: UserId,
 ) -> Generator[None, None, None]:
     """Session-scoped fixture that cleans up the Modal environment at session end."""
-    yield
     prefix = f"{modal_test_session_env_name}-"
     environment_name = f"{prefix}{modal_test_session_user_id}"
     if len(environment_name) > 64:
         environment_name = environment_name[:64]
+    register_modal_test_environment(environment_name)
+    yield
     delete_modal_apps_in_environment(environment_name)
     delete_modal_volumes_in_environment(environment_name)
     delete_modal_environment(environment_name)
@@ -319,13 +320,6 @@ def temp_source_dir(tmp_path: Path) -> Path:
 # These are importable by consuming packages via pytest_plugins so that
 # ModalProviderBackend state is properly cleaned up between tests.
 # =============================================================================
-
-
-@pytest.fixture(autouse=True)
-def _reset_modal_app_registry() -> Generator[None, None, None]:
-    """Reset the Modal app registry after each test for isolation."""
-    yield
-    ModalProviderBackend.reset_app_registry()
 
 
 def _get_leaked_modal_apps() -> list[tuple[str, str]]:
@@ -417,7 +411,9 @@ def _delete_modal_environments(environment_names: list[str]) -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def modal_session_cleanup() -> Generator[None, None, None]:
-    """Detect and clean up leaked Modal resources at the end of the test session."""
+    """Detect and clean up leaked Modal resources at the end of the test session.
+    ``autouse=True`` made it run cleanup after other non-autouse session fixtures.
+    """
     yield
     errors: list[str] = []
     leaked_apps = _get_leaked_modal_apps()
