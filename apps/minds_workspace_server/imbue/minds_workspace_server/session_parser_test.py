@@ -159,6 +159,38 @@ def test_tool_result_only_user_message_not_emitted_as_user_message() -> None:
     assert events[0]["type"] == "tool_result"
 
 
+def test_interrupt_sentinel_user_message_not_emitted() -> None:
+    """The ``[Request interrupted by user]`` sentinel must not surface as a user_message.
+
+    Claude writes this control text to the user channel when the user interrupts
+    a turn. Treating it as a real prompt would leave the activity indicator
+    pinned on "Thinking..." after every interrupt, since the indicator's tail-
+    event heuristic equates "tail = user_message" with "Claude is about to
+    reply." Verify both string content and array content forms.
+    """
+    string_form = json.dumps(
+        {
+            "type": "user",
+            "uuid": "uuid-1",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "[Request interrupted by user]"},
+        }
+    )
+    array_form = json.dumps(
+        {
+            "type": "user",
+            "uuid": "uuid-2",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "[Request interrupted by user]"}],
+            },
+        }
+    )
+    events = parse_session_lines([string_form, array_form])
+    assert events == []
+
+
 def test_events_sorted_by_timestamp() -> None:
     lines = [
         _make_assistant_line("uuid-2", "2026-01-01T00:00:02Z", "Second"),
