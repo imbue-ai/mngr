@@ -7,8 +7,10 @@ import threading
 from pathlib import Path
 
 import pytest
+from watchdog.events import FileClosedNoWriteEvent
 from watchdog.events import FileModifiedEvent
 from watchdog.events import FileMovedEvent
+from watchdog.events import FileOpenedEvent
 
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.agent_manager import _LogQueueCallback
@@ -390,6 +392,34 @@ def test_applications_file_handler_ignores_unrelated_paths(tmp_path: Path) -> No
     handler.dispatch(FileModifiedEvent(src_path=str(tmp_path / "applications.toml.abc123.tmp")))
 
     assert seen == []
+
+
+def test_applications_file_handler_ignores_open_and_close_no_write(tmp_path: Path) -> None:
+    """The handler must not fire on read-only events (FileOpenedEvent /
+    FileClosedNoWriteEvent). Watchdog 3+ emits these on Linux for any open()
+    / close() of the watched file -- including the read() inside
+    _read_applications itself. If the handler reacts to them it triggers an
+    inotify feedback loop that pins one CPU core per agent watcher.
+    """
+    seen: list[str] = []
+    handler = _make_applications_file_handler("agent-x", lambda aid: seen.append(aid))
+
+    handler.dispatch(FileOpenedEvent(src_path=str(tmp_path / "applications.toml")))
+    handler.dispatch(FileClosedNoWriteEvent(src_path=str(tmp_path / "applications.toml")))
+
+    assert seen == []
+
+
+def test_applications_file_handler_fires_on_modify(tmp_path: Path) -> None:
+    """A direct write (e.g. ``echo ... > applications.toml``) surfaces as a
+    FileModifiedEvent and must still trigger the change callback.
+    """
+    seen: list[str] = []
+    handler = _make_applications_file_handler("agent-x", lambda aid: seen.append(aid))
+
+    handler.dispatch(FileModifiedEvent(src_path=str(tmp_path / "applications.toml")))
+
+    assert seen == ["agent-x"]
 
 
 def test_stop_app_watcher_nonexistent(agent_manager: AgentManager) -> None:

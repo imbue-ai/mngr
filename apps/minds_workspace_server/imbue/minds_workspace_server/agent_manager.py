@@ -99,13 +99,19 @@ class _LogQueueCallback(MutableModel):
 
 
 class _ApplicationsFileHandler(FileSystemEventHandler):
-    """Watchdog handler that triggers on any change to applications.toml.
+    """Watchdog handler that triggers on mutating changes to applications.toml.
 
-    Uses ``on_any_event`` rather than ``on_modified`` because scripts/forward_port.py
-    upserts atomically via ``tempfile.mkstemp`` + ``os.replace``. Atomic replaces
-    surface through watchdog as moved/created events, not modified events, so a
-    handler that only overrides ``on_modified`` would silently miss every
-    service registration after the watcher starts.
+    Subscribes to mutation events (modified/created/deleted/moved/closed)
+    rather than ``on_any_event`` because watchdog's default inotify mask also
+    includes ``IN_OPEN`` / ``IN_CLOSE_NOWRITE``. Reacting to those would form
+    a feedback loop -- the handler reads the file, the read triggers fresh
+    open/close-no-write events, and one CPU core is pinned per agent watcher.
+
+    ``on_modified`` alone is insufficient because scripts/forward_port.py
+    upserts atomically via ``tempfile.mkstemp`` + ``os.replace``, which
+    surfaces as a moved/created event, not a modified event. ``on_closed``
+    (``IN_CLOSE_WRITE``) is included so that direct writers which don't go
+    through an atomic rename still trigger a re-read on close.
 
     Events are filtered to only those whose src or dest path basename is
     ``applications.toml``. Without this filter we'd also fire on every write
@@ -117,7 +123,7 @@ class _ApplicationsFileHandler(FileSystemEventHandler):
     agent_id: str
     on_change: Any
 
-    def on_any_event(self, event: FileSystemEvent) -> None:
+    def _maybe_fire(self, event: FileSystemEvent) -> None:
         if event.is_directory:
             return
         paths = [event.src_path]
@@ -125,6 +131,12 @@ class _ApplicationsFileHandler(FileSystemEventHandler):
             paths.append(event.dest_path)
         if any(os.path.basename(p) == _APPLICATIONS_TOML_BASENAME for p in paths):
             self.on_change(self.agent_id)
+
+    on_modified = _maybe_fire
+    on_created = _maybe_fire
+    on_deleted = _maybe_fire
+    on_moved = _maybe_fire
+    on_closed = _maybe_fire
 
 
 def _make_applications_file_handler(
