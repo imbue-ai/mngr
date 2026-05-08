@@ -280,6 +280,20 @@ def modal_test_session_cleanup(
     yielding, so the autouse session-end leak detector
     (``modal_session_cleanup``) will catch silent failures of the per-session
     deletes below and raise ``AssertionError`` rather than leak the env.
+
+    Finalizer ordering invariant (must hold for the leak detector to give
+    correct verdicts): this fixture's teardown -- which deletes the registered
+    env -- must run BEFORE ``modal_session_cleanup``'s teardown -- which
+    checks whether the registered env still exists. If the order flipped, the
+    detector would always see the still-existing env and raise a false-positive
+    ``AssertionError`` on every clean run.
+
+    Pytest's finalizer order (LIFO of setup) guarantees this today: the autouse
+    ``modal_session_cleanup`` is always set up before this fixture (autouse
+    fires first; this fixture is only set up when a test pulls in
+    ``modal_subprocess_env``, which always runs after the autouse), so this
+    fixture finalizes first. Be careful preserving this if either fixture is
+    refactored.
     """
     prefix = f"{modal_test_session_env_name}-"
     environment_name = f"{prefix}{modal_test_session_user_id}"
@@ -424,7 +438,15 @@ def _delete_modal_environments(environment_names: list[str]) -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def modal_session_cleanup() -> Generator[None, None, None]:
-    """Detect and clean up leaked Modal resources at the end of the test session."""
+    """Detect and clean up leaked Modal resources at the end of the test session.
+
+    This fixture's teardown must run AFTER any per-test or per-session cleanup
+    that deletes registered resources (notably ``modal_test_session_cleanup``);
+    otherwise the leak check below would see resources that were about to be
+    cleaned up and raise a false-positive ``AssertionError``. See the
+    finalizer-ordering note in ``modal_test_session_cleanup`` for the
+    pytest-level reason this holds.
+    """
     yield
     errors: list[str] = []
     leaked_apps = _get_leaked_modal_apps()
