@@ -16,7 +16,7 @@ on:
         required: true
         default: "yolo"
       modal_token_id:
-        description: "Override MODAL_TOKEN_ID (defaults to org var). NOTE: visible on the run details page to anyone with repo read access; logs are masked."
+        description: "Override MODAL_TOKEN_ID (defaults to org var)."
         required: false
         default: ""
       modal_token_secret:
@@ -24,7 +24,7 @@ on:
         required: false
         default: ""
       mngr_user_id:
-        description: "Optional MNGR_USER_ID to set on the orchestrator and pass to launched agents (lets you see CI-created modal agents from your local mngr)."
+        description: "Optional MNGR_USER_ID for the orchestrator (lets you see CI-created modal agents from your local mngr)."
         required: false
         default: ""
 
@@ -43,18 +43,11 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - name: Mask user-supplied credentials
-        if: inputs.modal_token_id != '' || inputs.modal_token_secret != ''
+      - name: Mask user-supplied MODAL_TOKEN_SECRET
+        if: inputs.modal_token_secret != ''
         env:
-          MODAL_TOKEN_ID_INPUT: ${{ inputs.modal_token_id }}
           MODAL_TOKEN_SECRET_INPUT: ${{ inputs.modal_token_secret }}
-        run: |
-          if [ -n "$MODAL_TOKEN_ID_INPUT" ]; then
-            echo "::add-mask::$MODAL_TOKEN_ID_INPUT"
-          fi
-          if [ -n "$MODAL_TOKEN_SECRET_INPUT" ]; then
-            echo "::add-mask::$MODAL_TOKEN_SECRET_INPUT"
-          fi
+        run: echo "::add-mask::$MODAL_TOKEN_SECRET_INPUT"
 
       - uses: actions/checkout@v6
         with:
@@ -89,10 +82,6 @@ jobs:
           # `-S` overrides. parent_type=claude inherits the claude defaults,
           # and cli_args adds --dangerously-skip-permissions so non-interactive
           # agents do not hang on per-tool permission prompts.
-          extra_env_args=()
-          if [ -n "${MNGR_USER_ID}" ]; then
-            extra_env_args+=(--env "MNGR_USER_ID=${MNGR_USER_ID}")
-          fi
           uv run --project libs/mngr_tmr mngr tmr -vv \
             -S 'agent_types.yolo.parent_type="claude"' \
             -S 'agent_types.yolo.cli_args=["--dangerously-skip-permissions"]' \
@@ -101,7 +90,6 @@ jobs:
             --env "MODAL_TOKEN_ID=${MODAL_TOKEN_ID}" \
             --env "MODAL_TOKEN_SECRET=${MODAL_TOKEN_SECRET}" \
             --env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
-            "${extra_env_args[@]}" \
             --output-html tmr-report/index.html \
             --format jsonl \
             ${{ inputs.test_paths }} \
