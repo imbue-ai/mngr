@@ -19,7 +19,7 @@ from imbue.imbue_common.ratchet_testing.core import RatchetMatchChunk
 from imbue.imbue_common.ratchet_testing.core import _get_non_ignored_files_with_extension
 from imbue.imbue_common.ratchet_testing.core import get_ast_nodes_of_type
 
-TEST_FILE_PATTERNS: Final[tuple[str, ...]] = ("*_test.py", "test_*.py")
+TEST_FILE_PATTERNS: Final[tuple[str, ...]] = ("*_test.py", "test_*.py", "conftest.py", "testing.py")
 
 
 def find_if_elif_without_else(

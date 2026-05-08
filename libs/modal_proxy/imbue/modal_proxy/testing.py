@@ -4,9 +4,12 @@
 # via ConcurrencyGroup (which handles process tracking and cleanup).
 # Images are lightweight no-ops. Apps and environments are thin metadata.
 
+import contextlib
 import shutil
 import uuid
 from collections.abc import Generator
+from contextlib import AbstractContextManager
+from io import StringIO
 from pathlib import Path
 from typing import Mapping
 from typing import Sequence
@@ -33,6 +36,7 @@ from imbue.modal_proxy.interface import ModalInterface
 from imbue.modal_proxy.interface import SandboxInterface
 from imbue.modal_proxy.interface import SecretInterface
 from imbue.modal_proxy.interface import VolumeInterface
+from imbue.modal_proxy.log_utils import ModalLoguruWriter
 
 # ---------------------------------------------------------------------------
 # Object implementations
@@ -508,3 +512,9 @@ class TestingModalInterface(ModalInterface):
     def get_sandbox_count(self) -> int:
         """Get the number of active (non-terminated) sandboxes."""
         return sum(1 for sb in self._sandboxes if not sb._is_terminated)
+
+    def enable_output_capture(
+        self, is_logging_to_loguru: bool = True
+    ) -> AbstractContextManager[tuple[StringIO, ModalLoguruWriter | None]]:
+        """No-op: nothing to capture without a Modal SDK behind it."""
+        return contextlib.nullcontext((StringIO(), None))
