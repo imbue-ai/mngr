@@ -9,7 +9,6 @@ from typing import Self
 
 from pydantic import Field
 from pydantic import GetCoreSchemaHandler
-from pydantic import model_validator
 from pydantic_core import CoreSchema
 from pydantic_core import core_schema
 
@@ -335,31 +334,23 @@ HostNameOrId = HostId | HostName
 
 
 class HostAddress(FrozenModel):
-    """A parsed ``HOST[.PROVIDER]`` (or bare ``.PROVIDER``) string.
+    """A parsed ``HOST[.PROVIDER]`` string.
 
-    At least one of ``host`` or ``provider`` is set. The bare ``.PROVIDER``
-    form (host omitted) is only meaningful in contexts that allow creating a
-    new host -- for example, ``mngr create NAME@.modal``. Most other contexts
-    require ``host`` to be set; they should validate that explicitly.
+    The host component is required. The bare ``.PROVIDER`` form -- which
+    appears only in ``mngr create NAME@.PROVIDER`` to mean "create a new host
+    on this provider" -- is represented by the flat fields on
+    :class:`NewAgentLocation` instead, not by a HostAddress with no host.
     """
 
-    host: HostNameOrId | None = Field(default=None, description="Host name or ID")
+    host: HostNameOrId = Field(description="Host name or ID")
     provider: ProviderInstanceName | None = Field(
         default=None, description="Provider instance name (the ``.PROVIDER`` qualifier)"
     )
 
-    @model_validator(mode="after")
-    def _at_least_one_component(self) -> "HostAddress":
-        if self.host is None and self.provider is None:
-            raise ValueError("Host address must specify at least a host or a provider")
-        return self
-
     def __str__(self) -> str:
-        if self.host is not None and self.provider is not None:
+        if self.provider is not None:
             return f"{self.host}.{self.provider}"
-        if self.host is not None:
-            return str(self.host)
-        return f".{self.provider}"
+        return str(self.host)
 
 
 class AgentAddress(FrozenModel):
@@ -383,18 +374,25 @@ class NewAgentLocation(FrozenModel):
     """A parsed ``[NAME][@[HOST][.PROVIDER]][:PATH]`` string.
 
     Used as the positional argument of ``mngr create``. The agent name is
-    optional (omitted means "auto-generate"); the host part can refer to an
-    existing host (``HOST[.PROVIDER]``) or hint at creating a new host on a
-    provider (bare ``.PROVIDER``). The trailing ``:PATH`` overrides the agent's
+    optional (omitted means "auto-generate"). The host and provider components
+    are flat-optional rather than a nested :class:`HostAddress`, because
+    ``mngr create`` is the only context in which the bare ``.PROVIDER`` form
+    is meaningful -- it means "create a new host on this provider with an
+    auto-generated name". When the user types ``HOST.PROVIDER``, both fields
+    are set; ``HOST`` alone sets just ``host_name``; ``.PROVIDER`` alone sets
+    just ``provider_name``. The trailing ``:PATH`` overrides the agent's
     default work-directory location.
 
-    Note that ``name`` is :class:`AgentName`, not :class:`AgentNameOrId` --
-    the agent doesn't yet exist when ``mngr create`` runs, so referring to it
-    by ID is meaningless.
+    ``name`` is :class:`AgentName`, not :class:`AgentNameOrId` -- the agent
+    doesn't yet exist when ``mngr create`` runs, so referring to it by ID is
+    meaningless.
     """
 
     name: AgentName | None = Field(default=None, description="Optional explicit agent name")
-    host: HostAddress | None = Field(default=None, description="Optional host disambiguator or new-host hint")
+    host_name: HostNameOrId | None = Field(default=None, description="Optional host name or ID")
+    provider_name: ProviderInstanceName | None = Field(
+        default=None, description="Optional provider instance name (the ``.PROVIDER`` qualifier)"
+    )
     path: Path | None = Field(default=None, description="Optional explicit work-directory path inside the host")
 
 

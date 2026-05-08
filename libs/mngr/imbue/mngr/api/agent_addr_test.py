@@ -54,12 +54,10 @@ def test_parse_agent_address_with_host_and_provider() -> None:
     assert addr.host == HostAddress(host=HostName("myhost"), provider=ProviderInstanceName("modal"))
 
 
-def test_parse_agent_address_with_provider_only() -> None:
-    """NAME@.PROVIDER extracts name and sets provider."""
-    addr = parse_agent_address("my-agent@.modal")
-
-    assert addr.agent == AgentName("my-agent")
-    assert addr.host == HostAddress(provider=ProviderInstanceName("modal"))
+def test_parse_agent_address_rejects_bare_provider_qualifier() -> None:
+    """``NAME@.PROVIDER`` is not a valid agent address: HostAddress requires a host."""
+    with pytest.raises(UserInputError):
+        parse_agent_address("my-agent@.modal")
 
 
 def test_parse_agent_address_rejects_dotted_host_name() -> None:
@@ -115,14 +113,6 @@ def test_address_matches_host_by_name() -> None:
     assert _address_matches_host(address, _make_host("otherhost")) is False
 
 
-def test_address_matches_host_by_provider() -> None:
-    """An address with provider matches hosts with that provider."""
-    address = AgentAddress(agent=AgentName("a"), host=HostAddress(provider=ProviderInstanceName("modal")))
-
-    assert _address_matches_host(address, _make_host(provider="modal")) is True
-    assert _address_matches_host(address, _make_host(provider="docker")) is False
-
-
 def test_address_matches_host_by_name_and_provider() -> None:
     """An address with both host name and provider requires both to match."""
     address = AgentAddress(
@@ -168,14 +158,6 @@ def test_address_matches_agent_match_by_host_name() -> None:
     assert _address_matches_agent_match(address, _make_match(host_name="other")) is False
 
 
-def test_address_matches_agent_match_by_provider() -> None:
-    """An address with provider filters by provider."""
-    address = AgentAddress(agent=AgentName("a"), host=HostAddress(provider=ProviderInstanceName("modal")))
-
-    assert _address_matches_agent_match(address, _make_match(provider="modal")) is True
-    assert _address_matches_agent_match(address, _make_match(provider="local")) is False
-
-
 # =============================================================================
 # filter_agents_by_host_constraint tests
 # =============================================================================
@@ -201,18 +183,6 @@ def test_filter_agents_by_host_name() -> None:
     result = filter_agents_by_host_constraint(agents_by_host, address)
     assert len(result) == 1
     assert host1 in result
-
-
-def test_filter_agents_by_provider() -> None:
-    """Filter keeps only hosts matching the address provider."""
-    host1 = _make_host("h1", "local")
-    host2 = _make_host("h2", "modal")
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {host1: [], host2: []}
-
-    address = AgentAddress(agent=AgentName("a"), host=HostAddress(provider=ProviderInstanceName("modal")))
-    result = filter_agents_by_host_constraint(agents_by_host, address)
-    assert len(result) == 1
-    assert host2 in result
 
 
 # =============================================================================
@@ -241,19 +211,6 @@ def test_post_filter_by_host_name() -> None:
 
     assert len(result) == 1
     assert result[0].host_name == HostName("host1")
-
-
-def test_post_filter_by_provider() -> None:
-    """An address with provider filters to only that provider's agents."""
-    match_local = _make_match("my-agent", "host1", "local")
-    match_modal = _make_match("my-agent", "host2", "modal")
-    matches = [match_local, match_modal]
-    addresses = [parse_agent_address("my-agent@.modal")]
-
-    result = _post_filter_matches_by_addresses(addresses, matches)
-
-    assert len(result) == 1
-    assert result[0].provider_name == ProviderInstanceName("modal")
 
 
 def test_post_filter_by_host_and_provider() -> None:

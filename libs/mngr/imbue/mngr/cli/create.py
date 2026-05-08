@@ -22,7 +22,6 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.addresses import HostAddress
 from imbue.mngr.api.addresses import NewAgentLocation
 from imbue.mngr.api.addresses import parse_source_location
 from imbue.mngr.api.connect import connect_to_agent
@@ -223,7 +222,7 @@ def _reject_incompatible_headless_flags(
 @pure
 def _is_new_host_implied(address: NewAgentLocation) -> bool:
     """True when the location implies creating a new host (``NAME@.PROVIDER`` form)."""
-    return address.host is not None and address.host.host is None and address.host.provider is not None
+    return address.host_name is None and address.provider_name is not None
 
 
 @pure
@@ -549,16 +548,14 @@ def create(ctx: click.Context, **kwargs) -> None:
         # Merge --provider flag into the address (alternative to .PROVIDER in the address).
         if opts.provider:
             flag_provider = ProviderInstanceName(opts.provider)
-            existing_provider = address.host.provider if address.host is not None else None
-            if existing_provider is not None and existing_provider != flag_provider:
+            if address.provider_name is not None and address.provider_name != flag_provider:
                 raise UserInputError(
-                    f"Conflicting providers: address has '{existing_provider}' "
+                    f"Conflicting providers: address has '{address.provider_name}' "
                     f"but --provider is '{flag_provider}'. Use one or the other."
                 )
-            if existing_provider is None:
-                existing_host = address.host.host if address.host is not None else None
+            if address.provider_name is None:
                 address = address.model_copy_update(
-                    to_update(address.field_ref().host, HostAddress(host=existing_host, provider=flag_provider)),
+                    to_update(address.field_ref().provider_name, flag_provider),
                 )
 
         # Merge --target-path flag into the address (alternative to :PATH in the address).
@@ -803,7 +800,7 @@ def _create_agent(
     if opts.reuse and agent_opts.name is not None:
         reuse_result = _try_reuse_existing_agent(
             agent_name=agent_opts.name,
-            provider_name=address.host.provider if address.host is not None else None,
+            provider_name=address.provider_name,
             target_host_ref=target_host if isinstance(target_host, DiscoveredHost) else None,
             mngr_ctx=mngr_ctx,
             agent_and_host_loader=setup.agent_and_host_loader,
@@ -1544,16 +1541,15 @@ def _parse_target_host(
     agent_and_host_loader: Callable[[], dict[DiscoveredHost, list[DiscoveredAgent]]],
     lifecycle: HostLifecycleOptions,
 ) -> DiscoveredHost | NewHostOptions | None:
-    if address.host is None:
+    if address.host_name is None and address.provider_name is None:
         # No host specified in address, use local host
         return None
 
-    address_host: HostAddress = address.host
     is_new_host = _is_creating_new_host(address, opts.new_host)
 
     if is_new_host:
         # Creating a new host - provider is required
-        if address_host.provider is None:
+        if address.provider_name is None:
             raise UserInputError(
                 "--new-host requires a provider in the agent address. "
                 "Use NAME@HOST.PROVIDER --new-host or NAME@.PROVIDER."
@@ -1561,20 +1557,20 @@ def _parse_target_host(
 
         # The local provider has a single fixed host; skip the new-host path
         # and use the existing localhost instead.
-        if address_host.provider.lower() == LOCAL_PROVIDER_NAME:
+        if address.provider_name.lower() == LOCAL_PROVIDER_NAME:
             return None
 
         # New hosts must be named with a (fresh) HostName, not an existing HostId.
         new_host_name: HostName | None
-        if address_host.host is None:
+        if address.host_name is None:
             new_host_name = None
-        elif isinstance(address_host.host, HostId):
+        elif isinstance(address.host_name, HostId):
             raise UserInputError(
-                f"--new-host cannot be combined with a host ID ('{address_host.host}'); "
+                f"--new-host cannot be combined with a host ID ('{address.host_name}'); "
                 "specify a fresh host name instead."
             )
         else:
-            new_host_name = address_host.host
+            new_host_name = address.host_name
 
         # Parse host-level labels
         host_labels_dict: dict[str, str] = {}
@@ -1600,7 +1596,7 @@ def _parse_target_host(
 
         parsed_host_name_style = HostNameStyle(opts.host_name_style.upper())
         return NewHostOptions(
-            provider=address_host.provider,
+            provider=address.provider_name,
             name=new_host_name,
             name_style=parsed_host_name_style,
             tags=host_labels_dict,
@@ -1612,18 +1608,17 @@ def _parse_target_host(
             lifecycle=lifecycle,
         )
 
-    # Targeting an existing host
-    if address_host.host is None:
-        # ``address.host is not None`` but host.host is None means only
-        # provider was set, which _is_new_host_implied catches above.
+    # Targeting an existing host. ``host_name is None`` here would imply only
+    # ``provider_name`` was set, which ``_is_new_host_implied`` catches above.
+    if address.host_name is None:
         raise UserInputError("Cannot target an existing host without a host name.")
 
     agents_by_host = agent_and_host_loader()
     all_hosts = list(agents_by_host.keys())
 
-    host_ref = _find_existing_host(address_host.host, address_host.provider, all_hosts)
+    host_ref = _find_existing_host(address.host_name, address.provider_name, all_hosts)
     if host_ref is None:
-        raise UserInputError(f"Could not find host: {address_host.host}")
+        raise UserInputError(f"Could not find host: {address.host_name}")
 
     return host_ref
 

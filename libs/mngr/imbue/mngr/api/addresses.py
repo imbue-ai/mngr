@@ -90,18 +90,19 @@ def _parse_provider_name(s: str) -> ProviderInstanceName:
 
 @pure
 def parse_host_address(s: str) -> HostAddress:
-    """Parse a ``HOST[.PROVIDER]`` (or bare ``.PROVIDER``) string into a :class:`HostAddress`.
+    """Parse a ``HOST[.PROVIDER]`` string into a :class:`HostAddress`.
 
-    Empty input raises :class:`UserInputError`. The dot is a deterministic
-    separator: real host names do not contain dots in the mngr DSL.
+    The host component is required. Empty input or input that starts with a
+    dot raises :class:`UserInputError`. The dot is a deterministic separator:
+    real host names do not contain dots in the mngr DSL.
     """
     if not s:
         raise UserInputError("Host address cannot be empty")
     host_part, provider_part = _split_host_part(s)
-    host = parse_host_name_or_id(host_part) if host_part else None
+    if not host_part:
+        raise UserInputError(f"Host address requires a host name or ID: '{s}'")
+    host = parse_host_name_or_id(host_part)
     provider = _parse_provider_name(provider_part) if provider_part else None
-    if host is None and provider is None:
-        raise UserInputError(f"Host address must specify at least a host or a provider: '{s}'")
     return HostAddress(host=host, provider=provider)
 
 
@@ -127,7 +128,10 @@ def parse_new_agent_location(s: str) -> NewAgentLocation:
     """Parse a ``[NAME][@[HOST][.PROVIDER]][:PATH]`` string into a :class:`NewAgentLocation`.
 
     Empty input parses to all-None (auto-generate everything). The name is
-    parsed as :class:`AgentName` only -- IDs are rejected.
+    parsed as :class:`AgentName` only -- IDs are rejected. The host part is
+    parsed into the flat ``host_name`` and ``provider_name`` fields directly,
+    not via :class:`HostAddress`, so the bare ``.PROVIDER`` form (which means
+    "create a new host on this provider") parses cleanly.
     """
     address_part, path = _split_path_suffix(s)
     name_str, host_part = _split_at_part(address_part)
@@ -140,8 +144,14 @@ def parse_new_agent_location(s: str) -> NewAgentLocation:
         except InvalidName as e:
             raise UserInputError(f"Not a valid agent name: '{name_str}' ({e})") from e
 
-    host = parse_host_address(host_part) if host_part else None
-    return NewAgentLocation(name=name, host=host, path=path)
+    if host_part:
+        host_str, provider_str = _split_host_part(host_part)
+        host_name = parse_host_name_or_id(host_str) if host_str else None
+        provider_name = _parse_provider_name(provider_str) if provider_str else None
+    else:
+        host_name = None
+        provider_name = None
+    return NewAgentLocation(name=name, host_name=host_name, provider_name=provider_name, path=path)
 
 
 @pure
@@ -220,12 +230,13 @@ def _split_path_suffix(s: str) -> tuple[str, Path | None]:
 
 @pure
 def host_addresses_match(a: HostAddress, b: HostAddress) -> bool:
-    """True if every component set on ``a`` matches the corresponding component on ``b``.
+    """True if ``a``'s host matches ``b``'s host, and (if set) ``a``'s provider matches ``b``'s.
 
-    Used to filter discovered hosts by an address constraint: an address with
-    only ``provider=docker`` matches every docker host, regardless of name.
+    Used to filter discovered hosts by an address constraint: ``HostAddress``
+    requires its host component, so only the provider component is allowed
+    to be missing on either side.
     """
-    if a.host is not None and a.host != b.host:
+    if a.host != b.host:
         return False
     if a.provider is not None and a.provider != b.provider:
         return False

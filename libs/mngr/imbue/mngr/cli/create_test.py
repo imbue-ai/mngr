@@ -12,7 +12,6 @@ import tomlkit
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
-from imbue.mngr.api.addresses import HostAddress
 from imbue.mngr.api.addresses import NewAgentLocation
 from imbue.mngr.api.addresses import parse_new_agent_location
 from imbue.mngr.api.find import ResolvedSource
@@ -1496,7 +1495,7 @@ def test_parse_new_agent_location_name_and_host() -> None:
 
     assert result == NewAgentLocation(
         name=AgentName("my-agent"),
-        host=HostAddress(host=HostName("myhost")),
+        host_name=HostName("myhost"),
     )
 
 
@@ -1506,7 +1505,8 @@ def test_parse_new_agent_location_name_host_and_provider() -> None:
 
     assert result == NewAgentLocation(
         name=AgentName("my-agent"),
-        host=HostAddress(host=HostName("myhost"), provider=ProviderInstanceName("modal")),
+        host_name=HostName("myhost"),
+        provider_name=ProviderInstanceName("modal"),
     )
 
 
@@ -1516,7 +1516,7 @@ def test_parse_new_agent_location_name_and_provider_only() -> None:
 
     assert result == NewAgentLocation(
         name=AgentName("my-agent"),
-        host=HostAddress(provider=ProviderInstanceName("modal")),
+        provider_name=ProviderInstanceName("modal"),
     )
 
 
@@ -1525,7 +1525,8 @@ def test_parse_new_agent_location_no_name_with_host_and_provider() -> None:
     result = parse_new_agent_location("@myhost.modal")
 
     assert result == NewAgentLocation(
-        host=HostAddress(host=HostName("myhost"), provider=ProviderInstanceName("modal")),
+        host_name=HostName("myhost"),
+        provider_name=ProviderInstanceName("modal"),
     )
 
 
@@ -1533,7 +1534,7 @@ def test_parse_new_agent_location_no_name_with_provider_only() -> None:
     """@.PROVIDER produces just provider (implies new host, auto-generate name)."""
     result = parse_new_agent_location("@.docker")
 
-    assert result == NewAgentLocation(host=HostAddress(provider=ProviderInstanceName("docker")))
+    assert result == NewAgentLocation(provider_name=ProviderInstanceName("docker"))
 
 
 def test_parse_new_agent_location_trailing_at_ignored() -> None:
@@ -1634,14 +1635,15 @@ def test_parse_new_agent_location_trailing_dot_means_host_only() -> None:
 
     assert result == NewAgentLocation(
         name=AgentName("foo"),
-        host=HostAddress(host=HostName("host")),
+        host_name=HostName("host"),
     )
 
 
 def test_parse_new_agent_location_bare_dot_means_nothing() -> None:
-    """'@.' has neither host nor provider, which is rejected by HostAddress."""
-    with pytest.raises(UserInputError):
-        parse_new_agent_location("foo@.")
+    """'@.' has neither host nor provider, so both flat fields stay None."""
+    result = parse_new_agent_location("foo@.")
+
+    assert result == NewAgentLocation(name=AgentName("foo"))
 
 
 def test_parse_new_agent_location_with_path() -> None:
@@ -1650,7 +1652,7 @@ def test_parse_new_agent_location_with_path() -> None:
 
     assert result == NewAgentLocation(
         name=AgentName("foo"),
-        host=HostAddress(host=HostName("myhost")),
+        host_name=HostName("myhost"),
         path=Path("/work/dir"),
     )
 
