@@ -1,9 +1,9 @@
 import pluggy
 from click.testing import CliRunner
 
-from imbue.mngr.api.addresses import AgentAddress
 from imbue.mngr.cli.archive import ArchiveCliOptions
 from imbue.mngr.cli.archive import archive
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 
 

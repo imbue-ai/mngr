@@ -6,8 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mngr.api.addresses import HostAddress
-from imbue.mngr.api.addresses import SourceLocation
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import resolve_source_location
 from imbue.mngr.config.data_types import MngrContext
@@ -18,9 +16,11 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import SourceLocation
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 

@@ -6,7 +6,7 @@ threaded through the API layer as typed objects rather than raw strings.
 
 ## New address types
 
-In `imbue.mngr.api.addresses`:
+In `imbue.mngr.primitives` (with parsers in `imbue.mngr.api.address_parsers`):
 
 - `HostAddress` — `HOST[.PROVIDER]` (or bare `.PROVIDER` for the new-host hint
   used by `mngr create`).
@@ -55,15 +55,21 @@ replacements:
 
 - `parse_address_part`, `parse_host_qualifier`, `parse_source_string`,
   `parse_identifier_as_address`, `ParsedSourceLocation` -> replaced by the
-  composite parsers and FrozenModel types in `api/addresses.py`.
+  composite parsers in `api/address_parsers.py` and FrozenModel types in
+  `primitives.py`.
 - `find_and_maybe_start_agent_by_name_or_id` -> `find_and_maybe_start_agent`
   (takes `AgentNameOrId` instead of `str`).
 - `parse_agent_spec` (cli helper for `mngr push`/`pull`) -> deleted; use
   `parse_source_location` / the `SOURCE_LOCATION` ParamType.
-- `_host_matches_filter` -> replaced by `host_addresses_match` in
-  `api/addresses.py`.
+- `_host_matches_filter` -> replaced by the `HostAddress.matches` method.
+- `api/agent_addr.py` was folded into `api/find.py` and `api/discover.py`; with
+  typed addresses as the norm, there is no longer a reason to segregate
+  address-accepting functions.
 - The api-level `find_agent_by_address`, `find_agents_by_addresses`,
   `discover_by_address`, `resolve_host_reference`, `resolve_agent_reference`,
   `find_all_matching_hosts`, `find_all_matching_agents`,
-  `find_agents_by_identifiers_or_state`, `exec_command_on_agent(s)`, etc., all
-  take typed addresses now instead of raw strings.
+  `exec_command_on_agent(s)`, etc., all take typed addresses now instead of
+  raw strings.
+- `AgentDetails.address` and `HostDetails.address` expose the corresponding
+  typed addresses as cached properties, so callers can pass them directly to
+  api functions instead of reconstructing addresses from individual fields.

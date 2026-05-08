@@ -5,9 +5,6 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.addresses import AgentAddress
-from imbue.mngr.api.addresses import HostAddress
-from imbue.mngr.api.addresses import SourceLocation
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import HOST_ADDRESS
 from imbue.mngr.cli.address_params import SOURCE_LOCATION
@@ -23,8 +20,11 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import ConflictMode
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import SourceLocation
 from imbue.mngr.primitives import SyncDirection
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.git_utils import find_git_worktree_root

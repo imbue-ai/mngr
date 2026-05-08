@@ -22,8 +22,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.addresses import NewAgentLocation
-from imbue.mngr.api.addresses import parse_source_location
+from imbue.mngr.api.address_parsers import parse_source_location
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
@@ -90,6 +89,7 @@ from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import LogLevel
+from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import Permission
 from imbue.mngr.primitives import ProviderInstanceName

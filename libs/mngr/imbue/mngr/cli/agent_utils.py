@@ -3,12 +3,9 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.addresses import AgentAddress
-from imbue.mngr.api.addresses import HostAddress
-from imbue.mngr.api.addresses import host_addresses_match
-from imbue.mngr.api.agent_addr import discover_by_address
-from imbue.mngr.api.agent_addr import find_agent_by_address
+from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.find import find_agent_by_address
 from imbue.mngr.api.find import find_and_maybe_start_agent
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.cli.connect import select_agent_interactively
@@ -18,8 +15,10 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import OutputFormat
 
 
@@ -35,7 +34,7 @@ def filter_agents_by_host(
     filtered = {
         host_ref: agent_refs
         for host_ref, agent_refs in agents_by_host.items()
-        if host_addresses_match(host_filter, HostAddress(host=host_ref.host_name, provider=host_ref.provider_name))
+        if host_filter.matches(HostAddress(host=host_ref.host_name, provider=host_ref.provider_name))
     }
     if not filtered:
         raise UserInputError(f"No host found matching: {host_filter}")

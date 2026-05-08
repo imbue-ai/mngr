@@ -1,12 +1,12 @@
 """Unit tests for the connect CLI command."""
 
-from imbue.mngr.api.addresses import AgentAddress
 from imbue.mngr.cli.connect import ConnectCliOptions
 from imbue.mngr.cli.connect import _build_connection_options
 from imbue.mngr.cli.connect import build_status_text
 from imbue.mngr.cli.connect import filter_agents
 from imbue.mngr.cli.connect import handle_search_key
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.utils.testing import make_test_agent_details

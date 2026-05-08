@@ -6,21 +6,20 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.mngr.api.addresses import AgentAddress
-from imbue.mngr.api.addresses import HostAddress
-from imbue.mngr.api.addresses import parse_agent_address
-from imbue.mngr.api.agent_addr import _address_matches_agent_match
-from imbue.mngr.api.agent_addr import _address_matches_host
-from imbue.mngr.api.agent_addr import _post_filter_matches_by_addresses
-from imbue.mngr.api.agent_addr import filter_agents_by_host_constraint
+from imbue.mngr.api.address_parsers import parse_agent_address
 from imbue.mngr.api.find import AgentMatch
+from imbue.mngr.api.find import _address_matches_agent_match
+from imbue.mngr.api.find import _post_filter_matches_by_addresses
+from imbue.mngr.cli.agent_utils import filter_agents_by_host
 from imbue.mngr.cli.stop import stop
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -85,7 +84,7 @@ def test_parse_agent_address_rejects_at_only() -> None:
 
 
 # =============================================================================
-# _address_matches_host tests
+# HostAddress.matches tests
 # =============================================================================
 
 
@@ -97,32 +96,25 @@ def _make_host(name: str = "myhost", provider: str = "local") -> DiscoveredHost:
     )
 
 
-def test_address_matches_host_no_constraints() -> None:
-    """An address with no host component matches any host."""
-    address = AgentAddress(agent=AgentName("a"))
-    host = _make_host()
-
-    assert _address_matches_host(address, host) is True
+def _host_address_for(host: DiscoveredHost) -> HostAddress:
+    return HostAddress(host=host.host_name, provider=host.provider_name)
 
 
-def test_address_matches_host_by_name() -> None:
-    """An address with host name matches hosts with that name."""
-    address = AgentAddress(agent=AgentName("a"), host=HostAddress(host=HostName("myhost")))
+def test_host_address_matches_by_name() -> None:
+    """A constraint with only a host name matches hosts with that name regardless of provider."""
+    constraint = HostAddress(host=HostName("myhost"))
 
-    assert _address_matches_host(address, _make_host("myhost")) is True
-    assert _address_matches_host(address, _make_host("otherhost")) is False
+    assert constraint.matches(_host_address_for(_make_host("myhost"))) is True
+    assert constraint.matches(_host_address_for(_make_host("otherhost"))) is False
 
 
-def test_address_matches_host_by_name_and_provider() -> None:
-    """An address with both host name and provider requires both to match."""
-    address = AgentAddress(
-        agent=AgentName("a"),
-        host=HostAddress(host=HostName("myhost"), provider=ProviderInstanceName("modal")),
-    )
+def test_host_address_matches_by_name_and_provider() -> None:
+    """A constraint with both host name and provider requires both to match."""
+    constraint = HostAddress(host=HostName("myhost"), provider=ProviderInstanceName("modal"))
 
-    assert _address_matches_host(address, _make_host("myhost", "modal")) is True
-    assert _address_matches_host(address, _make_host("myhost", "docker")) is False
-    assert _address_matches_host(address, _make_host("other", "modal")) is False
+    assert constraint.matches(_host_address_for(_make_host("myhost", "modal"))) is True
+    assert constraint.matches(_host_address_for(_make_host("myhost", "docker"))) is False
+    assert constraint.matches(_host_address_for(_make_host("other", "modal"))) is False
 
 
 # =============================================================================
@@ -159,30 +151,30 @@ def test_address_matches_agent_match_by_host_name() -> None:
 
 
 # =============================================================================
-# filter_agents_by_host_constraint tests
+# filter_agents_by_host tests
 # =============================================================================
 
 
-def test_filter_agents_no_constraint() -> None:
-    """When address has no host component, return all agents."""
-    host = _make_host("h1", "local")
-    agents: list[DiscoveredAgent] = []
-    agents_by_host = {host: agents}
-
-    result = filter_agents_by_host_constraint(agents_by_host, AgentAddress(agent=AgentName("a")))
-    assert len(result) == 1
-
-
-def test_filter_agents_by_host_name() -> None:
-    """Filter keeps only hosts matching the address host name."""
+def test_filter_agents_by_host_keeps_matching_host() -> None:
+    """Filter keeps only hosts matching the host filter."""
     host1 = _make_host("h1", "local")
     host2 = _make_host("h2", "local")
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {host1: [], host2: []}
 
-    address = AgentAddress(agent=AgentName("a"), host=HostAddress(host=HostName("h1")))
-    result = filter_agents_by_host_constraint(agents_by_host, address)
+    host_filter = HostAddress(host=HostName("h1"))
+    result = filter_agents_by_host(agents_by_host, host_filter)
     assert len(result) == 1
     assert host1 in result
+
+
+def test_filter_agents_by_host_raises_when_no_match() -> None:
+    """Filter raises UserInputError when no hosts match."""
+    host1 = _make_host("h1", "local")
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {host1: []}
+
+    host_filter = HostAddress(host=HostName("nonexistent"))
+    with pytest.raises(UserInputError):
+        filter_agents_by_host(agents_by_host, host_filter)
 
 
 # =============================================================================

@@ -10,7 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
-from imbue.mngr.api.addresses import parse_new_agent_location
+from imbue.mngr.api.address_parsers import parse_new_agent_location
 from imbue.mngr.cli.create import _create_agent
 from imbue.mngr.cli.create import _resolve_transfer_mode
 from imbue.mngr.cli.create import _setup_create

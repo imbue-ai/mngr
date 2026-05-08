@@ -6,7 +6,6 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.mngr.api.addresses import AgentAddress
 from imbue.mngr.api.message import MessageResult
 from imbue.mngr.cli.message import MessageCliOptions
 from imbue.mngr.cli.message import _emit_human_output
@@ -17,6 +16,7 @@ from imbue.mngr.cli.message import _emit_output
 from imbue.mngr.cli.message import _get_message_content
 from imbue.mngr.cli.message import message
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
 

@@ -12,8 +12,7 @@ import tomlkit
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
-from imbue.mngr.api.addresses import NewAgentLocation
-from imbue.mngr.api.addresses import parse_new_agent_location
+from imbue.mngr.api.address_parsers import parse_new_agent_location
 from imbue.mngr.api.find import ResolvedSource
 from imbue.mngr.cli.create import _AutoLabels
 from imbue.mngr.cli.create import _CreateCommand
@@ -55,6 +54,7 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import IdleMode
+from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance

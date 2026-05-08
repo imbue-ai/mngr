@@ -347,6 +347,21 @@ class HostAddress(FrozenModel):
         default=None, description="Provider instance name (the ``.PROVIDER`` qualifier)"
     )
 
+    def matches(self, other: "HostAddress") -> bool:
+        """True if every component of ``self`` matches the corresponding component of ``other``.
+
+        ``self`` is read as a constraint (e.g. parsed from a ``--host`` flag);
+        ``other`` is the concrete address being tested. Provider matching is
+        only enforced when ``self.provider`` is set, so a constraint of just
+        ``HOST`` matches every concrete host with that name regardless of
+        provider.
+        """
+        if self.host != other.host:
+            return False
+        if self.provider is not None and self.provider != other.provider:
+            return False
+        return True
+
     def __str__(self) -> str:
         if self.provider is not None:
             return f"{self.host}.{self.provider}"

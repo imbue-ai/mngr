@@ -6,8 +6,6 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.addresses import AgentAddress
-from imbue.mngr.api.addresses import HostAddress
 from imbue.mngr.api.provision import provision_agent
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import HOST_ADDRESS
@@ -25,6 +23,8 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import UploadFileSpec
+from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import OutputFormat
 
 

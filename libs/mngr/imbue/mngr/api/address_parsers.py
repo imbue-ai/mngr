@@ -21,7 +21,6 @@ Parsing rules (uniform across all four shapes):
   for :class:`HostNameOrId`. Inputs that are neither raise :class:`UserInputError`.
 """
 
-from collections.abc import Sequence
 from pathlib import Path
 
 from imbue.imbue_common.pure import pure
@@ -223,41 +222,3 @@ def _split_path_suffix(s: str) -> tuple[str, Path | None]:
         return (s, None)
     address_part, path_str = s.split(":", 1)
     return (address_part, Path(path_str) if path_str else None)
-
-
-# === Convenience helpers used by callers ===
-
-
-@pure
-def host_addresses_match(a: HostAddress, b: HostAddress) -> bool:
-    """True if ``a``'s host matches ``b``'s host, and (if set) ``a``'s provider matches ``b``'s.
-
-    Used to filter discovered hosts by an address constraint: ``HostAddress``
-    requires its host component, so only the provider component is allowed
-    to be missing on either side.
-    """
-    if a.host != b.host:
-        return False
-    if a.provider is not None and a.provider != b.provider:
-        return False
-    return True
-
-
-@pure
-def collect_required_provider_names(
-    addresses: Sequence[AgentAddress],
-) -> tuple[ProviderInstanceName, ...] | None:
-    """Return the set of provider names a discovery call can be restricted to.
-
-    If every address has a provider set, returns the deduped tuple. If any
-    address omits the provider, returns ``None`` (meaning: all providers must
-    be queried).
-    """
-    providers: set[ProviderInstanceName] = set()
-    for addr in addresses:
-        if addr.host is None or addr.host.provider is None:
-            return None
-        providers.add(addr.host.provider)
-    if not providers:
-        return None
-    return tuple(sorted(providers))

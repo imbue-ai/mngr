@@ -7,11 +7,9 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.addresses import AgentAddress
-from imbue.mngr.api.addresses import HostAddress
-from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import AgentMatch
+from imbue.mngr.api.find import find_agents_by_addresses
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.find import resolve_host_reference
 from imbue.mngr.api.providers import get_provider_instance
@@ -37,7 +35,9 @@ from imbue.mngr.interfaces.data_types import get_activity_sources_for_idle_mode
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import OutputFormat

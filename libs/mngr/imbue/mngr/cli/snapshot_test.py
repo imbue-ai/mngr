@@ -6,8 +6,6 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.mngr.api.addresses import AgentAddress
-from imbue.mngr.api.addresses import HostAddress
 from imbue.mngr.cli.snapshot import SnapshotCreateCliOptions
 from imbue.mngr.cli.snapshot import SnapshotDestroyCliOptions
 from imbue.mngr.cli.snapshot import SnapshotListCliOptions
@@ -20,7 +18,9 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.main import cli
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import SnapshotId

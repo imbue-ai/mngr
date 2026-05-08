@@ -14,7 +14,6 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.mngr.api.addresses import AgentAddress
 from imbue.mngr.cli.agent_utils import find_agent_for_command
 from imbue.mngr.cli.agent_utils import select_agent_interactively_with_host
 from imbue.mngr.cli.stop import stop
@@ -22,6 +21,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 
 

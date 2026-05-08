@@ -1,6 +1,5 @@
 import pytest
 
-from imbue.mngr.api.addresses import HostAddress
 from imbue.mngr.cli.agent_utils import filter_agents_by_host
 from imbue.mngr.cli.agent_utils import select_agent_interactively_with_host
 from imbue.mngr.config.data_types import MngrContext
@@ -9,6 +8,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName

@@ -7,7 +7,7 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.mngr.api.addresses import parse_agent_name_or_id
+from imbue.mngr.api.address_parsers import parse_agent_name_or_id
 from imbue.mngr.api.find import find_and_maybe_start_agent
 from imbue.mngr.cli.pull import PullCliOptions
 from imbue.mngr.cli.pull import pull

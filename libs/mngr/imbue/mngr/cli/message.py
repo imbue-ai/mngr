@@ -6,7 +6,6 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.addresses import AgentAddress
 from imbue.mngr.api.message import MessageResult
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
@@ -24,6 +23,7 @@ from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
 

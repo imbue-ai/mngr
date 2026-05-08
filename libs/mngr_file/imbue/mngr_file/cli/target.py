@@ -8,8 +8,8 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.addresses import parse_agent_name_or_id
-from imbue.mngr.api.addresses import parse_host_address
+from imbue.mngr.api.address_parsers import parse_agent_name_or_id
+from imbue.mngr.api.address_parsers import parse_host_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import find_all_matching_agents
 from imbue.mngr.api.find import find_all_matching_hosts

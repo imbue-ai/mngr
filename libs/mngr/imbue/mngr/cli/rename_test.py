@@ -3,12 +3,12 @@ import json
 import pluggy
 from click.testing import CliRunner
 
-from imbue.mngr.api.addresses import AgentAddress
 from imbue.mngr.cli.rename import RenameCliOptions
 from imbue.mngr.cli.rename import _output
 from imbue.mngr.cli.rename import _output_result
 from imbue.mngr.cli.rename import rename
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
 

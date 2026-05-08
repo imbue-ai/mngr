@@ -10,8 +10,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.addresses import HostAddress
-from imbue.mngr.api.addresses import SourceLocation
+from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
@@ -22,17 +21,20 @@ from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameOrId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameOrId
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import SourceLocation
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 
@@ -450,7 +452,7 @@ class AgentMatch(FrozenModel):
     provider_name: ProviderInstanceName = Field(description="Name of the provider instance that owns the host")
 
 
-def find_agents_by_identifiers_or_state(
+def _find_agents_by_identifiers_or_state(
     agent_identifiers: Sequence[AgentNameOrId],
     filter_all: bool,
     target_state: AgentLifecycleState | None,
@@ -553,3 +555,137 @@ def group_agents_by_host(agents: Sequence[AgentMatch]) -> dict[str, list[AgentMa
             agents_by_host[key] = []
         agents_by_host[key].append(match)
     return agents_by_host
+
+
+# === Address-driven find ===
+
+
+@pure
+def _address_matches_agent_match(address: AgentAddress, match: AgentMatch) -> bool:
+    """Check if an :class:`AgentMatch` satisfies the host/provider constraints of an address."""
+    if address.host is None:
+        return True
+    other = HostAddress(host=match.host_name, provider=match.provider_name)
+    return address.host.matches(other)
+
+
+@pure
+def _collect_required_provider_names(
+    addresses: Sequence[AgentAddress],
+) -> tuple[ProviderInstanceName, ...] | None:
+    """Return the set of provider names a discovery call can be restricted to.
+
+    If every address has a provider set, returns the deduped tuple. If any
+    address omits the provider, returns ``None`` (meaning: all providers must
+    be queried).
+    """
+    providers: set[ProviderInstanceName] = set()
+    for addr in addresses:
+        if addr.host is None or addr.host.provider is None:
+            return None
+        providers.add(addr.host.provider)
+    if not providers:
+        return None
+    return tuple(sorted(providers))
+
+
+def find_agents_by_addresses(
+    addresses: Sequence[AgentAddress],
+    filter_all: bool,
+    target_state: AgentLifecycleState | None,
+    mngr_ctx: MngrContext,
+    include_destroyed: bool = False,
+) -> list[AgentMatch]:
+    """Find agents matching a sequence of :class:`AgentAddress` constraints.
+
+    When all addresses pin a provider, only those providers are queried during
+    discovery. Identifiers without host/provider components match by name/ID
+    alone; identifiers with host/provider components are post-filtered to
+    keep only matches on a satisfying host.
+    """
+    agent_identifiers = [addr.agent for addr in addresses]
+    provider_filter = _collect_required_provider_names(addresses)
+    provider_names = tuple(str(p) for p in provider_filter) if provider_filter is not None else None
+
+    matches = _find_agents_by_identifiers_or_state(
+        agent_identifiers=agent_identifiers,
+        filter_all=filter_all,
+        target_state=target_state,
+        mngr_ctx=mngr_ctx,
+        include_destroyed=include_destroyed,
+        provider_names=provider_names,
+    )
+
+    return _post_filter_matches_by_addresses(addresses, matches)
+
+
+@pure
+def _post_filter_matches_by_addresses(
+    addresses: Sequence[AgentAddress],
+    matches: Sequence[AgentMatch],
+) -> list[AgentMatch]:
+    """Post-filter agent matches by the host/provider constraints of each address.
+
+    For addresses without host/provider components, matches pass through
+    unchanged. For constrained addresses, only matches on a satisfying host are
+    kept. Raises :class:`AgentNotFoundError` if a constrained address has no
+    matching agents after filtering.
+    """
+    has_host_constraints = any(addr.host is not None for addr in addresses)
+    if not has_host_constraints:
+        return list(matches)
+
+    # Group host-constrained addresses by their agent (str) for matching.
+    addresses_by_agent: dict[str, list[AgentAddress]] = {}
+    for addr in addresses:
+        if addr.host is not None:
+            addresses_by_agent.setdefault(str(addr.agent), []).append(addr)
+
+    filtered: list[AgentMatch] = []
+    for match in matches:
+        agent_name_str = str(match.agent_name)
+        agent_id_str = str(match.agent_id)
+
+        # Address agents may be either AgentName or AgentId; check both.
+        constraints = addresses_by_agent.get(agent_name_str) or addresses_by_agent.get(agent_id_str)
+        if constraints is None or any(_address_matches_agent_match(addr, match) for addr in constraints):
+            filtered.append(match)
+
+    for addr in addresses:
+        if addr.host is None:
+            continue
+        agent_str = str(addr.agent)
+        has_match = any(str(m.agent_name) == agent_str or str(m.agent_id) == agent_str for m in filtered)
+        if not has_match:
+            raise AgentNotFoundError(f"No agent found matching address: {addr}")
+
+    return filtered
+
+
+def find_agent_by_address(
+    address: AgentAddress,
+    mngr_ctx: MngrContext,
+    command_name: str,
+    is_start_desired: bool = False,
+    skip_agent_state_check: bool = False,
+) -> tuple[AgentInterface, OnlineHostInterface]:
+    """Find an agent by :class:`AgentAddress`, supporting host/provider disambiguation.
+
+    Handles the full flow: runs discovery (skipping irrelevant providers),
+    filters by the address's host constraint, and resolves to an agent+host
+    pair. Raises :class:`UserInputError` if the host constraint matches no
+    hosts.
+    """
+    agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
+
+    if not agents_by_host and address.host is not None:
+        raise UserInputError(f"No hosts found matching {address.host}")
+
+    return find_and_maybe_start_agent(
+        address.agent,
+        agents_by_host,
+        mngr_ctx,
+        command_name,
+        is_start_desired=is_start_desired,
+        skip_agent_state_check=skip_agent_state_check,
+    )

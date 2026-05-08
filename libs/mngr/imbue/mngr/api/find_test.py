@@ -5,13 +5,11 @@ import pytest
 from pydantic import Field
 
 from imbue.mngr.agents.base_agent import BaseAgent
-from imbue.mngr.api.addresses import HostAddress
-from imbue.mngr.api.addresses import SourceLocation
-from imbue.mngr.api.addresses import parse_source_location
+from imbue.mngr.api.address_parsers import parse_source_location
 from imbue.mngr.api.find import AgentMatch
+from imbue.mngr.api.find import _find_agents_by_identifiers_or_state
 from imbue.mngr.api.find import determine_resolved_path
 from imbue.mngr.api.find import ensure_agent_started
-from imbue.mngr.api.find import find_agents_by_identifiers_or_state
 from imbue.mngr.api.find import find_all_matching_agents
 from imbue.mngr.api.find import find_all_matching_hosts
 from imbue.mngr.api.find import get_host_from_list_by_id
@@ -33,9 +31,11 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import SourceLocation
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 
@@ -651,15 +651,15 @@ def test_group_agents_by_host_key_format() -> None:
 
 
 # =============================================================================
-# find_agents_by_identifiers_or_state Tests
+# _find_agents_by_identifiers_or_state Tests
 # =============================================================================
 
 
-def test_find_agents_by_identifiers_or_state_no_agents_returns_empty(
+def test__find_agents_by_identifiers_or_state_no_agents_returns_empty(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """find_agents_by_identifiers_or_state should return empty list when no agents exist and filter_all is True."""
-    result = find_agents_by_identifiers_or_state(
+    """_find_agents_by_identifiers_or_state should return empty list when no agents exist and filter_all is True."""
+    result = _find_agents_by_identifiers_or_state(
         agent_identifiers=[],
         filter_all=True,
         target_state=None,
@@ -668,11 +668,11 @@ def test_find_agents_by_identifiers_or_state_no_agents_returns_empty(
     assert result == []
 
 
-def test_find_agents_by_identifiers_or_state_no_identifiers_and_not_all(
+def test__find_agents_by_identifiers_or_state_no_identifiers_and_not_all(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """find_agents_by_identifiers_or_state should return empty list when no identifiers and filter_all is False."""
-    result = find_agents_by_identifiers_or_state(
+    """_find_agents_by_identifiers_or_state should return empty list when no identifiers and filter_all is False."""
+    result = _find_agents_by_identifiers_or_state(
         agent_identifiers=[],
         filter_all=False,
         target_state=None,
@@ -681,12 +681,12 @@ def test_find_agents_by_identifiers_or_state_no_identifiers_and_not_all(
     assert result == []
 
 
-def test_find_agents_by_identifiers_or_state_raises_on_unknown_identifier(
+def test__find_agents_by_identifiers_or_state_raises_on_unknown_identifier(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """find_agents_by_identifiers_or_state should raise AgentNotFoundError for unrecognized identifiers."""
+    """_find_agents_by_identifiers_or_state should raise AgentNotFoundError for unrecognized identifiers."""
     with pytest.raises(AgentNotFoundError, match="No agent"):
-        find_agents_by_identifiers_or_state(
+        _find_agents_by_identifiers_or_state(
             agent_identifiers=[AgentName("nonexistent-agent-xyz")],
             filter_all=False,
             target_state=None,
@@ -695,12 +695,12 @@ def test_find_agents_by_identifiers_or_state_raises_on_unknown_identifier(
 
 
 @pytest.mark.tmux
-def test_find_agents_by_identifiers_or_state_finds_by_name(
+def test__find_agents_by_identifiers_or_state_finds_by_name(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
     local_host: Host,
 ) -> None:
-    """find_agents_by_identifiers_or_state should find an agent by its name."""
+    """_find_agents_by_identifiers_or_state should find an agent by its name."""
     agent = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
@@ -710,7 +710,7 @@ def test_find_agents_by_identifiers_or_state_finds_by_name(
         ),
     )
 
-    results = find_agents_by_identifiers_or_state(
+    results = _find_agents_by_identifiers_or_state(
         agent_identifiers=[AgentName("find-by-name-test")],
         filter_all=False,
         target_state=None,
@@ -724,12 +724,12 @@ def test_find_agents_by_identifiers_or_state_finds_by_name(
 
 
 @pytest.mark.tmux
-def test_find_agents_by_identifiers_or_state_finds_by_id(
+def test__find_agents_by_identifiers_or_state_finds_by_id(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
     local_host: Host,
 ) -> None:
-    """find_agents_by_identifiers_or_state should find an agent by its ID."""
+    """_find_agents_by_identifiers_or_state should find an agent by its ID."""
     agent = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
@@ -739,7 +739,7 @@ def test_find_agents_by_identifiers_or_state_finds_by_id(
         ),
     )
 
-    results = find_agents_by_identifiers_or_state(
+    results = _find_agents_by_identifiers_or_state(
         agent_identifiers=[agent.id],
         filter_all=False,
         target_state=None,
@@ -753,12 +753,12 @@ def test_find_agents_by_identifiers_or_state_finds_by_id(
 
 
 @pytest.mark.tmux
-def test_find_agents_by_identifiers_or_state_filter_all_returns_all(
+def test__find_agents_by_identifiers_or_state_filter_all_returns_all(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
     local_host: Host,
 ) -> None:
-    """find_agents_by_identifiers_or_state with filter_all=True, target_state=None returns all agents."""
+    """_find_agents_by_identifiers_or_state with filter_all=True, target_state=None returns all agents."""
     agent1 = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
@@ -776,7 +776,7 @@ def test_find_agents_by_identifiers_or_state_filter_all_returns_all(
         ),
     )
 
-    results = find_agents_by_identifiers_or_state(
+    results = _find_agents_by_identifiers_or_state(
         agent_identifiers=[],
         filter_all=True,
         target_state=None,
@@ -792,12 +792,12 @@ def test_find_agents_by_identifiers_or_state_filter_all_returns_all(
 
 
 @pytest.mark.tmux
-def test_find_agents_by_identifiers_or_state_filter_by_stopped_state(
+def test__find_agents_by_identifiers_or_state_filter_by_stopped_state(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
     local_host: Host,
 ) -> None:
-    """find_agents_by_identifiers_or_state with target_state=STOPPED should only return stopped agents."""
+    """_find_agents_by_identifiers_or_state with target_state=STOPPED should only return stopped agents."""
     # Create an agent but don't start it (so it's stopped)
     agent = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
@@ -808,7 +808,7 @@ def test_find_agents_by_identifiers_or_state_filter_by_stopped_state(
         ),
     )
 
-    results = find_agents_by_identifiers_or_state(
+    results = _find_agents_by_identifiers_or_state(
         agent_identifiers=[],
         filter_all=True,
         target_state=AgentLifecycleState.STOPPED,

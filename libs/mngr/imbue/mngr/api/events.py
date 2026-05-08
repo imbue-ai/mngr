@@ -25,10 +25,9 @@ from imbue.imbue_common.logging import ROTATED_JSONL_PATTERN
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.addresses import AgentAddress
-from imbue.mngr.api.addresses import parse_agent_address
-from imbue.mngr.api.addresses import parse_host_address
-from imbue.mngr.api.agent_addr import discover_by_address
+from imbue.mngr.api.address_parsers import parse_agent_address
+from imbue.mngr.api.address_parsers import parse_host_address
+from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import resolve_agent_reference
 from imbue.mngr.api.find import resolve_host_reference
@@ -40,6 +39,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import Volume
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
@@ -159,7 +159,7 @@ def resolve_events_target(
     except UserInputError:
         address = None
 
-    filtered_agents_by_host: dict[DiscoveredHost, Sequence[DiscoveredAgent]] = {}
+    filtered_agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
     agent_result: tuple[DiscoveredHost, DiscoveredAgent] | None = None
     if address is not None:
         with log_span("Loading agents and hosts"):

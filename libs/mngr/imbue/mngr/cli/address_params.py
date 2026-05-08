@@ -1,6 +1,6 @@
 """Click ``ParamType`` adapters that parse mngr address strings into typed values.
 
-Each ParamType wraps one of the parsers in :mod:`imbue.mngr.api.addresses`.
+Each ParamType wraps one of the parsers in :mod:`imbue.mngr.api.address_parsers`.
 Click invokes these during argument parsing, so command bodies receive typed
 addresses (``AgentAddress``, ``HostAddress``, ``NewAgentLocation``,
 ``SourceLocation``) rather than raw strings.
@@ -13,21 +13,21 @@ from typing import Any
 
 import click
 
-from imbue.mngr.api.addresses import AgentAddress
-from imbue.mngr.api.addresses import HostAddress
-from imbue.mngr.api.addresses import NewAgentLocation
-from imbue.mngr.api.addresses import SourceLocation
-from imbue.mngr.api.addresses import parse_agent_address
-from imbue.mngr.api.addresses import parse_agent_name_or_id
-from imbue.mngr.api.addresses import parse_host_address
-from imbue.mngr.api.addresses import parse_host_name_or_id
-from imbue.mngr.api.addresses import parse_new_agent_location
-from imbue.mngr.api.addresses import parse_source_location
+from imbue.mngr.api.address_parsers import parse_agent_address
+from imbue.mngr.api.address_parsers import parse_agent_name_or_id
+from imbue.mngr.api.address_parsers import parse_host_address
+from imbue.mngr.api.address_parsers import parse_host_name_or_id
+from imbue.mngr.api.address_parsers import parse_new_agent_location
+from imbue.mngr.api.address_parsers import parse_source_location
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameOrId
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostNameOrId
 from imbue.mngr.primitives import InvalidName
+from imbue.mngr.primitives import NewAgentLocation
+from imbue.mngr.primitives import SourceLocation
 
 
 def _convert_with_user_input_error(

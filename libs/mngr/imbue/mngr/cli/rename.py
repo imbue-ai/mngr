@@ -5,8 +5,7 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.addresses import AgentAddress
-from imbue.mngr.api.agent_addr import discover_by_address
+from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.find import find_and_maybe_start_agent
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
@@ -22,6 +21,7 @@ from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
 

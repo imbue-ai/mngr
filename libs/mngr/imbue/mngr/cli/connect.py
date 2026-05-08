@@ -18,10 +18,9 @@ from urwid.widget.wimp import SelectableIcon
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.addresses import AgentAddress
-from imbue.mngr.api.agent_addr import find_agent_by_address
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.data_types import ConnectionOptions
+from imbue.mngr.api.find import find_agent_by_address
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
@@ -38,6 +37,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
 
 
@@ -413,7 +413,7 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         most_recent = sorted_agents[0]
         logger.info("No agent specified, connecting to most recently created: {}", most_recent.name)
         agent, host = find_agent_by_address(
-            AgentAddress(agent=most_recent.id),
+            most_recent.address,
             mngr_ctx,
             "connect",
             is_start_desired=opts.start,
@@ -437,7 +437,7 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
             return
 
         agent, host = find_agent_by_address(
-            AgentAddress(agent=selected.id),
+            selected.address,
             mngr_ctx,
             "connect",
             is_start_desired=opts.start,

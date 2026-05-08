@@ -4,7 +4,6 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.mngr.api.addresses import AgentAddress
 from imbue.mngr.cli.limit import LimitCliOptions
 from imbue.mngr.cli.limit import _build_updated_activity_config
 from imbue.mngr.cli.limit import _build_updated_permissions
@@ -16,6 +15,7 @@ from imbue.mngr.cli.limit import limit
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.primitives import ActivitySource
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import OutputFormat

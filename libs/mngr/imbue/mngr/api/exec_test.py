@@ -11,7 +11,7 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.agents.base_agent import BaseAgent
-from imbue.mngr.api.addresses import parse_agent_address
+from imbue.mngr.api.address_parsers import parse_agent_address
 from imbue.mngr.api.exec import ExecResult
 from imbue.mngr.api.exec import MultiExecResult
 from imbue.mngr.api.exec import OuterExecResult

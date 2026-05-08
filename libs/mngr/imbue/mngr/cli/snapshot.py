@@ -5,11 +5,9 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.addresses import AgentAddress
-from imbue.mngr.api.addresses import HostAddress
-from imbue.mngr.api.addresses import parse_host_address
-from imbue.mngr.api.agent_addr import find_agents_by_addresses
+from imbue.mngr.api.address_parsers import parse_host_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.find import find_agents_by_addresses
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.api.providers import get_provider_instance
@@ -39,8 +37,10 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName

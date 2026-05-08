@@ -5,7 +5,6 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.addresses import AgentAddress
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.agent_utils import find_agent_for_command
 from imbue.mngr.cli.common_opts import add_common_options
@@ -13,6 +12,7 @@ from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.primitives import AgentAddress
 
 
 class CaptureCliOptions(CommonCliOptions):
