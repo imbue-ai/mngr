@@ -133,6 +133,7 @@ class TmrCliOptions(CommonCliOptions):
     output_html: str | None
     source: str | None
     reintegrate: str | None
+    additional_authorized_keys: tuple[str, ...]
 
 
 _MIN_FD_LIMIT = 4096
@@ -344,6 +345,7 @@ def _run_reintegrate(
         env_options=env_options,
         label_options=label_options,
         templates=integrator_templates,
+        additional_authorized_keys=opts.additional_authorized_keys,
     )
     integrator_result = _run_integrator_phase(
         results, integrator_config, mngr_ctx, opts, output_dir, base_commit=base_commit
@@ -566,6 +568,13 @@ def _run_integrator_phase(
     help="Re-read outcomes from a previous TMR run (by run name), re-run integrator, and regenerate report. "
     "Skips test collection and agent launching.",
 )
+@click.option(
+    "--additional-authorized-host",
+    "additional_authorized_keys",
+    multiple=True,
+    help="SSH public key line to install in authorized_keys on each agent host "
+    "(test agents, integrator, host pool, and snapshotter), allowing inbound SSH [repeatable]",
+)
 @add_common_options
 @click.pass_context
 def tmr(ctx: click.Context, **kwargs: object) -> None:
@@ -631,6 +640,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         label_options=label_options,
         snapshot=provided_snapshot,
         templates=opts.agent_template,
+        additional_authorized_keys=opts.additional_authorized_keys,
     )
 
     try:
@@ -764,6 +774,7 @@ def _run_tmr_pipeline(
         env_options=env_options,
         label_options=label_options,
         templates=integrator_templates,
+        additional_authorized_keys=opts.additional_authorized_keys,
     )
     integrator_result = _run_integrator_phase(
         results, integrator_config, mngr_ctx, opts, output_dir, base_commit=base_commit
