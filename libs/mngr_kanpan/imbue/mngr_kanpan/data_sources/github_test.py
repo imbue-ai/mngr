@@ -1,4 +1,7 @@
 import json
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from unittest.mock import MagicMock
 
 from imbue.concurrency_group.errors import ProcessError
@@ -22,7 +25,7 @@ from imbue.mngr_kanpan.data_sources.github import _build_create_pr_url
 from imbue.mngr_kanpan.data_sources.github import _build_pr_branch_index
 from imbue.mngr_kanpan.data_sources.github import _build_unresolved_query
 from imbue.mngr_kanpan.data_sources.github import _fetch_repo_prs
-from imbue.mngr_kanpan.data_sources.github import _get_cached_repo_path
+from imbue.mngr_kanpan.data_sources.github import _get_cached_repo_field
 from imbue.mngr_kanpan.data_sources.github import _lookup_pr
 from imbue.mngr_kanpan.data_sources.github import _parse_check_status
 from imbue.mngr_kanpan.data_sources.github import _parse_conflicts
@@ -39,13 +42,15 @@ from imbue.mngr_kanpan.testing import make_pr_field
 
 
 def _make_pr_lookup(
+    *,
+    created: datetime,
     number: int = 1,
     branch: str = "test-branch",
     state: PrState = PrState.OPEN,
     check_status: CiStatus = CiStatus.PASSING,
 ) -> _PrLookup:
     return _PrLookup(
-        pr=make_pr_field(number=number, head_branch=branch, state=state),
+        pr=make_pr_field(number=number, head_branch=branch, state=state, created=created),
         check_status=check_status,
     )
 
@@ -78,40 +83,51 @@ def test_github_data_source_field_types_disabled() -> None:
     assert "ci" not in types
 
 
-# === _get_cached_repo_path ===
+# === _get_cached_repo_field ===
 
 
-def test_get_cached_repo_path_found() -> None:
+def test_get_cached_repo_field_found() -> None:
+    repo_field = RepoPathField(path="org/repo", created=datetime(2028, 1, 1, 0, 0, 1, tzinfo=timezone.utc))
     cached: dict[AgentName, dict[str, FieldValue]] = {
-        AgentName("a1"): {"repo_path": RepoPathField(path="org/repo")},
+        AgentName("a1"): {"repo_path": repo_field},
     }
-    assert _get_cached_repo_path(cached, AgentName("a1")) == "org/repo"
+    result = _get_cached_repo_field(cached, AgentName("a1"))
+    assert result == repo_field
 
 
-def test_get_cached_repo_path_not_found() -> None:
-    assert _get_cached_repo_path({}, AgentName("a1")) is None
+def test_get_cached_repo_field_not_found() -> None:
+    assert _get_cached_repo_field({}, AgentName("a1")) is None
 
 
-def test_get_cached_repo_path_wrong_type() -> None:
+def test_get_cached_repo_field_wrong_type() -> None:
     cached: dict[AgentName, dict[str, FieldValue]] = {
-        AgentName("a1"): {"repo_path": make_pr_field()},
+        AgentName("a1"): {"repo_path": make_pr_field(created=datetime(2028, 1, 1, 0, 0, 2, tzinfo=timezone.utc))},
     }
-    assert _get_cached_repo_path(cached, AgentName("a1")) is None
+    assert _get_cached_repo_field(cached, AgentName("a1")) is None
 
 
 # === _pr_priority ===
 
 
 def test_pr_priority_open() -> None:
-    assert _pr_priority(make_pr_field(state=PrState.OPEN)) == 2
+    assert (
+        _pr_priority(make_pr_field(state=PrState.OPEN, created=datetime(2028, 1, 1, 0, 0, 3, tzinfo=timezone.utc)))
+        == 2
+    )
 
 
 def test_pr_priority_merged() -> None:
-    assert _pr_priority(make_pr_field(state=PrState.MERGED)) == 1
+    assert (
+        _pr_priority(make_pr_field(state=PrState.MERGED, created=datetime(2028, 1, 1, 0, 0, 4, tzinfo=timezone.utc)))
+        == 1
+    )
 
 
 def test_pr_priority_closed() -> None:
-    assert _pr_priority(make_pr_field(state=PrState.CLOSED)) == 0
+    assert (
+        _pr_priority(make_pr_field(state=PrState.CLOSED, created=datetime(2028, 1, 1, 0, 0, 5, tzinfo=timezone.utc)))
+        == 0
+    )
 
 
 # === _build_pr_branch_index ===
@@ -122,15 +138,19 @@ def test_build_pr_branch_index_empty() -> None:
 
 
 def test_build_pr_branch_index_single() -> None:
-    lookup = _make_pr_lookup(branch="branch-1")
+    lookup = _make_pr_lookup(branch="branch-1", created=datetime(2028, 1, 1, 0, 0, 6, tzinfo=timezone.utc))
     result = _build_pr_branch_index((lookup,))
     assert "branch-1" in result
     assert result["branch-1"].pr.number == 1
 
 
 def test_build_pr_branch_index_prefers_open() -> None:
-    closed = _make_pr_lookup(number=1, branch="b", state=PrState.CLOSED)
-    open_pr = _make_pr_lookup(number=2, branch="b", state=PrState.OPEN)
+    closed = _make_pr_lookup(
+        number=1, branch="b", state=PrState.CLOSED, created=datetime(2028, 1, 1, 0, 0, 7, tzinfo=timezone.utc)
+    )
+    open_pr = _make_pr_lookup(
+        number=2, branch="b", state=PrState.OPEN, created=datetime(2028, 1, 1, 0, 0, 8, tzinfo=timezone.utc)
+    )
     result = _build_pr_branch_index((closed, open_pr))
     assert result["b"].pr.number == 2
 
@@ -139,7 +159,7 @@ def test_build_pr_branch_index_prefers_open() -> None:
 
 
 def test_lookup_pr_found() -> None:
-    lookup = _make_pr_lookup(branch="b")
+    lookup = _make_pr_lookup(branch="b", created=datetime(2028, 1, 1, 0, 0, 9, tzinfo=timezone.utc))
     index = {"repo": {"b": lookup}}
     assert _lookup_pr(index, "repo", "b") == lookup
 
@@ -149,7 +169,7 @@ def test_lookup_pr_not_found() -> None:
 
 
 def test_lookup_pr_no_repo() -> None:
-    lookup = _make_pr_lookup(branch="b")
+    lookup = _make_pr_lookup(branch="b", created=datetime(2028, 1, 1, 0, 0, 10, tzinfo=timezone.utc))
     assert _lookup_pr({"other": {"b": lookup}}, "repo", "b") is None
 
 
@@ -343,13 +363,15 @@ def _make_open_pr_json(number: int = 1, branch: str = "test-branch") -> str:
 
 
 def test_fetch_repo_prs_success() -> None:
+    now = datetime(2028, 1, 1, 0, 0, 11, tzinfo=timezone.utc)
     cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
-    repo_path, result = _fetch_repo_prs(cg, "org/repo")
+    repo_path, result = _fetch_repo_prs(cg, "org/repo", now)
     assert repo_path == "org/repo"
     assert result.error is None
     assert len(result.prs) == 1
     assert result.prs[0].pr.number == 1
     assert result.prs[0].pr.head_branch == "branch-1"
+    assert result.prs[0].pr.created == now
 
 
 def test_fetch_repo_prs_error() -> None:
@@ -359,7 +381,7 @@ def test_fetch_repo_prs_error() -> None:
     proc_fail.read_stderr.return_value = "some error"
     proc_fail.returncode = 1
     cg.run_process_in_background.side_effect = [proc_fail, proc_fail]
-    repo_path, result = _fetch_repo_prs(cg, "org/repo")
+    repo_path, result = _fetch_repo_prs(cg, "org/repo", datetime(2028, 1, 1, 0, 0, 12, tzinfo=timezone.utc))
     assert repo_path == "org/repo"
     assert result.error is not None
 
@@ -384,6 +406,24 @@ def test_compute_agents_without_repo() -> None:
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert fields == {}
     assert errors == []
+
+
+def test_compute_mixed_agents_with_and_without_repo() -> None:
+    """Agents lacking a repo (no labels, no cache) must not crash compute()
+    even when other agents in the same call have a repo. Regression test for
+    a KeyError on agent_created[agent.name] when the per-agent staleness map
+    was not populated for unlabeled agents.
+    """
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
+    ctx = make_mngr_ctx_with_cg(cg)
+    agent_with = make_agent_details(
+        name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"}
+    )
+    agent_without = make_agent_details(name="a2", initial_branch="branch-2", labels={})
+    fields, _errors = ds.compute(agents=(agent_with, agent_without), cached_fields={}, mngr_ctx=ctx)
+    assert agent_with.name in fields
+    assert agent_without.name not in fields
 
 
 def test_compute_agents_with_cached_repo_path() -> None:
@@ -447,8 +487,10 @@ def test_compute_pr_fetch_failed_with_cached_pr_uses_cache() -> None:
     """
     ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
-    cached_pr = make_pr_field(number=42, head_branch="branch-1")
-    cached_ci = CiField(status=CiStatus.PASSING)
+    cached_pr = make_pr_field(
+        number=42, head_branch="branch-1", created=datetime(2028, 1, 1, 0, 0, 13, tzinfo=timezone.utc)
+    )
+    cached_ci = CiField(status=CiStatus.PASSING, created=datetime(2028, 1, 1, 0, 0, 14, tzinfo=timezone.utc))
     cached: dict[AgentName, dict[str, FieldValue]] = {
         agent.name: {FIELD_PR: cached_pr, FIELD_CI: cached_ci},
     }
@@ -470,8 +512,10 @@ def test_compute_pr_fetch_failed_with_cached_pr_for_different_branch_emits_fetch
     ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
     agent = make_agent_details(name="a1", initial_branch="branch-2", labels={"remote": "git@github.com:org/repo.git"})
     # The cached PR's head_branch ("branch-1") differs from the agent's current branch.
-    stale_cached_pr = make_pr_field(number=42, head_branch="branch-1")
-    cached_ci = CiField(status=CiStatus.PASSING)
+    stale_cached_pr = make_pr_field(
+        number=42, head_branch="branch-1", created=datetime(2028, 1, 1, 0, 0, 15, tzinfo=timezone.utc)
+    )
+    cached_ci = CiField(status=CiStatus.PASSING, created=datetime(2028, 1, 1, 0, 0, 16, tzinfo=timezone.utc))
     cached: dict[AgentName, dict[str, FieldValue]] = {
         agent.name: {FIELD_PR: stale_cached_pr, FIELD_CI: cached_ci},
     }
@@ -526,6 +570,45 @@ def test_compute_with_conflicts_and_unresolved() -> None:
     assert FIELD_UNRESOLVED in fields[agent.name]
     assert isinstance(fields[agent.name][FIELD_CONFLICTS], ConflictsField)
     assert isinstance(fields[agent.name][FIELD_UNRESOLVED], UnresolvedField)
+
+
+def test_compute_falls_back_to_cached_repo_path_when_labels_lack_remote() -> None:
+    """If labels don't carry a remote, we fall back to the cached repo_path
+    and the derived PR/CI fields inherit the cached field's `created`.
+    """
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
+    ctx = make_mngr_ctx_with_cg(cg)
+    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={})
+    cached_created = datetime(2028, 1, 1, 0, 0, 17, tzinfo=timezone.utc) - timedelta(hours=2)
+    cached_fields: dict[AgentName, dict[str, FieldValue]] = {
+        AgentName("a1"): {"repo_path": RepoPathField(path="org/repo", created=cached_created)},
+    }
+    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached_fields, mngr_ctx=ctx)
+    pr = fields[AgentName("a1")][FIELD_PR]
+    ci = fields[AgentName("a1")][FIELD_CI]
+    assert pr.created == cached_created
+    assert ci.created == cached_created
+
+
+def test_compute_uses_now_when_labels_carry_remote() -> None:
+    """Labels are world data and always at least as fresh as the cache, so
+    when they carry a remote we use them and stamp `created=now` -- even if
+    a (potentially stale) cached repo_path is also available.
+    """
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
+    ctx = make_mngr_ctx_with_cg(cg)
+    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
+    # Even with a stale cache present, labels should win.
+    stale_cached = datetime(2028, 1, 1, 0, 0, 18, tzinfo=timezone.utc) - timedelta(hours=2)
+    cached_fields: dict[AgentName, dict[str, FieldValue]] = {
+        AgentName("a1"): {"repo_path": RepoPathField(path="org/repo", created=stale_cached)},
+    }
+    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached_fields, mngr_ctx=ctx)
+    pr = fields[AgentName("a1")][FIELD_PR]
+    delta = datetime.now(timezone.utc) - pr.created
+    assert delta.total_seconds() < 60
 
 
 def test_compute_disabled_pr_and_ci() -> None:
