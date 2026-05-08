@@ -1,30 +1,51 @@
 # imbue-mngr-usage
 
-`mngr usage` — scriptable visibility into Claude Code's rolling 5-hour and 7-day quota windows.
+`mngr usage` — agent-agnostic CLI for rolling-window usage / quota data.
 
 ## What it does
 
-Claude Code (CLI) shows quota usage interactively via the `/usage` slash command. The data
-comes from API response headers (`anthropic-ratelimit-unified-...`) on every call, and is not
-otherwise persisted to disk. This plugin makes the same data available to shell pipelines.
+Provides a single `mngr usage` command that surfaces rolling-window usage (e.g.
+Claude.ai's 5-hour, 7-day, and overage quota windows) in human / json / jsonl /
+format-template output. The command itself knows nothing about any specific agent
+type; it dispatches to data-providing plugins via a pluggy hook.
 
-## How it works
+## Architecture
 
-A statusline shim is installed into each per-agent Claude config; whenever Claude Code
-renders its statusline it pipes a JSON snapshot (including `rate_limits`) to the shim,
-which atomically merges the rate-limit fields into a shared cache file at
-`<profile_dir>/usage/claude_rate_limits.json`. The shim composes with any pre-existing
-user `statusLine.command`, so caveman / starship / etc. keep working unchanged.
+This package contains:
 
-`mngr usage` is purely a reader -- it never spawns Claude or hits the API, so it incurs
-no Anthropic charges. If the cache is empty (no interactive Claude session has rendered
-yet under this profile) it prints an actionable hint instead of empty windows.
+- The `mngr usage` CLI command and its rendering helpers.
+- The `current_usage_snapshot` hookspec (in `hookspecs.py`).
+- The `UsageSnapshot` and `WindowSnapshot` data types.
 
-## Output
+Provider plugins implement the hookspec to surface their own data:
 
-`mngr usage` supports the same output ergonomics as `mngr list`:
+- `imbue-mngr-claude-usage` — Claude.ai rate-limit data, captured via a
+  per-agent statusline shim and read from each agent's
+  `events/claude/rate_limits/events.jsonl`.
 
-- `mngr usage` (human)
+When multiple providers contribute, the freshest snapshot (largest `updated_at`)
+is rendered.
+
+## Output formats
+
+- `mngr usage` (human, with stale warning when applicable)
 - `mngr usage --format json`
 - `mngr usage --format jsonl`
 - `mngr usage --format '5h:{five_hour.used_percentage}%/{seven_day.used_percentage}%'`
+
+## Implementing a provider
+
+```python
+from imbue.mngr_usage.data_types import UsageSnapshot, WindowSnapshot
+from imbue.mngr import hookimpl
+
+
+@hookimpl
+def current_usage_snapshot(mngr_ctx) -> UsageSnapshot | None:
+    # Read whatever data source you own, return the freshest snapshot.
+    return UsageSnapshot(
+        source_name="myprovider",
+        windows={"five_hour": WindowSnapshot(used_percentage=42.0, resets_at=1778280000)},
+        updated_at=1778270000,
+    )
+```

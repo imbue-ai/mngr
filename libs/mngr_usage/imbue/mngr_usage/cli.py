@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections.abc import Iterable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from typing import assert_never
@@ -20,14 +22,38 @@ from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr_usage.data_types import CACHE_RELATIVE_PATH
-from imbue.mngr_usage.data_types import CACHE_SCHEMA_VERSION
-from imbue.mngr_usage.data_types import CacheDoc
 from imbue.mngr_usage.data_types import UsagePluginConfig
+from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WINDOW_KEYS
 from imbue.mngr_usage.data_types import WindowSnapshot
+
+# Discovery convention: each agent's state dir holds rate-limits events at
+#   <agent_state_dir>/events/<source>/rate_limits/events.jsonl
+# This mirrors mngr_claude's common_transcript pattern (events/<source>/
+# common_transcript/events.jsonl) used by `mngr transcript`. The <source>
+# segment names the writing agent type (e.g. "claude") and becomes the
+# UsageSnapshot.source_name for the event.
+_RATE_LIMITS_EVENTS_LEAF: tuple[str, str] = ("rate_limits", "events.jsonl")
+
+# Standard window labels for the human-format renderer. Providers may
+# return windows with other names; those render with the literal key.
+_DEFAULT_WINDOW_LABELS: dict[str, str] = {
+    "five_hour": "5h",
+    "seven_day": "7d",
+    "overage": "overage",
+}
+
+_NO_DATA_HINT = (
+    "No rate-limit data yet. `mngr usage` reads from per-agent events files at "
+    "<agent_state_dir>/events/<source>/rate_limits/events.jsonl, written by an "
+    "agent-specific plugin (e.g. `imbue-mngr-claude-usage` for Claude). To get "
+    "data flowing: ensure that plugin is installed in whichever env runs your "
+    "`mngr` (so the per-agent statusline shim gets provisioned), then run "
+    "`mngr create ... claude` and send the new agent any prompt. Existing "
+    "agents whose settings predate the plugin won't capture data until "
+    "they're re-provisioned."
+)
 
 
 class UsageCliOptions(CommonCliOptions):
@@ -37,42 +63,6 @@ class UsageCliOptions(CommonCliOptions):
     """
 
     max_age: str | None
-
-
-def cache_path(mngr_ctx: MngrContext) -> Path:
-    """Path to the shared rate-limit cache."""
-    return mngr_ctx.profile_dir / CACHE_RELATIVE_PATH
-
-
-def _load_cache(path: Path) -> CacheDoc | None:
-    """Load cache document from disk; return None if missing or unreadable."""
-    if not path.exists():
-        return None
-    try:
-        raw = json.loads(path.read_text())
-    except OSError as e:
-        logger.debug("Failed to read rate-limit cache at {}: {}", path, e)
-        return None
-    except (UnicodeDecodeError, json.JSONDecodeError) as e:
-        logger.warning("Rate-limit cache at {} is corrupt and will be ignored: {}", path, e)
-        return None
-    if not isinstance(raw, dict):
-        return None
-    windows_raw = raw.get("windows", {})
-    if not isinstance(windows_raw, dict):
-        windows_raw = {}
-    windows: dict[str, WindowSnapshot] = {}
-    for key, value in windows_raw.items():
-        if not isinstance(value, dict):
-            continue
-        try:
-            windows[str(key)] = WindowSnapshot.model_validate(value)
-        except (TypeError, ValueError) as e:
-            logger.debug("Skipping invalid window entry {!r}: {}", key, e)
-    schema_version = raw.get("schema_version", CACHE_SCHEMA_VERSION)
-    if not isinstance(schema_version, int):
-        schema_version = CACHE_SCHEMA_VERSION
-    return CacheDoc(schema_version=schema_version, windows=windows)
 
 
 @pure
@@ -95,33 +85,184 @@ def _parse_max_age(value: str | None) -> int | None:
     return n * multiplier
 
 
-@pure
-def _oldest_updated_at(cache: CacheDoc | None) -> int | None:
-    """Return the smallest updated_at across all windows, or None if no entries."""
-    if cache is None or not cache.windows:
-        return None
-    timestamps = [w.updated_at for w in cache.windows.values() if w.updated_at is not None]
-    if not timestamps:
-        return None
-    return min(timestamps)
+# =============================================================================
+# Discovery + parsing
+# =============================================================================
 
 
-@pure
-def _newest_updated_at(cache: CacheDoc | None) -> int | None:
-    """Return the largest updated_at across all windows, or None if no entries.
+def _iter_rate_limit_event_files(host_dir: Path) -> Iterable[tuple[Path, str]]:
+    """Yield ``(events_file, source_name)`` pairs across all agents on this host.
 
-    Used as the cache-age timestamp for the stale-warning message: "we got
-    fresh data this recently, even if some other window is older". The
-    statusline writer typically updates all windows together, so the value
-    is usually equal to ``_oldest_updated_at`` -- the divergence matters in
-    edge cases like a window being absent from a payload.
+    Pattern: ``<host_dir>/agents/agent-*/events/<source>/rate_limits/events.jsonl``
+    -- the same shape ``mngr transcript`` uses for ``events/<source>/common_transcript/...``.
+    The ``<source>`` segment is what we use as the snapshot source name.
+    Missing path components yield nothing rather than raising.
     """
-    if cache is None or not cache.windows:
+    agents_dir = host_dir / "agents"
+    if not agents_dir.is_dir():
+        return
+    for agent_state_dir in agents_dir.iterdir():
+        if not agent_state_dir.is_dir():
+            continue
+        events_dir = agent_state_dir / "events"
+        if not events_dir.is_dir():
+            continue
+        for source_dir in events_dir.iterdir():
+            if not source_dir.is_dir():
+                continue
+            candidate = source_dir / _RATE_LIMITS_EVENTS_LEAF[0] / _RATE_LIMITS_EVENTS_LEAF[1]
+            if candidate.is_file():
+                yield candidate, source_dir.name
+
+
+def _read_last_event(events_file: Path) -> dict[str, Any] | None:
+    """Read the last well-formed JSON object from a JSONL events file.
+
+    Walks lines from the end; tolerates a truncated trailing line by skipping
+    it and trying the previous one. Returns None if no valid line exists.
+    """
+    try:
+        text = events_file.read_text()
+    except OSError as e:
+        logger.debug("Could not read {}: {}", events_file, e)
         return None
-    timestamps = [w.updated_at for w in cache.windows.values() if w.updated_at is not None]
-    if not timestamps:
+    for line in reversed([raw for raw in text.splitlines() if raw.strip()]):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as e:
+            # A truncated trailing line (writer mid-flight, no newline yet) is the
+            # most common case; skip it and try the previous one. We log at warning
+            # level for visibility because corrupt earlier lines indicate something
+            # worse and the user should know about it; expected truncation will
+            # resolve on the next render.
+            logger.warning("Skipping malformed event line in {}: {}", events_file, e)
+            continue
+        if isinstance(event, dict):
+            return event
+    return None
+
+
+@pure
+def _parse_iso_timestamp(value: Any) -> int | None:
+    """Convert an ISO 8601 ``timestamp`` field to a Unix timestamp.
+
+    Returns None on any parse failure. The writer emits a fixed-width
+    nanosecond-precision form (``%Y-%m-%dT%H:%M:%S.000000000Z``) but we
+    accept any form ``datetime.fromisoformat`` handles.
+    """
+    if not isinstance(value, str):
         return None
-    return max(timestamps)
+    normalized = value.rstrip("Z") + "+00:00" if value.endswith("Z") else value
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    return int(dt.timestamp())
+
+
+@pure
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@pure
+def _coerce_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@pure
+def _coerce_optional_str(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+@pure
+def _coerce_optional_bool(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
+    """Reshape an event's ``rate_limits`` payload into UsageSnapshot windows.
+
+    The on-disk event shape (matching what the writer emits) is:
+
+        {"source": "<agent_type>/rate_limits", "type": "rate_limit_snapshot",
+         "event_id": ..., "timestamp": ...,
+         "rate_limits": {"five_hour": {"used_percentage": 11, "resets_at": ...},
+                         "seven_day": {...}, "overage": {...}}}
+
+    Unknown window names are passed through; missing fields are coerced to None.
+    """
+    rate_limits = event.get("rate_limits")
+    if not isinstance(rate_limits, dict):
+        return {}
+    windows: dict[str, WindowSnapshot] = {}
+    for window_key, window_value in rate_limits.items():
+        if not isinstance(window_value, dict):
+            continue
+        windows[str(window_key)] = WindowSnapshot(
+            used_percentage=_coerce_optional_float(window_value.get("used_percentage")),
+            resets_at=_coerce_optional_int(window_value.get("resets_at")),
+            status=_coerce_optional_str(window_value.get("status")),
+            is_using_overage=_coerce_optional_bool(window_value.get("is_using_overage")),
+        )
+    return windows
+
+
+def _snapshot_from_event(event: dict[str, Any], source_name: str) -> UsageSnapshot | None:
+    """Reshape one events.jsonl line into a UsageSnapshot, or None if unusable."""
+    timestamp = _parse_iso_timestamp(event.get("timestamp"))
+    if timestamp is None:
+        return None
+    windows = _windows_from_event(event)
+    if not windows:
+        return None
+    return UsageSnapshot(source_name=source_name, windows=windows, updated_at=timestamp)
+
+
+def _gather_snapshots(host_dir: Path) -> list[UsageSnapshot]:
+    """Walk events files across all agents, return one UsageSnapshot per source.
+
+    Multiple agents may share the same source name (e.g. all ``claude`` agents
+    write into ``events/claude/rate_limits/events.jsonl`` under their own state
+    dirs). For each (events_file, source_name) we extract the last event; if
+    several events files exist for the same source_name, ``_pick_freshest``
+    later picks across them on ``updated_at``.
+    """
+    snapshots: list[UsageSnapshot] = []
+    for events_file, source_name in _iter_rate_limit_event_files(host_dir):
+        event = _read_last_event(events_file)
+        if event is None:
+            continue
+        snapshot = _snapshot_from_event(event, source_name)
+        if snapshot is not None:
+            snapshots.append(snapshot)
+    return snapshots
+
+
+@pure
+def _pick_freshest(snapshots: list[UsageSnapshot]) -> UsageSnapshot | None:
+    """Return the snapshot with the largest updated_at, or None if empty.
+
+    Ties are broken by source_name so the choice is deterministic in tests.
+    """
+    if not snapshots:
+        return None
+    return max(snapshots, key=lambda s: (s.updated_at, s.source_name))
+
+
+# =============================================================================
+# Rendering
+# =============================================================================
 
 
 @pure
@@ -143,15 +284,7 @@ def _format_duration(seconds: int) -> str:
 
 @pure
 def _format_reset_phrase(resets_at: int, now: int) -> str:
-    """Render the reset timestamp in past or future tense.
-
-    "resets in 1h 12m" when the reset is upcoming; "reset 30m ago" when it
-    has already passed. The past-tense form is meaningful: when a cached
-    snapshot's reset has elapsed, the cached used_percentage is
-    necessarily stale (the limit refreshed and we never observed a
-    post-reset render), so the user needs to see the time-since-reset to
-    know how out-of-date the percentage is.
-    """
+    """Render the reset timestamp in past or future tense."""
     delta = resets_at - now
     if delta > 0:
         return f"resets in {_format_duration(delta)}"
@@ -162,13 +295,7 @@ def _format_reset_phrase(resets_at: int, now: int) -> str:
 
 @pure
 def _format_human_line(window_label: str, window: WindowSnapshot, now: int) -> str:
-    """Render one window's status as a single human-readable line.
-
-    When ``used_percentage`` is missing the "resets in ..." suffix would
-    render as misleading filler (the reset timestamp on its own is not
-    actionable without a usage number), so we collapse the line to a bare
-    "no data" instead.
-    """
+    """Render one window's status as a single human-readable line."""
     if window.used_percentage is None:
         return f"{window_label}: no data"
     parts = [f"{window_label}: {window.used_percentage:.0f}% used,"]
@@ -191,24 +318,38 @@ def _window_to_template_values(window: WindowSnapshot, now: int) -> dict[str, st
     return {
         "used_percentage": used_percentage,
         "resets_at": "" if window.resets_at is None else str(window.resets_at),
-        "source": window.source or "",
-        "updated_at": "" if window.updated_at is None else str(window.updated_at),
         "seconds_until_reset": seconds_until,
-        "is_present": "true" if window.updated_at is not None else "false",
+        "is_present": "true" if window.used_percentage is not None or window.resets_at is not None else "false",
     }
 
 
 class _UsageRenderModel(FrozenModel):
-    """Top-level view used both for JSON output and template rendering.
+    """Top-level view used both for JSON output and template rendering."""
 
-    Each window is the canonical WindowSnapshot plus two computed fields packed
-    into the JSON dump: seconds_until_reset and is_present.
-    """
-
-    schema_version: int
+    source_name: str
     now: int
     is_stale: bool
+    snapshot_updated_at: int | None
     windows: dict[str, WindowSnapshot]
+
+
+def _build_render_model(snapshot: UsageSnapshot, max_age: int, now: int) -> _UsageRenderModel:
+    """Assemble the renderable view for a snapshot.
+
+    Stale if either:
+    - snapshot updated_at is older than max_age (no fresh event in a while), OR
+    - any populated window's resets_at is in the past (the limit refreshed;
+      cached used_percentage is from the prior window).
+    """
+    age_stale = (now - snapshot.updated_at) > max_age
+    reset_stale = any(snap.resets_at is not None and snap.resets_at < now for snap in snapshot.windows.values())
+    return _UsageRenderModel(
+        source_name=snapshot.source_name,
+        now=now,
+        is_stale=age_stale or reset_stale,
+        snapshot_updated_at=snapshot.updated_at,
+        windows=snapshot.windows,
+    )
 
 
 def _window_render_dict(snap: WindowSnapshot, now: int) -> dict[str, Any]:
@@ -217,136 +358,97 @@ def _window_render_dict(snap: WindowSnapshot, now: int) -> dict[str, Any]:
     return {
         **snap.model_dump(),
         "seconds_until_reset": seconds_until_reset,
-        "is_present": snap.updated_at is not None,
+        "is_present": snap.used_percentage is not None or snap.resets_at is not None,
     }
-
-
-def _build_render_model(cache: CacheDoc | None, max_age: int, now: int) -> _UsageRenderModel:
-    """Assemble the renderable view for a cache snapshot.
-
-    A cache is considered stale if either:
-    - the oldest ``updated_at`` is older than ``max_age`` seconds (no fresh
-      statusline render has happened recently), OR
-    - any populated window's ``resets_at`` is now in the past (the limit
-      refreshed; the cached used_percentage is from the previous window
-      and no longer reflects current usage).
-    """
-    windows: dict[str, WindowSnapshot] = {}
-    if cache is not None:
-        for key in WINDOW_KEYS:
-            windows[key] = cache.windows.get(key, WindowSnapshot())
-    else:
-        for key in WINDOW_KEYS:
-            windows[key] = WindowSnapshot()
-
-    oldest = _oldest_updated_at(cache)
-    age_stale = oldest is None or (now - oldest) > max_age
-    reset_stale = any(
-        snap.resets_at is not None and snap.updated_at is not None and snap.resets_at < now
-        for snap in windows.values()
-    )
-    is_stale = age_stale or reset_stale
-
-    return _UsageRenderModel(
-        schema_version=cache.schema_version if cache is not None else CACHE_SCHEMA_VERSION,
-        now=now,
-        is_stale=is_stale,
-        windows=windows,
-    )
 
 
 def _render_model_for_json(model: _UsageRenderModel, now: int) -> dict[str, Any]:
-    """Convert the render model to a JSON-friendly dict (no Path/datetime types)."""
-    return {
-        "schema_version": model.schema_version,
+    """Convert the render model to a JSON-friendly dict (stable shape for scripts)."""
+    out: dict[str, Any] = {
+        "source": model.source_name,
         "now": now,
         "is_stale": model.is_stale,
-        **{key: _window_render_dict(model.windows[key], now) for key in WINDOW_KEYS},
+        "updated_at": model.snapshot_updated_at,
     }
+    for key in WINDOW_KEYS:
+        out[key] = _window_render_dict(model.windows.get(key, WindowSnapshot()), now)
+    for key, snap in model.windows.items():
+        if key not in WINDOW_KEYS:
+            out[key] = _window_render_dict(snap, now)
+    return out
 
 
 def _flatten_for_template(model: _UsageRenderModel, now: int) -> dict[str, str]:
     """Flatten the render model into dot-keyed string fields for format-template substitution."""
     flat: dict[str, str] = {
-        "schema_version": str(model.schema_version),
+        "source": model.source_name,
         "now": str(now),
         "is_stale": str(model.is_stale).lower(),
+        "updated_at": "" if model.snapshot_updated_at is None else str(model.snapshot_updated_at),
     }
     for key in WINDOW_KEYS:
-        for sub_key, value in _window_to_template_values(model.windows[key], now).items():
+        snap = model.windows.get(key, WindowSnapshot())
+        for sub_key, value in _window_to_template_values(snap, now).items():
             flat[f"{key}.{sub_key}"] = value
     return flat
 
 
-# Display labels for each window key (parallel to WINDOW_KEYS, kept here
-# rather than in data_types because labels are presentation-only).
-_WINDOW_HUMAN_LABELS: dict[str, str] = {
-    "five_hour": "5h",
-    "seven_day": "7d",
-    "overage": "overage",
-}
-
-
-_NO_DATA_HINT = (
-    "No rate-limit data yet. The cache is populated by a per-agent statusline "
-    "shim that fires whenever an interactive Claude session renders. The most "
-    "likely cause is that all your existing Claude agents were provisioned "
-    "before this plugin was active, so their settings.json doesn't have the "
-    "shim. To populate the cache, provision a fresh agent (e.g. "
-    "`mngr create ... claude`) and prompt it at least once, or re-provision "
-    "any existing agent."
-)
+@pure
+def _human_label_for(window_key: str) -> str:
+    """Best-effort human label; unknown window keys render as the literal key."""
+    return _DEFAULT_WINDOW_LABELS.get(window_key, window_key)
 
 
 def _emit_output(
-    model: _UsageRenderModel,
+    model: _UsageRenderModel | None,
     output_format: OutputFormat,
     format_template: str | None,
     now: int,
 ) -> None:
-    """Write output in the requested format."""
+    """Write output in the requested format. ``model`` is None when no event was found."""
     if format_template is not None:
-        line = render_format_template(format_template, _flatten_for_template(model, now))
+        if model is None:
+            empty = _UsageRenderModel(
+                source_name="",
+                now=now,
+                is_stale=True,
+                snapshot_updated_at=None,
+                windows={},
+            )
+            line = render_format_template(format_template, _flatten_for_template(empty, now))
+        else:
+            line = render_format_template(format_template, _flatten_for_template(model, now))
         write_human_line(line)
         return
     match output_format:
         case OutputFormat.JSON | OutputFormat.JSONL:
-            emit_final_json(_render_model_for_json(model, now))
+            if model is None:
+                emit_final_json({"source": None, "now": now, "is_stale": True, "updated_at": None})
+            else:
+                emit_final_json(_render_model_for_json(model, now))
         case OutputFormat.HUMAN:
-            any_present = False
+            if model is None:
+                write_human_line(_NO_DATA_HINT)
+                return
             any_with_percentage = False
-            for key in WINDOW_KEYS:
+            ordered_keys = [k for k in WINDOW_KEYS if k in model.windows] + [
+                k for k in model.windows if k not in WINDOW_KEYS
+            ]
+            for key in ordered_keys:
                 snap = model.windows[key]
-                if snap.updated_at is None:
+                if snap.used_percentage is None and snap.resets_at is None:
                     continue
-                write_human_line(_format_human_line(_WINDOW_HUMAN_LABELS[key], snap, now))
-                any_present = True
+                write_human_line(_format_human_line(_human_label_for(key), snap, now))
                 if snap.used_percentage is not None:
                     any_with_percentage = True
-            # The "no data yet" hint is for users whose cache has never been
-            # written to. Only emit it when no window has been touched -- if
-            # any window has updated_at set, the cache is being populated and
-            # the hint would contradict the per-window lines above.
-            if not any_present:
+            if not any_with_percentage:
                 write_human_line(_NO_DATA_HINT)
-            if any_present and any_with_percentage and model.is_stale:
-                # Pull the freshest updated_at across windows so the warning
-                # tells the user how recent the cache is. "How long ago" is
-                # the actionable signal; whether it crosses max_age vs
-                # crossed a reset is implicit from the per-window lines
-                # above (which already say "reset 30s ago" / "resets in ...").
-                newest = max(
-                    (snap.updated_at for snap in model.windows.values() if snap.updated_at is not None),
-                    default=None,
+            if any_with_percentage and model.is_stale and model.snapshot_updated_at is not None:
+                age = max(0, now - model.snapshot_updated_at)
+                logger.warning(
+                    "Rate-limit snapshot is stale (last updated {} ago); values may not reflect latest API state.",
+                    _format_duration(age),
                 )
-                if newest is None:
-                    logger.warning("Rate-limit cache is stale; values may not reflect latest API state.")
-                else:
-                    age = max(0, now - newest)
-                    logger.warning(
-                        "Rate-limit cache is stale (last updated {} ago); values may not reflect latest API state.",
-                        _format_duration(age),
-                    )
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -360,11 +462,12 @@ def _emit_output(
 @add_common_options
 @click.pass_context
 def usage(ctx: click.Context, **kwargs: Any) -> None:
-    """Show Claude Code rolling-window quota usage (5h, 7d, overage).
+    """Show rolling-window usage / quota data captured by an agent's statusline.
 
-    Reads from a shared cache populated by per-agent statusline shims. The
-    shim ships rate-limit JSON to a small writer that atomically merges into
-    the cache; `mngr usage` is purely a reader.
+    Walks ``<host_dir>/agents/*/events/<source>/rate_limits/events.jsonl``
+    (matching the same convention ``mngr transcript`` uses for
+    ``common_transcript``), parses the freshest event per source, picks the
+    most recent across sources, and renders.
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -377,29 +480,33 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
     max_age_override = _parse_max_age(opts.max_age)
     effective_max_age = max_age_override if max_age_override is not None else plugin_config.max_age_seconds
 
-    path = cache_path(mngr_ctx)
-    cache = _load_cache(path)
+    snapshots = _gather_snapshots(mngr_ctx.config.default_host_dir)
+    snapshot = _pick_freshest(snapshots)
     now = int(time.time())
 
-    model = _build_render_model(cache, effective_max_age, now)
+    model = _build_render_model(snapshot, effective_max_age, now) if snapshot is not None else None
     _emit_output(model, output_opts.output_format, output_opts.format_template, now)
 
 
 CommandHelpMetadata(
     key="usage",
-    one_line_description="Show Claude Code rolling-window quota usage (5h, 7d, overage)",
+    one_line_description="Show rolling-window usage / quota data from agent statusline events",
     synopsis="mngr usage [OPTIONS]",
-    description="""Reports Claude Code's rolling 5-hour, 7-day, and overage quota windows.
+    description="""Reports rolling-window usage / quota data captured by an agent's
+statusline.
 
-The data is sourced from the JSON snapshot Claude Code feeds to its statusline
-on every render; a small shim installed at each agent's
-<work_dir>/.claude/settings.local.json captures it into a shared cache under
-your profile_dir. `mngr usage` is purely a reader -- the cache is populated by
-interactive Claude sessions as a side effect of normal use, with no API
-cost.""",
+This command is agent-agnostic: it walks ``<host_dir>/agents/*/events/<source>/
+rate_limits/events.jsonl`` and renders the most recent event. The pattern
+mirrors how ``mngr transcript`` discovers ``common_transcript`` events --
+agent-specific plugins write events to the conventional path; ``mngr usage``
+discovers them automatically.
+
+The most common writer is ``imbue-mngr-claude-usage``, which surfaces
+Claude.ai's rolling 5-hour, 7-day, and overage quota windows captured by a
+per-agent statusline shim.""",
     examples=(
         ("Show current usage", "mngr usage"),
-        ("Treat the cache as stale after 60s (warning only)", "mngr usage --max-age 60"),
+        ("Treat the snapshot as stale after 60s (warning only)", "mngr usage --max-age 60"),
         ("Machine-readable output", "mngr usage --format json"),
         ("Custom format template", "mngr usage --format '{five_hour.used_percentage}/{seven_day.used_percentage}'"),
     ),
