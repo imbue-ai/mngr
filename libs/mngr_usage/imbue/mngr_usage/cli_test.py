@@ -203,6 +203,24 @@ def test_gather_snapshots_picks_up_alternate_source_segments(tmp_path: Path) -> 
     assert snapshots[0].source_name == "opencode"
 
 
+def test_gather_snapshots_expands_tilde_in_host_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``~``-prefixed host_dir must be expanded before walking the filesystem.
+
+    Regression: mngr's pydantic default for ``default_host_dir`` is the literal
+    ``Path("~/.mngr")`` (unexpanded). Without ``expanduser()``, a clean shell
+    with no ``MNGR_HOST_DIR`` env override would walk a non-existent
+    ``~/.mngr/agents`` and silently report no usage data.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_event(
+        tmp_path / ".mngr" / "agents" / "agent-aaa" / "events" / "claude" / "rate_limits" / "events.jsonl",
+        _make_event("2026-05-08T10:00:00.000000000Z", used_percentage=42.0),
+    )
+    snapshots = _gather_snapshots(Path("~/.mngr"))
+    assert len(snapshots) == 1
+    assert snapshots[0].source_name == "claude"
+
+
 # =============================================================================
 # Snapshot picking + render model
 # =============================================================================

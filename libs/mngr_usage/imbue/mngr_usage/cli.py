@@ -92,8 +92,15 @@ def _iter_rate_limit_event_files(host_dir: Path) -> Iterable[tuple[Path, str]]:
     -- the same shape ``mngr transcript`` uses for ``events/<source>/common_transcript/...``.
     The ``<source>`` segment is what we use as the snapshot source name.
     Missing path components yield nothing rather than raising.
+
+    ``host_dir`` is ``expanduser()``'d defensively because mngr's pydantic
+    default for ``default_host_dir`` is the literal unexpanded ``Path("~/.mngr")``
+    when neither ``MNGR_HOST_DIR`` env var nor a config file overrides it
+    (see ``libs/mngr/imbue/mngr/config/loader.py``). Without the expansion,
+    a clean shell with no ``MNGR_HOST_DIR`` would walk a non-existent
+    ``~/.mngr/agents`` and silently report no usage data.
     """
-    agents_dir = host_dir / "agents"
+    agents_dir = host_dir.expanduser() / "agents"
     if not agents_dir.is_dir():
         return
     for agent_state_dir in agents_dir.iterdir():
