@@ -30,6 +30,8 @@ manager would otherwise keep growing its connection set.
 import socket
 import threading
 import time
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -91,7 +93,9 @@ class _InProcessSSHServer:
     and so the server itself can shut down cleanly. Closing the server
     closes the listening socket (rejecting new connections) and the
     accepted transports (which is what makes the manager-side
-    ``is_active()`` flip to ``False``).
+    ``is_active()`` flip to ``False``). ``stop`` is idempotent so the
+    fixture's teardown can call it after a test has already stopped the
+    server mid-body.
     """
 
     def __init__(self, host_key: paramiko.RSAKey) -> None:
@@ -131,8 +135,11 @@ class _InProcessSSHServer:
         """Close the listener and all accepted transports.
 
         After this, the manager-side ``is_active()`` for any client that
-        connected here will flip to ``False`` on the next check.
+        connected here will flip to ``False`` on the next check. Safe to
+        call more than once -- the second call is a no-op.
         """
+        if self._stop.is_set():
+            return
         self._stop.set()
         try:
             self._listen_sock.close()
@@ -148,46 +155,68 @@ class _InProcessSSHServer:
         self._accept_thread.join(timeout=3.0)
 
 
-def _write_test_keys(tmp_path: Path) -> tuple[paramiko.RSAKey, RemoteSSHInfo]:
-    """Generate an RSA key, persist it to ``tmp_path``, return ``(host_key, ssh_info_template)``.
+@dataclass
+class _TunnelTestEnv:
+    """Shared scaffolding for a single test: manager + in-process sshd + key/template.
 
-    The same key serves as the (manager-side) client key and the
-    (server-side) host key -- ``_PermissiveServer`` accepts any auth, so
-    the actual key contents don't matter; we only need a real key file on
-    disk because ``SSHTunnelManager`` passes ``key_filename`` to
-    ``paramiko.SSHClient.connect``.
+    Returned by the ``tunnel_test_env`` fixture. ``ssh_info()`` builds a
+    fully-resolved ``RemoteSSHInfo`` that points at the in-process server
+    so tests don't have to know about the port.
+    """
+
+    manager: SSHTunnelManager
+    server: _InProcessSSHServer
+    ssh_info_template: RemoteSSHInfo
+
+    @property
+    def conn_key(self) -> str:
+        return f"127.0.0.1:{self.server.port}"
+
+    def ssh_info(self) -> RemoteSSHInfo:
+        return RemoteSSHInfo(
+            user=self.ssh_info_template.user,
+            host=self.ssh_info_template.host,
+            port=self.server.port,
+            key_path=self.ssh_info_template.key_path,
+        )
+
+
+@pytest.fixture
+def tunnel_test_env(tmp_path: Path) -> Iterator[_TunnelTestEnv]:
+    """Manager + in-process sshd + key bundle, with cleanup wired up.
+
+    Generates an RSA key on disk (the same key is used as both the
+    manager-side client key and the server-side host key -- the
+    ``_PermissiveServer`` ignores auth so the actual key material does
+    not matter, but ``SSHTunnelManager`` does need a real file at
+    ``ssh_info.key_path`` because it passes it to
+    ``paramiko.SSHClient.connect`` as ``key_filename``).
+
+    On teardown the manager is cleaned up *before* the server is stopped so
+    any in-flight paramiko cancel sees a still-alive server.
     """
     key = paramiko.RSAKey.generate(2048)
     key_path = tmp_path / "id_rsa"
     key.write_private_key_file(str(key_path))
-    # SSHTunnelManager looks for known_hosts beside the key file; absence
-    # falls back to AutoAddPolicy, which is what we want for the test.
-    # Port 0 is a placeholder; ``_ssh_info_for`` rewrites it per-server.
-    template = RemoteSSHInfo(
-        user=_TEST_USERNAME,
-        host="127.0.0.1",
-        port=0,
-        key_path=key_path,
-    )
-    return key, template
-
-
-def _ssh_info_for(template: RemoteSSHInfo, port: int) -> RemoteSSHInfo:
-    return RemoteSSHInfo(
-        user=template.user,
-        host=template.host,
-        port=port,
-        key_path=template.key_path,
-    )
+    # Port 0 is a placeholder; ``ssh_info()`` rewrites it per call.
+    template = RemoteSSHInfo(user=_TEST_USERNAME, host="127.0.0.1", port=0, key_path=key_path)
+    server = _InProcessSSHServer(key)
+    manager = SSHTunnelManager()
+    try:
+        yield _TunnelTestEnv(manager=manager, server=server, ssh_info_template=template)
+    finally:
+        manager.cleanup()
+        server.stop()
 
 
 def _start_local_listener() -> tuple[socket.socket, int]:
     """Open a localhost TCP listener; return ``(sock, port)``.
 
     The reverse tunnel forwards the (remote) sshd back to this local port.
-    The listener does not need to accept anything -- the test never sends
-    real traffic over the tunnel; it only cares about the transport
-    lifecycle.
+    The listener does not need to accept anything -- the tests never send
+    real traffic over the tunnel; they only care about the transport
+    lifecycle. Each test owns its listener's lifetime so tests that need
+    multiple listeners can just call this helper twice.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))
@@ -196,7 +225,9 @@ def _start_local_listener() -> tuple[socket.socket, int]:
 
 
 @pytest.mark.acceptance
-def test_remove_reverse_tunnels_for_agent_actually_releases_resources(tmp_path: Path) -> None:
+def test_remove_reverse_tunnels_for_agent_actually_releases_resources(
+    tunnel_test_env: _TunnelTestEnv,
+) -> None:
     """Fix 1: tearing down an agent removes its tunnels and closes the SSH client.
 
     Reproduces the leak: set up a reverse tunnel, observe the manager has
@@ -206,21 +237,16 @@ def test_remove_reverse_tunnels_for_agent_actually_releases_resources(tmp_path: 
     has somewhere to exit). Without Fix 1 the manager would keep both
     indefinitely.
     """
-    host_key, template = _write_test_keys(tmp_path)
-    server = _InProcessSSHServer(host_key)
     listener, local_port = _start_local_listener()
-
-    manager = SSHTunnelManager()
+    manager = tunnel_test_env.manager
     try:
-        ssh_info = _ssh_info_for(template, server.port)
-
         manager.setup_reverse_tunnel(
-            ssh_info=ssh_info,
+            ssh_info=tunnel_test_env.ssh_info(),
             local_port=local_port,
             agent_id="agent-A",
         )
 
-        conn_key = f"127.0.0.1:{server.port}"
+        conn_key = tunnel_test_env.conn_key
         with manager._lock:
             assert (conn_key, local_port) in manager._reverse_tunnels
             assert conn_key in manager._connections
@@ -239,14 +265,16 @@ def test_remove_reverse_tunnels_for_agent_actually_releases_resources(tmp_path: 
         # The previously-cached client itself must report inactive.
         assert not (client_before.get_transport() is not None and client_before.get_transport().is_active())
     finally:
-        manager.cleanup()
         listener.close()
-        server.stop()
 
 
 @pytest.mark.acceptance
 def test_remove_reverse_tunnels_for_agent_is_noop_for_unknown_agent() -> None:
-    """Idempotent: removing a nonexistent agent's tunnels returns 0 and does not raise."""
+    """Idempotent: removing a nonexistent agent's tunnels returns 0 and does not raise.
+
+    No SSH server is needed for this case -- the manager never reaches the
+    network -- so this test does not use the ``tunnel_test_env`` fixture.
+    """
     manager = SSHTunnelManager()
     try:
         assert manager.remove_reverse_tunnels_for_agent("never-existed") == 0
@@ -255,20 +283,19 @@ def test_remove_reverse_tunnels_for_agent_is_noop_for_unknown_agent() -> None:
 
 
 @pytest.mark.acceptance
-def test_remove_reverse_tunnels_for_agent_keeps_other_agents_intact(tmp_path: Path) -> None:
+def test_remove_reverse_tunnels_for_agent_keeps_other_agents_intact(
+    tunnel_test_env: _TunnelTestEnv,
+) -> None:
     """Removing one agent's tunnels does not disturb a sibling agent on the same SSH host."""
-    host_key, template = _write_test_keys(tmp_path)
-    server = _InProcessSSHServer(host_key)
     listener_a, port_a = _start_local_listener()
     listener_b, port_b = _start_local_listener()
-
-    manager = SSHTunnelManager()
+    manager = tunnel_test_env.manager
     try:
-        ssh_info = _ssh_info_for(template, server.port)
+        ssh_info = tunnel_test_env.ssh_info()
         manager.setup_reverse_tunnel(ssh_info=ssh_info, local_port=port_a, agent_id="agent-A")
         manager.setup_reverse_tunnel(ssh_info=ssh_info, local_port=port_b, agent_id="agent-B")
 
-        conn_key = f"127.0.0.1:{server.port}"
+        conn_key = tunnel_test_env.conn_key
         with manager._lock:
             assert (conn_key, port_a) in manager._reverse_tunnels
             assert (conn_key, port_b) in manager._reverse_tunnels
@@ -283,14 +310,14 @@ def test_remove_reverse_tunnels_for_agent_keeps_other_agents_intact(tmp_path: Pa
             # B still uses the SSH client, so it must NOT have been closed.
             assert conn_key in manager._connections
     finally:
-        manager.cleanup()
         listener_a.close()
         listener_b.close()
-        server.stop()
 
 
 @pytest.mark.acceptance
-def test_check_and_repair_backs_off_and_drops_after_max_failures(tmp_path: Path) -> None:
+def test_check_and_repair_backs_off_and_drops_after_max_failures(
+    tunnel_test_env: _TunnelTestEnv,
+) -> None:
     """Fix 2: a tunnel whose target server is gone is retried with backoff
     and dropped from the registry after ``_REVERSE_TUNNEL_MAX_REPAIR_FAILURES``
     consecutive failures.
@@ -307,19 +334,16 @@ def test_check_and_repair_backs_off_and_drops_after_max_failures(tmp_path: Path)
     zero out ``next_attempt_at`` between ticks, which is exactly what
     the wall-clock would do given enough elapsed time.
     """
-    host_key, template = _write_test_keys(tmp_path)
-    server = _InProcessSSHServer(host_key)
     listener, local_port = _start_local_listener()
-
-    manager = SSHTunnelManager()
+    manager = tunnel_test_env.manager
     try:
-        ssh_info = _ssh_info_for(template, server.port)
-        manager.setup_reverse_tunnel(ssh_info=ssh_info, local_port=local_port, agent_id="agent-A")
-        conn_key = f"127.0.0.1:{server.port}"
+        manager.setup_reverse_tunnel(ssh_info=tunnel_test_env.ssh_info(), local_port=local_port, agent_id="agent-A")
+        conn_key = tunnel_test_env.conn_key
         tunnel_key = (conn_key, local_port)
 
-        # Make the target permanently dead.
-        server.stop()
+        # Make the target permanently dead. The fixture will also call
+        # ``server.stop`` on teardown; the second call is a no-op.
+        tunnel_test_env.server.stop()
         # Also drop the now-stale client so the next health-check tick
         # treats the tunnel as broken (matching what paramiko would
         # eventually report once it noticed the closed transport).
@@ -367,13 +391,11 @@ def test_check_and_repair_backs_off_and_drops_after_max_failures(tmp_path: Path)
             # was re-established) must also be gone.
             assert conn_key not in manager._connections
     finally:
-        manager.cleanup()
         listener.close()
-        # ``server.stop()`` was called above; second call is harmless.
 
 
 @pytest.mark.acceptance
-def test_successful_repair_resets_backoff(tmp_path: Path) -> None:
+def test_successful_repair_resets_backoff(tunnel_test_env: _TunnelTestEnv) -> None:
     """A successful repair clears prior failure bookkeeping so subsequent
     failures start backing off from scratch (rather than at the cap).
 
@@ -382,15 +404,11 @@ def test_successful_repair_resets_backoff(tmp_path: Path) -> None:
     succeeds. After that success, a brand-new failure should start from
     zero (not from the previous failure count).
     """
-    host_key, template = _write_test_keys(tmp_path)
-    server = _InProcessSSHServer(host_key)
     listener, local_port = _start_local_listener()
-
-    manager = SSHTunnelManager()
+    manager = tunnel_test_env.manager
     try:
-        ssh_info = _ssh_info_for(template, server.port)
-        manager.setup_reverse_tunnel(ssh_info=ssh_info, local_port=local_port, agent_id="agent-A")
-        conn_key = f"127.0.0.1:{server.port}"
+        manager.setup_reverse_tunnel(ssh_info=tunnel_test_env.ssh_info(), local_port=local_port, agent_id="agent-A")
+        conn_key = tunnel_test_env.conn_key
         tunnel_key = (conn_key, local_port)
 
         # Plant prior failure history; also drop the cached SSH client so
@@ -415,6 +433,4 @@ def test_successful_repair_resets_backoff(tmp_path: Path) -> None:
             assert tunnel_key not in manager._failure_state
             assert tunnel_key in manager._reverse_tunnels
     finally:
-        manager.cleanup()
         listener.close()
-        server.stop()
