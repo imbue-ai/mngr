@@ -79,13 +79,16 @@ def claude_extra_per_agent_settings(
 ) -> ClaudeExtraSettingsContribution | None:
     """Install the rate-limit statusline shim, wrapping any pre-existing statusLine.
 
-    ``source_settings`` is the parsed ``<work_dir>/.claude/settings.json``
-    (the project tier of Claude Code's settings stack), so any existing
-    project-level ``statusLine.command`` is captured into
-    ``MNGR_USER_STATUSLINE_CMD`` for the shim to chain to. mngr_claude
-    installs our wrapper into ``<work_dir>/.claude/settings.local.json``
-    (the local tier, higher precedence than project), so we wrap rather
-    than replace.
+    ``source_settings`` is the merge of ``<work_dir>/.claude/settings.json``
+    (project tier) and ``<work_dir>/.claude/settings.local.json`` (local tier,
+    overriding project), mirroring Claude Code's own precedence between those
+    two files. So any existing user ``statusLine.command`` -- whether it lives
+    at the project tier or the local tier -- gets captured into
+    ``MNGR_USER_STATUSLINE_CMD`` for the shim to chain to. mngr_claude installs
+    our wrapper into ``<work_dir>/.claude/settings.local.json``, so on
+    re-provision the previously-installed shim is itself visible in
+    ``source_settings``; ``_extract_user_statusline_command`` filters that out
+    by comparing against ``own_shim_path`` to avoid wrapping ourselves.
 
     Skips remote hosts: the cache lives under the local user's profile_dir and
     is not reachable from a remote agent's filesystem, so installing the shim
