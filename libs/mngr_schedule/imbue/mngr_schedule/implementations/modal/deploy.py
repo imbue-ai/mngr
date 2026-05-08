@@ -346,13 +346,21 @@ def _build_package_mode_dockerfile(mngr_dockerfile_content: str) -> str:
             continue
 
         # Skip lines until we pass the last monorepo-specific install command.
-        # The sentinel is any RUN line containing "uv tool install" (which may
-        # be combined with other commands on the same line via &&).
+        # Two Dockerfile shapes are supported:
+        #   - Legacy: install commands inline in the Dockerfile, ended by a
+        #     `RUN ... uv tool install ...` line.
+        #   - Current: install commands consolidated into
+        #     scripts/post-source-setup.sh, called via a single
+        #     `RUN bash scripts/post-source-setup.sh` line.
+        # Either sentinel ends the install section.
         if is_in_install_section:
-            if stripped.startswith("RUN") and "uv tool install" in stripped:
+            if stripped.startswith("RUN") and (
+                "uv tool install" in stripped or "scripts/post-source-setup.sh" in stripped
+            ):
                 is_in_install_section = False
                 continue
-            # Also skip WORKDIR, RUN uv sync, and the tarball extraction lines
+            # Also skip WORKDIR, RUN uv sync, the tarball extraction lines,
+            # and the comment block above the post-source-setup.sh RUN.
             continue
 
         result_lines.append(line)
