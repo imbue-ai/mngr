@@ -82,7 +82,7 @@ def ensure_state_container(
     container_name = f"{prefix}docker-state-{user_id}"
     volume_name = f"{prefix}docker-state-{user_id}"
 
-    logger.info("ensure_state_container: checking for {} on outer {}", container_name, outer.get_name())
+    logger.info("ensure_state_container: checking for {} on outer {}", container_name, outer.connector.name)
 
     # List all containers on the VPS for diagnostics
     diag = outer.execute_idempotent_command("docker ps -a --format '{{.Names}} {{.Status}} {{.ID}}'")
@@ -112,7 +112,7 @@ def ensure_state_container(
         "ensure_state_container: creating volume {} and container {} on outer {}",
         volume_name,
         container_name,
-        outer.get_name(),
+        outer.connector.name,
     )
     _run_outer_command(outer, f"docker volume create {shlex.quote(volume_name)}", label="docker-volume-create")
 
