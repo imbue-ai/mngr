@@ -470,7 +470,7 @@ def test_with_tolerant_paths_raises_when_path_segment_missing() -> None:
 
 
 def test_with_tolerant_paths_raises_when_nested_path_segment_missing() -> None:
-    """A nested-path precondition violation also raises TypeError loud-ly."""
+    """A nested-path precondition violation also raises TolerantPathError loudly."""
     raw_context: dict[str, Any] = {"host": {"tags": {}}}
     cel_context = build_cel_context(raw_context)
     with pytest.raises(TolerantPathError):
