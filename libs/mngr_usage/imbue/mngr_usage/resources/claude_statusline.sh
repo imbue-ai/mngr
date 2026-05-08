@@ -1,15 +1,16 @@
 #!/bin/bash
 # Statusline shim provisioned by mngr_usage's claude_extra_per_agent_settings hookimpl.
 #
-# Claude Code calls statusLine.command (defined in per-agent settings.json) on every
-# render. The harness pipes a JSON snapshot to stdin that includes a `rate_limits`
-# field. We:
+# Claude Code calls statusLine.command (defined in <work_dir>/.claude/settings.local.json)
+# on every render. After the first successful API response of the session, the
+# JSON snapshot piped to stdin includes a `rate_limits` field with five_hour /
+# seven_day / overage windows (Claude.ai subscriptions only). We:
 #   1. Capture stdin once into a variable (the user's downstream command also reads stdin).
 #   2. Forward the payload to the rate-limits writer to update the shared cache.
 #   3. Replay the payload to MNGR_USER_STATUSLINE_CMD if set, so any pre-existing
 #      user statusline (caveman, starship, etc.) keeps working unchanged.
 #
-# Env vars (set by mngr_claude's settings.json env block):
+# Env vars (set by mngr_claude's plugin_env_vars.json -> ClaudeAgent.modify_env_vars):
 #   MNGR_RATE_LIMITS_WRITER  Path to claude_rate_limits_writer.sh
 #   MNGR_USER_STATUSLINE_CMD The user's pre-existing statusLine.command (optional)
 set -euo pipefail

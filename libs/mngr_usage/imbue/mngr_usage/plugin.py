@@ -23,30 +23,44 @@ _STATUSLINE_SHIM_SCRIPT = "claude_statusline.sh"
 
 
 def _format_statusline_command(agent_state_dir: Path) -> str:
-    """Return the shell-quoted statusline shim path for settings.json's statusLine.command.
+    """Return the shell-quoted statusline shim path for settings.local.json's statusLine.command.
 
     All env vars the shim needs (MNGR_RATE_LIMITS_WRITER, MNGR_RATE_LIMITS_CACHE,
-    MNGR_PROFILE_DIR, MNGR_USER_STATUSLINE_CMD) are populated through
-    settings.json's `env` block, so the command itself is just the shim path
-    (no inline env prefix, no chained commands).
+    MNGR_PROFILE_DIR, MNGR_USER_STATUSLINE_CMD) are exported into the agent's
+    process environment via mngr_claude's plugin_env_vars.json mechanism, so the
+    command itself is just the shim path -- the shim sees the env vars by
+    inheritance from Claude Code's process when the statusline subprocess fires.
     """
     state_dir = shlex.quote(str(agent_state_dir))
     return f"{state_dir}/commands/{_STATUSLINE_SHIM_SCRIPT}"
 
 
-def _extract_user_statusline_command(source_settings: dict[str, Any]) -> str | None:
+def _extract_user_statusline_command(source_settings: dict[str, Any], own_shim_path: str) -> str | None:
     """Pull the user's existing statusLine.command (if any) so we can chain to it.
 
     Claude Code's settings.json shape:
         {"statusLine": {"type": "command", "command": "..."}}
+
+    Skips ``own_shim_path`` (a previously-installed copy of *this* plugin's shim)
+    so re-provisioning doesn't capture our own shim as the "user's command" --
+    that would form a recursive wrap. In that case the caller should fall back to
+    looking at the project-tier (``settings.json``) value, which the merged
+    source_settings does not expose if local-tier already had statusLine. A
+    follow-up improvement could pre-strip our shim during the merge step in
+    ``_read_effective_project_claude_settings``; for now, returning None on a
+    self-match is good enough -- a re-provision without a separate user
+    statusline just leaves MNGR_USER_STATUSLINE_CMD unset, which the shim
+    handles gracefully.
     """
     statusline = source_settings.get("statusLine")
     if not isinstance(statusline, dict):
         return None
     command = statusline.get("command")
-    if isinstance(command, str) and command.strip():
-        return command
-    return None
+    if not isinstance(command, str) or not command.strip():
+        return None
+    if command.strip() == own_shim_path.strip():
+        return None
+    return command
 
 
 @hookimpl
@@ -60,39 +74,46 @@ def claude_extra_per_agent_settings(
     mngr_ctx: MngrContext,
     source_settings: dict[str, Any],
     agent_state_dir: Path,
+    work_dir: Path,
     is_local: bool,
 ) -> ClaudeExtraSettingsContribution | None:
-    """Install the rate-limit statusline shim into per-agent Claude settings.
+    """Install the rate-limit statusline shim, wrapping any pre-existing statusLine.
 
-    The shim wraps any existing statusLine.command the user already has, so
-    composability is preserved. Resource scripts are provisioned to
-    $MNGR_AGENT_STATE_DIR/commands/ via the standard mngr_claude path.
+    ``source_settings`` is the parsed ``<work_dir>/.claude/settings.json``
+    (the project tier of Claude Code's settings stack), so any existing
+    project-level ``statusLine.command`` is captured into
+    ``MNGR_USER_STATUSLINE_CMD`` for the shim to chain to. mngr_claude
+    installs our wrapper into ``<work_dir>/.claude/settings.local.json``
+    (the local tier, higher precedence than project), so we wrap rather
+    than replace.
 
     Skips remote hosts: the cache lives under the local user's profile_dir and
     is not reachable from a remote agent's filesystem, so installing the shim
     there would silently write to a remote-only path that `mngr usage` (run
     locally) never reads.
 
-    Env vars steered into the per-agent settings.json:
+    Env vars exported into the agent's process environment (via
+    ClaudeAgent.modify_env_vars / plugin_env_vars.json):
         MNGR_RATE_LIMITS_WRITER  Path to claude_rate_limits_writer.sh
         MNGR_RATE_LIMITS_CACHE   Path to the shared cache (under profile_dir)
         MNGR_PROFILE_DIR         Profile dir (used as fallback inside the writer)
-        MNGR_USER_STATUSLINE_CMD The user's pre-existing statusLine.command (optional)
+        MNGR_USER_STATUSLINE_CMD The pre-existing statusLine.command (optional)
     """
     if not is_local:
         return None
 
+    statusline_command = _format_statusline_command(agent_state_dir)
     env: dict[str, str] = {
         "MNGR_RATE_LIMITS_WRITER": str(agent_state_dir / "commands" / _RATE_LIMITS_WRITER_SCRIPT),
         "MNGR_RATE_LIMITS_CACHE": str(cache_path(mngr_ctx)),
         "MNGR_PROFILE_DIR": str(mngr_ctx.profile_dir),
     }
-    user_cmd = _extract_user_statusline_command(source_settings)
+    user_cmd = _extract_user_statusline_command(source_settings, own_shim_path=statusline_command)
     if user_cmd is not None:
         env["MNGR_USER_STATUSLINE_CMD"] = user_cmd
 
     return ClaudeExtraSettingsContribution(
-        statusline_command=_format_statusline_command(agent_state_dir),
+        statusline_command=statusline_command,
         env=env,
         resource_scripts=(_STATUSLINE_SHIM_SCRIPT, _RATE_LIMITS_WRITER_SCRIPT),
         resource_module=_usage_resources,

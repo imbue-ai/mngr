@@ -25,6 +25,7 @@ from typing import Final
 import click
 from loguru import logger
 from pydantic import Field
+from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
@@ -431,10 +432,41 @@ def _read_source_claude_settings(source_claude_dir: Path) -> dict[str, Any] | No
     return loaded if isinstance(loaded, dict) else None
 
 
+def _read_effective_project_claude_settings(work_dir: Path) -> dict[str, Any]:
+    """Read the project + local Claude settings into one dict, mimicking precedence.
+
+    Returns a shallow merge of ``<work_dir>/.claude/settings.json`` (project tier)
+    and ``<work_dir>/.claude/settings.local.json`` (local tier), with local fields
+    overriding project fields. Both files are optional; missing/corrupt is treated
+    as empty.
+
+    This is what ``claude_extra_per_agent_settings`` hookimpls see as
+    ``source_settings`` -- so a hookimpl looking up ``.statusLine.command`` will
+    see whatever statusLine Claude Code itself would pick at runtime, before our
+    contribution overlays in settings.local.json.
+    """
+    claude_dir = work_dir / ".claude"
+    project = _read_source_claude_settings(claude_dir) or {}
+    local_path = claude_dir / "settings.local.json"
+    local: dict[str, Any] = {}
+    if local_path.exists():
+        try:
+            loaded = json.loads(local_path.read_text())
+        except json.JSONDecodeError:
+            logger.warning("Corrupt {}, treating as empty", local_path)
+        else:
+            if isinstance(loaded, dict):
+                local = loaded
+    merged = dict(project)
+    merged.update(local)
+    return merged
+
+
 def _gather_claude_extra_settings(
     mngr_ctx: MngrContext,
     source_settings: dict[str, Any],
     agent_state_dir: Path,
+    work_dir: Path,
     is_local: bool,
 ) -> tuple[ClaudeExtraSettingsContribution, ...]:
     """Call the claude_extra_per_agent_settings hook and return non-None contributions."""
@@ -442,6 +474,7 @@ def _gather_claude_extra_settings(
         mngr_ctx=mngr_ctx,
         source_settings=source_settings,
         agent_state_dir=agent_state_dir,
+        work_dir=work_dir,
         is_local=is_local,
     )
     return tuple(c for c in raw if c is not None)
@@ -452,7 +485,6 @@ def _build_settings_json(
     config: ClaudeAgentConfig,
     ctx: ProvisioningContext,
     sync_local: bool,
-    extra_contributions: Sequence[ClaudeExtraSettingsContribution] = (),
     parsed_source_settings: dict[str, Any] | None = None,
 ) -> str:
     """Build settings.json content for per-agent config dirs.
@@ -461,18 +493,16 @@ def _build_settings_json(
     otherwise uses generated defaults. Applies context-dependent flags
     (e.g. skipDangerousModePermissionPrompt for unattended) and user overrides.
 
-    ``extra_contributions`` are merged in last: a contribution's
-    ``statusline_command`` overwrites any existing ``statusLine`` (the user's
-    pre-existing command should already be captured into the contribution's
-    env block by the contributing plugin's hookimpl), and its ``env`` entries
-    merge into ``settings.json``'s env block.
+    Note: plugin contributions from ``claude_extra_per_agent_settings`` are
+    *not* merged here. The per-agent settings.json sits at Claude Code's user
+    tier, which is overridden by the project-level ``<work_dir>/.claude/settings.json``;
+    contributions instead land in ``<work_dir>/.claude/settings.local.json``
+    (highest user-controllable tier) and the agent's process env. See
+    ``_install_plugin_settings_local`` and ``_persist_plugin_env_vars``.
 
     ``parsed_source_settings`` lets callers that have already parsed
-    ``source_claude_dir / "settings.json"`` (e.g. to feed the
-    ``claude_extra_per_agent_settings`` hook) reuse the parse rather than
-    paying for a second disk read + json.loads. Pass ``None`` (the default)
-    to have this function parse the file itself; in that case
-    ``source_claude_dir`` is read from disk when ``sync_local`` is True.
+    ``source_claude_dir / "settings.json"`` reuse the parse rather than
+    paying for a second disk read + json.loads.
     """
     if sync_local:
         source_settings = (
@@ -490,21 +520,110 @@ def _build_settings_json(
     data.update(compute_settings_json_flags(ctx))
     data.update(config.settings_overrides)
 
+    return json.dumps(data, indent=2) + "\n"
+
+
+PLUGIN_ENV_VARS_FILENAME: Final[str] = "plugin_env_vars.json"
+"""File under $MNGR_AGENT_STATE_DIR holding plugin-contributed env vars.
+
+Persisted at provisioning time and read by ClaudeAgent.modify_env_vars on
+every agent spawn (including re-attach), so the values reach the running
+Claude process and any subprocess it forks (statusline command, hooks).
+"""
+
+
+def _persist_plugin_env_vars(
+    agent_state_dir: Path,
+    extra_contributions: Sequence[ClaudeExtraSettingsContribution],
+) -> None:
+    """Merge contribution.env across plugins and write to PLUGIN_ENV_VARS_FILENAME.
+
+    Later contributions overwrite earlier ones for the same key (matches the
+    docstring of ``ClaudeExtraSettingsContribution.env``). Always writes a
+    file so that re-running provision overwrites stale state from a previous
+    run; an empty dict is a valid "no plugin env" record.
+    """
+    merged: dict[str, str] = {}
+    for contribution in extra_contributions:
+        merged.update(contribution.env)
+    target = agent_state_dir / PLUGIN_ENV_VARS_FILENAME
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(merged, indent=2) + "\n")
+
+
+def _load_plugin_env_vars(agent_state_dir: Path) -> dict[str, str]:
+    """Read PLUGIN_ENV_VARS_FILENAME from disk; return empty dict on any failure.
+
+    Used from ``ClaudeAgent.modify_env_vars`` (no mngr_ctx available there);
+    a missing/corrupt file should never break agent start, so the worst case
+    is plugin env vars are not exported -- the user-visible signal is the
+    feature relying on them quietly not working, which surfaces elsewhere
+    (e.g. the ``mngr usage`` no-data hint).
+    """
+    target = agent_state_dir / PLUGIN_ENV_VARS_FILENAME
+    if not target.exists():
+        return {}
+    try:
+        loaded = json.loads(target.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Could not read plugin env vars at {}: {}", target, e)
+        return {}
+    if not isinstance(loaded, dict):
+        logger.warning("Plugin env vars at {} is not a JSON object; ignoring", target)
+        return {}
+    out: dict[str, str] = {}
+    for key, value in loaded.items():
+        if isinstance(key, str) and isinstance(value, str):
+            out[key] = value
+    return out
+
+
+def _install_plugin_settings_local(
+    work_dir: Path,
+    extra_contributions: Sequence[ClaudeExtraSettingsContribution],
+) -> None:
+    """Install plugin-contributed statusLine into <work_dir>/.claude/settings.local.json.
+
+    The .local file is the highest user-controllable tier in Claude Code's
+    settings precedence stack -- it wins over the project-level
+    ``.claude/settings.json``, which is what we need so the wrapping shim
+    actually fires. The file is conventionally git-ignored (per Claude
+    Code's docs), so there's no risk of leaking machine-local state.
+
+    Merges with any existing settings.local.json: only the ``statusLine``
+    field (and the ``env`` field if present, see comment below) is touched;
+    other fields are preserved verbatim. Multiple plugins contributing
+    statusline_command: last one wins, matching ``_build_settings_json``.
+
+    Idempotent: re-running provisioning overwrites the previously-installed
+    statusLine cleanly. If no contribution sets statusline_command, this
+    function is a no-op (the file is left as-is, including any pre-existing
+    statusLine the user set themselves).
+    """
+    statusline_command: str | None = None
     for contribution in extra_contributions:
         if contribution.statusline_command is not None:
-            data["statusLine"] = {"type": "command", "command": contribution.statusline_command}
-        if contribution.env:
-            env_block = data.setdefault("env", {})
-            if isinstance(env_block, dict):
-                env_block.update(contribution.env)
-            else:
-                logger.warning(
-                    "settings.json env block is not a dict (got {}); dropping plugin-contributed env keys: {}",
-                    type(env_block).__name__,
-                    sorted(contribution.env.keys()),
-                )
+            statusline_command = contribution.statusline_command
+    if statusline_command is None:
+        return
 
-    return json.dumps(data, indent=2) + "\n"
+    settings_local_path = work_dir / ".claude" / "settings.local.json"
+    settings_local_path.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict[str, Any] = {}
+    if settings_local_path.exists():
+        try:
+            loaded = json.loads(settings_local_path.read_text())
+        except json.JSONDecodeError:
+            logger.warning(
+                "Existing {} is corrupt; replacing with our contribution. "
+                "Other fields the user may have set there will be lost.",
+                settings_local_path,
+            )
+        else:
+            if isinstance(loaded, dict):
+                existing = loaded
+    existing["statusLine"] = {"type": "command", "command": statusline_command}
+    settings_local_path.write_text(json.dumps(existing, indent=2) + "\n")
 
 
 def _build_claude_json(
@@ -1423,6 +1542,15 @@ class CostThresholdDialogIndicator(DialogIndicator):
 class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
     """Agent implementation for Claude with session resumption support."""
 
+    # Per-instance cache of plugin contributions, populated in
+    # on_before_provisioning so provision() doesn't re-invoke the hookspec.
+    # PrivateAttr keeps it out of pydantic's validated/serialized fields and
+    # gives every fresh ClaudeAgent the empty-tuple default automatically,
+    # which means provision() can read it directly even on call paths that
+    # bypass on_before_provisioning (e.g. plugin-provided agents that override
+    # the lifecycle).
+    _cached_extra_contributions: tuple[ClaudeExtraSettingsContribution, ...] = PrivateAttr(default=())
+
     @classmethod
     def preflight_check(
         cls,
@@ -1452,12 +1580,27 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         return self._get_agent_dir() / "plugin" / "claude" / "anthropic"
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
-        """Add CLAUDE_CONFIG_DIR, ORIGINAL_CLAUDE_CONFIG_DIR, and optionally enable common transcript emission."""
+        """Add CLAUDE_CONFIG_DIR, ORIGINAL_CLAUDE_CONFIG_DIR, optionally MNGR_EMIT_COMMON_TRANSCRIPT,
+        and any plugin-contributed env vars persisted at provision time.
+
+        Plugin env vars come from $MNGR_AGENT_STATE_DIR/plugin_env_vars.json,
+        written by ``_persist_plugin_env_vars`` from ``claude_extra_per_agent_settings``
+        contributions. We load them on every spawn (including re-attach) so
+        Claude's process gets the values, and any subprocess it forks
+        (statusline command, hooks) inherits them. We deliberately do *not*
+        rely on settings.json's env block: per-agent settings.json sits at
+        Claude Code's user tier and gets overridden by project-level
+        ``.claude/settings.json``, so the env block didn't propagate.
+        Caller-set env_vars win over plugin-contributed ones, in case the
+        user explicitly passed a conflicting value via --env.
+        """
         env_vars["CLAUDE_CONFIG_DIR"] = str(self.get_claude_config_dir())
         env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"] = str(get_user_claude_config_dir())
         config = self.agent_config
         if config.emit_common_transcript:
             env_vars["MNGR_EMIT_COMMON_TRANSCRIPT"] = "1"
+        for key, value in _load_plugin_env_vars(self._get_agent_dir()).items():
+            env_vars.setdefault(key, value)
 
     def get_lifecycle_state(self) -> AgentLifecycleState:
         """Get lifecycle state, accounting for Claude-specific permissions_waiting file.
@@ -1657,15 +1800,24 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Validate preconditions before provisioning (read-only).
+        """Validate preconditions before provisioning, and persist plugin env vars.
 
-        This method performs read-only validation only. No writes to
-        disk or interactive prompts -- actual setup happens in provision().
+        Two responsibilities:
 
-        For non-interactive local runs: validates that all known Claude
-        startup dialogs are dismissed so we fail early with a clear message.
-        Interactive and auto-approve runs skip these checks because
-        provision() will handle them.
+        1. (read-only) For non-interactive local runs, validate that all known
+           Claude startup dialogs are dismissed so we fail early with a clear
+           message. Interactive and auto-approve runs skip this -- provision()
+           handles them.
+        2. Gather plugin contributions from ``claude_extra_per_agent_settings``
+           and write the env-var dict to ``plugin_env_vars.json``. This needs
+           to happen *before* host._collect_agent_env_vars (which calls our
+           ``modify_env_vars``) so the env vars actually land in the env file
+           that's used to seed the running agent's process environment.
+           See the comment block at line ~228 ("get_provision_env_vars") --
+           a future mngr-core hook would let us do this without a side-effect
+           in on_before_provisioning, but until then this is the earliest
+           agent-class hook with mngr_ctx access. Contributions are cached
+           on ``self`` so provision() doesn't re-invoke the hook.
         """
         config = self.agent_config
 
@@ -1696,6 +1848,20 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                 "  - Set ANTHROPIC_API_KEY environment variable (use --pass-env ANTHROPIC_API_KEY)\n"
                 "  - Run 'claude login' to create ~/.claude/.credentials.json"
             )
+
+        # Persist plugin-contributed env vars early -- before _collect_agent_env_vars
+        # (and therefore modify_env_vars) reads plugin_env_vars.json to seed the
+        # agent's env file. We also stash the gathered contributions on self so
+        # provision() can reuse them without re-invoking the hook.
+        self._cached_extra_contributions = _gather_claude_extra_settings(
+            mngr_ctx,
+            _read_effective_project_claude_settings(self.work_dir),
+            self._get_agent_dir(),
+            self.work_dir,
+            is_local=host.is_local,
+        )
+        if host.is_local and self._cached_extra_contributions:
+            _persist_plugin_env_vars(self._get_agent_dir(), self._cached_extra_contributions)
 
     def get_provision_file_transfers(
         self,
@@ -1933,9 +2099,20 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             config,
             ctx,
             sync_local=config.sync_home_settings,
-            extra_contributions=extra_contributions,
             parsed_source_settings=parsed_source_settings,
         )
+
+        # Plugin contributions land *not* in the per-agent settings.json (which
+        # sits at Claude Code's user tier and loses to project-level
+        # .claude/settings.json) but in two higher-precedence places:
+        # - statusLine.command -> <work_dir>/.claude/settings.local.json
+        # - env vars            -> $MNGR_AGENT_STATE_DIR/plugin_env_vars.json
+        #                          (read by ClaudeAgent.modify_env_vars on every spawn)
+        # Both are skipped on remote hosts: the cache lives under the local
+        # profile_dir and the work_dir paths in env vars don't exist remotely.
+        if host.is_local and extra_contributions:
+            _install_plugin_settings_local(work_dir, extra_contributions)
+            _persist_plugin_env_vars(self._get_agent_dir(), extra_contributions)
 
         generated_files: dict[Path, str] = {
             Path("settings.json"): settings_json,
@@ -2011,21 +2188,14 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         with mngr_ctx.concurrency_group.make_concurrency_group("claude_provisioning") as concurrency_group:
             config = self.agent_config
 
-            # Parse ~/.claude/settings.json once, then feed it both to the
-            # claude_extra_per_agent_settings hook and to _build_settings_json
-            # (via _setup_per_agent_config_dir). Gather plugin contributions
-            # once and thread them through _setup_per_agent_config_dir
-            # (settings.json overlay) and _provision_background_scripts
-            # (resource scripts) so the hook isn't invoked twice per agent.
-            parsed_source_settings = _read_source_claude_settings(get_user_claude_config_dir())
-            extra_contributions = _gather_claude_extra_settings(
-                mngr_ctx,
-                # Coerce None (missing/corrupt source) to an empty dict so the
-                # hookspec's source_settings: dict[str, Any] contract holds.
-                parsed_source_settings or {},
-                self._get_agent_dir(),
-                is_local=host.is_local,
-            )
+            # parsed_user_settings (from ~/.claude/settings.json) is the base
+            # for the per-agent settings.json (CLAUDE_CONFIG_DIR/settings.json).
+            # Plugin contributions were already gathered + persisted in
+            # on_before_provisioning so that mngr's _collect_agent_env_vars
+            # (which runs before provision) could pick up plugin env vars;
+            # reuse the cache here.
+            parsed_user_settings = _read_source_claude_settings(get_user_claude_config_dir())
+            extra_contributions = self._cached_extra_contributions
 
             # Provision background task scripts to the agent state directory
             provision_backgroun_script_thread = concurrency_group.start_new_thread(
@@ -2107,9 +2277,13 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             if options.source_agent_state_dir is not None:
                 self._transfer_source_plugin_data(host, options.source_agent_state_dir)
 
-            # Set up per-agent config directory (for both local and remote hosts)
+            # Set up per-agent config directory (for both local and remote hosts).
+            # parsed_user_settings (from ~/.claude/settings.json) is the right
+            # base for CLAUDE_CONFIG_DIR/settings.json since both sit at Claude
+            # Code's user tier; the project-level source_settings used by the
+            # hookspec is fed separately above.
             self._setup_per_agent_config_dir(
-                host, options, mngr_ctx, extra_contributions, parsed_source_settings=parsed_source_settings
+                host, options, mngr_ctx, extra_contributions, parsed_source_settings=parsed_user_settings
             )
 
             # Configure readiness hooks (for both local and remote hosts)

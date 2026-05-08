@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from pathlib import Path
 
+import pytest
 from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import SecretStr
@@ -541,6 +542,11 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
     assert cli.create_calls[0]["metadata"] == {"agent_name": "my-agent"}
 
 
+# Flaky under heavy CI load: this is a sync unit test but its setup spins up
+# fresh ConcurrencyGroups and a recording http-server fixture; the combined
+# work occasionally exceeds the 10s pytest-timeout when offload sandboxes are
+# contended. Offload retries flaky tests automatically.
+@pytest.mark.flaky
 def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The API_KEY branch uses the user-supplied key directly and must never call
     ``create_litellm_key``."""

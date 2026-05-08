@@ -14,26 +14,42 @@ hookspec = pluggy.HookspecMarker("mngr")
 
 
 class ClaudeExtraSettingsContribution(FrozenModel):
-    """A contribution from a plugin that wants to extend a Claude agent's per-agent settings.
+    """A contribution from a plugin that wants to extend a Claude agent's per-agent setup.
 
-    Plugins return one of these from claude_extra_per_agent_settings to:
-    - install a statusLine.command into the agent's settings.json
-    - add env vars to the settings.json env block (e.g. for forwarding to hooks)
-    - request that resource scripts from the contributing plugin be provisioned
-      to ``$MNGR_AGENT_STATE_DIR/commands/`` so the statusline command can call them
+    Plugins return one of these from ``claude_extra_per_agent_settings`` to:
+
+    - install a ``statusLine.command`` for the agent. The command is written to
+      ``<work_dir>/.claude/settings.local.json`` (the highest user-controllable
+      precedence tier in Claude Code's settings stack), so it wins over any
+      project-level ``.claude/settings.json``. The hookimpl is expected to read
+      ``source_settings.statusLine.command`` (the project-level command, if
+      any) out of the hook's ``source_settings`` argument and weave it into
+      its own command (e.g. capture it into an env var for a wrapping shim
+      to chain to), so we wrap rather than replace.
+    - export env vars into the agent's *process* environment (via
+      ``ClaudeAgent.modify_env_vars``). These are visible to Claude Code and
+      any subprocess it spawns, including the statusline command and hooks.
+      (We deliberately do *not* use the ``env`` block of settings.json here:
+      it does not reliably propagate to Claude's process, and on this branch
+      we found the values went unseen in practice.)
+    - request resource scripts from the contributing plugin be provisioned
+      to ``$MNGR_AGENT_STATE_DIR/commands/`` so the statusline command (or
+      anything else) can reference them by absolute path.
     """
 
     model_config = {"arbitrary_types_allowed": True}
 
     statusline_command: str | None = Field(
         default=None,
-        description="Command string to install at settings.json's statusLine.command. "
+        description="Command string to install at the agent's statusLine.command, "
+        "written into <work_dir>/.claude/settings.local.json. "
         "If multiple plugins contribute one, later contributions overwrite earlier ones.",
     )
     env: dict[str, str] = Field(
         default_factory=dict,
-        description="Env vars to merge into settings.json's env block. "
-        "Later contributions overwrite earlier ones for the same key.",
+        description="Env vars to merge into the agent's process environment. "
+        "Later contributions overwrite earlier ones for the same key. "
+        "These are exported via ClaudeAgent.modify_env_vars, NOT via settings.json's env block.",
     )
     resource_scripts: tuple[str, ...] = Field(
         default=(),
@@ -52,18 +68,23 @@ def claude_extra_per_agent_settings(
     mngr_ctx: MngrContext,
     source_settings: dict[str, Any],
     agent_state_dir: Path,
+    work_dir: Path,
     is_local: bool,
 ) -> ClaudeExtraSettingsContribution | None:
     """Contribute statusline / env / scripts to a Claude agent's per-agent config.
 
     Called once per agent during provisioning. Plugins may inspect
-    ``source_settings`` (the user's ``~/.claude/settings.json`` already parsed
-    into a dict) to capture e.g. an existing ``statusLine.command`` so it can
-    be wrapped or forwarded.
+    ``source_settings`` -- the parsed contents of the project-level
+    ``<work_dir>/.claude/settings.json`` (the file that would otherwise win
+    Claude Code's settings precedence at the project tier) -- to capture e.g.
+    an existing ``statusLine.command`` so it can be wrapped or forwarded.
 
-    ``agent_state_dir`` is the path to ``$MNGR_AGENT_STATE_DIR`` for this
-    agent; plugins should reference resources at
-    ``$MNGR_AGENT_STATE_DIR/commands/<script>`` in any commands they install.
+    ``work_dir`` is the agent's working directory. The hookimpl's
+    ``statusline_command`` is installed at
+    ``<work_dir>/.claude/settings.local.json`` so it overrides the project's
+    ``.claude/settings.json`` (a higher tier in Claude Code's precedence
+    stack). ``agent_state_dir`` is ``$MNGR_AGENT_STATE_DIR``; plugins should
+    reference resources at ``$MNGR_AGENT_STATE_DIR/commands/<script>``.
     ``mngr_ctx`` gives access to the user's ``profile_dir`` for shared
     on-disk state.
 
