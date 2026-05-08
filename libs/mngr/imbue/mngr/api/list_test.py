@@ -564,6 +564,33 @@ def test_apply_cel_filters_wraps_each_schemaless_path_with_tolerant_map(path: tu
     assert isinstance(target, TolerantMapType)
 
 
+def test_apply_cel_filters_warns_on_typoed_strict_field_with_method_call() -> None:
+    """A typo on a strict field that triggers an evaluation error still surfaces a warning.
+
+    Counterpart to `test_apply_cel_filters_no_warning_for_missing_key_on_schemaless_field`:
+    schemaless fields stay quiet on missing keys, but missing-strict-field accesses
+    that the cel-python evaluator cannot fold into a clean BoolType (e.g. method
+    calls like `.contains(...)` on a missing field) must still warn so users can
+    see the typo. Locks in the third bullet of the branch's changelog entry for
+    the cases where the warning genuinely fires.
+
+    Note: `host.providr == "local"` (the changelog example) does NOT warn because
+    cel-python's evaluator carries CELEvalError through equality and yields
+    BoolType(False); the warning only surfaces for operations cel-python cannot
+    fold (method calls, `<`/`>` comparisons, etc.).
+    """
+    agent = _make_agent_details("test-agent", _make_host_details())
+    include_filters, exclude_filters = compile_cel_filters(
+        include_filters=(),
+        exclude_filters=('host.providr.contains("local")',),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result = _apply_cel_filters(agent, include_filters, exclude_filters)
+    # Exclude filter errored, so the agent is still included.
+    assert result is True
+    assert "Error evaluating" in log_output.getvalue()
+
+
 def test_apply_cel_filters_has_macro_correctly_reports_label_presence() -> None:
     """`has(labels.X)` must return True only when X is actually set on the agent.
 
