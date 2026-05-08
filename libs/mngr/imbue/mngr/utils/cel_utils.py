@@ -93,19 +93,15 @@ def compile_cel_filters(
 
 
 def _convert_to_cel_value(value: Any) -> Any:
-    """Convert a raw Python value to a CEL-compatible value.
+    """Convert a raw Python value to a strict CEL-compatible value.
 
-    Containers (dict, list, tuple) are walked here so the structure survives
-    intact and produces strict `MapType` / `ListType`. Leaf types delegate to
-    `celpy.json_to_cel` (which handles bool/int/float/str/datetime/None).
+    Delegates to `celpy.json_to_cel`, which handles leaf types
+    (bool/int/float/str/datetime/None) and recurses through containers
+    (dict -> MapType, list/tuple -> ListType).
 
-    Tolerance for schemaless fields is not baked in here -- apply
-    `with_tolerant_paths` to a built context if you need it.
+    Tolerance for schemaless fields is not applied here -- pass the built
+    context through `with_tolerant_paths` if you need it.
     """
-    if isinstance(value, dict):
-        return celpy.celtypes.MapType({celpy.json_to_cel(k): _convert_to_cel_value(v) for k, v in value.items()})
-    if isinstance(value, (list, tuple)):
-        return celpy.celtypes.ListType([_convert_to_cel_value(v) for v in value])
     return celpy.json_to_cel(value)
 
 
