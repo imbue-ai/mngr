@@ -8,8 +8,8 @@ from pathlib import Path
 import psutil
 import pytest
 
-from imbue.minds.desktop_client.latchkey._spawn import spawn_detached_latchkey_ensure_browser
-from imbue.minds.desktop_client.latchkey._spawn import spawn_detached_latchkey_gateway
+from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
+from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_gateway
 
 _POLL_INTERVAL_SECONDS = 0.05
 

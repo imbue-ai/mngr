@@ -51,9 +51,6 @@ from imbue.minds.desktop_client.forward_cli import LocalAgentDiscoveryHandler
 from imbue.minds.desktop_client.forward_cli import MindsApiUrlWriter
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
-from imbue.minds.desktop_client.latchkey.core import LATCHKEY_BINARY
-from imbue.minds.desktop_client.latchkey.core import Latchkey
-from imbue.minds.desktop_client.latchkey.core import LatchkeyDiscoveryHandler
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import LatchkeyServicesCatalogError
@@ -64,7 +61,13 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_latchkey.core import LATCHKEY_BINARY
+from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
+from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo as MindsRemoteSSHInfo
+from imbue.mngr.primitives import AgentId
+from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo as LatchkeyRemoteSSHInfo
+from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
@@ -217,7 +220,7 @@ def run(
         tunnel_manager=tunnel_manager,
         concurrency_group=root_concurrency_group,
     )
-    consumer.add_on_agent_discovered_callback(latchkey_discovery_handler)
+    consumer.add_on_agent_discovered_callback(_LatchkeyDiscoveryAdapter(handler=latchkey_discovery_handler))
     tunnel_manager.start_reverse_tunnel_health_check()
 
     # Auto-disable an ``imbue_cloud_<slug>`` provider if its session is
@@ -314,6 +317,32 @@ def _sleep_then_open(url: str, delay: float = 1.0) -> None:
     """
     threading.Event().wait(timeout=delay)
     webbrowser.open(url)
+
+
+class _LatchkeyDiscoveryAdapter(FrozenModel):
+    """Bridges minds' envelope discovery callbacks into the plugin's discovery handler.
+
+    Minds and ``imbue.mngr_latchkey`` each define their own
+    :class:`RemoteSSHInfo` (see the SSH-tunnel duplication note in the
+    plugin's README); this adapter converts a minds value into the
+    plugin's value before delegating. The fields are 1:1 so the
+    conversion is mechanical.
+    """
+
+    handler: LatchkeyDiscoveryHandler = Field(
+        frozen=True, description="Plugin-side discovery handler that does the real work"
+    )
+
+    def __call__(self, agent_id: AgentId, ssh_info: MindsRemoteSSHInfo | None, provider_name: str) -> None:
+        plugin_ssh_info: LatchkeyRemoteSSHInfo | None = None
+        if ssh_info is not None:
+            plugin_ssh_info = LatchkeyRemoteSSHInfo(
+                user=ssh_info.user,
+                host=ssh_info.host,
+                port=ssh_info.port,
+                key_path=ssh_info.key_path,
+            )
+        self.handler(agent_id, plugin_ssh_info, provider_name)
 
 
 class _ImbueCloudAuthErrorDisabler(FrozenModel):

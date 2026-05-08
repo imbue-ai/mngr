@@ -15,10 +15,6 @@ Keeping these in one class means there is exactly one place that knows
 about the binary path, the shared ``LATCHKEY_DIRECTORY``, and the global
 locking concerns, and exactly one place to mock or replace when something
 needs to change.
-
-The mngr-stream discovery callbacks (``LatchkeyDiscoveryHandler``) also
-live here because they exist purely to wire ``Latchkey`` into the
-agent-lifecycle event flow.
 """
 
 import hashlib
@@ -35,7 +31,6 @@ from enum import auto
 from pathlib import Path
 from typing import Final
 
-import paramiko
 import psutil
 from loguru import logger
 from pydantic import Field
@@ -43,28 +38,23 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.desktop_client.latchkey._spawn import spawn_detached_latchkey_ensure_browser
-from imbue.minds.desktop_client.latchkey._spawn import spawn_detached_latchkey_gateway
-from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
-from imbue.minds.desktop_client.latchkey.store import LatchkeyPermissionsConfig
-from imbue.minds.desktop_client.latchkey.store import default_permissions_path
-from imbue.minds.desktop_client.latchkey.store import delete_gateway_info
-from imbue.minds.desktop_client.latchkey.store import delete_legacy_per_agent_gateway_records
-from imbue.minds.desktop_client.latchkey.store import ensure_browser_log_path
-from imbue.minds.desktop_client.latchkey.store import gateway_log_path
-from imbue.minds.desktop_client.latchkey.store import load_gateway_info
-from imbue.minds.desktop_client.latchkey.store import save_gateway_info
-from imbue.minds.desktop_client.latchkey.store import save_permissions
-from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
-from imbue.mngr.primitives import AgentId
+from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
+from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_gateway
+from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import default_permissions_path
+from imbue.mngr_latchkey.store import delete_gateway_info
+from imbue.mngr_latchkey.store import delete_legacy_per_agent_gateway_records
+from imbue.mngr_latchkey.store import ensure_browser_log_path
+from imbue.mngr_latchkey.store import gateway_log_path
+from imbue.mngr_latchkey.store import load_gateway_info
+from imbue.mngr_latchkey.store import save_gateway_info
+from imbue.mngr_latchkey.store import save_permissions
 
 LATCHKEY_BINARY: Final[str] = "latchkey"
 
@@ -856,94 +846,3 @@ class Latchkey(MutableModel):
             logger.warning("Failed to spawn ``latchkey ensure-browser``: {}", e)
             return
         logger.info("Spawned ``latchkey ensure-browser`` (pid={}, log={})", pid, log_path)
-
-
-# -- mngr-stream discovery callback -------------------------------------------
-
-
-class LatchkeyDiscoveryHandler(MutableModel):
-    """Discovery callback that ensures the shared Latchkey gateway is running and tunnels it in.
-
-    Intended to be registered via ``MngrStreamManager.add_on_agent_discovered_callback``.
-
-    For every discovered agent, ensures the shared ``latchkey gateway``
-    subprocess is running on the desktop host. Agents that reach the
-    desktop via SSH (containers, VMs, VPS) also get a reverse tunnel that
-    exposes the host-side gateway on the agent's own
-    ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``. DEV-mode agents run on the
-    bare host and need no tunnel; their ``LATCHKEY_GATEWAY`` env var
-    points directly at the dynamic host port.
-
-    Tunnel setup is dispatched onto a worker thread via
-    ``concurrency_group`` so the ``MngrStreamManager`` discovery-stream
-    reader thread is never blocked on slow SSH I/O. Concurrent fires for
-    the same agent are coalesced via ``_pending_remote_agents`` -- the
-    underlying ``SSHTunnelManager.setup_reverse_tunnel`` is already
-    idempotent on ``(host:port, local_port)``, so a duplicate fire would
-    do no harm, but coalescing avoids spinning up a redundant worker
-    just to find an existing tunnel and exit.
-    """
-
-    latchkey: Latchkey = Field(description="Latchkey wrapper that owns the shared gateway subprocess")
-    tunnel_manager: SSHTunnelManager = Field(
-        description="SSH tunnel manager used to reverse-forward the host-side gateway into remote agents"
-    )
-    concurrency_group: ConcurrencyGroup = Field(description="CG used to dispatch off-thread tunnel setups")
-
-    _pending_remote_agents: set[str] = PrivateAttr(default_factory=set)
-    _pending_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-
-    def __call__(self, agent_id: AgentId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
-        del provider_name
-        try:
-            info = self.latchkey.ensure_gateway_started()
-        except LatchkeyError as e:
-            logger.warning("Failed to start shared Latchkey gateway for agent {}: {}", agent_id, e)
-            return
-
-        if ssh_info is None:
-            # DEV-mode agent runs on the bare host; it reaches the gateway
-            # directly on its dynamic host port, so no tunnel is needed.
-            return
-
-        agent_id_str = str(agent_id)
-        with self._pending_lock:
-            if agent_id_str in self._pending_remote_agents:
-                logger.debug("Latchkey tunnel setup already in flight for agent {}; skipping duplicate fire", agent_id)
-                return
-            self._pending_remote_agents.add(agent_id_str)
-        try:
-            self.concurrency_group.start_new_thread(
-                target=self._run_remote_setup,
-                args=(agent_id, ssh_info, info.port),
-                name=f"latchkey-discovery-setup-{agent_id_str}",
-                is_checked=False,
-            )
-        except (ConcurrencyExceptionGroup, InvalidConcurrencyGroupStateError, RuntimeError):
-            # Roll back the pending flag so a later fire (after the CG
-            # is healthy again) isn't permanently coalesced away.
-            with self._pending_lock:
-                self._pending_remote_agents.discard(agent_id_str)
-            raise
-
-    def _run_remote_setup(self, agent_id: AgentId, ssh_info: RemoteSSHInfo, host_side_port: int) -> None:
-        """Worker-thread entry point. Always clears the pending flag in
-        ``finally`` so a crash inside the SSH tunnel setup doesn't
-        permanently block subsequent fires for this agent.
-        """
-        try:
-            self.tunnel_manager.setup_reverse_tunnel(
-                ssh_info=ssh_info,
-                local_port=host_side_port,
-                remote_port=AGENT_SIDE_LATCHKEY_PORT,
-            )
-        except (SSHTunnelError, OSError, paramiko.SSHException) as e:
-            logger.warning(
-                "Failed to set up Latchkey reverse tunnel for agent {} (host-side port {}): {}",
-                agent_id,
-                host_side_port,
-                e,
-            )
-        finally:
-            with self._pending_lock:
-                self._pending_remote_agents.discard(str(agent_id))

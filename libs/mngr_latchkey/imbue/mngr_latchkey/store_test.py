@@ -7,26 +7,26 @@ from pathlib import Path
 
 import pytest
 
-from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
-from imbue.minds.desktop_client.latchkey.store import LatchkeyPermissionsConfig
-from imbue.minds.desktop_client.latchkey.store import LatchkeyStoreError
-from imbue.minds.desktop_client.latchkey.store import MalformedPermissionsConfigError
-from imbue.minds.desktop_client.latchkey.store import default_permissions_path
-from imbue.minds.desktop_client.latchkey.store import delete_gateway_info
-from imbue.minds.desktop_client.latchkey.store import delete_legacy_per_agent_gateway_records
-from imbue.minds.desktop_client.latchkey.store import gateway_info_path
-from imbue.minds.desktop_client.latchkey.store import gateway_log_path
-from imbue.minds.desktop_client.latchkey.store import granted_permissions_for_scope
-from imbue.minds.desktop_client.latchkey.store import link_opaque_permissions_to_agent
-from imbue.minds.desktop_client.latchkey.store import load_gateway_info
-from imbue.minds.desktop_client.latchkey.store import load_permissions
-from imbue.minds.desktop_client.latchkey.store import new_opaque_permissions_path
-from imbue.minds.desktop_client.latchkey.store import opaque_permissions_dir
-from imbue.minds.desktop_client.latchkey.store import permissions_path_for_agent
-from imbue.minds.desktop_client.latchkey.store import save_gateway_info
-from imbue.minds.desktop_client.latchkey.store import save_permissions
-from imbue.minds.desktop_client.latchkey.store import set_permissions_for_scope
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import MalformedPermissionsConfigError
+from imbue.mngr_latchkey.store import default_permissions_path
+from imbue.mngr_latchkey.store import delete_gateway_info
+from imbue.mngr_latchkey.store import delete_legacy_per_agent_gateway_records
+from imbue.mngr_latchkey.store import gateway_info_path
+from imbue.mngr_latchkey.store import gateway_log_path
+from imbue.mngr_latchkey.store import granted_permissions_for_scope
+from imbue.mngr_latchkey.store import link_opaque_permissions_to_agent
+from imbue.mngr_latchkey.store import load_gateway_info
+from imbue.mngr_latchkey.store import load_permissions
+from imbue.mngr_latchkey.store import new_opaque_permissions_path
+from imbue.mngr_latchkey.store import opaque_permissions_dir
+from imbue.mngr_latchkey.store import permissions_path_for_agent
+from imbue.mngr_latchkey.store import save_gateway_info
+from imbue.mngr_latchkey.store import save_permissions
+from imbue.mngr_latchkey.store import set_permissions_for_scope
 
 
 def _make_record() -> LatchkeyGatewayInfo:

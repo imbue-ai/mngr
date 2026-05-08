@@ -19,6 +19,7 @@ members = [
     "imbue-mngr-forward",
     "imbue-mngr-imbue-cloud",
     "imbue-mngr-kanpan",
+    "imbue-mngr-latchkey",
     "imbue-mngr-lima",
     "imbue-mngr-modal",
     "imbue-mngr-notifications",
@@ -1851,6 +1852,33 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "imbue-mngr", editable = "libs/mngr" },
+]
+
+[[package]]
+name = "imbue-mngr-latchkey"
+version = "0.1.0"
+source = { editable = "libs/mngr_latchkey" }
+dependencies = [
+    { name = "click" },
+    { name = "concurrency-group" },
+    { name = "imbue-common" },
+    { name = "imbue-mngr" },
+    { name = "loguru" },
+    { name = "paramiko" },
+    { name = "psutil" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.0" },
+    { name = "concurrency-group", editable = "libs/concurrency_group" },
+    { name = "imbue-common", editable = "libs/imbue_common" },
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "loguru", specifier = ">=0.7" },
+    { name = "paramiko", specifier = ">=3.0" },
+    { name = "psutil", specifier = ">=5.9" },
+    { name = "pydantic", specifier = ">=2.0" },
 ]
 
 [[package]]

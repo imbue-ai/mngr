@@ -15,22 +15,22 @@ import pytest
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.desktop_client.latchkey.core import AGENT_SIDE_LATCHKEY_PORT
-from imbue.minds.desktop_client.latchkey.core import CredentialStatus
-from imbue.minds.desktop_client.latchkey.core import Latchkey
-from imbue.minds.desktop_client.latchkey.core import LatchkeyBinaryNotFoundError
-from imbue.minds.desktop_client.latchkey.core import LatchkeyDiscoveryHandler
-from imbue.minds.desktop_client.latchkey.core import LatchkeyJwtMintError
-from imbue.minds.desktop_client.latchkey.core import LatchkeyNotInitializedError
-from imbue.minds.desktop_client.latchkey.core import _cmdline_looks_like_latchkey_gateway
-from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
-from imbue.minds.desktop_client.latchkey.store import default_permissions_path
-from imbue.minds.desktop_client.latchkey.store import ensure_browser_log_path
-from imbue.minds.desktop_client.latchkey.store import load_gateway_info
-from imbue.minds.desktop_client.latchkey.store import save_gateway_info
-from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
+from imbue.mngr_latchkey.core import CredentialStatus
+from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyBinaryNotFoundError
+from imbue.mngr_latchkey.core import LatchkeyJwtMintError
+from imbue.mngr_latchkey.core import LatchkeyNotInitializedError
+from imbue.mngr_latchkey.core import _cmdline_looks_like_latchkey_gateway
+from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
+from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
+from imbue.mngr_latchkey.store import default_permissions_path
+from imbue.mngr_latchkey.store import ensure_browser_log_path
+from imbue.mngr_latchkey.store import load_gateway_info
+from imbue.mngr_latchkey.store import save_gateway_info
 
 _POLL_INTERVAL_SECONDS = 0.05
 
