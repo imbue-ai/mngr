@@ -92,23 +92,6 @@ def delete_git_branch(branch_name: str, source_repo_path: Path, cg: ConcurrencyG
     return False
 
 
-def get_current_git_branch(path: Path | None, cg: ConcurrencyGroup) -> str | None:
-    """Get the current git branch name for the repository at the given path.
-
-    Returns None if the path is not a git repository or an error occurs.
-    """
-    try:
-        cwd = path or Path.cwd()
-        result = cg.run_process_to_completion(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=cwd,
-        )
-        return result.stdout.strip()
-    except ProcessError as e:
-        logger.trace("Failed to get current git branch: {}", e)
-        return None
-
-
 def resolve_project_filter_values(
     values: tuple[str, ...],
     cg: ConcurrencyGroup,
@@ -314,41 +297,6 @@ def clone_git_url_to_managed_dir(url: str, base_dir: Path, name: str, cg: Concur
     return dest
 
 
-def _get_git_config_value(path: Path, key: str, cg: ConcurrencyGroup) -> str | None:
-    """Get a git config value for the repository at the given path."""
-    try:
-        result = cg.run_process_to_completion(
-            ["git", "config", key],
-            cwd=path,
-        )
-    except ProcessError:
-        return None
-    if result.stdout.strip():
-        return result.stdout.strip()
-    return None
-
-
-def get_git_author_info(path: Path, cg: ConcurrencyGroup) -> tuple[str | None, str | None]:
-    """Get the git author name and email for the repository at the given path."""
-    return _get_git_config_value(path, "user.name", cg), _get_git_config_value(path, "user.email", cg)
-
-
-def get_git_remote_url(path: Path, remote_name: str, cg: ConcurrencyGroup) -> str | None:
-    """Get the URL of a git remote for the repository at the given path.
-
-    Returns None if the remote does not exist or the path is not a git repo.
-    """
-    try:
-        result = cg.run_process_to_completion(
-            ["git", "remote", "get-url", remote_name],
-            cwd=path,
-        )
-    except ProcessError:
-        return None
-    url = result.stdout.strip()
-    return url if url else None
-
-
 def find_git_worktree_root(start: Path | None, cg: ConcurrencyGroup) -> Path | None:
     """Find the git worktree root."""
     cwd = start or Path.cwd()
@@ -384,9 +332,8 @@ def is_git_repository(path: Path, cg: ConcurrencyGroup) -> bool:
 def get_current_branch(path: Path, cg: ConcurrencyGroup) -> str:
     """Get the current branch name for a git repository.
 
-    Unlike get_current_git_branch, this function raises an error if the operation
-    fails rather than returning None. Also raises if HEAD is detached (no branch),
-    since callers need an actual branch name for push/pull operations.
+    Raises MngrError if the operation fails or if HEAD is detached, since callers
+    need an actual branch name for push/pull operations.
     """
     try:
         result = cg.run_process_to_completion(
