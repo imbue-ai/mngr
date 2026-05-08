@@ -247,19 +247,9 @@ def list_agents(
             )
 
     except MngrError as e:
-        # Both ABORT and CONTINUE capture the error into the structured result so
-        # callers (in particular `mngr list --format json/jsonl`) can render a
-        # valid partial document rather than empty stdout. ABORT vs CONTINUE
-        # differs only at the per-provider catch level: ABORT stops further work
-        # at the first failure (the orchestrator re-raises); CONTINUE keeps every
-        # provider going. Either way, the caller learns success/failure from the
-        # populated `result.errors` and the exit code, not from a raise.
         _record_error(result, e, on_error)
     except ConcurrencyExceptionGroup as eg:
-        # ABORT-mode raises that originate inside a `with mngr_executor` block
-        # bubble up wrapped by the executor's __exit__. Unwrap and capture each
-        # MngrError; let any non-MngrError inner exception propagate so
-        # programming bugs aren't silently buried in result.errors.
+        # Unwrap `with mngr_executor` worker errors, capture MngrErrors into result.errors, and re-raise anything else.
         domain_errors: list[MngrError] = []
         for exc in eg.exceptions:
             if not isinstance(exc, MngrError):
