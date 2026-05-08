@@ -591,9 +591,11 @@ def _install_plugin_settings_local(
     Code's docs), so there's no risk of leaking machine-local state.
 
     Merges with any existing settings.local.json: only the ``statusLine``
-    field (and the ``env`` field if present, see comment below) is touched;
-    other fields are preserved verbatim. Multiple plugins contributing
-    statusline_command: last one wins, matching ``_build_settings_json``.
+    field is touched; other fields are preserved verbatim. Multiple plugins
+    contributing statusline_command: last one wins, matching
+    ``_build_settings_json``. (Plugin-contributed env vars are persisted
+    separately to ``plugin_env_vars.json`` -- see ``_persist_plugin_env_vars``
+    -- not into the ``env`` block of settings.local.json.)
 
     Idempotent: re-running provisioning overwrites the previously-installed
     statusLine cleanly. If no contribution sets statusline_command, this
