@@ -11,6 +11,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifiers
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
@@ -62,8 +63,16 @@ def _discover_provider_hosts_and_agents(
 
     This function is run in a thread by discover_hosts_and_agents.
     Results are merged into the shared agents_by_host dict under the results_lock.
+
+    Wraps any provider-side exception in ``ProviderDiscoveryError`` so the
+    snapshot/poll error path can attribute the failure to the exact provider
+    instance (e.g. ``imbue_cloud_alice@example.com``) without parsing
+    messages -- minds uses this to auto-disable a stale account.
     """
-    provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
+    try:
+        provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
+    except Exception as exc:
+        raise ProviderDiscoveryError(provider.name, exc) from exc
 
     # Merge results into the main dict under lock
     with results_lock:
@@ -158,7 +167,7 @@ def discover_hosts_and_agents(
             return _run_discovery(mngr_ctx, provider_names, include_destroyed, reset_caches)
 
         # Try to resolve identifiers to provider names from the event stream
-        resolved_providers = resolve_provider_names_for_identifiers(mngr_ctx.config, agent_identifiers)
+        resolved_providers = resolve_provider_names_for_identifiers(mngr_ctx, agent_identifiers)
         if resolved_providers is None:
             logger.trace("Could not resolve agent identifiers from event stream, doing full scan")
             return _run_discovery(mngr_ctx, None, include_destroyed, reset_caches)

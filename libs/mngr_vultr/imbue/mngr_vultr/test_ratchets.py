@@ -62,6 +62,10 @@ def test_prevent_builtin_exception_raises() -> None:
     rc.check_builtin_exception_raises(_DIR, snapshot(0))
 
 
+def test_prevent_silent_decode_error_catches() -> None:
+    rc.check_silent_decode_error_catches(_DIR, snapshot(0))
+
+
 # --- Import style ---
 
 
@@ -179,6 +183,10 @@ def test_prevent_fstring_logging() -> None:
 
 def test_prevent_click_echo() -> None:
     rc.check_click_echo(_DIR, snapshot(0))
+
+
+def test_prevent_logger_exception() -> None:
+    rc.check_logger_exception(_DIR, snapshot(0))
 
 
 # --- Testing conventions ---

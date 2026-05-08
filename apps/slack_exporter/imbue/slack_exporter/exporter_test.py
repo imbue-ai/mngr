@@ -928,6 +928,159 @@ def test_run_export_channel_info_only_for_specified_channels(temp_output_dir: Pa
     assert counts.get("conversations.info", 0) == 1
 
 
+def test_run_export_refresh_window_discovers_replies_on_old_parent(temp_output_dir: Path) -> None:
+    """A parent message exported with reply_count=0 that later gets replies in Slack should
+    have those replies pulled in on the next run, via the refresh-window pass.
+
+    This is the exact scenario that motivated the feature: the user posted a message, ran
+    the exporter (saw no replies), then threaded replies onto it. Without the refresh pass
+    the old parent is never re-examined so the replies stay invisible.
+    """
+    settings = ExporterSettings(
+        channels=(ChannelConfig(name=SlackChannelName("general")),),
+        default_oldest=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        output_dir=temp_output_dir,
+        max_recent_threads_for_reactions=0,
+        refresh_window_days=100000,
+        cache_ttl_seconds=0,
+    )
+
+    # Run 1: export a top-level message with no thread info.
+    parent_v1 = {"ts": "1700000000.000001", "text": "parent"}
+    caller1, _ = _tracking_api_caller(message_data=[parent_v1])
+    run_export(settings, api_caller=caller1)
+
+    reply_created = temp_output_dir / "reply" / "created" / "events.jsonl"
+    assert not reply_created.exists() or reply_created.read_text() == ""
+
+    # Run 2: Slack now reports the same parent with reply_count=2 and latest_reply set.
+    # Forward fetch (oldest=<parent_ts>, inclusive=false) returns nothing new, but the
+    # refresh window re-fetches the parent and discovers the thread.
+    parent_v2 = {
+        "ts": "1700000000.000001",
+        "text": "parent",
+        "reply_count": 2,
+        "latest_reply": "1700000000.000003",
+    }
+
+    history_params: list[dict[str, str] | None] = []
+
+    def caller2(method: str, query_params: dict[str, str] | None = None) -> dict[str, Any]:
+        if method == "auth.test":
+            return _DEFAULT_AUTH_RESPONSE
+        if method == "conversations.list":
+            return make_slack_response("channels", [{"id": "C123", "name": "general", "is_member": True}])
+        if method == "users.list":
+            return make_slack_response("members", [])
+        if method == "conversations.info":
+            return {
+                "ok": True,
+                "channel": {"id": "C123", "name": "general", "is_member": True, "last_read": "1700000000.000000"},
+            }
+        if method == "conversations.history":
+            history_params.append(query_params)
+            # Forward fetch (inclusive=false, no latest param) returns nothing new.
+            # Refresh fetch (inclusive=true, latest=<cursor>) returns the updated parent.
+            if query_params and query_params.get("inclusive") == "true" and "latest" in query_params:
+                return make_slack_response("messages", [parent_v2])
+            return make_slack_response("messages", [])
+        if method == "conversations.replies":
+            return make_slack_response(
+                "messages",
+                [
+                    {"ts": "1700000000.000001", "thread_ts": "1700000000.000001", "text": "parent"},
+                    {"ts": "1700000000.000002", "thread_ts": "1700000000.000001", "text": "reply 1"},
+                    {"ts": "1700000000.000003", "thread_ts": "1700000000.000001", "text": "reply 2"},
+                ],
+            )
+        return {"ok": True}
+
+    run_export(settings, api_caller=caller2)
+
+    # Two history calls on run 2: forward + refresh.
+    assert len(history_params) == 2
+    refresh_call = next(p for p in history_params if p and "latest" in p)
+    assert refresh_call["latest"] == "1700000000.000001"
+    assert refresh_call["inclusive"] == "true"
+
+    # The refreshed parent was written to the updated stream (not created, since the key
+    # already existed) with the new reply_count / latest_reply metadata.
+    msg_updated = (temp_output_dir / "message" / "updated" / "events.jsonl").read_text().strip().splitlines()
+    updated_parents = [
+        json.loads(line) for line in msg_updated if json.loads(line)["message_ts"] == "1700000000.000001"
+    ]
+    # Latest update for the parent should have reply_count=2
+    assert updated_parents[-1]["raw"]["reply_count"] == 2
+    assert updated_parents[-1]["raw"]["latest_reply"] == "1700000000.000003"
+    msg_created = (temp_output_dir / "message" / "created" / "events.jsonl").read_text().strip().splitlines()
+    # Only the original parent is in the created stream -- the refresh did not duplicate it.
+    assert len(msg_created) == 1
+
+    # The replies should now be saved.
+    reply_lines = (temp_output_dir / "reply" / "created" / "events.jsonl").read_text().strip().splitlines()
+    assert sorted(json.loads(line)["reply_ts"] for line in reply_lines) == [
+        "1700000000.000002",
+        "1700000000.000003",
+    ]
+
+
+def test_run_export_refresh_window_skips_first_run(temp_output_dir: Path) -> None:
+    """On the very first run for a channel, the forward fetch already covers everything;
+    the refresh pass must not issue a redundant API call."""
+    settings = ExporterSettings(
+        channels=(ChannelConfig(name=SlackChannelName("general")),),
+        default_oldest=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        output_dir=temp_output_dir,
+        max_recent_threads_for_reactions=0,
+        refresh_window_days=100000,
+        cache_ttl_seconds=0,
+    )
+    caller, counts = _tracking_api_caller(message_data=[{"ts": "1700000000.000001", "text": "hi"}])
+    run_export(settings, api_caller=caller)
+    assert counts.get("conversations.history", 0) == 1
+
+
+def test_run_export_refresh_window_skipped_when_window_shorter_than_age_of_cursor(
+    temp_output_dir: Path,
+) -> None:
+    """If the refresh window doesn't reach back as far as the forward cursor, no extra
+    fetch is issued -- the forward fetch already covered that range."""
+    settings = ExporterSettings(
+        channels=(ChannelConfig(name=SlackChannelName("general")),),
+        default_oldest=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        output_dir=temp_output_dir,
+        max_recent_threads_for_reactions=0,
+        refresh_window_days=1,
+        cache_ttl_seconds=0,
+    )
+    # Cursor is from 2023, so a 1-day refresh window starting from "now" ends up well
+    # after the cursor -- nothing to refresh.
+    caller1, _ = _tracking_api_caller(message_data=[{"ts": "1700000000.000001", "text": "hi"}])
+    run_export(settings, api_caller=caller1)
+    caller2, counts2 = _tracking_api_caller()
+    run_export(settings, api_caller=caller2)
+    assert counts2.get("conversations.history", 0) == 1
+
+
+def test_run_export_refresh_window_disabled(temp_output_dir: Path) -> None:
+    """With refresh_window_days=None the extra fetch is suppressed entirely."""
+    settings = ExporterSettings(
+        channels=(ChannelConfig(name=SlackChannelName("general")),),
+        default_oldest=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        output_dir=temp_output_dir,
+        max_recent_threads_for_reactions=0,
+        refresh_window_days=None,
+        cache_ttl_seconds=0,
+    )
+    # Seed state so existing_state is non-None on the next run.
+    caller1, _ = _tracking_api_caller(message_data=[{"ts": "1700000000.000001", "text": "hi"}])
+    run_export(settings, api_caller=caller1)
+    caller2, counts2 = _tracking_api_caller()
+    run_export(settings, api_caller=caller2)
+    # Forward only -- no refresh call even on incremental run.
+    assert counts2.get("conversations.history", 0) == 1
+
+
 def test_run_export_all_channels_when_channels_is_none(temp_output_dir: Path) -> None:
     """When channels is None, all channels from the fetched channel list are exported."""
     settings = ExporterSettings(

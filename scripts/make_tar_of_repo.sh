@@ -15,7 +15,7 @@ mkdir -p "$DEST";
   tmp=$(mktemp -d); \
   rm -rf "$tmp"; \
   real_origin="https://github.com/$(git remote get-url origin | sed 's|.*github.com[:/]||')"; \
-  git clone . "$tmp"; \
+  git clone --no-hardlinks . "$tmp"; \
   git -C "$tmp" remote set-url origin "$real_origin"; \
   git -C "$tmp" checkout "$HASH"; \
   mv "$tmp" "$DEST/$HASH"; \

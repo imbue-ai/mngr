@@ -9,6 +9,7 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
@@ -78,6 +79,7 @@ def test_create_in_place(e2e: E2eSession) -> None:
     )
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
@@ -112,6 +114,7 @@ def test_create_short_forms(e2e: E2eSession) -> None:
     assert "my-other-task" in agents_by_name, f"my-other-task not found in agents: {list(agents_by_name)}"
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
@@ -144,6 +147,7 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
     assert matching[0]["state"] in ("RUNNING", "WAITING")
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
@@ -177,6 +181,7 @@ def test_create_with_agent_args(e2e: E2eSession) -> None:
     assert "--model opus" in matching[0]["command"]
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
@@ -207,6 +212,7 @@ def test_create_named_agent(e2e: E2eSession) -> None:
     expect(exec_result).to_succeed()
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
@@ -235,6 +241,7 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
     assert agents[0]["name"] == "my-task"
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal

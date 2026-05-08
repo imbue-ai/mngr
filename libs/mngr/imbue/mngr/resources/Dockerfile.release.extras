@@ -23,6 +23,34 @@ RUN rm -f /usr/local/bin/runc \
 RUN update-alternatives --set iptables /usr/sbin/iptables-legacy \
     && update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
 
+# ---- Playwright (chromium + deps) baked in for minds release tests ----
+# Bake-in (not sandbox_init_cmd) so the install only happens at image build
+# time; otherwise every sandbox would re-download ~300MB.
+#
+# Pin PLAYWRIGHT_BROWSERS_PATH to an absolute location so tests that
+# isolate $HOME (e.g. via the autouse isolate_home fixture in mngr's
+# conftest) still find the baked-in chromium. The default lookup path
+# is $HOME/.cache/ms-playwright, which points at the pytest tmp dir
+# once isolate_home kicks in, where nothing is installed.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN uv run --with playwright python -m playwright install --with-deps chromium
+
+# ---- minds_workspace_server frontend build ----
+# The release e2e tests (apps/minds_workspace_server/imbue/minds_workspace_server/test_e2e.py)
+# load the workspace-server UI in chromium and assert on rendered content.
+# Without a built frontend, server.py serves an "Frontend not built" fallback
+# page, so every locator check fails. Install node and run the build so
+# apps/minds_workspace_server/imbue/minds_workspace_server/static/index.html
+# is present. We use npm (not pnpm) to honour the committed package-lock.json
+# and match the project's documented workflow (README, server.py fallback
+# page, server_test.py assertion).
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/*
+RUN cd /code/mngr/apps/minds_workspace_server/frontend && \
+    npm ci && \
+    npm run build
+
 # ---- Docker daemon startup script ----
 # dockerd itself is started by the _ensure_dockerd_for_release pytest
 # session fixture (libs/mngr/imbue/mngr/conftest.py), so we only need

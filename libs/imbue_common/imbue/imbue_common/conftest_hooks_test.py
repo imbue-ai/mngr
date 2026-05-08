@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from imbue.imbue_common.conftest_hooks import _acquire_global_test_lock
+from imbue.imbue_common.conftest_hooks import _compute_junit_test_id
 from imbue.imbue_common.conftest_hooks import _compute_lock_deadline
 from imbue.imbue_common.conftest_hooks import _compute_max_duration
 from imbue.imbue_common.conftest_hooks import _is_process_alive
@@ -241,3 +242,39 @@ def test_acquire_lock_after_stale_dead_pid(tmp_path: Path) -> None:
         assert handle is not None
     finally:
         handle.close()
+
+
+# --- _compute_junit_test_id ---
+
+
+def test_compute_junit_test_id_without_offload_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OFFLOAD_ROOT", raising=False)
+    assert (
+        _compute_junit_test_id(
+            nodeid="libs/foo/test_bar.py::test_thing",
+            fspath="/some/abs/libs/foo/test_bar.py",
+        )
+        == "libs/foo/test_bar.py::test_thing"
+    )
+
+
+def test_compute_junit_test_id_with_offload_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OFFLOAD_ROOT", "/code/mngr")
+    assert (
+        _compute_junit_test_id(
+            nodeid="test_bar.py::test_thing",
+            fspath="/code/mngr/libs/foo/test_bar.py",
+        )
+        == "libs/foo/test_bar.py::test_thing"
+    )
+
+
+def test_compute_junit_test_id_with_class(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OFFLOAD_ROOT", "/code/mngr")
+    assert (
+        _compute_junit_test_id(
+            nodeid="test_bar.py::TestCls::test_method",
+            fspath="/code/mngr/libs/foo/test_bar.py",
+        )
+        == "libs/foo/test_bar.py::TestCls::test_method"
+    )

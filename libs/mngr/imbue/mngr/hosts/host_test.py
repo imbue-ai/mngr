@@ -186,6 +186,7 @@ def test_discover_agents_skips_missing_data_json(
     assert refs == []
 
 
+@pytest.mark.allow_warnings(match=r"^Could not load agent reference from")
 def test_discover_agents_skips_invalid_json(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -203,6 +204,7 @@ def test_discover_agents_skips_invalid_json(
     assert refs == []
 
 
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
 def test_discover_agents_skips_missing_id(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -221,6 +223,7 @@ def test_discover_agents_skips_missing_id(
     assert refs == []
 
 
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
 def test_discover_agents_skips_missing_name(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -239,6 +242,7 @@ def test_discover_agents_skips_missing_name(
     assert refs == []
 
 
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
 def test_discover_agents_skips_invalid_id(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -257,6 +261,7 @@ def test_discover_agents_skips_invalid_id(
     assert refs == []
 
 
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
 def test_discover_agents_skips_invalid_name(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -296,6 +301,7 @@ def test_discover_agents_loads_multiple_agents(
     assert ref_ids == set(agent_ids)
 
 
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
 def test_discover_agents_skips_bad_records_but_loads_good_ones(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -1527,7 +1533,7 @@ def test_get_file_wraps_ssh_exception_in_host_connection_error(
             self,
             remote_filename: str,
             filename_or_io: str | IO[bytes],
-            remote_temp_filename: str | None,
+            remote_temp_filename: str | None = None,
         ) -> bool:
             raise SSHException("connection lost")
 
@@ -2586,7 +2592,12 @@ def test_host_collect_agent_env_vars_includes_mngr_variables(
     assert env["MNGR_AGENT_WORK_DIR"] == str(temp_work_dir)
     assert "MNGR_AGENT_STATE_DIR" in env
     assert "LLM_USER_PATH" in env
-    assert "GIT_BASE_BRANCH" in env
+    assert "MNGR_GIT_BASE_BRANCH" in env
+    # CODE_GUARDIAN_STOP_HOOK__BASE_BRANCH is a parallel export the
+    # imbue-code-guardian plugin's stop hook reads; it must always be set
+    # alongside MNGR_GIT_BASE_BRANCH and must hold the same value.
+    assert "CODE_GUARDIAN_STOP_HOOK__BASE_BRANCH" in env
+    assert env["CODE_GUARDIAN_STOP_HOOK__BASE_BRANCH"] == env["MNGR_GIT_BASE_BRANCH"]
 
 
 def test_host_collect_agent_env_vars_with_env_file(
@@ -2703,6 +2714,7 @@ def test_apply_work_dir_extra_paths_share_same_host_creates_symlink(
     assert target.resolve() == (source_dir / ".venv").resolve()
 
 
+@pytest.mark.allow_warnings(match=r"^work_dir_extra_paths: source path does not exist, skipping")
 def test_apply_work_dir_extra_paths_share_same_host_source_missing_warns(
     local_host: Host,
     source_and_work_dirs: tuple[Path, Path],

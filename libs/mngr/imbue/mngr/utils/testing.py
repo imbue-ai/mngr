@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import selectors
 import shlex
 import shutil
@@ -137,6 +138,13 @@ def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     or modifying the real home directory. Use this directly for lightweight
     test suites (e.g. minds). For full mngr test isolation (MNGR_HOST_DIR,
     MNGR_PREFIX, tmux server, etc.) use setup_test_mngr_env instead.
+
+    Also writes a minimal .gitconfig with `safe.directory = *` so subprocess
+    git invocations (e.g. mngr schedule add shelling out to
+    `git rev-parse --show-toplevel` inside /code/mngr on release sandboxes)
+    don't get blocked by git's repo-ownership guard. The image-time entry
+    /root/.gitconfig is invisible once HOME is redirected, so every
+    isolate_home() call must re-establish the exemption.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
@@ -144,6 +152,12 @@ def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # to the temp HOME, not an inherited agent config dir.
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("ORIGINAL_CLAUDE_CONFIG_DIR", raising=False)
+
+    # Write a minimal .gitconfig with safe.directory='*' so subprocess git
+    # calls from this HOME don't trip git's ownership check. isolate_git()
+    # overwrites this with a richer config when both are used together.
+    gitconfig = tmp_path / ".gitconfig"
+    gitconfig.write_text("[safe]\n\tdirectory = *\n")
 
 
 @contextmanager
@@ -206,22 +220,42 @@ def isolate_git(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Isolate git from system config and provide default user config.
 
     Sets GIT_CONFIG_NOSYSTEM to skip /etc/gitconfig, GIT_TERMINAL_PROMPT to
-    prevent interactive credential prompts, and writes a .gitconfig in the
-    fake HOME (set by isolate_home) with default user info and
-    ``init.defaultBranch``.
+    prevent interactive credential prompts, and (over)writes a .gitconfig in
+    the fake HOME (set by isolate_home) with default user info,
+    ``init.defaultBranch``, and ``safe.directory = *``. The .gitconfig is
+    always rewritten -- isolate_home() also writes a minimal [safe]-only
+    .gitconfig, so overwriting here ensures this function's richer contents
+    win regardless of fixture call order.
+
+    ``isolate_home()`` MUST have been called first. This function unconditionally
+    overwrites ``Path.home() / ".gitconfig"``, so without HOME redirection it
+    would clobber the developer's real ``~/.gitconfig``. The contract is
+    enforced via ``assert_home_is_temp_directory()`` -- a misuse raises an
+    AssertionError before any write happens.
 
     Tests that create git repos should use a subdirectory of tmp_path rather
     than tmp_path itself, so that .gitconfig does not appear as an untracked
     file in ``git status --porcelain``.
     """
+    # Safety check before the unconditional .gitconfig overwrite below:
+    # refuse to run if HOME is not in a temp directory, so a caller who
+    # forgets to run isolate_home() first cannot wipe the real ~/.gitconfig.
+    assert_home_is_temp_directory()
+
     for key, value in _GIT_ISOLATION_ENV.items():
         monkeypatch.setenv(key, value)
 
+    # Overwrite the minimal .gitconfig isolate_home() wrote with the richer
+    # [user] + [init] + [safe] config this function promises. safe.directory='*'
+    # is load-bearing for release tests: they run as root against /code/mngr
+    # in the offload sandbox, and the image-time /root/.gitconfig exemption is
+    # invisible once isolate_home() points HOME at a tmp dir.
     gitconfig = Path.home() / ".gitconfig"
-    if not gitconfig.exists():
-        gitconfig.write_text(
-            "[user]\n\tname = Test User\n\temail = test@example.com\n[init]\n\tdefaultBranch = main\n"
-        )
+    gitconfig.write_text(
+        "[user]\n\tname = Test User\n\temail = test@example.com\n"
+        "[init]\n\tdefaultBranch = main\n"
+        "[safe]\n\tdirectory = *\n"
+    )
 
     yield
 
@@ -462,6 +496,31 @@ def _get_descendant_pids(pid: str) -> list[str]:
     return descendants
 
 
+_TMUX_CLEANUP_SUBPROCESS_TIMEOUT_SECONDS: float = 5.0
+
+
+def _run_with_timeout(*args: str) -> "subprocess.CompletedProcess[bytes]":
+    """Run a subprocess command with a hard timeout, swallowing TimeoutExpired.
+
+    Test cleanup runs inside the test's ``pytest-timeout`` window (because
+    ``timeout_func_only = true`` counts ``ExitStack`` teardown as test-body
+    time). A hung ``tmux`` or ``pkill`` here would block the test indefinitely
+    -- even though the next cleanup steps (SIGTERM/SIGKILL via os.kill) do
+    not depend on the previous tmux call having returned. Capping every
+    subprocess.run lets cleanup keep making forward progress instead of
+    stalling on a single stuck step.
+    """
+    try:
+        return subprocess.run(
+            list(args),
+            capture_output=True,
+            timeout=_TMUX_CLEANUP_SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        # Empty placeholder so callers checking returncode don't crash.
+        return subprocess.CompletedProcess(args=list(args), returncode=-1)
+
+
 def cleanup_tmux_session(session_name: str) -> None:
     """Clean up a tmux session, all its processes, and any associated activity monitors.
 
@@ -476,14 +535,14 @@ def cleanup_tmux_session(session_name: str) -> None:
     3. Kills the tmux session itself
     4. Sends SIGKILL to any processes that survived
     5. Kills any orphaned activity monitors for this session
+
+    Every ``subprocess.run`` is bounded by ``_TMUX_CLEANUP_SUBPROCESS_TIMEOUT_SECONDS``;
+    a hung ``tmux`` step can't block the rest of the cleanup.
     """
     # Collect all pane PIDs and their descendants before killing the session.
     # Guard with has-session first: list-panes -s does not support the = prefix for
     # exact matching, so it would prefix-match a different session if this one is gone.
-    has_result = subprocess.run(
-        ["tmux", "has-session", "-t", f"={session_name}"],
-        capture_output=True,
-    )
+    has_result = _run_with_timeout("tmux", "has-session", "-t", f"={session_name}")
     all_pids: list[str] = []
     if has_result.returncode == 0:
         # Session exists -- safe to list panes (no risk of prefix-matching a different session).
@@ -492,6 +551,8 @@ def cleanup_tmux_session(session_name: str) -> None:
             ["tmux", "list-panes", "-s", "-t", session_name, "-F", "#{pane_pid}"],
             capture_output=True,
             text=True,
+            timeout=_TMUX_CLEANUP_SUBPROCESS_TIMEOUT_SECONDS,
+            check=False,
         )
         if result.returncode == 0 and result.stdout.strip():
             for pane_pid in result.stdout.strip().split("\n"):
@@ -507,10 +568,7 @@ def cleanup_tmux_session(session_name: str) -> None:
             pass
 
     # Kill the tmux session (sends SIGHUP to remaining pane processes)
-    subprocess.run(
-        ["tmux", "kill-session", "-t", f"={session_name}"],
-        capture_output=True,
-    )
+    _run_with_timeout("tmux", "kill-session", "-t", f"={session_name}")
 
     # SIGKILL any survivors
     for pid in all_pids:
@@ -520,10 +578,7 @@ def cleanup_tmux_session(session_name: str) -> None:
             pass
 
     # Kill any orphaned activity monitors for this session (started with nohup, detached)
-    subprocess.run(
-        ["pkill", "-9", "-f", f"list-panes -t {session_name}"],
-        capture_output=True,
-    )
+    _run_with_timeout("pkill", "-9", "-f", f"list-panes -t {session_name}")
 
 
 @contextmanager
@@ -761,6 +816,36 @@ def get_short_random_string() -> str:
     return uuid4().hex[:8]
 
 
+# Stack of opt-out frames for the autouse "no unexpected loguru warnings"
+# check. Each frame is either None (allow any warning) or a compiled regex
+# (allow only warnings whose message matches it; non-matching ones still fail
+# the test). The top frame governs. capture_loguru and allow_warnings push
+# frames; the autouse fixture in conftest.py pushes a frame when the test
+# carries ``@pytest.mark.allow_warnings``. This name is public because the
+# project conftest reads/mutates it as well as this module.
+WARNINGS_ALLOWED_STACK: list[re.Pattern[str] | None] = []
+
+
+@contextmanager
+def allow_warnings(match: str | None = None) -> Generator[None, None, None]:
+    """Suppress the autouse "no unexpected loguru warnings" check inside this scope.
+
+    The autouse fixture in libs/mngr/conftest.py fails any test that emits a
+    loguru WARNING-level (or higher) record. Wrap code that intentionally emits
+    such records in this context manager. For whole-test opt-out use
+    ``@pytest.mark.allow_warnings`` (optionally ``@pytest.mark.allow_warnings(match=...)``).
+
+    If ``match`` is given, only warning messages whose text matches the regex
+    (via ``re.search``) are allowed; non-matching warnings still fail the test.
+    """
+    pattern = re.compile(match) if match is not None else None
+    WARNINGS_ALLOWED_STACK.append(pattern)
+    try:
+        yield
+    finally:
+        WARNINGS_ALLOWED_STACK.pop()
+
+
 @contextmanager
 def capture_loguru(level: str = "WARNING") -> Generator[StringIO, None, None]:
     """Capture loguru output at the given level into a StringIO buffer.
@@ -768,11 +853,16 @@ def capture_loguru(level: str = "WARNING") -> Generator[StringIO, None, None]:
     Loguru's handlers don't follow CliRunner's sys.stderr replacement, so
     tests that need to verify logged messages should use this context manager
     instead of checking result.output.
+
+    Implicitly opts out of the autouse "no unexpected loguru warnings" check
+    while the context is active, since tests using ``capture_loguru`` are
+    inspecting warnings on purpose.
     """
     log_output = StringIO()
     sink_id = logger.add(log_output, level=level, format="{message}")
     try:
-        yield log_output
+        with allow_warnings():
+            yield log_output
     finally:
         logger.remove(sink_id)
 

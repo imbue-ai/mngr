@@ -61,6 +61,7 @@ def test_list_json_with_no_agents(e2e: E2eSession) -> None:
     assert parsed["agents"] == []
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
@@ -82,6 +83,7 @@ def test_create_named_agent(e2e: E2eSession) -> None:
     expect(list_result.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
@@ -104,6 +106,7 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
     assert len(parsed["agents"]) == 1
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
@@ -125,6 +128,7 @@ def test_create_headless(e2e: E2eSession) -> None:
     expect(list_result.stdout).to_contain("my-task")
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
@@ -144,6 +148,7 @@ def test_create_and_destroy_agent(e2e: E2eSession) -> None:
     expect(list_result.stdout).not_to_contain("my-task")
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
@@ -167,6 +172,7 @@ def test_create_and_rename_agent(e2e: E2eSession) -> None:
     expect(list_result.stdout).not_to_contain("my-task")
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal

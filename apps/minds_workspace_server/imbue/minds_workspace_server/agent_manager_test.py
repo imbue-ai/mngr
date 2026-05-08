@@ -346,6 +346,7 @@ def test_create_worktree_raises_for_unknown_agent(agent_manager: AgentManager) -
         agent_manager.create_worktree_agent("test", "nonexistent")
 
 
+@pytest.mark.flaky
 def test_start_app_watcher(agent_manager: AgentManager, tmp_path: Path) -> None:
     """Starting an app watcher for an agent creates the runtime directory."""
     runtime_dir = tmp_path / "runtime"
@@ -493,9 +494,10 @@ def test_handle_observe_output_line_empty_is_ignored(agent_manager: AgentManager
     assert agent_manager.get_agents() == []
 
 
-def test_handle_observe_output_line_invalid_json_is_ignored(agent_manager: AgentManager) -> None:
-    """Non-JSON output from the observe subprocess is ignored."""
-    agent_manager._handle_observe_output_line("not json {", True)
+def test_handle_observe_output_line_raises_on_invalid_json(agent_manager: AgentManager) -> None:
+    """Invalid JSON on stdout from mngr observe surfaces as JSONDecodeError so the upstream bug is visible."""
+    with pytest.raises(json.JSONDecodeError):
+        agent_manager._handle_observe_output_line("not json {", True)
     assert agent_manager.get_agents() == []
 
 

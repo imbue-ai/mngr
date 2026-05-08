@@ -99,8 +99,8 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr.utils.editor import EditorSession
 from imbue.mngr.utils.git_utils import clone_git_url_to_managed_dir
+from imbue.mngr.utils.git_utils import derive_project_name_for_source
 from imbue.mngr.utils.git_utils import find_git_worktree_root
-from imbue.mngr.utils.git_utils import get_current_git_branch
 from imbue.mngr.utils.git_utils import is_git_url
 from imbue.mngr.utils.git_utils import parse_project_name_from_url
 from imbue.mngr.utils.logging import LoggingConfig
@@ -186,7 +186,7 @@ def _resolve_or_generate_agent_name(address: AgentAddress, opts: CreateCliOption
 # ``_reject_incompatible_headless_flags`` for rationale.
 _HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
     ("edit_message", "--edit-message"),
-    ("attach_command", "--attach-command"),
+    ("session_command", "--session-command"),
     ("connect_command", "--connect-command"),
 )
 
@@ -238,7 +238,7 @@ def _reject_incompatible_headless_flags(
         raise UserInputError(
             f"Headless agent type '{agent_type_name}' does not support: {flags_str}. "
             f"The headless flow streams output and auto-destroys, so flags for the "
-            f"post-create connect/attach phase (e.g. --reconnect, --attach-command), "
+            f"post-create connect/attach phase (e.g. --reconnect, --session-command), "
             f"for send-message-based delivery (--edit-message), and for long-lived "
             f"agents (--reuse, --update, --start-on-boot) do not apply."
         )
@@ -347,7 +347,8 @@ class _CreateCommand(click.Command):
 @optgroup.option("--label", multiple=True, help="Agent label KEY=VALUE [repeatable] [experimental]")
 @optgroup.option(
     "--project",
-    help="Project name for the agent (sets the 'project' label) [default: derived from git remote origin or folder name]",
+    default=".",
+    help="Project name for the agent (sets the 'project' label; '.' inherits from source agent's project label when --from references an agent, else uses the source's git remote origin, else the source's folder name) [default: .]",
 )
 @optgroup.group("Host Options")
 @optgroup.option(
@@ -426,8 +427,9 @@ class _CreateCommand(click.Command):
     "none: run in-place (no transfer). "
     "rsync: copy via rsync (non-git projects). "
     "git-mirror: push all local branches and tags via git (git projects). "
-    "git-worktree: create a git worktree (git projects, local only). "
-    "[default: git-worktree for local git repos, git-mirror for remote git repos, rsync for non-git]",
+    "git-worktree: create a git worktree (git projects; source and target must be on the same host). "
+    "[default: git-worktree when source and target are on the same host (local or remote), "
+    "git-mirror for cross-host git repos, rsync for non-git]",
 )
 @optgroup.group("Git Configuration")
 @optgroup.option(
@@ -520,7 +522,7 @@ class _CreateCommand(click.Command):
     is_flag=True,
     help="Open an editor to compose the initial message (uses $EDITOR). Editor runs in parallel with agent creation. If --message or --message-file is provided, their content is used as initial editor content.",
 )
-@optgroup.option("--attach-command", help="Command to run instead of attaching to main session")
+@optgroup.option("--session-command", help="Command to run instead of attaching to main session")
 @optgroup.option(
     "--connect-command",
     help="Command to run instead of the builtin connect. MNGR_AGENT_NAME and MNGR_SESSION_NAME env vars are set.",
@@ -795,6 +797,7 @@ def _create_agent(
     agent_opts, has_explicit_base = _parse_agent_opts(
         opts=opts,
         address=address,
+        target_host=target_host,
         initial_message=setup.initial_message,
         source_location=setup.resolved_source.location,
         source_agent_state_dir=source_agent_state_dir,
@@ -815,7 +818,7 @@ def _create_agent(
         message=None,
         retry_count=mngr_ctx.config.retry.connect_retry_times,
         retry_delay=mngr_ctx.config.retry.connect_retry_delay,
-        attach_command=opts.attach_command,
+        session_command=opts.session_command,
     )
 
     # If --reuse is set, try to find and reuse an existing agent with the same name
@@ -1027,8 +1030,7 @@ def _rescue_editor_content(
     """Save editor content to a recovery file so the user does not lose their work.
 
     Reads the content from the editor's temp file (which still exists before cleanup)
-    and writes it to ~/.mngr/recovered-message.txt. Uses logger.warning which will be
-    buffered if logging is suppressed and replayed when suppression is disabled.
+    and writes it to ~/.mngr/recovered-message.txt.
     """
     if not editor_session.temp_file_path.exists():
         return
@@ -1053,7 +1055,7 @@ def _rescue_editor_content(
         logger.trace("Failed to write recovery file {}: {}", recovery_path, e)
         return
 
-    logger.warning("Your editor message has been saved to: {}", recovery_path)
+    logger.info("Your editor message has been saved to: {}", recovery_path)
 
 
 def _handle_editor_message(
@@ -1108,25 +1110,18 @@ def _parse_project_name(
 ) -> str:
     """Determine the project name for a new agent.
 
-    Priority: explicit --project flag > source agent's project label > git remote > folder name.
+    Priority: --project flag (when not the literal "." sentinel) > source agent's
+    project label > git remote > folder name. "." is the click default and triggers
+    the derivation chain (it is not used as a literal project name).
     """
-    if opts.project:
+    if opts.project and opts.project != ".":
         return opts.project
-
-    # If creating from an existing agent, inherit its project label
-    if resolved_source.agent is not None:
-        source_project = resolved_source.agent.labels.get("project")
-        if source_project is not None:
-            return source_project
-
-    # Derive from the already-fetched remote URL (works for both local and remote hosts)
-    if remote_url is not None:
-        project_name = parse_project_name_from_url(remote_url)
-        if project_name is not None:
-            return project_name
-
-    # Fall back to the source directory name (resolve to normalize symlinks / '..' components)
-    return resolved_source.location.path.resolve().name
+    source_project_label = resolved_source.agent.labels.get("project") if resolved_source.agent is not None else None
+    return derive_project_name_for_source(
+        resolved_source.location.path,
+        remote_url=remote_url,
+        source_project_label=source_project_label,
+    )
 
 
 def _try_reuse_existing_agent(
@@ -1188,7 +1183,7 @@ def _try_reuse_existing_agent(
     if agent is None:
         # Agent not found on online host - this could happen if the host came online
         # but the agent data is stale. Return None to create a new agent.
-        logger.warning("Agent {} not found on host after starting, will create new agent", agent_name)
+        logger.info("Agent {} not found on host after starting, will create new agent", agent_name)
         return None
 
     # Ensure the agent is started (reusing shared logic from find.py)
@@ -1257,7 +1252,7 @@ def _resolve_source_location(
     # resolve it locally without loading all providers. Loading all
     # providers is expensive and can fail if a provider's external service
     # (e.g. Docker daemon, Modal credentials) is unavailable.
-    if parsed.agent is None and parsed.host is None:
+    if parsed.agent is None and parsed.host_name is None and parsed.provider_name is None:
         source_path = parsed.path if parsed.path is not None else os.getcwd()
         _check_source_does_not_contain_state_dir(Path(source_path), mngr_ctx)
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
@@ -1296,13 +1291,18 @@ def _resolve_target_host(
     return resolved_target_host
 
 
-def _get_current_git_branch(source_location: HostLocation, mngr_ctx: MngrContext) -> str | None:
-    if not source_location.host.is_local:
-        raise NotImplementedError(
-            "Have to re-implement this function so that it works via HostInterface calls instead!"
-        )
+def _get_current_git_branch(source_location: HostLocation) -> str | None:
+    """Return the current git branch at the source location, or None if unavailable.
 
-    return get_current_git_branch(source_location.path, mngr_ctx.concurrency_group)
+    Runs via the host interface so it works for both local and remote sources.
+    """
+    result = source_location.host.execute_idempotent_command(
+        "git rev-parse --abbrev-ref HEAD",
+        cwd=source_location.path,
+    )
+    if not result.success:
+        return None
+    return result.stdout.strip() or None
 
 
 def _is_git_repo(path: Path, cg: ConcurrencyGroup) -> bool:
@@ -1328,9 +1328,27 @@ _TRANSFER_MODE_FROM_CLI: dict[str, TransferMode] = {
 }
 
 
+@pure
+def _is_source_target_same_host(
+    source_location: HostLocation,
+    target_host: DiscoveredHost | NewHostOptions | None,
+) -> bool:
+    """Decide whether the source and target resolve to the same physical host.
+
+    A NewHostOptions target is never the same host (it does not yet exist).
+    A None target means "local default host", which matches a local source.
+    A DiscoveredHost target matches the source iff their host IDs are equal.
+    """
+    if isinstance(target_host, NewHostOptions):
+        return False
+    if target_host is None:
+        return source_location.host.is_local
+    return target_host.host_id == source_location.host.id
+
+
 def _resolve_transfer_mode(
     opts: CreateCliOptions,
-    address: AgentAddress,
+    target_host: DiscoveredHost | NewHostOptions | None,
     source_location: HostLocation,
     mngr_ctx: MngrContext,
     target_path: Path | None,
@@ -1338,21 +1356,21 @@ def _resolve_transfer_mode(
     """Resolve the transfer mode from CLI flags and context.
 
     Validates the combination of transfer mode, project type (git vs non-git),
-    and target locality (local vs remote).
+    and source/target locality. ``git-worktree`` requires source and target to
+    be the same host (the only constraint the worktree implementation actually
+    has); the host need not be local.
     """
     is_git_repo = (
         _is_git_repo(source_location.path, mngr_ctx.concurrency_group) if source_location.host.is_local else True
     )
-    is_remote = (
-        address.provider_name is not None and address.provider_name.lower() != LOCAL_PROVIDER_NAME
-    ) or not source_location.host.is_local
+    is_same_host = _is_source_target_same_host(source_location, target_host)
 
     # Check if target path points to the same location as source
     is_same_path = False
-    if target_path is not None:
+    if target_path is not None and is_same_host:
         target_resolved = target_path.resolve()
         source_resolved = source_location.path.resolve()
-        if target_resolved == source_resolved and not is_remote:
+        if target_resolved == source_resolved:
             is_same_path = True
 
     if opts.transfer is not None:
@@ -1361,9 +1379,9 @@ def _resolve_transfer_mode(
     elif is_same_path:
         # Target path is the same as source path: must be none
         transfer_mode = TransferMode.NONE
-    elif is_git_repo and not is_remote:
+    elif is_git_repo and is_same_host:
         transfer_mode = TransferMode.GIT_WORKTREE
-    elif is_git_repo and is_remote:
+    elif is_git_repo:
         transfer_mode = TransferMode.GIT_MIRROR
     else:
         # Non-git project: use rsync (generates a target directory if needed)
@@ -1388,9 +1406,10 @@ def _resolve_transfer_mode(
             f"Use --transfer=rsync or --transfer=none."
         )
 
-    if is_remote and transfer_mode == TransferMode.GIT_WORKTREE:
+    if not is_same_host and transfer_mode == TransferMode.GIT_WORKTREE:
         raise UserInputError(
-            "--transfer=git-worktree only works for local agents. Use --transfer=git-mirror for remote agents."
+            "--transfer=git-worktree requires the source and target to be on the same host. "
+            "Use --transfer=git-mirror for cross-host transfers."
         )
 
     if transfer_mode == TransferMode.NONE and target_path is not None and not is_same_path:
@@ -1405,6 +1424,7 @@ def _resolve_transfer_mode(
 def _parse_agent_opts(
     opts: CreateCliOptions,
     address: AgentAddress,
+    target_host: DiscoveredHost | NewHostOptions | None,
     initial_message: str | None,
     source_location: HostLocation,
     mngr_ctx: MngrContext,
@@ -1416,7 +1436,7 @@ def _parse_agent_opts(
     parsed_agent_name = _resolve_or_generate_agent_name(address, opts)
 
     # Determine transfer mode
-    transfer_mode = _resolve_transfer_mode(opts, address, source_location, mngr_ctx, target_path)
+    transfer_mode = _resolve_transfer_mode(opts, target_host, source_location, mngr_ctx, target_path)
 
     # Parse --branch flag: [BASE_BRANCH][:NEW_BRANCH]
     base_branch, new_branch_name, has_explicit_base = _parse_branch_flag(opts.branch, parsed_agent_name)
@@ -1437,7 +1457,7 @@ def _parse_agent_opts(
         git = None
     else:
         git = AgentGitOptions(
-            base_branch=base_branch or _get_current_git_branch(source_location, mngr_ctx),
+            base_branch=base_branch or _get_current_git_branch(source_location),
             new_branch_name=new_branch_name,
             is_include_unclean=is_include_unclean,
             is_include_gitignored=opts.include_gitignored,
@@ -1751,9 +1771,10 @@ _CREATE_HELP_METADATA = CommandHelpMetadata(
     [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>]
-    [--env <KEY=VALUE>] [--env-file <FILE>] [--grant <PERMISSION>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
+    [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--grant <PERMISSION>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
-    [--[no-]connect] [--[no-]auto-start] [--] [<AGENT_ARGS>...]""",
+    [--message <TEXT>] [--message-file <FILE>] [--edit-message]
+    [--[no-]connect] [--[no-]auto-start] [-y|--yes] [--] [<AGENT_ARGS>...]""",
     aliases=("c",),
     arguments_description="""- `ADDRESS`: Agent address in `[NAME][@[HOST][.PROVIDER]][:PATH]` format (all parts optional):
   - `NAME` -- agent name only, creates on local host (default)
@@ -1784,9 +1805,10 @@ like headless_command and headless_claude) require the --foreground flag.
 The agent streams its output to stdout and is destroyed when done instead
 of being connected to.
 
-For local agents in git repos, mngr creates a git worktree that shares objects
-with your original repository. For remote agents, the repo is transferred
-by pushing all local branches and tags via git. Use --transfer to override the default.""",
+When the source and the agent are on the same host (local or a single remote
+provider host), mngr creates a git worktree that shares objects with the source
+repository. When they are on different hosts, the repo is transferred by
+pushing all local branches and tags via git. Use --transfer to override the default.""",
     examples=(
         ("Create an agent locally in a new git worktree (default)", "mngr create my-agent"),
         ("Create an agent in a new Docker container", "mngr create my-agent@.docker"),
