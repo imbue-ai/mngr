@@ -224,6 +224,15 @@ def _flatten_for_template(model: _UsageRenderModel, now: int) -> dict[str, str]:
     return flat
 
 
+# Display labels for each window key (parallel to WINDOW_KEYS, kept here
+# rather than in data_types because labels are presentation-only).
+_WINDOW_HUMAN_LABELS: dict[str, str] = {
+    "five_hour": "5h",
+    "seven_day": "7d",
+    "overage": "overage",
+}
+
+
 _NO_DATA_HINT = (
     "No rate-limit data yet. The cache is populated by a per-agent statusline "
     "shim that fires whenever an interactive Claude session renders. The most "
@@ -252,11 +261,11 @@ def _emit_output(
         case OutputFormat.HUMAN:
             any_present = False
             any_with_percentage = False
-            for key, label in (("five_hour", "5h"), ("seven_day", "7d"), ("overage", "overage")):
+            for key in WINDOW_KEYS:
                 snap = model.windows[key]
                 if snap.updated_at is None:
                     continue
-                write_human_line(_format_human_line(label, snap, now))
+                write_human_line(_format_human_line(_WINDOW_HUMAN_LABELS[key], snap, now))
                 any_present = True
                 if snap.used_percentage is not None:
                     any_with_percentage = True
