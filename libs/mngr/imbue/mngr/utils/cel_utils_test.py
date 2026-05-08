@@ -495,9 +495,7 @@ def test_with_tolerant_paths_multiple_paths() -> None:
     assert isinstance(host, celpy.celtypes.MapType)
     assert not isinstance(host, TolerantMapType)
     assert isinstance(host[celpy.json_to_cel("tags")], TolerantMapType)
-    # Non-listed nested map (host.ssh) stays strict and is shared by reference
-    # with the original (since it doesn't lie on any tolerant path).
+    # Non-listed nested maps (host.ssh) stay strict.
     ssh = host[celpy.json_to_cel("ssh")]
     assert isinstance(ssh, celpy.celtypes.MapType)
     assert not isinstance(ssh, TolerantMapType)
-    assert ssh is original["host"][celpy.json_to_cel("ssh")]

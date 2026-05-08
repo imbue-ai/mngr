@@ -1,3 +1,4 @@
+import copy
 from collections.abc import Sequence
 from typing import Any
 
@@ -103,8 +104,8 @@ def with_tolerant_paths(
     cel_context: dict[str, Any],
     paths: Sequence[Sequence[str]],
 ) -> dict[str, Any]:
-    """Return a copy of `cel_context` where each `path` target is wrapped in
-    `TolerantMapType`. The input is unchanged.
+    """Return a deep copy of `cel_context` where each `path` target is wrapped
+    in `TolerantMapType`. The input is unchanged.
 
     Each `path` navigates from the top of the CEL context; every segment of
     the path must already exist, and the target at the end of the path must
@@ -116,64 +117,51 @@ def with_tolerant_paths(
     or any segment's value is not a dict/MapType), so misconfigured paths
     surface immediately rather than silently no-op.
 
-    Sharing: only dicts/MapTypes that lie on a requested path are copied
-    (shallow); other values are shared by reference with the input. The
-    cost is bounded by the depth and number of paths, not the size of the
-    CEL context.
-
     Top-level keys in `cel_context` are plain Python strings; nested MapType
     keys are CEL StringType. Both look up correctly with plain `str` because
     StringType is a `str` subclass with consistent hash/eq.
     """
     if not paths:
         return cel_context
-    return _wrap_paths_recursively(cel_context, [tuple(p) for p in paths])
-
-
-def _wrap_paths_recursively(node: Any, paths: Sequence[tuple[str, ...]]) -> Any:
-    """Return a copy of `node` with `TolerantMapType` applied at each `path`.
-
-    `paths` are remaining suffixes from the perspective of `node`; an empty
-    path means "wrap `node` itself." Recurses into children specified by the
-    first segment of any non-empty path; children not on any path are shared
-    by reference.
-
-    Raises TypeError if a path's target (or any prefix segment) is not a
-    dict/MapType, or if a path's segment is missing entirely from its parent
-    dict. Both cases signal a programming error in the caller's `paths`
-    argument; the precondition is documented on `with_tolerant_paths`. We
-    fail loud rather than silent-no-op so misconfigured paths (e.g. a typoed
-    segment name) surface immediately.
-    """
-    wrap_here = any(len(p) == 0 for p in paths)
-    descend = [p for p in paths if len(p) > 0]
-
-    if not isinstance(node, dict):
-        raise TypeError(
-            f"with_tolerant_paths: cannot descend into / wrap non-dict node "
-            f"of type {type(node).__name__}; check that every path targets a "
-            f"MapType in the CEL context"
-        )
-
-    new_node: dict[Any, Any] = dict(node)
-    by_first: dict[str, list[tuple[str, ...]]] = {}
-    for path in descend:
-        first, *rest = path
-        by_first.setdefault(first, []).append(tuple(rest))
-    for key, sub_paths in by_first.items():
-        if key not in new_node:
+    new_context = copy.deepcopy(cel_context)
+    for path in paths:
+        *prefix, last = path
+        parent: Any = new_context
+        for step in prefix:
+            if not isinstance(parent, dict):
+                raise TypeError(
+                    f"with_tolerant_paths: cannot descend through non-dict node "
+                    f"of type {type(parent).__name__} at path step {step!r}; check "
+                    f"that every path targets a MapType in the CEL context"
+                )
+            if step not in parent:
+                raise TypeError(
+                    f"with_tolerant_paths: path segment {step!r} is not present "
+                    f"in node with keys {sorted(str(k) for k in parent)!r}; "
+                    f"check `paths` for a typo or unsupported path"
+                )
+            parent = parent[step]
+        if not isinstance(parent, dict):
             raise TypeError(
-                f"with_tolerant_paths: path segment {key!r} is not present "
-                f"in node with keys {sorted(str(k) for k in new_node)!r}; "
-                f"check that every path targets a MapType in the CEL context"
+                f"with_tolerant_paths: cannot wrap non-dict node of type "
+                f"{type(parent).__name__} at path target {last!r}; check that "
+                f"every path targets a MapType in the CEL context"
             )
-        new_node[key] = _wrap_paths_recursively(new_node[key], sub_paths)
-
-    if wrap_here:
-        return TolerantMapType(new_node)
-    if isinstance(node, celpy.celtypes.MapType):
-        return celpy.celtypes.MapType(new_node)
-    return new_node
+        if last not in parent:
+            raise TypeError(
+                f"with_tolerant_paths: path target {last!r} is not present in "
+                f"node with keys {sorted(str(k) for k in parent)!r}; check "
+                f"`paths` for a typo or unsupported path"
+            )
+        target = parent[last]
+        if not isinstance(target, dict):
+            raise TypeError(
+                f"with_tolerant_paths: target at path-final segment {last!r} is "
+                f"a {type(target).__name__}, not a MapType; tolerance only "
+                f"applies to dict-like CEL values"
+            )
+        parent[last] = TolerantMapType(target)
+    return new_context
 
 
 def apply_compiled_cel_filters(
