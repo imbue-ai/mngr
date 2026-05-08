@@ -128,7 +128,9 @@ def ensure_gateway(ctx: click.Context, **kwargs: Any) -> None:
     latchkey_binary = resolve_latchkey_binary(opts.latchkey_binary)
 
     instance = Latchkey(latchkey_binary=latchkey_binary, latchkey_directory=latchkey_dir)
-    instance.initialize(data_dir=latchkey_dir)
+    # No explicit ``data_dir``: defaults to ``latchkey_directory``, which is
+    # what we want here -- the CLI uses one path for both concerns.
+    instance.initialize()
 
     try:
         info = instance.ensure_gateway_started()

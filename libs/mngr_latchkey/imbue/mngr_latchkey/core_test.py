@@ -75,6 +75,26 @@ def test_ensure_gateway_started_requires_initialize(tmp_path: Path) -> None:
         manager.ensure_gateway_started()
 
 
+def test_initialize_defaults_data_dir_to_latchkey_directory(tmp_path: Path) -> None:
+    """Standalone callers can omit ``data_dir`` and reuse ``latchkey_directory``.
+
+    The CLI relies on this so it doesn't have to pass the same path twice.
+    """
+    manager = Latchkey(latchkey_directory=tmp_path)
+    manager.initialize()
+    # Internal state was set; a subsequent ``ensure_gateway_started`` would
+    # try to look for the binary, which it cannot find here -- but that
+    # path is already covered by the binary-missing test below. We just
+    # confirm the call returned without raising.
+
+
+def test_initialize_without_data_dir_or_latchkey_directory_raises(tmp_path: Path) -> None:
+    """Without either, there's no path to persist state under."""
+    manager = Latchkey()
+    with pytest.raises(LatchkeyNotInitializedError):
+        manager.initialize()
+
+
 def test_ensure_gateway_started_raises_when_binary_missing(tmp_path: Path) -> None:
     manager = Latchkey(latchkey_binary=str(tmp_path / "definitely-does-not-exist"))
     manager.initialize(data_dir=tmp_path)

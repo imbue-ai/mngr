@@ -453,7 +453,7 @@ class Latchkey(MutableModel):
 
     # -- Gateway lifecycle ---------------------------------------------------
 
-    def initialize(self, data_dir: Path) -> None:
+    def initialize(self, data_dir: Path | None = None) -> None:
         """Load the persisted gateway info from ``data_dir``, adopting it if alive.
 
         A dead record is removed from disk. A live, still-ours gateway is
@@ -463,11 +463,25 @@ class Latchkey(MutableModel):
         terminated best-effort) since the new architecture only uses one
         shared gateway.
 
+        ``data_dir`` defaults to ``self.latchkey_directory`` -- which is
+        what every standalone caller (e.g. the ``mngr latchkey ensure-gateway``
+        CLI) wants. Minds passes the two as different paths because its
+        plugin metadata lives in ``~/.minds`` while the upstream credential
+        store lives in ``~/.minds/latchkey``; that case keeps working
+        because the explicit argument wins over the default.
+
         Liveness probes include a TCP connect (up to
         ``_LIVENESS_CONNECT_TIMEOUT_SECONDS``), which is why they run
         outside the lock. ``initialize()`` is only expected to be called
         once before any concurrent use, so there is no real contention here.
         """
+        if data_dir is None:
+            if self.latchkey_directory is None:
+                raise LatchkeyNotInitializedError(
+                    "Latchkey.initialize() requires either an explicit data_dir or a "
+                    "latchkey_directory set on the instance."
+                )
+            data_dir = self.latchkey_directory
         existing = load_gateway_info(data_dir)
         is_alive = existing is not None and _is_info_alive(existing)
 
