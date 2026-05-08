@@ -125,12 +125,17 @@ def _format_duration(seconds: int) -> str:
 
 @pure
 def _format_human_line(window_label: str, window: WindowSnapshot, now: int) -> str:
-    """Render one window's status as a single human-readable line."""
-    parts = [f"{window_label}:"]
-    if window.used_percentage is not None:
-        parts.append(f"{window.used_percentage:.0f}% used,")
-    else:
-        parts.append("no data,")
+    """Render one window's status as a single human-readable line.
+
+    When ``used_percentage`` is missing the "resets in ..." suffix would
+    render as misleading filler (the reset timestamp on its own is not
+    actionable without a usage number, and "resets in now" is just noise),
+    so we collapse the line to a bare "no data" instead. The catch-all
+    hint emitted by ``_emit_output`` covers the wire-up advice for that case.
+    """
+    if window.used_percentage is None:
+        return f"{window_label}: no data"
+    parts = [f"{window_label}: {window.used_percentage:.0f}% used,"]
     if window.resets_at is not None:
         seconds_until = max(0, window.resets_at - now)
         parts.append(f"resets in {_format_duration(seconds_until)}")
