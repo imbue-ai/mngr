@@ -45,9 +45,9 @@ _DEFAULT_WINDOW_LABELS: dict[str, str] = {
 }
 
 _NO_DATA_HINT = (
-    "No usage data yet. Run an interactive agent (e.g. `mngr create ... claude` then send a "
-    "prompt). Pre-existing agents need re-provisioning. Requires the matching writer plugin "
-    "(e.g. imbue-mngr-claude-usage) installed in the env that runs `mngr`."
+    "No usage data yet -- check that a writer plugin (e.g. imbue-mngr-claude-usage) is "
+    "installed in the env running `mngr`, and that you've sent a prompt to an agent created "
+    "after that plugin was installed."
 )
 
 
@@ -422,7 +422,16 @@ def _emit_output(
     format_template: str | None,
     now: int,
 ) -> None:
-    """Write output for zero or more sources, freshest-first."""
+    """Write output for zero or more sources, freshest-first.
+
+    The no-data hint is emitted as a logger.warning rather than a stdout line,
+    so it (a) lands on stderr and doesn't pollute machine-readable output,
+    (b) matches the existing stale-cache warning's channel, and (c) carries
+    actionable info regardless of which output format the caller chose.
+    Two no-data cases trigger it: zero sources (no events files anywhere)
+    and "every source's events lack used_percentage" (renders as percentage-
+    less window lines, but still actionable for the user).
+    """
     if format_template is not None:
         # Format templates always reference the primary (freshest) source's
         # windows at top level for ergonomics; multi-source consumers should
@@ -442,6 +451,9 @@ def _emit_output(
         write_human_line(line)
         return
 
+    if not snapshots_with_models:
+        logger.warning(_NO_DATA_HINT)
+
     match output_format:
         case OutputFormat.JSON | OutputFormat.JSONL:
             payload: dict[str, Any] = {
@@ -451,7 +463,6 @@ def _emit_output(
             emit_final_json(payload)
         case OutputFormat.HUMAN:
             if not snapshots_with_models:
-                write_human_line(_NO_DATA_HINT)
                 return
             multi_source = len(snapshots_with_models) > 1
             any_with_percentage_anywhere = False
@@ -467,7 +478,7 @@ def _emit_output(
                 if section_had_percentage and model.is_stale and model.snapshot_updated_at is not None:
                     stale_sources.append((model.source_name, max(0, now - model.snapshot_updated_at)))
             if not any_with_percentage_anywhere:
-                write_human_line(_NO_DATA_HINT)
+                logger.warning(_NO_DATA_HINT)
             for source_name, age_seconds in stale_sources:
                 if multi_source:
                     logger.warning(
