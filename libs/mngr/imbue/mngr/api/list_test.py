@@ -27,12 +27,12 @@ from imbue.mngr.api.list import ProviderErrorInfo
 from imbue.mngr.api.list import WarningInfo
 from imbue.mngr.api.list import _ListAgentsParams
 from imbue.mngr.api.list import _apply_cel_filters
+from imbue.mngr.api.list import _capture_warnings_into
 from imbue.mngr.api.list import _collect_and_emit_details_for_host
 from imbue.mngr.api.list import _construct_discover_and_emit_for_provider
 from imbue.mngr.api.list import _handle_listing_error
 from imbue.mngr.api.list import _maybe_write_full_discovery_snapshot
 from imbue.mngr.api.list import _process_host_with_error_handling
-from imbue.mngr.api.list import _register_warning_capture_sink
 from imbue.mngr.api.list import agent_details_to_cel_context
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrContext
@@ -2018,23 +2018,20 @@ def test_process_host_with_error_handling_abort_mode_propagates_error(
 
 
 # =============================================================================
-# WarningInfo capture: _register_warning_capture_sink + result.warnings plumbing
+# WarningInfo capture: _capture_warnings_into + result.warnings plumbing
 # =============================================================================
 
 
 @pytest.mark.allow_warnings(match=r"captured-warning-test")
-def test_register_warning_capture_sink_captures_warning_into_result_warnings() -> None:
+def test_capture_warnings_into_captures_warning_into_result_warnings() -> None:
     """The per-call sink installs a loguru handler that records WARNING messages
     into result.warnings. Providers continue to call logger.warning(...) as today;
     the existing stderr and file sinks remain unaffected.
     """
     result = ListResult()
     lock = Lock()
-    sink_id = _register_warning_capture_sink(result, lock, on_warning=None)
-    try:
+    with _capture_warnings_into(result, lock, on_warning=None):
         logger.warning("captured-warning-test message")
-    finally:
-        logger.remove(sink_id)
 
     assert len(result.warnings) == 1
     assert isinstance(result.warnings[0], WarningInfo)
@@ -2042,16 +2039,13 @@ def test_register_warning_capture_sink_captures_warning_into_result_warnings() -
 
 
 @pytest.mark.allow_warnings(match=r"captured-warning-test")
-def test_register_warning_capture_sink_invokes_on_warning_callback() -> None:
+def test_capture_warnings_into_invokes_on_warning_callback() -> None:
     """The sink fires on_warning for each captured warning, parallel to on_error."""
     result = ListResult()
     lock = Lock()
     captured: list[WarningInfo] = []
-    sink_id = _register_warning_capture_sink(result, lock, on_warning=captured.append)
-    try:
+    with _capture_warnings_into(result, lock, on_warning=captured.append):
         logger.warning("captured-warning-test from callback")
-    finally:
-        logger.remove(sink_id)
 
     assert len(captured) == 1
     assert captured[0].message == "captured-warning-test from callback"
@@ -2061,7 +2055,7 @@ def test_register_warning_capture_sink_invokes_on_warning_callback() -> None:
 
 
 @pytest.mark.allow_warnings(match=r"unrelated-error-marker")
-def test_register_warning_capture_sink_filters_to_exactly_warning_level() -> None:
+def test_capture_warnings_into_filters_to_exactly_warning_level() -> None:
     """Only WARNING-level records reach result.warnings.
 
     INFO/DEBUG/TRACE are below the threshold; ERROR/CRITICAL are above. ERROR
@@ -2072,14 +2066,11 @@ def test_register_warning_capture_sink_filters_to_exactly_warning_level() -> Non
     """
     result = ListResult()
     lock = Lock()
-    sink_id = _register_warning_capture_sink(result, lock, on_warning=None)
-    try:
+    with _capture_warnings_into(result, lock, on_warning=None):
         logger.info("info should not be captured")
         logger.debug("debug should not be captured")
         logger.trace("trace should not be captured")
         logger.error("unrelated-error-marker should not be captured into warnings")
-    finally:
-        logger.remove(sink_id)
 
     assert result.warnings == []
 

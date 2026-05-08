@@ -1,11 +1,12 @@
 from collections.abc import Callable
+from collections.abc import Iterator
 from collections.abc import Sequence
 from concurrent.futures import Future
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from threading import Lock
 from typing import Any
-from typing import cast
 
 from loguru import logger
 from pydantic import Field
@@ -56,6 +57,12 @@ class ErrorInfo(FrozenModel):
         return cls(exception_type=type(exception).__name__, message=str(exception))
 
 
+class WarningInfo(FrozenModel):
+    """Information about a warning encountered during listing."""
+
+    message: str = Field(description="The warning message")
+
+
 class ProviderErrorInfo(ErrorInfo):
     """Error information with provider context."""
 
@@ -101,26 +108,12 @@ class AgentErrorInfo(ErrorInfo):
         )
 
 
-class WarningInfo(FrozenModel):
-    """Information about a non-fatal warning encountered during listing.
-
-    Captured from `logger.warning(...)` calls (typically from providers reporting
-    "not configured" / "unavailable" states) via a per-call loguru sink, and
-    surfaced through the structured output channels (jsonl / json) so
-    programmatic consumers can see what humans see on stderr.
-    """
-
-    message: str = Field(description="The warning message as logged")
-
-
 class ListResult(MutableModel):
     """Result of listing agents."""
 
     agents: list[AgentDetails] = Field(default_factory=list, description="List of agents with their full information")
     errors: list[ErrorInfo] = Field(default_factory=list, description="Errors encountered while listing")
-    warnings: list[WarningInfo] = Field(
-        default_factory=list, description="Non-fatal warnings logged during listing (e.g. provider not configured)"
-    )
+    warnings: list[WarningInfo] = Field(default_factory=list, description="Warnings encountered while listing")
 
 
 class _ListAgentsParams(FrozenModel):
@@ -192,12 +185,7 @@ def list_agents(
             field_generators=field_generators,
         )
 
-        # Capture WARNING-level loguru records into result.warnings so structured
-        # consumers (--format json/jsonl) see what stderr already shows. Providers
-        # call `logger.warning(...)` as today; the existing stderr and file sinks
-        # are unaffected -- this just adds a third receiver scoped to this call.
-        warning_handler_id = _register_warning_capture_sink(result, results_lock, on_warning)
-        try:
+        with _capture_warnings_into(result, results_lock, on_warning):
             if is_streaming:
                 # Streaming mode: each provider loads hosts, gets agent refs, and processes
                 # hosts immediately -- so fast providers fire on_agent callbacks while slow
@@ -220,8 +208,6 @@ def list_agents(
                     results_lock=results_lock,
                     reset_caches=reset_caches,
                 )
-        finally:
-            logger.remove(warning_handler_id)
 
     except MngrError as e:
         if error_behavior == ErrorBehavior.ABORT:
@@ -235,59 +221,37 @@ def list_agents(
     return result
 
 
-class _WarningCaptureSink(MutableModel):
-    """Callable loguru sink that records WARNING messages into result.warnings.
-
-    Mirrors the callable-state pattern used by _LimitedJsonlEmitter et al. in
-    cli/list.py: holds the captured state (result, shared lock, optional
-    callback) on the instance and exposes __call__ as the loguru sink. Stores
-    the raw `record["message"]` (unformatted producer text) rather than
-    loguru's stringified output so consumers see exactly what the producer
-    wrote.
-    """
-
-    model_config = {"arbitrary_types_allowed": True}
-    result: ListResult
-    results_lock: Lock
-    on_warning: Callable[[WarningInfo], None] | None
-
-    def __call__(self, message: Any) -> None:
-        warning_info = WarningInfo(message=message.record["message"])
-        with self.results_lock:
-            self.result.warnings.append(warning_info)
-        if self.on_warning:
-            self.on_warning(warning_info)
-
-
-def _register_warning_capture_sink(
+@contextmanager
+def _capture_warnings_into(
     result: ListResult,
     results_lock: Lock,
     on_warning: Callable[[WarningInfo], None] | None,
-) -> int:
-    """Register a per-call loguru sink that captures WARNING records into result.warnings.
+) -> Iterator[None]:
+    """Capture WARNING-level loguru records into ``result.warnings`` for the duration of the block."""
 
-    Returns the handler ID so the caller can `logger.remove(...)` it in a finally block.
-    The sink fires from whichever thread emitted the log; result.warnings.append is
-    serialized via results_lock to match the rest of the listing pipeline.
+    def sink(message: Any) -> None:
+        warning_info = WarningInfo(message=message.record["message"])
+        with results_lock:
+            result.warnings.append(warning_info)
+        if on_warning:
+            on_warning(warning_info)
 
-    Filters to exactly WARNING level (not "WARNING and above") so ERROR records don't
-    duplicate into result.warnings -- those are already represented in result.errors
-    via the per-provider catch path.
-    """
-    sink = _WarningCaptureSink(result=result, results_lock=results_lock, on_warning=on_warning)
-    # Cast: loguru.add expects Callable[[loguru.Message], None]; the type checker
-    # doesn't auto-detect a pydantic-model __call__ as a Callable, so we widen
-    # explicitly. Runtime call dispatch is unaffected.
-    return logger.add(cast(Any, sink), level="WARNING", filter=_is_warning_level, format="{message}")
-
-
-def _is_warning_level(record: Any) -> bool:
-    """Loguru filter: keep only records at exactly WARNING level.
-
-    Typed as Any because loguru's Record type isn't exposed at runtime;
-    the field shape (record["level"].name) is the documented public API.
-    """
-    return record["level"].name == "WARNING"
+    handler_id = logger.add(
+        sink,
+        level="WARNING",
+        filter=lambda record: record["level"].name == "WARNING",
+        format="{message}",
+    )
+    try:
+        yield
+    finally:
+        # Tolerate handler removal mid-call (e.g. setup_logging() calls
+        # logger.remove() with no arg, wiping all handlers); matches the
+        # pattern used by the log_warnings fixture and capture_loguru.
+        try:
+            logger.remove(handler_id)
+        except ValueError:
+            pass
 
 
 def _maybe_write_full_discovery_snapshot(
