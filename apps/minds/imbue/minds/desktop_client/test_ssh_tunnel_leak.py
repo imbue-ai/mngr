@@ -31,13 +31,14 @@ import socket
 import threading
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 import paramiko
 import pytest
+from pydantic import ConfigDict
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.desktop_client.ssh_tunnel import _REVERSE_TUNNEL_MAX_REPAIR_FAILURES
@@ -155,14 +156,17 @@ class _InProcessSSHServer:
         self._accept_thread.join(timeout=3.0)
 
 
-@dataclass
-class _TunnelTestEnv:
+class _TunnelTestEnv(FrozenModel):
     """Shared scaffolding for a single test: manager + in-process sshd + key/template.
 
     Returned by the ``tunnel_test_env`` fixture. ``ssh_info()`` builds a
     fully-resolved ``RemoteSSHInfo`` that points at the in-process server
     so tests don't have to know about the port.
     """
+
+    # Holds non-pydantic types (SSHTunnelManager, _InProcessSSHServer); same
+    # pattern as ``_ForwardedTunnelHandler`` in ssh_tunnel.py.
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
     manager: SSHTunnelManager
     server: _InProcessSSHServer

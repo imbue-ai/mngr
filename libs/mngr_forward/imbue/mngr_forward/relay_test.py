@@ -67,8 +67,7 @@ def test_relay_data_terminates_when_channel_has_received_eof() -> None:
     relay_thread.join(timeout=3.0)
     try:
         assert not relay_thread.is_alive(), (
-            "relay thread should have terminated on EOF-received channel; "
-            "without the fix it spins forever"
+            "relay thread should have terminated on EOF-received channel; without the fix it spins forever"
         )
     finally:
         sock_b.close()
