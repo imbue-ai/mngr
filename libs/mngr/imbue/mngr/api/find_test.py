@@ -991,6 +991,21 @@ class _TimeoutCapturingAgent(BaseAgent[AgentTypeConfig]):
         self.captured_timeouts.append(timeout)
 
 
+class _LockObservingAgent(BaseAgent[AgentTypeConfig]):
+    """Test agent that records whether the host lock is held during start."""
+
+    is_lock_held_during_start: list[bool] = Field(default_factory=list)
+
+    def wait_for_ready_signal(
+        self,
+        is_creating: bool,
+        start_action: Callable[[], None],
+        timeout: float | None = None,
+    ) -> None:
+        # Capture lock state at the moment we would actually invoke the start.
+        self.is_lock_held_during_start.append(self.host.is_lock_held())
+
+
 @pytest.mark.tmux
 def test_ensure_agent_started_uses_per_agent_ready_timeout(
     local_provider: LocalProviderInstance,
@@ -1035,3 +1050,32 @@ def test_ensure_agent_started_respects_env_var_when_data_unset(
     ensure_agent_started(agent, agent.host, is_start_desired=True)
 
     assert agent.captured_timeouts == [37.5]
+
+
+@pytest.mark.tmux
+def test_ensure_agent_started_holds_host_lock_during_start(
+    local_provider: LocalProviderInstance,
+    temp_work_dir: Path,
+) -> None:
+    """ensure_agent_started must hold the host lock while starting the agent.
+
+    Regression test for issue 1095: without the lock, the idle shutdown script
+    can trigger between tmux session creation and the agent becoming healthy,
+    corrupting the new session and leaving the agent in an inconsistent state.
+    """
+    agent = create_test_agent(
+        local_provider,
+        temp_work_dir,
+        agent_config=None,
+        agent_type=None,
+        extra_data=None,
+        agent_class=_LockObservingAgent,
+    )
+    assert isinstance(agent, _LockObservingAgent)
+    assert agent.get_lifecycle_state() == AgentLifecycleState.STOPPED
+    assert agent.host.is_lock_held() is False
+
+    ensure_agent_started(agent, agent.host, is_start_desired=True)
+
+    assert agent.is_lock_held_during_start == [True]
+    assert agent.host.is_lock_held() is False
