@@ -1,4 +1,6 @@
 from collections.abc import Sequence
+from datetime import datetime
+from datetime import timezone
 from typing import Any
 from typing import Literal
 from typing import Protocol
@@ -27,6 +29,12 @@ class KanpanFieldTypeError(KanpanDataSourceError, TypeError):
     ...
 
 
+class OldestCreatedNoInputsError(KanpanDataSourceError, ValueError):
+    """Raised when oldest_created is called with no non-None inputs."""
+
+    ...
+
+
 class CellDisplay(FrozenModel):
     """Everything the column renderer needs for one cell."""
 
@@ -38,6 +46,15 @@ class CellDisplay(FrozenModel):
 class FieldValue(FrozenModel):
     """Base for all field values. Subclass per data type."""
 
+    # Required (no default): forgetting to propagate `created` from cached
+    # inputs to derived values would silently mark stale data as fresh.
+    # Making this required means pydantic raises ValidationError at construction
+    # if a code path forgets it.
+    created: datetime = Field(
+        description="Timezone-aware UTC timestamp of when this value was computed. "
+        "For values derived from cached fields, must be the min of the inputs' created.",
+    )
+
     def display(self) -> CellDisplay:
         return CellDisplay(text=str(self))
 
@@ -48,6 +65,24 @@ class FieldValue(FrozenModel):
         Subclasses may override to provide more structured env vars (e.g. PR number, URL).
         """
         return {f"MNGR_FIELD_{key.upper()}": self.display().text}
+
+
+def now_utc() -> datetime:
+    """Current UTC timestamp. Helper to keep call sites short."""
+    return datetime.now(timezone.utc)
+
+
+def oldest_created(*fields: FieldValue | None) -> datetime:
+    """Minimum 'created' across non-None inputs.
+
+    Raises OldestCreatedNoInputsError if all inputs are None -- callers
+    should pass now_utc() explicitly when there are no cached inputs to
+    inherit from, rather than relying on a silent fallback.
+    """
+    timestamps = [f.created for f in fields if f is not None]
+    if not timestamps:
+        raise OldestCreatedNoInputsError("oldest_created requires at least one non-None FieldValue input")
+    return min(timestamps)
 
 
 class StringField(FieldValue):

@@ -1,4 +1,6 @@
 import json
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -76,12 +78,16 @@ def test_repo_path_from_labels_without_remote() -> None:
 
 
 def test_compute_section_muted() -> None:
-    fields: dict[str, FieldValue] = {FIELD_MUTED: BoolField(value=True)}
+    fields: dict[str, FieldValue] = {
+        FIELD_MUTED: BoolField(value=True, created=datetime(2026, 1, 1, 0, 0, 1, tzinfo=timezone.utc))
+    }
     assert compute_section(fields) == BoardSection.MUTED
 
 
 def test_compute_section_muted_false() -> None:
-    fields: dict[str, FieldValue] = {FIELD_MUTED: BoolField(value=False)}
+    fields: dict[str, FieldValue] = {
+        FIELD_MUTED: BoolField(value=False, created=datetime(2026, 1, 1, 0, 0, 2, tzinfo=timezone.utc))
+    }
     assert compute_section(fields) == BoardSection.STILL_COOKING
 
 
@@ -91,22 +97,30 @@ def test_compute_section_no_pr() -> None:
 
 
 def test_compute_section_draft_pr() -> None:
-    fields: dict[str, FieldValue] = {FIELD_PR: make_pr_field(is_draft=True)}
+    fields: dict[str, FieldValue] = {
+        FIELD_PR: make_pr_field(is_draft=True, created=datetime(2026, 1, 1, 0, 0, 3, tzinfo=timezone.utc))
+    }
     assert compute_section(fields) == BoardSection.PR_DRAFT
 
 
 def test_compute_section_merged_pr() -> None:
-    fields: dict[str, FieldValue] = {FIELD_PR: make_pr_field(state=PrState.MERGED)}
+    fields: dict[str, FieldValue] = {
+        FIELD_PR: make_pr_field(state=PrState.MERGED, created=datetime(2026, 1, 1, 0, 0, 4, tzinfo=timezone.utc))
+    }
     assert compute_section(fields) == BoardSection.PR_MERGED
 
 
 def test_compute_section_closed_pr() -> None:
-    fields: dict[str, FieldValue] = {FIELD_PR: make_pr_field(state=PrState.CLOSED)}
+    fields: dict[str, FieldValue] = {
+        FIELD_PR: make_pr_field(state=PrState.CLOSED, created=datetime(2026, 1, 1, 0, 0, 5, tzinfo=timezone.utc))
+    }
     assert compute_section(fields) == BoardSection.PR_CLOSED
 
 
 def test_compute_section_open_pr_no_ci() -> None:
-    fields: dict[str, FieldValue] = {FIELD_PR: make_pr_field()}
+    fields: dict[str, FieldValue] = {
+        FIELD_PR: make_pr_field(created=datetime(2026, 1, 1, 0, 0, 6, tzinfo=timezone.utc))
+    }
     assert compute_section(fields) == BoardSection.PR_BEING_REVIEWED
 
 
@@ -120,25 +134,31 @@ def test_compute_section_open_pr_ignores_ci(ci_status: CiStatus) -> None:
     # PRS_FAILED is reserved for the "could not load PR data" case (see
     # test_compute_section_pr_fetch_failed below).
     fields: dict[str, FieldValue] = {
-        FIELD_PR: make_pr_field(),
-        FIELD_CI: CiField(status=ci_status),
+        FIELD_PR: make_pr_field(created=datetime(2026, 1, 1, 0, 0, 7, tzinfo=timezone.utc)),
+        FIELD_CI: CiField(status=ci_status, created=datetime(2026, 1, 1, 0, 0, 8, tzinfo=timezone.utc)),
     }
     assert compute_section(fields) == BoardSection.PR_BEING_REVIEWED
 
 
 def test_compute_section_pr_fetch_failed() -> None:
-    fields: dict[str, FieldValue] = {FIELD_PR: PrFetchFailedField(repo="org/repo")}
+    fields: dict[str, FieldValue] = {
+        FIELD_PR: PrFetchFailedField(repo="org/repo", created=datetime(2026, 1, 1, 0, 0, 9, tzinfo=timezone.utc))
+    }
     assert compute_section(fields) == BoardSection.PRS_FAILED
 
 
 def test_compute_section_wrong_muted_type() -> None:
-    fields: dict[str, FieldValue] = {FIELD_MUTED: StringField(value="yes")}
+    fields: dict[str, FieldValue] = {
+        FIELD_MUTED: StringField(value="yes", created=datetime(2026, 1, 1, 0, 0, 10, tzinfo=timezone.utc))
+    }
     with pytest.raises(KanpanFieldTypeError, match="Expected BoolField"):
         compute_section(fields)
 
 
 def test_compute_section_wrong_pr_type() -> None:
-    fields: dict[str, FieldValue] = {FIELD_PR: StringField(value="oops")}
+    fields: dict[str, FieldValue] = {
+        FIELD_PR: StringField(value="oops", created=datetime(2026, 1, 1, 0, 0, 11, tzinfo=timezone.utc))
+    }
     with pytest.raises(KanpanFieldTypeError, match="Expected PrField"):
         compute_section(fields)
 
@@ -240,7 +260,7 @@ def test_run_data_sources_parallel_empty() -> None:
 
 def test_run_data_sources_parallel_single_source() -> None:
     agent = AgentName("agent-1")
-    pr = make_pr_field()
+    pr = make_pr_field(created=datetime(2026, 1, 1, 0, 0, 12, tzinfo=timezone.utc))
     source = _MockDataSource("github", {agent: {"pr": pr}})
     results, errors = _run_data_sources_parallel([source], (), {}, make_mngr_ctx())
     assert "github" in results
@@ -262,8 +282,8 @@ def test_run_data_sources_parallel_source_raises_exception() -> None:
 
 def test_run_data_sources_parallel_multiple_sources() -> None:
     a1 = AgentName("a1")
-    pr = make_pr_field()
-    ci = CiField(status=CiStatus.PASSING)
+    pr = make_pr_field(created=datetime(2026, 1, 1, 0, 0, 13, tzinfo=timezone.utc))
+    ci = CiField(status=CiStatus.PASSING, created=datetime(2026, 1, 1, 0, 0, 14, tzinfo=timezone.utc))
     s1 = _MockDataSource("github", {a1: {"pr": pr}})
     s2 = _MockDataSource("git_info", {a1: {"ci": ci}})
     results, errors = _run_data_sources_parallel([s1, s2], (), {}, make_mngr_ctx())
@@ -424,7 +444,7 @@ def test_save_field_cache_writes_json(tmp_path: Path) -> None:
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
     agent_name = AgentName("agent-1")
     cached: dict[AgentName, dict[str, FieldValue]] = {
-        agent_name: {"pr_count": StringField(value="3")},
+        agent_name: {"pr_count": StringField(value="3", created=datetime(2026, 1, 1, 0, 0, 15, tzinfo=timezone.utc))},
     }
     save_field_cache(ctx, cached)
     cache_file = tmp_path / "kanpan" / "field_cache.json"
@@ -442,8 +462,9 @@ def test_save_load_field_cache_roundtrip(tmp_path: Path) -> None:
     """Fields saved with save_field_cache are correctly restored by load_field_cache."""
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
     agent_name = AgentName("agent-1")
+    created = datetime(2026, 1, 1, 0, 0, 16, tzinfo=timezone.utc)
     original: dict[AgentName, dict[str, FieldValue]] = {
-        agent_name: {"status": StringField(value="hello")},
+        agent_name: {"status": StringField(value="hello", created=created)},
     }
     data_sources = [_make_mock_data_source("status", StringField)]
     save_field_cache(ctx, original)
@@ -452,6 +473,7 @@ def test_save_load_field_cache_roundtrip(tmp_path: Path) -> None:
     field = loaded[agent_name]["status"]
     assert isinstance(field, StringField)
     assert field.value == "hello"
+    assert field.created == created
 
 
 def test_save_load_field_cache_polymorphic_slot_roundtrip(tmp_path: Path) -> None:
@@ -464,9 +486,15 @@ def test_save_load_field_cache_polymorphic_slot_roundtrip(tmp_path: Path) -> Non
     a2 = AgentName("a2")
     a3 = AgentName("a3")
     original: dict[AgentName, dict[str, FieldValue]] = {
-        a1: {FIELD_PR: make_pr_field(number=42)},
-        a2: {FIELD_PR: CreatePrUrlField(url="https://example.com/compare")},
-        a3: {FIELD_PR: PrFetchFailedField(repo="org/repo")},
+        a1: {FIELD_PR: make_pr_field(number=42, created=datetime(2026, 1, 1, 0, 0, 17, tzinfo=timezone.utc))},
+        a2: {
+            FIELD_PR: CreatePrUrlField(
+                url="https://example.com/compare", created=datetime(2026, 1, 1, 0, 0, 18, tzinfo=timezone.utc)
+            )
+        },
+        a3: {
+            FIELD_PR: PrFetchFailedField(repo="org/repo", created=datetime(2026, 1, 1, 0, 0, 19, tzinfo=timezone.utc))
+        },
     }
     save_field_cache(ctx, original)
 
@@ -486,6 +514,17 @@ def test_load_field_cache_returns_empty_on_corrupt_json(tmp_path: Path) -> None:
     cache_dir = tmp_path / "kanpan"
     cache_dir.mkdir(parents=True)
     (cache_dir / "field_cache.json").write_text("not valid json {{{")
+    ctx = make_mngr_ctx_with_profile_dir(tmp_path)
+    result = load_field_cache(ctx, [])
+    assert result == {}
+
+
+def test_load_field_cache_returns_empty_on_non_utf8_bytes(tmp_path: Path) -> None:
+    """A cache file with non-utf8 bytes (e.g. partial write) must not crash the TUI."""
+    cache_dir = tmp_path / "kanpan"
+    cache_dir.mkdir(parents=True)
+    # 0xFF is not a valid utf-8 start byte
+    (cache_dir / "field_cache.json").write_bytes(b"\xff\xfe\x00bad")
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
     result = load_field_cache(ctx, [])
     assert result == {}
@@ -515,7 +554,7 @@ def test_load_field_cache_returns_empty_on_invalid_agent_name(tmp_path: Path) ->
     """
     cache_dir = tmp_path / "kanpan"
     cache_dir.mkdir(parents=True)
-    pr_payload = make_pr_field().model_dump(mode="json")
+    pr_payload = make_pr_field(created=datetime(2026, 1, 1, 0, 0, 20, tzinfo=timezone.utc)).model_dump(mode="json")
     # 'a1/x' contains '/', which violates SafeName's regex. The PR payload
     # makes deserialize_fields return a non-empty dict so that the
     # AgentName("a1/x") constructor is actually reached.
@@ -535,12 +574,47 @@ def test_load_field_cache_skips_unknown_types(tmp_path: Path) -> None:
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
     agent_name = AgentName("agent-1")
     original: dict[AgentName, dict[str, FieldValue]] = {
-        agent_name: {"status": StringField(value="hello")},
+        agent_name: {
+            "status": StringField(value="hello", created=datetime(2026, 1, 1, 0, 0, 21, tzinfo=timezone.utc))
+        },
     }
     save_field_cache(ctx, original)
     # No data sources -> no field-key adapters, so every saved key is unknown and dropped.
     loaded = load_field_cache(ctx, [])
     assert loaded == {}
+
+
+def test_load_field_cache_drops_legacy_entries_missing_created(tmp_path: Path) -> None:
+    """A legacy cache entry without `created` is silently dropped on load.
+
+    Other valid entries in the same file load normally.
+    """
+    ctx = make_mngr_ctx_with_profile_dir(tmp_path)
+    cache_dir = tmp_path / "kanpan"
+    cache_dir.mkdir(parents=True)
+    # Hand-craft a cache file with one legacy entry (no created) and one fresh
+    # entry. Using the post-`kind` wire format directly: per-field deserialize
+    # via the StringField TypeAdapter, which rejects payloads missing required
+    # fields (validation error, dropped silently).
+    cache_payload = {
+        "agent-legacy": {
+            "status": {"kind": "string", "value": "old"},
+        },
+        "agent-fresh": {
+            "status": {
+                "kind": "string",
+                "value": "new",
+                "created": datetime(2026, 1, 1, 0, 0, 22, tzinfo=timezone.utc).isoformat(),
+            },
+        },
+    }
+    (cache_dir / "field_cache.json").write_text(json.dumps(cache_payload))
+    data_sources = [_make_mock_data_source("status", StringField)]
+    loaded = load_field_cache(ctx, data_sources)
+    assert AgentName("agent-legacy") not in loaded
+    fresh = loaded[AgentName("agent-fresh")]["status"]
+    assert isinstance(fresh, StringField)
+    assert fresh.value == "new"
 
 
 def test_save_field_cache_swallows_errors(tmp_path: Path) -> None:
