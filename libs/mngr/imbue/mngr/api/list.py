@@ -645,6 +645,21 @@ def agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
     return result
 
 
+def build_agent_cel_context(agent: AgentDetails) -> dict[str, Any]:
+    """Build a CEL evaluation context for `agent` with schemaless fields wrapped tolerantly.
+
+    Composes the three steps (`agent_details_to_cel_context` ->
+    `build_cel_context` -> `with_tolerant_paths`) so that filter and sort
+    callers see a consistent view: missing keys under the schemaless fields
+    listed in `_AGENT_SCHEMALESS_PATHS` evaluate to a clean False instead of
+    raising at evaluation time.
+    """
+    return with_tolerant_paths(
+        build_cel_context(agent_details_to_cel_context(agent)),
+        _AGENT_SCHEMALESS_PATHS,
+    )
+
+
 def _apply_cel_filters(
     agent: AgentDetails,
     include_filters: Sequence[Any],
@@ -655,12 +670,8 @@ def _apply_cel_filters(
     Returns True if the agent should be included (matches all include filters
     and doesn't match any exclude filters).
     """
-    cel_context = with_tolerant_paths(
-        build_cel_context(agent_details_to_cel_context(agent)),
-        _AGENT_SCHEMALESS_PATHS,
-    )
     return apply_compiled_cel_filters(
-        cel_context=cel_context,
+        cel_context=build_agent_cel_context(agent),
         include_filters=include_filters,
         exclude_filters=exclude_filters,
         error_context_description=f"agent {agent.name}",
