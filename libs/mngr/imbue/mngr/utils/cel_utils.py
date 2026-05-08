@@ -139,6 +139,8 @@ def with_tolerant_paths(
     """
     new_context = copy.deepcopy(cel_context)
     for path in paths:
+        if not path:
+            raise TolerantPathError("with_tolerant_paths: each path must have at least one segment; got an empty path")
         *prefix, last = path
         parent: Any = new_context
         for step in prefix:

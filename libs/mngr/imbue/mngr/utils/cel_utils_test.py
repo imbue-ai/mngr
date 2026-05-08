@@ -478,6 +478,20 @@ def test_with_tolerant_paths_raises_when_nested_path_segment_missing() -> None:
         _ = with_tolerant_paths(cel_context, (("host", "missing_subfield"),))
 
 
+def test_with_tolerant_paths_raises_on_empty_path() -> None:
+    """An empty path tuple is a misconfiguration and must raise TolerantPathError.
+
+    Without an explicit check the unpacking `*prefix, last = path` would raise
+    a bare ValueError that doesn't tie back to the function or the caller's
+    misconfiguration; this guards the documented loud-fail contract for that
+    edge case.
+    """
+    raw_context: dict[str, Any] = {"labels": {}}
+    cel_context = build_cel_context(raw_context)
+    with pytest.raises(TolerantPathError):
+        _ = with_tolerant_paths(cel_context, ((),))
+
+
 def test_with_tolerant_paths_multiple_paths() -> None:
     """Multiple paths can be wrapped in one call; non-listed paths stay strict."""
     raw_context = {
