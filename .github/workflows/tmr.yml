@@ -15,14 +15,6 @@ on:
         description: "Agent type (e.g. yolo, claude)"
         required: true
         default: "yolo"
-      modal_token_id:
-        description: "Override MODAL_TOKEN_ID (defaults to org var)."
-        required: false
-        default: ""
-      modal_token_secret:
-        description: "Override MODAL_TOKEN_SECRET (defaults to org secret). NOTE: visible on the run details page to anyone with repo read access; logs are masked."
-        required: false
-        default: ""
       mngr_user_id:
         description: "Optional MNGR_USER_ID for the orchestrator (lets you see CI-created modal agents from your local mngr)."
         required: false
@@ -36,19 +28,13 @@ jobs:
       contents: write
       pull-requests: write
     env:
-      MODAL_TOKEN_ID: ${{ inputs.modal_token_id || vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ inputs.modal_token_secret || secrets.MODAL_TOKEN_SECRET }}
+      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
       MNGR_USER_ID: ${{ inputs.mngr_user_id }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - name: Mask user-supplied MODAL_TOKEN_SECRET
-        if: inputs.modal_token_secret != ''
-        env:
-          MODAL_TOKEN_SECRET_INPUT: ${{ inputs.modal_token_secret }}
-        run: echo "::add-mask::$MODAL_TOKEN_SECRET_INPUT"
-
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
