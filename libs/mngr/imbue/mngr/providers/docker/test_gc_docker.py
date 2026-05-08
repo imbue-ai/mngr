@@ -350,7 +350,6 @@ def test_parse_build_image_host_id_returns_none_for_unrelated_tag() -> None:
     assert parse_build_image_host_id("debian:bookworm-slim") is None
 
 
-@pytest.mark.acceptance
 def test_gc_orphaned_resources_removes_orphan_container(temp_mngr_ctx: MngrContext) -> None:
     """A labeled mngr-* container whose host id is unknown is force-removed."""
     provider = _zero_age_provider(temp_mngr_ctx)
@@ -371,7 +370,6 @@ def test_gc_orphaned_resources_removes_orphan_container(temp_mngr_ctx: MngrConte
     assert images == []
 
 
-@pytest.mark.acceptance
 def test_gc_orphaned_resources_preserves_live_container(temp_mngr_ctx: MngrContext) -> None:
     """Containers whose host id is in ``known_host_ids`` must be left alone."""
     provider = _zero_age_provider(temp_mngr_ctx)
@@ -391,7 +389,6 @@ def test_gc_orphaned_resources_preserves_live_container(temp_mngr_ctx: MngrConte
     assert images == []
 
 
-@pytest.mark.acceptance
 def test_gc_orphaned_resources_skips_other_provider_containers(temp_mngr_ctx: MngrContext) -> None:
     """Containers whose LABEL_PROVIDER is a different provider are not touched."""
     provider = _zero_age_provider(temp_mngr_ctx)
@@ -409,7 +406,6 @@ def test_gc_orphaned_resources_skips_other_provider_containers(temp_mngr_ctx: Mn
     assert containers == []
 
 
-@pytest.mark.acceptance
 def test_gc_orphaned_resources_skips_non_prefixed_container(temp_mngr_ctx: MngrContext) -> None:
     """Containers whose name does not start with the mngr prefix are ignored."""
     provider = _zero_age_provider(temp_mngr_ctx)
@@ -427,7 +423,6 @@ def test_gc_orphaned_resources_skips_non_prefixed_container(temp_mngr_ctx: MngrC
     assert containers == []
 
 
-@pytest.mark.acceptance
 def test_gc_orphaned_resources_grace_period_protects_young_container(temp_mngr_ctx: MngrContext) -> None:
     """Containers younger than ``get_min_online_host_age_seconds`` survive a sweep."""
     # Use the real default (10 minutes) by skipping the zero-age override, then
@@ -448,7 +443,6 @@ def test_gc_orphaned_resources_grace_period_protects_young_container(temp_mngr_c
     assert containers == []
 
 
-@pytest.mark.acceptance
 def test_gc_orphaned_resources_dry_run_reports_without_removing(temp_mngr_ctx: MngrContext) -> None:
     """``dry_run=True`` returns the same orphan list but never calls ``remove``."""
     provider = _zero_age_provider(temp_mngr_ctx)
@@ -475,7 +469,6 @@ def test_gc_orphaned_resources_dry_run_reports_without_removing(temp_mngr_ctx: M
     assert [img.host_id for img in images] == [image_host]
 
 
-@pytest.mark.acceptance
 def test_gc_orphaned_resources_removes_orphan_build_image(temp_mngr_ctx: MngrContext) -> None:
     """``mngr-build-host-*`` images whose host id is unknown are force-removed."""
     provider = _zero_age_provider(temp_mngr_ctx)
@@ -495,7 +488,6 @@ def test_gc_orphaned_resources_removes_orphan_build_image(temp_mngr_ctx: MngrCon
     assert images[0].size_bytes == 1_300_000_000
 
 
-@pytest.mark.acceptance
 def test_gc_orphaned_resources_preserves_live_build_image(temp_mngr_ctx: MngrContext) -> None:
     """Build images whose host id is live must be retained."""
     provider = _zero_age_provider(temp_mngr_ctx)
@@ -514,7 +506,6 @@ def test_gc_orphaned_resources_preserves_live_build_image(temp_mngr_ctx: MngrCon
     assert images == []
 
 
-@pytest.mark.acceptance
 def test_gc_orphaned_resources_ignores_snapshot_images(temp_mngr_ctx: MngrContext) -> None:
     """Snapshot images use a different tag scheme; only build images are reaped."""
     provider = _zero_age_provider(temp_mngr_ctx)
@@ -532,7 +523,6 @@ def test_gc_orphaned_resources_ignores_snapshot_images(temp_mngr_ctx: MngrContex
     assert images == []
 
 
-@pytest.mark.acceptance
 def test_gc_step_runs_orphan_reconciliation_via_api(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
     """Top-level ``gc()`` invokes the orphan reconciliation step end-to-end.
 
@@ -572,7 +562,6 @@ def test_gc_step_runs_orphan_reconciliation_via_api(temp_mngr_ctx: MngrContext, 
     assert [img.image_id for img in result.images_destroyed] == [image.id]
 
 
-@pytest.mark.acceptance
 def test_gc_orphaned_resources_cross_provider_known_ids(temp_mngr_ctx: MngrContext) -> None:
     """A host id known to *any* provider keeps its docker resources alive."""
     docker_provider = _zero_age_provider(temp_mngr_ctx)
@@ -604,6 +593,7 @@ def test_gc_orphaned_resources_cross_provider_known_ids(temp_mngr_ctx: MngrConte
     result = GcResult()
     gc_orphaned_resources(
         hosts_by_provider=hosts_by_provider,
+        deleted_host_ids=set(),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,

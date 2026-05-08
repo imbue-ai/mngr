@@ -143,12 +143,15 @@ def gc(
     if resource_types.is_orphaned_resources:
         if on_resource_type_start:
             on_resource_type_start("orphaned_resources")
-        # Re-discover hosts so the orphan-id set reflects records that earlier
-        # GC steps may have deleted (gc_machines.delete_host).
-        post_gc_hosts_by_provider = _discover_hosts_for_gc(providers, mngr_ctx)
         with log_span("Garbage collecting orphaned provider containers and images"):
+            # Adjust the original discovery for any host records that earlier GC
+            # steps deleted; this avoids a second round-trip through every
+            # provider's discover_hosts (which on a flaky daemon would retry,
+            # log duplicate warnings, and could transiently flip a live host
+            # to "orphan").
             gc_orphaned_resources(
-                hosts_by_provider=post_gc_hosts_by_provider,
+                hosts_by_provider=all_hosts_by_provider,
+                deleted_host_ids={dh.host_id for dh in result.machines_deleted},
                 dry_run=dry_run,
                 error_behavior=error_behavior,
                 result=result,
@@ -654,6 +657,7 @@ def _is_rotated_log_file(path: Path) -> bool:
 
 def gc_orphaned_resources(
     hosts_by_provider: ProviderHosts,
+    deleted_host_ids: set,
     dry_run: bool,
     error_behavior: ErrorBehavior,
     result: GcResult,
@@ -664,8 +668,14 @@ def gc_orphaned_resources(
     union of host ids known across every provider, so a docker provider does
     not reap a resource whose host is owned by a different provider that
     happens to share infrastructure.
+
+    ``deleted_host_ids`` are host ids whose records were just removed by
+    earlier GC steps (``gc_machines.delete_host``). They must be subtracted
+    from the live set so any leftover Docker resources tied to those records
+    can be reclaimed in this same pass instead of waiting for the next run.
     """
     known_host_ids: set = {host.host_id for _, hosts in hosts_by_provider for host in hosts}
+    known_host_ids -= deleted_host_ids
 
     for provider, _hosts in hosts_by_provider:
         try:

@@ -1869,8 +1869,12 @@ kill -TERM 1
         """Reap mngr-* containers and ``mngr-build-host-*`` images that no longer
         belong to a known host.
 
-        Containers and images younger than ``get_min_online_host_age_seconds()``
-        are skipped to avoid racing with in-progress host creation.
+        Reuses ``get_min_online_host_age_seconds()`` as the grace window
+        intentionally: a container/image younger than that has either just
+        been created by a real ``create_host`` flow that hasn't written its
+        host record yet, or by a flow that ``gc_machines`` would have refused
+        to touch for the same reason. Sharing the knob keeps both gates moving
+        together.
         """
         try:
             client = self._docker_client
@@ -1885,6 +1889,11 @@ kill -TERM 1
         orphan_containers: list[OrphanedContainerInfo] = []
         orphan_images: list[OrphanedImageInfo] = []
 
+        # We intentionally do NOT reuse ``_list_containers``: that helper
+        # filters strictly by ``LABEL_PROVIDER``, but interrupted creates can
+        # leave behind containers with the mngr name prefix and *no* provider
+        # label. We want to reap those too, so we list everything and filter
+        # inline (provider-label match OR label-less debris under our prefix).
         try:
             all_containers = client.containers.list(all=True)
         except docker.errors.DockerException as e:
@@ -1925,6 +1934,11 @@ kill -TERM 1
                 created_at=created_at if created_at is not None else datetime.now(timezone.utc),
             )
             if not dry_run:
+                # ``force=True`` SIGKILLs running containers without firing the
+                # normal ``on_before_host_destroy`` / ``emit_host_destroyed``
+                # hooks. That's intentional here: there is no live host record
+                # for these containers, so nothing meaningful would receive the
+                # event anyway.
                 try:
                     container.remove(force=True)
                 except docker.errors.DockerException as e:
