@@ -130,8 +130,7 @@ def _format_human_line(window_label: str, window: WindowSnapshot, now: int) -> s
     When ``used_percentage`` is missing the "resets in ..." suffix would
     render as misleading filler (the reset timestamp on its own is not
     actionable without a usage number, and "resets in now" is just noise),
-    so we collapse the line to a bare "no data" instead. The catch-all
-    hint emitted by ``_emit_output`` covers the wire-up advice for that case.
+    so we collapse the line to a bare "no data" instead.
     """
     if window.used_percentage is None:
         return f"{window_label}: no data"
