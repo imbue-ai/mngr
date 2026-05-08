@@ -1,0 +1,5 @@
+personality = "friendly"
+model = "opus[1m]"
+
+[features]
+codex_hooks = true

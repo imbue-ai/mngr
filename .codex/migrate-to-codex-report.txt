@@ -1,0 +1,83 @@
+Migration inventory:
+  active: instruction files - 2 found
+    - CLAUDE.md
+    - AGENTS.md
+  active: skills - 24 found
+    - asciinema-demos
+    - convert-github-issues-to-fixmes
+    - create-fixmes
+    - create-github-issues-from-file
+    - create-task-from-json
+    - find-agent
+    - fix-issue
+    - fix-something
+    - identify-doc-code-disagreements
+    - identify-inconsistencies
+    - identify-outdated-docstrings
+    - identify-style-issues
+    - message-agent
+    - minds-dev-iterate
+    - new-forever-claude-clone
+    - release-minds
+    - sync-tutorial-to-e2e-tests
+    - think-of-something-to-fix
+    - triage-backlog
+    - update-issues-in-repo
+    - wait-for-agent
+    - writing-docs
+    - writing-ratchet-tests
+    - writing-specs
+  inactive: command sources - none found
+  inactive: subagents - none found
+Migration surfaces:
+  active: AGENTS.md - 1 instruction file(s) found.
+  active: skills - 24 skill(s) converted.
+  active: MCP config - 0 MCP server(s) converted into config.toml.
+  inactive: subagents - No subagents found.
+Migration report:
+  symlinked: AGENTS.md - Linked to CLAUDE.md.
+  rewritten: .codex/hooks.json - Rewritten for Codex hooks; review behavior before relying on it. Codex hooks require `[features].codex_hooks = true`, only execute `command` handlers, skip `async` / `prompt` / `agent` handlers, ignore `matcher` for `UserPromptSubmit` and `Stop`, and `PreToolUse` / `PostToolUse` currently run for shell commands only.
+  rewritten: .agents/skills/asciinema-demos/SKILL.md - Converted Claude skill.
+  rewritten: .agents/skills/convert-github-issues-to-fixmes/SKILL.md - Converted Claude skill.
+  manual_fix_required: .agents/skills/create-fixmes/SKILL.md - Manual review required for Claude skill fields: `argument-hint`.
+  rewritten: .agents/skills/create-github-issues-from-file/SKILL.md - Converted Claude skill.
+  manual_fix_required: .agents/skills/create-task-from-json/SKILL.md - Manual review required for Claude skill fields: `argument-hint`.
+  manual_fix_required: .agents/skills/find-agent/SKILL.md - Manual review required for Claude skill fields: `allowed-tools`, `argument-hint`.
+  manual_fix_required: .agents/skills/fix-issue/SKILL.md - Manual review required for Claude skill fields: `argument-hint`.
+  manual_fix_required: .agents/skills/fix-something/SKILL.md - Manual review required for Claude skill fields: `argument-hint`.
+  manual_fix_required: .agents/skills/identify-doc-code-disagreements/SKILL.md - Manual review required for Claude skill fields: `argument-hint`.
+  manual_fix_required: .agents/skills/identify-inconsistencies/SKILL.md - Manual review required for Claude skill fields: `argument-hint`.
+  manual_fix_required: .agents/skills/identify-outdated-docstrings/SKILL.md - Manual review required for Claude skill fields: `argument-hint`.
+  manual_fix_required: .agents/skills/identify-style-issues/SKILL.md - Manual review required for Claude skill fields: `argument-hint`.
+  manual_fix_required: .agents/skills/message-agent/SKILL.md - Manual review required for Claude skill fields: `allowed-tools`, `argument-hint`.
+  rewritten: .agents/skills/minds-dev-iterate/SKILL.md - Converted Claude skill.
+  manual_fix_required: .agents/skills/new-forever-claude-clone/SKILL.md - Manual review required for Claude skill fields: `argument-hint`.
+  manual_fix_required: .agents/skills/release-minds/SKILL.md - Manual review required for Claude skill fields: `argument-hint`.
+  manual_fix_required: .agents/skills/sync-tutorial-to-e2e-tests/SKILL.md - Manual review required for Claude skill fields: `argument-hint`.
+  rewritten: .agents/skills/think-of-something-to-fix/SKILL.md - Converted Claude skill.
+  rewritten: .agents/skills/triage-backlog/SKILL.md - Converted Claude skill.
+  rewritten: .agents/skills/update-issues-in-repo/SKILL.md - Converted Claude skill.
+  manual_fix_required: .agents/skills/wait-for-agent/SKILL.md - Manual review required for Claude skill fields: `allowed-tools`, `argument-hint`.
+  rewritten: .agents/skills/writing-docs/SKILL.md - Converted Claude skill.
+  rewritten: .agents/skills/writing-ratchet-tests/SKILL.md - Converted Claude skill.
+  rewritten: .agents/skills/writing-specs/SKILL.md - Converted Claude skill.
+  rewritten: .codex/config.toml - Converted 0 MCP server entries.
+  overwritten: .agents/skills/fix-something - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/create-task-from-json - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/identify-outdated-docstrings - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/update-issues-in-repo - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/writing-specs - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/triage-backlog - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/asciinema-demos - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/create-github-issues-from-file - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/wait-for-agent - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/think-of-something-to-fix - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/writing-ratchet-tests - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/identify-style-issues - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/convert-github-issues-to-fixmes - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/identify-inconsistencies - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/create-fixmes - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/fix-issue - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/writing-docs - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/identify-doc-code-disagreements - Existing Codex skill will be replaced.
+  overwritten: .agents/skills/sync-tutorial-to-e2e-tests - Existing Codex skill will be replaced.
