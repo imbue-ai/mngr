@@ -56,7 +56,7 @@ class TolerantMapType(celpy.celtypes.MapType):
         try:
             return super().__getitem__(key)
         except KeyError:
-            return CELEvalError(f"no such member in mapping: {key!r}", KeyError, None)
+            return CELEvalError(f"no such member in mapping: {key!r}", KeyError, ())
 
 
 @pure
