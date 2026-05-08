@@ -58,10 +58,12 @@ class TolerantMapType(celpy.celtypes.MapType):
     implement optional types, so we hand-roll this targeted subclass instead.
     Drop this once cel-python supports `?`-prefixed field selection.
 
-    Caveat: comparisons against `null` do not work as you might expect on a
-    tolerant miss (`labels.X != null` evaluates to BoolType(True) even when X
-    is absent, because the LHS is a CELEvalError, not null). Use `has(field)`
-    as the canonical presence check.
+    Caveat: comparisons against `null` do not work as a presence check on a
+    tolerant miss. On 0.5.0 the LHS is a CELEvalError that propagates through
+    `==` / `!=` and raises at the top of evaluate(); the filter loop then
+    sees the marker and suppresses the warning, so the filter result is
+    False (an `--include 'labels.X != null'` rejects the agent rather than
+    matching it). Use `has(field)` as the canonical presence check.
     """
 
     def __getitem__(self, key: Any) -> Any:
