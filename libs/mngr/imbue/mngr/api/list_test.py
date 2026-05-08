@@ -569,27 +569,18 @@ def test_apply_cel_filters_wraps_each_schemaless_path_with_tolerant_map(path: tu
 @pytest.mark.parametrize(
     "exclude_expr",
     [
-        # method call on missing strict field (cel-python cannot resolve the call,
-        # raises CELEvalError out of evaluate())
+        'host.providr == "local"',
         'host.providr.contains("local")',
-        # ordered comparison against a missing strict field (cel-python cannot
-        # find an overload between IntType and the carried CELEvalError, raises)
         "host.providr > 5",
     ],
 )
 def test_apply_cel_filters_warns_on_typoed_strict_field(exclude_expr: str) -> None:
-    """A typo on a strict field that triggers an evaluation error still surfaces a warning.
+    """A typoed strict-field path surfaces a warning so users can see the typo.
 
-    Counterpart to `test_apply_cel_filters_no_warning_for_missing_key_on_schemaless_field`:
-    schemaless fields stay quiet on missing keys, but missing-strict-field accesses
-    that the cel-python evaluator cannot fold into a clean BoolType (method calls
-    like `.contains(...)` on a missing field, ordered comparisons like `> 5`,
-    etc.) must still warn so users can see the typo.
-
-    Note: `host.providr == "local"` does NOT warn because cel-python's
-    evaluator carries CELEvalError through equality and yields BoolType(False);
-    the warning only surfaces for operations cel-python cannot fold (method
-    calls, `<`/`>` comparisons, etc.).
+    Counterpart to test_apply_cel_filters_no_warning_for_missing_key_on_schemaless_field:
+    schemaless fields stay quiet on missing keys, but a missing-strict-field
+    access -- whether via equality, method call, or ordered comparison -- raises
+    out of the filter loop's evaluate() call and is logged.
     """
     agent = _make_agent_details("test-agent", _make_host_details())
     include_filters, exclude_filters = compile_cel_filters(

@@ -107,6 +107,7 @@ def test_cel_invalid_exclude_filter_raises_mngr_error() -> None:
         )
 
 
+@pytest.mark.allow_warnings
 def test_cel_include_filter_eval_error_returns_false() -> None:
     """apply_cel_filters_to_context should return False if include filter errors."""
     # Compile a filter that references a field not in the context
@@ -123,6 +124,7 @@ def test_cel_include_filter_eval_error_returns_false() -> None:
     assert result is False
 
 
+@pytest.mark.allow_warnings
 def test_cel_exclude_filter_eval_error_continues() -> None:
     """apply_cel_filters_to_context should continue when exclude filter errors."""
     # Compile an exclude filter that references a field not in the context

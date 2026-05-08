@@ -11,6 +11,12 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
 
+# Marker substring embedded in the CELEvalError message produced by
+# TolerantMapType on a missing-key access. apply_compiled_cel_filters checks
+# for this substring to distinguish a tolerant miss (suppress warning) from
+# any other CELEvalError flowing through the filter loop (log warning).
+_TOLERANT_MISS_MARKER = "__tolerant_key_miss__"
+
 
 class TolerantPathError(BaseMngrError, TypeError):
     """Raised by `with_tolerant_paths` when a path is misconfigured.
@@ -27,19 +33,25 @@ class TolerantPathError(BaseMngrError, TypeError):
 
 
 class TolerantMapType(celpy.celtypes.MapType):
-    """A CEL MapType whose missing-key access yields a CELEvalError value
-    instead of raising, so that boolean expressions short-circuit cleanly.
+    """A CEL MapType whose missing-key access yields a marked CELEvalError
+    value, so that `apply_compiled_cel_filters` can suppress the per-agent
+    warning that would otherwise fire on missing schemaless-field keys.
 
     Used for schemaless fields (e.g. agent labels) where the absence of a key
     should evaluate to a clean False in equality checks rather than emit a
     per-agent warning at filter time.
 
-    Returning a CELEvalError *value* (not raising) plays nicely with cel-python:
-    its evaluator carries CELEvalError through arithmetic / comparison ops,
-    so `labels.X == "Y"` short-circuits to BoolType(False) at the top level
-    with no error escaping evaluate(); and `has(labels.X)` correctly returns
-    False (cel-python's `has()` macro reports `not isinstance(_, CELEvalError)`,
-    see `celpy/evaluation.py::macro_has_eval`).
+    The CELEvalError value carries an internal marker substring
+    (`_TOLERANT_MISS_MARKER`) that the filter loop matches on. cel-python's
+    behavior on a CELEvalError flowing through `==` differs between versions
+    (0.4.0 folds it silently to BoolType(False); 0.5.0 propagates and raises
+    at the top level), so the marker-and-suppress approach is the
+    version-portable way to keep the warning quiet on a tolerant miss
+    without affecting unrelated CELEvalError flows.
+
+    `has(labels.X)` correctly returns False on a missing tolerant key:
+    cel-python's `has()` macro reports `not isinstance(_, CELEvalError)`
+    (see `celpy/evaluation.py::macro_has_eval`).
 
     The canonical CEL idiom for this would be optional-type field selection
     (`labels.?key`, see cel-spec proposal 246), but cel-python does not yet
@@ -56,7 +68,11 @@ class TolerantMapType(celpy.celtypes.MapType):
         try:
             return super().__getitem__(key)
         except KeyError:
-            return CELEvalError(f"no such member in mapping: {key!r}", KeyError, ())
+            return CELEvalError(
+                f"{_TOLERANT_MISS_MARKER} no such member in mapping: {key!r}",
+                KeyError,
+                (),
+            )
 
 
 @pure
@@ -197,7 +213,8 @@ def apply_compiled_cel_filters(
             if not result:
                 return False
         except (CELEvalError, TypeError) as e:
-            logger.warning("Error evaluating include filter on {}: {}", error_context_description, e)
+            if not _is_tolerant_miss(e):
+                logger.warning("Error evaluating include filter on {}: {}", error_context_description, e)
             return False
 
     for prgm in exclude_filters:
@@ -206,10 +223,21 @@ def apply_compiled_cel_filters(
             if result:
                 return False
         except (CELEvalError, TypeError) as e:
-            logger.warning("Error evaluating exclude filter on {}: {}", error_context_description, e)
+            if not _is_tolerant_miss(e):
+                logger.warning("Error evaluating exclude filter on {}: {}", error_context_description, e)
             continue
 
     return True
+
+
+def _is_tolerant_miss(exc: BaseException) -> bool:
+    """Return True if `exc` is the CELEvalError raised by a TolerantMapType miss.
+
+    Detected via the marker substring `_TOLERANT_MISS_MARKER` embedded in the
+    error message. Used by the filter loop to silence the per-agent warning
+    that would otherwise fire on missing keys under schemaless fields.
+    """
+    return isinstance(exc, CELEvalError) and bool(exc.args) and _TOLERANT_MISS_MARKER in str(exc.args[0])
 
 
 def apply_cel_filters_to_context(
