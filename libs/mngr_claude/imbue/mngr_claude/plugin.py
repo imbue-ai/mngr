@@ -412,17 +412,23 @@ def _rewrite_installed_plugins_paths(content: str, source_claude_dir: Path, targ
     return json.dumps(data, indent=2) + "\n"
 
 
-def _read_source_claude_settings(source_claude_dir: Path) -> dict[str, Any]:
-    """Parse ~/.claude/settings.json into a dict, returning {} if missing or corrupt."""
+def _read_source_claude_settings(source_claude_dir: Path) -> dict[str, Any] | None:
+    """Parse ~/.claude/settings.json into a dict.
+
+    Returns None when the file is missing, corrupt, or not a JSON object -- in
+    those cases callers should fall back to defaults. An empty-but-valid ``{}``
+    returns an empty dict (distinguishable from None) so callers can honour the
+    user's choice not to override anything.
+    """
     source = source_claude_dir / "settings.json"
     if not source.exists():
-        return {}
+        return None
     try:
         loaded = json.loads(source.read_text())
     except json.JSONDecodeError:
-        logger.warning("Corrupt settings.json at {}, treating as empty", source)
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
+        logger.warning("Corrupt settings.json at {}, treating as missing", source)
+        return None
+    return loaded if isinstance(loaded, dict) else None
 
 
 def _gather_claude_extra_settings(
@@ -462,7 +468,11 @@ def _build_settings_json(
     """
     if sync_local:
         source_settings = _read_source_claude_settings(source_claude_dir)
-        data: dict[str, Any] = dict(source_settings) if source_settings else _generate_claude_home_settings()
+        # Honour an empty-but-valid {} settings.json as an explicit empty base; only
+        # fall back to defaults when the source file is missing or corrupt (None).
+        data: dict[str, Any] = (
+            dict(source_settings) if source_settings is not None else _generate_claude_home_settings()
+        )
     else:
         data = _generate_claude_home_settings()
     data.update(compute_settings_json_flags(ctx))
@@ -1996,7 +2006,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             # invoked twice per agent.
             extra_contributions = _gather_claude_extra_settings(
                 mngr_ctx,
-                _read_source_claude_settings(get_user_claude_config_dir()),
+                # Coerce None (missing/corrupt source) to an empty dict so the
+                # hookspec's source_settings: dict[str, Any] contract holds.
+                _read_source_claude_settings(get_user_claude_config_dir()) or {},
                 self._get_agent_dir(),
                 is_local=host.is_local,
             )
