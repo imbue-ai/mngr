@@ -670,8 +670,6 @@ class AgentManager:
             self._mngr_binary,
             "observe",
             "--discovery-only",
-            "--on-error",
-            "continue",
             "--events-dir",
             str(events_dir),
         ]
