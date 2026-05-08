@@ -35,6 +35,10 @@ mkdir -p "$cache_dir"
 
 lock="$cache.lock"
 tmp="$cache.tmp.$$"
+# Ensure the tmp file is removed on any exit path (mid-write failure, ENOSPC,
+# interrupt). The successful mv -f "$tmp" "$cache" path turns the rm into a
+# no-op since the tmp file no longer exists.
+trap 'rm -f "$tmp"' EXIT
 now=$(date +%s)
 
 # Drain stdin once so jq processes it; the input stream is consumed.
