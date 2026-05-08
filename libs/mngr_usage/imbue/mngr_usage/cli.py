@@ -269,10 +269,13 @@ def _emit_output(
                 any_present = True
                 if snap.used_percentage is not None:
                     any_with_percentage = True
-            has_usable_data = any_present and any_with_percentage
-            if not has_usable_data:
+            # The "no data yet" hint is for users whose cache has never been
+            # written to. Only emit it when no window has been touched -- if
+            # any window has updated_at set, the cache is being populated and
+            # the hint would contradict the per-window lines above.
+            if not any_present:
                 write_human_line(_NO_DATA_HINT)
-            if has_usable_data and model.is_stale:
+            if any_present and any_with_percentage and model.is_stale:
                 logger.warning("Rate-limit cache is stale; values may not reflect latest API state.")
 
 
