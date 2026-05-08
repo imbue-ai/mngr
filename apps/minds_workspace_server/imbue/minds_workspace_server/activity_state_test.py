@@ -1,5 +1,7 @@
 from typing import Any
 
+import pytest
+
 from imbue.minds_workspace_server.activity_state import ActivityState
 from imbue.minds_workspace_server.activity_state import derive_activity_state
 from imbue.minds_workspace_server.activity_state import has_unmatched_tool_use
@@ -17,121 +19,128 @@ def _tool_result(tool_call_id: str) -> dict[str, Any]:
     return {"type": "tool_result", "tool_call_id": tool_call_id}
 
 
-def test_has_unmatched_tool_use_empty() -> None:
-    assert has_unmatched_tool_use([]) is False
+@pytest.mark.parametrize(
+    "events, expected",
+    [
+        pytest.param([], False, id="empty_transcript"),
+        pytest.param(
+            [
+                {"type": "user_message", "content": "hi"},
+                {"type": "assistant_message", "tool_calls": []},
+            ],
+            False,
+            id="no_tool_calls",
+        ),
+        pytest.param([_assistant_with_tool_calls("call_a")], True, id="single_unmatched"),
+        pytest.param(
+            [_assistant_with_tool_calls("call_a"), _tool_result("call_a")],
+            False,
+            id="all_matched",
+        ),
+        pytest.param(
+            [_assistant_with_tool_calls("call_a", "call_b"), _tool_result("call_a")],
+            True,
+            id="partially_matched",
+        ),
+        # A tool_result that arrives before the matching tool_use (theoretical) still matches.
+        pytest.param(
+            [_tool_result("call_a"), _assistant_with_tool_calls("call_a")],
+            False,
+            id="out_of_order_match",
+        ),
+        pytest.param(
+            [{"type": "assistant_message", "tool_calls": [{"tool_name": "Bash"}]}],
+            False,
+            id="skips_blocks_without_id",
+        ),
+    ],
+)
+def test_has_unmatched_tool_use(events: list[dict[str, Any]], expected: bool) -> None:
+    assert has_unmatched_tool_use(events) is expected
 
 
-def test_has_unmatched_tool_use_no_tool_calls() -> None:
-    events: list[dict[str, Any]] = [
-        {"type": "user_message", "content": "hi"},
-        {"type": "assistant_message", "tool_calls": []},
-    ]
-    assert has_unmatched_tool_use(events) is False
+@pytest.mark.parametrize(
+    "events, expected",
+    [
+        pytest.param([], None, id="empty_transcript"),
+        pytest.param(
+            [
+                {"type": "user_message"},
+                {"type": "assistant_message", "tool_calls": []},
+            ],
+            "assistant_message",
+            id="returns_final",
+        ),
+        pytest.param([{"foo": "bar"}], None, id="missing_type_key"),
+    ],
+)
+def test_last_event_type(events: list[dict[str, Any]], expected: str | None) -> None:
+    assert last_event_type(events) == expected
 
 
-def test_has_unmatched_tool_use_unmatched() -> None:
-    events = [_assistant_with_tool_calls("call_a")]
-    assert has_unmatched_tool_use(events) is True
-
-
-def test_has_unmatched_tool_use_all_matched() -> None:
-    events = [_assistant_with_tool_calls("call_a"), _tool_result("call_a")]
-    assert has_unmatched_tool_use(events) is False
-
-
-def test_has_unmatched_tool_use_partially_matched() -> None:
-    events = [_assistant_with_tool_calls("call_a", "call_b"), _tool_result("call_a")]
-    assert has_unmatched_tool_use(events) is True
-
-
-def test_has_unmatched_tool_use_handles_out_of_order_match() -> None:
-    """A tool_result that arrives before the matching tool_use (theoretical) still matches."""
-    events = [_tool_result("call_a"), _assistant_with_tool_calls("call_a")]
-    assert has_unmatched_tool_use(events) is False
-
-
-def test_has_unmatched_tool_use_skips_blocks_without_id() -> None:
-    events: list[dict[str, Any]] = [
-        {"type": "assistant_message", "tool_calls": [{"tool_name": "Bash"}]},
-    ]
-    assert has_unmatched_tool_use(events) is False
-
-
-def test_last_event_type_empty() -> None:
-    assert last_event_type([]) is None
-
-
-def test_last_event_type_returns_final() -> None:
-    events: list[dict[str, Any]] = [
-        {"type": "user_message"},
-        {"type": "assistant_message", "tool_calls": []},
-    ]
-    assert last_event_type(events) == "assistant_message"
-
-
-def test_last_event_type_missing_type_key() -> None:
-    events: list[dict[str, Any]] = [{"foo": "bar"}]
-    assert last_event_type(events) is None
-
-
-def test_derive_permissions_waiting_takes_priority_over_pending_tool() -> None:
+@pytest.mark.parametrize(
+    "permissions_waiting, has_pending_tool_use, tail_event_type, expected",
+    [
+        pytest.param(
+            True,
+            True,
+            "user_message",
+            ActivityState.WAITING_ON_PERMISSION,
+            id="permissions_overrides_pending_tool",
+        ),
+        pytest.param(
+            True,
+            False,
+            "assistant_message",
+            ActivityState.WAITING_ON_PERMISSION,
+            id="permissions_overrides_idle_signals",
+        ),
+        pytest.param(
+            False,
+            True,
+            "assistant_message",
+            ActivityState.TOOL_RUNNING,
+            id="tool_running_when_unmatched_tool_use",
+        ),
+        pytest.param(
+            False,
+            False,
+            "user_message",
+            ActivityState.THINKING,
+            id="thinking_when_last_event_is_user_message",
+        ),
+        pytest.param(
+            False,
+            False,
+            "tool_result",
+            ActivityState.THINKING,
+            id="thinking_when_last_event_is_tool_result",
+        ),
+        pytest.param(
+            False,
+            False,
+            "assistant_message",
+            ActivityState.IDLE,
+            id="idle_when_last_event_is_assistant_message",
+        ),
+        pytest.param(
+            False,
+            False,
+            None,
+            ActivityState.IDLE,
+            id="idle_when_no_events",
+        ),
+    ],
+)
+def test_derive_activity_state(
+    permissions_waiting: bool,
+    has_pending_tool_use: bool,
+    tail_event_type: str | None,
+    expected: ActivityState,
+) -> None:
     state = derive_activity_state(
-        permissions_waiting=True,
-        has_pending_tool_use=True,
-        tail_event_type="user_message",
+        permissions_waiting=permissions_waiting,
+        has_pending_tool_use=has_pending_tool_use,
+        tail_event_type=tail_event_type,
     )
-    assert state == ActivityState.WAITING_ON_PERMISSION
-
-
-def test_derive_permissions_waiting_takes_priority_when_idle_signals() -> None:
-    state = derive_activity_state(
-        permissions_waiting=True,
-        has_pending_tool_use=False,
-        tail_event_type="assistant_message",
-    )
-    assert state == ActivityState.WAITING_ON_PERMISSION
-
-
-def test_derive_tool_running_when_unmatched_tool_use() -> None:
-    state = derive_activity_state(
-        permissions_waiting=False,
-        has_pending_tool_use=True,
-        tail_event_type="assistant_message",
-    )
-    assert state == ActivityState.TOOL_RUNNING
-
-
-def test_derive_thinking_when_last_event_is_user_message() -> None:
-    state = derive_activity_state(
-        permissions_waiting=False,
-        has_pending_tool_use=False,
-        tail_event_type="user_message",
-    )
-    assert state == ActivityState.THINKING
-
-
-def test_derive_thinking_when_last_event_is_tool_result() -> None:
-    state = derive_activity_state(
-        permissions_waiting=False,
-        has_pending_tool_use=False,
-        tail_event_type="tool_result",
-    )
-    assert state == ActivityState.THINKING
-
-
-def test_derive_idle_when_last_event_is_assistant_message() -> None:
-    state = derive_activity_state(
-        permissions_waiting=False,
-        has_pending_tool_use=False,
-        tail_event_type="assistant_message",
-    )
-    assert state == ActivityState.IDLE
-
-
-def test_derive_idle_when_no_events() -> None:
-    state = derive_activity_state(
-        permissions_waiting=False,
-        has_pending_tool_use=False,
-        tail_event_type=None,
-    )
-    assert state == ActivityState.IDLE
+    assert state == expected
