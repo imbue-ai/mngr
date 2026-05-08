@@ -137,8 +137,6 @@ def with_tolerant_paths(
     keys are CEL StringType. Both look up correctly with plain `str` because
     StringType is a `str` subclass with consistent hash/eq.
     """
-    if not paths:
-        return cel_context
     new_context = copy.deepcopy(cel_context)
     for path in paths:
         *prefix, last = path
