@@ -535,8 +535,10 @@ def test_apply_cel_filters_no_warning_for_missing_key_on_schemaless_field(exclud
     agent = _make_agent_details("test-agent", _make_host_details())
     # All four schemaless fields default to empty dict, so the missing key
     # in the filter is genuinely missing.
-    assert agent.labels == {} and agent.plugin == {}
-    assert agent.host.tags == {} and agent.host.plugin == {}
+    assert agent.labels == {}
+    assert agent.plugin == {}
+    assert agent.host.tags == {}
+    assert agent.host.plugin == {}
 
     include_filters, exclude_filters = compile_cel_filters(
         include_filters=(),
