@@ -21,6 +21,7 @@ from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentGitOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import NewHostBuildOptions
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -88,6 +89,11 @@ def _resolve_build_options(config: TmrLaunchConfig, mngr_ctx: MngrContext) -> Ne
     build_args = tuple(str(a) for a in raw_build_args) if isinstance(raw_build_args, (list, tuple)) else ()
     start_args = tuple(str(a) for a in raw_start_args) if isinstance(raw_start_args, (list, tuple)) else ()
     return NewHostBuildOptions(snapshot=config.snapshot, build_args=build_args, start_args=start_args)
+
+
+def _build_host_environment(config: TmrLaunchConfig) -> HostEnvironmentOptions:
+    """Build HostEnvironmentOptions for hosts created by tmr."""
+    return HostEnvironmentOptions(authorized_keys=config.additional_authorized_keys)
 
 
 def build_agent_options(
@@ -160,7 +166,12 @@ def _create_tmr_agent(
         target_host = config.source_host
     else:
         build = _resolve_build_options(config, mngr_ctx)
-        target_host = NewHostOptions(provider=config.provider_name, name=host_name, build=build)
+        target_host = NewHostOptions(
+            provider=config.provider_name,
+            name=host_name,
+            build=build,
+            environment=_build_host_environment(config),
+        )
 
     if is_snapshotter:
         source_location = HostLocation(host=config.source_host, path=config.source_dir)
@@ -289,9 +300,15 @@ def _create_host_pool(
         max_workers=max_parallel,
     ) as executor:
         futures = []
+        host_environment = _build_host_environment(config)
         for i in range(host_count):
             h_name = HostName(f"{run_name}-host-{i}")
-            new_host_opts = NewHostOptions(provider=config.provider_name, name=h_name, build=build)
+            new_host_opts = NewHostOptions(
+                provider=config.provider_name,
+                name=h_name,
+                build=build,
+                environment=host_environment,
+            )
             futures.append(executor.submit(resolve_target_host, new_host_opts, mngr_ctx))
         for future in futures:
             try:
