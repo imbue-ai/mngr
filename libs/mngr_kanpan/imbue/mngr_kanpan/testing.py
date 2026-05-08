@@ -77,6 +77,8 @@ def make_mngr_ctx_with_profile_dir(profile_dir: Path) -> MngrContext:
 
 
 def make_pr_field(
+    *,
+    created: datetime,
     number: int = 1,
     state: PrState = PrState.OPEN,
     is_draft: bool = False,
@@ -90,6 +92,7 @@ def make_pr_field(
         url=f"https://github.com/org/repo/pull/{number}",
         head_branch=head_branch,
         is_draft=is_draft,
+        created=created,
     )
 
 
