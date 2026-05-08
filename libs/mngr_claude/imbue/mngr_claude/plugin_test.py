@@ -3799,6 +3799,35 @@ def test_gather_claude_extra_settings_skips_remote_hosts(temp_mngr_ctx: MngrCont
         temp_mngr_ctx.pm.unregister(_FakeExtraSettingsPlugin)
 
 
+def test_build_settings_json_uses_parsed_source_settings_without_disk_read(tmp_path: Path) -> None:
+    """When parsed_source_settings is provided, the on-disk settings.json is not re-read.
+
+    Caller passes a parsed dict; _build_settings_json should adopt it as the
+    base instead of reading source_claude_dir / settings.json. This avoids
+    the duplicate parse when provision_claude_environment has already loaded
+    the file to feed the claude_extra_per_agent_settings hook.
+    """
+    # Plant a misleading file on disk: if _build_settings_json read this
+    # instead of using the parsed dict we pass in, the assertions below
+    # would fail.
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.json").write_text(json.dumps({"model": "from-disk"}))
+
+    parsed = {"model": "from-parsed"}
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(check_installation=False)
+    content = _build_settings_json(
+        claude_dir,
+        config,
+        ctx,
+        sync_local=True,
+        parsed_source_settings=parsed,
+    )
+    data = json.loads(content)
+    assert data["model"] == "from-parsed"
+
+
 # =============================================================================
 # Volume-based session preservation tests
 # =============================================================================

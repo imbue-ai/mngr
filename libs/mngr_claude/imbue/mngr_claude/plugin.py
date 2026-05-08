@@ -453,6 +453,7 @@ def _build_settings_json(
     ctx: ProvisioningContext,
     sync_local: bool,
     extra_contributions: Sequence[ClaudeExtraSettingsContribution] = (),
+    parsed_source_settings: dict[str, Any] | None = None,
 ) -> str:
     """Build settings.json content for per-agent config dirs.
 
@@ -465,9 +466,20 @@ def _build_settings_json(
     pre-existing command should already be captured into the contribution's
     env block by the contributing plugin's hookimpl), and its ``env`` entries
     merge into ``settings.json``'s env block.
+
+    ``parsed_source_settings`` lets callers that have already parsed
+    ``source_claude_dir / "settings.json"`` (e.g. to feed the
+    ``claude_extra_per_agent_settings`` hook) reuse the parse rather than
+    paying for a second disk read + json.loads. Pass ``None`` (the default)
+    to have this function parse the file itself; in that case
+    ``source_claude_dir`` is read from disk when ``sync_local`` is True.
     """
     if sync_local:
-        source_settings = _read_source_claude_settings(source_claude_dir)
+        source_settings = (
+            parsed_source_settings
+            if parsed_source_settings is not None
+            else _read_source_claude_settings(source_claude_dir)
+        )
         # Honour an empty-but-valid {} settings.json as an explicit empty base; only
         # fall back to defaults when the source file is missing or corrupt (None).
         data: dict[str, Any] = (
@@ -1856,6 +1868,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
         extra_contributions: Sequence[ClaudeExtraSettingsContribution] = (),
+        parsed_source_settings: dict[str, Any] | None = None,
     ) -> None:
         """Create and populate the per-agent Claude config directory.
 
@@ -1864,6 +1877,11 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         2. Generate all file contents (.claude.json, settings.json, installed_plugins.json)
         3. Transfer directories (symlink/rsync) and set up credentials
         4. Stage generated files to temp dir and copy to config_dir
+
+        ``parsed_source_settings`` is forwarded to ``_build_settings_json`` so
+        that callers which already parsed ``~/.claude/settings.json`` (e.g.
+        to feed the ``claude_extra_per_agent_settings`` hook) avoid a second
+        disk read of the same file.
         """
         config = self.agent_config
         config_dir = self.get_claude_config_dir()
@@ -1924,6 +1942,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             ctx,
             sync_local=config.sync_home_settings,
             extra_contributions=extra_contributions,
+            parsed_source_settings=parsed_source_settings,
         )
 
         generated_files: dict[Path, str] = {
@@ -2000,15 +2019,18 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         with mngr_ctx.concurrency_group.make_concurrency_group("claude_provisioning") as concurrency_group:
             config = self.agent_config
 
-            # Gather plugin contributions once, then thread the result through both
-            # _setup_per_agent_config_dir (settings.json overlay) and
-            # _provision_background_scripts (resource scripts) so the hook isn't
-            # invoked twice per agent.
+            # Parse ~/.claude/settings.json once, then feed it both to the
+            # claude_extra_per_agent_settings hook and to _build_settings_json
+            # (via _setup_per_agent_config_dir). Gather plugin contributions
+            # once and thread them through _setup_per_agent_config_dir
+            # (settings.json overlay) and _provision_background_scripts
+            # (resource scripts) so the hook isn't invoked twice per agent.
+            parsed_source_settings = _read_source_claude_settings(get_user_claude_config_dir())
             extra_contributions = _gather_claude_extra_settings(
                 mngr_ctx,
                 # Coerce None (missing/corrupt source) to an empty dict so the
                 # hookspec's source_settings: dict[str, Any] contract holds.
-                _read_source_claude_settings(get_user_claude_config_dir()) or {},
+                parsed_source_settings or {},
                 self._get_agent_dir(),
                 is_local=host.is_local,
             )
@@ -2094,7 +2116,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                 self._transfer_source_plugin_data(host, options.source_agent_state_dir)
 
             # Set up per-agent config directory (for both local and remote hosts)
-            self._setup_per_agent_config_dir(host, options, mngr_ctx, extra_contributions)
+            self._setup_per_agent_config_dir(
+                host, options, mngr_ctx, extra_contributions, parsed_source_settings=parsed_source_settings
+            )
 
             # Configure readiness hooks (for both local and remote hosts)
             self._configure_agent_hooks(host)
