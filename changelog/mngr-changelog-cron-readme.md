@@ -1,0 +1,2 @@
+- Added `scripts/changelog_cron_README.md` documenting how to (re)deploy, trigger, and debug the changelog consolidation Modal cron — including which credentials to use, the schedule shape, the JSON-in-final-message outcome contract, and the common deploy pitfalls and how to avoid them.
+- `CLAUDE.md` now points at that README from the Changelog section so future agents find it.
