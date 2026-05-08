@@ -128,9 +128,10 @@ def with_tolerant_paths(
     dict). Use to opt specific schemaless fields into tolerant missing-key
     behavior without affecting siblings.
 
-    Raises TypeError on precondition violations (a path's segment is missing
-    or any segment's value is not a dict/MapType), so misconfigured paths
-    surface immediately rather than silently no-op.
+    Raises `TolerantPathError` (a `TypeError` subclass) on precondition
+    violations (a path's segment is missing or any segment's value is not
+    a dict/MapType), so misconfigured paths surface immediately rather
+    than silently no-op.
 
     Top-level keys in `cel_context` are plain Python strings; nested MapType
     keys are CEL StringType. Both look up correctly with plain `str` because
