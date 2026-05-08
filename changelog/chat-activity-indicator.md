@@ -1,0 +1,2 @@
+- Added a per-agent activity indicator above the chat input that surfaces whether Claude is `Thinking…`, `Running tool…`, `Waiting for permission`, or idle.
+- Activity state is derived from the session JSONL transcript plus the `permissions_waiting` marker file. The legacy `active` marker is no longer consulted, so a stale marker left behind by an abnormal Claude exit can no longer pin the indicator on `Thinking…` indefinitely.

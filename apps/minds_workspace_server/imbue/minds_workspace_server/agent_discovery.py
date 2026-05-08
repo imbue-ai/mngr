@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from loguru import logger as _loguru_logger
@@ -18,6 +19,16 @@ from imbue.mngr.main import get_or_create_plugin_manager
 from imbue.mngr.utils.env_utils import parse_env_file
 
 logger = _loguru_logger
+
+
+def get_host_dir() -> Path:
+    """Return the mngr host directory from the environment.
+
+    Falls back to ``~/.mngr`` when ``MNGR_HOST_DIR`` is unset. This is the
+    canonical resolver shared by both the API layer (``server._find_agent``)
+    and the activity-state tracker (``AgentManager``).
+    """
+    return Path(os.environ.get("MNGR_HOST_DIR", str(Path.home() / ".mngr")))
 
 
 class AgentInfo(FrozenModel):

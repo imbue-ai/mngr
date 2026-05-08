@@ -1,0 +1,4 @@
+- Fixed: `workspace_server`'s `/service/<name>/` HTTP proxy now rewrites the `Location` header on 3xx responses so backend redirects (e.g. `Location: /login`) follow through the service-prefixed path (`/service/<name>/login`) instead of bouncing the browser to the workspace_server's top-level path
+  - Absolute-path Location values are prefixed with the service path
+  - Same-origin absolute-URL Location values (those targeting the backend's own host:port) are rewritten into proxy-relative absolute paths under the service prefix, since the backend's localhost address is not reachable from the browser
+  - Fully external Location URLs (e.g. `https://example.com/`) and protocol-relative URLs pass through unchanged

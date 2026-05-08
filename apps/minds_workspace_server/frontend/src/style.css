@@ -247,6 +247,44 @@ body {
   }
 }
 
+/* ── Activity indicator ── */
+.agent-activity-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 auto 8px;
+  max-width: var(--width-message-column);
+  padding: 4px 6px;
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--color-text-muted, #94a3b8);
+}
+
+.agent-activity-indicator__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-text-muted, #94a3b8);
+  animation: activity-indicator-pulse 1.4s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+.agent-activity-indicator__label {
+  font-weight: 500;
+}
+
+@keyframes activity-indicator-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 /* ── Model selector ── */
 .model-selector-wrapper {
   position: relative;

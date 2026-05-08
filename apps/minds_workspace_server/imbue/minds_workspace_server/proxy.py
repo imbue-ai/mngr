@@ -1,5 +1,6 @@
 import re
 from typing import Final
+from urllib.parse import urlparse
 
 from imbue.imbue_common.pure import pure
 from imbue.minds_workspace_server.primitives import ServiceName
@@ -151,6 +152,50 @@ def rewrite_cookie_path(
         return set_cookie_header[: match.start(2)] + new_path + set_cookie_header[match.end(2) :]
     else:
         return set_cookie_header + f"; Path={prefix}/"
+
+
+@pure
+def rewrite_location_header(
+    location: str,
+    service_name: ServiceName,
+    backend_url: str,
+) -> str:
+    """Rewrite a Location header value so the browser follows the redirect via the service prefix.
+
+    Absolute-path values (``/foo``) are prefixed with ``/service/<name>``.
+    Absolute URLs whose host:port match the backend's are rewritten to
+    same-origin (proxy-relative) absolute paths under the service prefix,
+    since the backend's localhost address is not reachable from the
+    browser. Protocol-relative URLs (``//host/path``), relative paths,
+    and absolute URLs to other origins pass through unchanged.
+    """
+    prefix = get_service_prefix(service_name)
+
+    if location.startswith("//"):
+        return location
+
+    if location.startswith("/"):
+        if location.startswith(prefix + "/") or location == prefix:
+            return location
+        return prefix + location
+
+    parsed = urlparse(location)
+    if not (parsed.scheme and parsed.netloc):
+        return location
+
+    backend_parsed = urlparse(backend_url)
+    if parsed.netloc != backend_parsed.netloc:
+        return location
+
+    path = parsed.path or "/"
+    if not (path.startswith(prefix + "/") or path == prefix):
+        path = prefix + path
+    rewritten = path
+    if parsed.query:
+        rewritten += "?" + parsed.query
+    if parsed.fragment:
+        rewritten += "#" + parsed.fragment
+    return rewritten
 
 
 @pure
