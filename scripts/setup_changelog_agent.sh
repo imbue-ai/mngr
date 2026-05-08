@@ -4,7 +4,8 @@ set -euo pipefail
 # Idempotent setup of the nightly changelog consolidation agent.
 #
 # This script ensures exactly one "changelog-consolidation" schedule exists.
-# Safe to run multiple times: skips creation if the schedule already exists.
+# Safe to run multiple times: if the schedule already exists it is removed
+# and recreated from the current source, so re-running redeploys.
 #
 # The scheduled agent runs at midnight PST as a headless_claude agent. The
 # orchestration steps live in scripts/changelog_consolidation_prompt.md and
