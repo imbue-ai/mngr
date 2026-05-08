@@ -1,1 +1,2 @@
-- Expanded the header docstring of `scripts/setup_changelog_agent.sh` to document the deploy/trigger procedure inline: which token to set as `GH_TOKEN` (bot, not personal), `CHANGELOG_REPLACE=1` for redeploy, the on-demand trigger command, and the image-cache-clear command for stale checkpoints.
+- `scripts/setup_changelog_agent.sh` is now actually idempotent: running it twice in a row replaces an existing schedule instead of erroring out. Drops the `CHANGELOG_REPLACE=1` gate.
+- Header docstring now lists the required `GH_TOKEN` and `ANTHROPIC_API_KEY` env vars and the on-demand trigger one-liner.

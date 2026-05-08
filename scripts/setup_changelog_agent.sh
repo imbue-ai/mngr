@@ -15,15 +15,10 @@ set -euo pipefail
 # Modal logs, no separate state-volume artifact needed.
 #
 # Usage:
-#   ./scripts/setup_changelog_agent.sh                    # first-time deploy
-#   CHANGELOG_REPLACE=1 ./scripts/setup_changelog_agent.sh # redeploy (clobbers)
+#   ./scripts/setup_changelog_agent.sh
 #
 # Required environment:
-#   GH_TOKEN          - the bot account's token, NOT a personal `gh auth token`.
-#                       The bot's GitHub-verified email is bot@imbue.com, which
-#                       the consolidation prompt's git config commands match,
-#                       so commit attribution lines up. Using a personal token
-#                       pushes commits + PRs as the deployer's account.
+#   GH_TOKEN          - token for bot@imbue.com.
 #   ANTHROPIC_API_KEY - used by claude inside the cron container.
 #
 # Optional environment:
@@ -35,10 +30,6 @@ set -euo pipefail
 #   env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME=mngr-changelog-schedule \
 #     uv run mngr schedule run changelog-consolidation --provider modal $DISABLE_PLUGIN_ARGS
 # (claude's final assistant message is the structured outcome; see also Modal app logs)
-#
-# If a previous deploy left a stale image-cache checkpoint that conflicts:
-#   rm -f ~/.mngr-changelog-schedule/build/*/mngr_build/*.checkpoint \
-#         ~/.mngr-changelog-schedule/build/*/mngr_build/current.tar.gz
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -78,9 +69,9 @@ names = sorted({ep.name for ep in importlib.metadata.entry_points(group='mngr')}
 print(' '.join(f'--disable-plugin {n}' for n in names))
 ")
 
-# Check if the trigger already exists. Error unless CHANGELOG_REPLACE=1 was
-# set, since the user probably wants to know they're about to clobber a live
-# schedule.
+# Always remove an existing trigger before recreating, so the script is
+# truly idempotent (running it twice produces a schedule that matches the
+# current source, regardless of whether one already exists).
 EXISTING=$(uv run mngr schedule list --provider "$PROVIDER" --all --format json $DISABLE_PLUGIN_ARGS 2>/dev/null || echo '{"schedules":[]}')
 if echo "$EXISTING" | python3 -c "
 import json, sys
@@ -88,12 +79,7 @@ data = json.load(sys.stdin)
 names = [s['trigger']['name'] for s in data.get('schedules', [])]
 sys.exit(0 if '${TRIGGER_NAME}' in names else 1)
 " 2>/dev/null; then
-    if [ "${CHANGELOG_REPLACE:-}" != "1" ]; then
-        echo "Error: Schedule '${TRIGGER_NAME}' already exists on provider '$PROVIDER'." >&2
-        echo "       Set CHANGELOG_REPLACE=1 to remove the existing schedule and redeploy." >&2
-        exit 1
-    fi
-    echo "CHANGELOG_REPLACE=1 set. Removing existing schedule before redeploy..."
+    echo "Removing existing schedule '${TRIGGER_NAME}' before redeploy..."
     uv run mngr schedule remove "$TRIGGER_NAME" --provider "$PROVIDER" --force $DISABLE_PLUGIN_ARGS
 fi
 
