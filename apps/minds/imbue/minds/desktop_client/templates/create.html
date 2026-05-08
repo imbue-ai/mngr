@@ -5,8 +5,11 @@
   {% call ui.page_container() %}
     <div class="flex items-center justify-between mb-6 gap-4">
       <a href="/" class="text-zinc-600 text-sm hover:text-zinc-900 hover:no-underline">&larr; Back to projects</a>
-      {{ ui.btn_submit('Create', form='create-form') }}
+      {{ ui.btn_submit('Create', form='create-form', id='create-submit') }}
     </div>
+    {% if error_message %}
+      {% call ui.notice(variant='error') %}{{ error_message }}{% endcall %}
+    {% endif %}
     <form id="create-form" action="/create" method="post">
       <div class="flex gap-6 mb-4 items-start">
         <div class="basis-[200px] shrink-0 pt-2.5">
@@ -34,8 +37,8 @@
 
       <div class="flex gap-6 mb-4 items-start">
         <div class="basis-[200px] shrink-0 pt-2.5">
-          <label for="launch_mode" class="text-sm text-zinc-900 font-medium block">Launch mode</label>
-          <p class="mt-0.5 text-xs text-zinc-400">How to run the agent</p>
+          <label for="launch_mode" class="text-sm text-zinc-900 font-medium block">Compute provider</label>
+          <p class="mt-0.5 text-xs text-zinc-400">Where the agent runs</p>
         </div>
         <div class="flex-1">
           <select id="launch_mode" name="launch_mode"
@@ -45,7 +48,32 @@
                       {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ mode.value | lower }}</option>
             {% endfor %}
           </select>
-          <p id="leased-tooltip" class="hidden mt-1 text-xs text-amber-600">Leased mode requires an account.</p>
+          <p id="launch-mode-account-error" class="hidden mt-1 text-xs text-amber-600">
+            imbue_cloud requires a selected account.
+          </p>
+        </div>
+      </div>
+
+      <div class="flex gap-6 mb-4 items-start">
+        <div class="basis-[200px] shrink-0 pt-2.5">
+          <label for="ai_provider" class="text-sm text-zinc-900 font-medium block">AI provider</label>
+          <p class="mt-0.5 text-xs text-zinc-400">How Claude is authenticated</p>
+        </div>
+        <div class="flex-1">
+          <select id="ai_provider" name="ai_provider"
+                  class="w-full px-3 py-2.5 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+            {% for provider in ai_providers %}
+              <option value="{{ provider.value }}"{% if provider.value == selected_ai_provider %} selected{% endif %}
+                      {% if provider.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ provider.value | lower }}</option>
+            {% endfor %}
+          </select>
+          <p id="ai-provider-account-error" class="hidden mt-1 text-xs text-amber-600">
+            imbue_cloud requires a selected account.
+          </p>
+          <div id="api-key-row" class="mt-3 hidden">
+            <label for="anthropic_api_key" class="text-sm text-zinc-900 font-medium block mb-1">Anthropic API key</label>
+            {{ ui.text_input('anthropic_api_key', value=anthropic_api_key, placeholder='sk-ant-...', id='anthropic_api_key', type='password') }}
+          </div>
         </div>
       </div>
 
@@ -77,11 +105,11 @@
         </div>
         <div class="flex gap-6 mb-4 items-start">
           <div class="basis-[200px] shrink-0 pt-2.5">
-            <label for="include_env_file" class="text-sm text-zinc-900 font-medium block">Include .env file</label>
-            <p class="mt-0.5 text-xs text-zinc-400">Ships a local ".env" to the agent host. Ignored for git URLs.</p>
+            <label for="gh_token" class="text-sm text-zinc-900 font-medium block">GH_TOKEN</label>
+            <p class="mt-0.5 text-xs text-zinc-400">Optional GitHub token forwarded to the agent host</p>
           </div>
-          <div class="flex-1 pt-2">
-            <input type="checkbox" id="include_env_file" name="include_env_file" value="1" checked>
+          <div class="flex-1">
+            {{ ui.text_input('gh_token', value=gh_token, placeholder='ghp_...', id='gh_token', type='password') }}
           </div>
         </div>
       </div>
@@ -111,25 +139,40 @@
 
       var accountSelect = document.getElementById('account_id');
       var launchSelect = document.getElementById('launch_mode');
-      var leasedTooltip = document.getElementById('leased-tooltip');
+      var aiProviderSelect = document.getElementById('ai_provider');
+      var apiKeyRow = document.getElementById('api-key-row');
+      var apiKeyInput = document.getElementById('anthropic_api_key');
+      var launchModeError = document.getElementById('launch-mode-account-error');
+      var aiProviderError = document.getElementById('ai-provider-account-error');
+      var submitBtn = document.getElementById('create-submit');
 
-      function updateLeasedState() {
+      function update() {
         var hasAccount = accountSelect.value !== '';
-        var leasedOption = launchSelect.querySelector('option[data-requires-account]');
-        if (leasedOption) {
-          leasedOption.disabled = !hasAccount;
-          if (!hasAccount && launchSelect.value === 'IMBUE_CLOUD') {
-            launchSelect.value = 'LOCAL';
-          }
-        }
-        leasedTooltip.classList.toggle('hidden', hasAccount || launchSelect.value !== 'IMBUE_CLOUD');
+
+        // Disable the imbue_cloud option in each select when no account is
+        // chosen, so the dropdown itself signals "this is unavailable" -- the
+        // per-field amber notice below covers the case where the option was
+        // already selected before the account was cleared.
+        var launchImbueOption = launchSelect.querySelector('option[data-requires-account]');
+        if (launchImbueOption) launchImbueOption.disabled = !hasAccount;
+        var aiImbueOption = aiProviderSelect.querySelector('option[data-requires-account]');
+        if (aiImbueOption) aiImbueOption.disabled = !hasAccount;
+
+        var isApiKey = aiProviderSelect.value === 'API_KEY';
+        apiKeyRow.classList.toggle('hidden', !isApiKey);
+        apiKeyInput.required = isApiKey;
+
+        var launchInvalid = !hasAccount && launchSelect.value === 'IMBUE_CLOUD';
+        var aiInvalid = !hasAccount && aiProviderSelect.value === 'IMBUE_CLOUD';
+        launchModeError.classList.toggle('hidden', !launchInvalid);
+        aiProviderError.classList.toggle('hidden', !aiInvalid);
+        submitBtn.disabled = launchInvalid || aiInvalid;
       }
 
-      accountSelect.addEventListener('change', updateLeasedState);
-      launchSelect.addEventListener('change', function() {
-        leasedTooltip.classList.toggle('hidden', accountSelect.value !== '' || launchSelect.value !== 'IMBUE_CLOUD');
-      });
-      updateLeasedState();
+      accountSelect.addEventListener('change', update);
+      launchSelect.addEventListener('change', update);
+      aiProviderSelect.addEventListener('change', update);
+      update();
     })();
   </script>
 {% endblock %}

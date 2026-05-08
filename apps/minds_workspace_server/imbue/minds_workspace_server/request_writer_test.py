@@ -8,7 +8,6 @@ import pytest
 from imbue.minds_workspace_server.request_writer import UnknownRequestTypeError
 from imbue.minds_workspace_server.request_writer import write_refresh_request
 from imbue.minds_workspace_server.request_writer import write_request_event
-from imbue.minds_workspace_server.request_writer import write_sharing_request
 
 
 def test_write_refresh_request_writes_jsonl_to_correct_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -45,21 +44,6 @@ def test_write_refresh_request_without_agent_state_dir(monkeypatch: pytest.Monke
     monkeypatch.delenv("MNGR_AGENT_STATE_DIR", raising=False)
     with pytest.raises(RuntimeError, match="MNGR_AGENT_STATE_DIR"):
         write_refresh_request("web")
-
-
-def test_write_sharing_request_still_works(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Sanity: the refactor to share _append_event_line did not break sharing."""
-    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
-
-    write_sharing_request(agent_id="agent-1", service_name="web", is_user_requested=True)
-
-    events_file = tmp_path / "events" / "requests" / "events.jsonl"
-    assert events_file.exists()
-    event = json.loads(events_file.read_text().splitlines()[0])
-    assert event["type"] == "sharing_request"
-    assert event["source"] == "requests"
-    assert event["service_name"] == "web"
-    assert event["is_user_requested"] is True
 
 
 def test_write_request_event_writes_latchkey_permission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -101,7 +85,7 @@ def test_write_request_event_strips_reserved_metadata_keys(tmp_path: Path, monke
             "source": "not-requests",
             "type": "fake_type",
             "timestamp": "1970-01-01T00:00:00.000000Z",
-            "request_type": "SHARING",
+            "request_type": "PERMISSIONS",
         },
     )
 
@@ -140,7 +124,6 @@ def test_write_request_event_accepts_all_known_request_types(tmp_path: Path, mon
     monkeypatch.setenv("MNGR_AGENT_ID", "agent-1")
 
     expected_event_types = {
-        "SHARING": "sharing_request",
         "PERMISSIONS": "permissions_request",
         "LATCHKEY_PERMISSION": "latchkey_permission_request",
     }

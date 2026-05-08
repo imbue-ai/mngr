@@ -4,7 +4,7 @@
 {% block content %}
   {% call ui.page_container() %}
     {% if agent_ids %}
-      <div class="flex items-center justify-between mb-5">
+      <div class="flex items-center justify-between mb-5" data-landing-agent-ids="{{ agent_ids | map('string') | join(',') }}">
         <h1 class="text-xl font-semibold text-zinc-900">Projects</h1>
         {{ ui.btn_link('Create', '/create', variant='primary') }}
       </div>
@@ -61,4 +61,42 @@
       {% endif %}
     {% endif %}
   {% endcall %}
+{% endblock %}
+{% block scripts %}
+  {# Live updates: subscribe to the chrome SSE so the page reloads when a
+     destroy completes (or any other workspace-list change lands), without
+     forcing the user to click into the destroying detail page. #}
+  <script>
+    (function () {
+      var rendered = (document.querySelector('[data-landing-agent-ids]') || {}).dataset || {};
+      var renderedIds = (rendered.landingAgentIds || '').split(',').filter(function (s) { return s.length > 0; });
+      var renderedSet = new Set(renderedIds);
+      var es = null;
+      function connect() {
+        if (es) es.close();
+        es = new EventSource('/_chrome/events');
+        es.onmessage = function (event) {
+          var data;
+          try { data = JSON.parse(event.data); } catch (e) { return; }
+          if (data.type !== 'workspaces' || !Array.isArray(data.workspaces)) return;
+          var liveIds = data.workspaces.map(function (w) { return w.id; });
+          var liveSet = new Set(liveIds);
+          var differs = liveIds.length !== renderedSet.size
+            || liveIds.some(function (id) { return !renderedSet.has(id); })
+            || renderedIds.some(function (id) { return !liveSet.has(id); });
+          if (differs) {
+            es.close();
+            location.reload();
+          }
+        };
+        es.onerror = function () {
+          if (!es) return;
+          es.close();
+          es = null;
+          setTimeout(connect, 5000);
+        };
+      }
+      connect();
+    })();
+  </script>
 {% endblock %}

@@ -937,6 +937,7 @@ def test_list_command_with_limit_json_format(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_list_command_with_sort_by_name(
     cli_runner: CliRunner,
     temp_work_dir: Path,

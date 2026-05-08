@@ -18,6 +18,8 @@ from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import set_imbue_cloud_provider_for_account
 from imbue.minds.cli.run import _ImbueCloudAuthErrorDisabler
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
+from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 
@@ -77,9 +79,11 @@ def _seed_settings_toml(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def session_store_with_alice(tmp_path: Path) -> MultiAccountSessionStore:
-    store = MultiAccountSessionStore(data_dir=tmp_path / ".minds")
-    store.add_or_update_session(user_id=_USER_ID, email=_EMAIL)
-    return store
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    minds_dir = tmp_path / ".minds"
+    minds_dir.mkdir(parents=True, exist_ok=True)
+    return make_session_store_for_test(minds_dir, cli=cli)
 
 
 def test_auth_error_for_known_account_disables_provider_and_bounces_observe(

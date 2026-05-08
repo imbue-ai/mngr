@@ -2459,7 +2459,12 @@ def _init_supertokens() -> None:
         modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}"),
         modal.Secret.from_name(f"paid-accounts-{_DEPLOY_ENV}"),
         modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV}),
-    ]
+    ],
+    # Keep one container warm at all times so the desktop client (which
+    # hits this connector for auth, lease, and tunnel ops on every minds
+    # startup) doesn't pay a cold-boot penalty after a quiet period.
+    # Mirrors the litellm-proxy deployment in apps/modal_litellm/app.py.
+    min_containers=1,
 )
 @modal.asgi_app()
 def fastapi_app() -> FastAPI:

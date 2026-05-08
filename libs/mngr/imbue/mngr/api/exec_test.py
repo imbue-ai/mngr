@@ -13,9 +13,13 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.exec import ExecResult
 from imbue.mngr.api.exec import MultiExecResult
+from imbue.mngr.api.exec import OuterExecResult
+from imbue.mngr.api.exec import SkippedAgent
 from imbue.mngr.api.exec import _record_failure
 from imbue.mngr.api.exec import exec_command_on_agent
 from imbue.mngr.api.exec import exec_command_on_agents
+from imbue.mngr.api.exec import group_matches_by_outer_host
+from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundError
@@ -24,7 +28,9 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import cleanup_tmux_session
@@ -357,3 +363,82 @@ def test_exec_command_on_agents_returns_empty_when_no_agents_match(
     )
     assert result.successful_results == []
     assert result.failed_agents == []
+
+
+# =========================================================================
+# --outer mode tests
+# =========================================================================
+
+
+def test_skipped_agent_carries_all_ids() -> None:
+    """SkippedAgent has agent_id, agent_name, host_id, provider_name, reason."""
+    skipped = SkippedAgent(
+        agent_id=AgentId("agent-abc123def4567890abcd1234567890ef"),
+        agent_name=AgentName("my-agent"),
+        host_id=HostId("host-abc123def4567890abcd1234567890ef"),
+        provider_name=ProviderInstanceName("modal"),
+        reason="no outer host",
+    )
+    assert skipped.agent_name == "my-agent"
+    assert skipped.provider_name == "modal"
+    assert skipped.reason == "no outer host"
+
+
+def test_multi_exec_result_has_skipped_and_outer_lists() -> None:
+    """MultiExecResult has skipped_agents and outer_results lists, both empty by default."""
+    result = MultiExecResult()
+    assert result.skipped_agents == []
+    assert result.outer_results == []
+    assert result.is_any_failure is False
+
+
+def test_outer_exec_result_carries_outer_host_and_agents() -> None:
+    """OuterExecResult holds the canonical outer-host id and the input-agent list."""
+    r = OuterExecResult(
+        outer_host="outer:docker:host-abc",
+        agents=("a", "b", "c"),
+        stdout="hello\n",
+        stderr="",
+        success=True,
+    )
+    assert r.outer_host == "outer:docker:host-abc"
+    assert r.agents == ("a", "b", "c")
+    assert r.success is True
+
+
+def test_group_matches_by_outer_host_buckets_no_outer_for_local(
+    temp_mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """group_matches_by_outer_host groups by the provider's outer_host_id_for.
+
+    Local provider returns None for outer_host_id_for, so all matches end up
+    in the no_outer bucket.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    matches = [
+        AgentMatch(
+            agent_id=AgentId.generate(),
+            agent_name=AgentName(f"a{i}"),
+            host_id=host.id,
+            host_name=HostName("h"),
+            provider_name=local_provider.name,
+        )
+        for i in range(3)
+    ]
+    by_outer, no_outer, errors = group_matches_by_outer_host(matches, temp_mngr_ctx)
+    assert by_outer == {}
+    assert {m.agent_name for m in no_outer} == {AgentName("a0"), AgentName("a1"), AgentName("a2")}
+    assert errors == []
+
+
+def test_provider_outer_host_for_default_yields_none(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """The base ProviderInstanceInterface.outer_host_for default yields None.
+
+    Local provider does not override outer_host_for, so it inherits the default.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    with local_provider.outer_host_for(host.id) as outer:
+        assert outer is None
