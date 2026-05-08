@@ -443,12 +443,11 @@ def test_with_tolerant_paths_does_not_mutate_input() -> None:
 
 
 def test_with_tolerant_paths_raises_tolerant_path_error_when_target_is_not_dict() -> None:
-    """A precondition violation (path target is not a MapType) raises TypeError.
+    """A precondition violation (path target is not a MapType) raises TolerantPathError.
 
-    Regression guard: the previous mutating implementation crashed loudly on
-    this case (TolerantMapType(non_dict) raises). The recursive replacement
-    must keep the same fail-loud behavior so misconfigured paths surface
-    immediately rather than silently no-op.
+    Misconfigured paths must surface immediately rather than silently no-op,
+    so a path that names a non-dict target (e.g. a string field) is rejected
+    loudly at setup time.
     """
     raw_context = {"name": "h1"}
     cel_context = build_cel_context(raw_context)
