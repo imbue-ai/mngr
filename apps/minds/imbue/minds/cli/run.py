@@ -132,7 +132,7 @@ def run(
     backend_resolver = MngrCliBackendResolver()
     tunnel_manager = SSHTunnelManager()
     latchkey = _build_latchkey(data_directory=data_directory)
-    latchkey.initialize(data_dir=data_directory)
+    latchkey.initialize()
 
     root_concurrency_group = ConcurrencyGroup(name="minds-run")
     root_concurrency_group.__enter__()
@@ -303,8 +303,13 @@ def _build_latchkey(data_directory: Path) -> Latchkey:
     # bundled CLI's path) so the in-process API and any subprocess
     # ``mngr latchkey ...`` invocation agree on which binary to talk to.
     latchkey_binary = resolve_latchkey_binary()
+    # Single rooted directory for both upstream latchkey's credential
+    # store (passed as ``LATCHKEY_DIRECTORY``) and the plugin's own
+    # ``mngr_latchkey/`` metadata subdir. ``MINDS_LATCHKEY_DIRECTORY``
+    # is honored as an override for users who want to share credentials
+    # across multiple ``MINDS_ROOT_NAME``s.
     directory_override = os.environ.get("MINDS_LATCHKEY_DIRECTORY")
-    latchkey_directory: Path | None
+    latchkey_directory: Path
     if directory_override:
         latchkey_directory = Path(directory_override).expanduser()
     else:

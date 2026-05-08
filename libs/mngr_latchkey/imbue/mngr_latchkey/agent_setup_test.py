@@ -96,7 +96,7 @@ class _FakeLatchkey(Latchkey):
 
 
 def _full_fake(tmp_path: Path) -> _FakeLatchkey:
-    fake = _FakeLatchkey()
+    fake = _FakeLatchkey(latchkey_directory=tmp_path)
     fake.configure(
         gateway_url="http://127.0.0.1:55555",
         password="hunter2",
@@ -115,7 +115,7 @@ def test_prepare_no_latchkey_tunneled_returns_constant_url(tmp_path: Path) -> No
     latchkey wrapper -- tests and non-password-protected gateways can
     still receive traffic at that URL.
     """
-    setup = prepare_agent_latchkey(None, data_dir=tmp_path, is_tunneled=True)
+    setup = prepare_agent_latchkey(None, is_tunneled=True)
     assert setup.env[ENV_LATCHKEY_GATEWAY] == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
     assert setup.env[ENV_LATCHKEY_DISABLE_COUNTING] == "1"
     assert ENV_LATCHKEY_GATEWAY_PASSWORD not in setup.env
@@ -129,42 +129,42 @@ def test_prepare_no_latchkey_on_host_returns_empty(tmp_path: Path) -> None:
     On-host agents need the gateway's live port; without a Latchkey
     wrapper there is nothing to query.
     """
-    setup = prepare_agent_latchkey(None, data_dir=tmp_path, is_tunneled=False)
+    setup = prepare_agent_latchkey(None, is_tunneled=False)
     assert setup.env == {}
     assert setup.opaque_permissions_path is None
 
 
 def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     fake = _full_fake(tmp_path)
-    setup = prepare_agent_latchkey(fake, data_dir=tmp_path, is_tunneled=True)
+    setup = prepare_agent_latchkey(fake, is_tunneled=True)
     assert setup.env[ENV_LATCHKEY_GATEWAY] == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
     assert setup.env[ENV_LATCHKEY_GATEWAY_PASSWORD] == "hunter2"
     assert setup.env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] == "header.payload.signature"
     assert setup.env[ENV_LATCHKEY_DISABLE_COUNTING] == "1"
     assert setup.opaque_permissions_path is not None
-    # The opaque path lives under the per-data-dir opaque directory and
-    # was materialized with deny-all baseline rules.
-    assert setup.opaque_permissions_path.parent == opaque_permissions_dir(tmp_path)
+    # The opaque path lives under the plugin's data subdir and was
+    # materialized with deny-all baseline rules.
+    assert setup.opaque_permissions_path.parent == opaque_permissions_dir(fake.plugin_data_dir)
     assert load_permissions(setup.opaque_permissions_path).rules == ()
 
 
 def test_prepare_full_wiring_on_host_uses_live_port(tmp_path: Path) -> None:
     """On-host (DEV) agents get the gateway's live host:port pair."""
     fake = _full_fake(tmp_path)
-    setup = prepare_agent_latchkey(fake, data_dir=tmp_path, is_tunneled=False)
+    setup = prepare_agent_latchkey(fake, is_tunneled=False)
     assert setup.env[ENV_LATCHKEY_GATEWAY] == "http://127.0.0.1:55555"
     assert setup.env[ENV_LATCHKEY_GATEWAY_PASSWORD] == "hunter2"
     assert setup.env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] == "header.payload.signature"
 
 
 def test_prepare_on_host_gateway_start_failure_returns_empty(tmp_path: Path) -> None:
-    fake = _FakeLatchkey()
+    fake = _FakeLatchkey(latchkey_directory=tmp_path)
     fake.configure(
         gateway_error=LatchkeyError("boom"),
         password="hunter2",
         jwt="header.payload.signature",
     )
-    setup = prepare_agent_latchkey(fake, data_dir=tmp_path, is_tunneled=False)
+    setup = prepare_agent_latchkey(fake, is_tunneled=False)
     assert setup.env == {}
     assert setup.opaque_permissions_path is None
 
@@ -176,31 +176,31 @@ def test_prepare_password_derivation_failure_skips_password(tmp_path: Path) -> N
     consequence is that a password-protected gateway will reject this
     agent. That's a clearer failure mode than aborting agent creation.
     """
-    fake = _FakeLatchkey()
+    fake = _FakeLatchkey(latchkey_directory=tmp_path)
     fake.configure(
         gateway_url="http://127.0.0.1:55555",
         password_error=LatchkeyJwtMintError("nope"),
         jwt="header.payload.signature",
     )
-    setup = prepare_agent_latchkey(fake, data_dir=tmp_path, is_tunneled=True)
+    setup = prepare_agent_latchkey(fake, is_tunneled=True)
     assert ENV_LATCHKEY_GATEWAY in setup.env
     assert ENV_LATCHKEY_GATEWAY_PASSWORD not in setup.env
     assert setup.env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] == "header.payload.signature"
 
 
 def test_prepare_jwt_mint_failure_skips_override_and_cleans_up(tmp_path: Path) -> None:
-    fake = _FakeLatchkey()
+    fake = _FakeLatchkey(latchkey_directory=tmp_path)
     fake.configure(
         gateway_url="http://127.0.0.1:55555",
         password="hunter2",
         jwt_error=LatchkeyJwtMintError("nope"),
     )
-    setup = prepare_agent_latchkey(fake, data_dir=tmp_path, is_tunneled=True)
+    setup = prepare_agent_latchkey(fake, is_tunneled=True)
     assert setup.env[ENV_LATCHKEY_GATEWAY_PASSWORD] == "hunter2"
     assert ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE not in setup.env
     assert setup.opaque_permissions_path is None
     # The orphan opaque file should have been unlinked, not left behind.
-    opaque_dir = opaque_permissions_dir(tmp_path)
+    opaque_dir = opaque_permissions_dir(fake.plugin_data_dir)
     assert not opaque_dir.exists() or list(opaque_dir.iterdir()) == []
 
 
@@ -209,14 +209,14 @@ def test_prepare_jwt_mint_failure_skips_override_and_cleans_up(tmp_path: Path) -
 
 def test_finalize_links_opaque_to_canonical(tmp_path: Path) -> None:
     fake = _full_fake(tmp_path)
-    setup = prepare_agent_latchkey(fake, data_dir=tmp_path, is_tunneled=True)
+    setup = prepare_agent_latchkey(fake, is_tunneled=True)
     assert setup.opaque_permissions_path is not None
     agent_id = AgentId()
 
-    finalize_agent_permissions(tmp_path, setup.opaque_permissions_path, agent_id)
+    finalize_agent_permissions(fake, setup.opaque_permissions_path, agent_id)
 
     # The opaque path is now a symlink pointing at the canonical agent path.
-    canonical = permissions_path_for_agent(tmp_path, agent_id)
+    canonical = permissions_path_for_agent(fake.plugin_data_dir, agent_id)
     assert canonical.is_file()
     assert setup.opaque_permissions_path.is_symlink()
     assert setup.opaque_permissions_path.resolve() == canonical.resolve()
@@ -224,8 +224,9 @@ def test_finalize_links_opaque_to_canonical(tmp_path: Path) -> None:
 
 def test_finalize_with_none_path_is_a_noop(tmp_path: Path) -> None:
     """``opaque_permissions_path=None`` is what ``prepare_agent_latchkey`` returns on JWT-mint failure."""
-    finalize_agent_permissions(tmp_path, None, AgentId())
-    assert not (tmp_path / "agents").exists()
+    fake = _full_fake(tmp_path)
+    finalize_agent_permissions(fake, None, AgentId())
+    assert not (fake.plugin_data_dir / "agents").exists()
 
 
 # -- AgentLatchkeySetup model -------------------------------------------------

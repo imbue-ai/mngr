@@ -119,7 +119,9 @@ def _make_latchkey_with_status(
         "    sys.exit(99)\n"
     )
     binary.chmod(0o755)
-    return Latchkey(latchkey_binary=str(binary), latchkey_directory=latchkey_directory)
+    # ``latchkey_directory`` is required on ``Latchkey``; default to ``tmp_path``
+    # for tests that don't care about the credential-store location.
+    return Latchkey(latchkey_binary=str(binary), latchkey_directory=latchkey_directory or tmp_path)
 
 
 def _build_handler(
@@ -196,7 +198,7 @@ def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(
     # Auth browser must not have been invoked.
     assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
     # Permissions file reflects the new rule.
-    config = load_permissions(permissions_path_for_agent(tmp_path, agent_id))
+    config = load_permissions(permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id))
     assert config.rules == ({"slack-api": ["slack-read-all", "slack-write-all"]},)
     # Response event was written and mngr message sent.
     responses = load_response_events(tmp_path)
@@ -263,7 +265,7 @@ def test_grant_with_unknown_credentials_invokes_auth_browser(tmp_path: Path) -> 
     mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
     handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
-        latchkey=Latchkey(latchkey_binary=str(binary)),
+        latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary)),
         services_catalog={_SLACK_SERVICE_INFO.name: _SLACK_SERVICE_INFO},
         mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
     )
@@ -299,7 +301,7 @@ def test_grant_treats_failed_browser_flow_as_deny_with_distinct_message(tmp_path
     assert "sign-in" in result.message.lower()
     assert "user cancelled" in result.message
     # latchkey_permissions.json must NOT have been written.
-    assert not permissions_path_for_agent(tmp_path, agent_id).exists()
+    assert not permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id).exists()
     # A DENIED response event was appended (no separate AUTH_FAILED status).
     responses = load_response_events(tmp_path)
     assert len(responses) == 1
@@ -355,7 +357,7 @@ def test_grant_replaces_existing_rule_for_same_scope(tmp_path: Path) -> None:
         granted_permissions=("slack-read-all", "slack-write-all"),
     )
 
-    config = load_permissions(permissions_path_for_agent(tmp_path, agent_id))
+    config = load_permissions(permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id))
     assert config.rules == ({"slack-api": ["slack-read-all", "slack-write-all"]},)
 
 
@@ -363,12 +365,12 @@ def test_grant_replaces_existing_rule_for_same_scope(tmp_path: Path) -> None:
 
 
 def test_grant_refuses_when_browser_auth_unsupported_and_returns_set_example(tmp_path: Path) -> None:
-    expected_example = 'latchkey auth set coolify -H "Authorization: Bearer <token>"'
+    base_example = 'latchkey auth set coolify -H "Authorization: Bearer <token>"'
     handler = _build_handler(
         tmp_path,
         credential_status="missing",
         auth_options_json=json.dumps(["set"]),
-        set_credentials_example=expected_example,
+        set_credentials_example=base_example,
     )
     agent_id = AgentId()
 
@@ -380,14 +382,20 @@ def test_grant_refuses_when_browser_auth_unsupported_and_returns_set_example(tmp
     )
 
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
-    assert result.set_credentials_example == expected_example
+    # ``latchkey_directory`` is required on ``Latchkey`` now so the
+    # ``LATCHKEY_DIRECTORY=`` prefix is always added so the user's
+    # terminal-run ``latchkey auth set`` writes credentials into the same
+    # store the desktop client uses.
+    assert result.set_credentials_example is not None
+    assert result.set_credentials_example.startswith("LATCHKEY_DIRECTORY=")
+    assert result.set_credentials_example.endswith(f" {base_example}")
     assert result.response_event is None
     # The browser flow must not have been invoked.
     assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
     # The request must remain pending: no response event, no permissions
     # file, no mngr message.
     assert load_response_events(tmp_path) == []
-    assert not permissions_path_for_agent(tmp_path, agent_id).exists()
+    assert not permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id).exists()
     assert not (tmp_path / "mngr_report.jsonl").exists()
 
 
@@ -447,19 +455,23 @@ def test_grant_prefixes_set_example_with_latchkey_directory_when_pinned(tmp_path
     assert result.set_credentials_example.endswith(base_example)
 
 
-def test_grant_does_not_prefix_set_example_when_no_latchkey_directory(tmp_path: Path) -> None:
-    """Without a pinned directory the command must not carry an env override.
+def test_grant_prefixes_set_example_with_pinned_latchkey_directory(tmp_path: Path) -> None:
+    """The suggested command always carries the pinned ``LATCHKEY_DIRECTORY=``.
 
-    Otherwise we'd be inventing an empty ``LATCHKEY_DIRECTORY=`` prefix
-    that doesn't reflect what the desktop client actually does.
+    ``Latchkey`` requires a ``latchkey_directory``, so the user's
+    terminal-run ``latchkey auth set`` must point at the same store
+    the desktop client uses; otherwise upstream latchkey would write
+    credentials to its own default ``~/.latchkey`` and the desktop
+    client would never see them.
     """
     base_example = 'latchkey auth set slack -H "Authorization: Bearer <token>"'
+    pinned = tmp_path / "shared-latchkey"
     handler = _build_handler(
         tmp_path,
         credential_status="missing",
         auth_options_json=json.dumps(["set"]),
         set_credentials_example=base_example,
-        latchkey_directory=None,
+        latchkey_directory=pinned,
     )
 
     result = handler.grant(
@@ -470,7 +482,7 @@ def test_grant_does_not_prefix_set_example_when_no_latchkey_directory(tmp_path: 
     )
 
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
-    assert result.set_credentials_example == base_example
+    assert result.set_credentials_example == f"LATCHKEY_DIRECTORY={pinned} {base_example}"
 
 
 def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path: Path) -> None:
@@ -500,7 +512,7 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
     mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
     handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
-        latchkey=Latchkey(latchkey_binary=str(binary)),
+        latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary)),
         services_catalog={_SLACK_SERVICE_INFO.name: _SLACK_SERVICE_INFO},
         mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
     )
@@ -599,7 +611,7 @@ def test_deny_writes_response_event_without_touching_permissions_file(tmp_path: 
     assert len(responses) == 1
     assert responses[0].status == str(RequestStatus.DENIED)
     # No permissions file should have been created.
-    assert not permissions_path_for_agent(tmp_path, agent_id).exists()
+    assert not permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id).exists()
     # The auth-browser binary must not have been invoked either.
     assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
 

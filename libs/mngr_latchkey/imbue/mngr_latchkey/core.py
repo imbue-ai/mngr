@@ -49,10 +49,10 @@ from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import delete_gateway_info
-from imbue.mngr_latchkey.store import delete_legacy_per_agent_gateway_records
 from imbue.mngr_latchkey.store import ensure_browser_log_path
 from imbue.mngr_latchkey.store import gateway_log_path
 from imbue.mngr_latchkey.store import load_gateway_info
+from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
 from imbue.mngr_latchkey.store import save_gateway_info
 from imbue.mngr_latchkey.store import save_permissions
 
@@ -424,19 +424,17 @@ class Latchkey(MutableModel):
         frozen=True,
         description="Host to bind the shared gateway to",
     )
-    latchkey_directory: Path | None = Field(
-        default=None,
+    latchkey_directory: Path = Field(
         frozen=True,
         description=(
-            "Value to pass through as ``LATCHKEY_DIRECTORY`` to every spawned subprocess "
-            "(gateway, services-info, auth-browser, ensure-browser, create-jwt). When set, all "
-            "minds-managed latchkey calls share this credential/config directory "
-            "instead of falling back to the default ``~/.latchkey``. When ``None``, "
-            "latchkey uses its own default."
+            "Root directory for everything latchkey-related. Passed through to spawned "
+            "subprocesses as ``LATCHKEY_DIRECTORY`` so the upstream ``latchkey`` CLI's "
+            "credential / config files live here, and also used as the parent of the "
+            "plugin's own metadata subdirectory (``mngr_latchkey/``, accessible via "
+            ":attr:`plugin_data_dir`). Required."
         ),
     )
 
-    _data_dir: Path | None = PrivateAttr(default=None)
     _info: LatchkeyGatewayInfo | None = PrivateAttr(default=None)
     _gateway_password: str | None = PrivateAttr(default=None)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -453,57 +451,37 @@ class Latchkey(MutableModel):
 
     # -- Gateway lifecycle ---------------------------------------------------
 
-    def initialize(self, data_dir: Path | None = None) -> None:
-        """Load the persisted gateway info from ``data_dir``, adopting it if alive.
+    @property
+    def plugin_data_dir(self) -> Path:
+        """Return the directory the plugin owns under :attr:`latchkey_directory`.
+
+        Always ``<latchkey_directory>/mngr_latchkey/``. The plugin writes
+        all of its own files (gateway record, default permissions,
+        per-agent permissions, opaque handles, log files) here so they
+        cannot collide with anything the upstream ``latchkey`` CLI
+        chooses to put in :attr:`latchkey_directory`.
+        """
+        return _plugin_data_dir(self.latchkey_directory)
+
+    def initialize(self) -> None:
+        """Load the persisted gateway info, adopting an existing live gateway if any.
 
         A dead record is removed from disk. A live, still-ours gateway is
         adopted so subsequent calls to ``ensure_gateway_started`` are
-        no-ops. Any leftover per-agent gateway records from older
-        minds versions are also cleaned up here (their PIDs are
-        terminated best-effort) since the new architecture only uses one
-        shared gateway.
-
-        ``data_dir`` defaults to ``self.latchkey_directory`` -- which is
-        what every standalone caller (e.g. the ``mngr latchkey ensure-gateway``
-        CLI) wants. Minds passes the two as different paths because its
-        plugin metadata lives in ``~/.minds`` while the upstream credential
-        store lives in ``~/.minds/latchkey``; that case keeps working
-        because the explicit argument wins over the default.
+        no-ops.
 
         Liveness probes include a TCP connect (up to
         ``_LIVENESS_CONNECT_TIMEOUT_SECONDS``), which is why they run
         outside the lock. ``initialize()`` is only expected to be called
         once before any concurrent use, so there is no real contention here.
         """
-        if data_dir is None:
-            if self.latchkey_directory is None:
-                raise LatchkeyNotInitializedError(
-                    "Latchkey.initialize() requires either an explicit data_dir or a "
-                    "latchkey_directory set on the instance."
-                )
-            data_dir = self.latchkey_directory
-        existing = load_gateway_info(data_dir)
+        plugin_dir = self.plugin_data_dir
+        existing = load_gateway_info(plugin_dir)
         is_alive = existing is not None and _is_info_alive(existing)
-
-        # Best-effort cleanup of legacy per-agent gateway records that an
-        # older minds version might have left behind. We can't recover
-        # the PIDs from the record alone here (the records were already
-        # parsed inside ``delete_legacy_per_agent_gateway_records`` and
-        # discarded along with the file), but the intent is just to
-        # avoid stale files lying around -- leftover processes will be
-        # reaped when the user's machine reboots or when the user
-        # explicitly cleans them up.
-        legacy_agent_ids = delete_legacy_per_agent_gateway_records(data_dir)
-        if legacy_agent_ids:
-            logger.info(
-                "Removed {} legacy per-agent latchkey gateway record(s); minds now uses a single shared gateway",
-                len(legacy_agent_ids),
-            )
 
         with self._lock:
             if self._is_initialized:
                 return
-            self._data_dir = data_dir
             if is_alive and existing is not None:
                 logger.info(
                     "Adopted existing shared Latchkey gateway (pid={}, {}:{})",
@@ -517,7 +495,7 @@ class Latchkey(MutableModel):
                     "Discarding stale Latchkey gateway record (pid={})",
                     existing.pid,
                 )
-                delete_gateway_info(data_dir)
+                delete_gateway_info(plugin_dir)
                 self._info = None
             else:
                 self._info = None
@@ -543,10 +521,11 @@ class Latchkey(MutableModel):
         # liveness-probe the existing gateway (if any) without
         # blocking other state accesses.
         with self._lock:
-            data_dir = self._require_initialized_locked()
+            self._require_initialized_locked()
             existing = self._info
         if existing is not None and _is_info_alive(existing):
             return existing
+        plugin_dir = self.plugin_data_dir
         # Slow path: serialize spawning. The double-check after
         # acquiring ``_spawn_lock`` matters: while we waited for the
         # spawn lock another caller may have already spawned and
@@ -557,10 +536,10 @@ class Latchkey(MutableModel):
                 existing = self._info
             if existing is not None and _is_info_alive(existing):
                 return existing
-            info = self._spawn_gateway(data_dir)
+            info = self._spawn_gateway(plugin_dir)
             with self._lock:
                 self._info = info
-                save_gateway_info(data_dir, info)
+                save_gateway_info(plugin_dir, info)
             return info
 
     def stop_gateway(self) -> None:
@@ -577,11 +556,10 @@ class Latchkey(MutableModel):
         granted permissions survive desktop-client restarts and reboots.
         """
         with self._lock:
-            data_dir = self._data_dir
             info = self._info
             self._info = None
-            if data_dir is not None:
-                delete_gateway_info(data_dir)
+            if self._is_initialized:
+                delete_gateway_info(self.plugin_data_dir)
         if info is not None:
             logger.info("Stopping shared Latchkey gateway (pid={})", info.pid)
             _terminate_pid(info.pid)
@@ -778,14 +756,13 @@ class Latchkey(MutableModel):
 
     # -- Internals -----------------------------------------------------------
 
-    def _require_initialized_locked(self) -> Path:
-        if not self._is_initialized or self._data_dir is None:
+    def _require_initialized_locked(self) -> None:
+        if not self._is_initialized:
             raise LatchkeyNotInitializedError(
-                "Latchkey.initialize(data_dir=...) must be called before use",
+                "Latchkey.initialize() must be called before use",
             )
-        return self._data_dir
 
-    def _spawn_gateway(self, data_dir: Path) -> LatchkeyGatewayInfo:
+    def _spawn_gateway(self, plugin_dir: Path) -> LatchkeyGatewayInfo:
         """Build a fresh ``LatchkeyGatewayInfo`` by spawning a detached gateway.
 
         Materializes the deny-all default permissions file, derives the
@@ -800,7 +777,7 @@ class Latchkey(MutableModel):
         # actually spawn the gateway in this minds session. It runs
         # detached alongside the gateway spawn below and we don't wait for
         # it.
-        self._ensure_browser_once(data_dir)
+        self._ensure_browser_once(plugin_dir)
 
         # Latchkey treats a missing permissions file as ``allow all``, so
         # we always materialize an empty-rules default file before
@@ -810,7 +787,7 @@ class Latchkey(MutableModel):
         # files are left untouched; minds always rewrites them with
         # empty rules anyway, but on adoption we leave the existing one
         # alone in case the user inspected it.
-        default_perms = default_permissions_path(data_dir)
+        default_perms = default_permissions_path(plugin_dir)
         if not default_perms.is_file():
             save_permissions(default_perms, LatchkeyPermissionsConfig())
 
@@ -823,7 +800,7 @@ class Latchkey(MutableModel):
             raise LatchkeyError(f"Failed to derive gateway password: {e}") from e
 
         port = _allocate_free_port(self.listen_host)
-        log_path = gateway_log_path(data_dir)
+        log_path = gateway_log_path(plugin_dir)
 
         with log_span(
             "Starting shared Latchkey gateway on {}:{}",
@@ -865,7 +842,7 @@ class Latchkey(MutableModel):
             started_at=datetime.now(timezone.utc),
         )
 
-    def _ensure_browser_once(self, data_dir: Path) -> None:
+    def _ensure_browser_once(self, plugin_dir: Path) -> None:
         """Spawn ``latchkey ensure-browser`` the first time we're asked to, per Latchkey lifetime.
 
         ``ensure-browser`` discovers or downloads a Playwright-compatible
@@ -879,7 +856,7 @@ class Latchkey(MutableModel):
             if self._has_ensured_browser:
                 return
             self._has_ensured_browser = True
-        log_path = ensure_browser_log_path(data_dir)
+        log_path = ensure_browser_log_path(plugin_dir)
         try:
             pid = spawn_detached_latchkey_ensure_browser(
                 latchkey_binary=self.latchkey_binary,

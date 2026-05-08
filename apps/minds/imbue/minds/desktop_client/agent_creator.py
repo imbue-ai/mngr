@@ -1109,7 +1109,6 @@ class AgentCreator(MutableModel):
                 # so the agent talks straight to the gateway's host port).
                 latchkey_setup = prepare_agent_latchkey(
                     self.latchkey,
-                    data_dir=self.paths.data_dir,
                     is_tunneled=launch_mode is not LaunchMode.DEV,
                 )
                 self._log_latchkey_setup(launch_mode, latchkey_setup, log_queue)
@@ -1157,11 +1156,12 @@ class AgentCreator(MutableModel):
                 # (DEV included): the symlink lives under ``data_dir``
                 # which both the desktop client and any in-process DEV
                 # agent can see.
-                finalize_agent_permissions(
-                    self.paths.data_dir,
-                    latchkey_setup.opaque_permissions_path,
-                    canonical_id,
-                )
+                if self.latchkey is not None:
+                    finalize_agent_permissions(
+                        self.latchkey,
+                        latchkey_setup.opaque_permissions_path,
+                        canonical_id,
+                    )
 
                 log_queue.put("[minds] Agent created successfully.")
 

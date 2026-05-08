@@ -102,7 +102,6 @@ class AgentLatchkeySetup(FrozenModel):
 def prepare_agent_latchkey(
     latchkey: Latchkey | None,
     *,
-    data_dir: Path,
     is_tunneled: bool,
 ) -> AgentLatchkeySetup:
     """Pre-create env vars + opaque permissions handle for a new agent.
@@ -145,7 +144,7 @@ def prepare_agent_latchkey(
         if password is not None:
             env[ENV_LATCHKEY_GATEWAY_PASSWORD] = password
 
-        opaque_path, jwt = _prepare_opaque_permissions_handle(latchkey, data_dir)
+        opaque_path, jwt = _prepare_opaque_permissions_handle(latchkey)
         if jwt is not None:
             env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] = jwt
 
@@ -158,7 +157,7 @@ def prepare_agent_latchkey(
 
 
 def finalize_agent_permissions(
-    data_dir: Path,
+    latchkey: Latchkey,
     opaque_permissions_path: Path | None,
     agent_id: AgentId,
 ) -> None:
@@ -172,14 +171,13 @@ def finalize_agent_permissions(
     requests will still be evaluated against the deny-all baseline file
     that the JWT references directly (i.e. the opaque file itself); the
     only consequence of a failed finalize is that subsequent
-    user-driven permission grants will not take effect because the
-    desktop UI writes to the canonical agent-keyed path which is not
-    yet linked.
+    user-driven permission grants will not take effect because the UI
+    writes to the canonical agent-keyed path which is not yet linked.
     """
     if opaque_permissions_path is None:
         return
     try:
-        link_opaque_permissions_to_agent(data_dir, opaque_permissions_path, agent_id)
+        link_opaque_permissions_to_agent(latchkey.plugin_data_dir, opaque_permissions_path, agent_id)
     except LatchkeyStoreError as e:
         logger.warning("Failed to link latchkey permissions handle for agent {}: {}", agent_id, e)
 
@@ -220,16 +218,15 @@ def _derive_gateway_password_or_warn(latchkey: Latchkey) -> str | None:
 
 def _prepare_opaque_permissions_handle(
     latchkey: Latchkey,
-    data_dir: Path,
 ) -> tuple[Path | None, str | None]:
     """Allocate an opaque permissions handle and mint its override JWT.
 
     Returns ``(opaque_path, jwt)`` on success. On JWT-mint failure the
     just-created file is unlinked (best-effort) so we don't litter
-    ``data_dir`` with orphan handles for agents that will never be
-    able to use them, and ``(None, None)`` is returned.
+    the plugin data directory with orphan handles for agents that will
+    never be able to use them, and ``(None, None)`` is returned.
     """
-    opaque_path = new_opaque_permissions_path(data_dir)
+    opaque_path = new_opaque_permissions_path(latchkey.plugin_data_dir)
     save_permissions(opaque_path, LatchkeyPermissionsConfig())
     try:
         jwt = latchkey.create_permissions_override_jwt(opaque_path)

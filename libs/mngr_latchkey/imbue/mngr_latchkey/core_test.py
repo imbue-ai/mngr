@@ -70,34 +70,20 @@ def test_cmdline_matcher_accepts_plausible_latchkey_gateway() -> None:
 
 
 def test_ensure_gateway_started_requires_initialize(tmp_path: Path) -> None:
-    manager = Latchkey()
+    manager = Latchkey(latchkey_directory=tmp_path)
     with pytest.raises(LatchkeyNotInitializedError):
         manager.ensure_gateway_started()
 
 
-def test_initialize_defaults_data_dir_to_latchkey_directory(tmp_path: Path) -> None:
-    """Standalone callers can omit ``data_dir`` and reuse ``latchkey_directory``.
-
-    The CLI relies on this so it doesn't have to pass the same path twice.
-    """
+def test_plugin_data_dir_is_subdir_of_latchkey_directory(tmp_path: Path) -> None:
+    """Plugin metadata always lives in ``<latchkey_directory>/mngr_latchkey/``."""
     manager = Latchkey(latchkey_directory=tmp_path)
-    manager.initialize()
-    # Internal state was set; a subsequent ``ensure_gateway_started`` would
-    # try to look for the binary, which it cannot find here -- but that
-    # path is already covered by the binary-missing test below. We just
-    # confirm the call returned without raising.
-
-
-def test_initialize_without_data_dir_or_latchkey_directory_raises(tmp_path: Path) -> None:
-    """Without either, there's no path to persist state under."""
-    manager = Latchkey()
-    with pytest.raises(LatchkeyNotInitializedError):
-        manager.initialize()
+    assert manager.plugin_data_dir == tmp_path / "mngr_latchkey"
 
 
 def test_ensure_gateway_started_raises_when_binary_missing(tmp_path: Path) -> None:
-    manager = Latchkey(latchkey_binary=str(tmp_path / "definitely-does-not-exist"))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(tmp_path / "definitely-does-not-exist"))
+    manager.initialize()
     with pytest.raises(LatchkeyBinaryNotFoundError):
         manager.ensure_gateway_started()
 
@@ -190,8 +176,8 @@ def _wait_for_process_exit(pid: int, timeout: float = 5.0) -> bool:
 
 def test_ensure_gateway_started_spawns_subprocess_and_persists_record(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
-    manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
     try:
         info = manager.ensure_gateway_started()
         assert info.host == "127.0.0.1"
@@ -200,7 +186,7 @@ def test_ensure_gateway_started_spawns_subprocess_and_persists_record(tmp_path: 
         assert _wait_for_listening(info.host, info.port), "gateway did not start listening"
 
         # The record was persisted and matches the returned info.
-        record = load_gateway_info(tmp_path)
+        record = load_gateway_info(manager.plugin_data_dir)
         assert record is not None
         assert record.host == info.host
         assert record.port == info.port
@@ -223,9 +209,9 @@ def test_ensure_gateway_started_materializes_deny_all_default_permissions(tmp_pa
     permissions-override JWT, so it must not be permissive.
     """
     fake_binary = _make_fake_latchkey_binary(tmp_path)
-    manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.initialize(data_dir=tmp_path)
-    perms_path = default_permissions_path(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    perms_path = default_permissions_path(manager.plugin_data_dir)
     assert not perms_path.exists()
     try:
         info = manager.ensure_gateway_started()
@@ -239,9 +225,9 @@ def test_ensure_gateway_started_materializes_deny_all_default_permissions(tmp_pa
 def test_ensure_gateway_started_preserves_existing_default_permissions_file(tmp_path: Path) -> None:
     """An existing default permissions file must not be overwritten on spawn."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
-    manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.initialize(data_dir=tmp_path)
-    perms_path = default_permissions_path(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    perms_path = default_permissions_path(manager.plugin_data_dir)
     perms_path.parent.mkdir(parents=True, exist_ok=True)
     existing = '{"rules": [{"some-scope": ["any"]}]}'
     perms_path.write_text(existing)
@@ -259,15 +245,15 @@ def test_restart_adopts_live_gateway_and_discards_stale_info(tmp_path: Path) -> 
     # -- in production the desktop client just exits and the detached
     # gateway keeps running. The second-session manager below must adopt
     # the surviving subprocess from the on-disk record alone.
-    manager_a = Latchkey(latchkey_binary=str(fake_binary))
-    manager_a.initialize(data_dir=tmp_path)
+    manager_a = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager_a.initialize()
     info = manager_a.ensure_gateway_started()
     assert _wait_for_listening(info.host, info.port)
 
     try:
         # Second "session": manager should adopt the live record.
-        manager_b = Latchkey(latchkey_binary=str(fake_binary))
-        manager_b.initialize(data_dir=tmp_path)
+        manager_b = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+        manager_b.initialize()
         try:
             adopted = manager_b.get_gateway_info()
             assert adopted is not None
@@ -296,27 +282,11 @@ def test_initialize_discards_stale_record(tmp_path: Path) -> None:
         pid=2**31 - 1,
         started_at=datetime.now(timezone.utc),
     )
-    save_gateway_info(tmp_path, stale_info)
-    manager = Latchkey(latchkey_binary=str(tmp_path / "missing"))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(tmp_path / "missing"))
+    save_gateway_info(manager.plugin_data_dir, stale_info)
+    manager.initialize()
     assert manager.get_gateway_info() is None
-    assert load_gateway_info(tmp_path) is None
-
-
-def test_initialize_cleans_up_legacy_per_agent_records(tmp_path: Path) -> None:
-    """Older minds versions wrote latchkey_gateway.json under each agent dir.
-
-    These obsolete records must be deleted on initialize so they do not
-    accumulate.
-    """
-    legacy_dir = tmp_path / "agents" / str(AgentId())
-    legacy_dir.mkdir(parents=True)
-    (legacy_dir / "latchkey_gateway.json").write_text("{}")
-
-    manager = Latchkey(latchkey_binary=str(tmp_path / "missing"))
-    manager.initialize(data_dir=tmp_path)
-
-    assert not (legacy_dir / "latchkey_gateway.json").exists()
+    assert load_gateway_info(manager.plugin_data_dir) is None
 
 
 def test_concurrent_ensure_gateway_started_spawns_at_most_one_subprocess(tmp_path: Path) -> None:
@@ -360,8 +330,8 @@ def test_concurrent_ensure_gateway_started_spawns_at_most_one_subprocess(tmp_pat
     )
     script.chmod(0o755)
 
-    manager = Latchkey(latchkey_binary=str(script))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
+    manager.initialize()
 
     barrier = threading.Barrier(8)
     results: list[LatchkeyGatewayInfo] = []
@@ -397,28 +367,28 @@ def test_concurrent_ensure_gateway_started_spawns_at_most_one_subprocess(tmp_pat
 
 def test_stop_gateway_terminates_subprocess_and_removes_record(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
-    manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
     info = manager.ensure_gateway_started()
     assert _wait_for_listening(info.host, info.port)
 
     manager.stop_gateway()
     assert manager.get_gateway_info() is None
-    assert load_gateway_info(tmp_path) is None
+    assert load_gateway_info(manager.plugin_data_dir) is None
     assert _wait_for_process_exit(info.pid)
 
 
 def test_stop_gateway_is_no_op_when_not_running(tmp_path: Path) -> None:
-    manager = Latchkey()
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path)
+    manager.initialize()
     manager.stop_gateway()
 
 
 def test_derive_gateway_password_returns_sha256_of_sentinel_jwt(tmp_path: Path) -> None:
     """The password is the SHA-256 hex of the sentinel-path JWT."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
-    manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
 
     # The fake binary emits ``fake-jwt-for:<path>``; we don't care
     # about the exact path here, only that we got a stable hex digest
@@ -443,16 +413,16 @@ def test_derive_gateway_password_propagates_failure(tmp_path: Path) -> None:
         "#!/usr/bin/env python3\nimport sys\nsys.stderr.write('No encryption key available.\\n')\nsys.exit(1)\n"
     )
     script.chmod(0o755)
-    manager = Latchkey(latchkey_binary=str(script))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
+    manager.initialize()
     with pytest.raises(LatchkeyJwtMintError):
         manager.derive_gateway_password()
 
 
 def test_create_permissions_override_jwt_returns_stripped_stdout(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
-    manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
 
     permissions_path = tmp_path / "agents" / str(AgentId()) / "latchkey_permissions.json"
     jwt = manager.create_permissions_override_jwt(permissions_path)
@@ -463,8 +433,8 @@ def test_create_permissions_override_jwt_propagates_failure(tmp_path: Path) -> N
     script = tmp_path / "latchkey"
     script.write_text("#!/usr/bin/env python3\nimport sys; sys.exit(2)\n")
     script.chmod(0o755)
-    manager = Latchkey(latchkey_binary=str(script))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
+    manager.initialize()
     with pytest.raises(LatchkeyJwtMintError):
         manager.create_permissions_override_jwt(tmp_path / "perms.json")
 
@@ -488,8 +458,8 @@ def test_create_permissions_override_jwt_clears_latchkey_gateway_env(
         "print('jwt')\n"
     )
     script.chmod(0o755)
-    manager = Latchkey(latchkey_binary=str(script))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
+    manager.initialize()
     manager.create_permissions_override_jwt(tmp_path / "perms.json")
     assert report_path.read_text() == "<unset>"
 
@@ -521,8 +491,8 @@ def test_ensure_gateway_started_passes_password_to_subprocess(tmp_path: Path) ->
     )
     script.chmod(0o755)
 
-    manager = Latchkey(latchkey_binary=str(script))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
+    manager.initialize()
     try:
         info = manager.ensure_gateway_started()
         assert _wait_for_listening(info.host, info.port)
@@ -542,8 +512,8 @@ def test_ensure_gateway_started_passes_password_to_subprocess(tmp_path: Path) ->
 def test_discovery_handler_spawns_shared_gateway_for_every_provider(tmp_path: Path) -> None:
     """Every provider triggers the shared gateway to start; a second call is a no-op."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
-    manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
     tunnel_manager = SSHTunnelManager()
     try:
         with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
@@ -581,8 +551,8 @@ class _RecordingTunnelManager(SSHTunnelManager):
 
 def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
-    manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
     tunnel_manager = _RecordingTunnelManager()
     agent_id = AgentId()
     ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=22, key_path=tmp_path / "k")
@@ -612,8 +582,8 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: 
 def test_discovery_handler_skips_reverse_tunnel_for_dev_agents(tmp_path: Path) -> None:
     """DEV agents (ssh_info is None) run on the bare host and need no tunnel."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
-    manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
     tunnel_manager = _RecordingTunnelManager()
     try:
         with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
@@ -632,8 +602,8 @@ def test_discovery_handler_skips_reverse_tunnel_for_dev_agents(tmp_path: Path) -
 
 def test_discovery_handler_swallows_gateway_errors(tmp_path: Path) -> None:
     """A missing binary must not crash the discovery callback -- just log a warning."""
-    manager = Latchkey(latchkey_binary=str(tmp_path / "missing"))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(tmp_path / "missing"))
+    manager.initialize()
     tunnel_manager = _RecordingTunnelManager()
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
         handler = LatchkeyDiscoveryHandler(
@@ -696,8 +666,8 @@ def test_ensure_browser_runs_once_on_first_spawn(tmp_path: Path, monkeypatch: py
     counter_path = tmp_path / "ensure_browser_counter"
     monkeypatch.setenv("FAKE_LATCHKEY_COUNTER", str(counter_path))
     fake_binary = _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path, counter_path)
-    manager = Latchkey(latchkey_binary=str(fake_binary))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
     try:
         # Multiple ensure_gateway_started calls -- the gateway is shared.
         for _ in range(3):
@@ -706,7 +676,7 @@ def test_ensure_browser_runs_once_on_first_spawn(tmp_path: Path, monkeypatch: py
         # ensure-browser must have run exactly once.
         assert _wait_for_counter(counter_path, expected=1) == 1
         # And a log file for ensure-browser got written in the minds data dir.
-        assert ensure_browser_log_path(tmp_path).is_file()
+        assert ensure_browser_log_path(manager.plugin_data_dir).is_file()
     finally:
         manager.stop_gateway()
 
@@ -714,11 +684,11 @@ def test_ensure_browser_runs_once_on_first_spawn(tmp_path: Path, monkeypatch: py
 def test_ensure_browser_not_called_when_binary_missing(tmp_path: Path) -> None:
     """If the binary is missing, the manager must raise without trying to
     spawn ``ensure-browser`` (there's nothing to run)."""
-    manager = Latchkey(latchkey_binary=str(tmp_path / "missing"))
-    manager.initialize(data_dir=tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(tmp_path / "missing"))
+    manager.initialize()
     with pytest.raises(LatchkeyBinaryNotFoundError):
         manager.ensure_gateway_started()
-    assert not ensure_browser_log_path(tmp_path).exists()
+    assert not ensure_browser_log_path(manager.plugin_data_dir).exists()
 
 
 # -- services_info / auth_browser --
@@ -772,7 +742,7 @@ def _make_recording_binary(tmp_path: Path, *, exit_code: int = 0, stderr: str = 
 
 def test_services_info_returns_valid_when_status_is_valid(tmp_path: Path) -> None:
     binary = _make_services_info_binary(tmp_path, credential_status="valid")
-    latchkey = Latchkey(latchkey_binary=str(binary))
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
     info = latchkey.services_info("slack")
     assert info.credential_status == CredentialStatus.VALID
     assert info.auth_options == frozenset({"browser", "set"})
@@ -781,19 +751,19 @@ def test_services_info_returns_valid_when_status_is_valid(tmp_path: Path) -> Non
 
 def test_services_info_returns_missing_when_status_is_missing(tmp_path: Path) -> None:
     binary = _make_services_info_binary(tmp_path, credential_status="missing")
-    latchkey = Latchkey(latchkey_binary=str(binary))
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
     assert latchkey.services_info("slack").credential_status == CredentialStatus.MISSING
 
 
 def test_services_info_returns_invalid_when_status_is_invalid(tmp_path: Path) -> None:
     binary = _make_services_info_binary(tmp_path, credential_status="invalid")
-    latchkey = Latchkey(latchkey_binary=str(binary))
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
     assert latchkey.services_info("slack").credential_status == CredentialStatus.INVALID
 
 
 def test_services_info_returns_unknown_when_process_fails(tmp_path: Path) -> None:
     binary = _make_services_info_binary(tmp_path, exit_code=1)
-    latchkey = Latchkey(latchkey_binary=str(binary))
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
     info = latchkey.services_info("slack")
     assert info.credential_status == CredentialStatus.UNKNOWN
     assert info.auth_options == frozenset()
@@ -802,7 +772,7 @@ def test_services_info_returns_unknown_when_process_fails(tmp_path: Path) -> Non
 
 def test_services_info_returns_unknown_when_binary_does_not_exist(tmp_path: Path) -> None:
     """Missing latchkey binary must degrade to UNKNOWN, not crash callers (e.g. dialog render)."""
-    latchkey = Latchkey(latchkey_binary=str(tmp_path / "does-not-exist"))
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(tmp_path / "does-not-exist"))
     info = latchkey.services_info("slack")
     assert info.credential_status == CredentialStatus.UNKNOWN
     assert info.auth_options == frozenset()
@@ -813,7 +783,7 @@ def test_services_info_returns_unknown_when_output_is_not_json(tmp_path: Path) -
     script = tmp_path / "latchkey"
     script.write_text("#!/usr/bin/env python3\nprint('not json')\n")
     script.chmod(0o755)
-    latchkey = Latchkey(latchkey_binary=str(script))
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
     info = latchkey.services_info("slack")
     assert info.credential_status == CredentialStatus.UNKNOWN
     assert info.auth_options == frozenset()
@@ -822,7 +792,7 @@ def test_services_info_returns_unknown_when_output_is_not_json(tmp_path: Path) -
 
 def test_services_info_returns_unknown_for_unrecognized_status(tmp_path: Path) -> None:
     binary = _make_services_info_binary(tmp_path, credential_status="totally-new")
-    latchkey = Latchkey(latchkey_binary=str(binary))
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
     assert latchkey.services_info("slack").credential_status == CredentialStatus.UNKNOWN
 
 
@@ -830,7 +800,7 @@ def test_services_info_returns_empty_auth_options_when_field_is_missing(tmp_path
     script = tmp_path / "latchkey"
     script.write_text("#!/usr/bin/env python3\nimport json\nprint(json.dumps({'credentialStatus': 'missing'}))\n")
     script.chmod(0o755)
-    latchkey = Latchkey(latchkey_binary=str(script))
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
     info = latchkey.services_info("coolify")
     assert info.credential_status == CredentialStatus.MISSING
     assert info.auth_options == frozenset()
@@ -849,7 +819,7 @@ def test_services_info_returns_set_only_auth_options_for_set_only_service(tmp_pa
         "}))\n"
     )
     script.chmod(0o755)
-    latchkey = Latchkey(latchkey_binary=str(script))
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
     info = latchkey.services_info("coolify")
     assert info.credential_status == CredentialStatus.MISSING
     assert info.auth_options == frozenset({"set"})
@@ -865,7 +835,7 @@ def test_services_info_skips_malformed_auth_options(tmp_path: Path) -> None:
         "print(json.dumps({'credentialStatus': 'missing', 'authOptions': 'browser'}))\n"
     )
     script.chmod(0o755)
-    latchkey = Latchkey(latchkey_binary=str(script))
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
     info = latchkey.services_info("slack")
     assert info.credential_status == CredentialStatus.MISSING
     assert info.auth_options == frozenset()
@@ -884,7 +854,7 @@ def test_services_info_passes_latchkey_directory_through(tmp_path: Path) -> None
     script.chmod(0o755)
     latchkey_dir = tmp_path / "shared_latchkey"
 
-    latchkey = Latchkey(latchkey_binary=str(script), latchkey_directory=latchkey_dir)
+    latchkey = Latchkey(latchkey_directory=latchkey_dir, latchkey_binary=str(script))
     latchkey.services_info("slack")
 
     assert report_path.read_text() == str(latchkey_dir)
@@ -892,7 +862,7 @@ def test_services_info_passes_latchkey_directory_through(tmp_path: Path) -> None
 
 def test_auth_browser_reports_success_on_zero_exit(tmp_path: Path) -> None:
     binary = _make_recording_binary(tmp_path, exit_code=0)
-    latchkey = Latchkey(latchkey_binary=str(binary))
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
     is_success, detail = latchkey.auth_browser("slack")
 
@@ -902,7 +872,7 @@ def test_auth_browser_reports_success_on_zero_exit(tmp_path: Path) -> None:
 
 def test_auth_browser_reports_failure_on_non_zero_exit(tmp_path: Path) -> None:
     binary = _make_recording_binary(tmp_path, exit_code=1, stderr="user cancelled")
-    latchkey = Latchkey(latchkey_binary=str(binary))
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
     is_success, detail = latchkey.auth_browser("slack")
 
@@ -912,11 +882,11 @@ def test_auth_browser_reports_failure_on_non_zero_exit(tmp_path: Path) -> None:
 
 def test_auth_browser_uses_auth_browser_subcommand(tmp_path: Path) -> None:
     binary = _make_recording_binary(tmp_path, exit_code=0)
-    latchkey = Latchkey(latchkey_binary=str(binary))
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
     latchkey.auth_browser("slack")
 
     report_path = tmp_path / "latchkey_report.jsonl"
     line = report_path.read_text().strip()
     record = json.loads(line)
-    assert record == {"argv": ["auth", "browser", "slack"], "env_LATCHKEY_DIRECTORY": ""}
+    assert record == {"argv": ["auth", "browser", "slack"], "env_LATCHKEY_DIRECTORY": str(tmp_path)}

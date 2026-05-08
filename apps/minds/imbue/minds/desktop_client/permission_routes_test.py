@@ -156,7 +156,7 @@ def _make_recording_handler(
     """Build a ``_RecordingHandler`` with stub probes that won't be exercised in routing tests."""
     return _RecordingHandler(
         data_dir=tmp_path,
-        latchkey=Latchkey(latchkey_binary="/nonexistent"),
+        latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent"),
         services_catalog=load_services_catalog(),
         mngr_message_sender=MngrMessageSender(mngr_binary="/nonexistent"),
         grant_outcome=grant_outcome,
@@ -366,7 +366,7 @@ def test_get_permission_request_page_pre_checks_existing_grants(tmp_path: Path) 
     agent_id = AgentId()
     # Pre-populate latchkey_permissions.json so the dialog should pre-check those.
     save_permissions(
-        permissions_path_for_agent(tmp_path, agent_id),
+        permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id),
         LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-chat-read"]},)),
     )
     request = create_latchkey_permission_request_event(

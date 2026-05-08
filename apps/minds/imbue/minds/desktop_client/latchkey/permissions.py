@@ -167,16 +167,16 @@ def _fallback_set_credentials_example(service_name: str) -> str:
     return f'latchkey auth set {service_name} -H "Authorization: Bearer <token>"'
 
 
-def _prepend_latchkey_directory(command: str, latchkey_directory: Path | None) -> str:
+def _prepend_latchkey_directory(command: str, latchkey_directory: Path) -> str:
     """Prefix ``command`` with ``LATCHKEY_DIRECTORY=<dir>`` so the credential
-    written by the user lands in the same store the desktop client uses.
+    the user writes from their terminal lands in the same store the
+    desktop client uses.
 
-    No-op when the desktop client doesn't pin a custom directory (then the
-    user's terminal will inherit latchkey's own default, matching what the
-    desktop client also does).
+    Without the prefix the user's terminal-run ``latchkey`` would write
+    credentials to its own default (``~/.latchkey``) and the desktop
+    client (which runs latchkey with ``LATCHKEY_DIRECTORY`` set) would
+    never see them.
     """
-    if latchkey_directory is None:
-        return command
     return f"LATCHKEY_DIRECTORY={shlex.quote(str(latchkey_directory))} {command}"
 
 
@@ -556,7 +556,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         are used so the dialog doubles as a revoke UI; otherwise the
         implicit catch-all default (``any``) is pre-checked.
         """
-        path = permissions_path_for_agent(self.data_dir, agent_id)
+        path = permissions_path_for_agent(self.latchkey.plugin_data_dir, agent_id)
         try:
             config = load_permissions(path)
         except LatchkeyStoreError as e:
@@ -581,7 +581,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         scope_schemas: Sequence[str],
         granted_permissions: Sequence[str],
     ) -> None:
-        path = permissions_path_for_agent(self.data_dir, agent_id)
+        path = permissions_path_for_agent(self.latchkey.plugin_data_dir, agent_id)
         try:
             existing = load_permissions(path)
         except LatchkeyStoreError as e:
