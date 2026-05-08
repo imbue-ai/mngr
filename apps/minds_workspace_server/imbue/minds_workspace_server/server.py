@@ -34,6 +34,7 @@ from imbue.minds_workspace_server.agent_discovery import send_message
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
 from imbue.minds_workspace_server.event_queues import AgentEventQueues
+from imbue.minds_workspace_server.events import BufferBehavior
 from imbue.minds_workspace_server.models import AgentCreationError
 from imbue.minds_workspace_server.models import AgentListItem
 from imbue.minds_workspace_server.models import AgentListResponse
@@ -47,12 +48,12 @@ from imbue.minds_workspace_server.models import RandomNameResponse
 from imbue.minds_workspace_server.models import SendMessageRequest
 from imbue.minds_workspace_server.models import SendMessageResponse
 from imbue.minds_workspace_server.plugins import get_plugin_manager
+from imbue.minds_workspace_server.request_writer import KNOWN_REQUEST_TYPES
+from imbue.minds_workspace_server.request_writer import UnknownRequestTypeError
 from imbue.minds_workspace_server.request_writer import write_refresh_request
+from imbue.minds_workspace_server.request_writer import write_request_event
 from imbue.minds_workspace_server.service_dispatcher import register_service_routes
 from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
-from imbue.minds_workspace_server.sharing_proxy import SharingProxyError
-from imbue.minds_workspace_server.sharing_proxy import get_sharing_status
-from imbue.minds_workspace_server.sharing_proxy import request_sharing_edit
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 
 _LOOPBACK_CLIENT_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
@@ -151,8 +152,11 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
         return watchers[agent_info.id]
 
     def on_events(agent_id: str, events: list[dict[str, Any]]) -> None:
+        # IGNORE: session events are persisted in JSONL and recoverable via
+        # the REST /events endpoint; storing them in the in-memory replay
+        # buffer would grow unboundedly for the agent's lifetime.
         for event in events:
-            event_queues.broadcast(agent_id, event)
+            event_queues.broadcast(agent_id, {**event, "buffer_behavior": BufferBehavior.IGNORE})
 
     watcher = AgentSessionWatcher(
         agent_id=agent_info.id,
@@ -583,7 +587,28 @@ async def _ws_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     agent_manager: AgentManager = websocket.app.state.agent_manager
     ws_broadcaster: WebSocketBroadcaster = websocket.app.state.broadcaster
+    await _run_ws_broadcast_loop(
+        websocket=websocket,
+        agent_manager=agent_manager,
+        ws_broadcaster=ws_broadcaster,
+    )
 
+
+async def _run_ws_broadcast_loop(
+    websocket: WebSocket,
+    agent_manager: AgentManager,
+    ws_broadcaster: WebSocketBroadcaster,
+) -> None:
+    """Stream broadcaster messages to ``websocket`` until the client disconnects.
+
+    A wedged ``websocket.send_text`` (eg. a half-dead TCP connection) is freed
+    by the broadcaster: ``register`` captures the current asyncio Task and
+    loop, and when this client's queue racks up enough consecutive overflow
+    broadcasts the broadcaster cancels the task via
+    ``loop.call_soon_threadsafe``. ``CancelledError`` propagates into the
+    blocked send and unwinds through the ``finally`` below, which unregisters
+    the queue. There is no per-send wall-clock timeout.
+    """
     client_queue = ws_broadcaster.register()
     try:
         await websocket.send_text(
@@ -610,12 +635,12 @@ async def _ws_endpoint(websocket: WebSocket) -> None:
         while not shutdown:
             try:
                 message = await run_in_threadpool(client_queue.get, timeout=1.0)
-                if message is None:
-                    shutdown = True
-                else:
-                    await websocket.send_text(message)
             except queue.Empty:
                 continue
+            if message is None:
+                shutdown = True
+            else:
+                await websocket.send_text(message)
     except WebSocketDisconnect:
         pass
     finally:
@@ -627,8 +652,26 @@ async def _proto_agent_logs_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     agent_manager: AgentManager = websocket.app.state.agent_manager
     agent_id = websocket.path_params.get("agent_id", "")
-
     log_queue = agent_manager.get_log_queue(agent_id)
+    await _run_proto_agent_logs_loop(
+        websocket=websocket,
+        log_queue=log_queue,
+    )
+
+
+async def _run_proto_agent_logs_loop(
+    websocket: WebSocket,
+    log_queue: queue.Queue[str | None] | None,
+) -> None:
+    """Stream ``log_queue`` messages to ``websocket`` until the proto-agent finishes.
+
+    If ``log_queue`` is ``None`` the proto-agent does not exist; send a
+    structured not-found error and close the socket. Unlike ``_ws_endpoint``
+    this path has no broadcaster behind it, so a half-dead TCP connection can
+    keep ``send_text`` parked forever -- accepted as a much narrower failure
+    surface than the original broadcaster flood (one stuck task per stuck
+    creation, capped by the bounded log queue).
+    """
     if log_queue is None:
         await websocket.send_text(json.dumps({"done": True, "success": False, "error": "Proto-agent not found"}))
         await websocket.close()
@@ -639,12 +682,12 @@ async def _proto_agent_logs_endpoint(websocket: WebSocket) -> None:
         while not finished:
             try:
                 message = await run_in_threadpool(log_queue.get, timeout=1.0)
-                if message is None:
-                    finished = True
-                else:
-                    await websocket.send_text(message)
             except queue.Empty:
                 continue
+            if message is None:
+                finished = True
+            else:
+                await websocket.send_text(message)
     except WebSocketDisconnect:
         pass
 
@@ -682,28 +725,60 @@ async def _destroy_agent(agent_id: str, request: Request) -> JSONResponse:
     return JSONResponse(content=DestroyAgentResponse(status="ok").model_dump())
 
 
-async def _get_sharing_status_endpoint(service_name: str) -> JSONResponse:
-    """Get the Cloudflare forwarding status for a server."""
-    try:
-        status = await run_in_threadpool(get_sharing_status, service_name)
-        return JSONResponse(content=status.model_dump())
-    except SharingProxyError as e:
-        error = ErrorResponse(detail=str(e))
-        return JSONResponse(content=error.model_dump(), status_code=502)
+async def _request_event_endpoint(request: Request) -> JSONResponse:
+    """Append a generic ``RequestEvent`` to ``events/requests/events.jsonl``.
 
-
-async def _request_sharing_edit_endpoint(service_name: str) -> JSONResponse:
-    """Create a sharing request event for editing sharing settings.
-
-    Writes a request event to requests/events.jsonl so the desktop client
-    can handle the actual sharing changes. Returns success immediately.
+    The body must be a JSON object containing at least ``request_type`` (e.g.
+    ``"LATCHKEY_PERMISSION"``) plus whatever request-type-specific fields the
+    desktop client expects (e.g. ``service_name``, ``rationale``). Server-
+    controlled metadata fields (``timestamp``, ``type``, ``event_id``,
+    ``source``, ``agent_id``) are filled in by the workspace server and
+    silently override any caller-provided values for those keys.
     """
     try:
-        await run_in_threadpool(request_sharing_edit, service_name, True)
-        return JSONResponse(content={"ok": True, "message": "Sharing request sent"})
-    except (SharingProxyError, RuntimeError) as e:
+        body: object = await request.json()
+    except json.JSONDecodeError as e:
+        error = ErrorResponse(detail=f"Invalid JSON body: {e}")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    if not isinstance(body, dict):
+        error = ErrorResponse(detail="Request body must be a JSON object")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    request_type_raw = body.get("request_type")
+    if not isinstance(request_type_raw, str) or not request_type_raw:
+        error = ErrorResponse(detail="Field 'request_type' is required and must be a non-empty string")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    if request_type_raw not in KNOWN_REQUEST_TYPES:
+        known = ", ".join(sorted(KNOWN_REQUEST_TYPES))
+        error = ErrorResponse(detail=f"Unknown request_type {request_type_raw!r}; expected one of: {known}")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    is_user_requested_raw = body.get("is_user_requested", True)
+    if not isinstance(is_user_requested_raw, bool):
+        error = ErrorResponse(detail="Field 'is_user_requested' must be a boolean")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    payload: dict[str, object] = {
+        key: value for key, value in body.items() if key not in {"request_type", "is_user_requested"}
+    }
+
+    try:
+        event = await run_in_threadpool(
+            write_request_event,
+            request_type_raw,
+            payload,
+            is_user_requested_raw,
+        )
+    except UnknownRequestTypeError as e:
         error = ErrorResponse(detail=str(e))
-        return JSONResponse(content=error.model_dump(), status_code=502)
+        return JSONResponse(content=error.model_dump(), status_code=400)
+    except (RuntimeError, OSError) as e:
+        error = ErrorResponse(detail=str(e))
+        return JSONResponse(content=error.model_dump(), status_code=500)
+
+    return JSONResponse(content={"ok": True, "event_id": event["event_id"]})
 
 
 async def _refresh_service_request_endpoint(service_name: str) -> JSONResponse:
@@ -711,7 +786,7 @@ async def _refresh_service_request_endpoint(service_name: str) -> JSONResponse:
 
     Called by agents inside the container to tell the minds desktop client
     that an open web-service tab should reload. The desktop client picks the
-    event up via ``mngr events --follow`` and POSTs back to the broadcast
+    event up via ``mngr event --follow`` and POSTs back to the broadcast
     endpoint below.
     """
     try:
@@ -726,7 +801,7 @@ async def _refresh_service_broadcast_endpoint(service_name: str, request: Reques
     """Broadcast a refresh_service WebSocket message for the given service_name.
 
     Called by the desktop client after it observes a refresh event on the
-    mngr events stream. Locked to loopback clients since no authentication
+    mngr event stream. Locked to loopback clients since no authentication
     exists between the desktop client and the workspace server inside the
     container.
     """
@@ -788,8 +863,7 @@ def create_application(
     application.add_api_route("/api/layout", _save_layout, methods=["POST"])
     application.add_api_route("/api/agents/{agent_id}/screen", _get_screen_capture, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/destroy", _destroy_agent, methods=["POST"])
-    application.add_api_route("/api/sharing/{service_name}", _get_sharing_status_endpoint, methods=["GET"])
-    application.add_api_route("/api/sharing/{service_name}/request", _request_sharing_edit_endpoint, methods=["POST"])
+    application.add_api_route("/api/permissions/request", _request_event_endpoint, methods=["POST"])
     application.add_api_route(
         "/api/refresh-service/{service_name}", _refresh_service_request_endpoint, methods=["POST"]
     )

@@ -42,9 +42,10 @@ build_arg = ["--file=path/to/Dockerfile", "build/context/dir"]
 target_path = "/code/my-project"
 agent_args = ["--dangerously-skip-permissions"]
 pass_env = ["GH_TOKEN"]
+pass_host_env = ["EDITOR"]
 ```
 
-`build_arg` entries are appended to `docker build -t <generated-tag>` (so the last entry is the build context). The container is an isolated environment, so `--dangerously-skip-permissions` is reasonable for the container itself -- but credentials forwarded via `pass_env` (e.g. `GH_TOKEN`) can still be used by the agent without confirmation. The container can also read/write any bind-mounted host paths you pass via `-s -v=...`, so do not rely on the container as a strong sandbox if you mount sensitive host directories.
+`build_arg` entries are appended to `docker build -t <generated-tag>` (so the last entry is the build context). `pass_host_env = ["EDITOR"]` forwards your local `$EDITOR` into the container so commands like `git commit` open the editor you actually use rather than whatever fallback the base image happens to provide. The container is an isolated environment, so `--dangerously-skip-permissions` is reasonable for the container itself -- but credentials forwarded via `pass_env` (e.g. `GH_TOKEN`) can still be used by the agent without confirmation. The container can also read/write any bind-mounted host paths you pass via `-s -v=...`, so do not rely on the container as a strong sandbox if you mount sensitive host directories.
 
 See [Create Templates](../customization.md#create-templates) for the full set of template options.
 

@@ -1,12 +1,14 @@
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from functools import cached_property
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import Iterator
 from typing import Mapping
 from typing import Sequence
 from urllib.parse import urlparse
@@ -32,6 +34,9 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
+from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -42,10 +47,12 @@ from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -552,6 +559,27 @@ kill -TERM 1
             )
             self._host_store.write_host_record(updated_host_record)
 
+    def _mark_host_destroyed(self, host_id: HostId) -> None:
+        """Set stop_reason to DESTROYED on the host record.
+
+        Marks the host as DESTROYED for state derivation while preserving
+        snapshot records so gc_snapshots can age-gate their deletion.
+        """
+        host_record = self._host_store.read_host_record(host_id, use_cache=False)
+        if host_record is None:
+            return
+
+        updated_certified_data = host_record.certified_host_data.model_copy_update(
+            to_update(host_record.certified_host_data.field_ref().stop_reason, HostState.DESTROYED.value),
+            to_update(host_record.certified_host_data.field_ref().updated_at, datetime.now(timezone.utc)),
+        )
+        self._host_store.write_host_record(
+            host_record.model_copy_update(
+                to_update(host_record.field_ref().certified_host_data, updated_certified_data),
+            )
+        )
+        logger.debug("Marked host as DESTROYED: {}", host_id)
+
     def _save_failed_host_record(
         self,
         host_id: HostId,
@@ -593,10 +621,16 @@ kill -TERM 1
         env.setdefault("BUILDKIT_PROGRESS", "plain")
         return env
 
-    def _run_docker_creation_command(self, args: list[str], timeout: float = 300) -> FinishedProcess:
-        """Run a docker CLI command and return the result."""
+    def _run_docker_creation_command(
+        self, args: list[str], timeout: float = 300, executable: DockerBuilder = DockerBuilder.DOCKER
+    ) -> FinishedProcess:
+        """Run a docker-compatible CLI command and return the result.
+
+        `executable` defaults to DOCKER; pass DEPOT to use the depot.dev remote
+        builder (only valid for build subcommands).
+        """
         return self.mngr_ctx.concurrency_group.run_process_to_completion(
-            ["docker"] + args,
+            [executable.value.lower()] + args,
             timeout=timeout,
             env=self._docker_env(),
             on_output=self._log_docker_creation_command_output,
@@ -609,10 +643,13 @@ kill -TERM 1
             logger.log(LogLevel.BUILD.value, "{}", line.rstrip(), source="docker")
 
     def _build_image(self, build_args: Sequence[str], tag: str) -> str:
-        """Build a Docker image using native docker build with passthrough args."""
-        cmd = ["build", "-t", tag] + list(build_args)
-        with log_span("Running docker build with {} args", len(build_args)):
-            self._run_docker_creation_command(cmd)
+        """Build a Docker image using the configured builder (docker or depot)."""
+        builder = self.config.builder
+        # depot requires --load to import the resulting image into the local daemon.
+        extra_args = ["--load"] if builder is DockerBuilder.DEPOT else []
+        args = ["build", *extra_args, "-t", tag, *build_args]
+        with log_span("Running {} build with {} args", builder.value.lower(), len(build_args)):
+            self._run_docker_creation_command(args, executable=builder)
         return tag
 
     def _build_default_image(self, tag: str) -> str:
@@ -1187,12 +1224,16 @@ kill -TERM 1
         self._evict_cached_host(host_id, replacement=restored_host)
         return restored_host
 
-    def destroy_host(
-        self,
-        host: HostInterface | HostId,
-        delete_snapshots: bool = True,
-    ) -> None:
-        """Destroy a Docker container permanently."""
+    def destroy_host(self, host: HostInterface | HostId) -> None:
+        """Destroy a Docker container permanently.
+
+        Stops and removes the container, then marks the host record as
+        DESTROYED via stop_reason. Snapshot records, snapshot images, and
+        the host volume directory are preserved so gc_snapshots can
+        age-gate their deletion (and so users can recover via
+        ``mngr create --snapshot``). Use ``delete_host`` to permanently
+        purge all records.
+        """
         host_id = host.id if isinstance(host, HostInterface) else host
 
         # Stop the host first (without creating a snapshot since we're destroying)
@@ -1206,19 +1247,28 @@ kill -TERM 1
             except docker.errors.DockerException as e:
                 logger.warning("Error removing container: {}", e)
 
-        if delete_snapshots:
-            # Delete snapshot images
-            host_record = self._host_store.read_host_record(host_id)
-            if host_record is not None:
-                for snap in host_record.certified_host_data.snapshots:
-                    try:
-                        self._docker_client.images.remove(snap.id)
-                    except docker.errors.DockerException as e:
-                        logger.warning("Error removing snapshot image {}: {}", snap.id, e)
+        self._mark_host_destroyed(host_id)
 
-            self._host_store.delete_host_record(host_id)
+        self._container_cache_by_id.pop(host_id, None)
+        self._evict_cached_host(host_id)
 
-        # Clean up the host volume directory
+    def delete_host(self, host: HostInterface) -> None:
+        """Permanently delete all records associated with a (destroyed) host.
+
+        Removes snapshot images, the host volume directory, and the host
+        record. Called by gc_machines once a destroyed host has aged past
+        ``destroyed_host_persisted_seconds``.
+        """
+        host_id = host.id
+
+        host_record = self._host_store.read_host_record(host_id, use_cache=False)
+        if host_record is not None:
+            for snap in host_record.certified_host_data.snapshots:
+                try:
+                    self._docker_client.images.remove(snap.id)
+                except docker.errors.DockerException as e:
+                    logger.warning("Error removing snapshot image {}: {}", snap.id, e)
+
         if self.config.is_host_volume_created:
             volume_id = self._volume_id_for_host(host_id)
             try:
@@ -1226,14 +1276,9 @@ kill -TERM 1
             except (FileNotFoundError, OSError, MngrError) as e:
                 logger.trace("No host volume to clean up for {}: {}", host_id, e)
 
+        self._host_store.delete_host_record(host_id)
         self._container_cache_by_id.pop(host_id, None)
         self._evict_cached_host(host_id)
-
-    def delete_host(self, host: HostInterface) -> None:
-        """Permanently delete all records associated with a (destroyed) host."""
-        self._host_store.delete_host_record(host.id)
-        self._container_cache_by_id.pop(host.id, None)
-        self._evict_cached_host(host.id)
 
     def on_connection_error(self, host_id: HostId) -> None:
         """Clear all caches for a host on connection error."""
@@ -1354,7 +1399,10 @@ kill -TERM 1
                     host_obj = self._create_host_from_host_record(host_record)
                     # OfflineHost.get_state() uses certified data only (no SSH),
                     # so it's safe to call here unlike Host.get_state().
-                    hosts_with_state.append((host_obj, host_obj.get_state()))
+                    state = host_obj.get_state()
+                    if state == HostState.DESTROYED and not include_destroyed:
+                        continue
+                    hosts_with_state.append((host_obj, state))
                 except (OSError, ValueError, KeyError) as e:
                     logger.warning("Failed to create host from record {}: {}", host_id, e)
 
@@ -1686,6 +1734,87 @@ kill -TERM 1
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
         """Remove persisted agent data."""
         self._host_store.remove_persisted_agent_data(host_id, agent_id)
+
+    # =========================================================================
+    # Outer Host Access
+    # =========================================================================
+
+    def _outer_machine_id(self) -> str | None:
+        """Stable id for the actual outer machine (the docker daemon's host).
+
+        All containers managed by this provider share the same daemon and so
+        share the same outer. Returns None when the outer is not accessible
+        (e.g. tcp:// daemon).
+        """
+        url = self.config.host
+        if not url or url.startswith("unix://"):
+            return "local"
+        parsed = urlparse(url)
+        if parsed.scheme == "ssh":
+            if not parsed.hostname:
+                return None
+            user = parsed.username or "default"
+            port = parsed.port or 22
+            return f"ssh:{user}@{parsed.hostname}:{port}"
+        return None
+
+    def outer_host_id_for(self, host_id: HostId) -> str | None:
+        """Stable id for the outer of `host_id` -- shared across all containers on this daemon."""
+        if self._host_store.read_host_record(host_id, use_cache=False) is None:
+            raise HostNotFoundError(host_id)
+        machine = self._outer_machine_id()
+        if machine is None:
+            return None
+        return f"outer:{self.name}:{machine}"
+
+    @contextmanager
+    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+        """Open the outer host (the docker daemon's host machine).
+
+        - Local socket / unix:// → outer = the local machine.
+        - ssh://user@host[:port] → outer = the SSH-reachable VM (credentials
+          come from the user's ~/.ssh/config + ssh-agent).
+        - tcp://... → no accessible outer (returns None).
+
+        Raises HostNotFoundError if host_id is unknown to this provider.
+        """
+        if self._host_store.read_host_record(host_id, use_cache=False) is None:
+            raise HostNotFoundError(host_id)
+
+        outer = self._build_outer_host(host_id)
+        try:
+            yield outer
+        finally:
+            if outer is not None:
+                outer.disconnect()
+
+    def _build_outer_host(self, host_id: HostId) -> OuterHostInterface | None:
+        """Build an OuterHost (or None) for the docker daemon's host machine."""
+        docker_host_url = self.config.host
+        if not docker_host_url or docker_host_url.startswith("unix://"):
+            pyinfra_host = create_local_pyinfra_host()
+            return OuterHost(
+                id=host_id,
+                connector=PyinfraConnector(pyinfra_host),
+                mngr_ctx=self.mngr_ctx,
+            )
+        parsed = urlparse(docker_host_url)
+        if parsed.scheme == "ssh":
+            if not parsed.hostname:
+                logger.warning("Cannot parse hostname from DOCKER_HOST URL {}", docker_host_url)
+                return None
+            pyinfra_host = create_ssh_pyinfra_host_using_user_config(
+                hostname=parsed.hostname,
+                port=parsed.port,
+                user=parsed.username,
+            )
+            return OuterHost(
+                id=host_id,
+                connector=PyinfraConnector(pyinfra_host),
+                mngr_ctx=self.mngr_ctx,
+            )
+        # tcp://, http://, https://, or anything else: no SSH-accessible outer.
+        return None
 
     # =========================================================================
     # Lifecycle Methods

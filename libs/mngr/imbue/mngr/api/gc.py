@@ -968,7 +968,7 @@ def _handle_error(error_msg: str, error_behavior: ErrorBehavior, exc: Exception 
             raise MngrError(error_msg)
         case ErrorBehavior.CONTINUE:
             if exc:
-                logger.exception(exc)
+                logger.opt(exception=exc).error(error_msg)
             else:
                 logger.error(error_msg)
         case _ as unreachable:

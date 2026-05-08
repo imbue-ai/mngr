@@ -17,7 +17,7 @@ fi
 # but daemon hasn't finished starting yet)
 if [ -f /var/run/docker.pid ] && kill -0 "$(cat /var/run/docker.pid)" 2>/dev/null; then
     echo "Docker daemon process exists (PID $(cat /var/run/docker.pid)), waiting for it..."
-    timeout 30 sh -c 'until /usr/local/bin/docker info >/dev/null 2>&1; do sleep 1; done'
+    timeout 60 sh -c 'until /usr/local/bin/docker info >/dev/null 2>&1; do sleep 1; done'
     echo "Docker daemon is ready."
     exit 0
 fi
@@ -79,7 +79,10 @@ fi
 # daemon itself uses the host's resolver for image pulls (the --dns flag
 # only affects containers), and the sandbox's default resolver in gVisor
 # sometimes returns unreachable addresses or fails lookups entirely.
-cat > /etc/resolv.conf <<'EOF'
+#
+# On some Modal sandboxes /etc/resolv.conf is on a read-only overlay;
+# tolerate that (dockerd --dns=... still works for container resolution).
+cat > /etc/resolv.conf <<'EOF' || echo "Warning: could not write /etc/resolv.conf (read-only); relying on --dns flags."
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 options single-request-reopen
@@ -93,5 +96,5 @@ EOF
 dockerd --iptables=false --ip6tables=false --ipv6=false --dns=1.1.1.1 --dns=8.8.8.8 &
 
 # Wait for Docker daemon to be ready
-timeout 30 sh -c 'until /usr/local/bin/docker info >/dev/null 2>&1; do sleep 1; done'
+timeout 60 sh -c 'until /usr/local/bin/docker info >/dev/null 2>&1; do sleep 1; done'
 echo "Docker daemon is ready."

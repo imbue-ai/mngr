@@ -1,10 +1,7 @@
 """Tests for VPS Docker error hierarchy."""
 
 from imbue.mngr.errors import MngrError
-from imbue.mngr_vps_docker.errors import ContainerSetupError
-from imbue.mngr_vps_docker.errors import DockerNotReadyError
 from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsConnectionError
 from imbue.mngr_vps_docker.errors import VpsDockerError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 
@@ -15,19 +12,6 @@ def test_error_hierarchy_base() -> None:
 
 def test_error_hierarchy_provisioning() -> None:
     assert issubclass(VpsProvisioningError, VpsDockerError)
-
-
-def test_error_hierarchy_connection() -> None:
-    assert issubclass(VpsConnectionError, VpsDockerError)
-    assert issubclass(VpsConnectionError, ConnectionError)
-
-
-def test_error_hierarchy_docker_not_ready() -> None:
-    assert issubclass(DockerNotReadyError, VpsDockerError)
-
-
-def test_error_hierarchy_container_setup() -> None:
-    assert issubclass(ContainerSetupError, VpsDockerError)
 
 
 def test_error_hierarchy_api() -> None:

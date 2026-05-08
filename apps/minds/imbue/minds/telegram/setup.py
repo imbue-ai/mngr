@@ -236,7 +236,7 @@ class TelegramSetupOrchestrator(MutableModel):
             MngrCommandError,
             OSError,
         ) as exc:
-            logger.error("Telegram setup failed for agent {}: {}", agent_id, exc)
+            logger.opt(exception=exc).error("Telegram setup failed for agent {}", agent_id)
             with self._lock:
                 self._statuses[aid] = TelegramSetupStatus.FAILED
                 self._errors[aid] = str(exc)

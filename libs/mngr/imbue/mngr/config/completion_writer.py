@@ -32,7 +32,7 @@ _POSITIONAL_COMPLETION_SPEC: Final[dict[str, list[list[str]]]] = {
     "destroy": [["agent_names"]],
     "exec": [["agent_names"]],
     "limit": [["agent_names"]],
-    "events": [["agent_names", "host_names"], []],
+    "event": [["agent_names", "host_names"], []],
     "label": [["agent_names"]],
     "message": [["agent_names"]],
     "pair": [["agent_names"]],

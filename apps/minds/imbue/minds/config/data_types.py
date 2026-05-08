@@ -2,10 +2,10 @@ import json
 from pathlib import Path
 from typing import Final
 
-from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.errors import MalformedMngrOutputError
 from imbue.mngr.primitives import AgentId
 
 DEFAULT_DESKTOP_CLIENT_HOST: Final[str] = "127.0.0.1"
@@ -36,19 +36,21 @@ class WorkspacePaths(FrozenModel):
 
 
 def parse_agents_from_mngr_output(stdout: str) -> list[dict[str, object]]:
-    """Extract agent records from ``mngr list --format json`` stdout.
+    """Extract agent records from the first JSON object line of ``mngr list --format json`` stdout.
 
-    The stdout may contain non-JSON lines (e.g. SSH error tracebacks)
-    mixed with the JSON. Finds the first line starting with ``{`` and
-    parses the ``agents`` array from it.
+    Raises ``MalformedMngrOutputError`` when the first non-empty line is not a
+    JSON object. stdout is reserved for JSON data; if log lines or SSH errors
+    are leaking onto it, fix the underlying process rather than papering over
+    it here.
     """
     for line in stdout.splitlines():
         stripped = line.strip()
-        if stripped.startswith("{"):
-            try:
-                data = json.loads(stripped)
-                return list(data.get("agents", []))
-            except json.JSONDecodeError:
-                logger.trace("Failed to parse JSON from mngr list output line: {}", stripped[:200])
-                continue
+        if not stripped:
+            continue
+        if not stripped.startswith("{"):
+            raise MalformedMngrOutputError(
+                f"Expected JSON object on first non-empty mngr output line, got: {stripped[:200]!r}"
+            )
+        data = json.loads(stripped)
+        return data["agents"]
     return []

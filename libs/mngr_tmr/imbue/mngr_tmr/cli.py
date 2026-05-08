@@ -24,6 +24,7 @@ from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -158,6 +159,19 @@ def _emit_report_path(path: Path, output_opts: OutputOptions) -> None:
             assert_never(unreachable)
 
 
+def _emit_integrator_branch(branch_name: str | None, output_opts: OutputOptions) -> None:
+    """Emit the name of the integrator branch, if one was produced."""
+    if branch_name is None:
+        return
+    match output_opts.output_format:
+        case OutputFormat.JSON | OutputFormat.JSONL:
+            emit_event("integrator_branch", {"branch_name": branch_name}, output_opts.output_format)
+        case OutputFormat.HUMAN:
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _run_reintegrate(
     opts: TmrCliOptions,
     mngr_ctx: MngrContext,
@@ -171,22 +185,27 @@ def _run_reintegrate(
     """
     assert opts.reintegrate is not None
     run_name = opts.reintegrate
-    write_human_line("Reintegrating run: {}", run_name)
+    is_human = output_opts.output_format == OutputFormat.HUMAN
+    if is_human:
+        write_human_line("Reintegrating run: {}", run_name)
 
     # Discover agents from the previous run by label
     list_result = try_list_agents(mngr_ctx)
     if list_result is None:
-        write_human_line("Failed to list agents. Nothing to reintegrate.")
+        if is_human:
+            write_human_line("Failed to list agents. Nothing to reintegrate.")
         return
     matching_agents = [
         detail
         for detail in list_result.agents
         if detail.labels.get("tmr_run_name") == run_name and not str(detail.name).startswith("tmr-integrator-")
     ]
-    write_human_line("Found {} agent(s) from run {}", len(matching_agents), run_name)
+    if is_human:
+        write_human_line("Found {} agent(s) from run {}", len(matching_agents), run_name)
 
     if not matching_agents:
-        write_human_line("No agents found for run name '{}'. Nothing to reintegrate.", run_name)
+        if is_human:
+            write_human_line("No agents found for run name '{}'. Nothing to reintegrate.", run_name)
         return
 
     # Get local host (needed for local agent host mapping and integrator config)
@@ -293,7 +312,8 @@ def _run_reintegrate(
         run_commands=_build_run_commands(run_name, integrated_branch),
     )
     _emit_report_path(html_path, output_opts)
-    _print_run_commands(run_name, integrated_branch)
+    _emit_integrator_branch(integrated_branch, output_opts)
+    _print_run_commands(run_name, output_opts, integrated_branch)
 
 
 def _run_integrator_phase(
@@ -319,7 +339,7 @@ def _run_integrator_phase(
             config=config,
             mngr_ctx=mngr_ctx,
         )
-    except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
+    except (MngrError, HostError, AgentError, OSError, BaseExceptionGroup) as exc:
         logger.warning("Failed to launch integrator agent: {}", exc)
         return None
 
@@ -585,7 +605,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         )
     except KeyboardInterrupt:
         traceback.print_exc()
-        _print_run_commands(e2e_run_prefix, None)
+        _print_run_commands(e2e_run_prefix, output_opts, None)
         raise
 
 
@@ -620,8 +640,10 @@ def _run_tmr_pipeline(
     # Otherwise, all agents are launched up front and then polled via the same function.
     use_batched = opts.max_agents > 0 and opts.max_agents < len(test_node_ids)
 
+    launch_failures: list[TestMapReduceResult] = []
+
     if use_batched:
-        if opts.use_snapshot:
+        if opts.use_snapshot and output_opts.output_format == OutputFormat.HUMAN:
             write_human_line("WARNING: --use-snapshot is not supported with --max-agents and will be ignored")
         agent_infos: list[TestAgentInfo] = []
         agent_hosts: dict[str, OnlineHostInterface] = {}
@@ -633,6 +655,7 @@ def _run_tmr_pipeline(
             config=config,
             mngr_ctx=mngr_ctx,
             pytest_flags=testing_flags,
+            launch_failures=launch_failures,
             prompt_suffix=opts.prompt_suffix or "",
             use_snapshot=opts.use_snapshot and provided_snapshot is None,
             max_parallel=opts.max_parallel,
@@ -657,6 +680,7 @@ def _run_tmr_pipeline(
         report_path=html_path,
         all_agents=agent_infos,
         all_hosts=agent_hosts,
+        launch_failures=launch_failures,
         artifact_output_dir=output_dir,
         source_dir=source_dir,
         base_commit=base_commit if is_remote_provider else None,
@@ -676,6 +700,7 @@ def _run_tmr_pipeline(
         cg=mngr_ctx.concurrency_group,
         base_commit=base_commit if is_remote_provider else None,
         cached_results=cached_results,
+        launch_failures=launch_failures,
     )
 
     # Step 9: Write report with final results (artifacts already pulled during polling)
@@ -705,8 +730,9 @@ def _run_tmr_pipeline(
         run_commands=_build_run_commands(e2e_run_prefix, integrated_branch),
     )
     _emit_report_path(html_path, output_opts)
+    _emit_integrator_branch(integrated_branch, output_opts)
 
-    _print_run_commands(e2e_run_prefix, integrated_branch)
+    _print_run_commands(e2e_run_prefix, output_opts, integrated_branch)
 
 
 def _build_run_commands(run_name: str, integrated_branch: str | None = None) -> list[tuple[str, str]]:
@@ -720,8 +746,15 @@ def _build_run_commands(run_name: str, integrated_branch: str | None = None) -> 
     return commands
 
 
-def _print_run_commands(run_name: str, integrated_branch: str | None = None) -> None:
-    """Print useful commands for managing a TMR run's agents."""
+def _print_run_commands(run_name: str, output_opts: OutputOptions, integrated_branch: str | None = None) -> None:
+    """Print useful commands for managing a TMR run's agents.
+
+    Only emits in HUMAN output mode; in JSON/JSONL the run name and integrator
+    branch are already exposed via structured events, and unguarded
+    `write_human_line` calls would pollute the structured stream.
+    """
+    if output_opts.output_format != OutputFormat.HUMAN:
+        return
     write_human_line("")
     for label, cmd in _build_run_commands(run_name, integrated_branch):
         write_human_line("{}:", label)

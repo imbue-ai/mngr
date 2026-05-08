@@ -8,7 +8,7 @@ The system has two main components:
 
 ### Desktop client (runs on your machine)
 
-The desktop client (`minds forward`) provides:
+The desktop client (`minds run`) provides:
 - Authentication via one-time codes and signed cookies
 - A landing page listing all accessible workspaces (or a creation form if none exist)
 - Agent creation from git repositories or local paths via a web form or API

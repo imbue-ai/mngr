@@ -12,10 +12,14 @@ from imbue.mngr.primitives import UserId
 
 
 class ModalMode(UpperCaseStrEnum):
-    """Mode for the Modal provider backend."""
+    """How the modal provider backend talks to Modal.
+
+    ``DIRECT`` uses the Modal SDK against the user's account.
+    ``PROXIED`` routes Modal traffic through the imbue_cloud gateway.
+    """
 
     DIRECT = auto()
-    TESTING = auto()
+    PROXIED = auto()
 
 
 class ModalProviderConfig(ProviderInstanceConfig):
@@ -27,7 +31,10 @@ class ModalProviderConfig(ProviderInstanceConfig):
     )
     mode: ModalMode = Field(
         default=ModalMode.DIRECT,
-        description=("Modal interface mode. DIRECT calls the Modal SDK directly (bring your own key)."),
+        description=(
+            "How to reach Modal. ``DIRECT`` uses the Modal SDK against the "
+            "user's Modal account. ``PROXIED`` routes Modal traffic through the imbue_cloud gateway."
+        ),
     )
     user_id: UserId | None = Field(
         default=None,

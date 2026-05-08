@@ -42,6 +42,7 @@ def test_create_with_source_path(e2e: E2eSession, tmp_path: Path) -> None:
     expect(cat_result.stdout).to_contain("hello from source")
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
@@ -101,6 +102,7 @@ def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None
     expect(cat_result.stdout).to_contain("hello world")
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_default_branch(e2e: E2eSession) -> None:
@@ -143,6 +145,7 @@ def test_create_default_branch(e2e: E2eSession) -> None:
     assert main_commit_result.stdout.strip() == branch_commit_result.stdout.strip()
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_custom_branch_pattern(e2e: E2eSession) -> None:
@@ -174,6 +177,7 @@ def test_create_with_custom_branch_pattern(e2e: E2eSession) -> None:
     expect(worktree_branch.stdout).to_contain("feature/my-task")
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_base_branch(e2e: E2eSession) -> None:
@@ -218,6 +222,7 @@ def test_create_with_base_branch(e2e: E2eSession) -> None:
     assert agent_rev_result.stdout.strip() == main_rev
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_explicit_branch_name(e2e: E2eSession) -> None:
@@ -349,6 +354,7 @@ def test_create_with_transfer_none(e2e: E2eSession) -> None:
     assert "mngr/my-task" not in branch_result.stdout
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal

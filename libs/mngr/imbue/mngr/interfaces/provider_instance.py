@@ -31,6 +31,7 @@ from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -711,3 +712,52 @@ class ProviderInstanceInterface(MutableModel, ABC):
 
         The default implementation is a no-op for providers that don't need this.
         """
+
+    # =========================================================================
+    # Outer Host Access
+    # =========================================================================
+
+    def outer_host_id_for(self, host_id: HostId) -> str | None:
+        """Return a stable identifier for the actual outer host of ``host_id``.
+
+        Used by ``mngr exec --outer`` to dedup *before* opening any
+        connections: two inner hosts whose ``outer_host_id_for`` returns the
+        same string are guaranteed to share the same outer machine. For
+        example, all docker containers on the same daemon share one outer
+        and should produce the same id; each VPS-Docker instance has its
+        own outer (per VPS IP).
+
+        Returns ``None`` when this provider has no accessible outer (e.g.
+        modal sandboxes, the local provider, the ssh provider, or
+        docker-over-tcp daemons). Raises ``HostNotFoundError`` for unknown ids.
+
+        The id is for grouping only and should be cheap to compute (no SSH
+        connection). Providers that override ``outer_host_for`` MUST also
+        override this method to return a non-None id so the dedup logic
+        works.
+
+        The default implementation returns ``None`` (consistent with the
+        default ``outer_host_for`` returning ``None``).
+        """
+        return None
+
+    @contextmanager
+    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+        """Open the outer host for the inner host with the given id.
+
+        Yields an ``OuterHostInterface`` for the underlying machine that hosts
+        the inner host (container/sandbox), or ``None`` when no outer host is
+        accessible (e.g. modal sandboxes, the local provider, the ssh provider,
+        or docker-over-tcp daemons).
+
+        Raises ``HostNotFoundError`` if the given ``host_id`` is unknown to this
+        provider. Outer-host construction is a pure function of (provider,
+        host_id) and does not depend on the inner host being reachable.
+
+        Each ``with`` entry produces a fresh outer-host instance and a fresh
+        SSH connection (when applicable); the connection is closed on exit.
+
+        The default implementation yields ``None``. Providers that have an
+        accessible outer host override this method (and ``outer_host_id_for``).
+        """
+        yield None
