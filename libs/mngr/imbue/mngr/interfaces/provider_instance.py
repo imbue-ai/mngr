@@ -27,6 +27,8 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
+from imbue.mngr.interfaces.data_types import OrphanedContainerInfo
+from imbue.mngr.interfaces.data_types import OrphanedImageInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
@@ -680,6 +682,25 @@ class ProviderInstanceInterface(MutableModel, ABC):
 
         The default implementation does nothing.
         """
+
+    def gc_orphaned_resources(
+        self,
+        known_host_ids: "set[HostId]",
+        dry_run: bool,
+    ) -> tuple[list[OrphanedContainerInfo], list[OrphanedImageInfo]]:
+        """Remove provider-level resources that no longer correspond to any known mngr host.
+
+        Default implementation is a no-op. Providers that hold low-level
+        infrastructure resources (Docker containers/images, modal sandboxes,
+        etc.) should override this to reconcile their state against ``known_host_ids``
+        and reclaim anything orphaned.
+
+        ``known_host_ids`` is the union of all host ids known to every provider
+        passed to ``gc()`` (across providers and across host states), so a
+        Docker container labeled with a host id that belongs to a different
+        provider is still recognised as live and left alone.
+        """
+        return [], []
 
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
         """List persisted agent data for a stopped host.

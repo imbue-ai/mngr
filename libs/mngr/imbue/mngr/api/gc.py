@@ -140,6 +140,20 @@ def gc(
                 result=result,
             )
 
+    if resource_types.is_orphaned_resources:
+        if on_resource_type_start:
+            on_resource_type_start("orphaned_resources")
+        # Re-discover hosts so the orphan-id set reflects records that earlier
+        # GC steps may have deleted (gc_machines.delete_host).
+        post_gc_hosts_by_provider = _discover_hosts_for_gc(providers, mngr_ctx)
+        with log_span("Garbage collecting orphaned provider containers and images"):
+            gc_orphaned_resources(
+                hosts_by_provider=post_gc_hosts_by_provider,
+                dry_run=dry_run,
+                error_behavior=error_behavior,
+                result=result,
+            )
+
     return result
 
 
@@ -636,6 +650,36 @@ def _is_rotated_log_file(path: Path) -> bool:
         return False
     suffix = name[last_dot + 1 :]
     return suffix.isdigit()
+
+
+def gc_orphaned_resources(
+    hosts_by_provider: ProviderHosts,
+    dry_run: bool,
+    error_behavior: ErrorBehavior,
+    result: GcResult,
+) -> None:
+    """Garbage collect provider containers and images with no live host record.
+
+    Cross-references each provider's container/image inventory against the
+    union of host ids known across every provider, so a docker provider does
+    not reap a resource whose host is owned by a different provider that
+    happens to share infrastructure.
+    """
+    known_host_ids: set = {host.host_id for _, hosts in hosts_by_provider for host in hosts}
+
+    for provider, _hosts in hosts_by_provider:
+        try:
+            containers, images = provider.gc_orphaned_resources(
+                known_host_ids=known_host_ids,
+                dry_run=dry_run,
+            )
+        except MngrError as e:
+            error_msg = f"Failed to garbage collect orphaned resources for provider {provider.name}: {e}"
+            result.errors.append(error_msg)
+            _handle_error(error_msg, error_behavior, exc=e)
+            continue
+        result.containers_destroyed.extend(containers)
+        result.images_destroyed.extend(images)
 
 
 def gc_build_cache(
