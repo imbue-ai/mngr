@@ -456,7 +456,7 @@ def test_with_tolerant_paths_raises_tolerant_path_error_when_target_is_not_dict(
 
 
 def test_with_tolerant_paths_raises_when_path_segment_missing() -> None:
-    """A precondition violation (path's segment not present) raises TypeError.
+    """A precondition violation (path's segment not present) raises TolerantPathError.
 
     Both "segment value is wrong type" and "segment is missing entirely"
     represent caller misconfiguration; both must fail loud so a typoed path
