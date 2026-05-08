@@ -61,6 +61,7 @@ from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeInfo
+from imbue.mngr.interfaces.data_types import WarningInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import HostVolume
@@ -2349,6 +2350,7 @@ log "=== Shutdown script completed ==="
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        on_warning: Callable[[WarningInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         """Load hosts and agent references entirely from the state volume and sandbox list.
 

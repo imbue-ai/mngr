@@ -27,6 +27,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import WarningInfo
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
@@ -105,6 +106,29 @@ class ListResult(MutableModel):
 
     agents: list[AgentDetails] = Field(default_factory=list, description="List of agents with their full information")
     errors: list[ErrorInfo] = Field(default_factory=list, description="Errors encountered while listing")
+    warnings: list[WarningInfo] = Field(default_factory=list, description="Warnings encountered while listing")
+
+
+class _WarningEmitter(MutableModel):
+    """Per-call emitter providers call to surface a structured warning.
+
+    Mirrors the on_error pattern: appends to result.warnings under the shared
+    results_lock and forwards to params.on_warning if provided. Defined as a
+    callable class (not an inline closure) to satisfy the inline-functions
+    ratchet, and to keep the type signature explicit at the provider boundary.
+    """
+
+    model_config = {"arbitrary_types_allowed": True}
+    result: ListResult
+    # threading.Lock; typed Any because pydantic cannot introspect the C type
+    results_lock: Any
+    on_warning: Callable[[WarningInfo], None] | None
+
+    def __call__(self, warning_info: WarningInfo) -> None:
+        with self.results_lock:
+            self.result.warnings.append(warning_info)
+        if self.on_warning:
+            self.on_warning(warning_info)
 
 
 class _ListAgentsParams(FrozenModel):
@@ -116,6 +140,7 @@ class _ListAgentsParams(FrozenModel):
     error_behavior: ErrorBehavior
     on_agent: Callable[[AgentDetails], None] | None
     on_error: Callable[[ErrorInfo], None] | None
+    on_warning: Callable[[WarningInfo], None] | None
     field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = Field(
         default_factory=dict,
     )
@@ -139,6 +164,8 @@ def list_agents(
     on_agent: Callable[[AgentDetails], None] | None = None,
     # Optional callback invoked immediately when each error is encountered (for streaming)
     on_error: Callable[[ErrorInfo], None] | None = None,
+    # Optional callback invoked immediately when a non-fatal provider warning is emitted
+    on_warning: Callable[[WarningInfo], None] | None = None,
     # whether to force the providers to refresh their caches and get new data. Only needed if calling this multiple
     # times within the same process
     reset_caches: bool = False,
@@ -169,6 +196,7 @@ def list_agents(
             error_behavior=error_behavior,
             on_agent=on_agent,
             on_error=on_error,
+            on_warning=on_warning,
             field_generators=field_generators,
         )
 
@@ -256,7 +284,12 @@ def _construct_and_discover_for_provider(
         provider = get_provider_instance(provider_name, mngr_ctx)
         if reset_caches:
             provider.reset_caches()
-        provider_results = provider.discover_hosts_and_agents(cg=mngr_ctx.concurrency_group, include_destroyed=True)
+        warning_emitter = _WarningEmitter(result=result, results_lock=results_lock, on_warning=params.on_warning)
+        provider_results = provider.discover_hosts_and_agents(
+            cg=mngr_ctx.concurrency_group,
+            include_destroyed=True,
+            on_warning=warning_emitter,
+        )
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
             if isinstance(e, MngrError):
@@ -446,7 +479,10 @@ def _construct_discover_and_emit_for_provider(
             provider.reset_caches()
 
         # Phase 1: list hosts and get agent refs
-        provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=True)
+        warning_emitter = _WarningEmitter(result=result, results_lock=results_lock, on_warning=params.on_warning)
+        provider_results = provider.discover_hosts_and_agents(
+            cg=cg, include_destroyed=True, on_warning=warning_emitter
+        )
 
         # Warn if any host names are duplicated within this provider
         warn_on_duplicate_host_names(provider_results)
