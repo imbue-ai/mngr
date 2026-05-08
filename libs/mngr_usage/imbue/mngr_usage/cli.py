@@ -47,8 +47,7 @@ _DEFAULT_WINDOW_LABELS: dict[str, str] = {
 _NO_DATA_HINT = (
     "No usage data yet -- check that a writer plugin (e.g. imbue-mngr-claude-usage) is "
     "installed in the env running `mngr`, and that you've sent a prompt to an agent that "
-    "(a) was created after that plugin was installed and (b) is still alive (events live "
-    "inside the agent state dir, so destroying the agent removes them)."
+    "(a) was created after that plugin was installed and (b) is still alive."
 )
 
 
