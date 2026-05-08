@@ -582,14 +582,12 @@ def test_apply_cel_filters_warns_on_typoed_strict_field(exclude_expr: str) -> No
     schemaless fields stay quiet on missing keys, but missing-strict-field accesses
     that the cel-python evaluator cannot fold into a clean BoolType (method calls
     like `.contains(...)` on a missing field, ordered comparisons like `> 5`,
-    etc.) must still warn so users can see the typo. Locks in the third bullet
-    of the branch's changelog entry for the cases where the warning genuinely
-    fires.
+    etc.) must still warn so users can see the typo.
 
-    Note: `host.providr == "local"` (the changelog example) does NOT warn because
-    cel-python's evaluator carries CELEvalError through equality and yields
-    BoolType(False); the warning only surfaces for operations cel-python cannot
-    fold (method calls, `<`/`>` comparisons, etc.).
+    Note: `host.providr == "local"` does NOT warn because cel-python's
+    evaluator carries CELEvalError through equality and yields BoolType(False);
+    the warning only surfaces for operations cel-python cannot fold (method
+    calls, `<`/`>` comparisons, etc.).
     """
     agent = _make_agent_details("test-agent", _make_host_details())
     include_filters, exclude_filters = compile_cel_filters(
