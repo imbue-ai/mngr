@@ -38,7 +38,7 @@ A writer plugin is responsible for producing `rate_limit_snapshot` events at
 the conventional path. The minimal contract is just the JSONL line shape:
 
 ```jsonl
-{"source":"<your-source>/rate_limits","type":"rate_limit_snapshot","event_id":"evt-<hex>","timestamp":"<ISO 8601>","rate_limits":{"<window-key>":{"used_percentage":<float>,"resets_at":<unix-ts>,"label":"<display-label>"}}}
+{"source":"<your-source>/rate_limits","type":"rate_limit_snapshot","event_id":"evt-<hex>","timestamp":"<ISO 8601>","rate_limits":{"<window-key>":{"used_percentage":<float>,"resets_at":<unix-ts>}}}
 ```
 
 Append one line per refresh to:
