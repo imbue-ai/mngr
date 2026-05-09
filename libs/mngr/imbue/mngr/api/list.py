@@ -261,11 +261,15 @@ def _construct_and_discover_for_provider(
     except ProviderUnavailableError as e:
         # The provider literally cannot operate on this machine right now
         # (binary missing, daemon down, network unreachable). This is a
-        # deployment fact, not a misconfiguration -- log a warning and skip
+        # deployment fact, not a misconfiguration -- log at DEBUG and skip
         # the provider gracefully so other providers still produce hosts.
-        # Use --on-error abort + ProviderNotAuthorizedError (or disable the
-        # provider) when you want explicit failure for misconfigurations.
-        logger.warning("Skipping provider {} (unavailable): {}", provider_name, e)
+        # DEBUG (not WARNING) matches the established convention for "expected
+        # provider-unavailable" cases (see e.g. the prior Lima discover code)
+        # and keeps stderr clean for the common "Lima not installed" scenario.
+        # Misconfigurations (wrong/missing credentials) raise
+        # ProviderNotAuthorizedError or similar and surface loudly through
+        # the broad-except below.
+        logger.debug("Skipping provider {} (unavailable): {}", provider_name, e)
         return
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
@@ -487,8 +491,9 @@ def _construct_discover_and_emit_for_provider(
     except ProviderUnavailableError as e:
         # See _construct_and_discover_for_provider for the rationale: machines
         # missing a provider's prerequisite (binary, daemon) skip gracefully
-        # so other providers still produce hosts.
-        logger.warning("Skipping provider {} (unavailable): {}", provider_name, e)
+        # at DEBUG so other providers still produce hosts and stderr stays
+        # clean for the common case.
+        logger.debug("Skipping provider {} (unavailable): {}", provider_name, e)
         return
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:

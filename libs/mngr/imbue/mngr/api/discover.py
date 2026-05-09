@@ -74,11 +74,12 @@ def _discover_provider_hosts_and_agents(
         provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
     except ProviderUnavailableError as exc:
         # Provider literally cannot operate on this machine right now (binary
-        # missing, daemon down, network unreachable). Skip it gracefully; other
-        # providers still produce hosts. Misconfigurations (wrong credentials)
-        # raise ProviderNotAuthorizedError or similar and fall through to the
-        # broad-catch below, which surfaces them as ProviderDiscoveryError.
-        logger.warning("Skipping provider {} (unavailable): {}", provider.name, exc)
+        # missing, daemon down, network unreachable). Skip it gracefully at
+        # DEBUG; other providers still produce hosts and stderr stays clean.
+        # Misconfigurations (wrong credentials) raise ProviderNotAuthorizedError
+        # or similar and fall through to the broad-catch below, which surfaces
+        # them as ProviderDiscoveryError.
+        logger.debug("Skipping provider {} (unavailable): {}", provider.name, exc)
         return
     except Exception as exc:
         raise ProviderDiscoveryError(provider.name, exc) from exc
