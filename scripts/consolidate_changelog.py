@@ -37,17 +37,20 @@ def _collect_entries(changelog_dir: Path) -> list[tuple[Path, str]]:
 
 
 def _get_entry_added_datetime(path: Path, repo_root: Path) -> datetime:
-    """Return when the entry was added to the repo, as a Pacific-time datetime.
+    """Return when the entry's PR landed on the current branch, as PT.
 
-    Uses ``git log --diff-filter=A --format=%aI -- <path>`` to find the
-    author date of the commit that added the file. If the file has been
-    added more than once (added, deleted, re-added), takes the most recent.
-    Falls back to the file's mtime if git has no record (e.g. uncommitted
-    file on a local dev box).
+    Uses ``git log --first-parent --diff-filter=A --format=%cI -- <path>``
+    to find the committer date of the commit that introduced the file on
+    the current branch's first-parent line. For files merged in via a PR
+    merge commit, that's the merge commit's committer date -- i.e. when
+    the PR landed -- not the feature-branch author date. If the file has
+    been added more than once on the first-parent line, takes the most
+    recent. Falls back to the file's mtime if git has no record (e.g. an
+    uncommitted file on a local dev box).
     """
     rel = path.relative_to(repo_root)
     result = subprocess.run(
-        ["git", "log", "--diff-filter=A", "--format=%aI", "--", str(rel)],
+        ["git", "log", "--first-parent", "--diff-filter=A", "--format=%cI", "--", str(rel)],
         cwd=repo_root,
         capture_output=True,
         text=True,

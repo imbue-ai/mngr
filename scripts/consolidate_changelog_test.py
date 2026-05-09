@@ -122,20 +122,23 @@ def test_insert_section_preserves_multiple_existing_sections(tmp_path: Path) -> 
     assert idx_new < idx_mid < idx_old
 
 
-def _init_git_repo_with_files(repo: Path, files_with_dates: list[tuple[str, str, str]]) -> None:
-    """Init a temp git repo and commit each file at its given author date.
-
-    files_with_dates: list of (rel_path, content, iso_date) tuples. Each entry
-    is added in its own commit so git log --diff-filter=A --format=%aI returns
-    the per-file date.
-    """
-    env = {
+def _git_env() -> dict[str, str]:
+    return {
         **os.environ,
         "GIT_AUTHOR_NAME": "test",
         "GIT_AUTHOR_EMAIL": "test@test",
         "GIT_COMMITTER_NAME": "test",
         "GIT_COMMITTER_EMAIL": "test@test",
     }
+
+
+def _init_git_repo_with_files(repo: Path, files_with_dates: list[tuple[str, str, str]]) -> None:
+    """Init a temp git repo and commit each file at its given committer date.
+
+    files_with_dates: list of (rel_path, content, iso_date) tuples. Each entry
+    is added in its own commit on the (linear) main branch.
+    """
+    env = _git_env()
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=env)
     for rel_path, content, iso_date in files_with_dates:
         path = repo / rel_path
@@ -151,8 +154,8 @@ def _init_git_repo_with_files(repo: Path, files_with_dates: list[tuple[str, str,
         )
 
 
-def test_get_entry_added_datetime_uses_git_author_date(tmp_path: Path) -> None:
-    """The helper returns the author date of the commit that added the file, in PT."""
+def test_get_entry_added_datetime_uses_committer_date(tmp_path: Path) -> None:
+    """The helper returns the committer date of the commit that added the file, in PT."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_git_repo_with_files(
@@ -162,6 +165,44 @@ def test_get_entry_added_datetime_uses_git_author_date(tmp_path: Path) -> None:
             ("changelog/foo.md", "- entry foo\n", "2026-05-08T18:00:00Z"),
         ],
     )
+    dt = _get_entry_added_datetime(repo / "changelog" / "foo.md", repo)
+    assert dt.strftime("%Y-%m-%d") == "2026-05-08"
+    assert dt.strftime("%H") == "11"
+
+
+def test_get_entry_added_datetime_returns_merge_commit_date(tmp_path: Path) -> None:
+    """For files merged in via a merge commit, return the merge commit's date,
+    not the feature-branch commit's date.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = _git_env()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=env)
+    # Seed main with an unrelated commit so we have a non-empty first-parent line.
+    (repo / "README.md").write_text("# repo\n")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True, env=env)
+    seed_env = {**env, "GIT_AUTHOR_DATE": "2026-05-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-05-01T00:00:00Z"}
+    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True, env=seed_env)
+
+    # Branch off main, add the entry on the feature branch with an early author/committer date.
+    subprocess.run(["git", "checkout", "-q", "-b", "feature"], cwd=repo, check=True, env=env)
+    (repo / "changelog").mkdir()
+    (repo / "changelog" / "foo.md").write_text("- entry foo\n")
+    subprocess.run(["git", "add", "changelog/foo.md"], cwd=repo, check=True, env=env)
+    feat_env = {**env, "GIT_AUTHOR_DATE": "2026-05-03T12:00:00Z", "GIT_COMMITTER_DATE": "2026-05-03T12:00:00Z"}
+    subprocess.run(["git", "commit", "-q", "-m", "add foo"], cwd=repo, check=True, env=feat_env)
+
+    # Merge feature into main with a later committer date (the "PR merged" time).
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True, env=env)
+    # 2026-05-08T18:00:00Z = 2026-05-08T11:00:00 PT
+    merge_env = {**env, "GIT_AUTHOR_DATE": "2026-05-08T18:00:00Z", "GIT_COMMITTER_DATE": "2026-05-08T18:00:00Z"}
+    subprocess.run(
+        ["git", "merge", "-q", "--no-ff", "-m", "merge feature", "feature"],
+        cwd=repo,
+        check=True,
+        env=merge_env,
+    )
+
     dt = _get_entry_added_datetime(repo / "changelog" / "foo.md", repo)
     assert dt.strftime("%Y-%m-%d") == "2026-05-08"
     assert dt.strftime("%H") == "11"
