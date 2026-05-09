@@ -30,6 +30,7 @@ from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude_usage import resources as _resources
 
 _RATE_LIMITS_WRITER_SCRIPT = "claude_rate_limits_writer.sh"
@@ -130,6 +131,25 @@ def _install_settings_local_statusline(work_dir: Path, statusline_command: str) 
     os.replace(tmp, settings_path)
 
 
+def _provision_statusline_shim(state_dir: Path, work_dir: Path) -> None:
+    """Install shim, writer, sidecar, and settings.local.json statusLine.
+
+    Factored out of the hookimpl so tests can exercise the full file-side
+    behavior without needing a fully-constructed ``ClaudeAgent``.
+    """
+    commands_dir = state_dir / "commands"
+    commands_dir.mkdir(parents=True, exist_ok=True)
+
+    shim_path = str(commands_dir / _STATUSLINE_SHIM_SCRIPT)
+    user_cmd = _capture_existing_statusline_command(work_dir, our_shim_path=shim_path)
+    _write_user_statusline_cmd(commands_dir, user_cmd)
+
+    _copy_resource_script(commands_dir, _STATUSLINE_SHIM_SCRIPT)
+    _copy_resource_script(commands_dir, _RATE_LIMITS_WRITER_SCRIPT)
+
+    _install_settings_local_statusline(work_dir, shim_path)
+
+
 @hookimpl
 def on_before_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
     """Provision the rate-limit statusline shim for Claude agents on the local host.
@@ -144,23 +164,12 @@ def on_before_provisioning(agent: AgentInterface, host: OnlineHostInterface, mng
 
     Skips non-Claude agents and remote hosts: ``mngr usage`` walks the local
     host_dir for events files, so a remote-only events file would never be
-    visible.
+    visible. The ``isinstance`` check covers ``claude``, ``headless_claude``,
+    and user-defined agent types whose ``parent_type`` chain reaches
+    ``claude`` (e.g. config-defined templates like ``write-plus``).
     """
-    logger.warning("DEBUG mngr_claude_usage hook fired: agent_type={} is_local={}", agent.agent_type, host.is_local)
-    if str(agent.agent_type) != "claude":
+    if not isinstance(agent, ClaudeAgent):
         return
     if not host.is_local:
         return
-
-    state_dir = _agent_state_dir(agent, host)
-    commands_dir = state_dir / "commands"
-    commands_dir.mkdir(parents=True, exist_ok=True)
-
-    shim_path = str(commands_dir / _STATUSLINE_SHIM_SCRIPT)
-    user_cmd = _capture_existing_statusline_command(agent.work_dir, our_shim_path=shim_path)
-    _write_user_statusline_cmd(commands_dir, user_cmd)
-
-    _copy_resource_script(commands_dir, _STATUSLINE_SHIM_SCRIPT)
-    _copy_resource_script(commands_dir, _RATE_LIMITS_WRITER_SCRIPT)
-
-    _install_settings_local_statusline(agent.work_dir, shim_path)
+    _provision_statusline_shim(_agent_state_dir(agent, host), agent.work_dir)

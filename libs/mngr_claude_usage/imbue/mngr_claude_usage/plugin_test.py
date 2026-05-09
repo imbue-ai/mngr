@@ -1,4 +1,4 @@
-"""Unit tests for mngr_claude_usage.plugin (hookimpl + provisioning helpers)."""
+"""Unit tests for mngr_claude_usage.plugin (provisioning helpers + hookimpl filter)."""
 
 from __future__ import annotations
 
@@ -10,11 +10,12 @@ from pydantic import BaseModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_claude_usage.plugin import _capture_existing_statusline_command
 from imbue.mngr_claude_usage.plugin import _install_settings_local_statusline
+from imbue.mngr_claude_usage.plugin import _provision_statusline_shim
 from imbue.mngr_claude_usage.plugin import on_before_provisioning
 
 
 class _StubAgent(BaseModel):
-    """Stub matching the duck-typed interface the hookimpl needs from AgentInterface."""
+    """Stub agent for the hookimpl filter test (not a real ClaudeAgent)."""
 
     id: str
     agent_type: str
@@ -22,7 +23,7 @@ class _StubAgent(BaseModel):
 
 
 class _StubHost(BaseModel):
-    """Stub matching the duck-typed interface the hookimpl needs from OnlineHostInterface."""
+    """Stub host for tests."""
 
     host_dir: Path
     is_local: bool
@@ -109,69 +110,58 @@ def test_install_overwrites_previous_statusline(tmp_path: Path) -> None:
 # =============================================================================
 
 
-def _run_hook(tmp_path: Path, mngr_ctx: MngrContext, *, agent_type: str = "claude", is_local: bool = True) -> Path:
-    """Invoke the hookimpl with a stub agent + host. Returns the agent's state dir."""
-    host_dir = tmp_path / "host"
+def test_provision_creates_shim_writer_and_settings_local(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
     work_dir = tmp_path / "work"
-    work_dir.mkdir(parents=True, exist_ok=True)
-    agent = _StubAgent(id="agent-test", agent_type=agent_type, work_dir=work_dir)
-    host = _StubHost(host_dir=host_dir, is_local=is_local)
-    on_before_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)  # ty: ignore[invalid-argument-type]
-    return host_dir / "agents" / "agent-test"
-
-
-def test_hookimpl_provisions_shim_writer_and_settings_local(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    state_dir = _run_hook(tmp_path, temp_mngr_ctx)
+    work_dir.mkdir()
+    _provision_statusline_shim(state_dir, work_dir)
     commands = state_dir / "commands"
     assert (commands / "claude_statusline.sh").is_file()
     assert (commands / "claude_rate_limits_writer.sh").is_file()
-    # Both must be executable.
     assert (commands / "claude_statusline.sh").stat().st_mode & 0o111
     assert (commands / "claude_rate_limits_writer.sh").stat().st_mode & 0o111
-    # settings.local.json points at the shim.
-    settings_local = tmp_path / "work" / ".claude" / "settings.local.json"
-    settings = json.loads(settings_local.read_text())
+    settings = json.loads((work_dir / ".claude" / "settings.local.json").read_text())
     assert settings["statusLine"]["command"] == str(commands / "claude_statusline.sh")
-    # No user statusline was present, so the sidecar is empty.
     sidecar = commands / "user_statusline_cmd"
     assert sidecar.is_file()
     assert sidecar.read_text() == ""
 
 
-def test_hookimpl_captures_existing_user_statusline(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+def test_provision_captures_existing_user_statusline(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
     work_dir = tmp_path / "work"
-    work_dir.mkdir()
     claude_dir = work_dir / ".claude"
-    claude_dir.mkdir()
+    claude_dir.mkdir(parents=True)
     (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/path/to/caveman.sh"}}))
-    state_dir = _run_hook(tmp_path, temp_mngr_ctx)
+    _provision_statusline_shim(state_dir, work_dir)
     sidecar = state_dir / "commands" / "user_statusline_cmd"
     assert sidecar.read_text() == "/path/to/caveman.sh"
-    # The wrapping shim is now installed, but settings.json (project tier) is unchanged.
     project_settings = json.loads((claude_dir / "settings.json").read_text())
     assert project_settings["statusLine"]["command"] == "/path/to/caveman.sh"
 
 
-def test_hookimpl_skips_non_claude_agents(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    state_dir = _run_hook(tmp_path, temp_mngr_ctx, agent_type="opencode")
-    assert not (state_dir / "commands").exists()
-    assert not (tmp_path / "work" / ".claude" / "settings.local.json").exists()
+def test_provision_is_idempotent_on_reprovision(tmp_path: Path) -> None:
+    """Re-running must not capture our own shim as the user command, and must
+    preserve the originally captured user command across runs."""
+    state_dir = tmp_path / "state"
+    work_dir = tmp_path / "work"
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir(parents=True)
+    (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/caveman.sh"}}))
+    _provision_statusline_shim(state_dir, work_dir)
+    _provision_statusline_shim(state_dir, work_dir)
+    assert (state_dir / "commands" / "user_statusline_cmd").read_text() == "/caveman.sh"
 
 
-def test_hookimpl_skips_remote_hosts(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    state_dir = _run_hook(tmp_path, temp_mngr_ctx, is_local=False)
-    assert not (state_dir / "commands").exists()
-    assert not (tmp_path / "work" / ".claude" / "settings.local.json").exists()
-
-
-def test_hookimpl_is_idempotent_on_reprovision(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    """Re-running provisioning must not capture our own shim as the user command,
-    and must preserve the originally captured user command across runs."""
+def test_hookimpl_skips_non_claude_stub(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """The hookimpl filters with isinstance(agent, ClaudeAgent). Stub agents don't
+    pass that check, so the hookimpl is a no-op for them -- no commands dir, no
+    settings.local.json. Real ClaudeAgent integration is exercised in mngr_claude's
+    own provisioning tests; this test just locks in the filter behavior."""
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    claude_dir = work_dir / ".claude"
-    claude_dir.mkdir()
-    (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/caveman.sh"}}))
-    state_dir = _run_hook(tmp_path, temp_mngr_ctx)
-    state_dir = _run_hook(tmp_path, temp_mngr_ctx)
-    assert (state_dir / "commands" / "user_statusline_cmd").read_text() == "/caveman.sh"
+    agent = _StubAgent(id="agent-test", agent_type="opencode", work_dir=work_dir)
+    host = _StubHost(host_dir=tmp_path / "host", is_local=True)
+    on_before_provisioning(agent=agent, host=host, mngr_ctx=temp_mngr_ctx)  # ty: ignore[invalid-argument-type]
+    assert not (tmp_path / "host" / "agents" / "agent-test").exists()
+    assert not (work_dir / ".claude" / "settings.local.json").exists()
