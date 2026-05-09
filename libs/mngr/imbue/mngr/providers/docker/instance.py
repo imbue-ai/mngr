@@ -1350,12 +1350,15 @@ kill -TERM 1
         """Discover all Docker container hosts."""
         processed_host_ids: set[HostId] = set()
 
+        # _docker_client already wraps daemon-unreachable as ProviderUnavailableError.
+        # Wrap any other DockerException to match that typing so the listing-pipeline
+        # boundary (api/list.py) sees a single typed error class for "Docker is not
+        # available", recorded as ProviderErrorInfo under --on-error continue.
         try:
             containers = self._list_containers()
             all_host_records = self._host_store.list_all_host_records()
-        except (MngrError, docker.errors.DockerException) as e:
-            logger.warning("Cannot list Docker hosts (Docker daemon unavailable?): {}", e)
-            return []
+        except docker.errors.DockerException as e:
+            raise ProviderUnavailableError(self.name, str(e)) from e
 
         # Map running containers by host_id
         container_by_host_id: dict[HostId, docker.models.containers.Container] = {}

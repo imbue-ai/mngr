@@ -426,16 +426,22 @@ def test_docker_client_error_is_mngr_error_subclass(temp_mngr_ctx: MngrContext) 
 
 
 @pytest.mark.docker_sdk
-def test_discover_hosts_returns_empty_when_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
-    """discover_hosts gracefully returns [] when Docker is unreachable."""
+def test_discover_hosts_raises_provider_unavailable_when_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
+    """discover_hosts raises ProviderUnavailableError when Docker is unreachable.
+
+    The listing pipeline catches this at the boundary and records a
+    ProviderErrorInfo under --on-error continue (or aborts otherwise).
+    """
     provider = make_offline_docker_provider(temp_mngr_ctx)
-    result = provider.discover_hosts(cg=temp_mngr_ctx.concurrency_group)
-    assert result == []
+    with pytest.raises(ProviderUnavailableError):
+        provider.discover_hosts(cg=temp_mngr_ctx.concurrency_group)
 
 
 @pytest.mark.docker_sdk
-def test_discover_hosts_and_agents_returns_empty_when_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
-    """discover_hosts_and_agents gracefully returns {} when Docker is unreachable."""
+def test_discover_hosts_and_agents_raises_provider_unavailable_when_daemon_offline(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """discover_hosts_and_agents raises ProviderUnavailableError when Docker is unreachable."""
     provider = make_offline_docker_provider(temp_mngr_ctx)
-    result = provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
-    assert result == {}
+    with pytest.raises(ProviderUnavailableError):
+        provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
