@@ -14,10 +14,10 @@ class UsagePluginConfig(PluginConfig):
     max_age_seconds: int = Field(
         default=300,
         description="Snapshot freshness threshold in seconds. When the snapshot's "
-        "updated_at is older than this, `mngr usage` prints a stale-cache warning. "
-        "Reader-only -- this plugin doesn't capture data, it asks data-providing "
-        "plugins (e.g. mngr_claude_usage) for the latest snapshot via the "
-        "`current_usage_snapshot` hook.",
+        "updated_at is older than this, `mngr usage` prints a stale-snapshot warning. "
+        "Reader-only -- this plugin doesn't capture data, it walks events files "
+        "produced by writer plugins (one event per provisioned agent's rate-limit "
+        "render) and renders the freshest.",
     )
 
     def merge_with(self, override: PluginConfig) -> UsagePluginConfig:
@@ -33,14 +33,12 @@ class UsagePluginConfig(PluginConfig):
 class WindowSnapshot(FrozenModel):
     """A single rate-limit window's snapshot state.
 
-    Each provider's hookimpl populates these from whatever data source it
-    owns. The fields are intentionally generic enough to cover Claude.ai's
-    rate_limits payload (the only provider today) and any future provider
-    that emits per-window usage percentages with reset timestamps.
+    The fields are intentionally generic: any provider that emits per-window
+    usage percentages with reset timestamps fits, regardless of which API
+    the percentages came from.
 
     ``status`` and ``is_using_overage`` are declared as optional fields
-    defaulting to None; no current provider emits them, but they're
-    reserved for forward-compat without a schema bump.
+    defaulting to None; reserved for forward-compat without a schema bump.
     """
 
     used_percentage: float | None = Field(default=None)
@@ -50,21 +48,22 @@ class WindowSnapshot(FrozenModel):
 
 
 class UsageSnapshot(FrozenModel):
-    """A complete usage snapshot returned by a ``current_usage_snapshot`` hookimpl.
+    """A complete usage snapshot derived from one writer's events file.
 
     Carries:
-    - ``source_name``: free-form identifier for the originating provider
-      (e.g. ``"claude"``). Used in the human output and as a tiebreaker
-      across hookimpls. Should not contain spaces.
+    - ``source_name``: free-form identifier for the writer (taken from the
+      ``<source>`` segment of ``events/<source>/rate_limits/events.jsonl``).
+      Used in the ``[source]`` header and as a tiebreaker when multiple
+      writers contribute. Should not contain spaces.
     - ``windows``: per-window state, keyed by names from ``WINDOW_KEYS`` for
-      the standard cases. Providers may include other window names too;
+      the standard cases. Writers may include other window names too;
       ``mngr usage`` renders unknown ones with the literal key as the label.
-    - ``updated_at``: Unix timestamp the provider regards as the snapshot's
+    - ``updated_at``: Unix timestamp the writer regards as the snapshot's
       freshness. The CLI uses this to pick the freshest snapshot when
-      multiple providers contribute, and to compute the stale-warning age.
+      multiple writers contribute, and to compute the stale-warning age.
     """
 
-    source_name: str = Field(description="Provider name, e.g. 'claude'")
+    source_name: str = Field(description="Writer-chosen source identifier")
     windows: dict[str, WindowSnapshot] = Field(
         default_factory=dict,
         description="Per-window state, keyed by window name (five_hour / seven_day / overage / ...).",

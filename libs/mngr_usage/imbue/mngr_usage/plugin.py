@@ -3,8 +3,8 @@
 Agent-agnostic: provides the ``mngr usage`` CLI command. Discovery is by
 convention -- the CLI walks ``$MNGR_HOST_DIR/agents/*/events/*/rate_limits/events.jsonl``
 matching the same pattern ``mngr transcript`` uses for ``common_transcript``
-events. Plugins like ``imbue-mngr-claude-usage`` write events to those paths;
-nothing else is required.
+events. Any plugin that writes ``rate_limit_snapshot`` events to those paths
+will be picked up automatically; this plugin doesn't know or care which.
 """
 
 from __future__ import annotations

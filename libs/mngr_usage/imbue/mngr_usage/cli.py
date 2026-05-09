@@ -30,9 +30,9 @@ from imbue.mngr_usage.data_types import WindowSnapshot
 
 # Discovery convention: each agent's state dir holds rate-limits events at
 #   <agent_state_dir>/events/<source>/rate_limits/events.jsonl
-# This mirrors mngr_claude's common_transcript pattern (events/<source>/
-# common_transcript/events.jsonl) used by `mngr transcript`. The <source>
-# segment names the writing agent type (e.g. "claude") and becomes the
+# This mirrors the common_transcript pattern (events/<source>/common_transcript/
+# events.jsonl) used by `mngr transcript`. The <source> segment names the
+# writer (a free-form identifier chosen by the writer plugin) and becomes the
 # UsageSnapshot.source_name for the event.
 _RATE_LIMITS_EVENTS_LEAF: tuple[str, str] = ("rate_limits", "events.jsonl")
 
@@ -45,9 +45,9 @@ _DEFAULT_WINDOW_LABELS: dict[str, str] = {
 }
 
 _NO_DATA_HINT = (
-    "No usage data yet -- check that a writer plugin (e.g. imbue-mngr-claude-usage) is "
-    "installed in the env running `mngr`, and that you've sent a prompt to an agent that "
-    "(a) was created after that plugin was installed and (b) is still alive."
+    "No usage data yet -- check that a usage writer plugin is installed in the env "
+    "running `mngr`, and that you've sent a prompt to an agent that (a) was created "
+    "after that plugin was installed and (b) is still alive."
 )
 
 
@@ -234,11 +234,12 @@ def _snapshot_from_event(event: dict[str, Any], source_name: str) -> UsageSnapsh
 def _gather_snapshots(host_dir: Path) -> list[UsageSnapshot]:
     """Walk events files across all agents, return one UsageSnapshot per source.
 
-    Multiple agents may share the same source name (e.g. all ``claude`` agents
-    write into ``events/claude/rate_limits/events.jsonl`` under their own state
-    dirs). For each (events_file, source_name) we extract the last event; if
-    several events files exist for the same source_name, ``_pick_freshest``
-    later picks across them on ``updated_at``.
+    Multiple agents may share the same source name -- the writer plugin
+    chooses the segment, so all agents that share a writer write to the
+    same ``events/<source>/rate_limits/events.jsonl`` under their own state
+    dirs. For each (events_file, source_name) we extract the last event;
+    if several events files exist for the same source_name,
+    ``_pick_freshest`` later picks across them on ``updated_at``.
     """
     snapshots: list[UsageSnapshot] = []
     for events_file, source_name in _iter_rate_limit_event_files(host_dir):
@@ -542,12 +543,8 @@ statusline.
 This command is agent-agnostic: it walks ``<host_dir>/agents/*/events/<source>/
 rate_limits/events.jsonl`` and renders the most recent event. The pattern
 mirrors how ``mngr transcript`` discovers ``common_transcript`` events --
-agent-specific plugins write events to the conventional path; ``mngr usage``
-discovers them automatically.
-
-The most common writer is ``imbue-mngr-claude-usage``, which surfaces
-Claude.ai's rolling 5-hour, 7-day, and overage quota windows captured by a
-per-agent statusline shim.""",
+writer plugins emit events to the conventional path; ``mngr usage`` discovers
+them automatically without any agent-specific knowledge.""",
     examples=(
         ("Show current usage", "mngr usage"),
         ("Treat the snapshot as stale after 60s (warning only)", "mngr usage --max-age 60"),

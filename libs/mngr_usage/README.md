@@ -1,30 +1,29 @@
 # imbue-mngr-usage
 
-`mngr usage` — agent-agnostic CLI for rolling-window usage / quota data.
+`mngr usage` -- agent-agnostic CLI for rolling-window usage / quota data.
 
 ## What it does
 
-Provides a single `mngr usage` command that surfaces rolling-window usage (e.g.
-Claude.ai's 5-hour, 7-day, and overage quota windows) in human / json / jsonl /
-format-template output. The command itself knows nothing about any specific agent
-type; it dispatches to data-providing plugins via a pluggy hook.
+Provides a single `mngr usage` command that surfaces rolling-window usage data
+in human / json / jsonl / format-template output. The command itself knows
+nothing about any specific agent type or provider; it walks events files on
+disk and renders whatever it finds.
 
 ## Architecture
 
 This package contains:
 
 - The `mngr usage` CLI command and its rendering helpers.
-- The `current_usage_snapshot` hookspec (in `hookspecs.py`).
 - The `UsageSnapshot` and `WindowSnapshot` data types.
 
-Provider plugins implement the hookspec to surface their own data:
+Discovery is by path convention. The CLI walks
+`<host_dir>/agents/*/events/<source>/rate_limits/events.jsonl` (the same shape
+`mngr transcript` uses for `events/<source>/common_transcript/...`), reads the
+last event from each file, and renders the freshest snapshot per `<source>`.
+The `<source>` segment is free-form -- whatever the writer plugin chose.
 
-- `imbue-mngr-claude-usage` — Claude.ai rate-limit data, captured via a
-  per-agent statusline shim and read from each agent's
-  `events/claude/rate_limits/events.jsonl`.
-
-When multiple providers contribute, the freshest snapshot (largest `updated_at`)
-is rendered.
+When multiple writers contribute, each renders as its own `[source]` section in
+human output and as an entry in the JSON `sources` array.
 
 ## Output formats
 
@@ -33,19 +32,24 @@ is rendered.
 - `mngr usage --format jsonl`
 - `mngr usage --format '5h:{five_hour.used_percentage}%/{seven_day.used_percentage}%'`
 
-## Implementing a provider
+## Implementing a writer plugin
 
-```python
-from imbue.mngr_usage.data_types import UsageSnapshot, WindowSnapshot
-from imbue.mngr import hookimpl
+A writer plugin is responsible for producing `rate_limit_snapshot` events at
+the conventional path. The minimal contract is just the JSONL line shape:
 
-
-@hookimpl
-def current_usage_snapshot(mngr_ctx) -> UsageSnapshot | None:
-    # Read whatever data source you own, return the freshest snapshot.
-    return UsageSnapshot(
-        source_name="myprovider",
-        windows={"five_hour": WindowSnapshot(used_percentage=42.0, resets_at=1778280000)},
-        updated_at=1778270000,
-    )
+```jsonl
+{"source":"<your-source>/rate_limits","type":"rate_limit_snapshot","event_id":"evt-<hex>","timestamp":"<ISO 8601>","rate_limits":{"<window-key>":{"used_percentage":<float>,"resets_at":<unix-ts>}}}
 ```
+
+Append one line per refresh to:
+
+```
+<agent_state_dir>/events/<your-source>/rate_limits/events.jsonl
+```
+
+`mngr usage` will pick it up automatically -- no plugin registration with this
+package required.
+
+The window keys recognized for human-output labels are `five_hour`,
+`seven_day`, and `overage`; any other keys render with the literal key as the
+label.
