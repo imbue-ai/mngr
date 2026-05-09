@@ -261,11 +261,11 @@ class ImbueCloudProvider(BaseProviderInstance):
             return self._leased_hosts_cache
         account = self._require_account()
         token = self._get_access_token(account)
-        try:
-            self._leased_hosts_cache = self.client.list_hosts(token)
-        except MngrError as exc:
-            logger.warning("imbue_cloud[{}] list_hosts failed: {}", self.name, exc)
-            self._leased_hosts_cache = []
+        # Let MngrError propagate -- listing nothing because the API call
+        # failed is fatal for this provider; the listing pipeline catches it
+        # at the boundary and records it as a ProviderErrorInfo (or aborts
+        # the whole run when --on-error abort is in effect).
+        self._leased_hosts_cache = self.client.list_hosts(token)
         return self._leased_hosts_cache
 
     def discover_hosts(

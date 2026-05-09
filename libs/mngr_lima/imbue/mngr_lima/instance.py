@@ -774,15 +774,16 @@ sudo poweroff
         """
         prefix = self.mngr_ctx.config.prefix
 
-        # Get all Lima instances with our prefix (gracefully handle missing limactl)
-        instances: list[dict[str, Any]] = []
+        # Both _ensure_lima_available() (raises ProviderUnavailableError) and
+        # limactl_list (raises LimaCommandError / OSError) signal that this
+        # provider cannot list anything. Let the failures propagate to the
+        # listing-pipeline boundary, where they become a ProviderErrorInfo
+        # under --on-error continue (or abort the run otherwise).
+        self._ensure_lima_available()
         try:
-            self._ensure_lima_available()
             instances = limactl_list(cg)
         except (LimaCommandError, OSError) as e:
-            logger.warning("Failed to list Lima instances: {}", e)
-        except ProviderUnavailableError as e:
-            logger.debug("Lima provider not available for discovery: {}", e)
+            raise ProviderUnavailableError(self.name, str(e)) from e
 
         # Build a map of instance_name -> status
         instance_status: dict[str, str] = {}
