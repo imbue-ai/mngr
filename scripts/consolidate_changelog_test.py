@@ -1,6 +1,7 @@
 import os
 import subprocess
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -176,7 +177,7 @@ def test_get_entry_added_datetime_falls_back_to_mtime_when_uncommitted(tmp_path:
     untracked.write_text("- new\n")
     dt = _get_entry_added_datetime(untracked, repo)
     # Mtime fallback: just check we got an aware datetime in PT
-    assert dt.tzinfo is not None
+    assert isinstance(dt.tzinfo, ZoneInfo)
     assert dt.tzinfo.key == "America/Los_Angeles"
 
 
