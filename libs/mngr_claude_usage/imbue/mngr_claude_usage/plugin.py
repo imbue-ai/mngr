@@ -9,78 +9,157 @@ Discovery is by convention -- ``mngr usage`` walks all
 ``mngr transcript`` finds ``common_transcript`` events. We don't implement a
 reader hookspec; we just write to the conventional path and let the generic
 CLI find the data.
+
+Provisioning runs from a single ``on_before_provisioning`` hookimpl on
+mngr core, so this plugin doesn't depend on any Claude-specific hookspec.
 """
 
 from __future__ import annotations
 
-import shlex
+import importlib.resources
+import json
+import os
+import shutil
+import stat
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr_claude.hookspecs import ClaudeExtraSettingsContribution
+from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr_claude_usage import resources as _resources
 
 _RATE_LIMITS_WRITER_SCRIPT = "claude_rate_limits_writer.sh"
 _STATUSLINE_SHIM_SCRIPT = "claude_statusline.sh"
+_USER_STATUSLINE_CMD_FILE = "user_statusline_cmd"
 
 
-def _format_statusline_command(agent_state_dir: Path) -> str:
-    """Return the shell-quoted shim path used as the value of statusLine.command.
+def _agent_state_dir(agent: AgentInterface, host: OnlineHostInterface) -> Path:
+    """Mirror BaseAgent._get_agent_dir(): the per-agent state directory on this host."""
+    return host.host_dir / "agents" / str(agent.id)
 
-    The shim reads MNGR_RATE_LIMITS_WRITER and (optionally) MNGR_USER_STATUSLINE_CMD
-    from the agent's process env, so the command itself is just the shim path.
+
+def _read_existing_settings(path: Path) -> dict[str, Any]:
+    """Return the JSON contents of ``path`` as a dict, or empty if missing/malformed.
+
+    A malformed settings.local.json is logged at warning level and treated as
+    empty rather than raising -- we don't want a typo in the user's settings to
+    break agent provisioning.
     """
-    state_dir = shlex.quote(str(agent_state_dir))
-    return f"{state_dir}/commands/{_STATUSLINE_SHIM_SCRIPT}"
+    if not path.is_file():
+        return {}
+    try:
+        loaded = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        logger.warning("Could not parse {} as JSON ({}); treating as empty.", path, e)
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
-def _extract_user_statusline_command(source_settings: dict[str, Any], own_shim_path: str) -> str | None:
-    """Pull the user's existing statusLine.command (if any) so we can chain to it.
+def _capture_existing_statusline_command(work_dir: Path, our_shim_path: str) -> str:
+    """Capture the user's pre-existing ``statusLine.command`` so the shim can chain to it.
 
-    Skips ``own_shim_path`` (a previously-installed copy of *this* plugin's shim)
-    so re-provisioning doesn't capture our own shim as the "user's command" --
-    that would form a recursive wrap.
+    Reads ``<work_dir>/.claude/settings.local.json`` first (local tier wins in
+    Claude Code's precedence stack), then ``<work_dir>/.claude/settings.json``.
+    Returns ``""`` if there's nothing to wrap.
+
+    Skips ``our_shim_path`` -- on re-provisioning, settings.local.json's
+    ``statusLine.command`` is OUR shim, and capturing it would form a recursive
+    wrap.
     """
-    statusline = source_settings.get("statusLine")
-    if not isinstance(statusline, dict):
-        return None
-    command = statusline.get("command")
-    if not isinstance(command, str) or not command.strip():
-        return None
-    if command.strip() == own_shim_path.strip():
-        return None
-    return command
+    claude_dir = work_dir / ".claude"
+    for filename in ("settings.local.json", "settings.json"):
+        settings = _read_existing_settings(claude_dir / filename)
+        statusline = settings.get("statusLine")
+        if not isinstance(statusline, dict):
+            continue
+        command = statusline.get("command")
+        if not isinstance(command, str) or not command.strip():
+            continue
+        if command.strip() == our_shim_path.strip():
+            continue
+        return command
+    return ""
+
+
+def _write_user_statusline_cmd(commands_dir: Path, command: str) -> None:
+    """Write the captured user command to the sidecar file the shim reads.
+
+    If the sidecar already exists with the same contents, skip the write (avoid
+    needless mtime churn on re-provisioning). Empty string is also valid and
+    means "no user command to chain to" -- the shim treats an empty/missing
+    sidecar as a no-op.
+    """
+    sidecar = commands_dir / _USER_STATUSLINE_CMD_FILE
+    if sidecar.is_file() and sidecar.read_text() == command:
+        return
+    sidecar.write_text(command)
+
+
+def _copy_resource_script(commands_dir: Path, filename: str) -> None:
+    """Copy a packaged resource script into ``commands_dir`` and chmod +x.
+
+    Uses ``importlib.resources.as_file`` so it works whether the package is
+    installed as source files or zipped (we only ever ship as source today,
+    but the pattern is correct).
+    """
+    dst = commands_dir / filename
+    src_traversable = importlib.resources.files(_resources).joinpath(filename)
+    with importlib.resources.as_file(src_traversable) as src_path:
+        shutil.copyfile(src_path, dst)
+    dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _install_settings_local_statusline(work_dir: Path, statusline_command: str) -> None:
+    """Set the agent's ``statusLine.command`` in ``<work_dir>/.claude/settings.local.json``.
+
+    Merges with whatever else is in that file (other plugins or the user may
+    have written hooks, MCP servers, etc.). Atomic via temp + os.replace so a
+    partial write can't corrupt the file.
+    """
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = claude_dir / "settings.local.json"
+    settings = _read_existing_settings(settings_path)
+    settings["statusLine"] = {"type": "command", "command": statusline_command}
+    tmp = settings_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(settings, indent=2))
+    os.replace(tmp, settings_path)
 
 
 @hookimpl
-def claude_extra_per_agent_settings(
-    mngr_ctx: MngrContext,
-    source_settings: dict[str, Any],
-    agent_state_dir: Path,
-    work_dir: Path,
-    is_local: bool,
-) -> ClaudeExtraSettingsContribution | None:
-    """Install the rate-limit statusline shim, wrapping any pre-existing statusLine.
+def on_before_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
+    """Provision the rate-limit statusline shim for Claude agents on the local host.
 
-    Skips remote hosts: ``mngr usage`` walks the local host_dir for events files,
-    so a remote-only events file would never be visible.
+    Steps:
+    1. Capture the user's pre-existing ``statusLine.command`` (if any) into
+       ``<state_dir>/commands/user_statusline_cmd`` so the shim can chain.
+    2. Copy the shim and the writer into ``<state_dir>/commands/``.
+    3. Set ``<work_dir>/.claude/settings.local.json``'s ``statusLine.command``
+       to point at our shim (local-tier wins over project-tier in Claude Code's
+       precedence stack).
+
+    Skips non-Claude agents and remote hosts: ``mngr usage`` walks the local
+    host_dir for events files, so a remote-only events file would never be
+    visible.
     """
-    if not is_local:
-        return None
+    if str(agent.agent_type) != "claude":
+        return
+    if not host.is_local:
+        return
 
-    statusline_command = _format_statusline_command(agent_state_dir)
-    env: dict[str, str] = {
-        "MNGR_RATE_LIMITS_WRITER": str(agent_state_dir / "commands" / _RATE_LIMITS_WRITER_SCRIPT),
-    }
-    user_cmd = _extract_user_statusline_command(source_settings, own_shim_path=statusline_command)
-    if user_cmd is not None:
-        env["MNGR_USER_STATUSLINE_CMD"] = user_cmd
+    state_dir = _agent_state_dir(agent, host)
+    commands_dir = state_dir / "commands"
+    commands_dir.mkdir(parents=True, exist_ok=True)
 
-    return ClaudeExtraSettingsContribution(
-        statusline_command=statusline_command,
-        env=env,
-        resource_scripts=(_STATUSLINE_SHIM_SCRIPT, _RATE_LIMITS_WRITER_SCRIPT),
-        resource_module=_resources,
-    )
+    shim_path = str(commands_dir / _STATUSLINE_SHIM_SCRIPT)
+    user_cmd = _capture_existing_statusline_command(agent.work_dir, our_shim_path=shim_path)
+    _write_user_statusline_cmd(commands_dir, user_cmd)
+
+    _copy_resource_script(commands_dir, _STATUSLINE_SHIM_SCRIPT)
+    _copy_resource_script(commands_dir, _RATE_LIMITS_WRITER_SCRIPT)
+
+    _install_settings_local_statusline(agent.work_dir, shim_path)

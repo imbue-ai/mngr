@@ -53,18 +53,15 @@ from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
-from imbue.mngr_claude.hookspecs import ClaudeExtraSettingsContribution
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
-from imbue.mngr_claude.plugin import PLUGIN_ENV_VARS_FILENAME
 from imbue.mngr_claude.plugin import ProvisioningContext
 from imbue.mngr_claude.plugin import WaitingReason
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _check_settings_local_gitignored
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
-from imbue.mngr_claude.plugin import _gather_claude_extra_settings
 from imbue.mngr_claude.plugin import _generate_installed_plugins_content
 from imbue.mngr_claude.plugin import _generate_known_marketplaces_content
 from imbue.mngr_claude.plugin import _get_claude_version
@@ -72,10 +69,7 @@ from imbue.mngr_claude.plugin import _get_preserved_sessions_dir
 from imbue.mngr_claude.plugin import _get_preserved_sessions_dir_for
 from imbue.mngr_claude.plugin import _has_api_credentials_available
 from imbue.mngr_claude.plugin import _install_claude
-from imbue.mngr_claude.plugin import _install_plugin_settings_local
-from imbue.mngr_claude.plugin import _load_plugin_env_vars
 from imbue.mngr_claude.plugin import _parse_claude_version_output
-from imbue.mngr_claude.plugin import _persist_plugin_env_vars
 from imbue.mngr_claude.plugin import _preserve_session_files
 from imbue.mngr_claude.plugin import _preserve_session_files_from_volume
 from imbue.mngr_claude.plugin import _provision_local_credentials
@@ -3693,125 +3687,6 @@ def test_build_settings_json_local_context_no_flags() -> None:
     assert "skipDangerousModePermissionPrompt" in data
     # Local (attended) context does not force fastMode
     assert "fastMode" not in data
-
-
-_HOOKIMPL = pluggy.HookimplMarker("mngr")
-
-
-class _FakeExtraSettingsPlugin:
-    @staticmethod
-    @_HOOKIMPL
-    def claude_extra_per_agent_settings(
-        mngr_ctx: MngrContext,
-        source_settings: dict[str, object],
-        agent_state_dir: Path,
-        work_dir: Path,
-        is_local: bool,
-    ) -> ClaudeExtraSettingsContribution | None:
-        if not is_local:
-            return None
-        return ClaudeExtraSettingsContribution(
-            statusline_command="echo wrapped",
-            env={"FOO": "bar"},
-        )
-
-
-def test_install_plugin_settings_local_writes_statusline(tmp_path: Path) -> None:
-    """Statusline contribution lands in <work_dir>/.claude/settings.local.json."""
-    work_dir = tmp_path / "work"
-    contribution = ClaudeExtraSettingsContribution(statusline_command="echo wrapped")
-    _install_plugin_settings_local(work_dir, (contribution,))
-    written = json.loads((work_dir / ".claude" / "settings.local.json").read_text())
-    assert written["statusLine"] == {"type": "command", "command": "echo wrapped"}
-
-
-def test_install_plugin_settings_local_preserves_other_fields(tmp_path: Path) -> None:
-    """Existing non-statusLine fields in settings.local.json must survive the merge."""
-    work_dir = tmp_path / "work"
-    settings_local = work_dir / ".claude" / "settings.local.json"
-    settings_local.parent.mkdir(parents=True)
-    settings_local.write_text(json.dumps({"someUserField": 42, "statusLine": {"command": "old"}}))
-    contribution = ClaudeExtraSettingsContribution(statusline_command="echo wrapped")
-    _install_plugin_settings_local(work_dir, (contribution,))
-    written = json.loads(settings_local.read_text())
-    assert written["someUserField"] == 42
-    assert written["statusLine"] == {"type": "command", "command": "echo wrapped"}
-
-
-def test_install_plugin_settings_local_noop_without_statusline(tmp_path: Path) -> None:
-    """If no contribution sets statusline_command, the file is not touched."""
-    work_dir = tmp_path / "work"
-    contribution = ClaudeExtraSettingsContribution(env={"FOO": "bar"})
-    _install_plugin_settings_local(work_dir, (contribution,))
-    assert not (work_dir / ".claude" / "settings.local.json").exists()
-
-
-def test_persist_and_load_plugin_env_vars_round_trip(tmp_path: Path) -> None:
-    """Env merged across contributions, written to plugin_env_vars.json, read back identically."""
-    agent_state_dir = tmp_path / "agent_state"
-    contributions = (
-        ClaudeExtraSettingsContribution(env={"A": "1", "B": "2"}),
-        ClaudeExtraSettingsContribution(env={"B": "overridden", "C": "3"}),
-    )
-    _persist_plugin_env_vars(agent_state_dir, contributions)
-    loaded = _load_plugin_env_vars(agent_state_dir)
-    assert loaded == {"A": "1", "B": "overridden", "C": "3"}
-
-
-def test_load_plugin_env_vars_returns_empty_when_missing(tmp_path: Path) -> None:
-    assert _load_plugin_env_vars(tmp_path / "no_such_dir") == {}
-
-
-def test_load_plugin_env_vars_tolerates_corrupt_file(tmp_path: Path) -> None:
-    p = tmp_path / PLUGIN_ENV_VARS_FILENAME
-    p.write_text("not json")
-    assert _load_plugin_env_vars(tmp_path) == {}
-
-
-def test_gather_claude_extra_settings_skips_remote_hosts(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    """The _FakeExtraSettingsPlugin returns None when is_local=False, exercising the remote-skip path."""
-    temp_mngr_ctx.pm.register(_FakeExtraSettingsPlugin)
-    try:
-        local = _gather_claude_extra_settings(
-            temp_mngr_ctx, source_settings={}, agent_state_dir=tmp_path, work_dir=tmp_path, is_local=True
-        )
-        remote = _gather_claude_extra_settings(
-            temp_mngr_ctx, source_settings={}, agent_state_dir=tmp_path, work_dir=tmp_path, is_local=False
-        )
-        assert len(local) == 1
-        assert local[0].statusline_command == "echo wrapped"
-        assert remote == ()
-    finally:
-        temp_mngr_ctx.pm.unregister(_FakeExtraSettingsPlugin)
-
-
-def test_build_settings_json_uses_parsed_source_settings_without_disk_read(tmp_path: Path) -> None:
-    """When parsed_source_settings is provided, the on-disk settings.json is not re-read.
-
-    Caller passes a parsed dict; _build_settings_json should adopt it as the
-    base instead of reading source_claude_dir / settings.json. This avoids
-    the duplicate parse when provision_claude_environment has already loaded
-    the file to feed the claude_extra_per_agent_settings hook.
-    """
-    # Plant a misleading file on disk: if _build_settings_json read this
-    # instead of using the parsed dict we pass in, the assertions below
-    # would fail.
-    claude_dir = tmp_path / ".claude"
-    claude_dir.mkdir()
-    (claude_dir / "settings.json").write_text(json.dumps({"model": "from-disk"}))
-
-    parsed = {"model": "from-parsed"}
-    ctx = ProvisioningContext(is_unattended=False)
-    config = ClaudeAgentConfig(check_installation=False)
-    content = _build_settings_json(
-        claude_dir,
-        config,
-        ctx,
-        sync_local=True,
-        parsed_source_settings=parsed,
-    )
-    data = json.loads(content)
-    assert data["model"] == "from-parsed"
 
 
 # =============================================================================

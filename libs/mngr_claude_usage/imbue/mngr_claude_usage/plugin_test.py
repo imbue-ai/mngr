@@ -1,114 +1,177 @@
-"""Unit tests for mngr_claude_usage.plugin (hookimpl behavior)."""
+"""Unit tests for mngr_claude_usage.plugin (hookimpl + provisioning helpers)."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+from pydantic import BaseModel
+
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr_claude_usage.plugin import _extract_user_statusline_command
-from imbue.mngr_claude_usage.plugin import _format_statusline_command
-from imbue.mngr_claude_usage.plugin import claude_extra_per_agent_settings
+from imbue.mngr_claude_usage.plugin import _capture_existing_statusline_command
+from imbue.mngr_claude_usage.plugin import _install_settings_local_statusline
+from imbue.mngr_claude_usage.plugin import on_before_provisioning
 
 
-def test_extract_user_statusline_command_picks_up_existing() -> None:
-    settings = {"statusLine": {"type": "command", "command": "/path/to/caveman.sh"}}
-    assert _extract_user_statusline_command(settings, own_shim_path="/different/shim.sh") == "/path/to/caveman.sh"
+class _StubAgent(BaseModel):
+    """Stub matching the duck-typed interface the hookimpl needs from AgentInterface."""
+
+    id: str
+    agent_type: str
+    work_dir: Path
 
 
-def test_extract_user_statusline_command_handles_missing() -> None:
-    assert _extract_user_statusline_command({}, own_shim_path="/x") is None
-    assert _extract_user_statusline_command({"statusLine": {}}, own_shim_path="/x") is None
-    assert _extract_user_statusline_command({"statusLine": {"command": "  "}}, own_shim_path="/x") is None
-    assert _extract_user_statusline_command({"statusLine": "not a dict"}, own_shim_path="/x") is None
+class _StubHost(BaseModel):
+    """Stub matching the duck-typed interface the hookimpl needs from OnlineHostInterface."""
+
+    host_dir: Path
+    is_local: bool
 
 
-def test_extract_user_statusline_command_skips_self_recursion() -> None:
-    """Re-provisioning sees the previously-installed shim path as the effective
-    statusLine command. We must skip it instead of capturing it as
-    MNGR_USER_STATUSLINE_CMD, otherwise the shim chains to itself."""
-    own_shim = "/Users/ev/.mngr/agents/agent-XXX/commands/claude_statusline.sh"
-    settings = {"statusLine": {"type": "command", "command": own_shim}}
-    assert _extract_user_statusline_command(settings, own_shim_path=own_shim) is None
+# =============================================================================
+# _capture_existing_statusline_command
+# =============================================================================
 
 
-def test_format_statusline_command_quotes_state_dir(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state with spaces"
-    cmd = _format_statusline_command(state_dir)
-    assert "'" in cmd or '"' in cmd
-    assert "claude_statusline.sh" in cmd
-    # No leftover env-var prefix; env is set via plugin_env_vars.json.
-    assert "=" not in cmd
-
-
-def test_claude_extra_per_agent_settings_wraps_existing_command(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    state_dir = tmp_path / "agent_state"
-    work_dir = tmp_path / "work"
-    contribution = claude_extra_per_agent_settings(
-        mngr_ctx=temp_mngr_ctx,
-        source_settings={"statusLine": {"command": "/caveman.sh"}},
-        agent_state_dir=state_dir,
-        work_dir=work_dir,
-        is_local=True,
+def test_capture_picks_up_command_from_settings_json(tmp_path: Path) -> None:
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"statusLine": {"type": "command", "command": "/path/to/caveman.sh"}})
     )
-    assert contribution is not None
-    assert contribution.statusline_command is not None
-    assert "claude_statusline.sh" in contribution.statusline_command
-    assert contribution.env["MNGR_USER_STATUSLINE_CMD"] == "/caveman.sh"
-    assert contribution.env["MNGR_RATE_LIMITS_WRITER"].endswith("claude_rate_limits_writer.sh")
-    # No more MNGR_RATE_LIMITS_CACHE / MNGR_PROFILE_DIR -- we write events to
-    # $MNGR_AGENT_STATE_DIR/events/claude/rate_limits/events.jsonl, which the
-    # writer derives from MNGR_AGENT_STATE_DIR (set by mngr core).
-    assert "MNGR_RATE_LIMITS_CACHE" not in contribution.env
-    assert "MNGR_PROFILE_DIR" not in contribution.env
-    assert "claude_statusline.sh" in contribution.resource_scripts
-    assert "claude_rate_limits_writer.sh" in contribution.resource_scripts
+    assert _capture_existing_statusline_command(tmp_path, our_shim_path="/different/shim.sh") == "/path/to/caveman.sh"
 
 
-def test_claude_extra_per_agent_settings_handles_no_existing_command(
-    temp_mngr_ctx: MngrContext, tmp_path: Path
-) -> None:
-    state_dir = tmp_path / "agent_state"
+def test_capture_prefers_settings_local_over_settings_json(tmp_path: Path) -> None:
+    """Local tier wins over project tier in Claude Code's precedence stack."""
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/project.sh"}}))
+    (claude_dir / "settings.local.json").write_text(json.dumps({"statusLine": {"command": "/local.sh"}}))
+    assert _capture_existing_statusline_command(tmp_path, our_shim_path="/different.sh") == "/local.sh"
+
+
+def test_capture_skips_self_recursion(tmp_path: Path) -> None:
+    """On re-provisioning, our own shim is in settings.local.json -- skip it and
+    fall through to settings.json so we don't form a recursive wrap."""
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    own_shim = "/state/commands/claude_statusline.sh"
+    (claude_dir / "settings.local.json").write_text(json.dumps({"statusLine": {"command": own_shim}}))
+    (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/caveman.sh"}}))
+    assert _capture_existing_statusline_command(tmp_path, our_shim_path=own_shim) == "/caveman.sh"
+
+
+def test_capture_returns_empty_when_no_settings(tmp_path: Path) -> None:
+    assert _capture_existing_statusline_command(tmp_path, our_shim_path="/x") == ""
+
+
+def test_capture_tolerates_malformed_json(tmp_path: Path) -> None:
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.json").write_text("{not valid json")
+    assert _capture_existing_statusline_command(tmp_path, our_shim_path="/x") == ""
+
+
+# =============================================================================
+# _install_settings_local_statusline
+# =============================================================================
+
+
+def test_install_creates_settings_local_when_absent(tmp_path: Path) -> None:
+    _install_settings_local_statusline(tmp_path, "/path/to/shim.sh")
+    settings = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
+    assert settings == {"statusLine": {"type": "command", "command": "/path/to/shim.sh"}}
+
+
+def test_install_merges_into_existing_settings_local(tmp_path: Path) -> None:
+    """Existing keys (hooks, MCP servers, etc.) must be preserved."""
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.local.json").write_text(json.dumps({"hooks": {"SessionStart": "..."}}))
+    _install_settings_local_statusline(tmp_path, "/shim.sh")
+    settings = json.loads((claude_dir / "settings.local.json").read_text())
+    assert settings["hooks"] == {"SessionStart": "..."}
+    assert settings["statusLine"]["command"] == "/shim.sh"
+
+
+def test_install_overwrites_previous_statusline(tmp_path: Path) -> None:
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.local.json").write_text(json.dumps({"statusLine": {"command": "/old.sh"}}))
+    _install_settings_local_statusline(tmp_path, "/new.sh")
+    settings = json.loads((claude_dir / "settings.local.json").read_text())
+    assert settings["statusLine"]["command"] == "/new.sh"
+
+
+# =============================================================================
+# on_before_provisioning (end-to-end)
+# =============================================================================
+
+
+def _run_hook(tmp_path: Path, mngr_ctx: MngrContext, *, agent_type: str = "claude", is_local: bool = True) -> Path:
+    """Invoke the hookimpl with a stub agent + host. Returns the agent's state dir."""
+    host_dir = tmp_path / "host"
     work_dir = tmp_path / "work"
-    contribution = claude_extra_per_agent_settings(
-        mngr_ctx=temp_mngr_ctx,
-        source_settings={},
-        agent_state_dir=state_dir,
-        work_dir=work_dir,
-        is_local=True,
-    )
-    assert contribution is not None
-    assert "MNGR_USER_STATUSLINE_CMD" not in contribution.env
+    work_dir.mkdir(parents=True, exist_ok=True)
+    agent = _StubAgent(id="agent-test", agent_type=agent_type, work_dir=work_dir)
+    host = _StubHost(host_dir=host_dir, is_local=is_local)
+    on_before_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)  # ty: ignore[invalid-argument-type]
+    return host_dir / "agents" / "agent-test"
 
 
-def test_claude_extra_per_agent_settings_skips_remote_hosts(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    """For non-local hosts the events file lives under the remote agent's
-    filesystem, which `mngr usage` (run locally) never reads."""
-    state_dir = tmp_path / "agent_state"
+def test_hookimpl_provisions_shim_writer_and_settings_local(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    state_dir = _run_hook(tmp_path, temp_mngr_ctx)
+    commands = state_dir / "commands"
+    assert (commands / "claude_statusline.sh").is_file()
+    assert (commands / "claude_rate_limits_writer.sh").is_file()
+    # Both must be executable.
+    assert (commands / "claude_statusline.sh").stat().st_mode & 0o111
+    assert (commands / "claude_rate_limits_writer.sh").stat().st_mode & 0o111
+    # settings.local.json points at the shim.
+    settings_local = tmp_path / "work" / ".claude" / "settings.local.json"
+    settings = json.loads(settings_local.read_text())
+    assert settings["statusLine"]["command"] == str(commands / "claude_statusline.sh")
+    # No user statusline was present, so the sidecar is empty.
+    sidecar = commands / "user_statusline_cmd"
+    assert sidecar.is_file()
+    assert sidecar.read_text() == ""
+
+
+def test_hookimpl_captures_existing_user_statusline(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
-    contribution = claude_extra_per_agent_settings(
-        mngr_ctx=temp_mngr_ctx,
-        source_settings={"statusLine": {"command": "/caveman.sh"}},
-        agent_state_dir=state_dir,
-        work_dir=work_dir,
-        is_local=False,
-    )
-    assert contribution is None
+    work_dir.mkdir()
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/path/to/caveman.sh"}}))
+    state_dir = _run_hook(tmp_path, temp_mngr_ctx)
+    sidecar = state_dir / "commands" / "user_statusline_cmd"
+    assert sidecar.read_text() == "/path/to/caveman.sh"
+    # The wrapping shim is now installed, but settings.json (project tier) is unchanged.
+    project_settings = json.loads((claude_dir / "settings.json").read_text())
+    assert project_settings["statusLine"]["command"] == "/path/to/caveman.sh"
 
 
-def test_claude_extra_per_agent_settings_skips_self_referenced_shim(
-    temp_mngr_ctx: MngrContext, tmp_path: Path
-) -> None:
-    """Re-provision case: source_settings already has our shim installed as
-    statusLine. The hookimpl must not capture that as MNGR_USER_STATUSLINE_CMD."""
-    state_dir = tmp_path / "agent_state"
+def test_hookimpl_skips_non_claude_agents(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    state_dir = _run_hook(tmp_path, temp_mngr_ctx, agent_type="opencode")
+    assert not (state_dir / "commands").exists()
+    assert not (tmp_path / "work" / ".claude" / "settings.local.json").exists()
+
+
+def test_hookimpl_skips_remote_hosts(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    state_dir = _run_hook(tmp_path, temp_mngr_ctx, is_local=False)
+    assert not (state_dir / "commands").exists()
+    assert not (tmp_path / "work" / ".claude" / "settings.local.json").exists()
+
+
+def test_hookimpl_is_idempotent_on_reprovision(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """Re-running provisioning must not capture our own shim as the user command,
+    and must preserve the originally captured user command across runs."""
     work_dir = tmp_path / "work"
-    own_shim = _format_statusline_command(state_dir)
-    contribution = claude_extra_per_agent_settings(
-        mngr_ctx=temp_mngr_ctx,
-        source_settings={"statusLine": {"type": "command", "command": own_shim}},
-        agent_state_dir=state_dir,
-        work_dir=work_dir,
-        is_local=True,
-    )
-    assert contribution is not None
-    assert "MNGR_USER_STATUSLINE_CMD" not in contribution.env
+    work_dir.mkdir()
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/caveman.sh"}}))
+    state_dir = _run_hook(tmp_path, temp_mngr_ctx)
+    state_dir = _run_hook(tmp_path, temp_mngr_ctx)
+    assert (state_dir / "commands" / "user_statusline_cmd").read_text() == "/caveman.sh"
