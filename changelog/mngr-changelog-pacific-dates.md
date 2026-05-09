@@ -1,0 +1,2 @@
+- The changelog consolidator now dates the new section using the most recent entry's git-add author date converted to America/Los_Angeles, instead of the consolidator's run-time UTC date. The heading reflects when the entries were actually written.
+- Enabled auto-merge on the consolidation cron: each fire now runs `git fetch && checkout main && merge origin/main` before forking the per-run branch, so the eventual PR's diff against `main` is always just the consolidation commit -- no script-snapshot drift even if the cron is redeployed less often than `main` moves.

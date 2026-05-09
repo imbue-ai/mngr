@@ -52,10 +52,9 @@ with the failing step number and error detail in `notes`.
 
 8. Capture the current branch name with `BRANCH=$(git rev-parse
    --abbrev-ref HEAD)` and push it: `git push --set-upstream origin
-   "$BRANCH"`. The schedule's `--branch` flag already created this
-   branch off the deployed-code HEAD; once the changelog scripts ship
-   on `main`, every cron deploy will be from main, so the branch's
-   parentage is automatically `origin/main` and the eventual PR diff
+   "$BRANCH"`. The schedule's auto-merge step ran `git fetch && checkout
+   && merge origin/main` before this agent started, so the per-run
+   branch is forked off current `origin/main` and the eventual PR diff
    contains only the consolidation commit.
 
 9. Open a PR with `gh pr create --base main --title "Changelog
