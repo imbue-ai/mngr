@@ -219,8 +219,8 @@ def test_get_entry_added_datetime_raises_when_file_not_in_history(tmp_path: Path
         _get_entry_added_datetime(untracked, repo)
 
 
-def test_group_entries_by_date_groups_by_authored_pt_date(tmp_path: Path) -> None:
-    """Entries with different add dates land in separate per-date buckets."""
+def test_group_entries_by_date_groups_by_committed_pt_date(tmp_path: Path) -> None:
+    """Entries with different commit dates land in separate per-date buckets."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_git_repo_with_files(
