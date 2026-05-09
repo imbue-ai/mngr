@@ -36,7 +36,7 @@ from imbue.mngr_usage.data_types import WindowSnapshot
 # UsageSnapshot.source_name for the event.
 _RATE_LIMITS_EVENTS_LEAF: tuple[str, str] = ("rate_limits", "events.jsonl")
 
-# Standard window labels for the human-format renderer. Providers may
+# Standard window labels for the human-format renderer. Writers may
 # return windows with other names; those render with the literal key.
 _DEFAULT_WINDOW_LABELS: dict[str, str] = {
     "five_hour": "5h",
