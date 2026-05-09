@@ -323,26 +323,35 @@ class SSHTunnelManager(MutableModel):
         tunnel_info: ReverseTunnelInfo,
         error: Exception,
     ) -> None:
-        """Update backoff bookkeeping after a failed repair.
+        """Record backoff state after a failed repair (the retry itself is
+        driven from ``_check_and_repair_tunnels``).
 
         Split out of ``_check_and_repair_tunnels`` for readability; the only
         caller is the ``except`` arm of the repair loop, which catches
         ``paramiko.SSHException``, ``OSError``, and our own ``SSHTunnelError``.
-        Failures retry forever -- the backoff is capped at
+        The retry continues forever -- the backoff is capped at
         ``_REVERSE_TUNNEL_BACKOFF_CAP_SECONDS`` so a permanently-gone target
         only costs one paramiko handshake every five minutes, but a target
         that comes back online still gets repaired.
+
+        Once the exponential schedule has reached the cap, the failure
+        counter stops incrementing. Otherwise an agent that fails forever
+        would compute an ever-growing ``2 ** failures`` per tick (e.g.
+        ~30K-digit bigints after a year of one-failure-per-five-minutes)
+        before clamping it back down to the cap, which is wasted work.
         """
         with self._lock:
             failure_state = self._failure_state.get(tunnel_key)
             if failure_state is None:
                 failure_state = _TunnelFailureState()
                 self._failure_state[tunnel_key] = failure_state
-            failure_state.consecutive_failures += 1
-            backoff_seconds = min(
-                float(2**failure_state.consecutive_failures),
-                _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS,
-            )
+            # Stop incrementing once the exponential schedule has already
+            # reached the cap; further increments would just keep
+            # recomputing larger ``2 ** failures`` values that immediately
+            # get clamped back down.
+            if 2**failure_state.consecutive_failures < _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS:
+                failure_state.consecutive_failures += 1
+            backoff_seconds = min(float(2**failure_state.consecutive_failures), _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS)
             failure_state.next_attempt_at = time.monotonic() + backoff_seconds
             failures = failure_state.consecutive_failures
 

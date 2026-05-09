@@ -29,6 +29,7 @@ own change. The leak symptom itself is reproduced by manually invoking
 manager would otherwise keep growing its connection set.
 """
 
+import math
 import socket
 import threading
 import time
@@ -383,8 +384,16 @@ def test_check_and_repair_backs_off_and_keeps_retrying_forever(
         # Walk the failure counter past the point where 2**failures exceeds
         # the cap, zeroing the cooldown before each tick. The tunnel must
         # remain in the registry the whole time -- we never give up.
-        cap_failure_count = int(_REVERSE_TUNNEL_BACKOFF_CAP_SECONDS).bit_length() + 4
-        for _ in range(cap_failure_count):
+        # ``saturation_failure_count`` is the smallest N for which
+        # ``2 ** N >= cap``; once the counter reaches this value the
+        # implementation stops incrementing it (otherwise the bigint would
+        # grow unboundedly across long-running failure stretches), and the
+        # backoff stays pinned at the cap.
+        saturation_failure_count = math.ceil(math.log2(_REVERSE_TUNNEL_BACKOFF_CAP_SECONDS))
+        # Run several extra ticks past the saturation point to confirm the
+        # counter does not grow past it.
+        loop_count = saturation_failure_count + 4
+        for _ in range(loop_count):
             with manager._lock:
                 state = manager._failure_state.get(tunnel_key)
                 if state is not None:
@@ -398,11 +407,16 @@ def test_check_and_repair_backs_off_and_keeps_retrying_forever(
             )
             state = manager._failure_state.get(tunnel_key)
             assert state is not None
+            # Counter must have saturated at the smallest N where
+            # 2**N >= cap, neither below (cap not yet applied) nor above
+            # (counter incrementing past saturation, which would let the
+            # 2**N bigint grow without bound on a permanently-failing
+            # tunnel).
+            assert state.consecutive_failures == saturation_failure_count
             # Backoff must have saturated at the cap rather than grown
             # unbounded -- doubling 2**N forever would overflow time. We
             # check both bounds so the test fails the moment the cap stops
             # being applied.
-            assert state.consecutive_failures >= cap_failure_count
             backoff_seconds_at_cap = state.next_attempt_at - time.monotonic()
             assert backoff_seconds_at_cap <= _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS
             # A tiny amount of wall-clock elapses between the failure
