@@ -1,2 +1,0 @@
-- `scripts/setup_changelog_agent.sh` is now actually idempotent: running it twice in a row replaces an existing schedule instead of erroring out. Drops the `CHANGELOG_REPLACE=1` gate.
-- Header docstring now lists the required `GH_TOKEN` and `ANTHROPIC_API_KEY` env vars and the on-demand trigger one-liner.
