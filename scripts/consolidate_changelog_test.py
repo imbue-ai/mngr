@@ -4,11 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from scripts.consolidate_changelog import _build_new_section
+from scripts.consolidate_changelog import _build_dated_sections
 from scripts.consolidate_changelog import _collect_entries
 from scripts.consolidate_changelog import _get_entry_added_datetime
+from scripts.consolidate_changelog import _group_entries_by_date
 from scripts.consolidate_changelog import _insert_section_into_changelog
-from scripts.consolidate_changelog import _latest_entry_date_str
 
 
 def test_collect_entries_empty_dir(tmp_path: Path) -> None:
@@ -45,18 +45,31 @@ def test_collect_entries_returns_sorted_entries(tmp_path: Path) -> None:
     assert entries[1][1] == "- Feature B"
 
 
-def test_build_new_section_single_entry() -> None:
-    entries = [(Path("a.md"), "- Added feature X")]
-    result = _build_new_section("2026-04-02", entries)
+def test_build_dated_sections_single_date() -> None:
+    by_date = {"2026-04-02": [(Path("a.md"), "- Added feature X")]}
+    result = _build_dated_sections(by_date)
     assert result == "## 2026-04-02\n\n- Added feature X\n"
 
 
-def test_build_new_section_multiple_entries() -> None:
-    entries = [
-        (Path("a.md"), "- Feature A"),
-        (Path("b.md"), "- Feature B"),
-    ]
-    result = _build_new_section("2026-04-02", entries)
+def test_build_dated_sections_multiple_dates_newest_first() -> None:
+    by_date = {
+        "2026-04-01": [(Path("a.md"), "- Feature A")],
+        "2026-04-03": [(Path("c.md"), "- Feature C")],
+        "2026-04-02": [(Path("b.md"), "- Feature B")],
+    }
+    result = _build_dated_sections(by_date)
+    # Newest date first; sections separated by a blank line
+    assert result == "## 2026-04-03\n\n- Feature C\n\n## 2026-04-02\n\n- Feature B\n\n## 2026-04-01\n\n- Feature A\n"
+
+
+def test_build_dated_sections_multiple_entries_per_date() -> None:
+    by_date = {
+        "2026-04-02": [
+            (Path("a.md"), "- Feature A"),
+            (Path("b.md"), "- Feature B"),
+        ],
+    }
+    result = _build_dated_sections(by_date)
     assert result == "## 2026-04-02\n\n- Feature A\n\n- Feature B\n"
 
 
@@ -167,8 +180,8 @@ def test_get_entry_added_datetime_falls_back_to_mtime_when_uncommitted(tmp_path:
     assert dt.tzinfo.key == "America/Los_Angeles"
 
 
-def test_latest_entry_date_str_picks_most_recent(tmp_path: Path) -> None:
-    """When entries have different add dates, pick the most recent (in PT)."""
+def test_group_entries_by_date_groups_by_authored_pt_date(tmp_path: Path) -> None:
+    """Entries with different add dates land in separate per-date buckets."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_git_repo_with_files(
@@ -180,7 +193,42 @@ def test_latest_entry_date_str_picks_most_recent(tmp_path: Path) -> None:
         ],
     )
     entries = _collect_entries(repo / "changelog")
-    assert _latest_entry_date_str(entries, repo) == "2026-05-08"
+    by_date = _group_entries_by_date(entries, repo)
+    assert sorted(by_date.keys()) == ["2026-05-01", "2026-05-05", "2026-05-08"]
+    assert [p.name for p, _ in by_date["2026-05-08"]] == ["new.md"]
+
+
+def test_group_entries_by_date_combines_same_day(tmp_path: Path) -> None:
+    """Two entries written the same PT date end up in one bucket, sorted by filename."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo_with_files(
+        repo,
+        [
+            ("changelog/b.md", "- b entry\n", "2026-05-08T11:00:00Z"),
+            ("changelog/a.md", "- a entry\n", "2026-05-08T17:00:00Z"),
+        ],
+    )
+    entries = _collect_entries(repo / "changelog")
+    by_date = _group_entries_by_date(entries, repo)
+    assert list(by_date.keys()) == ["2026-05-08"]
+    assert [p.name for p, _ in by_date["2026-05-08"]] == ["a.md", "b.md"]
+
+
+def test_group_entries_by_date_uses_pacific_timezone(tmp_path: Path) -> None:
+    """A UTC entry past midnight that's still 'yesterday' in PT lands under the PT date."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo_with_files(
+        repo,
+        [
+            # 2026-05-09T03:00:00Z = 2026-05-08T20:00:00 PT (PDT, UTC-7)
+            ("changelog/late.md", "- late\n", "2026-05-09T03:00:00Z"),
+        ],
+    )
+    entries = _collect_entries(repo / "changelog")
+    by_date = _group_entries_by_date(entries, repo)
+    assert list(by_date.keys()) == ["2026-05-08"]
 
 
 def test_get_entry_added_datetime_raises_when_not_a_git_repo(tmp_path: Path) -> None:
@@ -192,18 +240,3 @@ def test_get_entry_added_datetime_raises_when_not_a_git_repo(tmp_path: Path) -> 
     stray.write_text("- stray\n")
     with pytest.raises(RuntimeError, match="git log failed"):
         _get_entry_added_datetime(stray, not_a_repo)
-
-
-def test_latest_entry_date_str_uses_pacific_timezone(tmp_path: Path) -> None:
-    """A UTC midnight entry that's still 'yesterday' in PT keeps the PT date."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _init_git_repo_with_files(
-        repo,
-        [
-            # 2026-05-09T03:00:00Z = 2026-05-08T20:00:00 PT (PDT)
-            ("changelog/late.md", "- late\n", "2026-05-09T03:00:00Z"),
-        ],
-    )
-    entries = _collect_entries(repo / "changelog")
-    assert _latest_entry_date_str(entries, repo) == "2026-05-08"

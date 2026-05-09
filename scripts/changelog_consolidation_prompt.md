@@ -30,37 +30,39 @@ with the failing step number and error detail in `notes`.
 2. Run `python3 scripts/consolidate_changelog.py`. Capture stdout. If
    stdout contains the literal string "No changelog entries", emit
    `{"status": "skipped-no-entries", "pr_url": null, "notes": ""}` and
-   stop.
+   stop. Otherwise stdout contains a `Sections added: YYYY-MM-DD,
+   YYYY-MM-DD, ...` line (newest first) — these are the date headings
+   the consolidator just inserted at the top of `UNABRIDGED_CHANGELOG.md`.
 
-3. Read `UNABRIDGED_CHANGELOG.md`. Find the most recent date section
-   (heading matching `## YYYY-MM-DD`). Extract the date string and the
-   bullet content under it.
+3. For each date in `Sections added`, read its bullet content from
+   `UNABRIDGED_CHANGELOG.md` (the section is between `## <date>` and the
+   next `## ` line) and generate a concise, human-friendly summary as a
+   few markdown bullets — no preamble, no trailing prose. Group related
+   changes within a date. Use natural language.
 
-4. Generate a concise, human-friendly summary of that section: a few
-   markdown bullets, no preamble, no trailing prose. Group related
-   changes. Use natural language.
-
-5. Insert the summary into `CHANGELOG.md` under the same date heading,
-   immediately above any prior date sections (so dates remain in
+4. Insert each per-date summary into `CHANGELOG.md` under a `## <date>`
+   heading, in the same newest-first order as `Sections added`,
+   immediately above any pre-existing date sections (so dates remain in
    reverse-chronological order). Preserve the existing file header.
 
-6. Configure git: `git config user.email "bot@imbue.com"`,
+5. Configure git: `git config user.email "bot@imbue.com"`,
    `git config user.name "Changelog Bot"`, `gh auth setup-git`.
 
-7. `git add -A` and `git commit -m "Consolidate changelog entries for <date>"`,
-   substituting the date from step 3.
+6. Let `LATEST_DATE` be the first (newest) date from `Sections added` in
+   step 2. `git add -A` and `git commit -m "Consolidate changelog
+   entries for <LATEST_DATE>"`.
 
-8. Capture the current branch name with `BRANCH=$(git rev-parse
+7. Capture the current branch name with `BRANCH=$(git rev-parse
    --abbrev-ref HEAD)` and push it: `git push --set-upstream origin
    "$BRANCH"`. The schedule's auto-merge step ran `git fetch && checkout
    && merge origin/main` before this agent started, so the per-run
    branch is forked off current `origin/main` and the eventual PR diff
    contains only the consolidation commit.
 
-9. Open a PR with `gh pr create --base main --title "Changelog
-   consolidation <date>" --body "Automated changelog consolidation for
-   <date>."`. Capture the URL from stdout into `PR_URL` while diverting
-   stderr to a temp file, e.g.
+8. Open a PR with `gh pr create --base main --title "Changelog
+   consolidation <LATEST_DATE>" --body "Automated changelog
+   consolidation for <LATEST_DATE>."`. Capture the URL from stdout
+   into `PR_URL` while diverting stderr to a temp file, e.g.
    `PR_URL=$(gh pr create --base main --title "..." --body "..." 2>/tmp/gh_stderr)`.
    **Do not** fold stderr in via `2>&1` — `gh pr create` writes progress
    lines (e.g. "Creating pull request for X into Y in Z") to stderr
@@ -68,6 +70,6 @@ with the failing step number and error detail in `notes`.
    non-zero, read `/tmp/gh_stderr` and emit a `failed` JSON object
    with that stderr content in `notes`.
 
-10. Emit your final JSON object: `{"status": "done", "pr_url":
-    "<PR_URL>", "notes": "Opened PR <PR_URL> for branch <BRANCH>."}`,
-    substituting the values from steps 8 and 9.
+9. Emit your final JSON object: `{"status": "done", "pr_url":
+   "<PR_URL>", "notes": "Opened PR <PR_URL> for branch <BRANCH>."}`,
+   substituting the values from steps 7 and 8.

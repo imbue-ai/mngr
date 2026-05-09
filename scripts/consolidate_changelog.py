@@ -1,13 +1,15 @@
 """Consolidate individual changelog entry files into UNABRIDGED_CHANGELOG.md.
 
 Reads all .md files in the changelog/ directory (excluding .gitkeep),
-prepends a new date-headed section to UNABRIDGED_CHANGELOG.md with their contents,
-and deletes the individual files.
+groups them by the author date of the commit that first added each file
+(in America/Los_Angeles), prepends one date-headed section per distinct
+date to UNABRIDGED_CHANGELOG.md (newest first), and deletes the individual
+files.
 
-The section's date is the most recent of the consolidated entries' git-add
-dates (the author date of the commit that first added each file), in
-America/Los_Angeles timezone -- so the heading reflects when the entries
-were actually written rather than when the consolidator happened to run.
+The per-date grouping means an entry written today is never dated as
+yesterday or tomorrow just because the consolidator happened to run at
+an awkward hour, and entries that have been sitting in changelog/ across
+multiple days are grouped under the date they were actually written.
 
 Exits with code 0 and no changes if there are no changelog entries to consolidate.
 """
@@ -66,18 +68,29 @@ def _get_entry_added_datetime(path: Path, repo_root: Path) -> datetime:
     return datetime.fromtimestamp(path.stat().st_mtime, tz=_PACIFIC)
 
 
-def _latest_entry_date_str(entries: list[tuple[Path, str]], repo_root: Path) -> str:
-    """Return the YYYY-MM-DD (Pacific) of the most recently added entry."""
-    return max(_get_entry_added_datetime(path, repo_root) for path, _ in entries).strftime("%Y-%m-%d")
+def _group_entries_by_date(entries: list[tuple[Path, str]], repo_root: Path) -> dict[str, list[tuple[Path, str]]]:
+    """Group entries by the YYYY-MM-DD (Pacific) they were added to the repo.
+
+    Within each date the entries keep their input order (i.e. filename-sorted
+    by ``_collect_entries``).
+    """
+    by_date: dict[str, list[tuple[Path, str]]] = {}
+    for path, content in entries:
+        date_str = _get_entry_added_datetime(path, repo_root).strftime("%Y-%m-%d")
+        by_date.setdefault(date_str, []).append((path, content))
+    return by_date
 
 
-def _build_new_section(date_str: str, entries: list[tuple[Path, str]]) -> str:
-    """Build a new changelog section from the collected entries."""
-    lines: list[str] = [f"## {date_str}", ""]
-    for _path, content in entries:
-        lines.append(content)
-        lines.append("")
-    return "\n".join(lines)
+def _build_dated_sections(by_date: dict[str, list[tuple[Path, str]]]) -> str:
+    """Build one ``## YYYY-MM-DD`` section per date, newest first."""
+    parts: list[str] = []
+    for date_str in sorted(by_date, reverse=True):
+        section_lines = [f"## {date_str}", ""]
+        for _path, content in by_date[date_str]:
+            section_lines.append(content)
+            section_lines.append("")
+        parts.append("\n".join(section_lines))
+    return "\n".join(parts)
 
 
 def _insert_section_into_changelog(changelog_path: Path, new_section: str) -> None:
@@ -117,15 +130,18 @@ def main() -> None:
         print("No changelog entries found. Nothing to consolidate.")
         return
 
-    date_str = _latest_entry_date_str(entries, _REPO_ROOT)
-    new_section = _build_new_section(date_str, entries)
-    _insert_section_into_changelog(_CHANGELOG_FILE, new_section)
+    by_date = _group_entries_by_date(entries, _REPO_ROOT)
+    new_block = _build_dated_sections(by_date)
+    _insert_section_into_changelog(_CHANGELOG_FILE, new_block)
 
     # Delete the individual entry files
     for path, _content in entries:
         path.unlink()
 
-    print(f"Consolidated {len(entries)} changelog entries into {_CHANGELOG_FILE.name} under {date_str}.")
+    dates_added = sorted(by_date, reverse=True)
+    print(f"Consolidated {len(entries)} changelog entries into {_CHANGELOG_FILE.name}.")
+    # Machine-readable line for the orchestration prompt to parse.
+    print(f"Sections added: {', '.join(dates_added)}")
     entry_names = [path.name for path, _ in entries]
     print(f"Deleted: {', '.join(entry_names)}")
 
