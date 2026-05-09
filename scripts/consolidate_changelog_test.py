@@ -1,7 +1,6 @@
 import os
 import subprocess
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -208,18 +207,16 @@ def test_get_entry_added_datetime_returns_merge_commit_date(tmp_path: Path) -> N
     assert dt.strftime("%H") == "11"
 
 
-def test_get_entry_added_datetime_falls_back_to_mtime_when_uncommitted(tmp_path: Path) -> None:
-    """If git has no record of the file, fall back to its mtime."""
+def test_get_entry_added_datetime_raises_when_file_not_in_history(tmp_path: Path) -> None:
+    """If the file isn't tracked by git, raise instead of guessing from mtime."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_git_repo_with_files(repo, [("placeholder.txt", "x\n", "2026-05-01T00:00:00Z")])
     untracked = repo / "changelog" / "fresh.md"
     untracked.parent.mkdir()
     untracked.write_text("- new\n")
-    dt = _get_entry_added_datetime(untracked, repo)
-    # Mtime fallback: just check we got an aware datetime in PT
-    assert isinstance(dt.tzinfo, ZoneInfo)
-    assert dt.tzinfo.key == "America/Los_Angeles"
+    with pytest.raises(RuntimeError, match="no commit found"):
+        _get_entry_added_datetime(untracked, repo)
 
 
 def test_group_entries_by_date_groups_by_authored_pt_date(tmp_path: Path) -> None:

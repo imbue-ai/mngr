@@ -46,8 +46,7 @@ def _get_entry_added_datetime(path: Path, repo_root: Path) -> datetime:
     merge commit, that's the merge commit's committer date -- i.e. when
     the PR landed -- not the feature-branch author date. If the file has
     been added more than once on the first-parent line, takes the most
-    recent. Falls back to the file's mtime if git has no record (e.g. an
-    uncommitted file on a local dev box).
+    recent.
     """
     rel = path.relative_to(repo_root)
     result = subprocess.run(
@@ -60,11 +59,11 @@ def _get_entry_added_datetime(path: Path, repo_root: Path) -> datetime:
     if result.returncode != 0:
         raise RuntimeError(f"git log failed for {rel} (exit {result.returncode}): {result.stderr.strip()}")
     iso_lines = [line for line in result.stdout.splitlines() if line.strip()]
-    if iso_lines:
-        # `git log` prints newest-first, so iso_lines[0] is the most recent
-        # add. fromisoformat parses the offset, giving an aware datetime.
-        return datetime.fromisoformat(iso_lines[0]).astimezone(_PACIFIC)
-    return datetime.fromtimestamp(path.stat().st_mtime, tz=_PACIFIC)
+    if not iso_lines:
+        raise RuntimeError(f"no commit found that adds {rel} on the first-parent line")
+    # `git log` prints newest-first, so iso_lines[0] is the most recent
+    # add. fromisoformat parses the offset, giving an aware datetime.
+    return datetime.fromisoformat(iso_lines[0]).astimezone(_PACIFIC)
 
 
 def _group_entries_by_date(entries: list[tuple[Path, str]], repo_root: Path) -> dict[str, list[tuple[Path, str]]]:
