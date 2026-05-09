@@ -93,8 +93,11 @@ def _build_dated_sections(by_date: dict[str, list[tuple[Path, str]]]) -> str:
     return "\n".join(parts)
 
 
-def _insert_section_into_changelog(changelog_path: Path, new_section: str) -> None:
-    """Insert a new section after the header of the existing changelog file."""
+def _insert_section_into_changelog(changelog_path: Path, new_block: str) -> None:
+    """Insert a pre-built block (one or more ``## YYYY-MM-DD`` sections) after
+    the header of the existing changelog file, before any pre-existing date
+    sections.
+    """
     if not changelog_path.exists():
         raise FileNotFoundError(f"Changelog file does not exist: {changelog_path}")
     existing = changelog_path.read_text()
@@ -111,9 +114,9 @@ def _insert_section_into_changelog(changelog_path: Path, new_section: str) -> No
     before = "\n".join(lines[:insert_index]).rstrip("\n")
     after = "\n".join(lines[insert_index:])
 
-    # Ensure exactly one blank line before the new section and before any
+    # Ensure exactly one blank line before the new block and before any
     # existing sections that follow it.
-    result = before + "\n\n" + new_section
+    result = before + "\n\n" + new_block
     if after:
         result += "\n" + after
 
