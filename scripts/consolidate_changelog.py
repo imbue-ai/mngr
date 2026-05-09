@@ -6,11 +6,6 @@ groups them by the author date of the commit that first added each file
 date to UNABRIDGED_CHANGELOG.md (newest first), and deletes the individual
 files.
 
-The per-date grouping means an entry written today is never dated as
-yesterday or tomorrow just because the consolidator happened to run at
-an awkward hour, and entries that have been sitting in changelog/ across
-multiple days are grouped under the date they were actually written.
-
 Exits with code 0 and no changes if there are no changelog entries to consolidate.
 """
 
