@@ -13,6 +13,7 @@ from click.testing import CliRunner
 
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr_usage.cli import _build_render_model
+from imbue.mngr_usage.cli import _collapse_by_source
 from imbue.mngr_usage.cli import _flatten_primary_for_template
 from imbue.mngr_usage.cli import _format_duration
 from imbue.mngr_usage.cli import _format_human_line
@@ -251,6 +252,22 @@ def test_pick_freshest_tiebreaks_by_source_name() -> None:
     assert _pick_freshest([a, z]) == z
 
 
+def test_collapse_by_source_picks_freshest_per_source() -> None:
+    """Multiple agents writing to the same source should collapse to the freshest."""
+    older_claude = _snap(name="claude", at=1000, percentage=10.0)
+    newer_claude = _snap(name="claude", at=2000, percentage=20.0)
+    only_opencode = _snap(name="opencode", at=1500, percentage=30.0)
+    result = _collapse_by_source([older_claude, newer_claude, only_opencode])
+    assert {s.source_name for s in result} == {"claude", "opencode"}
+    claude_snap = next(s for s in result if s.source_name == "claude")
+    assert claude_snap.updated_at == 2000
+    assert claude_snap.windows["five_hour"].used_percentage == 20.0
+
+
+def test_collapse_by_source_returns_empty_for_empty_input() -> None:
+    assert _collapse_by_source([]) == []
+
+
 def test_render_model_marks_past_reset_as_stale() -> None:
     snapshot = UsageSnapshot(
         source_name="claude",
@@ -453,8 +470,10 @@ def test_usage_command_picks_freshest_across_agents(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output.strip())
     # Both events share source_name="claude" since they live under .../events/claude/...
-    # so the sources list collapses to two entries with the same source name. The
-    # freshest-first sort puts the newer event's data first.
+    # _collapse_by_source keeps only the freshest per source, so we see exactly one
+    # entry and its data is the newer event's.
+    assert len(payload["sources"]) == 1
+    assert payload["sources"][0]["source"] == "claude"
     assert payload["sources"][0]["five_hour"]["used_percentage"] == 99.0
 
 

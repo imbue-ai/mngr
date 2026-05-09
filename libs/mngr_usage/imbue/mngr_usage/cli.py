@@ -258,6 +258,23 @@ def _pick_freshest(snapshots: list[UsageSnapshot]) -> UsageSnapshot | None:
     return max(snapshots, key=lambda s: (s.updated_at, s.source_name))
 
 
+@pure
+def _collapse_by_source(snapshots: list[UsageSnapshot]) -> list[UsageSnapshot]:
+    """Reduce per-agent snapshots to one per ``source_name`` (the freshest).
+
+    Multiple agents may write to the same source (e.g. several Claude agents
+    all writing to ``events/claude/rate_limits/events.jsonl`` in their own
+    state dirs). The user wants the most recent reading of each source, not
+    a separate block per agent. Grouping is stable in source_name order.
+    """
+    by_source: dict[str, UsageSnapshot] = {}
+    for snap in snapshots:
+        existing = by_source.get(snap.source_name)
+        if existing is None or (snap.updated_at, snap.source_name) > (existing.updated_at, existing.source_name):
+            by_source[snap.source_name] = snap
+    return list(by_source.values())
+
+
 # =============================================================================
 # Rendering
 # =============================================================================
@@ -508,11 +525,12 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
     max_age_override = _parse_max_age(opts.max_age)
     effective_max_age = max_age_override if max_age_override is not None else plugin_config.max_age_seconds
 
-    snapshots = _gather_snapshots(mngr_ctx.config.default_host_dir)
+    snapshots = _collapse_by_source(_gather_snapshots(mngr_ctx.config.default_host_dir))
     now = int(time.time())
 
-    # Multi-source: build a render model per source, sort freshest-first.
-    # Tiebreak by source_name so the order is stable in tests.
+    # One render model per source (freshest snapshot for that source), sorted
+    # freshest-first across sources. Tiebreak by source_name so the order is
+    # stable in tests.
     snapshots_with_models = sorted(
         ((s, _build_render_model(s, effective_max_age, now)) for s in snapshots),
         key=lambda sm: (sm[0].updated_at, sm[0].source_name),
