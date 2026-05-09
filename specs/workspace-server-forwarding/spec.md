@@ -1,4 +1,5 @@
 # Move Service Forwarding Into `minds_workspace_server`
+> Note: minds_workspace_server has since been moved out of mngr to `forever-claude-template/apps/system_interface/`. Path references to `apps/minds_workspace_server/...` describe state at the time this spec was written.
 
 ## Overview
 

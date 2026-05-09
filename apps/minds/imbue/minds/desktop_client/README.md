@@ -65,4 +65,4 @@ Because the desktop client only byte-forwards requests to the per-workspace `min
 - Cookie paths in `Set-Cookie` headers are rewritten to scope under the service prefix.
 - WebSocket connections are proxied bidirectionally.
 
-See `apps/minds_workspace_server/imbue/minds_workspace_server/service_dispatcher.py` for the service-side implementation.
+See `service_dispatcher.py` in the system_interface workspace server (now at `forever-claude-template/apps/system_interface/imbue/minds_workspace_server/`) for the service-side implementation.

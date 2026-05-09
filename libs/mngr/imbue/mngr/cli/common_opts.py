@@ -123,6 +123,7 @@ def setup_command_context(
     command_class: type[TCommandOptions],
     is_format_template_supported: bool = False,
     strict: bool | None = None,
+    silent_unknown_fields: bool = False,
 ) -> tuple[MngrContext, OutputOptions, TCommandOptions]:
     """Set up config and logging for a command.
 
@@ -132,6 +133,11 @@ def setup_command_context(
 
     Set is_format_template_supported=True for commands that handle
     output_opts.format_template.
+
+    Set ``silent_unknown_fields=True`` to suppress warnings about unknown
+    config fields and unknown provider backends (used by ``mngr plugin add``,
+    where the config is expected to reference plugins that are not yet
+    installed). Only takes effect when ``strict=False``.
 
     The resolved LoggingConfig (with CLI overrides applied) is stored on the
     click context at ctx.meta["logging_config"] for callers that need logging
@@ -168,6 +174,7 @@ def setup_command_context(
         disabled_plugins=initial_opts.disable_plugin,
         is_interactive=False,
         strict=strict,
+        silent_unknown_fields=silent_unknown_fields,
     )
 
     # Resolve is_interactive from all sources.

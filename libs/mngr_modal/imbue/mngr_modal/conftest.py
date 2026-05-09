@@ -322,6 +322,13 @@ def temp_source_dir(tmp_path: Path) -> Path:
 # =============================================================================
 
 
+@pytest.fixture(autouse=True)
+def _reset_modal_app_registry() -> Generator[None, None, None]:
+    """Reset the Modal app registry after each test for isolation."""
+    yield
+    ModalProviderBackend.reset_app_registry()
+
+
 def _get_leaked_modal_apps() -> list[tuple[str, str]]:
     if not worker_modal_app_names:
         return []

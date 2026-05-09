@@ -29,7 +29,7 @@ This starts the local desktop client (default: `http://127.0.0.1:8420`). A one-t
 ## Accessing your agent
 
 After creation, the agent is accessible at:
-- **Local**: `http://{agent_id}.localhost:8420/` (the desktop client byte-forwards the subdomain to the workspace's `minds_workspace_server`, which serves the dockview UI)
+- **Local**: `http://{agent_id}.localhost:8420/` (the desktop client byte-forwards the subdomain to the workspace's workspace server, which serves the dockview UI)
 - **Individual service**: `http://{agent_id}.localhost:8420/service/{service_name}/` (e.g. `.../service/web/`, `.../service/terminal/`)
 - **Global** (if Cloudflare configured): `https://{service}--{agent_id}--{username}.{domain}`
 
