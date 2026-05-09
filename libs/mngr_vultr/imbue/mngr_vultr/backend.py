@@ -14,7 +14,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderNotAuthorizedError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import HostId
@@ -54,9 +54,14 @@ class VultrProvider(VpsDockerProvider):
     def _get_tagged_vps_ips(self) -> list[str]:
         """Get IPs of Vultr instances tagged with this provider's name."""
         if not self.vultr_client.api_key.get_secret_value():
-            raise ProviderNotAuthorizedError(
+            # No API key configured -- treat as ProviderUnavailableError so
+            # the discovery boundary soft-skips Vultr (consistent with Lima
+            # limactl-missing and Docker daemon-down). Genuine 401/403
+            # responses from the Vultr API surface as VpsApiError and
+            # propagate as the existing typed error.
+            raise ProviderUnavailableError(
                 self.name,
-                auth_help="Set VULTR_API_KEY in the environment or configure providers.<name>.api_key.",
+                "Vultr API key not configured. Set VULTR_API_KEY or providers.<name>.api_key.",
             )
         provider_tag = f"mngr-provider={self.name}"
         instances = self._list_instances_cached()
@@ -141,9 +146,9 @@ class VultrProvider(VpsDockerProvider):
                     return cached_record
 
         if not self.vultr_client.api_key.get_secret_value():
-            raise ProviderNotAuthorizedError(
+            raise ProviderUnavailableError(
                 self.name,
-                auth_help="Set VULTR_API_KEY in the environment or configure providers.<name>.api_key.",
+                "Vultr API key not configured. Set VULTR_API_KEY or providers.<name>.api_key.",
             )
 
         # Fall back to full discovery

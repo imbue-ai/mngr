@@ -31,6 +31,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import HostNotFoundError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import SnapshotInfo
@@ -109,11 +110,18 @@ def _find_host_across_providers(
             return host.id, provider.name
         except (HostNotFoundError, ValueError):
             pass
+        except ProviderUnavailableError:
+            # Provider can't run on this machine (binary missing, daemon
+            # down). Skip it and try the next provider -- this iteration is
+            # specifically "find which provider has this host".
+            continue
         try:
             host = provider.get_host(host_name)
             return host.id, provider.name
         except (HostNotFoundError, ValueError):
             pass
+        except ProviderUnavailableError:
+            continue
     return None
 
 
