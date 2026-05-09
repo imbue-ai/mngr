@@ -271,7 +271,7 @@ def test_group_entries_by_date_uses_pacific_timezone(tmp_path: Path) -> None:
 
 
 def test_get_entry_added_datetime_raises_when_not_a_git_repo(tmp_path: Path) -> None:
-    """If the directory isn't a git repo at all, raise rather than silently using mtime."""
+    """If the directory isn't a git repo at all, the helper raises RuntimeError."""
     not_a_repo = tmp_path / "not_a_repo"
     not_a_repo.mkdir()
     stray = not_a_repo / "changelog" / "stray.md"
