@@ -47,6 +47,9 @@ def _get_entry_added_datetime(path: Path, repo_root: Path) -> datetime:
     the PR landed -- not the feature-branch author date. If the file has
     been added more than once on the first-parent line, takes the most
     recent.
+
+    Raises ``RuntimeError`` if ``git log`` fails or if no commit on the
+    first-parent line introduces the file.
     """
     rel = path.relative_to(repo_root)
     result = subprocess.run(
