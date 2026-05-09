@@ -575,8 +575,12 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: 
         manager.stop_gateway()
 
 
-def test_discovery_handler_skips_reverse_tunnel_for_dev_agents(tmp_path: Path) -> None:
-    """DEV agents (ssh_info is None) run on the bare host and need no tunnel."""
+def test_discovery_handler_skips_reverse_tunnel_when_ssh_info_missing(tmp_path: Path) -> None:
+    """Agents discovered without SSH info skip reverse-tunnel setup.
+
+    Without an SSH route the handler cannot forward the host-side gateway
+    into the agent, so it just ensures the gateway is up and returns.
+    """
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_binary=str(fake_binary))
     manager.initialize(data_dir=tmp_path)

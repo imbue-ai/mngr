@@ -37,7 +37,6 @@ class LaunchMode(UpperCaseStrEnum):
 
     LOCAL = auto()
     CLOUD = auto()
-    DEV = auto()
     LIMA = auto()
     IMBUE_CLOUD = auto()
 

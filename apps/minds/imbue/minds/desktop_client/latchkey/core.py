@@ -870,9 +870,11 @@ class LatchkeyDiscoveryHandler(MutableModel):
     subprocess is running on the desktop host. Agents that reach the
     desktop via SSH (containers, VMs, VPS) also get a reverse tunnel that
     exposes the host-side gateway on the agent's own
-    ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``. DEV-mode agents run on the
-    bare host and need no tunnel; their ``LATCHKEY_GATEWAY`` env var
-    points directly at the dynamic host port.
+    ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``. Agents discovered without SSH
+    info (e.g. local-provider agents in tests, or any discovery that
+    arrives before the host SSH event) skip the reverse-tunnel step and
+    are expected to reach the gateway via whatever direct route already
+    exists.
 
     Tunnel setup is dispatched onto a worker thread via
     ``concurrency_group`` so the ``MngrStreamManager`` discovery-stream
@@ -902,8 +904,10 @@ class LatchkeyDiscoveryHandler(MutableModel):
             return
 
         if ssh_info is None:
-            # DEV-mode agent runs on the bare host; it reaches the gateway
-            # directly on its dynamic host port, so no tunnel is needed.
+            # No SSH info for this agent (e.g. local-provider agent in tests,
+            # or a discovery event that fired before the host SSH event); we
+            # cannot set up a reverse tunnel, so just ensure the gateway is up
+            # and let the agent reach it via whatever direct route exists.
             return
 
         agent_id_str = str(agent_id)
