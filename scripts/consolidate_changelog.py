@@ -1,9 +1,10 @@
 """Consolidate individual changelog entry files into UNABRIDGED_CHANGELOG.md.
 
 Reads all .md files in the changelog/ directory (excluding .gitkeep),
-groups them by the author date of the commit that first added each file
-(in America/Los_Angeles), prepends one date-headed section per distinct
-date to UNABRIDGED_CHANGELOG.md (newest first), and deletes the individual
+groups them by the date the entry's PR landed on the current branch
+(committer date of the introducing commit on the first-parent line, in
+America/Los_Angeles), prepends one date-headed section per distinct date
+to UNABRIDGED_CHANGELOG.md (newest first), and deletes the individual
 files.
 
 Exits with code 0 and no changes if there are no changelog entries to consolidate.
