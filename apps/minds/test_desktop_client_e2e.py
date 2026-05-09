@@ -89,8 +89,8 @@ _MINIMAL_TEMPLATE_SETTINGS = textwrap.dedent(
 def minds_template_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Path, None, None]:
     """Create a controllable minds template repo for the e2e tests.
 
-    Writes a minimal `.{MNGR_ROOT_NAME}/settings.toml` defining the `main`,
-    `dev`, and `docker` templates that `AgentCreator._build_mngr_create_command`
+    Writes a minimal `.{MNGR_ROOT_NAME}/settings.toml` defining the `main`
+    and `docker` templates that `AgentCreator._build_mngr_create_command`
     passes to `mngr create`. Sets `MINDS_TEMPLATE_REPO` so the desktop client
     uses the local path instead of cloning forever-claude-template from
     GitHub; this sidesteps both the network clone and the fact that the
