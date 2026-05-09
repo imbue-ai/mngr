@@ -90,11 +90,22 @@ def _write_user_statusline_cmd(commands_dir: Path, command: str) -> None:
     """Write the captured user command to the sidecar file the shim reads.
 
     If the sidecar already exists with the same contents, skip the write (avoid
-    needless mtime churn on re-provisioning). Empty string is also valid and
-    means "no user command to chain to" -- the shim treats an empty/missing
-    sidecar as a no-op.
+    needless mtime churn on re-provisioning).
+
+    An empty ``command`` means "no user command was found in settings this
+    run". On re-provisioning that's the expected state for users whose
+    original statusline lived in ``settings.local.json``: our first provision
+    captured it into the sidecar and overwrote settings.local.json with our
+    shim, so subsequent runs find only our shim there and nothing in
+    settings.json. To avoid silently dropping a previously-captured user
+    command, we preserve any existing non-empty sidecar when called with an
+    empty ``command``. (A user who genuinely wants to clear their wrapped
+    statusline can delete the sidecar manually -- it's still a strictly
+    better failure mode than silent loss.)
     """
     sidecar = commands_dir / _USER_STATUSLINE_CMD_FILE
+    if not command and sidecar.is_file() and sidecar.read_text():
+        return
     if sidecar.is_file() and sidecar.read_text() == command:
         return
     sidecar.write_text(command)

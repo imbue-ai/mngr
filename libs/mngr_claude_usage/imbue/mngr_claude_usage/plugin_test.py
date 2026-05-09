@@ -153,6 +153,22 @@ def test_provision_is_idempotent_on_reprovision(tmp_path: Path) -> None:
     assert (state_dir / "commands" / "user_statusline_cmd").read_text() == "/caveman.sh"
 
 
+def test_provision_preserves_user_cmd_when_only_in_settings_local(tmp_path: Path) -> None:
+    """User's original statusline lives only in settings.local.json (gitignored
+    local tier). First provision captures it, then overwrites settings.local.json
+    with our shim. On re-provisioning, the sidecar must still hold the original
+    command -- settings.local.json no longer contains it, and falling through to
+    an empty settings.json must not silently drop the captured command."""
+    state_dir = tmp_path / "state"
+    work_dir = tmp_path / "work"
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir(parents=True)
+    (claude_dir / "settings.local.json").write_text(json.dumps({"statusLine": {"command": "/caveman.sh"}}))
+    _provision_statusline_shim(state_dir, work_dir)
+    _provision_statusline_shim(state_dir, work_dir)
+    assert (state_dir / "commands" / "user_statusline_cmd").read_text() == "/caveman.sh"
+
+
 def test_hookimpl_skips_non_claude_stub(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
     """The hookimpl filters with isinstance(agent, ClaudeAgent). Stub agents don't
     pass that check, so the hookimpl is a no-op for them -- no commands dir, no
