@@ -1,13 +1,21 @@
-Fatal provider failures during `mngr list` now raise typed errors instead of being silently downgraded to `logger.warning(...) + return []`. Three sites changed:
+Provider error handling in the discovery pipeline is now consistent and typed. Two-part change:
 
-- **Vultr**: missing API key in `_get_tagged_vps_ips` and `_find_host_record` now raises `ProviderNotAuthorizedError`.
-- **Lima**: `limactl` unreachable (`LimaCommandError`/`OSError`) now raises `ProviderUnavailableError`. The previous swallow of `ProviderUnavailableError` (logged at debug only) is also dropped.
-- **imbue_cloud**: `client.list_hosts(...)` failure in `_list_leased_hosts_cached` now propagates the `MngrError` instead of clearing the cache to `[]`.
+**Provider implementations** now raise typed errors instead of `logger.warning(...) + return []`:
 
-These match Modal's existing pattern (`@handle_modal_auth_error`) so all providers behave consistently. Errors flow through the normal listing-pipeline boundary in `api/list.py`: under `--on-error continue` they appear as `ProviderErrorInfo` entries in `result.errors`; under `--on-error abort` the listing exits non-zero.
+- **Vultr**: missing API key in `_get_tagged_vps_ips` / `_find_host_record` raises `ProviderNotAuthorizedError`.
+- **Lima**: `limactl` errors raise `ProviderUnavailableError`; the previous catch of `ProviderUnavailableError` (debug-logged only) is removed so it propagates.
+- **Docker**: any `DockerException` from `discover_hosts` raises `ProviderUnavailableError`; `_docker_client` already wrapped daemon-down this way.
+- **imbue_cloud**: `ImbueCloudConnectorError` from `client.list_hosts` (5xx, network, malformed response) is rewrapped as `ProviderUnavailableError`. `ImbueCloudAuthError` (401/403) propagates unchanged so misconfigured credentials surface as a hard error.
 
-User-visible behavior change: users with an enabled-but-unconfigured Vultr/imbue_cloud/Lima provider running `mngr list` (default `--on-error abort`) will now see an error instead of a soft warning. To opt out, either configure the provider, switch to `--on-error continue`, or disable the provider:
+**Discovery boundary** (`api/list.py`, `api/discover.py`) now distinguishes "provider unavailable" from other errors:
 
-```
-mngr config set --scope user providers.<name>.is_enabled false
-```
+- `ProviderUnavailableError` → log a warning, skip that provider gracefully, listing continues with the rest. This preserves the friendly UX for "machine doesn't have prerequisite" (binary missing, daemon down, network unreachable).
+- All other `MngrError` subclasses → behave as before: under `--on-error continue` they appear as `ProviderErrorInfo` in `result.errors`; under `--on-error abort` the listing exits non-zero.
+
+The split mirrors Modal's existing pattern: configuration errors (wrong/missing credentials, e.g. `ModalAuthError`, `ProviderNotAuthorizedError`) are loud; deployment facts (machine can't run this provider) are quiet.
+
+Behavior changes worth flagging:
+
+- `mngr list` with an enabled-but-misconfigured provider (e.g. Vultr API key not set) now exits non-zero under default `--on-error abort`. Either configure the provider, use `--on-error continue`, or disable the provider via `mngr config set --scope user providers.<name>.is_enabled false`.
+- `mngr wait` and other commands going through `api/discover.py` no longer silently treat connector outages as "host not found"; they surface as the underlying error. This is more honest but is a contract change for callers that conflated the two.
+- Lima/Docker on machines without `limactl` / Docker daemon running continue to work via soft-skip (no behavior change for these specific cases — the provider implementations now raise typed errors but the boundary catches them).

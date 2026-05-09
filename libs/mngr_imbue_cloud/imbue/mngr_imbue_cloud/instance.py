@@ -41,6 +41,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
@@ -89,6 +90,7 @@ from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import get_provider_data_dir
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
+from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
@@ -261,11 +263,18 @@ class ImbueCloudProvider(BaseProviderInstance):
             return self._leased_hosts_cache
         account = self._require_account()
         token = self._get_access_token(account)
-        # Let MngrError propagate -- listing nothing because the API call
-        # failed is fatal for this provider; the listing pipeline catches it
-        # at the boundary and records it as a ProviderErrorInfo (or aborts
-        # the whole run when --on-error abort is in effect).
-        self._leased_hosts_cache = self.client.list_hosts(token)
+        # Translate connector-unreachable into ProviderUnavailableError so the
+        # discovery boundary soft-skips this provider consistently with Lima
+        # limactl-missing and Docker daemon-down. The narrow catch is
+        # deliberate: ImbueCloudAuthError (401/403, wrong token) propagates as
+        # its own typed error so misconfigured credentials surface as a hard
+        # error rather than being silently skipped. The client layer can't
+        # raise ProviderUnavailableError directly because its constructor
+        # needs the provider instance name, which the client doesn't know.
+        try:
+            self._leased_hosts_cache = self.client.list_hosts(token)
+        except ImbueCloudConnectorError as exc:
+            raise ProviderUnavailableError(self.name, str(exc)) from exc
         return self._leased_hosts_cache
 
     def discover_hosts(

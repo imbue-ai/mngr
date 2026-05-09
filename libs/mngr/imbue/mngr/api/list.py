@@ -25,6 +25,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -257,6 +258,15 @@ def _construct_and_discover_for_provider(
         if reset_caches:
             provider.reset_caches()
         provider_results = provider.discover_hosts_and_agents(cg=mngr_ctx.concurrency_group, include_destroyed=True)
+    except ProviderUnavailableError as e:
+        # The provider literally cannot operate on this machine right now
+        # (binary missing, daemon down, network unreachable). This is a
+        # deployment fact, not a misconfiguration -- log a warning and skip
+        # the provider gracefully so other providers still produce hosts.
+        # Use --on-error abort + ProviderNotAuthorizedError (or disable the
+        # provider) when you want explicit failure for misconfigurations.
+        logger.warning("Skipping provider {} (unavailable): {}", provider_name, e)
+        return
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
             if isinstance(e, MngrError):
@@ -474,6 +484,12 @@ def _construct_discover_and_emit_for_provider(
         for future in host_futures:
             future.result()
 
+    except ProviderUnavailableError as e:
+        # See _construct_and_discover_for_provider for the rationale: machines
+        # missing a provider's prerequisite (binary, daemon) skip gracefully
+        # so other providers still produce hosts.
+        logger.warning("Skipping provider {} (unavailable): {}", provider_name, e)
+        return
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
             if isinstance(e, MngrError):

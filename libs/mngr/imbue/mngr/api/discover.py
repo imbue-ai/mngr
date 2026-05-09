@@ -12,6 +12,7 @@ from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifie
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ProviderDiscoveryError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
@@ -71,6 +72,14 @@ def _discover_provider_hosts_and_agents(
     """
     try:
         provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
+    except ProviderUnavailableError as exc:
+        # Provider literally cannot operate on this machine right now (binary
+        # missing, daemon down, network unreachable). Skip it gracefully; other
+        # providers still produce hosts. Misconfigurations (wrong credentials)
+        # raise ProviderNotAuthorizedError or similar and fall through to the
+        # broad-catch below, which surfaces them as ProviderDiscoveryError.
+        logger.warning("Skipping provider {} (unavailable): {}", provider.name, exc)
+        return
     except Exception as exc:
         raise ProviderDiscoveryError(provider.name, exc) from exc
 
