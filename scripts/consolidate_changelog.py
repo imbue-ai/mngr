@@ -67,7 +67,7 @@ def _get_entry_added_datetime(path: Path, repo_root: Path) -> datetime:
 
 
 def _group_entries_by_date(entries: list[tuple[Path, str]], repo_root: Path) -> dict[str, list[tuple[Path, str]]]:
-    """Group entries by the YYYY-MM-DD (Pacific) they were added to the repo.
+    """Group entries by the YYYY-MM-DD (Pacific) their PR landed on the current branch.
 
     Within each date the entries keep their input order (i.e. filename-sorted
     by ``_collect_entries``).
