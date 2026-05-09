@@ -166,6 +166,12 @@ def _discover_hosts_for_gc(
                 include_destroyed=True,
                 cg=mngr_ctx.concurrency_group,
             )
+        except ProviderUnavailableError as e:
+            # Provider literally can't operate (binary missing, daemon down).
+            # Log at DEBUG to keep stderr clean for the common "Lima not
+            # installed" / "Docker daemon down" cases.
+            logger.debug("Skipping provider {} during GC (unavailable): {}", provider.name, e)
+            continue
         except MngrError as e:
             logger.warning("Failed to discover hosts for provider {}: {}", provider.name, e)
             # Skip the provider entirely when discovery fails.  This is
