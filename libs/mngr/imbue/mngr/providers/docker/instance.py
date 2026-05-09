@@ -25,9 +25,11 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.errors import DockerBuildTimeoutError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -629,12 +631,17 @@ kill -TERM 1
         `executable` defaults to DOCKER; pass DEPOT to use the depot.dev remote
         builder (only valid for build subcommands).
         """
-        return self.mngr_ctx.concurrency_group.run_process_to_completion(
+        # Defer the success/timeout/non-zero distinction to FinishedProcess.check(), which
+        # raises ProcessTimeoutError on timeout instead of a generic ProcessError.
+        result = self.mngr_ctx.concurrency_group.run_process_to_completion(
             [executable.value.lower()] + args,
             timeout=timeout,
             env=self._docker_env(),
             on_output=self._log_docker_creation_command_output,
+            is_checked_after=False,
         )
+        result.check()
+        return result
 
     def _log_docker_creation_command_output(self, line: str, is_stdout: bool) -> None:
         """Log output from docker subprocess calls, prefixing with [DOCKER]."""
@@ -648,8 +655,12 @@ kill -TERM 1
         # depot requires --load to import the resulting image into the local daemon.
         extra_args = ["--load"] if builder is DockerBuilder.DEPOT else []
         args = ["build", *extra_args, "-t", tag, *build_args]
+        timeout_seconds = self.config.build_timeout_seconds
         with log_span("Running {} build with {} args", builder.value.lower(), len(build_args)):
-            self._run_docker_creation_command(args, executable=builder)
+            try:
+                self._run_docker_creation_command(args, timeout=timeout_seconds, executable=builder)
+            except ProcessTimeoutError as e:
+                raise DockerBuildTimeoutError(provider_name=self.name, timeout_seconds=timeout_seconds) from e
         return tag
 
     def _build_default_image(self, tag: str) -> str:
