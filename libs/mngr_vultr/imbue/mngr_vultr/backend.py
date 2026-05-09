@@ -14,6 +14,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import HostId
@@ -53,8 +54,10 @@ class VultrProvider(VpsDockerProvider):
     def _get_tagged_vps_ips(self) -> list[str]:
         """Get IPs of Vultr instances tagged with this provider's name."""
         if not self.vultr_client.api_key.get_secret_value():
-            logger.warning("Vultr API key not configured, skipping VPS discovery")
-            return []
+            raise ProviderNotAuthorizedError(
+                self.name,
+                auth_help="Set VULTR_API_KEY in the environment or configure providers.<name>.api_key.",
+            )
         provider_tag = f"mngr-provider={self.name}"
         instances = self._list_instances_cached()
         vps_ips: list[str] = []
@@ -138,8 +141,10 @@ class VultrProvider(VpsDockerProvider):
                     return cached_record
 
         if not self.vultr_client.api_key.get_secret_value():
-            logger.warning("Vultr API key not configured, cannot resolve host")
-            return None
+            raise ProviderNotAuthorizedError(
+                self.name,
+                auth_help="Set VULTR_API_KEY in the environment or configure providers.<name>.api_key.",
+            )
 
         # Fall back to full discovery
         records = self._discover_host_records()
