@@ -71,6 +71,7 @@ def load_config(
     disabled_plugins: Sequence[str] | None = None,
     is_interactive: bool = False,
     strict: bool | None = None,
+    silent_unknown_fields: bool = False,
 ) -> MngrContext:
     """Load and merge configuration from all sources.
 
@@ -129,7 +130,11 @@ def load_config(
         load_local_config(context_dir, root_name, concurrency_group),
     ):
         if raw is not None:
-            config = config.merge_with(parse_config(raw, disabled_plugins=config_disabled_plugins, strict=strict))
+            config = config.merge_with(
+                parse_config(
+                    raw, disabled_plugins=config_disabled_plugins, strict=strict, silent=silent_unknown_fields
+                )
+            )
 
     # Apply environment variable overrides
     prefix = os.environ.get("MNGR_PREFIX")
@@ -336,12 +341,17 @@ def _check_unknown_fields(
     context: str,
     *,
     strict: bool = True,
+    silent: bool = False,
 ) -> None:
     """Check for unknown fields in raw_config and either raise or warn.
 
     When strict=True, raises ConfigParseError (used by config set to catch typos).
     When strict=False, logs a warning and removes the unknown fields so that config files
     written for newer versions of mngr don't break older versions.
+    When silent=True (and strict=False), suppress the warning entirely. Used by
+    ``mngr plugin add``, where the config is expected to reference plugins that
+    are not yet installed; the warnings are noise that resolve themselves once
+    the install completes.
     """
     known_fields = set(model_class.model_fields.keys())
     unknown = set(raw_config.keys()) - known_fields
@@ -350,7 +360,10 @@ def _check_unknown_fields(
             raise ConfigParseError(
                 f"Unknown fields in {context}: {sorted(unknown)}. Valid fields: {sorted(known_fields)}"
             )
-        logger.warning("Unknown fields in {}: {}. Valid fields: {}", context, sorted(unknown), sorted(known_fields))
+        if not silent:
+            logger.warning(
+                "Unknown fields in {}: {}. Valid fields: {}", context, sorted(unknown), sorted(known_fields)
+            )
         for key in unknown:
             del raw_config[key]
 
@@ -360,6 +373,7 @@ def _parse_providers(
     disabled_plugins: frozenset[str],
     *,
     strict: bool = True,
+    silent: bool = False,
 ) -> dict[ProviderInstanceName, ProviderInstanceConfig]:
     """Parse provider configs using the registry.
 
@@ -405,10 +419,10 @@ def _parse_providers(
                 msg += f" {get_plugin_install_hint(backend)}"
             if strict:
                 raise ConfigParseError(msg) from e
-            else:
+            if not silent:
                 logger.warning(msg)
-                continue
-        _check_unknown_fields(raw_config, config_class, f"providers.{name}", strict=strict)
+            continue
+        _check_unknown_fields(raw_config, config_class, f"providers.{name}", strict=strict, silent=silent)
         providers[ProviderInstanceName(name)] = config_class.model_construct(**raw_config)
 
     return providers
@@ -482,6 +496,7 @@ def _parse_agent_types(
     disabled_plugins: frozenset[str],
     *,
     strict: bool = True,
+    silent: bool = False,
 ) -> dict[AgentTypeName, AgentTypeConfig]:
     """Parse agent type configs using the registry.
 
@@ -505,7 +520,7 @@ def _parse_agent_types(
         if _has_disabled_ancestor(name, raw_types, disabled_plugins):
             continue
         config_class = get_agent_config_class(parent_type if parent_type is not None else name)
-        _check_unknown_fields(raw_config, config_class, f"agent_types.{name}", strict=strict)
+        _check_unknown_fields(raw_config, config_class, f"agent_types.{name}", strict=strict, silent=silent)
         normalized_config = _normalize_tuple_fields_for_construct(raw_config)
         agent_types[AgentTypeName(name)] = config_class.model_construct(**normalized_config)
 
@@ -516,6 +531,7 @@ def _parse_plugins(
     raw_plugins: dict[str, dict[str, Any]],
     *,
     strict: bool = True,
+    silent: bool = False,
 ) -> dict[PluginName, PluginConfig]:
     """Parse plugin configs using the registry.
 
@@ -526,7 +542,7 @@ def _parse_plugins(
     for name, raw_config in raw_plugins.items():
         raw_config = _normalize_field_keys(raw_config, f"plugins.{name}")
         config_class = get_plugin_config_class(name)
-        _check_unknown_fields(raw_config, config_class, f"plugins.{name}", strict=strict)
+        _check_unknown_fields(raw_config, config_class, f"plugins.{name}", strict=strict, silent=silent)
         plugins[PluginName(name)] = config_class.model_construct(**raw_config)
 
     return plugins
@@ -598,23 +614,23 @@ def block_disabled_plugins(pm: pluggy.PluginManager, disabled_names: frozenset[s
             pm.set_blocked(name)
 
 
-def _parse_retry_config(raw_retry: dict[str, Any], *, strict: bool = True) -> RetryConfig:
+def _parse_retry_config(raw_retry: dict[str, Any], *, strict: bool = True, silent: bool = False) -> RetryConfig:
     """Parse retry config.
 
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
     raw_retry = _normalize_field_keys(raw_retry, "retry")
-    _check_unknown_fields(raw_retry, RetryConfig, "retry", strict=strict)
+    _check_unknown_fields(raw_retry, RetryConfig, "retry", strict=strict, silent=silent)
     return RetryConfig.model_construct(**raw_retry)
 
 
-def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True) -> LoggingConfig:
+def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True, silent: bool = False) -> LoggingConfig:
     """Parse logging config.
 
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
     raw_logging = _normalize_field_keys(raw_logging, "logging")
-    _check_unknown_fields(raw_logging, LoggingConfig, "logging", strict=strict)
+    _check_unknown_fields(raw_logging, LoggingConfig, "logging", strict=strict, silent=silent)
     return LoggingConfig.model_construct(**raw_logging)
 
 
@@ -679,6 +695,7 @@ def parse_config(
     disabled_plugins: frozenset[str],
     *,
     strict: bool = True,
+    silent: bool = False,
 ) -> MngrConfig:
     """Parse a raw config dict into MngrConfig.
 
@@ -687,6 +704,9 @@ def parse_config(
     When strict=True (default), raises ConfigParseError for unknown fields.
     When strict=False, logs a warning and ignores unknown fields (used when
     MNGR_ALLOW_UNKNOWN_CONFIG is set to allow forward-compatible config files).
+    When silent=True (and strict=False), suppresses the warning entirely. Used by
+    ``mngr plugin add``, where the config is expected to reference plugins that
+    are not yet installed.
     """
     raw = _normalize_field_keys(raw, "top-level config")
     # Build kwargs with None for unset scalar fields
@@ -699,22 +719,28 @@ def parse_config(
     kwargs["connect_command"] = raw.pop("connect_command", None)
     kwargs["is_remote_agent_installation_allowed"] = raw.pop("is_remote_agent_installation_allowed", None)
     kwargs["agent_types"] = (
-        _parse_agent_types(raw.pop("agent_types", {}), disabled_plugins=disabled_plugins, strict=strict)
+        _parse_agent_types(raw.pop("agent_types", {}), disabled_plugins=disabled_plugins, strict=strict, silent=silent)
         if "agent_types" in raw
         else {}
     )
     kwargs["providers"] = (
-        _parse_providers(raw.pop("providers", {}), disabled_plugins=disabled_plugins, strict=strict)
+        _parse_providers(raw.pop("providers", {}), disabled_plugins=disabled_plugins, strict=strict, silent=silent)
         if "providers" in raw
         else {}
     )
-    kwargs["plugins"] = _parse_plugins(raw.pop("plugins", {}), strict=strict) if "plugins" in raw else {}
+    kwargs["plugins"] = (
+        _parse_plugins(raw.pop("plugins", {}), strict=strict, silent=silent) if "plugins" in raw else {}
+    )
     kwargs["commands"] = _parse_commands(raw.pop("commands", {})) if "commands" in raw else {}
     kwargs["create_templates"] = (
         _parse_create_templates(raw.pop("create_templates", {})) if "create_templates" in raw else {}
     )
-    kwargs["retry"] = _parse_retry_config(raw.pop("retry", {}), strict=strict) if "retry" in raw else None
-    kwargs["logging"] = _parse_logging_config(raw.pop("logging", {}), strict=strict) if "logging" in raw else None
+    kwargs["retry"] = (
+        _parse_retry_config(raw.pop("retry", {}), strict=strict, silent=silent) if "retry" in raw else None
+    )
+    kwargs["logging"] = (
+        _parse_logging_config(raw.pop("logging", {}), strict=strict, silent=silent) if "logging" in raw else None
+    )
     kwargs["is_nested_tmux_allowed"] = raw.pop("is_nested_tmux_allowed", None)
     kwargs["headless"] = raw.pop("headless", None)
     kwargs["is_error_reporting_enabled"] = raw.pop("is_error_reporting_enabled", None)
@@ -727,7 +753,8 @@ def parse_config(
     if len(raw) > 0:
         if strict:
             raise ConfigParseError(f"Unknown configuration fields: {list(raw.keys())}")
-        logger.warning("Unknown configuration fields: {}", list(raw.keys()))
+        if not silent:
+            logger.warning("Unknown configuration fields: {}", list(raw.keys()))
 
     # Use model_construct to bypass field defaults
     return MngrConfig.model_construct(**kwargs)
