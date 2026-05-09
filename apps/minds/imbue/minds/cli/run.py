@@ -161,16 +161,10 @@ def run(
     # surviving resolver from the plugin's stdout stream.
     mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
     mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
-    # ``MINDS_ALLOW_HOST_LOOPBACK=1`` opts into the plugin dialing host loopback
-    # without an SSH tunnel — needed for ``LaunchMode.DEV`` agents which run on
-    # the bare host. Off by default so the safer "refuse loopback fallback"
-    # path applies for everyone else (PR 1482).
-    allow_host_loopback = os.getenv("MINDS_ALLOW_HOST_LOOPBACK") == "1"
     forward_config = ForwardSubprocessConfig(
         port=mngr_forward_port,
         reverse_specs=(f"0:{port}",),
         mngr_host_dir=mngr_host_dir,
-        allow_host_loopback=allow_host_loopback,
     )
     consumer, preauth_cookie = start_mngr_forward(
         config=forward_config,

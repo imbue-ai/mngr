@@ -761,7 +761,7 @@ def test_create_form_submit_passes_launch_mode(tmp_path: Path) -> None:
         data={
             "git_url": "file:///nonexistent-repo",
             "agent_name": "my-agent",
-            "launch_mode": "DEV",
+            "launch_mode": "LIMA",
         },
         follow_redirects=False,
     )
@@ -778,7 +778,7 @@ def test_create_agent_api_passes_launch_mode(tmp_path: Path) -> None:
         json={
             "git_url": "file:///nonexistent-repo",
             "agent_name": "my-agent",
-            "launch_mode": "DEV",
+            "launch_mode": "LIMA",
         },
     )
     assert response.status_code == 200
@@ -812,7 +812,8 @@ def test_create_form_shows_launch_mode_dropdown(tmp_path: Path) -> None:
     assert "launch_mode" in response.text
     assert "local" in response.text
     assert "cloud" in response.text
-    assert "dev" in response.text
+    assert "lima" in response.text
+    assert "imbue_cloud" in response.text
 
 
 def test_create_form_shows_ai_provider_dropdown(tmp_path: Path) -> None:

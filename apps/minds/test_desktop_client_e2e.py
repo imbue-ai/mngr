@@ -10,18 +10,15 @@ from the GitHub repo into a temporary directory.
 
 Run from the repo root:
     just test apps/minds/test_desktop_client_e2e.py::test_create_agent_e2e
-    just test apps/minds/test_desktop_client_e2e.py::test_create_agent_dev_mode_e2e
 
 The Docker E2E test waits for /tmp/minds-e2e-done before tearing down:
     touch /tmp/minds-e2e-done
 """
 
 import os
-import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import textwrap
 import threading
 from collections.abc import Generator
@@ -49,7 +46,7 @@ _SIGNAL_FILE = Path("/tmp/minds-e2e-done")
 
 # Minimal template repo config for the test fixture. Mirrors the shape of
 # forever-claude-template's `.mngr/settings.toml` (the templates and agent
-# types that `AgentCreator` references via `--template main --template dev`)
+# types that `AgentCreator` references via `--template main --template <mode>`)
 # but omits the production-only `extra_provision_command` that expects a
 # populated `vendor/mngr/` submodule -- the test wants to exercise the minds
 # agent-creation plumbing, not the full template's provisioning script.
@@ -78,9 +75,6 @@ _MINIMAL_TEMPLATE_SETTINGS = textwrap.dedent(
 
     [create_templates.main]
     type = "main"
-
-    [create_templates.dev]
-    provider = "local"
 
     [create_templates.docker]
     provider = "docker"
@@ -188,23 +182,6 @@ def _destroy_agent(agent_name: str) -> None:
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         logger.debug("mngr destroy {} failed (best-effort cleanup): {}", agent_name, exc)
-
-    # Clean up any leftover worktree branch from dev-mode agents.
-    # mngr destroy removes the worktree directory but not the git branch.
-    # Only relevant when using a local checkout (not a cloned URL).
-    template_repo = os.environ.get("MINDS_TEMPLATE_REPO")
-    if template_repo is not None:
-        branch_name = f"mngr/{agent_name}"
-        try:
-            subprocess.run(
-                ["git", "branch", "-D", branch_name],
-                capture_output=True,
-                timeout=5,
-                text=True,
-                cwd=str(Path(template_repo).expanduser()),
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-            logger.debug("git branch -D {} failed (best-effort cleanup): {}", branch_name, exc)
 
 
 class DesktopClientFixture:
@@ -414,85 +391,3 @@ def test_create_agent_e2e(tmp_path: Path, minds_template_repo: Path) -> None:
         _destroy_agent(_AGENT_NAME)
         server.stop()
         _SIGNAL_FILE.unlink(missing_ok=True)
-
-
-_DEV_AGENT_NAME = "forever-dev"
-
-
-# docker / docker_sdk / tmux marks are required because `mngr create` shells
-# out to the docker binary, uses the Python docker SDK during provisioning
-# (even in DEV mode, which runs the agent on the local provider), and spawns
-# the agent inside a tmux pane.
-#
-# Skipped for the same reason as test_create_agent_e2e above (see its
-# inline comment for the full write-up): Modal pty buffering + slow
-# sandbox filesystem make the initial `mngr create --message` send sit
-# apparently-stuck for well over the 90s wait, even though the same
-# send flow runs fine locally. Dev-mode exits via pytest-timeout at
-# 120s because the send hasn't completed by then.
-@pytest.mark.release
-@pytest.mark.docker
-@pytest.mark.docker_sdk
-@pytest.mark.tmux
-@pytest.mark.timeout(120)
-@pytest.mark.skip(reason="TUI send-enter timeout in test-docker-release; needs follow-up, see inline comment")
-def test_create_agent_dev_mode_e2e(tmp_path: Path, minds_template_repo: Path) -> None:
-    """Create a DEV-mode agent (local provider, no Docker) and verify its web server is proxied.
-
-    This is faster than the Docker E2E test because it skips the Docker build.
-    The agent runs in a local git worktree with its own UV tool installation.
-    """
-    _configure_logging()
-    _load_env()
-    os.environ["MINDS_WORKSPACE_NAME"] = _DEV_AGENT_NAME
-
-    # Set up isolated UV tool directories so the extra_provision_command
-    # installs mngr into a temp location instead of clobbering the host's install.
-    uv_tool_dir = tempfile.mkdtemp(prefix="minds-e2e-uv-tool-")
-    uv_tool_bin_dir = tempfile.mkdtemp(prefix="minds-e2e-uv-bin-")
-    orig_uv_tool_dir = os.environ.get("UV_TOOL_DIR")
-    orig_uv_tool_bin_dir = os.environ.get("UV_TOOL_BIN_DIR")
-    os.environ["UV_TOOL_DIR"] = uv_tool_dir
-    os.environ["UV_TOOL_BIN_DIR"] = uv_tool_bin_dir
-
-    server = DesktopClientFixture(tmp_path)
-    client: httpx.Client | None = None
-
-    try:
-        _destroy_agent(_DEV_AGENT_NAME)
-        server.start()
-
-        client = httpx.Client(
-            base_url=server.base_url,
-            cookies={"minds_session": "skip"},
-            timeout=15.0,
-        )
-        os.environ["SKIP_AUTH"] = "1"
-
-        agent_id = _create_agent_with_retry(
-            client,
-            max_attempts=2,
-            agent_name=_DEV_AGENT_NAME,
-            launch_mode="DEV",
-        )
-        logger.info("Agent ready: {}", agent_id)
-
-        # Wait for the desktop client to discover the agent's web server
-        # and verify it is accessible through the proxy.
-        _wait_for_web_server(client, agent_id, timeout_seconds=60)
-
-    finally:
-        if client is not None:
-            client.close()
-        _destroy_agent(_DEV_AGENT_NAME)
-        server.stop()
-        shutil.rmtree(uv_tool_dir, ignore_errors=True)
-        shutil.rmtree(uv_tool_bin_dir, ignore_errors=True)
-        if orig_uv_tool_dir is None:
-            os.environ.pop("UV_TOOL_DIR", None)
-        else:
-            os.environ["UV_TOOL_DIR"] = orig_uv_tool_dir
-        if orig_uv_tool_bin_dir is None:
-            os.environ.pop("UV_TOOL_BIN_DIR", None)
-        else:
-            os.environ["UV_TOOL_BIN_DIR"] = orig_uv_tool_bin_dir
