@@ -48,9 +48,11 @@ with the failing step number and error detail in `notes`.
 5. Configure git: `git config user.email "bot@imbue.com"`,
    `git config user.name "Changelog Bot"`, `gh auth setup-git`.
 
-6. Let `LATEST_DATE` be the first (newest) date from `Sections added` in
-   step 2. `git add -A` and `git commit -m "Consolidate changelog
-   entries for <LATEST_DATE>"`.
+6. Capture today's date in Pacific time: `RUN_DATE=$(TZ=America/Los_Angeles
+   date +%Y-%m-%d)`. This identifies *when this consolidation run
+   happened*, distinct from the per-entry `## YYYY-MM-DD` section
+   headings (which identify when each entry was written). `git add -A`
+   and `git commit -m "Consolidate changelog entries (run <RUN_DATE>)"`.
 
 7. Capture the current branch name with `BRANCH=$(git rev-parse
    --abbrev-ref HEAD)` and push it: `git push --set-upstream origin
@@ -60,8 +62,8 @@ with the failing step number and error detail in `notes`.
    contains only the consolidation commit.
 
 8. Open a PR with `gh pr create --base main --title "Changelog
-   consolidation <LATEST_DATE>" --body "Automated changelog
-   consolidation for <LATEST_DATE>."`. Capture the URL from stdout
+   consolidation (run <RUN_DATE>)" --body "Automated changelog
+   consolidation run on <RUN_DATE>."`. Capture the URL from stdout
    into `PR_URL` while diverting stderr to a temp file, e.g.
    `PR_URL=$(gh pr create --base main --title "..." --body "..." 2>/tmp/gh_stderr)`.
    **Do not** fold stderr in via `2>&1` — `gh pr create` writes progress
