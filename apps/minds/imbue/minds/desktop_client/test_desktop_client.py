@@ -761,7 +761,7 @@ def test_create_form_submit_passes_launch_mode(tmp_path: Path) -> None:
         data={
             "git_url": "file:///nonexistent-repo",
             "agent_name": "my-agent",
-            "launch_mode": "LIMA",
+            "launch_mode": "LOCAL",
         },
         follow_redirects=False,
     )
@@ -778,7 +778,7 @@ def test_create_agent_api_passes_launch_mode(tmp_path: Path) -> None:
         json={
             "git_url": "file:///nonexistent-repo",
             "agent_name": "my-agent",
-            "launch_mode": "LIMA",
+            "launch_mode": "LOCAL",
         },
     )
     assert response.status_code == 200
