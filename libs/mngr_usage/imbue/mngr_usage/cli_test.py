@@ -281,7 +281,10 @@ def test_render_model_fresh() -> None:
     assert model.is_stale is False
 
 
-def test_flatten_for_template_uses_window_keys() -> None:
+def test_flatten_for_template_emits_only_present_windows() -> None:
+    """Format-template flat dict reflects only the windows the writer actually
+    emitted. Absent windows produce no template keys -- that's the writer's
+    responsibility to populate, not mngr_usage's to synthesize."""
     snapshot = UsageSnapshot(
         source_name="claude",
         updated_at=900,
@@ -294,7 +297,9 @@ def test_flatten_for_template_uses_window_keys() -> None:
     assert flat["five_hour.resets_at"] == "1500"
     assert flat["five_hour.seconds_until_reset"] == "500"
     assert flat["five_hour.is_present"] == "true"
-    assert flat["seven_day.is_present"] == "false"
+    # seven_day was not emitted by the writer, so no seven_day.* keys exist.
+    assert "seven_day.is_present" not in flat
+    assert "seven_day.used_percentage" not in flat
 
 
 # =============================================================================
@@ -331,12 +336,13 @@ def test_usage_command_human_format(
             # Timestamp in the future so the snapshot won't be stale-by-age in the test
             "timestamp": "2056-05-08T10:00:00.000000000Z",
             "rate_limits": {
-                "five_hour": {"used_percentage": 73.4, "resets_at": 9_999_999_999_999},
+                "five_hour": {"used_percentage": 73.4, "resets_at": 9_999_999_999_999, "label": "5h"},
             },
         },
     )
     result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
+    # Writer emitted label="5h", so the line uses "5h:" rather than the literal key.
     assert "5h:" in result.output
     assert "73% used" in result.output
 
@@ -366,7 +372,8 @@ def test_usage_command_json_format(
     assert payload["sources"][0]["source"] == "claude"
     assert payload["sources"][0]["five_hour"]["used_percentage"] == 12.3
     assert payload["sources"][0]["five_hour"]["is_present"] is True
-    assert payload["sources"][0]["seven_day"]["is_present"] is False
+    # seven_day was not emitted by the writer, so it doesn't appear in the JSON either.
+    assert "seven_day" not in payload["sources"][0]
 
 
 def test_usage_command_format_template(

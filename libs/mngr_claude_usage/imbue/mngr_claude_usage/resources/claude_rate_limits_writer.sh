@@ -51,9 +51,18 @@ mkdir -p "$(dirname "$events_path")"
 event_id="evt-$(head -c 16 /dev/urandom | xxd -p)"
 timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")
 
+# Decorate Claude Code's window keys (five_hour / seven_day / overage) with
+# short human-display labels (5h / 7d / overage). mngr usage uses these
+# labels for the per-window line prefix; without them the literal key would
+# be shown ("five_hour: 9% used"). Window keys themselves stay
+# identifier-safe so format templates like {five_hour.used_percentage}
+# remain functional.
+labels='{"five_hour":"5h","seven_day":"7d","overage":"overage"}'
 event=$(printf '%s' "$rate_limits" | jq -c \
   --arg event_id "$event_id" \
   --arg timestamp "$timestamp" \
-  '{source:"claude/rate_limits",type:"rate_limit_snapshot",event_id:$event_id,timestamp:$timestamp,rate_limits:.}')
+  --argjson labels "$labels" \
+  '{source:"claude/rate_limits",type:"rate_limit_snapshot",event_id:$event_id,timestamp:$timestamp,
+    rate_limits:(. as $rl | reduce (keys_unsorted[]) as $k ({}; .[$k] = ($rl[$k] + (if $labels[$k] then {label:$labels[$k]} else {} end))))}')
 
 printf '%s\n' "$event" >> "$events_path"

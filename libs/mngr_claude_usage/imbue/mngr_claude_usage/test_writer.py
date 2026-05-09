@@ -83,6 +83,11 @@ def test_writer_emits_event_with_rate_limits(writer_path: Path, events_file: Pat
     assert event["rate_limits"]["five_hour"]["used_percentage"] == 73.4
     assert event["rate_limits"]["five_hour"]["resets_at"] == 1777673400
     assert event["rate_limits"]["seven_day"]["used_percentage"] == 41.0
+    # Writer decorates Claude Code's window keys with short human-display labels
+    # (5h / 7d / overage) so mngr_usage's per-line prefix is compact. Without
+    # these, the renderer would fall back to the literal key (`five_hour: ...`).
+    assert event["rate_limits"]["five_hour"]["label"] == "5h"
+    assert event["rate_limits"]["seven_day"]["label"] == "7d"
 
 
 def test_writer_skips_when_no_rate_limits(writer_path: Path, events_file: Path) -> None:

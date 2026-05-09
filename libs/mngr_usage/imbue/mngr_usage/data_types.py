@@ -5,8 +5,6 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import PluginConfig
 
-WINDOW_KEYS: tuple[str, ...] = ("five_hour", "seven_day", "overage")
-
 
 class UsagePluginConfig(PluginConfig):
     """Configuration for the usage plugin."""
@@ -37,12 +35,18 @@ class WindowSnapshot(FrozenModel):
     usage percentages with reset timestamps fits, regardless of which API
     the percentages came from.
 
+    ``label``, when present, is what the human renderer displays before the
+    colon (e.g. ``"5h"``). When absent, the renderer falls back to the
+    window's key as the label. Writers can use this to give compact display
+    names while keeping keys identifier-safe so format templates work.
+
     ``status`` and ``is_using_overage`` are declared as optional fields
     defaulting to None; reserved for forward-compat without a schema bump.
     """
 
     used_percentage: float | None = Field(default=None)
     resets_at: int | None = Field(default=None, description="Unix timestamp when this window resets")
+    label: str | None = Field(default=None, description="Human-display label; falls back to the window key.")
     status: str | None = Field(default=None)
     is_using_overage: bool | None = Field(default=None)
 
@@ -55,9 +59,10 @@ class UsageSnapshot(FrozenModel):
       ``<source>`` segment of ``events/<source>/rate_limits/events.jsonl``).
       Used in the ``[source]`` header and as a tiebreaker when multiple
       writers contribute. Should not contain spaces.
-    - ``windows``: per-window state, keyed by names from ``WINDOW_KEYS`` for
-      the standard cases. Writers may include other window names too;
-      ``mngr usage`` renders unknown ones with the literal key as the label.
+    - ``windows``: per-window state. Keys are writer-chosen and treated as
+      opaque by ``mngr usage``; render order is the writer's insertion order
+      (preserved through the JSONL serialization). Per-window optional
+      ``label`` controls the human display name (falls back to the key).
     - ``updated_at``: Unix timestamp the writer regards as the snapshot's
       freshness. The CLI uses this to pick the freshest snapshot when
       multiple writers contribute, and to compute the stale-warning age.
@@ -66,6 +71,6 @@ class UsageSnapshot(FrozenModel):
     source_name: str = Field(description="Writer-chosen source identifier")
     windows: dict[str, WindowSnapshot] = Field(
         default_factory=dict,
-        description="Per-window state, keyed by window name (five_hour / seven_day / overage / ...).",
+        description="Per-window state, keyed by writer-chosen window names (insertion-order preserved).",
     )
     updated_at: int = Field(description="Unix timestamp this snapshot was last refreshed")

@@ -25,7 +25,6 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr_usage.data_types import UsagePluginConfig
 from imbue.mngr_usage.data_types import UsageSnapshot
-from imbue.mngr_usage.data_types import WINDOW_KEYS
 from imbue.mngr_usage.data_types import WindowSnapshot
 
 # Discovery convention: each agent's state dir holds rate-limits events at
@@ -35,14 +34,6 @@ from imbue.mngr_usage.data_types import WindowSnapshot
 # writer (a free-form identifier chosen by the writer plugin) and becomes the
 # UsageSnapshot.source_name for the event.
 _RATE_LIMITS_EVENTS_LEAF: tuple[str, str] = ("rate_limits", "events.jsonl")
-
-# Standard window labels for the human-format renderer. Writers may
-# return windows with other names; those render with the literal key.
-_DEFAULT_WINDOW_LABELS: dict[str, str] = {
-    "five_hour": "5h",
-    "seven_day": "7d",
-    "overage": "overage",
-}
 
 _NO_DATA_HINT = (
     "No usage data yet -- check that a usage writer plugin is installed in the env "
@@ -197,12 +188,15 @@ def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
 
     The on-disk event shape (matching what the writer emits) is:
 
-        {"source": "<agent_type>/rate_limits", "type": "rate_limit_snapshot",
+        {"source": "<source>/rate_limits", "type": "rate_limit_snapshot",
          "event_id": ..., "timestamp": ...,
-         "rate_limits": {"five_hour": {"used_percentage": 11, "resets_at": ...},
-                         "seven_day": {...}, "overage": {...}}}
+         "rate_limits": {"<window_key>": {"used_percentage": 11, "resets_at": ...,
+                                          "label": "5h"}, ...}}
 
-    Unknown window names are passed through; missing fields are coerced to None.
+    Window keys and their order are entirely up to the writer; we preserve
+    JSONL insertion order. Per-window ``label`` (optional) is what the
+    human renderer uses; missing labels fall back to the window key.
+    Missing fields are coerced to None.
     """
     rate_limits = event.get("rate_limits")
     if not isinstance(rate_limits, dict):
@@ -214,6 +208,7 @@ def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
         windows[str(window_key)] = WindowSnapshot(
             used_percentage=_coerce_optional_float(window_value.get("used_percentage")),
             resets_at=_coerce_optional_int(window_value.get("resets_at")),
+            label=_coerce_optional_str(window_value.get("label")),
             status=_coerce_optional_str(window_value.get("status")),
             is_using_overage=_coerce_optional_bool(window_value.get("is_using_overage")),
         )
@@ -366,26 +361,25 @@ def _window_render_dict(snap: WindowSnapshot, now: int) -> dict[str, Any]:
 
 
 def _render_one_source_for_json(model: _UsageRenderModel, now: int) -> dict[str, Any]:
-    """JSON shape for a single source's snapshot."""
+    """JSON shape for a single source's snapshot. Window order = writer's insertion order."""
     out: dict[str, Any] = {
         "source": model.source_name,
         "updated_at": model.snapshot_updated_at,
         "is_stale": model.is_stale,
     }
-    for key in WINDOW_KEYS:
-        out[key] = _window_render_dict(model.windows.get(key, WindowSnapshot()), now)
     for key, snap in model.windows.items():
-        if key not in WINDOW_KEYS:
-            out[key] = _window_render_dict(snap, now)
+        out[key] = _window_render_dict(snap, now)
     return out
 
 
 def _flatten_primary_for_template(model: _UsageRenderModel, now: int) -> dict[str, str]:
     """Flatten the freshest source's render model for format-template substitution.
 
-    The format-template surface is intentionally simple: it always reflects the
-    primary (freshest) source's windows at top level. Multi-source consumers
-    should use ``--format json``, which exposes every source separately.
+    The format-template surface is intentionally simple: it reflects the
+    primary (freshest) source's windows at top level. Window keys come from
+    the writer; if a writer wants format-template support it must emit
+    identifier-safe keys (Python's ``str.format`` parses them as identifiers).
+    Multi-source consumers should use ``--format json``.
     """
     flat: dict[str, str] = {
         "source": model.source_name,
@@ -393,32 +387,26 @@ def _flatten_primary_for_template(model: _UsageRenderModel, now: int) -> dict[st
         "is_stale": str(model.is_stale).lower(),
         "updated_at": "" if model.snapshot_updated_at is None else str(model.snapshot_updated_at),
     }
-    for key in WINDOW_KEYS:
-        snap = model.windows.get(key, WindowSnapshot())
+    for key, snap in model.windows.items():
         for sub_key, value in _window_to_template_values(snap, now).items():
             flat[f"{key}.{sub_key}"] = value
     return flat
 
 
-@pure
-def _human_label_for(window_key: str) -> str:
-    """Best-effort human label; unknown window keys render as the literal key."""
-    return _DEFAULT_WINDOW_LABELS.get(window_key, window_key)
-
-
 def _write_source_section(model: _UsageRenderModel, now: int, header: str) -> bool:
     """Render one source's window lines (always preceded by a ``[source]`` header).
+
+    Window order is the writer's insertion order. The line label is the
+    window's ``label`` field if present, else the literal key.
     Returns True if any window with a percentage was rendered (drives the
     catch-all hint downstream).
     """
     write_human_line(header)
     any_with_percentage = False
-    ordered_keys = [k for k in WINDOW_KEYS if k in model.windows] + [k for k in model.windows if k not in WINDOW_KEYS]
-    for key in ordered_keys:
-        snap = model.windows[key]
+    for key, snap in model.windows.items():
         if snap.used_percentage is None and snap.resets_at is None:
             continue
-        write_human_line(_format_human_line(_human_label_for(key), snap, now))
+        write_human_line(_format_human_line(snap.label or key, snap, now))
         if snap.used_percentage is not None:
             any_with_percentage = True
     return any_with_percentage

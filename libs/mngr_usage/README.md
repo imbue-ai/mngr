@@ -38,7 +38,7 @@ A writer plugin is responsible for producing `rate_limit_snapshot` events at
 the conventional path. The minimal contract is just the JSONL line shape:
 
 ```jsonl
-{"source":"<your-source>/rate_limits","type":"rate_limit_snapshot","event_id":"evt-<hex>","timestamp":"<ISO 8601>","rate_limits":{"<window-key>":{"used_percentage":<float>,"resets_at":<unix-ts>}}}
+{"source":"<your-source>/rate_limits","type":"rate_limit_snapshot","event_id":"evt-<hex>","timestamp":"<ISO 8601>","rate_limits":{"<window-key>":{"used_percentage":<float>,"resets_at":<unix-ts>,"label":"<display-label>"}}}
 ```
 
 Append one line per refresh to:
@@ -50,6 +50,8 @@ Append one line per refresh to:
 `mngr usage` will pick it up automatically -- no plugin registration with this
 package required.
 
-The window keys recognized for human-output labels are `five_hour`,
-`seven_day`, and `overage`; any other keys render with the literal key as the
-label.
+The writer chooses both the window keys and (optionally) per-window
+`label`s. Keys are used by format templates (`{<key>.used_percentage}`) and
+should be identifier-safe if you want format-template support; the per-window
+`label` controls human display (e.g. `"5h"` vs the literal key `"five_hour"`).
+Render order is the writer's insertion order in the JSONL.
