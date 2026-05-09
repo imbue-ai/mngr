@@ -20,7 +20,6 @@ from imbue.mngr_usage.cli import _format_human_line
 from imbue.mngr_usage.cli import _format_reset_phrase
 from imbue.mngr_usage.cli import _gather_snapshots
 from imbue.mngr_usage.cli import _parse_max_age
-from imbue.mngr_usage.cli import _pick_freshest
 from imbue.mngr_usage.cli import _read_last_event
 from imbue.mngr_usage.cli import _snapshot_from_event
 from imbue.mngr_usage.cli import usage
@@ -233,23 +232,6 @@ def _snap(name: str = "x", at: int = 1000, percentage: float | None = 50.0) -> U
         updated_at=at,
         windows={"five_hour": WindowSnapshot(used_percentage=percentage, resets_at=at + 3600)},
     )
-
-
-def test_pick_freshest_returns_none_for_empty() -> None:
-    assert _pick_freshest([]) is None
-
-
-def test_pick_freshest_picks_largest_updated_at() -> None:
-    a = _snap(name="a", at=1000)
-    b = _snap(name="b", at=2000)
-    assert _pick_freshest([a, b]) == b
-    assert _pick_freshest([b, a]) == b
-
-
-def test_pick_freshest_tiebreaks_by_source_name() -> None:
-    a = _snap(name="a", at=1000)
-    z = _snap(name="z", at=1000)
-    assert _pick_freshest([a, z]) == z
 
 
 def test_collapse_by_source_picks_freshest_per_source() -> None:

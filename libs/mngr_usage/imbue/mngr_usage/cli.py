@@ -234,7 +234,7 @@ def _gather_snapshots(host_dir: Path) -> list[UsageSnapshot]:
     same ``events/<source>/rate_limits/events.jsonl`` under their own state
     dirs. For each (events_file, source_name) we extract the last event;
     if several events files exist for the same source_name,
-    ``_pick_freshest`` later picks across them on ``updated_at``.
+    ``_collapse_by_source`` later keeps the freshest per source_name.
     """
     snapshots: list[UsageSnapshot] = []
     for events_file, source_name in _iter_rate_limit_event_files(host_dir):
@@ -245,17 +245,6 @@ def _gather_snapshots(host_dir: Path) -> list[UsageSnapshot]:
         if snapshot is not None:
             snapshots.append(snapshot)
     return snapshots
-
-
-@pure
-def _pick_freshest(snapshots: list[UsageSnapshot]) -> UsageSnapshot | None:
-    """Return the snapshot with the largest updated_at, or None if empty.
-
-    Ties are broken by source_name so the choice is deterministic in tests.
-    """
-    if not snapshots:
-        return None
-    return max(snapshots, key=lambda s: (s.updated_at, s.source_name))
 
 
 @pure
