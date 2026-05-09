@@ -28,9 +28,11 @@ if [ -x "$writer" ]; then
   printf '%s' "$payload" | "$writer" || true
 fi
 
-# User command is best-effort: keep the shim's exit clean even if the user's
-# command itself misbehaves, so Claude Code's statusline rendering is unaffected.
+# Pass the user's command's exit status through unchanged: if their statusline
+# was already misbehaving (or their command path is broken), Claude Code should
+# see the same non-zero exit it would have seen without us in the chain. Eating
+# the failure here would hide problems they were previously aware of.
 if [ -s "$user_cmd_file" ]; then
   user_cmd=$(cat "$user_cmd_file")
-  printf '%s' "$payload" | sh -c "$user_cmd" || true
+  printf '%s' "$payload" | sh -c "$user_cmd"
 fi

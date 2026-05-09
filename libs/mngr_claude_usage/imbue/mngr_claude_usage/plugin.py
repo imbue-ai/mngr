@@ -146,6 +146,7 @@ def on_before_provisioning(agent: AgentInterface, host: OnlineHostInterface, mng
     host_dir for events files, so a remote-only events file would never be
     visible.
     """
+    logger.warning("DEBUG mngr_claude_usage hook fired: agent_type={} is_local={}", agent.agent_type, host.is_local)
     if str(agent.agent_type) != "claude":
         return
     if not host.is_local:
