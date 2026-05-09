@@ -56,6 +56,8 @@ def _get_entry_added_datetime(path: Path, repo_root: Path) -> datetime:
         text=True,
         check=False,
     )
+    if result.returncode != 0:
+        raise RuntimeError(f"git log failed for {rel} (exit {result.returncode}): {result.stderr.strip()}")
     iso_lines = [line for line in result.stdout.splitlines() if line.strip()]
     if iso_lines:
         # `git log` prints newest-first, so iso_lines[0] is the most recent

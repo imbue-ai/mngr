@@ -183,6 +183,17 @@ def test_latest_entry_date_str_picks_most_recent(tmp_path: Path) -> None:
     assert _latest_entry_date_str(entries, repo) == "2026-05-08"
 
 
+def test_get_entry_added_datetime_raises_when_not_a_git_repo(tmp_path: Path) -> None:
+    """If the directory isn't a git repo at all, raise rather than silently using mtime."""
+    not_a_repo = tmp_path / "not_a_repo"
+    not_a_repo.mkdir()
+    stray = not_a_repo / "changelog" / "stray.md"
+    stray.parent.mkdir()
+    stray.write_text("- stray\n")
+    with pytest.raises(RuntimeError, match="git log failed"):
+        _get_entry_added_datetime(stray, not_a_repo)
+
+
 def test_latest_entry_date_str_uses_pacific_timezone(tmp_path: Path) -> None:
     """A UTC midnight entry that's still 'yesterday' in PT keeps the PT date."""
     repo = tmp_path / "repo"
