@@ -190,12 +190,12 @@ agent_update() {
     fi
     echo "      Done."
 
-    echo "[3.5/4] Rebuilding minds_workspace_server frontend..."
+    echo "[3.5/4] Rebuilding system_interface frontend..."
     if [[ "${MODE}" == "remote" ]]; then
         ssh -p "${SSH_PORT}" -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-            "${SSH_USER}@${SSH_HOST}" "cd /code/vendor/mngr/apps/minds_workspace_server/frontend && npm run build" 2>&1
+            "${SSH_USER}@${SSH_HOST}" "cd /code/apps/system_interface/frontend && npm run build" 2>&1
     else
-        (cd "${LOCAL_TARGET}/vendor/mngr/apps/minds_workspace_server/frontend" && npm run build) 2>&1
+        (cd "${LOCAL_TARGET}/apps/system_interface/frontend" && npm run build) 2>&1
     fi
     echo "      Frontend rebuilt."
 

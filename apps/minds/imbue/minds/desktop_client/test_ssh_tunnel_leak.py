@@ -18,8 +18,10 @@ the two independent fixes:
 * Fix 1: ``remove_reverse_tunnels_for_agent`` actually drops tunnels and
   closes the underlying SSH client when no other tunnel uses it.
 * Fix 2: a permanently-broken tunnel left in the registry is retried with
-  exponential backoff, and dropped from the registry after the configured
-  number of consecutive failures.
+  exponential backoff that caps at ``_REVERSE_TUNNEL_BACKOFF_CAP_SECONDS``
+  and continues forever, so a target that comes back online still gets
+  repaired (and a permanently-gone one only costs one handshake per cap
+  interval).
 
 The two fixes are exercised independently so each can be attributed to its
 own change. The leak symptom itself is reproduced by manually invoking
@@ -27,6 +29,7 @@ own change. The leak symptom itself is reproduced by manually invoking
 manager would otherwise keep growing its connection set.
 """
 
+import math
 import socket
 import threading
 import time
@@ -41,7 +44,7 @@ from pydantic import ConfigDict
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
-from imbue.minds.desktop_client.ssh_tunnel import _REVERSE_TUNNEL_MAX_REPAIR_FAILURES
+from imbue.minds.desktop_client.ssh_tunnel import _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS
 from imbue.minds.desktop_client.ssh_tunnel import _TunnelFailureState
 
 _TEST_USERNAME: Final[str] = "tunnel-test-user"
@@ -319,18 +322,20 @@ def test_remove_reverse_tunnels_for_agent_keeps_other_agents_intact(
 
 
 @pytest.mark.acceptance
-def test_check_and_repair_backs_off_and_drops_after_max_failures(
+def test_check_and_repair_backs_off_and_keeps_retrying_forever(
     tunnel_test_env: _TunnelTestEnv,
 ) -> None:
     """Fix 2: a tunnel whose target server is gone is retried with backoff
-    and dropped from the registry after ``_REVERSE_TUNNEL_MAX_REPAIR_FAILURES``
-    consecutive failures.
+    that caps at ``_REVERSE_TUNNEL_BACKOFF_CAP_SECONDS`` and continues
+    retrying forever.
 
-    Without Fix 2, every 30s tick would re-handshake forever, leaking a
-    paramiko transport thread per attempt. With Fix 2:
+    Without Fix 2, every 30s tick would re-handshake forever at full speed,
+    leaking a paramiko transport thread per attempt. With Fix 2:
       * the first failure schedules a backoff,
       * subsequent ticks within that backoff window do nothing,
-      * after N total failures the tunnel is removed from the registry.
+      * the backoff doubles per failure but stops growing once it hits
+        ``_REVERSE_TUNNEL_BACKOFF_CAP_SECONDS`` -- the tunnel is *not*
+        dropped, so a target that comes back online still gets repaired.
 
     The test forces the failure path by setting up a tunnel and then
     closing the SSH server (so the next setup attempt cannot complete).
@@ -376,9 +381,19 @@ def test_check_and_repair_backs_off_and_drops_after_max_failures(
             assert state is not None
             assert state.consecutive_failures == 1
 
-        # Walk the failure counter up to the cap by zeroing the cooldown
-        # before each tick. After enough strikes the tunnel must vanish.
-        for _ in range(_REVERSE_TUNNEL_MAX_REPAIR_FAILURES):
+        # Walk the failure counter past the point where 2**failures exceeds
+        # the cap, zeroing the cooldown before each tick. The tunnel must
+        # remain in the registry the whole time -- we never give up.
+        # ``saturation_failure_count`` is the smallest N for which
+        # ``2 ** N >= cap``; once the counter reaches this value the
+        # implementation stops incrementing it (otherwise the bigint would
+        # grow unboundedly across long-running failure stretches), and the
+        # backoff stays pinned at the cap.
+        saturation_failure_count = math.ceil(math.log2(_REVERSE_TUNNEL_BACKOFF_CAP_SECONDS))
+        # Run several extra ticks past the saturation point to confirm the
+        # counter does not grow past it.
+        loop_count = saturation_failure_count + 4
+        for _ in range(loop_count):
             with manager._lock:
                 state = manager._failure_state.get(tunnel_key)
                 if state is not None:
@@ -386,14 +401,29 @@ def test_check_and_repair_backs_off_and_drops_after_max_failures(
             manager._check_and_repair_tunnels()
 
         with manager._lock:
-            assert tunnel_key not in manager._reverse_tunnels, (
-                "Expected the broken tunnel to be dropped after "
-                f"{_REVERSE_TUNNEL_MAX_REPAIR_FAILURES} consecutive failures"
+            assert tunnel_key in manager._reverse_tunnels, (
+                "Expected the broken tunnel to keep being retried forever "
+                "(uncapped failure count) so it can recover when the target returns"
             )
-            assert tunnel_key not in manager._failure_state
-            # Last tunnel for this host gone -- the SSH client (if any
-            # was re-established) must also be gone.
-            assert conn_key not in manager._connections
+            state = manager._failure_state.get(tunnel_key)
+            assert state is not None
+            # Counter must have saturated at the smallest N where
+            # 2**N >= cap, neither below (cap not yet applied) nor above
+            # (counter incrementing past saturation, which would let the
+            # 2**N bigint grow without bound on a permanently-failing
+            # tunnel).
+            assert state.consecutive_failures == saturation_failure_count
+            # Backoff must have saturated at the cap rather than grown
+            # unbounded -- doubling 2**N forever would overflow time. We
+            # check both bounds so the test fails the moment the cap stops
+            # being applied.
+            backoff_seconds_at_cap = state.next_attempt_at - time.monotonic()
+            assert backoff_seconds_at_cap <= _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS
+            # A tiny amount of wall-clock elapses between the failure
+            # recording and our read here; allow a generous slack so this
+            # is not flaky on a loaded CI runner, but the lower bound must
+            # still prove the cap was applied (not, say, 0).
+            assert backoff_seconds_at_cap > _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS - 5.0
     finally:
         listener.close()
 

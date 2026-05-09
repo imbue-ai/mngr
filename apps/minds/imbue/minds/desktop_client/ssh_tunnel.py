@@ -18,11 +18,12 @@ _REVERSE_TUNNEL_HEALTH_CHECK_SECONDS: Final[float] = 30.0
 
 # Per-tunnel backoff for the health-check repair loop. After each failed
 # repair attempt the next attempt is scheduled at ``min(2 ** failures, cap)``
-# seconds in the future; after ``_REVERSE_TUNNEL_MAX_REPAIR_FAILURES``
-# consecutive failures the tunnel is dropped entirely so the manager does
-# not keep paying for new SSH handshakes against a permanently-gone target.
+# seconds in the future. The retry continues forever (with the per-tunnel
+# wait saturating at the 5-minute backoff ceiling) so a tunnel whose
+# target is temporarily unreachable -- e.g. the user's laptop went offline
+# overnight -- still recovers when the target comes back, instead of being
+# permanently dropped.
 _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS: Final[float] = 300.0
-_REVERSE_TUNNEL_MAX_REPAIR_FAILURES: Final[int] = 10
 
 
 class RemoteSSHInfo(FrozenModel):
@@ -258,9 +259,9 @@ class SSHTunnelManager(MutableModel):
         Failed repair attempts back off exponentially (per tunnel, capped at
         ``_REVERSE_TUNNEL_BACKOFF_CAP_SECONDS``) so the manager does not pay
         for a fresh paramiko handshake against a permanently-gone target on
-        every 30s tick. After ``_REVERSE_TUNNEL_MAX_REPAIR_FAILURES`` straight
-        failures the tunnel is dropped entirely; a successful repair clears
-        the backoff state.
+        every 30s tick. The retry continues indefinitely so that a tunnel
+        whose target is temporarily unreachable still recovers once the
+        target comes back. A successful repair clears the backoff state.
         """
         with self._lock:
             tunnels = dict(self._reverse_tunnels)
@@ -281,9 +282,9 @@ class SSHTunnelManager(MutableModel):
                 # clears failure_state only for the specific tunnel_key it
                 # just set up, so siblings observing is_alive=True would
                 # otherwise carry stale failure_state into the next break
-                # and could hit ``_REVERSE_TUNNEL_MAX_REPAIR_FAILURES``
-                # prematurely. Drop any lingering bookkeeping so this
-                # tunnel's next failure starts a fresh schedule.
+                # and back off from the cap instead of from zero. Drop any
+                # lingering bookkeeping so this tunnel's next failure
+                # starts a fresh schedule.
                 if failure_state is not None:
                     with self._lock:
                         self._failure_state.pop(tunnel_key, None)
@@ -322,45 +323,46 @@ class SSHTunnelManager(MutableModel):
         tunnel_info: ReverseTunnelInfo,
         error: Exception,
     ) -> None:
-        """Update backoff bookkeeping after a failed repair, dropping the tunnel after N strikes.
+        """Record backoff state after a failed repair (the retry itself is
+        driven from ``_check_and_repair_tunnels``).
 
         Split out of ``_check_and_repair_tunnels`` for readability; the only
         caller is the ``except`` arm of the repair loop, which catches
         ``paramiko.SSHException``, ``OSError``, and our own ``SSHTunnelError``.
+        The retry continues forever -- the backoff is capped at
+        ``_REVERSE_TUNNEL_BACKOFF_CAP_SECONDS`` so a permanently-gone target
+        only costs one paramiko handshake every five minutes, but a target
+        that comes back online still gets repaired.
+
+        Once the exponential schedule has reached the cap, the failure
+        counter stops incrementing. Otherwise an agent that fails forever
+        would compute an ever-growing ``2 ** failures`` per tick (e.g.
+        ~30K-digit bigints after a year of one-failure-per-five-minutes)
+        before clamping it back down to the cap, which is wasted work.
         """
         with self._lock:
             failure_state = self._failure_state.get(tunnel_key)
             if failure_state is None:
                 failure_state = _TunnelFailureState()
                 self._failure_state[tunnel_key] = failure_state
-            failure_state.consecutive_failures += 1
-            backoff_seconds = min(
-                float(2**failure_state.consecutive_failures),
-                _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS,
-            )
+            # Stop incrementing once the exponential schedule has already
+            # reached the cap; further increments would just keep
+            # recomputing larger ``2 ** failures`` values that immediately
+            # get clamped back down.
+            if 2**failure_state.consecutive_failures < _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS:
+                failure_state.consecutive_failures += 1
+            backoff_seconds = min(float(2**failure_state.consecutive_failures), _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS)
             failure_state.next_attempt_at = time.monotonic() + backoff_seconds
             failures = failure_state.consecutive_failures
 
         logger.warning(
-            "Failed to re-establish reverse tunnel to {} (local {}): {} (failure {}/{}, backoff {:.0f}s)",
+            "Failed to re-establish reverse tunnel to {} (local {}): {} (failure {}, backoff {:.0f}s)",
             conn_key,
             tunnel_info.local_port,
             error,
             failures,
-            _REVERSE_TUNNEL_MAX_REPAIR_FAILURES,
             backoff_seconds,
         )
-
-        if failures >= _REVERSE_TUNNEL_MAX_REPAIR_FAILURES:
-            logger.warning(
-                "Dropping reverse tunnel to {} (local {}) after {} consecutive "
-                "failed repair attempts; further repair attempts would just keep "
-                "spinning a paramiko transport against a gone target.",
-                conn_key,
-                tunnel_info.local_port,
-                failures,
-            )
-            self._drop_tunnel_keys((tunnel_key,))
 
     def _reverse_tunnel_health_check_loop(self) -> None:
         """Periodically check reverse tunnels and re-establish broken ones."""
