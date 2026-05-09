@@ -382,6 +382,80 @@ propagate-changes agent_name mngr_host_dir="$HOME/.minds/mngr":
         --agent "$agent_name" \
         --user root --host 127.0.0.1 --port "$port" --key "$key"
 
+# Create a Cloudflare tunnel for the named agent's system_interface
+# service: locks the tunnel to the active imbue_cloud account, injects
+# the cloudflared token into the agent (via mngr exec), and registers
+# system_interface at http://localhost:8000 on the tunnel. Prints the
+# resulting public hostname. Idempotent: tunnels create returns the
+# existing tunnel if one already exists; service add no-ops if the same
+# DNS+target is already registered.
+# Forward system_interface for a minds-profile agent.
+forward-minds-system-interface agent_name: (_forward-system-interface agent_name "$HOME/.minds/mngr" "minds-")
+
+# Same as forward-minds-system-interface but for the dev (devminds) profile.
+forward-devminds-system-interface agent_name: (_forward-system-interface agent_name "$HOME/.devminds/mngr" "devminds-")
+
+[private]
+_forward-system-interface agent_name mngr_host_dir mngr_prefix:
+    #!/bin/bash
+    set -ueo pipefail
+    export MNGR_HOST_DIR="{{mngr_host_dir}}"
+    export MNGR_PREFIX="{{mngr_prefix}}"
+    AGENT_NAME="{{agent_name}}"
+
+    # Resolve agent name to its full agent_id from local mngr state. The
+    # tunnel layer truncates "agent-<hex>" to the first 16 hex chars for
+    # hostname uniqueness, so the full id is what we want here -- not the
+    # short name (which would let two agents with the same name across
+    # different hosts collide in the tunnel namespace).
+    AGENT_ID=$(uv run mngr list --format jsonl 2>/dev/null \
+        | jq -r --arg n "$AGENT_NAME" 'select(.resource_type == "agent" and .name == $n) | .id' \
+        | head -1)
+    if [ -z "$AGENT_ID" ]; then
+        echo "error: no agent named '$AGENT_NAME' found via 'mngr list' under MNGR_HOST_DIR=$MNGR_HOST_DIR" >&2
+        exit 1
+    fi
+
+    EMAIL=$(uv run mngr imbue_cloud auth list \
+        | jq -r '.[] | select(.is_active) | .email')
+    if [ -z "$EMAIL" ]; then
+        echo "error: no active imbue_cloud account; run 'mngr imbue_cloud auth signin' first" >&2
+        exit 1
+    fi
+
+    TUNNEL_JSON=$(uv run mngr imbue_cloud tunnels create "$AGENT_ID" \
+        --account "$EMAIL" \
+        --policy "$(jq -nc --arg e "$EMAIL" '{emails:[$e]}')")
+    TUNNEL_NAME=$(jq -r '.tunnel_name' <<<"$TUNNEL_JSON")
+    TOKEN=$(jq -r '.token' <<<"$TUNNEL_JSON")
+    if [ -z "$TUNNEL_NAME" ] || [ "$TOKEN" = "null" ]; then
+        echo "error: tunnels create did not return a usable tunnel/token:" >&2
+        echo "$TUNNEL_JSON" >&2
+        exit 1
+    fi
+
+    # Inject the token where the agent's cloudflare-tunnel service
+    # (libs/cloudflare_tunnel/.../runner.py) watches for it. Strip any
+    # existing CLOUDFLARE_TUNNEL_TOKEN line first so we don't keep two
+    # copies, then atomic-rename so the watcher never observes a
+    # half-written file. CF tokens are base64url-y, so single-quoting
+    # the value is safe.
+    uv run mngr exec "$AGENT_ID" \
+        "mkdir -p runtime && { [ -f runtime/secrets ] && grep -Ev '^export[[:space:]]+CLOUDFLARE_TUNNEL_TOKEN=' runtime/secrets || true; printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\n' '$TOKEN'; } > runtime/secrets.tmp && mv runtime/secrets.tmp runtime/secrets"
+
+    URL=$(uv run mngr imbue_cloud tunnels services add \
+        "$TUNNEL_NAME" system_interface http://localhost:8000 \
+        | jq -r .hostname)
+    if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+        echo "error: services add did not return a hostname" >&2
+        exit 1
+    fi
+
+    echo
+    echo "Forwarded system_interface for $AGENT_NAME ($AGENT_ID)"
+    echo "  URL:    https://$URL/"
+    echo "  Tunnel: $TUNNEL_NAME (locked to $EMAIL)"
+
 # Spin up a new PRIVATE personal GitHub repo as a full-history copy of
 # imbue-ai/forever-claude-template's main. Clones into
 # <parent_dir>/<repo_name> (default parent: $HOME/project), creates the
