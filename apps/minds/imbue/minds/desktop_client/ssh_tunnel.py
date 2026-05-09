@@ -18,11 +18,11 @@ _REVERSE_TUNNEL_HEALTH_CHECK_SECONDS: Final[float] = 30.0
 
 # Per-tunnel backoff for the health-check repair loop. After each failed
 # repair attempt the next attempt is scheduled at ``min(2 ** failures, cap)``
-# seconds in the future. The retry continues forever (capped at the
-# 5-minute polling interval) so a tunnel whose target is temporarily
-# unreachable -- e.g. the user's laptop went offline overnight -- still
-# recovers when the target comes back, instead of being permanently
-# dropped.
+# seconds in the future. The retry continues forever (with the per-tunnel
+# wait saturating at the 5-minute backoff ceiling) so a tunnel whose
+# target is temporarily unreachable -- e.g. the user's laptop went offline
+# overnight -- still recovers when the target comes back, instead of being
+# permanently dropped.
 _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS: Final[float] = 300.0
 
 
