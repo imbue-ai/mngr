@@ -92,8 +92,8 @@ Fix WebSocket broadcaster queue-full flood and hung-send pin: stuck WS clients a
 
 - Fixed the changelog consolidation cron's commit author email: was `dev@imbue.com`, now `bot@imbue.com`, matching the verified email on the bot GitHub account whose token the cron uses to push and open PRs. Without this, GitHub couldn't attribute consolidation commits to the bot user.
 
-- `scripts/setup_changelog_agent.sh` is now actually idempotent: running it twice in a row replaces an existing schedule instead of erroring out. Drops the `CHANGELOG_REPLACE=1` gate.
-- Header docstring now lists the required `GH_TOKEN` and `ANTHROPIC_API_KEY` env vars and the on-demand trigger one-liner.
+- `scripts/setup_changelog_agent.sh` now redeploys when re-run: removes any existing `changelog-consolidation` schedule before recreating, so the deployed schedule always reflects the current source. Drops the `CHANGELOG_REPLACE=1` gate that previously errored on an existing schedule.
+- Header docstring now lists the required `GH_TOKEN` (token for `bot@imbue.com`) and `ANTHROPIC_API_KEY` env vars, and includes the on-demand trigger one-liner.
 
 - Added a changelog system for tracking changes across PRs
   - Per-PR changelog entry files in `changelog/` directory, enforced by CI via meta ratchet test

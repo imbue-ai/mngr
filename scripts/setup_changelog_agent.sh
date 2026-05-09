@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Idempotent setup of the nightly changelog consolidation agent.
-#
-# This script ensures exactly one "changelog-consolidation" schedule exists.
-# Safe to run multiple times: if the schedule already exists it is removed
-# and recreated from the current source, so re-running redeploys.
+# (Re)deploy the nightly changelog-consolidation schedule from the current
+# source. Removes any existing "changelog-consolidation" schedule first, so
+# running this is the way to redeploy after editing the prompt or this
+# script.
 #
 # The scheduled agent runs at midnight PST as a headless_claude agent. The
 # orchestration steps live in scripts/changelog_consolidation_prompt.md and
@@ -70,9 +69,8 @@ names = sorted({ep.name for ep in importlib.metadata.entry_points(group='mngr')}
 print(' '.join(f'--disable-plugin {n}' for n in names))
 ")
 
-# Always remove an existing trigger before recreating, so the script is
-# truly idempotent (running it twice produces a schedule that matches the
-# current source, regardless of whether one already exists).
+# Always remove an existing trigger before recreating, so the deployed
+# schedule reflects the current source no matter what was deployed before.
 EXISTING=$(uv run mngr schedule list --provider "$PROVIDER" --all --format json $DISABLE_PLUGIN_ARGS 2>/dev/null || echo '{"schedules":[]}')
 if echo "$EXISTING" | python3 -c "
 import json, sys
