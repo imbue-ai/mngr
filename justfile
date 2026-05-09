@@ -519,20 +519,51 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
     echo
 
     if [ ! -t 0 ]; then
-        echo "(stdin is not a TTY; skipping interactive token prompt -- create .env manually if needed)"
+        echo "(stdin is not a TTY; skipping interactive token prompt and LiteLLM key creation -- create .env manually if needed)"
         exit 0
     fi
-    echo "Paste the generated PAT here (input hidden), or press Enter to skip writing .env:"
-    token=""
-    read -r -s token || token=""
+
+    echo "Paste the generated PAT here (input hidden), or press Enter to skip GH_TOKEN:"
+    gh_token=""
+    read -r -s gh_token || gh_token=""
     echo
-    if [ -z "$token" ]; then
-        echo "No token entered; skipped .env"
+
+    # Mint a LiteLLM virtual key for this repo and pull ANTHROPIC_API_KEY +
+    # ANTHROPIC_BASE_URL out of the JSON response (see
+    # libs/mngr_imbue_cloud/.../cli/keys.py:create_key -> emits {key, base_url}).
+    # Failures here are non-fatal: the GitHub repo is already created and
+    # pushed at this point, and the user can always create a key manually
+    # later via `mngr imbue_cloud keys litellm create`.
+    api_key=""
+    base_url=""
+    echo "Creating LiteLLM virtual key (alias: $repo)..."
+    litellm_output=""
+    if litellm_output=$(uv run --project {{justfile_directory()}} mngr imbue_cloud keys litellm create --alias "$repo" 2>&1); then
+        api_key=$(jq -r '.key // empty' <<<"$litellm_output" 2>/dev/null || echo "")
+        base_url=$(jq -r '.base_url // empty' <<<"$litellm_output" 2>/dev/null || echo "")
+        if [ -z "$api_key" ] || [ -z "$base_url" ]; then
+            echo "warning: LiteLLM create returned unexpected output; skipping ANTHROPIC_* vars" >&2
+            echo "$litellm_output" >&2
+            api_key=""
+            base_url=""
+        fi
+    else
+        echo "warning: 'mngr imbue_cloud keys litellm create' failed; skipping ANTHROPIC_* vars" >&2
+        echo "$litellm_output" >&2
+        api_key=""
+        base_url=""
+    fi
+
+    env_file="$target/.env"
+    if [ -z "$gh_token" ] && [ -z "$api_key" ]; then
+        echo "Nothing collected (no GH PAT, no LiteLLM key); skipped .env"
         exit 0
     fi
-    env_file="$target/.env"
-    printf 'export GH_TOKEN=%s\n' "$token" > "$env_file"
+    : > "$env_file"
     chmod 600 "$env_file"
+    [ -n "$gh_token" ] && printf 'export GH_TOKEN=%s\n' "$gh_token" >> "$env_file"
+    [ -n "$api_key" ] && printf 'export ANTHROPIC_API_KEY=%s\n' "$api_key" >> "$env_file"
+    [ -n "$base_url" ] && printf 'export ANTHROPIC_BASE_URL=%s\n' "$base_url" >> "$env_file"
     echo "Wrote $env_file (mode 600)"
 
 # Destroy and remove every host in the pool with status='released'.
