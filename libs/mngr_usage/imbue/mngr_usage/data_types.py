@@ -33,7 +33,7 @@ class UsagePluginConfig(PluginConfig):
 class WindowSnapshot(FrozenModel):
     """A single rate-limit window's snapshot state.
 
-    The fields are intentionally generic: any provider that emits per-window
+    The fields are intentionally generic: any writer that emits per-window
     usage percentages with reset timestamps fits, regardless of which API
     the percentages came from.
 
