@@ -208,7 +208,7 @@ def test_get_entry_added_datetime_returns_merge_commit_date(tmp_path: Path) -> N
 
 
 def test_get_entry_added_datetime_raises_when_file_not_in_history(tmp_path: Path) -> None:
-    """If the file isn't tracked by git, raise instead of guessing from mtime."""
+    """If the file has no commit introducing it on the first-parent line, raise."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_git_repo_with_files(repo, [("placeholder.txt", "x\n", "2026-05-01T00:00:00Z")])
