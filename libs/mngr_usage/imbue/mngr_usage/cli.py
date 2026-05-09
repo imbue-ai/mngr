@@ -265,7 +265,8 @@ def _collapse_by_source(snapshots: list[UsageSnapshot]) -> list[UsageSnapshot]:
     Multiple agents may write to the same source (e.g. several Claude agents
     all writing to ``events/claude/rate_limits/events.jsonl`` in their own
     state dirs). The user wants the most recent reading of each source, not
-    a separate block per agent. Grouping is stable in source_name order.
+    a separate block per agent. The returned list's order is unspecified --
+    callers re-sort freshest-first by ``(updated_at, source_name)`` anyway.
     """
     by_source: dict[str, UsageSnapshot] = {}
     for snap in snapshots:
