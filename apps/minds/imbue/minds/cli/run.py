@@ -53,6 +53,7 @@ from imbue.minds.desktop_client.forward_cli import start_mngr_forward
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.core import LATCHKEY_BINARY
 from imbue.minds.desktop_client.latchkey.core import Latchkey
+from imbue.minds.desktop_client.latchkey.core import LatchkeyDestructionHandler
 from imbue.minds.desktop_client.latchkey.core import LatchkeyDiscoveryHandler
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
@@ -207,17 +208,22 @@ def run(
     consumer.add_on_reverse_tunnel_established_callback(MindsApiUrlWriter(resolver=backend_resolver))
     # Latchkey gateway lifecycle: a single shared ``latchkey gateway``
     # subprocess serves every agent (lifetime is independent of any one
-    # agent), so there is no per-agent destruction or reconcile step --
-    # the discovery callback's job is just to ensure the shared gateway
-    # is up and to (for remote agents) reverse-tunnel it into the
-    # container. Per-agent permission overrides ride on the JWT injected
-    # at ``mngr create`` time.
+    # agent), so the discovery callback's job is just to ensure the
+    # shared gateway is up and to (for remote agents) reverse-tunnel it
+    # into the container. Per-agent permission overrides ride on the JWT
+    # injected at ``mngr create`` time. The destruction callback exists
+    # solely to drop the per-agent reverse SSH tunnel when an agent goes
+    # away -- otherwise ``SSHTunnelManager`` keeps the entry in its
+    # registry and the 30s health-check loop spins paramiko transports
+    # against an SSH host that no longer exists, pegging a CPU.
     latchkey_discovery_handler = LatchkeyDiscoveryHandler(
         latchkey=latchkey,
         tunnel_manager=tunnel_manager,
         concurrency_group=root_concurrency_group,
     )
+    latchkey_destruction_handler = LatchkeyDestructionHandler(tunnel_manager=tunnel_manager)
     consumer.add_on_agent_discovered_callback(latchkey_discovery_handler)
+    consumer.add_on_agent_destroyed_callback(latchkey_destruction_handler)
     tunnel_manager.start_reverse_tunnel_health_check()
 
     # Auto-disable an ``imbue_cloud_<slug>`` provider if its session is
