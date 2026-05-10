@@ -1,6 +1,8 @@
 from collections.abc import Callable
+from collections.abc import Iterator
 from collections.abc import Sequence
 from concurrent.futures import Future
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from threading import Lock
@@ -55,6 +57,12 @@ class ErrorInfo(FrozenModel):
         return cls(exception_type=type(exception).__name__, message=str(exception))
 
 
+class WarningInfo(FrozenModel):
+    """Information about a warning encountered during listing."""
+
+    message: str = Field(description="The warning message")
+
+
 class ProviderErrorInfo(ErrorInfo):
     """Error information with provider context."""
 
@@ -105,6 +113,7 @@ class ListResult(MutableModel):
 
     agents: list[AgentDetails] = Field(default_factory=list, description="List of agents with their full information")
     errors: list[ErrorInfo] = Field(default_factory=list, description="Errors encountered while listing")
+    warnings: list[WarningInfo] = Field(default_factory=list, description="Warnings encountered while listing")
 
 
 class _ListAgentsParams(FrozenModel):
@@ -116,6 +125,7 @@ class _ListAgentsParams(FrozenModel):
     error_behavior: ErrorBehavior
     on_agent: Callable[[AgentDetails], None] | None
     on_error: Callable[[ErrorInfo], None] | None
+    on_warning: Callable[[WarningInfo], None] | None
     field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = Field(
         default_factory=dict,
     )
@@ -139,6 +149,8 @@ def list_agents(
     on_agent: Callable[[AgentDetails], None] | None = None,
     # Optional callback invoked immediately when each error is encountered (for streaming)
     on_error: Callable[[ErrorInfo], None] | None = None,
+    # Optional callback invoked immediately when each warning is captured (for streaming)
+    on_warning: Callable[[WarningInfo], None] | None = None,
     # whether to force the providers to refresh their caches and get new data. Only needed if calling this multiple
     # times within the same process
     reset_caches: bool = False,
@@ -169,31 +181,33 @@ def list_agents(
             error_behavior=error_behavior,
             on_agent=on_agent,
             on_error=on_error,
+            on_warning=on_warning,
             field_generators=field_generators,
         )
 
-        if is_streaming:
-            # Streaming mode: each provider loads hosts, gets agent refs, and processes
-            # hosts immediately -- so fast providers fire on_agent callbacks while slow
-            # providers are still loading
-            _list_agents_streaming(
-                mngr_ctx=mngr_ctx,
-                provider_names=provider_names,
-                params=params,
-                result=result,
-                results_lock=results_lock,
-                reset_caches=reset_caches,
-            )
-        else:
-            # Batch mode: load all agents first, then process
-            _list_agents_batch(
-                mngr_ctx=mngr_ctx,
-                provider_names=provider_names,
-                params=params,
-                result=result,
-                results_lock=results_lock,
-                reset_caches=reset_caches,
-            )
+        with _capture_warnings_into(result, results_lock, on_warning):
+            if is_streaming:
+                # Streaming mode: each provider loads hosts, gets agent refs, and processes
+                # hosts immediately -- so fast providers fire on_agent callbacks while slow
+                # providers are still loading
+                _list_agents_streaming(
+                    mngr_ctx=mngr_ctx,
+                    provider_names=provider_names,
+                    params=params,
+                    result=result,
+                    results_lock=results_lock,
+                    reset_caches=reset_caches,
+                )
+            else:
+                # Batch mode: load all agents first, then process
+                _list_agents_batch(
+                    mngr_ctx=mngr_ctx,
+                    provider_names=provider_names,
+                    params=params,
+                    result=result,
+                    results_lock=results_lock,
+                    reset_caches=reset_caches,
+                )
 
     except MngrError as e:
         if error_behavior == ErrorBehavior.ABORT:
@@ -205,6 +219,39 @@ def list_agents(
 
     _maybe_write_full_discovery_snapshot(mngr_ctx, result, provider_names, include_filters, exclude_filters)
     return result
+
+
+@contextmanager
+def _capture_warnings_into(
+    result: ListResult,
+    results_lock: Lock,
+    on_warning: Callable[[WarningInfo], None] | None,
+) -> Iterator[None]:
+    """Capture WARNING-level loguru records into ``result.warnings`` for the duration of the block."""
+
+    def sink(message: Any) -> None:
+        warning_info = WarningInfo(message=message.record["message"])
+        with results_lock:
+            result.warnings.append(warning_info)
+        if on_warning:
+            on_warning(warning_info)
+
+    handler_id = logger.add(
+        sink,
+        level="WARNING",
+        filter=lambda record: record["level"].name == "WARNING",
+        format="{message}",
+    )
+    try:
+        yield
+    finally:
+        # Tolerate handler removal mid-call (e.g. setup_logging() calls
+        # logger.remove() with no arg, wiping all handlers); matches the
+        # pattern used by the log_warnings fixture and capture_loguru.
+        try:
+            logger.remove(handler_id)
+        except ValueError:
+            pass
 
 
 def _maybe_write_full_discovery_snapshot(
