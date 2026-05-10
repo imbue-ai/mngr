@@ -578,6 +578,22 @@ class ImbueCloudProvider(BaseProviderInstance):
                 exc,
             )
 
+    def _build_lease_ssh_info(self, host_id: HostId, lease: LeasedHostInfo) -> SSHInfo:
+        """Build the SSHInfo that points at a leased container's inner sshd.
+
+        Shared by both the lease-only fallback and the cached-listing path so
+        the two stay in lockstep if SSHInfo grows new fields or the rendered
+        ``command`` string changes.
+        """
+        private_key_path, _ = self._host_keypair_paths(host_id)
+        return SSHInfo(
+            user=lease.ssh_user,
+            host=lease.vps_ip,
+            port=lease.container_ssh_port,
+            key_path=private_key_path,
+            command=f"ssh -i {private_key_path} -p {lease.container_ssh_port} {lease.ssh_user}@{lease.vps_ip}",
+        )
+
     def _build_offline_details_from_lease(
         self,
         host_ref: DiscoveredHost,
@@ -591,14 +607,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         populated so the user can see the unreachable address;
         ``failure_reason`` carries the underlying error.
         """
-        private_key_path, _ = self._host_keypair_paths(host_ref.host_id)
-        ssh_info = SSHInfo(
-            user=lease.ssh_user,
-            host=lease.vps_ip,
-            port=lease.container_ssh_port,
-            key_path=private_key_path,
-            command=f"ssh -i {private_key_path} -p {lease.container_ssh_port} {lease.ssh_user}@{lease.vps_ip}",
-        )
+        ssh_info = self._build_lease_ssh_info(host_ref.host_id, lease)
         host_details = HostDetails(
             id=host_ref.host_id,
             name=str(host_ref.host_name),
@@ -625,14 +634,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         state is derived from ``container_state`` in the raw output (set
         by ``build_outer_listing_collection_script``).
         """
-        private_key_path, _ = self._host_keypair_paths(host_ref.host_id)
-        ssh_info = SSHInfo(
-            user=lease.ssh_user,
-            host=lease.vps_ip,
-            port=lease.container_ssh_port,
-            key_path=private_key_path,
-            command=f"ssh -i {private_key_path} -p {lease.container_ssh_port} {lease.ssh_user}@{lease.vps_ip}",
-        )
+        ssh_info = self._build_lease_ssh_info(host_ref.host_id, lease)
         host_state = _derive_host_state_from_raw(raw)
         failure_reason = _derive_offline_note_from_raw(raw)
         boot_time = timestamp_to_datetime(raw.get("btime"))
