@@ -220,6 +220,10 @@ class OuterHost(OuterHostInterface):
 
     def get_name(self) -> HostName:
         """Return the human-readable name of this host."""
+        return self.get_connector_host_name()
+
+    def get_connector_host_name(self) -> HostName:
+        """Return the literal hostname/address used by the pyinfra connector."""
         name = self.connector.name
         if name.startswith("@"):
             name = name[1:]
