@@ -53,6 +53,14 @@ class DockerProviderConfig(ProviderInstanceConfig):
             "DEPOT runs `depot build --load` (requires depot CLI + DEPOT_TOKEN in env)."
         ),
     )
+    build_timeout_seconds: int = Field(
+        default=600,
+        description=(
+            "Maximum time (in seconds) to wait for `docker build` to finish before aborting. "
+            "Increase this when your Dockerfile pulls large bases or downloads heavy assets "
+            "(e.g. browser binaries) that would otherwise exceed the default."
+        ),
+    )
     is_host_volume_created: bool = Field(
         default=True,
         description=(

@@ -382,6 +382,80 @@ propagate-changes agent_name mngr_host_dir="$HOME/.minds/mngr":
         --agent "$agent_name" \
         --user root --host 127.0.0.1 --port "$port" --key "$key"
 
+# Create a Cloudflare tunnel for the named agent's system_interface
+# service: locks the tunnel to the active imbue_cloud account, injects
+# the cloudflared token into the agent (via mngr exec), and registers
+# system_interface at http://localhost:8000 on the tunnel. Prints the
+# resulting public hostname. Idempotent: tunnels create returns the
+# existing tunnel if one already exists; service add no-ops if the same
+# DNS+target is already registered.
+# Forward system_interface for a minds-profile agent.
+forward-minds-system-interface agent_name: (_forward-system-interface agent_name "$HOME/.minds/mngr" "minds-")
+
+# Same as forward-minds-system-interface but for the dev (devminds) profile.
+forward-devminds-system-interface agent_name: (_forward-system-interface agent_name "$HOME/.devminds/mngr" "devminds-")
+
+[private]
+_forward-system-interface agent_name mngr_host_dir mngr_prefix:
+    #!/bin/bash
+    set -ueo pipefail
+    export MNGR_HOST_DIR="{{mngr_host_dir}}"
+    export MNGR_PREFIX="{{mngr_prefix}}"
+    AGENT_NAME="{{agent_name}}"
+
+    # Resolve agent name to its full agent_id from local mngr state. The
+    # tunnel layer truncates "agent-<hex>" to the first 16 hex chars for
+    # hostname uniqueness, so the full id is what we want here -- not the
+    # short name (which would let two agents with the same name across
+    # different hosts collide in the tunnel namespace).
+    AGENT_ID=$(uv run mngr list --format jsonl 2>/dev/null \
+        | jq -r --arg n "$AGENT_NAME" 'select(.resource_type == "agent" and .name == $n) | .id' \
+        | head -1)
+    if [ -z "$AGENT_ID" ]; then
+        echo "error: no agent named '$AGENT_NAME' found via 'mngr list' under MNGR_HOST_DIR=$MNGR_HOST_DIR" >&2
+        exit 1
+    fi
+
+    EMAIL=$(uv run mngr imbue_cloud auth list \
+        | jq -r '.[] | select(.is_active) | .email')
+    if [ -z "$EMAIL" ]; then
+        echo "error: no active imbue_cloud account; run 'mngr imbue_cloud auth signin' first" >&2
+        exit 1
+    fi
+
+    TUNNEL_JSON=$(uv run mngr imbue_cloud tunnels create "$AGENT_ID" \
+        --account "$EMAIL" \
+        --policy "$(jq -nc --arg e "$EMAIL" '{emails:[$e]}')")
+    TUNNEL_NAME=$(jq -r '.tunnel_name' <<<"$TUNNEL_JSON")
+    TOKEN=$(jq -r '.token' <<<"$TUNNEL_JSON")
+    if [ -z "$TUNNEL_NAME" ] || [ "$TOKEN" = "null" ]; then
+        echo "error: tunnels create did not return a usable tunnel/token:" >&2
+        echo "$TUNNEL_JSON" >&2
+        exit 1
+    fi
+
+    # Inject the token where the agent's cloudflare-tunnel service
+    # (libs/cloudflare_tunnel/.../runner.py) watches for it. Strip any
+    # existing CLOUDFLARE_TUNNEL_TOKEN line first so we don't keep two
+    # copies, then atomic-rename so the watcher never observes a
+    # half-written file. CF tokens are base64url-y, so single-quoting
+    # the value is safe.
+    uv run mngr exec "$AGENT_ID" \
+        "mkdir -p runtime && { [ -f runtime/secrets ] && grep -Ev '^export[[:space:]]+CLOUDFLARE_TUNNEL_TOKEN=' runtime/secrets || true; printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\n' '$TOKEN'; } > runtime/secrets.tmp && mv runtime/secrets.tmp runtime/secrets"
+
+    URL=$(uv run mngr imbue_cloud tunnels services add \
+        "$TUNNEL_NAME" system_interface http://localhost:8000 \
+        | jq -r .hostname)
+    if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+        echo "error: services add did not return a hostname" >&2
+        exit 1
+    fi
+
+    echo
+    echo "Forwarded system_interface for $AGENT_NAME ($AGENT_ID)"
+    echo "  URL:    https://$URL/"
+    echo "  Tunnel: $TUNNEL_NAME (locked to $EMAIL)"
+
 # Spin up a new PRIVATE personal GitHub repo as a full-history copy of
 # imbue-ai/forever-claude-template's main. Clones into
 # <parent_dir>/<repo_name> (default parent: $HOME/project), creates the
@@ -445,20 +519,51 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
     echo
 
     if [ ! -t 0 ]; then
-        echo "(stdin is not a TTY; skipping interactive token prompt -- create .env manually if needed)"
+        echo "(stdin is not a TTY; skipping interactive token prompt and LiteLLM key creation -- create .env manually if needed)"
         exit 0
     fi
-    echo "Paste the generated PAT here (input hidden), or press Enter to skip writing .env:"
-    token=""
-    read -r -s token || token=""
+
+    echo "Paste the generated PAT here (input hidden), or press Enter to skip GH_TOKEN:"
+    gh_token=""
+    read -r -s gh_token || gh_token=""
     echo
-    if [ -z "$token" ]; then
-        echo "No token entered; skipped .env"
+
+    # Mint a LiteLLM virtual key for this repo and pull ANTHROPIC_API_KEY +
+    # ANTHROPIC_BASE_URL out of the JSON response (see
+    # libs/mngr_imbue_cloud/.../cli/keys.py:create_key -> emits {key, base_url}).
+    # Failures here are non-fatal: the GitHub repo is already created and
+    # pushed at this point, and the user can always create a key manually
+    # later via `mngr imbue_cloud keys litellm create`.
+    api_key=""
+    base_url=""
+    echo "Creating LiteLLM virtual key (alias: $repo)..."
+    litellm_output=""
+    if litellm_output=$(uv run --project {{justfile_directory()}} mngr imbue_cloud keys litellm create --alias "$repo" 2>&1); then
+        api_key=$(jq -r '.key // empty' <<<"$litellm_output" 2>/dev/null || echo "")
+        base_url=$(jq -r '.base_url // empty' <<<"$litellm_output" 2>/dev/null || echo "")
+        if [ -z "$api_key" ] || [ -z "$base_url" ]; then
+            echo "warning: LiteLLM create returned unexpected output; skipping ANTHROPIC_* vars" >&2
+            echo "$litellm_output" >&2
+            api_key=""
+            base_url=""
+        fi
+    else
+        echo "warning: 'mngr imbue_cloud keys litellm create' failed; skipping ANTHROPIC_* vars" >&2
+        echo "$litellm_output" >&2
+        api_key=""
+        base_url=""
+    fi
+
+    env_file="$target/.env"
+    if [ -z "$gh_token" ] && [ -z "$api_key" ]; then
+        echo "Nothing collected (no GH PAT, no LiteLLM key); skipped .env"
         exit 0
     fi
-    env_file="$target/.env"
-    printf 'export GH_TOKEN=%s\n' "$token" > "$env_file"
+    : > "$env_file"
     chmod 600 "$env_file"
+    [ -n "$gh_token" ] && printf 'export GH_TOKEN=%s\n' "$gh_token" >> "$env_file"
+    [ -n "$api_key" ] && printf 'export ANTHROPIC_API_KEY=%s\n' "$api_key" >> "$env_file"
+    [ -n "$base_url" ] && printf 'export ANTHROPIC_BASE_URL=%s\n' "$base_url" >> "$env_file"
     echo "Wrote $env_file (mode 600)"
 
 # Destroy and remove every host in the pool with status='released'.
