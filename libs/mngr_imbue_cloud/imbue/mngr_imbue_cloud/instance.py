@@ -52,6 +52,7 @@ from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -128,11 +129,6 @@ class ImbueCloudProvider(BaseProviderInstance):
     session_store: ImbueCloudSessionStore = Field(frozen=True, description="Shared session store keyed by user_id")
 
     _leased_hosts_cache: list[LeasedHostInfo] | None = PrivateAttr(default=None)
-    # Cache of the parsed listing-script output keyed by host_id, populated by
-    # ``discover_hosts_and_agents`` and consumed by
-    # ``get_host_and_agent_details`` so a single SSH round-trip (per host)
-    # serves both phases of ``mngr list``.
-    _listing_raw_cache: dict[HostId, dict[str, Any]] = PrivateAttr(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Capability flags
@@ -157,7 +153,6 @@ class ImbueCloudProvider(BaseProviderInstance):
     def reset_caches(self) -> None:
         super().reset_caches()
         self._leased_hosts_cache = None
-        self._listing_raw_cache.clear()
 
     # ------------------------------------------------------------------
     # Paths
@@ -285,16 +280,18 @@ class ImbueCloudProvider(BaseProviderInstance):
         ]
 
     # ------------------------------------------------------------------
-    # Optimized listing
+    # Listing
     #
-    # The default ``discover_hosts_and_agents`` and
-    # ``get_host_and_agent_details`` implementations on
-    # ``BaseProviderInstance`` reach out to the leased container many
-    # times per host (``ls``, ``stat``, ``ps``, ``tmux``, ...), so on a
-    # high-RTT remote VPS ``mngr list`` ends up doing ~15 sequential
-    # SSH round-trips per host. The override below collects everything
-    # we need with one ``build_listing_collection_script`` execution per
-    # host and caches the parsed output for the second phase to reuse.
+    # Discovery is purely connector-API driven (no SSH), mirroring how
+    # mngr_modal does discovery: a single SSH failure must not drop a
+    # leased host from ``mngr list``. Each lease is surfaced as a
+    # ``DiscoveredHost`` plus a synthesized ``DiscoveredAgent`` for the
+    # pre-baked agent. The expensive single-shot listing script then runs
+    # in ``get_host_and_agent_details``, which is invoked in parallel by
+    # the listing layer; on SSH failure that path falls through to
+    # ``super().get_host_and_agent_details`` -> ``to_offline_host``, which
+    # produces an offline ``HostDetails`` with state UNAUTHENTICATED for
+    # auth-class failures and a derived offline state otherwise.
     # ------------------------------------------------------------------
 
     def discover_hosts_and_agents(
@@ -312,31 +309,17 @@ class ImbueCloudProvider(BaseProviderInstance):
                 provider_name=self.name,
                 host_state=HostState.RUNNING,
             )
-            try:
-                raw = self._collect_listing_raw(entry)
-            except (HostConnectionError, MngrError) as exc:
-                logger.warning("imbue_cloud[{}] listing collection for {} failed: {}", self.name, host_id, exc)
-                self.on_connection_error(host_id)
-                result[host_ref] = []
-                continue
-            self._listing_raw_cache[host_id] = raw
-            agent_refs: list[DiscoveredAgent] = []
-            for agent_raw in raw.get("agents", []):
-                data = agent_raw.get("data", {})
-                agent_id_str = data.get("id")
-                agent_name_str = data.get("name")
-                if not agent_id_str or not agent_name_str:
-                    logger.debug("imbue_cloud[{}] skipping agent missing id/name: {}", self.name, data)
-                    continue
-                agent_refs.append(
-                    DiscoveredAgent(
-                        agent_id=AgentId(agent_id_str),
-                        agent_name=AgentName(agent_name_str),
-                        host_id=host_id,
-                        provider_name=self.name,
-                    )
+            # The lease only knows about its single pre-baked agent. If the
+            # SSH succeeds later in get_host_and_agent_details, additional
+            # agents discovered there will replace this stub.
+            result[host_ref] = [
+                DiscoveredAgent(
+                    agent_id=AgentId(entry.agent_id),
+                    agent_name=AgentName(entry.agent_id),
+                    host_id=host_id,
+                    provider_name=self.name,
                 )
-            result[host_ref] = agent_refs
+            ]
         return result
 
     def _collect_listing_raw(self, lease: LeasedHostInfo) -> dict[str, Any]:
@@ -364,16 +347,36 @@ class ImbueCloudProvider(BaseProviderInstance):
         | None = None,
         on_error: Callable[[DiscoveredAgent | DiscoveredHost, BaseException], None] | None = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
-        """Build HostDetails + AgentDetails from the cached listing output.
+        """Collect host + agent details with a single SSH round-trip when reachable.
 
-        Falls back to the framework's default (per-field SSH) when the
-        cache is cold or the cached entry can't be matched to a current
-        lease (rare; happens if the lease was released between phases).
+        Falls back to the framework's default offline path (which uses
+        ``to_offline_host``) when SSH or the listing script fails, so an
+        unreachable lease still appears in the listing with an offline
+        host state instead of disappearing.
         """
         host_id = host_ref.host_id
-        raw = self._listing_raw_cache.get(host_id)
         lease = self._find_leased(host_id)
-        if raw is None or lease is None:
+        if lease is None:
+            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+        try:
+            raw = self._collect_listing_raw(lease)
+        except HostConnectionError as exc:
+            logger.debug(
+                "imbue_cloud[{}] host {} unreachable during optimized listing, falling back to offline: {}",
+                self.name,
+                host_id,
+                exc,
+            )
+            self.on_connection_error(host_id)
+            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+        except MngrError as exc:
+            logger.warning(
+                "imbue_cloud[{}] listing collection for {} failed: {}",
+                self.name,
+                host_id,
+                exc,
+            )
+            self.on_connection_error(host_id)
             return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
         try:
             host = self.get_host(host_id)
@@ -585,7 +588,29 @@ class ImbueCloudProvider(BaseProviderInstance):
         raise HostNotFoundError(host)
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
-        raise NotImplementedError("imbue_cloud does not yet support offline hosts; lease state is server-side")
+        """Build an OfflineHost from the connector's lease metadata.
+
+        The lease has no certified host data (that lives on the host itself,
+        readable only via SSH). For the offline path used by ``mngr list``
+        when SSH fails, we synthesize a minimal ``CertifiedHostData`` from
+        the lease so the listing layer can still produce a row.
+        """
+        lease = self._find_leased(host_id)
+        if lease is None:
+            raise HostNotFoundError(host_id)
+        now = datetime.now(timezone.utc)
+        certified_host_data = CertifiedHostData(
+            host_id=str(host_id),
+            host_name=lease.host_id,
+            created_at=now,
+            updated_at=now,
+        )
+        return OfflineHost(
+            id=host_id,
+            certified_host_data=certified_host_data,
+            provider_instance=self,
+            mngr_ctx=self.mngr_ctx,
+        )
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
         leased = self._list_leased_hosts_cached()

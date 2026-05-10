@@ -1563,13 +1563,27 @@ class VpsDockerProvider(BaseProviderInstance):
             # Cache the host record for later use by get_host_and_agent_details
             self._host_record_cache[host_id] = record
 
-            # Determine host state from container running status
+            # Determine host state from container running status. If the VPS
+            # is unreachable, we trust the offline-state derivation rather
+            # than crashing the listing -- one bad VPS must not drop the
+            # other VPSes' hosts.
             is_running = False
             if record.vps_ip is not None and record.config is not None:
                 container_name = record.config.container_name
                 if container_name not in self._container_running_cache:
-                    with self._make_outer_for_vps_ip(record.vps_ip) as outer:
-                        self._container_running_cache[container_name] = _docker_inspect_running(outer, container_name)
+                    try:
+                        with self._make_outer_for_vps_ip(record.vps_ip) as outer:
+                            self._container_running_cache[container_name] = _docker_inspect_running(
+                                outer, container_name
+                            )
+                    except (HostConnectionError, MngrError) as exc:
+                        logger.warning(
+                            "Failed to inspect container status for host {} on VPS {}: {}",
+                            host_id,
+                            record.vps_ip,
+                            exc,
+                        )
+                        self._container_running_cache[container_name] = False
                 is_running = self._container_running_cache[container_name]
 
             has_snapshots = len(record.certified_host_data.snapshots) > 0
