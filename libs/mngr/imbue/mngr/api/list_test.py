@@ -23,7 +23,9 @@ from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import HostErrorInfo
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.api.list import ProviderErrorInfo
+from imbue.mngr.api.list import WarningInfo
 from imbue.mngr.api.list import _ListAgentsParams
+from imbue.mngr.api.list import _WarningEmitter
 from imbue.mngr.api.list import _apply_cel_filters
 from imbue.mngr.api.list import _collect_and_emit_details_for_host
 from imbue.mngr.api.list import _construct_discover_and_emit_for_provider
@@ -1126,6 +1128,7 @@ class _RaisingDiscoveryProviderInstance(MockProviderInstance):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        on_warning: Any = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         raise MngrError("simulated discovery failure from test")
 
@@ -1158,6 +1161,7 @@ class _MismatchedProviderInstance(MockProviderInstance):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        on_warning: Any = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         mismatched_host = DiscoveredHost(
             host_id=HostId.generate(),
@@ -1255,6 +1259,7 @@ def _make_list_params(
     error_behavior: ErrorBehavior = ErrorBehavior.CONTINUE,
     on_error: Any = None,
     on_agent: Any = None,
+    on_warning: Any = None,
     include_filters: tuple[str, ...] = (),
     exclude_filters: tuple[str, ...] = (),
 ) -> _ListAgentsParams:
@@ -1269,6 +1274,7 @@ def _make_list_params(
         error_behavior=error_behavior,
         on_agent=on_agent,
         on_error=on_error,
+        on_warning=on_warning,
     )
 
 
@@ -2010,3 +2016,49 @@ def test_process_host_with_error_handling_abort_mode_propagates_error(
         )
 
     assert result.errors == []
+
+
+# =============================================================================
+# WarningInfo capture: explicit on_warning + result.warnings plumbing
+# =============================================================================
+
+
+def test_warning_emitter_appends_to_result_warnings() -> None:
+    """The _WarningEmitter callable appends WarningInfo records to result.warnings."""
+    result = ListResult()
+    lock = Lock()
+    emitter = _WarningEmitter(result=result, results_lock=lock, on_warning=None)
+    emitter(WarningInfo(source="vultr-test", type="VultrApiKeyMissing", message="API key not configured"))
+
+    assert len(result.warnings) == 1
+    assert result.warnings[0].source == "vultr-test"
+    assert result.warnings[0].type == "VultrApiKeyMissing"
+    assert result.warnings[0].message == "API key not configured"
+
+
+def test_warning_emitter_invokes_on_warning_callback() -> None:
+    """The emitter forwards each warning to the params.on_warning callback, parallel to on_error."""
+    result = ListResult()
+    lock = Lock()
+    captured: list[WarningInfo] = []
+    emitter = _WarningEmitter(result=result, results_lock=lock, on_warning=captured.append)
+    warning = WarningInfo(source="vultr-test", type="VultrApiKeyMissing", message="API key not configured")
+    emitter(warning)
+
+    # Callback fires alongside the structured collection -- not instead of it.
+    assert len(captured) == 1
+    assert captured[0] is warning
+    assert len(result.warnings) == 1
+    assert result.warnings[0] is warning
+
+
+def test_list_agents_returns_empty_warnings_when_none_emitted(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """list_agents returns a ListResult with the warnings field present (default empty).
+
+    Smoke test that the field is wired through the public API; populated-warnings
+    behavior is covered by per-provider tests.
+    """
+    result = list_agents(mngr_ctx=temp_mngr_ctx, is_streaming=False)
+    assert result.warnings == []

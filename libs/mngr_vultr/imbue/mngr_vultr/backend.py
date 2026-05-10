@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any
 from typing import Final
 
@@ -14,6 +15,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.data_types import WarningInfo
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import HostId
@@ -50,10 +52,16 @@ class VultrProvider(VpsDockerProvider):
         self._instances_cache = self.vultr_client.list_instances()
         return self._instances_cache
 
-    def _get_tagged_vps_ips(self) -> list[str]:
+    def _get_tagged_vps_ips(
+        self,
+        on_warning: Callable[[WarningInfo], None] | None = None,
+    ) -> list[str]:
         """Get IPs of Vultr instances tagged with this provider's name."""
         if not self.vultr_client.api_key.get_secret_value():
-            logger.warning("Vultr API key not configured, skipping VPS discovery")
+            message = "Vultr API key not configured, skipping VPS discovery"
+            logger.warning(message)
+            if on_warning is not None:
+                on_warning(WarningInfo(source=str(self.name), type="VultrApiKeyMissing", message=message))
             return []
         provider_tag = f"mngr-provider={self.name}"
         instances = self._list_instances_cached()
@@ -69,6 +77,7 @@ class VultrProvider(VpsDockerProvider):
     def _read_records_from_vps(
         self,
         vps_ip: str,
+        on_warning: Callable[[WarningInfo], None] | None = None,
     ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
         """Read all host records and agent data from a single VPS in one SSH command.
 
@@ -85,18 +94,22 @@ class VultrProvider(VpsDockerProvider):
                     return [], {}
                 return host_store.list_all_host_records_with_agents()
         except (HostConnectionError, MngrError) as e:
-            logger.warning("Failed to read records from VPS {}: {}", vps_ip, e)
+            message = f"Failed to read records from VPS {vps_ip}: {e}"
+            logger.warning(message)
+            if on_warning is not None:
+                on_warning(WarningInfo(source=str(self.name), type="VultrVpsReadFailed", message=message))
             return [], {}
 
     def _discover_host_records_with_agents(
         self,
+        on_warning: Callable[[WarningInfo], None] | None = None,
     ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
         """Discover host records and agent data from all Vultr VPSes.
 
         Queries the Vultr API for tagged instances, then SSHes to each VPS
         in parallel to read host records and agent data in a single command.
         """
-        vps_ips = self._get_tagged_vps_ips()
+        vps_ips = self._get_tagged_vps_ips(on_warning=on_warning)
         if not vps_ips:
             return [], {}
 
@@ -112,7 +125,7 @@ class VultrProvider(VpsDockerProvider):
                     name="vultr_read_records",
                     max_workers=min(len(vps_ips), 32),
                 ) as executor:
-                    futures = [executor.submit(self._read_records_from_vps, ip) for ip in vps_ips]
+                    futures = [executor.submit(self._read_records_from_vps, ip, on_warning) for ip in vps_ips]
 
                 for future in futures:
                     records, agent_data = future.result()

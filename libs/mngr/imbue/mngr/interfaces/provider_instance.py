@@ -29,6 +29,7 @@ from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
+from imbue.mngr.interfaces.data_types import WarningInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -419,6 +420,12 @@ class ProviderInstanceInterface(MutableModel, ABC):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        # When provided, the provider may invoke this callback to surface
+        # non-fatal, structured warnings (e.g. "API key not configured") to
+        # the listing pipeline. Independent of `logger.warning(...)`: providers
+        # are still expected to log warnings for human visibility -- this
+        # callback is solely the structured/programmatic channel.
+        on_warning: Callable[[WarningInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         """Load hosts from this provider and fetch agent references for each host.
 

@@ -187,6 +187,21 @@ class CommandResult(FrozenModel):
     success: bool = Field(description="True if the command succeeded (had an expected exit code)")
 
 
+class WarningInfo(FrozenModel):
+    """Structured non-fatal warning surfaced from a provider during listing.
+
+    Providers explicitly construct and emit these via the on_warning callback
+    threaded through `discover_hosts_and_agents`, alongside (or instead of)
+    their `logger.warning(...)` calls. This gives programmatic consumers
+    (--format json/jsonl) a typed record with provider attribution rather
+    than a free-form log line.
+    """
+
+    source: str = Field(description="Origin of the warning, e.g. provider instance name or subsystem")
+    type: str = Field(description="Stable identifier for the warning category (e.g. 'VultrApiKeyMissing')")
+    message: str = Field(description="Human-readable warning message")
+
+
 class CpuResources(FrozenModel):
     """CPU resource information for a host."""
 
