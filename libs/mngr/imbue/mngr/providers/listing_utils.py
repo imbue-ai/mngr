@@ -195,7 +195,7 @@ fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/extract"
-if ! docker cp "$CID:{host_dir}" "$TMP/extract/" 2>/dev/null; then
+if ! docker cp "$CID":{quoted_host_dir} "$TMP/extract/" 2>/dev/null; then
     echo "EXTRACTION_FAILED=true"
     exit 0
 fi
