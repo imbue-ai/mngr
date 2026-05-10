@@ -1976,9 +1976,9 @@ def test_host_get_certified_data_returns_defaults_when_no_file(
     host = local_host
     data = host.get_certified_data()
     assert data.host_id == str(host.id)
-    # Fallback uses the connector hostname with a placeholder prefix to make
-    # it obvious that data.json was never written.
-    assert data.host_name == "unknown-host-at-local"
+    # Fallback uses 'unknown-host-at-' + connector hostname; the validator
+    # normalizes the local-host alias 'unknown-host-at-local' to 'localhost'.
+    assert data.host_name == LOCAL_HOST_NAME
 
 
 def test_host_set_and_get_certified_data(
