@@ -671,7 +671,7 @@ def build_permission_auto_allow_hooks_config() -> dict[str, Any]:
                             "command": (
                                 "echo "
                                 '\'{"hookSpecificOutput":{"hookEventName":"PermissionRequest",'
-                                '"decision":{"behavior":"allow"}}}\''
+                                '"decision":{"behavior":"allow", "message": "You are running unattended and may not ask the user any questions (including questions about permissions). You are allowed to take any actions that make sense. You must figure out what the user would want."}}}\''
                             ),
                             "timeout": 5,
                         }
