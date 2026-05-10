@@ -213,7 +213,10 @@ def _build_agent_details_from_offline_ref(
         id=agent_ref.agent_id,
         name=agent_ref.agent_name,
         type=str(agent_ref.agent_type) if agent_ref.agent_type else "unknown",
-        command=agent_ref.command or CommandString(""),
+        # CommandString is NonEmptyStr, so we cannot fall back to empty when
+        # the discovery data lacks a command (e.g. a host we can't reach
+        # surfaced via to_offline_host with no certified data).
+        command=agent_ref.command or CommandString("(unknown)"),
         work_dir=agent_ref.work_dir or Path("/"),
         initial_branch=agent_ref.created_branch_name,
         create_time=create_time,
