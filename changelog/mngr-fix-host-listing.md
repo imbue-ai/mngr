@@ -1,0 +1,1 @@
+Fix `mngr list` so a single unreachable imbue_cloud (or vultr/vps_docker) host no longer drops the host from the listing — unauthorized/unreachable hosts now show up with the appropriate offline state instead of disappearing.
