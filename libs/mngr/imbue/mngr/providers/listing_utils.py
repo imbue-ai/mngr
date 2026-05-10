@@ -7,9 +7,22 @@ in a single SSH command instead of making many individual round-trips.
 The shell script collects structured output with unique delimiters, and
 the parser extracts it into a dict suitable for building HostDetails and
 AgentDetails.
+
+There are two variants:
+- ``build_listing_collection_script`` runs *inside* the host (filesystem
+  paths are real). Used by providers that have direct SSH access to the
+  host (or run via ``docker exec`` into a running container).
+- ``build_outer_listing_collection_script`` runs on an outer/VPS root
+  shell that has ``docker`` available. It looks up the container by
+  label, dispatches to ``docker exec`` for running containers, or to
+  ``docker cp`` + a stopped-variant script for non-running ones. This
+  lets us collect listing data without needing the inner container's
+  sshd to be reachable -- a stopped container still surfaces its
+  ``data.json``, host name, agents, etc.
 """
 
 import json
+import shlex
 from typing import Any
 from typing import Final
 
@@ -84,6 +97,116 @@ if [ -d '{host_dir}/agents' ]; then
         echo '{SEP_AGENT_END}'
     done
 fi
+"""
+
+
+@pure
+def _build_stopped_listing_collection_script(prefix: str) -> str:
+    """Build a script that reads listing data from an *extracted* host_dir tree.
+
+    Used in the stopped-container branch of ``build_outer_listing_collection_script``
+    after ``docker cp`` has copied the container's host_dir to a temp path on
+    the outer host. Expects ``HOST_DIR`` env var to point at that path. Emits
+    the same delimiter format as ``build_listing_collection_script`` so the
+    same parser handles both. Skips fields that only make sense for a running
+    container (uptime, btime, ps output, tmux info, active marker).
+    """
+    return f"""
+echo "LOCK_MTIME=$(stat -c %Y "$HOST_DIR/host_lock" 2>/dev/null)"
+echo "SSH_ACTIVITY_MTIME=$(stat -c %Y "$HOST_DIR/activity/ssh" 2>/dev/null)"
+echo '{SEP_DATA_JSON_START}'
+cat "$HOST_DIR/data.json" 2>/dev/null || echo '{{}}'
+echo ''
+echo '{SEP_DATA_JSON_END}'
+echo '{SEP_PS_START}'
+echo '{SEP_PS_END}'
+if [ -d "$HOST_DIR/agents" ]; then
+    for agent_dir in "$HOST_DIR/agents"/*/; do
+        [ -d "$agent_dir" ] || continue
+        data_file="${{agent_dir}}data.json"
+        [ -f "$data_file" ] || continue
+        agent_id=$(basename "$agent_dir")
+        echo '{SEP_AGENT_START}'"$agent_id"'---'
+        echo '{SEP_AGENT_DATA_START}'
+        cat "$data_file"
+        echo ''
+        echo '{SEP_AGENT_DATA_END}'
+        echo "USER_MTIME=$(stat -c %Y "${{agent_dir}}activity/user" 2>/dev/null)"
+        echo "AGENT_MTIME=$(stat -c %Y "${{agent_dir}}activity/agent" 2>/dev/null)"
+        echo "START_MTIME=$(stat -c %Y "${{agent_dir}}activity/start" 2>/dev/null)"
+        echo "TMUX_INFO="
+        echo "ACTIVE=false"
+        url=$(cat "${{agent_dir}}status/url" 2>/dev/null | tr -d '\\n')
+        echo "URL=$url"
+        echo '{SEP_AGENT_END}'
+    done
+fi
+"""
+
+
+# Unique heredoc terminators so the embedded inner scripts can't accidentally
+# collide with a line of bash inside their own content.
+_INNER_RUNNING_EOF: Final[str] = "MNGR_INNER_LISTING_EOF_a7f3d9e2"
+_INNER_STOPPED_EOF: Final[str] = "MNGR_STOPPED_LISTING_EOF_a7f3d9e2"
+
+
+@pure
+def build_outer_listing_collection_script(
+    host_id: str,
+    host_dir: str,
+    prefix: str,
+    host_id_label: str = "com.imbue.mngr.host-id",
+) -> str:
+    """Build a script that runs on the outer (VPS root) and collects listing data.
+
+    Looks up the container by ``<host_id_label>=<host_id>`` label, then:
+    - if the container is missing: emits ``CONTAINER_MISSING=true``.
+    - if the container is running: ``docker exec``s the inner listing script.
+    - otherwise: ``docker cp``s the host_dir tree to a temp path on the outer
+      host and runs the stopped-variant listing script against it.
+
+    Always prepends ``CONTAINER_STATE=`` and ``CONTAINER_EXIT_CODE=`` lines so
+    the caller can map the docker container status to a ``HostState`` without
+    a second round-trip.
+    """
+    inner_running = build_listing_collection_script(host_dir, prefix)
+    inner_stopped = _build_stopped_listing_collection_script(prefix)
+    quoted_host_id = shlex.quote(str(host_id))
+    quoted_host_dir = shlex.quote(host_dir)
+    quoted_label = shlex.quote(host_id_label)
+    return f"""CID=$(docker ps -aq --filter label={quoted_label}={quoted_host_id} | head -1)
+if [ -z "$CID" ]; then
+    echo "CONTAINER_MISSING=true"
+    exit 0
+fi
+STATE=$(docker inspect --format '{{{{.State.Status}}}}' "$CID" 2>/dev/null)
+EXIT_CODE=$(docker inspect --format '{{{{.State.ExitCode}}}}' "$CID" 2>/dev/null)
+echo "CONTAINER_STATE=$STATE"
+echo "CONTAINER_EXIT_CODE=$EXIT_CODE"
+if [ "$STATE" = "running" ]; then
+    # ``-w /`` overrides the container's cwd (which can refer to a path
+    # that no longer exists in the container filesystem, causing
+    # ``OCI runtime exec failed: chdir to cwd ... no such file or directory``)
+    docker exec -i -w / "$CID" bash <<'{_INNER_RUNNING_EOF}'
+{inner_running}
+{_INNER_RUNNING_EOF}
+    exit 0
+fi
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/extract"
+if ! docker cp "$CID:{host_dir}" "$TMP/extract/" 2>/dev/null; then
+    echo "EXTRACTION_FAILED=true"
+    exit 0
+fi
+EXTRACTED="$TMP/extract/$(basename {quoted_host_dir})"
+if [ ! -d "$EXTRACTED" ]; then
+    echo "EXTRACTION_FAILED=true"
+    exit 0
+fi
+HOST_DIR="$EXTRACTED" bash <<'{_INNER_STOPPED_EOF}'
+{inner_stopped}
+{_INNER_STOPPED_EOF}
 """
 
 
@@ -173,6 +296,14 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
             result["lock_mtime"] = parse_optional_int(line[len("LOCK_MTIME=") :])
         elif line.startswith("SSH_ACTIVITY_MTIME=") and "ssh_activity_mtime" not in result:
             result["ssh_activity_mtime"] = parse_optional_int(line[len("SSH_ACTIVITY_MTIME=") :])
+        elif line.startswith("CONTAINER_STATE=") and "container_state" not in result:
+            result["container_state"] = line[len("CONTAINER_STATE=") :].strip()
+        elif line.startswith("CONTAINER_EXIT_CODE=") and "container_exit_code" not in result:
+            result["container_exit_code"] = parse_optional_int(line[len("CONTAINER_EXIT_CODE=") :])
+        elif line.startswith("CONTAINER_MISSING=") and "container_missing" not in result:
+            result["container_missing"] = line[len("CONTAINER_MISSING=") :].strip() == "true"
+        elif line.startswith("EXTRACTION_FAILED=") and "extraction_failed" not in result:
+            result["extraction_failed"] = line[len("EXTRACTION_FAILED=") :].strip() == "true"
         elif line.strip() == SEP_DATA_JSON_START:
             idx += 1
             json_str, idx = _extract_delimited_block(lines, idx, SEP_DATA_JSON_END)

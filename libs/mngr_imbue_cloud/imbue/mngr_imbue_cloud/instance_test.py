@@ -70,32 +70,21 @@ def test_map_docker_status_exited_nonzero_note_includes_exit_code() -> None:
 
 
 class _StubImbueCloudProvider(ImbueCloudProvider):
-    """Test stub that injects a deterministic outer-state result and tmp keypair paths.
+    """Test stub that supplies a tmp keypair path so we don't hit real disk paths."""
 
-    Used to exercise ``_build_offline_details_from_lease`` without standing up a
-    real connector / SSH stack: the SSH-failure branch in ``mngr list`` is the
-    whole point of this branch, so we want a regression test that locks in the
-    contract (host still appears, SSH info populated, failure_reason carries
-    both the inner SSH error and the outer-state diagnostic).
-    """
-
-    _stub_outer_state_result: tuple[HostState, str | None] = (HostState.STOPPED, "container exited cleanly")
     _stub_keypair_dir: Path = Path("/tmp/stub-imbue-cloud-keypair")
-
-    def _inspect_outer_container_state(self, host_id: HostId) -> tuple[HostState, str | None]:
-        return self._stub_outer_state_result
 
     def _host_keypair_paths(self, host_id: HostId) -> tuple[Path, Path]:
         return self._stub_keypair_dir / "ssh_key", self._stub_keypair_dir / "ssh_key.pub"
 
 
 def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_path: Path) -> None:
-    """The SSH-failure branch must not drop the host and must carry diagnostics.
+    """When outer SSH is unreachable, the lease-only fallback must keep the host visible.
 
-    This is the regression test for the branch's stated fix: when inner SSH
-    to a leased imbue_cloud container fails, ``mngr list`` should still emit
-    a HostDetails row with SSH info populated and ``failure_reason`` carrying
-    both the inner-SSH error message and the outer-state diagnostic.
+    Regression test for the branch's stated fix: even in the worst-case
+    "no SSH at all" path, ``mngr list`` should still emit a HostDetails
+    row with the SSH target populated (so the user can see what we tried
+    to reach) and ``failure_reason`` carrying the underlying error.
     """
     provider_name = ProviderInstanceName("imbue-cloud-test")
     host_id = HostId.generate()
@@ -115,7 +104,7 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
         host_id=host_id,
         host_name=HostName(str(host_id)),
         provider_name=provider_name,
-        host_state=HostState.RUNNING,
+        host_state=HostState.CRASHED,
     )
     agent_ref = DiscoveredAgent(
         host_id=host_id,
@@ -123,12 +112,9 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
         agent_name=AgentName(str(agent_id)),
         provider_name=provider_name,
     )
-    inner_failure_message = "ssh: connect to host 203.0.113.42 port 2222: Connection timed out"
-    expected_state = HostState.UNAUTHENTICATED
-    expected_outer_note = "container is running but inner SSH was unreachable"
+    failure_message = "outer SSH unreachable: connect to host 203.0.113.42 port 22: Connection timed out"
     provider = _StubImbueCloudProvider.model_construct(
         name=provider_name,
-        _stub_outer_state_result=(expected_state, expected_outer_note),
         _stub_keypair_dir=tmp_path,
     )
 
@@ -136,7 +122,7 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
         host_ref=host_ref,
         agent_refs=[agent_ref],
         lease=lease,
-        inner_failure_message=inner_failure_message,
+        failure_message=failure_message,
     )
 
     # The host is NOT dropped from the listing -- this is the primary contract.
@@ -147,14 +133,11 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
     assert host_details.ssh.user == lease.ssh_user
     assert host_details.ssh.host == lease.vps_ip
     assert host_details.ssh.port == lease.container_ssh_port
-    # The state is whatever ``_inspect_outer_container_state`` reported, not
-    # an unconditional CRASHED.
-    assert host_details.state == expected_state
-    # ``failure_reason`` must carry BOTH the inner-SSH error and the outer
-    # diagnostic so the user has enough info to act.
-    assert host_details.failure_reason is not None
-    assert inner_failure_message in host_details.failure_reason
-    assert expected_outer_note in host_details.failure_reason
+    # State defaults to CRASHED in the lease-only fallback (we have no
+    # outer-SSH-derived state to be more specific).
+    assert host_details.state == HostState.CRASHED
+    # ``failure_reason`` carries the underlying error.
+    assert host_details.failure_reason == failure_message
     # One agent_details per agent_ref, all attached to the offline host.
     assert len(agent_details_list) == 1
     assert agent_details_list[0].id == agent_id

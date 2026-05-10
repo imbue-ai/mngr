@@ -78,7 +78,7 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
-from imbue.mngr.providers.listing_utils import build_listing_collection_script
+from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
@@ -96,6 +96,57 @@ from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
 
 _SSH_WAIT_TIMEOUT_SECONDS: Final[float] = 120.0
+
+
+def _certified_host_name(raw: Mapping[str, Any]) -> str | None:
+    """Pull the friendly host name out of the listing raw output, if present."""
+    certified = raw.get("certified_data") or {}
+    name = certified.get("host_name")
+    return name if isinstance(name, str) and name else None
+
+
+def _derive_host_state_from_raw(raw: Mapping[str, Any]) -> HostState:
+    """Map the outer-listing raw output to a HostState.
+
+    The outer listing script tags the output with ``CONTAINER_STATE``,
+    ``CONTAINER_EXIT_CODE``, and ``CONTAINER_MISSING`` so we don't have
+    to re-run docker inspect.
+    """
+    if raw.get("container_missing"):
+        return HostState.DESTROYED
+    container_state = raw.get("container_state")
+    if not container_state:
+        # Outer SSH succeeded but produced no state -- treat as crashed
+        # (no info to be more specific).
+        return HostState.CRASHED
+    exit_code = raw.get("container_exit_code") or 0
+    has_certified_data = bool(raw.get("certified_data"))
+    if container_state == "running" and has_certified_data:
+        return HostState.RUNNING
+    if container_state == "running":
+        # Container is up but docker exec didn't give us data -- we know
+        # the host exists but can't read its state from inside.
+        return HostState.UNAUTHENTICATED
+    state, _note = _map_docker_status_to_host_state(container_state, exit_code)
+    return state
+
+
+def _derive_offline_note_from_raw(raw: Mapping[str, Any]) -> str | None:
+    """Produce a short ``failure_reason`` note for non-running containers.
+
+    Returns None for running containers (no note needed) and for the
+    DESTROYED / missing case (the state itself is the message). For
+    stopped/paused/etc., returns the human-readable note that
+    ``_map_docker_status_to_host_state`` produced.
+    """
+    container_state = raw.get("container_state")
+    if not container_state or container_state == "running":
+        return None
+    if raw.get("container_missing"):
+        return None
+    exit_code = raw.get("container_exit_code") or 0
+    _state, note = _map_docker_status_to_host_state(container_state, exit_code)
+    return note
 
 
 def _map_docker_status_to_host_state(status: str, exit_code: int) -> tuple[HostState, str | None]:
@@ -154,6 +205,11 @@ class ImbueCloudProvider(BaseProviderInstance):
     session_store: ImbueCloudSessionStore = Field(frozen=True, description="Shared session store keyed by user_id")
 
     _leased_hosts_cache: list[LeasedHostInfo] | None = PrivateAttr(default=None)
+    # Parsed listing output keyed by host_id; populated by
+    # ``discover_hosts_and_agents`` via outer SSH + ``docker exec`` (running)
+    # or ``docker cp`` (stopped), and consumed by ``get_host_and_agent_details``
+    # so the two listing phases share a single outer-SSH round-trip per host.
+    _listing_raw_cache: dict[HostId, dict[str, Any]] = PrivateAttr(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Capability flags
@@ -178,6 +234,7 @@ class ImbueCloudProvider(BaseProviderInstance):
     def reset_caches(self) -> None:
         super().reset_caches()
         self._leased_hosts_cache = None
+        self._listing_raw_cache.clear()
 
     # ------------------------------------------------------------------
     # Paths
@@ -307,16 +364,19 @@ class ImbueCloudProvider(BaseProviderInstance):
     # ------------------------------------------------------------------
     # Listing
     #
-    # Discovery is purely connector-API driven (no SSH), mirroring how
-    # mngr_modal does discovery: a single SSH failure must not drop a
-    # leased host from ``mngr list``. Each lease is surfaced as a
-    # ``DiscoveredHost`` plus a synthesized ``DiscoveredAgent`` for the
-    # pre-baked agent. The expensive single-shot listing script then runs
-    # in ``get_host_and_agent_details``, which is invoked in parallel by
-    # the listing layer; on SSH failure that path falls through to
-    # ``super().get_host_and_agent_details`` -> ``to_offline_host``, which
-    # produces an offline ``HostDetails`` with state UNAUTHENTICATED for
-    # auth-class failures and a derived offline state otherwise.
+    # Discovery is outer-SSH-primary: for each lease we connect to the
+    # VPS root (port 22) once and run ``build_outer_listing_collection_script``,
+    # which dispatches to ``docker exec`` for a running container or to
+    # ``docker cp`` (extracting host_dir to a tmp path) for a stopped one.
+    # Either way we surface the container's actual state (RUNNING /
+    # STOPPED / CRASHED / PAUSED / DESTROYED) plus the host's data.json
+    # (friendly name, image, tags, agents). The cached raw output is then
+    # consumed by ``get_host_and_agent_details`` without another SSH.
+    #
+    # Lease-only synthesis (with state=CRASHED and failure_reason carrying
+    # the underlying error) is reserved for the last-resort case where
+    # even the outer SSH is unreachable -- in normal operation we expect
+    # outer SSH to be reachable for every leased VPS.
     # ------------------------------------------------------------------
 
     def discover_hosts_and_agents(
@@ -328,41 +388,106 @@ class ImbueCloudProvider(BaseProviderInstance):
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
         for entry in leased:
             host_id = HostId(entry.host_id)
+            raw, outer_error = self._collect_listing_raw_via_outer(entry)
+            if raw is None:
+                # Outer SSH itself failed; fall back to a lease-only stub
+                # so the host doesn't disappear from `mngr list`.
+                self._listing_raw_cache.pop(host_id, None)
+                host_ref = DiscoveredHost(
+                    host_id=host_id,
+                    host_name=HostName(entry.host_id),
+                    provider_name=self.name,
+                    host_state=HostState.CRASHED,
+                )
+                agent_refs = [
+                    DiscoveredAgent(
+                        agent_id=AgentId(entry.agent_id),
+                        agent_name=AgentName(entry.agent_id),
+                        host_id=host_id,
+                        provider_name=self.name,
+                    )
+                ]
+                # Stash the outer error so get_host_and_agent_details can
+                # surface it in failure_reason.
+                self._listing_raw_cache[host_id] = {"outer_ssh_error": outer_error}
+                result[host_ref] = agent_refs
+                continue
+            self._listing_raw_cache[host_id] = raw
+            host_state = _derive_host_state_from_raw(raw)
+            if host_state == HostState.DESTROYED and not include_destroyed:
+                continue
             host_ref = DiscoveredHost(
                 host_id=host_id,
-                host_name=HostName(entry.host_id),
+                host_name=HostName(_certified_host_name(raw) or entry.host_id),
                 provider_name=self.name,
-                host_state=HostState.RUNNING,
+                host_state=host_state,
             )
-            # The lease only knows about its single pre-baked agent. If the
-            # SSH succeeds later in get_host_and_agent_details, additional
-            # agents discovered there will replace this stub.
-            result[host_ref] = [
-                DiscoveredAgent(
-                    agent_id=AgentId(entry.agent_id),
-                    agent_name=AgentName(entry.agent_id),
-                    host_id=host_id,
-                    provider_name=self.name,
+            agent_refs: list[DiscoveredAgent] = []
+            for agent_raw in raw.get("agents", []):
+                data = agent_raw.get("data", {})
+                agent_id_str = data.get("id")
+                agent_name_str = data.get("name")
+                if not agent_id_str or not agent_name_str:
+                    continue
+                agent_refs.append(
+                    DiscoveredAgent(
+                        agent_id=AgentId(agent_id_str),
+                        agent_name=AgentName(agent_name_str),
+                        host_id=host_id,
+                        provider_name=self.name,
+                    )
                 )
-            ]
+            # If the outer-SSH discovery returned no agents (e.g. container
+            # gone, or data.json is empty), still synthesize a single agent
+            # from the lease so the host shows in the listing.
+            if not agent_refs:
+                agent_refs.append(
+                    DiscoveredAgent(
+                        agent_id=AgentId(entry.agent_id),
+                        agent_name=AgentName(entry.agent_id),
+                        host_id=host_id,
+                        provider_name=self.name,
+                    )
+                )
+            result[host_ref] = agent_refs
         return result
 
-    def _collect_listing_raw(self, lease: LeasedHostInfo) -> dict[str, Any]:
-        """Run ``build_listing_collection_script`` once on the leased host.
+    def _collect_listing_raw_via_outer(
+        self,
+        lease: LeasedHostInfo,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Run the outer listing script over root SSH on the leased VPS.
 
-        Builds the host (which sets up the pyinfra connector) and runs the
-        shared listing script. Returns the parsed dict; raises
-        ``HostConnectionError`` / ``MngrError`` on SSH or remote failures
-        so the caller can decide to fall back.
+        Returns ``(raw, None)`` on success (where ``raw`` is the parsed
+        output of ``build_outer_listing_collection_script``) or
+        ``(None, error_message)`` when outer SSH can't be reached at all
+        -- the lease-only fallback case.
         """
-        host = self._build_host_object(lease)
-        script = build_listing_collection_script(str(host.host_dir), self.mngr_ctx.config.prefix)
-        result = host.execute_idempotent_command(script, timeout_seconds=30.0)
-        if not result.success:
-            raise MngrError(
-                f"imbue_cloud listing script on host {lease.host_id} exited non-zero: {result.stderr.strip()}"
+        self._ensure_outer_host_key_known(lease)
+        host_id = HostId(lease.host_id)
+        host_dir = str(self.host_dir)
+        try:
+            with self.outer_host_for(host_id) as outer:
+                assert outer is not None
+                script = build_outer_listing_collection_script(str(host_id), host_dir, self.mngr_ctx.config.prefix)
+                result = outer.execute_idempotent_command(script, timeout_seconds=60.0)
+        except (HostConnectionError, HostNotFoundError, MngrError) as exc:
+            logger.warning(
+                "imbue_cloud[{}] outer SSH unreachable for host {}: {}",
+                self.name,
+                host_id,
+                exc,
             )
-        return parse_listing_collection_output(result.stdout)
+            return None, f"outer SSH unreachable: {exc}"
+        if not result.success:
+            logger.warning(
+                "imbue_cloud[{}] outer listing script for host {} exited non-zero: {}",
+                self.name,
+                host_id,
+                result.stderr.strip(),
+            )
+            return None, f"outer listing script failed: {result.stderr.strip() or 'non-zero exit'}"
+        return parse_listing_collection_output(result.stdout), None
 
     def get_host_and_agent_details(
         self,
@@ -372,43 +497,28 @@ class ImbueCloudProvider(BaseProviderInstance):
         | None = None,
         on_error: Callable[[DiscoveredAgent | DiscoveredHost, BaseException], None] | None = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
-        """Collect host + agent details with a single SSH round-trip when reachable.
+        """Build HostDetails + AgentDetails from the cached outer-listing output.
 
-        Falls back to lease-derived offline details (with SSH info populated
-        and ``failure_reason`` carrying the underlying error) when SSH or
-        the listing script fails, so an unreachable lease still appears in
-        the listing with enough diagnostic info for the user to see what
-        we tried to connect to and why it failed.
+        ``discover_hosts_and_agents`` already did the single outer-SSH
+        round-trip and cached the parsed data; this method just shapes it
+        into the typed details structures. When the cached raw indicates
+        outer SSH failed during discovery, fall back to lease-only details
+        (state=CRASHED, ssh from lease, failure_reason carrying the
+        original error).
         """
         host_id = host_ref.host_id
         lease = self._find_leased(host_id)
         if lease is None:
             return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
-        try:
-            raw = self._collect_listing_raw(lease)
-        except HostConnectionError as exc:
-            logger.debug(
-                "imbue_cloud[{}] host {} unreachable during optimized listing, falling back to offline: {}",
-                self.name,
-                host_id,
-                exc,
-            )
-            self.on_connection_error(host_id)
-            return self._build_offline_details_from_lease(host_ref, agent_refs, lease, str(exc))
-        except MngrError as exc:
-            logger.warning(
-                "imbue_cloud[{}] listing collection for {} failed: {}",
-                self.name,
-                host_id,
-                exc,
-            )
-            self.on_connection_error(host_id)
-            return self._build_offline_details_from_lease(host_ref, agent_refs, lease, str(exc))
-        try:
-            host = self.get_host(host_id)
-        except HostNotFoundError:
-            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
-        host_details = self._build_host_details_from_raw(host, host_ref, lease, raw)
+        raw = self._listing_raw_cache.get(host_id)
+        if raw is None:
+            # Discovery wasn't run for this host (rare; e.g. an explicit
+            # detail call without going through `mngr list`); fall back.
+            return self._build_offline_details_from_lease(host_ref, agent_refs, lease, "discovery did not run")
+        outer_error = raw.get("outer_ssh_error")
+        if outer_error is not None:
+            return self._build_offline_details_from_lease(host_ref, agent_refs, lease, str(outer_error))
+        host_details = self._build_host_details_from_raw(host_ref, lease, raw)
         agent_details_list: list[AgentDetails] = []
         ssh_activity = timestamp_to_datetime(raw.get("ssh_activity_mtime"))
         ps_output = raw.get("ps_output", "")
@@ -421,6 +531,14 @@ class ImbueCloudProvider(BaseProviderInstance):
             )
             if agent_details is not None:
                 agent_details_list.append(agent_details)
+        # If the raw produced no agent details (stopped container with
+        # empty agents dir, or a hung docker exec), synthesize one from
+        # any agent_ref the caller passed in so the host still shows up
+        # in the agent-driven listing table.
+        if not agent_details_list and agent_refs:
+            agent_details_list = [
+                build_agent_details_from_offline_ref(agent_ref, host_details) for agent_ref in agent_refs
+            ]
         return host_details, agent_details_list
 
     def _ensure_outer_host_key_known(self, lease: LeasedHostInfo) -> None:
@@ -449,18 +567,13 @@ class ImbueCloudProvider(BaseProviderInstance):
         host_ref: DiscoveredHost,
         agent_refs: Sequence[DiscoveredAgent],
         lease: LeasedHostInfo,
-        inner_failure_message: str,
+        failure_message: str,
     ) -> tuple[HostDetails, list[AgentDetails]]:
-        """Build HostDetails + AgentDetails from lease info when inner SSH fails.
+        """Build HostDetails + AgentDetails from lease info when outer SSH is unreachable.
 
-        When the leased container's sshd is unreachable we still have the
-        VPS root SSH (port 22) in our pocket -- the lease step authorized
-        the same key on both. We use it to ``docker inspect`` the
-        container so we can show the user the *real* state (STOPPED /
-        PAUSED / CRASHED with exit code / DESTROYED if the container is
-        gone), instead of always defaulting to CRASHED. The originating
-        inner-SSH error is still preserved on ``failure_reason`` so the
-        user knows why we had to fall back here.
+        Last-resort path: we have nothing but lease metadata. SSH info is
+        populated so the user can see the unreachable address;
+        ``failure_reason`` carries the underlying error.
         """
         private_key_path, _ = self._host_keypair_paths(host_ref.host_id)
         ssh_info = SSHInfo(
@@ -470,92 +583,42 @@ class ImbueCloudProvider(BaseProviderInstance):
             key_path=private_key_path,
             command=f"ssh -i {private_key_path} -p {lease.container_ssh_port} {lease.ssh_user}@{lease.vps_ip}",
         )
-        host_state, outer_note = self._inspect_outer_container_state(host_ref.host_id)
-        if outer_note is None:
-            failure_reason = inner_failure_message
-        else:
-            failure_reason = f"{inner_failure_message}; {outer_note}"
         host_details = HostDetails(
             id=host_ref.host_id,
             name=str(host_ref.host_name),
             provider_name=host_ref.provider_name,
-            state=host_state,
+            state=HostState.CRASHED,
             ssh=ssh_info,
-            failure_reason=failure_reason,
+            failure_reason=failure_message,
         )
         agent_details_list = [
             build_agent_details_from_offline_ref(agent_ref, host_details) for agent_ref in agent_refs
         ]
         return host_details, agent_details_list
 
-    def _inspect_outer_container_state(self, host_id: HostId) -> tuple[HostState, str | None]:
-        """Determine the leased container's state via outer (VPS root) SSH.
-
-        Returns ``(state, note)``. ``note`` is a short human-readable string
-        that gets folded into ``HostDetails.failure_reason`` so the user
-        sees both the original inner-SSH failure and what the outer host
-        knows. ``note`` is ``None`` only when we have nothing extra to add.
-        Returns ``(HostState.CRASHED, "outer SSH also failed: ...")`` if
-        even the outer can't be reached -- this is the no-info-at-all case.
-        """
-        # The lease step only added the inner container's host key to
-        # known_hosts (port 2222). Scan the VPS root sshd's key (port 22)
-        # so the strict host-key check below passes -- otherwise the
-        # outer connection always fails on first contact.
-        lease = self._find_leased(host_id)
-        if lease is not None:
-            self._ensure_outer_host_key_known(lease)
-        try:
-            with self.outer_host_for(host_id) as outer:
-                assert outer is not None
-                container_id = self._resolve_container_id_on_outer(outer, host_id)
-                if container_id is None:
-                    return HostState.DESTROYED, "container not found on leased VPS"
-                result = outer.execute_idempotent_command(
-                    f"docker inspect --format '{{{{.State.Status}}}};{{{{.State.ExitCode}}}}' "
-                    f"{shlex.quote(container_id)}"
-                )
-        except (HostConnectionError, HostNotFoundError, MngrError) as exc:
-            return HostState.CRASHED, f"outer SSH also failed: {exc}"
-        if not result.success:
-            return HostState.CRASHED, f"docker inspect failed: {result.stderr.strip()}"
-        parts = result.stdout.strip().split(";", 1)
-        if len(parts) != 2:
-            return HostState.CRASHED, f"unexpected docker inspect output: {result.stdout.strip()!r}"
-        status, exit_code_str = parts[0].strip(), parts[1].strip()
-        try:
-            exit_code = int(exit_code_str)
-        except ValueError:
-            # Don't silently default to 0 -- that would map status="exited"
-            # to STOPPED ("clean exit") and hide the real state from the
-            # user. Treat a malformed exit code as the no-info case.
-            logger.warning(
-                "imbue_cloud[{}] docker inspect produced unparseable exit code {!r} for host {}",
-                self.name,
-                exit_code_str,
-                host_id,
-            )
-            return HostState.CRASHED, f"unparseable docker inspect exit code: {result.stdout.strip()!r}"
-        return _map_docker_status_to_host_state(status, exit_code)
-
     def _build_host_details_from_raw(
         self,
-        host: Host,
         host_ref: DiscoveredHost,
         lease: LeasedHostInfo,
         raw: dict[str, Any],
     ) -> HostDetails:
-        ssh_info: SSHInfo | None = None
-        ssh_connection = host.get_ssh_connection_info()
-        if ssh_connection is not None:
-            user, hostname, port, key_path = ssh_connection
-            ssh_info = SSHInfo(
-                user=user,
-                host=hostname,
-                port=port,
-                key_path=key_path,
-                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
-            )
+        """Build HostDetails from the cached outer-listing raw output.
+
+        Works for both running containers (full data via ``docker exec``)
+        and stopped containers (data.json + mtimes via ``docker cp``). The
+        state is derived from ``container_state`` in the raw output (set
+        by ``build_outer_listing_collection_script``).
+        """
+        private_key_path, _ = self._host_keypair_paths(host_ref.host_id)
+        ssh_info = SSHInfo(
+            user=lease.ssh_user,
+            host=lease.vps_ip,
+            port=lease.container_ssh_port,
+            key_path=private_key_path,
+            command=f"ssh -i {private_key_path} -p {lease.container_ssh_port} {lease.ssh_user}@{lease.vps_ip}",
+        )
+        host_state = _derive_host_state_from_raw(raw)
+        failure_reason = _derive_offline_note_from_raw(raw)
         boot_time = timestamp_to_datetime(raw.get("btime"))
         uptime_seconds = raw.get("uptime_seconds")
         lock_mtime = raw.get("lock_mtime")
@@ -582,10 +645,10 @@ class ImbueCloudProvider(BaseProviderInstance):
         memory_gb = float(memory_attr) if isinstance(memory_attr, (int, float)) else 1.0
         resource = HostResources(cpu=CpuResources(count=cpu_count), memory_gb=memory_gb, disk_gb=None, gpu=None)
         return HostDetails(
-            id=host.id,
+            id=host_ref.host_id,
             name=HostName(host_name_str),
             provider_name=host_ref.provider_name,
-            state=HostState.RUNNING,
+            state=host_state,
             image=image,
             tags=tags,
             boot_time=boot_time,
@@ -597,7 +660,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             locked_time=locked_time,
             plugin=plugin,
             ssh_activity_time=ssh_activity,
-            failure_reason=None,
+            failure_reason=failure_reason,
         )
 
     def _build_agent_details_from_raw(
