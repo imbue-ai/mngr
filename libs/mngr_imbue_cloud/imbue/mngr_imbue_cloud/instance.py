@@ -173,15 +173,16 @@ def _map_docker_status_to_host_state(status: str, exit_code: int) -> tuple[HostS
     return HostState.CRASHED, f"unrecognized docker status {status!r}"
 
 
-def _scan_container_host_key(vps_ip: str, container_ssh_port: int) -> str | None:
-    """Best-effort: pull the leased container's sshd public key for known_hosts.
+def _scan_ssh_host_key(host: str, port: int) -> str | None:
+    """Best-effort: pull a remote sshd's public key for known_hosts.
 
-    Returns ``"<key_type> <base64>"`` on success, or ``None`` on any failure
-    (timeout, connection refused, protocol error). Callers add this to
-    ``known_hosts`` so subsequent SSH connections succeed under
-    ``StrictHostKeyChecking``.
+    Used for both the inner container's sshd (port 2222) and the outer
+    VPS root sshd (port 22). Returns ``"<key_type> <base64>"`` on success,
+    or ``None`` on any failure (timeout, connection refused, protocol
+    error). Callers add this to ``known_hosts`` so subsequent SSH
+    connections succeed under ``StrictHostKeyChecking``.
     """
-    transport = paramiko.Transport((vps_ip, container_ssh_port))
+    transport = paramiko.Transport((host, port))
     try:
         transport.start_client(timeout=10.0)
         host_key = transport.get_remote_server_key()
@@ -558,7 +559,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         error -- the caller's outer-SSH guard then maps that to the
         lease-only fallback.
         """
-        scanned_key = _scan_container_host_key(lease.vps_ip, 22)
+        scanned_key = _scan_ssh_host_key(lease.vps_ip, 22)
         if scanned_key is None:
             return
         host_id = HostId(lease.host_id)
@@ -940,7 +941,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
         if not known_hosts_path.exists():
             known_hosts_path.touch()
-        scanned_key = _scan_container_host_key(lease_result.vps_ip, lease_result.container_ssh_port)
+        scanned_key = _scan_ssh_host_key(lease_result.vps_ip, lease_result.container_ssh_port)
         if scanned_key is not None:
             add_host_to_known_hosts(
                 known_hosts_path,
