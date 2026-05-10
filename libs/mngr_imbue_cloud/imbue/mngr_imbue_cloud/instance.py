@@ -98,6 +98,30 @@ from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
 _SSH_WAIT_TIMEOUT_SECONDS: Final[float] = 120.0
 
 
+def _map_docker_status_to_host_state(status: str, exit_code: int) -> tuple[HostState, str | None]:
+    """Translate docker's container ``State.Status`` into a ``HostState``.
+
+    Returns ``(state, note)`` where ``note`` is a short human-readable
+    diagnostic appended to ``HostDetails.failure_reason``. If the docker
+    container is ``running`` but inner SSH was unreachable we treat that
+    as an authentication problem -- the host is up; we just can't get
+    inside it.
+    """
+    if status == "running":
+        return HostState.UNAUTHENTICATED, "container is running on outer host but inner SSH was unreachable"
+    if status == "exited":
+        if exit_code == 0:
+            return HostState.STOPPED, "container exited cleanly"
+        return HostState.CRASHED, f"container exited with code {exit_code}"
+    if status == "paused":
+        return HostState.PAUSED, "container is paused"
+    if status in ("created", "restarting"):
+        return HostState.STARTING, f"container in {status} state"
+    if status in ("dead", "removing"):
+        return HostState.CRASHED, f"container in {status} state"
+    return HostState.CRASHED, f"unrecognized docker status {status!r}"
+
+
 def _scan_container_host_key(vps_ip: str, container_ssh_port: int) -> str | None:
     """Best-effort: pull the leased container's sshd public key for known_hosts.
 
@@ -399,21 +423,44 @@ class ImbueCloudProvider(BaseProviderInstance):
                 agent_details_list.append(agent_details)
         return host_details, agent_details_list
 
+    def _ensure_outer_host_key_known(self, lease: LeasedHostInfo) -> None:
+        """Best-effort: scan the VPS root sshd's host key and add it to known_hosts.
+
+        ``outer_host_for`` connects with strict host-key checking, but the
+        lease step only added the inner container's host key (port 2222)
+        to ``known_hosts``. Without this scan, the very first outer-SSH
+        connection always fails. The scan and add are both idempotent and
+        safe to run multiple times; on scan failure (e.g. the VPS itself
+        is unreachable) we just leave ``known_hosts`` alone and let the
+        connection produce its natural error.
+        """
+        scanned_key = _scan_container_host_key(lease.vps_ip, 22)
+        if scanned_key is None:
+            return
+        host_id = HostId(lease.host_id)
+        known_hosts_path = self._host_known_hosts_path(host_id)
+        known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+        if not known_hosts_path.exists():
+            known_hosts_path.touch()
+        add_host_to_known_hosts(known_hosts_path, lease.vps_ip, 22, scanned_key)
+
     def _build_offline_details_from_lease(
         self,
         host_ref: DiscoveredHost,
         agent_refs: Sequence[DiscoveredAgent],
         lease: LeasedHostInfo,
-        failure_message: str,
+        inner_failure_message: str,
     ) -> tuple[HostDetails, list[AgentDetails]]:
-        """Build HostDetails + AgentDetails from lease info when SSH is unavailable.
+        """Build HostDetails + AgentDetails from lease info when inner SSH fails.
 
-        Populates ``ssh`` from the lease so the user can see the address we
-        attempted to reach, and ``failure_reason`` with the underlying error
-        message. Uses ``HostState.CRASHED`` because TCP-level failure to a
-        leased container is a strong signal that the container is not
-        running (matches the default-derived state from
-        ``derive_offline_host_state`` when stop_reason is unknown).
+        When the leased container's sshd is unreachable we still have the
+        VPS root SSH (port 22) in our pocket -- the lease step authorized
+        the same key on both. We use it to ``docker inspect`` the
+        container so we can show the user the *real* state (STOPPED /
+        PAUSED / CRASHED with exit code / DESTROYED if the container is
+        gone), instead of always defaulting to CRASHED. The originating
+        inner-SSH error is still preserved on ``failure_reason`` so the
+        user knows why we had to fall back here.
         """
         private_key_path, _ = self._host_keypair_paths(host_ref.host_id)
         ssh_info = SSHInfo(
@@ -423,18 +470,64 @@ class ImbueCloudProvider(BaseProviderInstance):
             key_path=private_key_path,
             command=f"ssh -i {private_key_path} -p {lease.container_ssh_port} {lease.ssh_user}@{lease.vps_ip}",
         )
+        host_state, outer_note = self._inspect_outer_container_state(host_ref.host_id)
+        if outer_note is None:
+            failure_reason = inner_failure_message
+        else:
+            failure_reason = f"{inner_failure_message}; {outer_note}"
         host_details = HostDetails(
             id=host_ref.host_id,
             name=str(host_ref.host_name),
             provider_name=host_ref.provider_name,
-            state=HostState.CRASHED,
+            state=host_state,
             ssh=ssh_info,
-            failure_reason=failure_message,
+            failure_reason=failure_reason,
         )
         agent_details_list = [
             build_agent_details_from_offline_ref(agent_ref, host_details) for agent_ref in agent_refs
         ]
         return host_details, agent_details_list
+
+    def _inspect_outer_container_state(self, host_id: HostId) -> tuple[HostState, str | None]:
+        """Determine the leased container's state via outer (VPS root) SSH.
+
+        Returns ``(state, note)``. ``note`` is a short human-readable string
+        that gets folded into ``HostDetails.failure_reason`` so the user
+        sees both the original inner-SSH failure and what the outer host
+        knows. ``note`` is ``None`` only when we have nothing extra to add.
+        Returns ``(HostState.CRASHED, "outer SSH also failed: ...")`` if
+        even the outer can't be reached -- this is the no-info-at-all case.
+        """
+        # The lease step only added the inner container's host key to
+        # known_hosts (port 2222). Scan the VPS root sshd's key (port 22)
+        # so the strict host-key check below passes -- otherwise the
+        # outer connection always fails on first contact.
+        lease = self._find_leased(host_id)
+        if lease is not None:
+            self._ensure_outer_host_key_known(lease)
+        try:
+            with self.outer_host_for(host_id) as outer:
+                assert outer is not None
+                container_id = self._resolve_container_id_on_outer(outer, host_id)
+                if container_id is None:
+                    return HostState.DESTROYED, "container not found on leased VPS"
+                result = outer.execute_idempotent_command(
+                    f"docker inspect --format '{{{{.State.Status}}}};{{{{.State.ExitCode}}}}' "
+                    f"{shlex.quote(container_id)}"
+                )
+        except (HostConnectionError, HostNotFoundError, MngrError) as exc:
+            return HostState.CRASHED, f"outer SSH also failed: {exc}"
+        if not result.success:
+            return HostState.CRASHED, f"docker inspect failed: {result.stderr.strip()}"
+        parts = result.stdout.strip().split(";", 1)
+        if len(parts) != 2:
+            return HostState.CRASHED, f"unexpected docker inspect output: {result.stdout.strip()!r}"
+        status, exit_code_str = parts[0].strip(), parts[1].strip()
+        try:
+            exit_code = int(exit_code_str)
+        except ValueError:
+            exit_code = 0
+        return _map_docker_status_to_host_state(status, exit_code)
 
     def _build_host_details_from_raw(
         self,
