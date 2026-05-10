@@ -463,10 +463,14 @@ class ImbueCloudProvider(BaseProviderInstance):
         ``(None, error_message)`` when outer SSH can't be reached at all
         -- the lease-only fallback case.
         """
-        self._ensure_outer_host_key_known(lease)
         host_id = HostId(lease.host_id)
         host_dir = str(self.host_dir)
         try:
+            # ``_ensure_outer_host_key_known`` is documented as best-effort
+            # but performs disk I/O that could in principle raise; keep it
+            # inside the guard so a single bad lease can never drop the
+            # rest of the listing.
+            self._ensure_outer_host_key_known(lease)
             with self.outer_host_for(host_id) as outer:
                 assert outer is not None
                 script = build_outer_listing_collection_script(str(host_id), host_dir, self.mngr_ctx.config.prefix)
@@ -549,18 +553,29 @@ class ImbueCloudProvider(BaseProviderInstance):
         to ``known_hosts``. Without this scan, the very first outer-SSH
         connection always fails. The scan and add are both idempotent and
         safe to run multiple times; on scan failure (e.g. the VPS itself
-        is unreachable) we just leave ``known_hosts`` alone and let the
-        connection produce its natural error.
+        is unreachable) or on local disk failure we just leave
+        ``known_hosts`` alone and let the connection produce its natural
+        error -- the caller's outer-SSH guard then maps that to the
+        lease-only fallback.
         """
         scanned_key = _scan_container_host_key(lease.vps_ip, 22)
         if scanned_key is None:
             return
         host_id = HostId(lease.host_id)
-        known_hosts_path = self._host_known_hosts_path(host_id)
-        known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
-        if not known_hosts_path.exists():
-            known_hosts_path.touch()
-        add_host_to_known_hosts(known_hosts_path, lease.vps_ip, 22, scanned_key)
+        try:
+            known_hosts_path = self._host_known_hosts_path(host_id)
+            known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+            if not known_hosts_path.exists():
+                known_hosts_path.touch()
+            add_host_to_known_hosts(known_hosts_path, lease.vps_ip, 22, scanned_key)
+        except OSError as exc:
+            logger.warning(
+                "imbue_cloud[{}] could not update known_hosts for host {} (vps {}): {}",
+                self.name,
+                host_id,
+                lease.vps_ip,
+                exc,
+            )
 
     def _build_offline_details_from_lease(
         self,
