@@ -1368,14 +1368,19 @@ kill -TERM 1
             logger.warning("Cannot list Docker hosts (Docker daemon unavailable?): {}", e)
             return []
 
-        # Map running containers by host_id
+        # Map running containers by host_id, and harvest host names from labels.
+        # We use this map below instead of h.get_name() so building DiscoveredHosts
+        # does not trigger a per-host SSH read of data.json.
         container_by_host_id: dict[HostId, docker.models.containers.Container] = {}
+        host_name_by_id: dict[HostId, HostName] = {}
         for container in containers:
             labels = container.labels or {}
             if LABEL_HOST_ID in labels:
                 try:
                     host_id = HostId(labels[LABEL_HOST_ID])
                     container_by_host_id[host_id] = container
+                    if LABEL_HOST_NAME in labels:
+                        host_name_by_id[host_id] = HostName(labels[LABEL_HOST_NAME])
                 except (KeyError, ValueError) as e:
                     logger.warning("Skipped container with invalid labels: {}", e)
 
@@ -1387,6 +1392,9 @@ kill -TERM 1
         for host_record in all_host_records:
             host_id = HostId(host_record.certified_host_data.host_id)
             processed_host_ids.add(host_id)
+            # Records always carry the canonical mngr-assigned name; prefer
+            # this over container labels (which can be stale) when both exist.
+            host_name_by_id[host_id] = HostName(host_record.certified_host_data.host_name)
 
             if host_id in container_by_host_id:
                 container = container_by_host_id[host_id]
@@ -1432,8 +1440,15 @@ kill -TERM 1
         for h, _ in hosts_with_state:
             self._evict_cached_host(h.id, replacement=h)
 
+        # Use names collected from records / labels so building the DiscoveredHost
+        # list does not trigger an SSH read of data.json per running host.
         return [
-            DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name, host_state=state)
+            DiscoveredHost(
+                host_id=h.id,
+                host_name=host_name_by_id.get(h.id) or h.get_name(),
+                provider_name=self.name,
+                host_state=state,
+            )
             for h, state in hosts_with_state
         ]
 
