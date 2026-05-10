@@ -526,7 +526,16 @@ class ImbueCloudProvider(BaseProviderInstance):
         try:
             exit_code = int(exit_code_str)
         except ValueError:
-            exit_code = 0
+            # Don't silently default to 0 -- that would map status="exited"
+            # to STOPPED ("clean exit") and hide the real state from the
+            # user. Treat a malformed exit code as the no-info case.
+            logger.warning(
+                "imbue_cloud[{}] docker inspect produced unparseable exit code {!r} for host {}",
+                self.name,
+                exit_code_str,
+                host_id,
+            )
+            return HostState.CRASHED, f"unparseable docker inspect exit code: {result.stdout.strip()!r}"
         return _map_docker_status_to_host_state(status, exit_code)
 
     def _build_host_details_from_raw(
