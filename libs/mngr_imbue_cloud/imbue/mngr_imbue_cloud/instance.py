@@ -63,6 +63,7 @@ from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
@@ -349,10 +350,11 @@ class ImbueCloudProvider(BaseProviderInstance):
     ) -> tuple[HostDetails, list[AgentDetails]]:
         """Collect host + agent details with a single SSH round-trip when reachable.
 
-        Falls back to the framework's default offline path (which uses
-        ``to_offline_host``) when SSH or the listing script fails, so an
-        unreachable lease still appears in the listing with an offline
-        host state instead of disappearing.
+        Falls back to lease-derived offline details (with SSH info populated
+        and ``failure_reason`` carrying the underlying error) when SSH or
+        the listing script fails, so an unreachable lease still appears in
+        the listing with enough diagnostic info for the user to see what
+        we tried to connect to and why it failed.
         """
         host_id = host_ref.host_id
         lease = self._find_leased(host_id)
@@ -368,7 +370,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 exc,
             )
             self.on_connection_error(host_id)
-            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+            return self._build_offline_details_from_lease(host_ref, agent_refs, lease, str(exc))
         except MngrError as exc:
             logger.warning(
                 "imbue_cloud[{}] listing collection for {} failed: {}",
@@ -377,7 +379,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 exc,
             )
             self.on_connection_error(host_id)
-            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+            return self._build_offline_details_from_lease(host_ref, agent_refs, lease, str(exc))
         try:
             host = self.get_host(host_id)
         except HostNotFoundError:
@@ -395,6 +397,43 @@ class ImbueCloudProvider(BaseProviderInstance):
             )
             if agent_details is not None:
                 agent_details_list.append(agent_details)
+        return host_details, agent_details_list
+
+    def _build_offline_details_from_lease(
+        self,
+        host_ref: DiscoveredHost,
+        agent_refs: Sequence[DiscoveredAgent],
+        lease: LeasedHostInfo,
+        failure_message: str,
+    ) -> tuple[HostDetails, list[AgentDetails]]:
+        """Build HostDetails + AgentDetails from lease info when SSH is unavailable.
+
+        Populates ``ssh`` from the lease so the user can see the address we
+        attempted to reach, and ``failure_reason`` with the underlying error
+        message. Uses ``HostState.CRASHED`` because TCP-level failure to a
+        leased container is a strong signal that the container is not
+        running (matches the default-derived state from
+        ``derive_offline_host_state`` when stop_reason is unknown).
+        """
+        private_key_path, _ = self._host_keypair_paths(host_ref.host_id)
+        ssh_info = SSHInfo(
+            user=lease.ssh_user,
+            host=lease.vps_ip,
+            port=lease.container_ssh_port,
+            key_path=private_key_path,
+            command=f"ssh -i {private_key_path} -p {lease.container_ssh_port} {lease.ssh_user}@{lease.vps_ip}",
+        )
+        host_details = HostDetails(
+            id=host_ref.host_id,
+            name=str(host_ref.host_name),
+            provider_name=host_ref.provider_name,
+            state=HostState.CRASHED,
+            ssh=ssh_info,
+            failure_reason=failure_message,
+        )
+        agent_details_list = [
+            build_agent_details_from_offline_ref(agent_ref, host_details) for agent_ref in agent_refs
+        ]
         return host_details, agent_details_list
 
     def _build_host_details_from_raw(
