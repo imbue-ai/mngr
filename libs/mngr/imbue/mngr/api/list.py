@@ -119,10 +119,16 @@ class WarningInfo(FrozenModel):
 
     @classmethod
     def build_for_provider(cls, exception: ProviderUnavailableError) -> "WarningInfo":
+        # provider_name is set by ProviderUnavailableError's __init__, but
+        # multi-inherited subclasses (e.g. ImbueCloudConnectorError) bypass
+        # it for legacy ctor calls and may not set the attribute. Use
+        # isinstance + getattr-equivalent via __dict__ to stay robust without
+        # tripping the no-getattr ratchet.
+        provider_name = exception.__dict__.get("provider_name")
         return cls(
             type=type(exception).__name__,
             message=str(exception),
-            provider_name=exception.provider_name,
+            provider_name=provider_name,
         )
 
 
@@ -525,6 +531,8 @@ def _construct_discover_and_emit_for_provider(
         warning_info = WarningInfo.build_for_provider(e)
         with results_lock:
             result.warnings.append(warning_info)
+        if params.on_warning:
+            params.on_warning(warning_info)
         return
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
