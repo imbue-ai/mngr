@@ -50,9 +50,15 @@ class SubagentProxyPluginConfig(PluginConfig):
         Scalar fields: override wins if not None. Matches the convention
         established by other plugin configs (see ``RecursivePluginConfig``).
 
-        Accepts the base ``PluginConfig`` type for LSP-compatibility with
-        the parent's signature; behavior for non-subclass overrides falls
-        through to the base merge.
+        Accepts the base ``PluginConfig`` type to keep the signature
+        compatible with the parent class. The two branches:
+
+        - If ``override`` is not a ``SubagentProxyPluginConfig``, it can
+          only carry ``enabled``; preserve ``self.mode`` and merge only
+          ``enabled`` from the override.
+        - If ``override`` IS a ``SubagentProxyPluginConfig``, both
+          ``enabled`` and ``mode`` are merged scalar-style (override
+          wins when not None).
         """
         if not isinstance(override, SubagentProxyPluginConfig):
             return SubagentProxyPluginConfig(
