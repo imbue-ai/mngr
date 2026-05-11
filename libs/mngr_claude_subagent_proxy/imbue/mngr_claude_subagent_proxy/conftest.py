@@ -1,4 +1,4 @@
-"""Shared test fixtures for mngr_subagent_proxy unit tests.
+"""Shared test fixtures for mngr_claude_subagent_proxy unit tests.
 
 Both ``hooks_test.py`` and ``hooks/deny_test.py`` need to clear the same
 set of subagent-proxy env vars and stand up a fresh ``state_dir`` under

@@ -1,4 +1,4 @@
-"""Data types for the mngr_subagent_proxy plugin."""
+"""Data types for the mngr_claude_subagent_proxy plugin."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ class SubagentProxyMode(UpperCaseStrEnum):
 
 
 class SubagentProxyPluginConfig(PluginConfig):
-    """Configuration for the mngr_subagent_proxy plugin."""
+    """Configuration for the mngr_claude_subagent_proxy plugin."""
 
     mode: SubagentProxyMode = Field(
         default=SubagentProxyMode.PROXY,
