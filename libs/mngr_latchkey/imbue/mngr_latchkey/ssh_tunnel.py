@@ -1,4 +1,3 @@
-import select
 import socket
 import threading
 import time
@@ -13,10 +12,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
-
-_BUFFER_SIZE: Final[int] = 65536
-
-_SELECT_TIMEOUT_SECONDS: Final[float] = 1.0
+from imbue.mngr_forward.relay import relay_data
 
 _REVERSE_TUNNEL_HEALTH_CHECK_SECONDS: Final[float] = 30.0
 
@@ -519,61 +515,6 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     return client
 
 
-def _relay_step(sock: socket.socket, channel: paramiko.Channel) -> bool:
-    """Perform one relay step: transfer available data between sock and channel.
-
-    Returns True to continue relaying, False when either end has closed.
-    """
-    r, _, _ = select.select([sock, channel], [], [], _SELECT_TIMEOUT_SECONDS)
-
-    if sock in r:
-        data = sock.recv(_BUFFER_SIZE)
-        if not data:
-            return False
-        channel.sendall(data)
-
-    if channel in r:
-        if channel.recv_ready():
-            data = channel.recv(_BUFFER_SIZE)
-            if not data:
-                return False
-            sock.sendall(data)
-        elif channel.eof_received or channel.closed:
-            # Paramiko marks the channel's fileno readable on EOF/close as well
-            # as on data arrival, but recv_ready() only goes True for data. Without
-            # this branch the relay loop would spin at ~1M iters/sec on a half-closed
-            # channel until something else tore it down.
-            return False
-        else:
-            # select woke us for a non-data channel event (e.g. window-adjust);
-            # keep looping so the next iteration re-checks for data or EOF.
-            pass
-
-    return True
-
-
-def _relay_data(sock: socket.socket, channel: paramiko.Channel) -> None:
-    """Relay data bidirectionally between a local socket and a paramiko channel.
-
-    Uses select() to multiplex reads from both ends. Terminates when either
-    end closes or an error occurs.
-    """
-    try:
-        while _relay_step(sock, channel):
-            pass
-    except (OSError, EOFError, paramiko.SSHException) as e:
-        logger.trace("SSH tunnel relay ended: {}", e)
-    finally:
-        try:
-            channel.close()
-        except (OSError, paramiko.SSHException) as e:
-            logger.trace("Error closing SSH channel in relay: {}", e)
-        try:
-            sock.close()
-        except OSError as e:
-            logger.trace("Error closing socket in relay: {}", e)
-
-
 class _ForwardedTunnelHandler(FrozenModel):
     """Per-forward port-forward handler that relays inbound channels to ``127.0.0.1:local_port``.
 
@@ -626,7 +567,7 @@ class _ForwardedTunnelHandler(FrozenModel):
                 logger.trace("Error closing channel after failed local connect: {}", close_err)
             return
         threading.Thread(
-            target=_relay_data,
+            target=relay_data,
             args=(local_sock, channel),
             daemon=True,
             name=f"reverse-relay-127.0.0.1:{self.local_port}",
