@@ -91,4 +91,4 @@ Independent of the wait, the user (or you, on request) can:
   polling. `subagent_wait` is the supported wait primitive.
 - Do not skip the `mngr_claude_subagent_proxy_parent_*` labels; without
   them, the subagent will not be identifiable as a proxy child via
-  `mngr list` filters and will not be reaped automatically.
+  `mngr list` filters.
