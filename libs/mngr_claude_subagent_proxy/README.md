@@ -25,9 +25,10 @@ The plugin has two modes, selected via mngr config:
 [plugins.subagent_proxy]
 mode = "PROXY"   # default: route Task calls through a mngr-managed subagent
                  # via a Haiku dispatcher (the original behavior).
-# mode = "DENY"  # alternative: deny Task calls with a copy-pasteable
-                 # `mngr create` invocation in the deny reason. Claude
-                 # is expected to run those commands itself in Bash.
+# mode = "DENY"  # alternative: deny Task calls with a short skill-pointer
+                 # reason that directs Claude at the `mngr-subagents` skill;
+                 # the skill teaches the two-command `mngr create` +
+                 # `subagent_wait` protocol Claude runs itself via Bash.
 ```
 
 `PROXY` mode is the default and what the rest of this README describes.
