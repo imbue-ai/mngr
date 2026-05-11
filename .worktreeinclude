@@ -1,0 +1,10 @@
+# Gitignored paths to copy into worktrees created by Claude Code
+# (claude --worktree, Agent isolation: "worktree", desktop parallel sessions).
+# Uses .gitignore syntax. Mirrors what mngr's work_dir_extra_paths already
+# carries into mngr-created worktrees — keep the two sets aligned.
+
+.mngr/settings.local.toml
+.reviewer/settings.local.json
+.claude/settings.local.json
+.env
+.envrc
