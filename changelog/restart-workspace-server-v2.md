@@ -1,4 +1,4 @@
-Re-implement workspace-server restart and health-recovery UI on top of the new `mngr_forward` plugin architecture.
+Workspace-server restart and health-recovery UI on the `mngr_forward` plugin architecture.
 
 User-visible changes:
 - A persistent banner now appears at the top of the workspace iframe when the agent's workspace server stops responding. Clicking it opens the recovery page so the user can restart the server.
