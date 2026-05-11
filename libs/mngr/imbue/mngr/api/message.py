@@ -26,6 +26,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.utils.cel_utils import agent_to_cel_context
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.thread_cleanup import mngr_executor
@@ -195,7 +196,7 @@ def _process_host_for_messaging(
 
             # Apply CEL filters if provided
             if compiled_include_filters or compiled_exclude_filters or not all_agents:
-                agent_context = _agent_to_cel_context(agent, str(host_ref.host_name), host_ref.provider_name)
+                agent_context = agent_to_cel_context(agent, str(host_ref.host_name), host_ref.provider_name)
                 is_included = apply_cel_filters_to_context(
                     context=agent_context,
                     include_filters=compiled_include_filters,
@@ -287,18 +288,3 @@ def _send_message_to_agent(
             on_error(agent_name, error_msg)
         if error_behavior == ErrorBehavior.ABORT:
             raise MngrError(error_msg) from e
-
-
-def _agent_to_cel_context(agent: AgentInterface, host_name: str, provider_name: str) -> dict[str, Any]:
-    """Convert an agent to a CEL-friendly dict for filtering."""
-    return {
-        "id": str(agent.id),
-        "name": str(agent.name),
-        "type": str(agent.agent_type),
-        "state": agent.get_lifecycle_state().value,
-        "host": {
-            "id": str(agent.host_id),
-            "name": host_name,
-            "provider": provider_name,
-        },
-    }

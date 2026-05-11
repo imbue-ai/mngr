@@ -5,7 +5,6 @@ import pytest
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.create import CreateAgentOptions
 from imbue.mngr.api.message import MessageResult
-from imbue.mngr.api.message import _agent_to_cel_context
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import SendMessageError
@@ -18,6 +17,7 @@ from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.cel_utils import agent_to_cel_context
 
 
 def test_message_result_initializes_with_empty_lists() -> None:
@@ -46,7 +46,7 @@ def test_agent_to_cel_context_returns_expected_fields(
     temp_work_dir: Path,
     local_provider: LocalProviderInstance,
 ) -> None:
-    """Test that _agent_to_cel_context returns the expected fields."""
+    """Test that agent_to_cel_context returns the expected fields."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
@@ -59,7 +59,7 @@ def test_agent_to_cel_context_returns_expected_fields(
         ),
     )
 
-    context = _agent_to_cel_context(agent, LOCAL_HOST_NAME, "local")
+    context = agent_to_cel_context(agent, LOCAL_HOST_NAME, "local")
 
     assert context["id"] == str(agent.id)
     assert context["name"] == "cel-test-agent"
