@@ -1,6 +1,4 @@
 import json
-import types
-import typing
 from enum import Enum
 from typing import Any
 from typing import Final
@@ -19,6 +17,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.utils.click_utils import detect_alias_to_canonical
 from imbue.mngr.utils.file_utils import atomic_write
+from imbue.mngr.utils.pydantic_utils import unwrap_optional
 
 # Per-position positional completion spec for top-level commands.
 # Maps command name -> list of source identifier lists per position.
@@ -206,26 +205,6 @@ def flatten_dict_keys(data: dict[str, Any], prefix: str = "") -> list[str]:
     return sorted(result)
 
 
-def _unwrap_optional(annotation: Any) -> Any:
-    """Unwrap Optional[T] or T | None to get the inner type T.
-
-    Python 3.10+ uses types.UnionType for X | Y syntax;
-    typing.Optional[X] / typing.Union[X, None] uses typing.Union.
-    Returns the annotation unchanged if it is not an Optional wrapper.
-    """
-    if isinstance(annotation, types.UnionType):
-        args = [a for a in annotation.__args__ if a is not type(None)]
-        if len(args) == 1:
-            return args[0]
-        return annotation
-    if hasattr(annotation, "__origin__") and annotation.__origin__ is typing.Union:
-        args = [a for a in annotation.__args__ if a is not type(None)]
-        if len(args) == 1:
-            return args[0]
-        return annotation
-    return annotation
-
-
 def _extract_config_value_choices(
     config: BaseModel,
     dynamic_values: dict[str, list[str]] | None = None,
@@ -258,7 +237,7 @@ def _walk_model_for_choices(
     for field_name, field_info in type(obj).model_fields.items():
         key = f"{prefix}{field_name}" if prefix else field_name
         value = field_values[field_name]
-        annotation = _unwrap_optional(field_info.annotation)
+        annotation = unwrap_optional(field_info.annotation)
 
         if annotation is bool:
             result[key] = ["true", "false"]
