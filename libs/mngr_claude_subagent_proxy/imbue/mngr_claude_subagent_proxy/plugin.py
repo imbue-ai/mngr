@@ -39,8 +39,11 @@ from imbue.mngr_claude_subagent_proxy.hooks.destroy_detached import destroy_agen
 
 SUBAGENT_PROXY_CHILD_AGENT_TYPE: Final[str] = "mngr-proxy-child"
 
-# Plugin name used to look up our config from MngrContext. Matches the
-# entry-point name in pyproject.toml ([project.entry-points.mngr]).
+# Plugin-config registry key used to look up our config from MngrContext.
+# This is the key users put in their settings.toml under
+# `[plugins.subagent_proxy]`, and must match what register_plugin_config()
+# below registers. (Distinct from the pyproject.toml entry-point key
+# `claude_subagent_proxy`, which mngr uses to import this module.)
 SUBAGENT_PROXY_PLUGIN_NAME: Final[str] = "subagent_proxy"
 
 register_plugin_config(SUBAGENT_PROXY_PLUGIN_NAME, SubagentProxyPluginConfig)
