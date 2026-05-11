@@ -20,14 +20,13 @@ Two kinds of files live there:
   grants or revokes permissions. Only the subset of detent's file
   schema that we actually produce is modeled.
 
-The ``host_name`` is known up-front (minds derives it from the agent
-name), so the JWT can be minted directly for the canonical host path
-before ``mngr create`` runs -- no per-agent opaque indirection is
-needed. Once ``mngr create`` returns the canonical ``host_id`` we
-verify it against the ``{plugin_data_dir}/hosts/{host_name}/host-id``
-file: a mismatch means the host with that name has been recreated
-(stale prior permissions), so we clear the permissions file and
-overwrite ``host-id`` with the freshly-reported value.
+The ``host_name`` is known up-front (minds derives it from the agent name), so
+the JWT can be minted directly for the canonical host path before ``mngr create``
+runs. Once ``mngr create`` returns the canonical ``host_id`` we verify it
+against the ``{plugin_data_dir}/hosts/{host_name} /host-id`` file: a mismatch
+means the host with that name has been recreated (stale prior permissions), so
+we clear the permissions file and overwrite ``host-id`` with the
+freshly-reported value.
 
 All writes share the same atomic-write pattern (write to ``.tmp``,
 chmod, rename) where applicable.
