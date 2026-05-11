@@ -229,7 +229,19 @@ def test_deny_below_max_depth_emits_skill_pointer_reason(
     assert "depth limit" not in reason
 
 
+@pytest.mark.parametrize(
+    "raw_stdin",
+    [
+        pytest.param(json.dumps(_hook_input()), id="valid_input"),
+        pytest.param("", id="empty_stdin"),
+        pytest.param("{not json", id="malformed_json"),
+        pytest.param("[1, 2, 3]", id="non_dict_json"),
+        pytest.param(json.dumps({"tool_input": {"prompt": "hi"}}), id="missing_tool_use_id"),
+        pytest.param(json.dumps({"tool_use_id": "toolu_x"}), id="missing_prompt"),
+    ],
+)
 def test_deny_never_allows_passthrough(
+    raw_stdin: str,
     tmp_path: Path,
     hook_env: pytest.MonkeyPatch,
 ) -> None:
@@ -238,18 +250,9 @@ def test_deny_never_allows_passthrough(
     A pass-through would let the native Task tool run, defeating the
     point of deny mode.
     """
-    cases: list[tuple[str, str]] = [
-        ("valid input", json.dumps(_hook_input())),
-        ("empty stdin", ""),
-        ("malformed JSON", "{not json"),
-        ("non-dict JSON", "[1, 2, 3]"),
-        ("payload missing tool_use_id", json.dumps({"tool_input": {"prompt": "hi"}})),
-        ("payload missing prompt", json.dumps({"tool_use_id": "toolu_x"})),
-    ]
     hook_env.chdir(tmp_path)
-    for label, raw_stdin in cases:
-        stdin_buffer = io.StringIO(raw_stdin)
-        stdout_buffer = io.StringIO()
-        deny_hook.run(stdin_buffer, stdout_buffer)
-        decision = json.loads(stdout_buffer.getvalue())["hookSpecificOutput"]["permissionDecision"]
-        assert decision == "deny", f"case {label!r} unexpectedly emitted {decision!r}"
+    stdin_buffer = io.StringIO(raw_stdin)
+    stdout_buffer = io.StringIO()
+    deny_hook.run(stdin_buffer, stdout_buffer)
+    decision = json.loads(stdout_buffer.getvalue())["hookSpecificOutput"]["permissionDecision"]
+    assert decision == "deny"
