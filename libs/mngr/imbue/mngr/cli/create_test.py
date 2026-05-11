@@ -1258,6 +1258,7 @@ def test_parse_agent_opts_includes_labels(
     result, _ = _parse_agent_opts(
         opts=opts,
         address=AgentAddress(),
+        target_host=None,
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
@@ -1284,6 +1285,7 @@ def test_parse_agent_opts_label_invalid_format_raises(
         _parse_agent_opts(
             opts=opts,
             address=AgentAddress(),
+            target_host=None,
             initial_message=None,
             source_location=source_location,
             mngr_ctx=temp_mngr_ctx,
@@ -1304,6 +1306,7 @@ def test_parse_agent_opts_empty_labels_by_default(
     result, _ = _parse_agent_opts(
         opts=default_create_cli_opts,
         address=AgentAddress(),
+        target_host=None,
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
@@ -1330,6 +1333,7 @@ def test_parse_agent_opts_with_agent_id(
     result, _ = _parse_agent_opts(
         opts=opts,
         address=AgentAddress(),
+        target_host=None,
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
@@ -1352,6 +1356,7 @@ def test_parse_agent_opts_agent_id_none_by_default(
     result, _ = _parse_agent_opts(
         opts=default_create_cli_opts,
         address=AgentAddress(),
+        target_host=None,
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
@@ -1378,6 +1383,7 @@ def test_parse_agent_opts_matching_type_and_positional_ok(
     result, _ = _parse_agent_opts(
         opts=opts,
         address=AgentAddress(),
+        target_host=None,
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,

@@ -13,6 +13,8 @@
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Generator
+from contextlib import AbstractContextManager
+from io import StringIO
 from pathlib import Path
 from typing import Mapping
 from typing import Sequence
@@ -21,6 +23,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import StreamType
 from imbue.modal_proxy.data_types import TunnelInfo
+from imbue.modal_proxy.log_utils import ModalLoguruWriter
 
 # ---------------------------------------------------------------------------
 # Object interfaces -- mirror modal's instance-level APIs
@@ -353,4 +356,23 @@ class ModalInterface(MutableModel, ABC):
         environment_name: str | None = None,
     ) -> None:
         """Deploy a script to Modal (mirrors `modal deploy` CLI)."""
+        ...
+
+    # =====================================================================
+    # Output capture
+    # =====================================================================
+
+    @abstractmethod
+    def enable_output_capture(
+        self, is_logging_to_loguru: bool = True
+    ) -> AbstractContextManager[tuple[StringIO, "ModalLoguruWriter | None"]]:
+        """Capture Modal app output for the duration of the returned context.
+
+        Yields ``(buffer, loguru_writer)``. The buffer collects all Modal
+        log lines for programmatic inspection; when
+        ``is_logging_to_loguru`` is True the writer additionally tees into
+        loguru with deduplication. Implementations decide whether the
+        capture is real (``DirectModalInterface``) or a no-op nullcontext
+        (``TestingModalInterface``).
+        """
         ...

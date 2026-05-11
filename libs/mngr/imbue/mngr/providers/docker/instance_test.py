@@ -6,14 +6,19 @@ from pathlib import Path
 
 import pytest
 
+from imbue.concurrency_group.errors import ProcessTimeoutError
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import DockerBuildTimeoutError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.docker.instance import CONTAINER_SSH_PORT
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
 from imbue.mngr.providers.docker.instance import LABEL_HOST_ID
@@ -439,3 +444,58 @@ def test_discover_hosts_and_agents_returns_empty_when_daemon_offline(temp_mngr_c
     provider = make_offline_docker_provider(temp_mngr_ctx)
     result = provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
     assert result == {}
+
+
+# =========================================================================
+# Build Timeout
+# =========================================================================
+
+
+class _BuildTimingOutDockerProvider(DockerProviderInstance):
+    """Provider subclass that simulates a build process timing out.
+
+    Lets us exercise the timeout-translation path in `_build_image` without
+    needing a real Docker daemon or a long-running subprocess.
+    """
+
+    def _run_docker_creation_command(
+        self,
+        args: list[str],
+        timeout: float = 300,
+        executable: DockerBuilder = DockerBuilder.DOCKER,
+    ) -> FinishedProcess:
+        raise ProcessTimeoutError(
+            command=tuple([executable.value.lower()] + args),
+            stdout="",
+            stderr="",
+            is_output_already_logged=True,
+        )
+
+
+def test_build_image_translates_process_timeout_to_docker_build_timeout_error(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A timed-out `docker build` surfaces as a clear DockerBuildTimeoutError."""
+    config = DockerProviderConfig(build_timeout_seconds=42)
+    provider = _BuildTimingOutDockerProvider(
+        name=ProviderInstanceName("test-docker-timeout"),
+        host_dir=Path("/mngr"),
+        mngr_ctx=temp_mngr_ctx,
+        config=config,
+    )
+    with pytest.raises(DockerBuildTimeoutError) as exc_info:
+        provider._build_image(["--file", "Dockerfile", "."], "test-tag")
+    assert exc_info.value.timeout_seconds == 42
+    assert exc_info.value.provider_name == ProviderInstanceName("test-docker-timeout")
+    assert "timed out after 42 seconds" in str(exc_info.value)
+
+
+def test_docker_build_timeout_error_help_text_mentions_config_setting() -> None:
+    """The error tells the user how to raise the timeout in their config."""
+    error = DockerBuildTimeoutError(
+        provider_name=ProviderInstanceName("my-docker"),
+        timeout_seconds=600,
+    )
+    assert error.user_help_text is not None
+    assert "build_timeout_seconds" in error.user_help_text
+    assert "my-docker" in error.user_help_text
