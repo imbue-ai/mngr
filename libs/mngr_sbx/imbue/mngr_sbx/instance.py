@@ -747,8 +747,14 @@ kill -TERM 1
             return self._create_offline_host(host_record)
 
         # If the keeper died, the sandbox auto-stops within a few seconds. Try to revive it before
-        # falling back to offline, so transient mngr CLI exits don't permanently break the host.
-        ensure_keeper_alive(self._provider_dir, host_id, host_record.config.sandbox_name)
+        # falling back to offline, so transient mngr CLI exits don't permanently break the host. If
+        # the revival itself fails (e.g. sbx GC'd the sandbox after a long mngr-less stretch), fall
+        # through to offline rather than propagating the error.
+        try:
+            ensure_keeper_alive(self._provider_dir, host_id, host_record.config.sandbox_name)
+        except SbxCommandError as e:
+            logger.debug("Could not revive keeper for sandbox {}: {}", host_record.config.sandbox_name, e)
+            return self._create_offline_host(host_record)
 
         try:
             sandboxes = sbx_list(self.mngr_ctx.concurrency_group, self.name)
