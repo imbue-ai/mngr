@@ -210,10 +210,15 @@ class ProviderDaemonNotRunningError(ProviderUnavailableError):
 
 
 class ProviderCredentialsMissingError(ProviderUnavailableError):
-    """Credentials for this provider were never configured (empty/missing key/token).
+    """Credentials field is provably absent before any API call.
 
-    For credentials that ARE configured but the provider's API rejects them
-    (401/403), use ``ProviderNotAuthorizedError`` instead.
+    Raise this only when the provider can cheaply tell from local state
+    that no credentials were supplied at all -- e.g. an API-key string in
+    the config is empty, or a required env var is unset and there is no
+    fallback. Providers whose SDK signals auth issues only after a network
+    round-trip cannot make this distinction and should raise
+    ``ProviderNotAuthorizedError`` for all auth failures (see
+    ``ModalAuthError``).
     """
 
 
@@ -251,11 +256,14 @@ class ProviderInstanceNotFoundError(ProviderError):
 
 
 class ProviderNotAuthorizedError(ProviderError):
-    """Provider's API rejected the configured credentials (401/403, expired token, etc.).
+    """Provider's auth path failed and the provider cannot distinguish
+    "credentials never set" from "credentials rejected".
 
-    User-actionable: surfaces as ``ProviderErrorInfo`` on ``ListResult.errors``
-    and gates the exit code under ``--on-error abort``. For "no credentials
-    configured at all", raise ``ProviderCredentialsMissingError`` instead.
+    Surfaces as ``ProviderErrorInfo`` on ``ListResult.errors`` and gates
+    the exit code under ``--on-error abort``. Providers that *can*
+    cheaply detect missing credentials before any API call should raise
+    ``ProviderCredentialsMissingError`` (warning) for that case and
+    reserve this class for confirmed 401/403 / token-rejected paths.
     """
 
     def __init__(self, provider_name: ProviderInstanceName, auth_help: str | None = None) -> None:
@@ -405,11 +413,15 @@ class PluginMngrError(MngrError):
 
 
 class ModalAuthError(ProviderNotAuthorizedError):
-    """Modal API rejected the configured token (missing or invalid).
+    """Modal auth path failed.
 
-    For "no Modal token configured at all", raise
-    ``ProviderCredentialsMissingError`` instead so it surfaces as a
-    warning rather than an error.
+    The Modal SDK reports both "no credentials configured anywhere" and
+    "credentials rejected by the server" as the same ``AuthError``, and
+    Modal accepts auth from multiple sources (``MODAL_TOKEN_ID``/
+    ``MODAL_TOKEN_SECRET`` env vars, ``~/.modal.toml`` profiles, etc.),
+    so we cannot cheaply tell the two apart without re-implementing
+    Modal's auth discovery. All Modal auth failures therefore surface as
+    an error (not a warning).
     """
 
     def __init__(self, provider_name: ProviderInstanceName) -> None:

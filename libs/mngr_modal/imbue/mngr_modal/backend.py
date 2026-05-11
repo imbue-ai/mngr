@@ -22,6 +22,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ModalAuthError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -491,10 +492,7 @@ Supported build arguments for the modal provider:
                 get_output_callback=lambda: context_handle.output_buffer.getvalue(),
             )
         except ModalProxyAuthError as e:
-            raise MngrError(
-                "Modal is not authorized: run 'uvx modal token set' to authenticate, or disable this provider with "
-                f"'mngr config set --scope local providers.{name}.is_enabled false'. (original error: {e})",
-            ) from e
+            raise ModalAuthError(name) from e
         except ModalProxyError as e:
             raise MngrError(f"Modal provider '{name}' failed to initialize: {e}") from e
 
