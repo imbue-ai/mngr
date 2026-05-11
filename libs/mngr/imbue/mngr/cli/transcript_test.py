@@ -47,10 +47,10 @@ def _make_transcript_opts(
     )
 
 
-def _make_numbered_user_assistant_events(num_turns: int) -> list[dict[str, str | list | bool]]:
+def _make_numbered_user_assistant_events(turn_count: int) -> list[dict[str, str | list | bool]]:
     """Build a transcript with N turns; each turn is a user_message + assistant_message."""
     events: list[dict[str, str | list | bool]] = []
-    for i in range(num_turns):
+    for i in range(turn_count):
         events.append(
             {
                 "timestamp": f"2026-01-01T00:00:{i * 2:02d}Z",

@@ -15,6 +15,7 @@ from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
+from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import MngrError
@@ -181,24 +182,20 @@ def _emit_turn_summary(summaries: list[dict[str, Any]], output_opts: OutputOptio
     match output_opts.output_format:
         case OutputFormat.JSONL:
             for s in summaries:
-                sys.stdout.write(json.dumps(s, separators=(",", ":")) + "\n")
-            sys.stdout.flush()
+                write_human_line(json.dumps(s, separators=(",", ":")))
 
         case OutputFormat.JSON:
-            sys.stdout.write(json.dumps(summaries, indent=2) + "\n")
-            sys.stdout.flush()
+            write_human_line(json.dumps(summaries, indent=2))
 
         case OutputFormat.HUMAN:
             if not summaries:
-                sys.stdout.write("(no turns)\n")
-                sys.stdout.flush()
+                write_human_line("(no turns)")
                 return
             header = f"{'#':>4}  {'timestamp':<24}  preview"
-            sys.stdout.write(header + "\n")
-            sys.stdout.write("-" * len(header) + "\n")
+            write_human_line(header)
+            write_human_line("-" * len(header))
             for s in summaries:
-                sys.stdout.write(f"{s['turn']:>4}  {str(s['timestamp']):<24}  {s['content_preview']}\n")
-            sys.stdout.flush()
+                write_human_line(f"{s['turn']:>4}  {str(s['timestamp']):<24}  {s['content_preview']}")
 
         case _ as unreachable:
             assert_never(unreachable)
@@ -399,8 +396,7 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
 
     if opts.count_turns:
         count = len(_user_message_indices(all_events))
-        sys.stdout.write(f"{count}\n")
-        sys.stdout.flush()
+        write_human_line(str(count))
         return
 
     if opts.list_turns:
