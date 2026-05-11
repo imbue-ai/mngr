@@ -50,6 +50,7 @@ from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
 from imbue.mngr_lima.errors import LimaCommandError
@@ -80,6 +81,15 @@ _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
     "Broken": HostState.CRASHED,
     "Unknown": HostState.CRASHED,
 }
+
+# ssh-keyscan tuning. sshd finishes loading host keys slightly after the
+# TCP port becomes reachable, so wait_for_sshd can succeed while keyscan
+# still sees an empty banner. We poll until at least one key parses, with
+# a per-attempt subprocess timeout, a poll interval between attempts, and
+# a total budget that covers a worst-case slow first boot.
+_HOST_KEY_SCAN_TIMEOUT_SECONDS = 10.0
+_HOST_KEY_SCAN_POLL_INTERVAL_SECONDS = 2.0
+_HOST_KEY_SCAN_TOTAL_BUDGET_SECONDS = 60.0
 
 
 class LimaProviderInstance(BaseProviderInstance):
@@ -260,24 +270,43 @@ class LimaProviderInstance(BaseProviderInstance):
         First removes any stale keys for this host:port (from previous VMs
         that may have reused the same port), then adds all key types from
         ssh-keyscan so paramiko can negotiate any of them.
+
+        sshd can race with ssh-keyscan during VM bring-up: the TCP port is
+        reachable (what wait_for_sshd checks) but sshd has not finished
+        loading host keys, so ssh-keyscan returns empty output. Poll until
+        at least one key parses, and raise if we still cannot read a key
+        after the total budget -- otherwise downstream rsync/ssh fails
+        with a cryptic "host key not known".
         """
         clear_host_from_known_hosts(self._known_hosts_path, hostname, port)
+        if not poll_until(
+            lambda: self._try_scan_and_record_host_key(hostname, port),
+            timeout=_HOST_KEY_SCAN_TOTAL_BUDGET_SECONDS,
+            poll_interval=_HOST_KEY_SCAN_POLL_INTERVAL_SECONDS,
+        ):
+            raise MngrError(
+                f"ssh-keyscan could not read a host key for {hostname}:{port} after "
+                f"{_HOST_KEY_SCAN_TOTAL_BUDGET_SECONDS}s; the Lima VM may not have "
+                f"finished starting sshd"
+            )
+
+    def _try_scan_and_record_host_key(self, hostname: str, port: int) -> bool:
+        """Run ssh-keyscan once. Returns True iff at least one host key was added."""
         result = self.mngr_ctx.concurrency_group.run_process_to_completion(
             ["ssh-keyscan", "-t", "rsa,ecdsa,ed25519", "-p", str(port), hostname],
-            timeout=10.0,
+            timeout=_HOST_KEY_SCAN_TIMEOUT_SECONDS,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            added_any = False
-            for line in result.stdout.strip().splitlines():
-                if line and not line.startswith("#"):
-                    parts = line.split(None, 2)
-                    if len(parts) >= 3:
-                        key_type_and_data = f"{parts[1]} {parts[2]}"
-                        add_host_to_known_hosts(self._known_hosts_path, hostname, port, key_type_and_data)
-                        added_any = True
-            if added_any:
-                return
-        logger.warning("Could not scan SSH host key for {}:{}", hostname, port)
+        if result.returncode != 0 or not result.stdout.strip():
+            return False
+        added_any = False
+        for line in result.stdout.strip().splitlines():
+            if line and not line.startswith("#"):
+                parts = line.split(None, 2)
+                if len(parts) >= 3:
+                    key_type_and_data = f"{parts[1]} {parts[2]}"
+                    add_host_to_known_hosts(self._known_hosts_path, hostname, port, key_type_and_data)
+                    added_any = True
+        return added_any
 
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData) -> None:
         """Update the certified host data in the host record."""
