@@ -61,9 +61,12 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         emit_depth_limit_deny(stdout, depth, max_depth)
         return
 
-    # Drain stdin so the parent runner sees clean closure. We don't use
-    # any of the content -- the deny is uniform regardless of what
-    # Claude was trying to delegate.
+    # Read stdin through the shared parser even though we discard the
+    # result. We don't use any of the content -- the deny is uniform
+    # regardless of what Claude was trying to delegate -- but using the
+    # same primitive as hooks/spawn.py keeps malformed-input warnings
+    # uniform across the two PreToolUse hooks (single source of truth
+    # for stdin validation in hook_io.read_hook_stdin_json).
     read_hook_stdin_json(stdin, "deny")
     emit_pre_tool_deny(stdout, DENY_REASON)
 
