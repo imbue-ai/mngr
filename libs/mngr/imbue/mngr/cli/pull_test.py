@@ -135,6 +135,14 @@ def test_find_agent_by_name_or_id_raises_for_empty_agents(temp_mngr_ctx: MngrCon
         find_and_maybe_start_agent_by_name_or_id("nonexistent-agent", agents_by_host, temp_mngr_ctx, "test")
 
 
+def test_find_agent_by_name_or_id_raises_user_input_error_for_invalid_name(temp_mngr_ctx: MngrContext) -> None:
+    """A structurally invalid identifier must surface as UserInputError, not as an unexpected InvalidName."""
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
+
+    with pytest.raises(UserInputError, match="Invalid agent name or ID"):
+        find_and_maybe_start_agent_by_name_or_id("mngr/schedule-verify", agents_by_host, temp_mngr_ctx, "test")
+
+
 def test_find_agent_by_name_or_id_raises_agent_not_found_for_valid_id(temp_mngr_ctx: MngrContext) -> None:
     """Test that find_agent_by_name_or_id raises AgentNotFoundError for valid but nonexistent ID."""
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}

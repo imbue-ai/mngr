@@ -503,7 +503,10 @@ def find_and_maybe_start_agent_by_name_or_id(
         raise AgentNotFoundError(agent_id)
 
     # Try matching by name
-    agent_name = AgentName(agent_str)
+    try:
+        agent_name = AgentName(agent_str)
+    except ValueError as e:
+        raise UserInputError(f"Invalid agent name or ID: {e}") from None
     matching: list[tuple[AgentInterface, OnlineHostInterface]] = []
     # Track display info for error messages: (agent_id, host_name, provider_name)
     match_display_info: list[tuple[AgentId, HostName, ProviderInstanceName]] = []
