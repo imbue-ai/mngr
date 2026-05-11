@@ -1589,7 +1589,7 @@ def test_list_command_json_format_no_agents(
         catch_exceptions=False,
     )
     assert result.exit_code == 0
-    data = json.loads(result.output.strip())
+    data = json.loads(result.stdout.strip())
     assert data["agents"] == []
 
 
@@ -1597,7 +1597,7 @@ def test_list_command_format_template_no_agents(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """list --format with a template string and no agents should produce empty output."""
+    """list --format with a template string and no agents should produce empty stdout."""
     result = cli_runner.invoke(
         list_command,
         ["--format", "{name}"],
@@ -1605,8 +1605,9 @@ def test_list_command_format_template_no_agents(
         catch_exceptions=False,
     )
     assert result.exit_code == 0
-    # Template mode produces no output for zero agents
-    assert result.output.strip() == ""
+    # Template mode produces no stdout for zero agents (stderr may still
+    # carry the warning/error summary).
+    assert result.stdout.strip() == ""
 
 
 def test_list_command_ids_flag(
