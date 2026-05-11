@@ -235,7 +235,13 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(0))
+    # The sandbox keeper must outlive the parent mngr CLI invocation so the
+    # sbx sandbox stays in the running state across mngr commands.
+    # ConcurrencyGroup cleans up its child processes on context exit, which is
+    # the opposite of what the keeper needs -- so we spawn it with a direct
+    # subprocess.Popen using start_new_session=True. This is the spirit of an
+    # accepted exception to the ratchet, documented in keeper.py.
+    rc.check_direct_subprocess(_DIR, snapshot(1))
 
 
 # --- AST-based ratchets ---

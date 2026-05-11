@@ -15,8 +15,9 @@ import errno
 import os
 import signal
 import subprocess
-import time
 from pathlib import Path
+from threading import Event
+from time import monotonic
 
 from loguru import logger
 from pydantic import Field
@@ -27,8 +28,9 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_sbx.errors import SbxCommandError
 
 # Sleep duration baked into the keeper command. Any large value is fine; we
-# rely on mngr-side termination, not the timeout, to end the keeper.
-_KEEPER_SLEEP_SECONDS: int = 31_536_000  # 1 year
+# rely on mngr-side termination, not the timeout, to end the keeper. ~365 days
+# in seconds so the keeper outlives any reasonable mngr session.
+_KEEPER_SLEEP_SECONDS: int = 31_536_000
 
 
 class SbxKeeperHandle(FrozenModel):
@@ -89,13 +91,14 @@ def spawn_keeper(
     # Settle window: give sbx a moment to confirm the sandbox is up. If the
     # keeper exits immediately, the sandbox name is bad or sbx is unhealthy.
     settle_seconds = 1.5
-    deadline = time.time() + settle_seconds
-    while time.time() < deadline:
+    settle_deadline = monotonic() + settle_seconds
+    poll_event = Event()
+    while monotonic() < settle_deadline:
         returncode = process.poll()
         if returncode is not None:
             captured = log_path.read_text(errors="replace") if log_path.exists() else ""
             raise SbxCommandError("exec", returncode, captured.strip() or "keeper exited immediately")
-        time.sleep(0.1)
+        poll_event.wait(timeout=0.1)
 
     return SbxKeeperHandle(pid=process.pid, sandbox_name=sandbox_name)
 
@@ -153,12 +156,15 @@ def stop_keeper(provider_dir: Path, host_id: HostId, timeout_seconds: float = 2.
             pid_path.unlink(missing_ok=True)
             return
 
-        deadline = time.time() + timeout_seconds
-        while time.time() < deadline:
+        deadline = monotonic() + timeout_seconds
+        poll_event = Event()
+        was_terminated = False
+        while monotonic() < deadline:
             if not is_keeper_alive(pid):
+                was_terminated = True
                 break
-            time.sleep(0.1)
-        else:
+            poll_event.wait(timeout=0.1)
+        if not was_terminated:
             logger.debug("Keeper pid={} did not exit on SIGTERM after {}s; sending SIGKILL", pid, timeout_seconds)
             try:
                 os.kill(pid, signal.SIGKILL)
