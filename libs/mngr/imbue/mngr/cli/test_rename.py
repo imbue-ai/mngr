@@ -276,7 +276,7 @@ def test_rename_json_output(
     )
 
     assert result.exit_code == 0, f"JSON rename failed: {result.output}"
-    output = json.loads(result.output.strip())
+    output = json.loads(result.stdout.strip())
     assert output["old_name"] == agent_name
     assert output["new_name"] == new_name
     assert "agent_id" in output

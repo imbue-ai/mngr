@@ -326,7 +326,7 @@ def test_transcript_cli_reads_jsonl_format(
         obj=plugin_manager,
     )
     assert result.exit_code == 0
-    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    lines = [line for line in result.stdout.strip().split("\n") if line.strip()]
     assert len(lines) == 3
     parsed = json.loads(lines[0])
     assert parsed["type"] == "user_message"
@@ -347,7 +347,7 @@ def test_transcript_cli_reads_json_format(
         obj=plugin_manager,
     )
     assert result.exit_code == 0
-    parsed = json.loads(result.output)
+    parsed = json.loads(result.stdout)
     assert isinstance(parsed, list)
     assert len(parsed) == 3
 
@@ -366,7 +366,7 @@ def test_transcript_cli_filters_by_role(
         obj=plugin_manager,
     )
     assert result.exit_code == 0
-    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    lines = [line for line in result.stdout.strip().split("\n") if line.strip()]
     assert len(lines) == 1
     parsed = json.loads(lines[0])
     assert parsed["type"] == "user_message"
@@ -386,7 +386,7 @@ def test_transcript_cli_filters_by_multiple_roles(
         obj=plugin_manager,
     )
     assert result.exit_code == 0
-    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    lines = [line for line in result.stdout.strip().split("\n") if line.strip()]
     assert len(lines) == 2
 
 
@@ -417,7 +417,7 @@ def test_transcript_cli_applies_tail(
         obj=plugin_manager,
     )
     assert result.exit_code == 0
-    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    lines = [line for line in result.stdout.strip().split("\n") if line.strip()]
     assert len(lines) == 2
     assert json.loads(lines[0])["content"] == "msg-3"
     assert json.loads(lines[1])["content"] == "msg-4"
@@ -450,7 +450,7 @@ def test_transcript_cli_applies_head(
         obj=plugin_manager,
     )
     assert result.exit_code == 0
-    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    lines = [line for line in result.stdout.strip().split("\n") if line.strip()]
     assert len(lines) == 2
     assert json.loads(lines[0])["content"] == "msg-0"
     assert json.loads(lines[1])["content"] == "msg-1"

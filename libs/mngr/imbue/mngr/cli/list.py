@@ -382,6 +382,8 @@ def _list_jsonl(
         on_warning=_emit_jsonl_warning,
         is_streaming=False,
     )
+    _render_warnings_to_stderr(result.warnings, ctx)
+    _render_errors_to_stderr(result.errors)
     _exit_for_errors(ctx, error_behavior, result)
 
 
@@ -430,13 +432,7 @@ def _list_streaming_template(
     format_template: str,
     limit: int | None,
 ) -> None:
-    """Streaming template output path: write one template-expanded line per agent.
-
-    Template format is for scripting; the stderr rendering of warnings
-    and errors is intentionally skipped so it doesn't end up captured by
-    pipes or tests that read a combined stream. Errors still gate the
-    exit code via ``_exit_for_errors``.
-    """
+    """Streaming template output path: write one template-expanded line per agent."""
     emitter = _StreamingTemplateEmitter(format_template=format_template, output=sys.stdout, limit=limit)
 
     result = api_list_agents(
@@ -449,6 +445,8 @@ def _list_streaming_template(
         is_streaming=True,
     )
 
+    _render_warnings_to_stderr(result.warnings, ctx)
+    _render_errors_to_stderr(result.errors)
     _exit_for_errors(ctx, error_behavior, result)
 
 
@@ -731,14 +729,11 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
             # JSONL is handled above with streaming, so this should be unreachable
             raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")
 
-    # Render warnings/errors to stderr only for plain HUMAN format. JSON
-    # and JSONL include them in the structured stdout; template format is
-    # for scripting and stays clean. --quiet drops these via the loguru
-    # console handler being removed.
-    is_human_no_template = params.output_opts.output_format == OutputFormat.HUMAN and params.format_template is None
-    if is_human_no_template:
-        _render_warnings_to_stderr(result.warnings, ctx)
-        _render_errors_to_stderr(result.errors)
+    # stderr always carries the human-readable warning/error summary; the
+    # output format only controls stdout. --quiet still drops these because
+    # it removes the loguru console handler that backs the rendering.
+    _render_warnings_to_stderr(result.warnings, ctx)
+    _render_errors_to_stderr(result.errors)
     _exit_for_errors(ctx, params.error_behavior, result)
 
 

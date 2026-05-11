@@ -49,19 +49,33 @@ register_conftest_hooks(globals())
 _unexpected_warnings: list[str] = []
 
 
+# Warnings whose message matches any of these patterns are tolerated regardless
+# of the per-test opt-out state. They represent structural environment facts
+# rather than code regressions -- e.g. CI sandboxes intentionally don't have
+# every provider's CLI installed, so any test that exercises discovery emits
+# the "Skipping provider X (unavailable): ..." line.
+_ALWAYS_ALLOWED_WARNING_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^Skipping provider \S+( during GC)? \(unavailable\):"),
+)
+
+
 def _unexpected_warning_sink(message: Any) -> None:
     """Loguru sink that records WARNING+ records when not opted out.
 
     The top frame of WARNINGS_ALLOWED_STACK governs: if it is None, any
     warning is allowed; if it is a regex, only warnings whose message
-    matches are allowed.
+    matches are allowed. Patterns in _ALWAYS_ALLOWED_WARNING_PATTERNS are
+    tolerated even when the stack is empty.
     """
     # record["message"] is the bare message body (no traceback), which is
     # what allow_warnings() match patterns are written against.
+    body = message.record["message"]
     if WARNINGS_ALLOWED_STACK:
         pattern = WARNINGS_ALLOWED_STACK[-1]
-        if pattern is None or pattern.search(message.record["message"]):
+        if pattern is None or pattern.search(body):
             return
+    if any(p.search(body) for p in _ALWAYS_ALLOWED_WARNING_PATTERNS):
+        return
     # str(message) follows the sink's format ("{message}") and additionally
     # appends an exception traceback whenever an exception is bound to the
     # record, so it can be a multi-line block. We display this full text in

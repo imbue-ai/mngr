@@ -425,7 +425,7 @@ def test_cleanup_destroy_json_output_with_real_agent(
         )
 
         assert cleanup_result.exit_code == 0
-        output = json.loads(cleanup_result.output.strip())
+        output = json.loads(cleanup_result.stdout.strip())
         assert agent_name in output["destroyed_agents"]
         assert output["destroyed_count"] >= 1
 
