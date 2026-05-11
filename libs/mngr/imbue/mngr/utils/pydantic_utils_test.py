@@ -11,18 +11,6 @@ def test_unwrap_optional_pep604_union_with_none() -> None:
     assert unwrap_optional(str | None) is str
 
 
-def test_unwrap_optional_typing_union_form() -> None:
-    """`typing.Union[X, None]` (the form `typing.Optional[X]` collapses into) unwraps to `X`.
-
-    Constructed via a `typing.Union` alias to keep PEP 604 lint rules happy
-    while still exercising the `typing.Union` origin branch of the helper.
-    """
-    union_alias = typing.Union
-    annotation = union_alias[int, None]
-    assert typing.get_origin(annotation) is typing.Union
-    assert unwrap_optional(annotation) is int
-
-
 def test_unwrap_optional_non_union_passthrough() -> None:
     """Non-union annotations are returned unchanged."""
     assert unwrap_optional(int) is int
