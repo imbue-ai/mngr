@@ -1003,7 +1003,7 @@ def test_deny_mode_intercepts_task_with_deny_reason(
         # parents legitimately take longer than the default wait window
         # because the skill teaches a multi-step workflow (write prompt
         # file -> mngr create -> subagent_wait, possibly via
-        # Bash run_in_background + TaskOutput polling), so we use a
+        # Bash run_in_background + BashOutput polling), so we use a
         # longer per-test timeout here.
         deny_mode_wait_timeout = 600.0
         final_parent = _poll_for_agent_state(
