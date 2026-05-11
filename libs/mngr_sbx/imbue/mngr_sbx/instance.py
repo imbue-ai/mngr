@@ -237,30 +237,32 @@ class SbxProviderInstance(BaseProviderInstance):
         We bypass mngr's shared ``build_check_and_install_packages_command`` here
         because it doesn't take a lock-timeout flag.
         """
+        # The sbx docker-agent image launches a background `apt-get update` on every fresh sandbox
+        # start, holding both /var/lib/apt/lists/lock and (briefly) /var/lib/dpkg/lock-frontend.
+        # Strategy: tell apt itself to wait for the locks via well-known config options, then run
+        # install. apt's built-in lock-wait is more robust than us polling -- pgrep can race, and
+        # extra sbx exec calls used to be re-arming the boot apt-update.
         prelude = (
             "set -e; "
-            # Wait up to 4 minutes for the boot-time apt update to drop both the lists lock and the
-            # dpkg lock. We need *both* clear because `apt-get install` reads /var/lib/apt/lists
-            # and writes /var/lib/dpkg. Polling the lock files directly works without needing fuser
-            # or lsof installed.
-            "for _ in $(seq 1 240); do "
-            "  if "
-            "    ! pgrep -fl 'apt-get update' >/dev/null 2>&1 && "
-            "    ! pgrep -fl 'apt-get install' >/dev/null 2>&1 && "
-            "    ! pgrep -fl 'dpkg' >/dev/null 2>&1; "
-            "  then break; fi; "
-            "  sleep 1; "
-            "done; "
-            # Belt-and-braces: tell apt to wait for the dpkg lock if a leftover process is still mid-transaction.
             "mkdir -p /etc/apt/apt.conf.d; "
-            "printf 'DPkg::Lock::Timeout \"120\";\\n' > /etc/apt/apt.conf.d/99-mngr-sbx-lock-timeout; "
+            'printf \'DPkg::Lock::Timeout "300";\\nAcquire::Retries "3";\\n\' '
+            ">  /etc/apt/apt.conf.d/99-mngr-sbx-lock-timeout; "
             "export DEBIAN_FRONTEND=noninteractive; "
         )
         host_dir_str = str(self.host_dir)
-        # Skip our own `apt-get update`: the sbx docker-agent image runs one on boot, so the
-        # package cache is fresh. Avoiding the redundant update sidesteps a race on the apt-lists lock.
+        # Skip our own `apt-get update`: the boot-time one already populated the cache. Hitting
+        # the lists lock ourselves doesn't add anything and just risks contention.
+        # Wrap apt-get install in a small bash retry loop -- on rare occasions the boot update
+        # leaves the lists lock held briefly after the dpkg lock is freed, and a second attempt
+        # always succeeds.
         install_body = (
-            f"apt-get install -y -qq openssh-server tmux rsync git jq xxd curl ca-certificates && "
+            "for attempt in 1 2 3; do "
+            "  if apt-get install -y -qq openssh-server tmux rsync git jq xxd curl ca-certificates; then "
+            "    INSTALL_OK=1; break; "
+            "  fi; "
+            "  sleep 10; "
+            "done; "
+            '[ "${INSTALL_OK:-0}" = 1 ] && '
             f"mkdir -p /run/sshd && mkdir -p {host_dir_str}"
         )
         combined_cmd = prelude + install_body

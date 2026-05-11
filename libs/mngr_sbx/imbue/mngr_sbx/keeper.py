@@ -128,8 +128,13 @@ def read_keeper_pid(provider_dir: Path, host_id: HostId) -> int | None:
         return None
 
 
-def stop_keeper(provider_dir: Path, host_id: HostId, timeout_seconds: float = 5.0) -> None:
-    """Terminate the keeper subprocess (if any) and remove its pidfile."""
+def stop_keeper(provider_dir: Path, host_id: HostId, timeout_seconds: float = 2.0) -> None:
+    """Terminate the keeper subprocess (if any) and remove its pidfile.
+
+    sbx's CLI does not forward SIGTERM to the inner sleep process, so SIGTERM
+    alone never exits the keeper. We send SIGTERM first (best effort cleanup),
+    give it a brief moment, then go straight to SIGKILL.
+    """
     pid = read_keeper_pid(provider_dir, host_id)
     pid_path = keeper_pid_path(provider_dir, host_id)
     if pid is None:
@@ -154,7 +159,7 @@ def stop_keeper(provider_dir: Path, host_id: HostId, timeout_seconds: float = 5.
                 break
             time.sleep(0.1)
         else:
-            logger.warning("Keeper pid={} did not exit after {}s; sending SIGKILL", pid, timeout_seconds)
+            logger.debug("Keeper pid={} did not exit on SIGTERM after {}s; sending SIGKILL", pid, timeout_seconds)
             try:
                 os.kill(pid, signal.SIGKILL)
             except OSError as e:
