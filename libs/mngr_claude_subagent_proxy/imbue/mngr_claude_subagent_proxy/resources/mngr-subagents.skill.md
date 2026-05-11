@@ -68,10 +68,13 @@ path. The two-command form above is the canonical and only interface.
 ## Permission dialogs
 
 If the spawned subagent itself raises a permission dialog,
-`subagent_wait` exits non-zero and prints `NEED_PERMISSION: <name>`.
-Tell the user to run `mngr connect <name>` in another terminal to
-resolve, then re-run the same `subagent_wait` command. The spawn step
-is idempotent under `--reuse`, so you do not need to repeat it.
+`subagent_wait` prints a single line `PERMISSION_REQUIRED:<slug>` on
+stdout and exits 0 (the same exit code as the `END_TURN:` happy path).
+Detect the permission case by the `PERMISSION_REQUIRED:` prefix on the
+output, not by the exit code. Tell the user to run `mngr connect <slug>`
+in another terminal to resolve, then re-run the same `subagent_wait`
+command. The spawn step is idempotent under `--reuse`, so you do not
+need to repeat it.
 
 ## Inspecting a running subagent
 
