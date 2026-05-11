@@ -13,6 +13,7 @@ from datetime import timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import pytest
 from pydantic import PrivateAttr
 
 from imbue.mngr.primitives import AgentId
@@ -28,6 +29,7 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
+from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_agent
@@ -227,6 +229,20 @@ def test_finalize_with_none_path_is_a_noop(tmp_path: Path) -> None:
     fake = _full_fake(tmp_path)
     finalize_agent_permissions(fake, None, AgentId())
     assert not (fake.plugin_data_dir / "agents").exists()
+
+
+def test_finalize_propagates_link_errors(tmp_path: Path) -> None:
+    """Linking failures bubble up to the caller; the helper does not swallow them.
+
+    Callers (e.g. minds) decide whether to fail agent creation or just
+    surface a warning; the plugin's job is just to report what happened.
+    """
+    fake = _full_fake(tmp_path)
+    # Pass an opaque path the helper cannot operate on (it doesn't
+    # exist), forcing ``link_opaque_permissions_to_agent`` to raise.
+    missing_path = tmp_path / "definitely-not-there.json"
+    with pytest.raises(LatchkeyStoreError):
+        finalize_agent_permissions(fake, missing_path, AgentId())
 
 
 # -- AgentLatchkeySetup model -------------------------------------------------

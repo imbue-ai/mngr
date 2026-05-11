@@ -59,6 +59,7 @@ from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import finalize_agent_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.store import LatchkeyStoreError
 
 # Inlined to avoid pulling the ``imbue-mngr-forward`` package into minds'
 # import graph -- minds spawns the plugin as a subprocess and otherwise has
@@ -1144,16 +1145,33 @@ class AgentCreator(MutableModel):
                 # at the canonical agent-keyed permissions file. After
                 # this, ``LatchkeyPermissionGrantHandler`` can write to
                 # the canonical path and the gateway will see the
-                # changes via the symlink. Same flow for every mode
-                # (DEV included): the symlink lives under ``data_dir``
-                # which both the desktop client and any in-process DEV
-                # agent can see.
+                # changes via the symlink.
+                #
+                # We downgrade ``LatchkeyStoreError`` here to a warning
+                # rather than failing agent creation: the gateway still
+                # has the deny-all baseline at the opaque path (the JWT
+                # already points there), so the agent comes up working
+                # but any later UI-driven permission grants will not
+                # take effect. The user can recover by re-creating the
+                # agent.
                 if self.latchkey is not None:
-                    finalize_agent_permissions(
-                        self.latchkey,
-                        latchkey_setup.opaque_permissions_path,
-                        canonical_id,
-                    )
+                    try:
+                        finalize_agent_permissions(
+                            self.latchkey,
+                            latchkey_setup.opaque_permissions_path,
+                            canonical_id,
+                        )
+                    except LatchkeyStoreError as link_error:
+                        logger.warning(
+                            "Failed to link latchkey permissions handle for agent {}: {}",
+                            canonical_id,
+                            link_error,
+                        )
+                        log_queue.put(
+                            "[minds] Warning: could not link latchkey permissions handle to "
+                            f"canonical path for agent {canonical_id}; permission grants will not "
+                            f"take effect until the agent is re-created. Reason: {link_error}"
+                        )
 
                 log_queue.put("[minds] Agent created successfully.")
 

@@ -39,7 +39,6 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
-from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_agent
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
 from imbue.mngr_latchkey.store import save_permissions
@@ -163,23 +162,22 @@ def finalize_agent_permissions(
 ) -> None:
     """Replace the opaque permissions handle with a symlink to the canonical agent path.
 
-    Idempotent / no-op when ``opaque_permissions_path`` is ``None``
-    (which is what :func:`prepare_agent_latchkey` returns on the JWT-mint
-    failure path -- there is nothing to finalize then).
+    No-op when ``opaque_permissions_path`` is ``None`` -- that's the
+    sentinel :func:`prepare_agent_latchkey` returns when JWT minting
+    failed, in which case there is nothing to finalize.
 
-    Failures here are logged but do not raise. The agent's gateway
-    requests will still be evaluated against the deny-all baseline file
-    that the JWT references directly (i.e. the opaque file itself); the
-    only consequence of a failed finalize is that subsequent
-    user-driven permission grants will not take effect because the UI
-    writes to the canonical agent-keyed path which is not yet linked.
+    Raises :class:`LatchkeyStoreError` if the linking fails. Callers
+    decide whether to surface the failure or carry on: if the link
+    isn't established, the agent's gateway requests still evaluate
+    against the deny-all baseline file the JWT references directly
+    (the opaque file itself, which already exists), but subsequent
+    UI-driven permission grants will not take effect because the UI
+    writes to the canonical agent-keyed path that this function would
+    have linked.
     """
     if opaque_permissions_path is None:
         return
-    try:
-        link_opaque_permissions_to_agent(latchkey.plugin_data_dir, opaque_permissions_path, agent_id)
-    except LatchkeyStoreError as e:
-        logger.warning("Failed to link latchkey permissions handle for agent {}: {}", agent_id, e)
+    link_opaque_permissions_to_agent(latchkey.plugin_data_dir, opaque_permissions_path, agent_id)
 
 
 # -- Internals ----------------------------------------------------------------
