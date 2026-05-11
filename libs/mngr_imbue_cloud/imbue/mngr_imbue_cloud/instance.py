@@ -38,6 +38,7 @@ from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
@@ -389,16 +390,19 @@ class ImbueCloudProvider(BaseProviderInstance):
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
         for entry in leased:
             host_id = HostId(entry.host_id)
-            raw, outer_error = self._collect_listing_raw_via_outer(entry)
+            raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(entry)
             if raw is None:
                 # Outer SSH itself failed; fall back to a lease-only stub
-                # so the host doesn't disappear from `mngr list`.
-                self._listing_raw_cache.pop(host_id, None)
+                # so the host doesn't disappear from `mngr list`. The state
+                # depends on whether the failure was an auth mismatch (the
+                # host is reachable, our key is just wrong) or something
+                # more terminal (network down, host destroyed).
+                fallback_state = HostState.UNAUTHENTICATED if is_auth_failure else HostState.CRASHED
                 host_ref = DiscoveredHost(
                     host_id=host_id,
                     host_name=HostName(entry.host_id),
                     provider_name=self.name,
-                    host_state=HostState.CRASHED,
+                    host_state=fallback_state,
                 )
                 agent_refs = [
                     DiscoveredAgent(
@@ -409,8 +413,11 @@ class ImbueCloudProvider(BaseProviderInstance):
                     )
                 ]
                 # Stash the outer error so get_host_and_agent_details can
-                # surface it in failure_reason.
-                self._listing_raw_cache[host_id] = {"outer_ssh_error": outer_error}
+                # surface it in failure_reason without re-trying SSH.
+                self._listing_raw_cache[host_id] = {
+                    "outer_ssh_error": outer_error,
+                    "outer_ssh_is_auth_failure": is_auth_failure,
+                }
                 result[host_ref] = agent_refs
                 continue
             self._listing_raw_cache[host_id] = raw
@@ -456,13 +463,16 @@ class ImbueCloudProvider(BaseProviderInstance):
     def _collect_listing_raw_via_outer(
         self,
         lease: LeasedHostInfo,
-    ) -> tuple[dict[str, Any] | None, str | None]:
+    ) -> tuple[dict[str, Any] | None, str | None, bool]:
         """Run the outer listing script over root SSH on the leased VPS.
 
-        Returns ``(raw, None)`` on success (where ``raw`` is the parsed
-        output of ``build_outer_listing_collection_script``) or
-        ``(None, error_message)`` when outer SSH can't be reached at all
-        -- the lease-only fallback case.
+        Returns ``(raw, None, False)`` on success (where ``raw`` is the
+        parsed output of ``build_outer_listing_collection_script``) or
+        ``(None, error_message, is_auth_failure)`` when outer SSH can't be
+        reached. ``is_auth_failure`` is True iff the failure was an
+        authentication error (``HostAuthenticationError``) -- in that case
+        the host is reachable but our key was rejected, which is the
+        ``UNAUTHENTICATED`` state, not ``CRASHED``.
         """
         host_id = HostId(lease.host_id)
         host_dir = str(self.host_dir)
@@ -476,6 +486,14 @@ class ImbueCloudProvider(BaseProviderInstance):
                 assert outer is not None
                 script = build_outer_listing_collection_script(str(host_id), host_dir, self.mngr_ctx.config.prefix)
                 result = outer.execute_idempotent_command(script, timeout_seconds=60.0)
+        except HostAuthenticationError as exc:
+            logger.warning(
+                "imbue_cloud[{}] outer SSH authentication failed for host {}: {}",
+                self.name,
+                host_id,
+                exc,
+            )
+            return None, f"outer SSH authentication failed: {exc}", True
         except (HostConnectionError, HostNotFoundError, MngrError) as exc:
             logger.warning(
                 "imbue_cloud[{}] outer SSH unreachable for host {}: {}",
@@ -483,7 +501,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 host_id,
                 exc,
             )
-            return None, f"outer SSH unreachable: {exc}"
+            return None, f"outer SSH unreachable: {exc}", False
         if not result.success:
             logger.warning(
                 "imbue_cloud[{}] outer listing script for host {} exited non-zero: {}",
@@ -491,8 +509,8 @@ class ImbueCloudProvider(BaseProviderInstance):
                 host_id,
                 result.stderr.strip(),
             )
-            return None, f"outer listing script failed: {result.stderr.strip() or 'non-zero exit'}"
-        return parse_listing_collection_output(result.stdout), None
+            return None, f"outer listing script failed: {result.stderr.strip() or 'non-zero exit'}", False
+        return parse_listing_collection_output(result.stdout), None, False
 
     def get_host_and_agent_details(
         self,
@@ -605,14 +623,18 @@ class ImbueCloudProvider(BaseProviderInstance):
 
         Last-resort path: we have nothing but lease metadata. SSH info is
         populated so the user can see the unreachable address;
-        ``failure_reason`` carries the underlying error.
+        ``failure_reason`` carries the underlying error. The state comes
+        from ``host_ref.host_state`` (which discovery set to
+        ``UNAUTHENTICATED`` for auth failures and ``CRASHED`` for other
+        outer-SSH errors), with ``CRASHED`` as a safe default if it's
+        unset.
         """
         ssh_info = self._build_lease_ssh_info(host_ref.host_id, lease)
         host_details = HostDetails(
             id=host_ref.host_id,
             name=str(host_ref.host_name),
             provider_name=host_ref.provider_name,
-            state=HostState.CRASHED,
+            state=host_ref.host_state or HostState.CRASHED,
             ssh=ssh_info,
             failure_reason=failure_message,
         )
