@@ -56,13 +56,19 @@ timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")
 # labels for the per-window line prefix; without them the literal key would
 # be shown ("five_hour: 9% used"). Window keys themselves stay
 # identifier-safe so format templates like {five_hour.used_percentage}
-# remain functional.
+# remain functional. The `type == "object"` guard preserves pass-through
+# behavior if Claude Code ever sends a non-object `rate_limits` value: the
+# previous (decoration-less) writer accepted any JSON value, and the CLI
+# reader's isinstance(dict) check then filtered the malformed event. We
+# match that robustness rather than crashing under `set -euo pipefail`.
 labels='{"five_hour":"5h","seven_day":"7d","overage":"overage"}'
 event=$(printf '%s' "$rate_limits" | jq -c \
   --arg event_id "$event_id" \
   --arg timestamp "$timestamp" \
   --argjson labels "$labels" \
   '{source:"claude/rate_limits",type:"rate_limit_snapshot",event_id:$event_id,timestamp:$timestamp,
-    rate_limits:(. as $rl | reduce (keys_unsorted[]) as $k ({}; .[$k] = ($rl[$k] + (if $labels[$k] then {label:$labels[$k]} else {} end))))}')
+    rate_limits:(if type == "object"
+                 then . as $rl | reduce (keys_unsorted[]) as $k ({}; .[$k] = ($rl[$k] + (if $labels[$k] then {label:$labels[$k]} else {} end)))
+                 else . end)}')
 
 printf '%s\n' "$event" >> "$events_path"
