@@ -35,9 +35,12 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
@@ -105,24 +108,35 @@ def _find_host_across_providers(
             continue
         if host_name is None:
             continue
+        # Outer try covers "this provider isn't available on this machine"
+        # (skip it and try the next provider). Inner _lookup helper covers
+        # "this provider IS available but doesn't have this host" (the
+        # caller falls through to the next identifier form).
         try:
-            host = provider.get_host(HostId(str(host_name)))
-            return host.id, provider.name
-        except (HostNotFoundError, ValueError):
-            pass
-        except ProviderUnavailableError:
-            # Provider can't run on this machine (binary missing, daemon
-            # down). Skip it and try the next provider -- this iteration is
-            # specifically "find which provider has this host".
-            continue
-        try:
-            host = provider.get_host(host_name)
-            return host.id, provider.name
-        except (HostNotFoundError, ValueError):
-            pass
+            host = _lookup_host(provider, host_name)
         except ProviderUnavailableError:
             continue
+        if host is not None:
+            return host.id, provider.name
     return None
+
+
+def _lookup_host(provider: ProviderInstanceInterface, host_name: HostName) -> HostInterface | None:
+    """Return the host for ``host_name``, treating it first as a HostId then as a HostName.
+
+    Returns ``None`` when the provider doesn't recognise the identifier in
+    either form (or when the HostId form is malformed). Propagates
+    ``ProviderUnavailableError`` so the caller can fall through to the
+    next provider.
+    """
+    try:
+        return provider.get_host(HostId(str(host_name)))
+    except (HostNotFoundError, ValueError):
+        pass
+    try:
+        return provider.get_host(host_name)
+    except (HostNotFoundError, ValueError):
+        return None
 
 
 def _classify_mixed_identifiers(
