@@ -824,14 +824,14 @@ def _render_errors_to_stderr(errors: list[ErrorInfo]) -> None:
 
 
 def _exit_for_errors(ctx: click.Context, error_behavior: ErrorBehavior, result: ListResult) -> None:
-    """Exit 1 only when ``--on-error abort`` and any errors were collected.
+    """Gate exit code on collected ``result.errors``.
 
     - ``--on-error abort`` (default): exit 1 if ``result.errors`` is non-empty.
-    - ``--on-error continue``: exit 0 always; the caller inspects
-      ``result.errors`` programmatically. Internal bugs (non-MngrError
-      exceptions) propagate as exit 1 before reaching this helper.
+    - ``--on-error continue``: no exit here; caller inspects ``result.errors``.
 
-    Warnings never affect the exit code.
+    Warnings never affect the exit code. Internal bugs and other
+    non-provider exceptions (CEL compile failures, AbortError, etc.)
+    propagate around this helper and produce exit 1 regardless of mode.
     """
     if error_behavior == ErrorBehavior.ABORT and result.errors:
         ctx.exit(1)
