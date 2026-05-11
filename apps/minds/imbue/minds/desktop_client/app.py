@@ -1237,15 +1237,26 @@ async def _handle_chrome_events(
 
             # Wait for changes and push updates until client disconnects.
             #
-            # Loop ordering invariant: ``change_event.clear()`` must happen
-            # AFTER draining the per-connection queues but BEFORE the next
-            # ``wait()``. A producer always pushes to the queue first and
-            # then sets the event. If we cleared the event at the top of the
-            # loop (before drain), a producer firing between the previous
-            # drain and the clear would have its wakeup wiped and the queued
-            # item could sit idle for up to the 30s timeout before the
-            # consumer observed it -- a UX regression for health-state
-            # transitions like RESTARTING -> HEALTHY.
+            # Loop ordering invariant: ``change_event.clear()`` runs
+            # immediately after ``wait()`` returns and BEFORE draining the
+            # per-connection queue. A producer always pushes to the queue
+            # first and then sets the event. With this ordering:
+            #
+            # - Producer fires between ``wait()`` returning and ``clear()``:
+            #   queue gets the item, event is wiped, but this iteration's
+            #   drain catches the item.
+            # - Producer fires between ``clear()`` and drain: queue gets the
+            #   item, event is set again. Drain catches the item. Next
+            #   ``wait()`` returns immediately, drain is empty -- a benign
+            #   false wake.
+            # - Producer fires after drain: event is set. Next ``wait()``
+            #   returns immediately and drain catches the item.
+            #
+            # Clearing at the bottom of the loop instead would lose the
+            # wakeup for any producer that fires between the drain and the
+            # bottom-of-loop clear, leaving the queued item idle for up to
+            # 30s -- a UX regression for health-state transitions like
+            # RESTARTING -> HEALTHY.
             connected = not await request.is_disconnected()
             while connected:
                 # Wait for a change signal or timeout (timeout for disconnect checks).
@@ -1253,6 +1264,10 @@ async def _handle_chrome_events(
                     await asyncio.wait_for(change_event.wait(), timeout=30.0)
                 except TimeoutError:
                     pass
+                # Clear BEFORE draining so any producer firing between drain
+                # and the next ``wait()`` re-sets the event and is observed
+                # promptly. See the comment above for the full invariant.
+                change_event.clear()
 
                 connected = not await request.is_disconnected()
                 if not connected:
@@ -1279,10 +1294,6 @@ async def _handle_chrome_events(
                     yield "data: {}\n\n".format(
                         json.dumps({"type": "request_count", "count": current_request_count, "auto_open": auto_open})
                     )
-
-                # Clear AFTER all drains/yields so that any producer signal
-                # that lands during the next ``wait()`` is observed promptly.
-                change_event.clear()
         finally:
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.remove_on_change_callback(_on_change)
