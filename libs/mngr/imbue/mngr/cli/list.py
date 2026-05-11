@@ -20,6 +20,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import ListResult
+from imbue.mngr.api.list import ProviderErrorInfo
 from imbue.mngr.api.list import WarningInfo
 from imbue.mngr.api.list import agent_details_to_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
@@ -428,7 +429,12 @@ def _list_streaming_template(
     format_template: str,
     limit: int | None,
 ) -> None:
-    """Streaming template output path: write one template-expanded line per agent."""
+    """Streaming template output path: write one template-expanded line per agent.
+
+    Template format is for scripting (downstream parsers) -- skip the stderr
+    rendering of warnings/errors so they don't end up captured by tests or
+    pipes that read the combined stream. Errors still gate exit code.
+    """
     emitter = _StreamingTemplateEmitter(format_template=format_template, output=sys.stdout, limit=limit)
 
     result = api_list_agents(
@@ -441,8 +447,6 @@ def _list_streaming_template(
         is_streaming=True,
     )
 
-    _render_warnings_to_stderr(result.warnings, ctx)
-    _render_errors_to_stderr(result.errors)
     _exit_for_errors(ctx, error_behavior, result)
 
 
@@ -725,12 +729,13 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
             # JSONL is handled above with streaming, so this should be unreachable
             raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")
 
-    # Render warnings + errors to stderr ONLY for human format. JSON/JSONL
-    # already include them in the structured stdout, so duplicating them on
-    # stderr would (a) be redundant and (b) corrupt tests that capture
-    # output and parse it as JSON. --quiet suppresses these via the loguru
-    # console handler being removed.
-    if params.output_opts.output_format == OutputFormat.HUMAN:
+    # Render warnings + errors to stderr ONLY for true human format (no
+    # template). JSON/JSONL already include them in the structured stdout;
+    # template format is for scripting (one line per agent) where stderr
+    # noise breaks downstream parsers. --quiet suppresses these via the
+    # loguru console handler being removed.
+    is_human_no_template = params.output_opts.output_format == OutputFormat.HUMAN and params.format_template is None
+    if is_human_no_template:
         _render_warnings_to_stderr(result.warnings, ctx)
         _render_errors_to_stderr(result.errors)
     _exit_for_errors(ctx, params.error_behavior, result)
@@ -809,11 +814,10 @@ def _render_errors_to_stderr(errors: list[ErrorInfo]) -> None:
     """Render ErrorInfo entries to stderr at ERROR level (red prefix).
 
     ProviderErrorInfo carries provider_name as an attribute; bare ErrorInfo
-    doesn't, so the prefix is conditional.
+    doesn't, so the prefix is conditional via isinstance rather than getattr.
     """
     for error in errors:
-        provider_name = getattr(error, "provider_name", None)
-        prefix = f"{provider_name}: " if provider_name else ""
+        prefix = f"{error.provider_name}: " if isinstance(error, ProviderErrorInfo) else ""
         logger.error("{}{}: {}", prefix, error.exception_type, error.message)
 
 
