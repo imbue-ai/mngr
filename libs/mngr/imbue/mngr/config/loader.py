@@ -358,7 +358,9 @@ def _check_unknown_fields(
                 f"Unknown fields in {context}: {sorted(unknown)}. Valid fields: {sorted(known_fields)}"
             )
         if not silent:
-            logger.warning("Unknown fields in {}: {}. Valid fields: {}", context, sorted(unknown), sorted(known_fields))
+            logger.warning(
+                "Unknown fields in {}: {}. Valid fields: {}", context, sorted(unknown), sorted(known_fields)
+            )
         for key in unknown:
             del raw_config[key]
 
@@ -414,10 +416,14 @@ def _parse_providers(
                 msg += f" {get_plugin_install_hint(backend)}"
             if strict:
                 raise ConfigParseError(msg) from e
+            if not silent:
+                logger.warning(msg)
             else:
-                if not silent:
-                    logger.warning(msg)
-                continue
+                # silent=True path is used by `mngr plugin add`; suppressing
+                # the warning is intentional and the only side effect is the
+                # `continue` below.
+                pass
+            continue
         _check_unknown_fields(raw_config, config_class, f"providers.{name}", strict=strict, silent=silent)
         providers[ProviderInstanceName(name)] = config_class.model_construct(**raw_config)
 
