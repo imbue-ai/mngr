@@ -250,9 +250,11 @@ The deny hook does NOT generate per-Task wait-scripts or stage prompt
 sidefiles -- the skill is the single source of truth and uniform
 invocation is cleaner than offering two redundant ways to do the same
 thing. If the subagent itself raises a permission dialog,
-`subagent_wait` exits non-zero with `NEED_PERMISSION: <name>` on
-stderr; resolve with `mngr connect <name>` in another terminal and
-re-run the same command (`mngr create --reuse` is idempotent).
+`subagent_wait` prints a single line `PERMISSION_REQUIRED:<slug>` on
+stdout and exits 0 (same exit code as the `END_TURN:` happy path; the
+prefix is the signal, not the exit code). Resolve with
+`mngr connect <slug>` in another terminal and re-run the same
+`subagent_wait` command (`mngr create --reuse` is idempotent).
 
 What deny mode installs:
 - `PreToolUse:Agent` hook only.
