@@ -1460,7 +1460,6 @@ async def _handle_restart_workspace_server_api(
     agent_id: str,
     request: Request,
     auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
 ) -> Response:
     """Restart the workspace_server tmux window on the agent host.
 
@@ -1471,9 +1470,11 @@ async def _handle_restart_workspace_server_api(
     ``_RESTART_BLOCK_TIMEOUT_SECONDS`` elapses. On timeout, returns 504
     and leaves the tracker in RESTARTING -- the background probe loop
     will flip it to HEALTHY whenever the workspace recovers.
+
+    No backend_resolver dependency is taken: ``mngr exec`` routes by
+    agent ID through the mngr Host abstraction, so the per-agent backend
+    URL the resolver carries is not needed here.
     """
-    # No per-agent host details needed; mngr exec routes by agent ID.
-    del backend_resolver
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return _json_error("Not authenticated", status_code=403)
     aid = AgentId(agent_id)
