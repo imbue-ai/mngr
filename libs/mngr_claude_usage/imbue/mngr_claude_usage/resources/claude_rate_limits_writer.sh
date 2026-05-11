@@ -56,11 +56,14 @@ timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")
 # labels for the per-window line prefix; without them the literal key would
 # be shown ("five_hour: 9% used"). Window keys themselves stay
 # identifier-safe so format templates like {five_hour.used_percentage}
-# remain functional. The `type == "object"` guard preserves pass-through
-# behavior if Claude Code ever sends a non-object `rate_limits` value: the
-# previous (decoration-less) writer accepted any JSON value, and the CLI
-# reader's isinstance(dict) check then filtered the malformed event. We
-# match that robustness rather than crashing under `set -euo pipefail`.
+# remain functional.
+#
+# The `type == "object"` guard handles unexpected `rate_limits` shapes
+# (e.g. a string or array, if the statusline schema ever changes): the
+# value is passed through unchanged, and the CLI reader's
+# isinstance(dict) check filters the malformed event downstream. Without
+# this guard, jq's reduce would error and `set -euo pipefail` would
+# abort the writer.
 labels='{"five_hour":"5h","seven_day":"7d","overage":"overage"}'
 event=$(printf '%s' "$rate_limits" | jq -c \
   --arg event_id "$event_id" \
