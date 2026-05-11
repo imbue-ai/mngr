@@ -40,9 +40,11 @@ from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_HOST
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_PORT
+from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
+from imbue.minds.desktop_client.app import start_workspace_health_probe_loop
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
@@ -50,7 +52,6 @@ from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
 from imbue.minds.desktop_client.forward_cli import LocalAgentDiscoveryHandler
 from imbue.minds.desktop_client.forward_cli import MindsApiUrlWriter
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
-from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.core import LATCHKEY_BINARY
 from imbue.minds.desktop_client.latchkey.core import Latchkey
@@ -67,6 +68,7 @@ from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
+from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
@@ -167,7 +169,6 @@ def run(
         port=mngr_forward_port,
         reverse_specs=(f"0:{port}",),
         mngr_host_dir=mngr_host_dir,
-        minds_origin=f"http://localhost:{port}",
     )
     consumer, preauth_cookie = start_mngr_forward(
         config=forward_config,
@@ -285,6 +286,20 @@ def run(
         output_format=output_format,
         root_concurrency_group=root_concurrency_group,
         workspace_health_tracker=workspace_health_tracker,
+        mngr_binary=MNGR_BINARY,
+        mngr_host_dir=mngr_host_dir,
+    )
+
+    # Background probe loop: flips STUCK/RESTARTING agents back to HEALTHY
+    # once the plugin probe sees a 200. Started here (not inside
+    # ``create_desktop_client``) so test factories that build the app can
+    # skip the probe thread by simply not calling this function.
+    start_workspace_health_probe_loop(
+        tracker=workspace_health_tracker,
+        backend_resolver=backend_resolver,
+        mngr_forward_port=mngr_forward_port,
+        mngr_forward_preauth_cookie=preauth_cookie,
+        root_concurrency_group=root_concurrency_group,
     )
 
     if not no_browser:

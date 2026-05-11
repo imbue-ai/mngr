@@ -64,7 +64,6 @@ class ForwardCliOptions(CommonCliOptions):
     preauth_cookie: str | None = None
     open_browser: bool = False
     allow_host_loopback: bool = False
-    minds_origin: str | None = None
 
 
 def _parse_reverse_specs(raw: tuple[str, ...]) -> tuple[ReverseTunnelSpec, ...]:
@@ -160,17 +159,6 @@ def _resolve_plugin_state_dir(mngr_host_dir: Path) -> Path:
         "the host. Pass this flag only for setups that intentionally run agents directly on the host."
     ),
 )
-@click.option(
-    "--minds-origin",
-    "minds_origin",
-    default=None,
-    help=(
-        "Origin of the minds desktop client (e.g. http://localhost:8420). When set, HTML 503s from "
-        "subdomain forwarding 302-redirect to <origin>/agents/<id>/recovery so the user lands on the "
-        "minds-owned recovery page instead of the plugin's auto-refresh page. When unset, the legacy "
-        "auto-refresh HTML is served (no minds origin known)."
-    ),
-)
 @add_common_options
 @click.pass_context
 def forward(ctx: click.Context, **kwargs: Any) -> None:
@@ -260,7 +248,6 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
         preauth_cookie_value=opts.preauth_cookie,
         on_listening=_on_listening,
         allow_host_loopback=opts.allow_host_loopback,
-        minds_origin=opts.minds_origin,
     )
 
     try:

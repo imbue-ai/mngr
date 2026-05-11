@@ -62,6 +62,7 @@ from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr_forward.data_types import WorkspaceBackendFailureReason
 
 _DEFAULT_MNGR_HOST_DIR: Final[Path] = Path.home() / ".mngr"
 _REMOTE_HOST_DIR: Final[str] = "/mngr"
@@ -71,7 +72,7 @@ OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
 OnAgentDestroyedCallback = Callable[[AgentId], None]
 OnReverseTunnelEstablishedCallback = Callable[["ReverseTunnelEstablishedInfo"], None]
 OnProviderErrorCallback = Callable[[str, str, str], None]
-OnWorkspaceBackendFailureCallback = Callable[[AgentId, str, int | None], None]
+OnWorkspaceBackendFailureCallback = Callable[[AgentId, WorkspaceBackendFailureReason, int | None], None]
 
 
 class ReverseTunnelEstablishedInfo(FrozenModel):
@@ -106,14 +107,6 @@ class ForwardSubprocessConfig(FrozenModel):
     )
     mngr_binary: str = Field(default=MNGR_BINARY, description="Path to mngr binary")
     mngr_host_dir: Path = Field(default=_DEFAULT_MNGR_HOST_DIR, description="MNGR_HOST_DIR for the subprocess")
-    minds_origin: str | None = Field(
-        default=None,
-        description=(
-            "Origin of the minds-side HTTP server (e.g. http://localhost:8420). When set, the plugin "
-            "302-redirects HTML 503s to <origin>/agents/<id>/recovery so the user lands on minds' "
-            "recovery page instead of the plugin's auto-refresh fallback."
-        ),
-    )
 
 
 class EnvelopeStreamConsumer(MutableModel):
@@ -166,9 +159,9 @@ class EnvelopeStreamConsumer(MutableModel):
         """Register a callback fired for each ``workspace_backend_failure`` forward-stream envelope.
 
         The callback receives ``(agent_id, reason, status_code)``. ``reason``
-        is one of the literals defined on ``WorkspaceBackendFailurePayload``
-        (``connect_error`` / ``sse_eof`` / ``5xx_response`` / ``unresolved``);
-        ``status_code`` is set only when ``reason == "5xx_response"``.
+        is a ``WorkspaceBackendFailureReason`` enum value (CONNECT_ERROR /
+        SSE_EOF / FIVEXX_RESPONSE / UNRESOLVED); ``status_code`` is set
+        only when ``reason == WorkspaceBackendFailureReason.FIVEXX_RESPONSE``.
         Used by minds to feed its ``WorkspaceServerHealthTracker``.
         """
         with self._lock:
@@ -571,7 +564,7 @@ class EnvelopeStreamConsumer(MutableModel):
         elif payload_type == "workspace_backend_failure":
             try:
                 agent_id = AgentId(str(payload["agent_id"]))
-                reason = str(payload["reason"])
+                reason = WorkspaceBackendFailureReason(str(payload["reason"]))
             except (KeyError, ValueError, TypeError) as e:
                 logger.warning("Could not parse workspace_backend_failure payload: {}", e)
                 return
@@ -730,8 +723,6 @@ def start_mngr_forward(
         command.extend(["--agent-include", include])
     for spec in config.reverse_specs:
         command.extend(["--reverse", spec])
-    if config.minds_origin is not None:
-        command.extend(["--minds-origin", config.minds_origin])
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(config.mngr_host_dir)
     logger.info("Spawning `mngr forward` subprocess: {}", " ".join(_redact_secrets(command)))

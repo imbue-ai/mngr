@@ -487,49 +487,6 @@ def open_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     return _create_ssh_client(ssh_info)
 
 
-def _run_command_on_client(
-    client: paramiko.SSHClient,
-    command: str,
-    timeout_seconds: float,
-) -> tuple[int, str]:
-    """Run ``command`` on an already-connected SSH client.
-
-    Split out of ``exec_remote_command`` so tests can substitute a fake client
-    (paramiko.SSHClient is hard to construct in tests without an SSH server)
-    without monkeypatching the connection factory.
-    """
-    stdin, stdout, stderr = client.exec_command(command, timeout=timeout_seconds)
-    stdin.close()
-    stderr_bytes = stderr.read()
-    exit_status = stdout.channel.recv_exit_status()
-    stderr_text = stderr_bytes.decode("utf-8", errors="replace")
-    return exit_status, stderr_text
-
-
-def exec_remote_command(
-    ssh_info: RemoteSSHInfo,
-    command: str,
-    timeout_seconds: float = 10.0,
-) -> tuple[int, str]:
-    """Execute ``command`` on the remote host and return ``(exit_status, stderr_text)``.
-
-    Opens a fresh paramiko connection, runs the command via the channel API
-    so we can capture the exit status, and closes the connection on return.
-    Stderr is decoded with ``utf-8`` replace; stdout is discarded (callers
-    that need it should not use this helper). Used by the workspace-server
-    restart endpoint to drive ``tmux kill-window`` + ``touch`` on the agent
-    host without managing connection lifetime at the call site.
-    """
-    client = _create_ssh_client(ssh_info)
-    try:
-        return _run_command_on_client(client, command, timeout_seconds)
-    finally:
-        try:
-            client.close()
-        except (paramiko.SSHException, OSError) as e:
-            logger.trace("Error closing SSH client after exec_remote_command: {}", e)
-
-
 def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     """Create a paramiko SSH connection to the given host.
 

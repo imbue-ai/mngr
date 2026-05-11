@@ -80,17 +80,6 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return None
 
-    def get_work_dir(self, agent_id: AgentId) -> Path | None:
-        """Return the agent's working directory on its host, or None if unknown.
-
-        Used by the workspace-server restart endpoint to ``touch`` the
-        services.toml mtime watch file on the agent host. Default returns
-        None; subclasses that have access to ``DiscoveredAgent.work_dir``
-        should override.
-        """
-        del agent_id
-        return None
-
     def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
         """Return display-oriented info about an agent, or None if unknown.
 
@@ -385,14 +374,6 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """Return SSH info for the agent's host, or None for local agents."""
         with self._lock:
             return self._agents_result.ssh_info_by_agent_id.get(str(agent_id))
-
-    def get_work_dir(self, agent_id: AgentId) -> Path | None:
-        """Return ``DiscoveredAgent.work_dir`` for ``agent_id``, or None if unknown."""
-        with self._lock:
-            for agent in self._agents_result.discovered_agents:
-                if agent.agent_id == agent_id:
-                    return agent.work_dir
-            return None
 
     def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
         """Return display info from discovered agent data."""

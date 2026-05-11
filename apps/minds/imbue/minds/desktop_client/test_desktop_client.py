@@ -11,11 +11,10 @@ from starlette.testclient import TestClient
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
-from imbue.minds.desktop_client.app import _build_restart_command
+from imbue.minds.desktop_client.app import _build_mngr_exec_argv
+from imbue.minds.desktop_client.app import _build_restart_shell_command
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import create_desktop_client
-from imbue.minds.desktop_client.workspace_server_health import AgentHealth
-from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -33,6 +32,8 @@ from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
+from imbue.minds.desktop_client.workspace_server_health import AgentHealth
+from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
@@ -1372,15 +1373,27 @@ def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path
 # -- workspace-server restart + recovery tests --
 
 
-def test_build_restart_command_uses_provided_work_dir() -> None:
-    cmd = _build_restart_command(Path("/work/dir"))
+def test_build_restart_shell_command_kicks_tmux_and_touches_services_toml() -> None:
+    cmd = _build_restart_shell_command()
     assert "tmux kill-window -t imbue-agent:workspace_server" in cmd
-    assert "touch /work/dir/services.toml" in cmd
+    # mngr exec already runs in the agent's work_dir, so services.toml is relative.
+    assert "touch services.toml" in cmd
 
 
-def test_build_restart_command_defaults_to_code_services_toml_when_unknown() -> None:
-    cmd = _build_restart_command(None)
-    assert "touch /code/services.toml" in cmd
+def test_build_mngr_exec_argv_includes_agent_id_and_command() -> None:
+    aid = AgentId.generate()
+    argv = _build_mngr_exec_argv(
+        mngr_binary="/usr/local/bin/mngr",
+        mngr_host_dir=Path("/tmp/mngr-host"),
+        agent_id=aid,
+        shell_command="echo hello",
+    )
+    assert argv[0] == "/usr/local/bin/mngr"
+    assert argv[1] == "exec"
+    assert argv[2] == str(aid)
+    assert argv[3] == "echo hello"
+    assert "--timeout" in argv
+    assert "--quiet" in argv
 
 
 def test_recovery_page_requires_authentication(tmp_path: Path) -> None:

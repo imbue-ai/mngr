@@ -1,14 +1,29 @@
+from enum import auto
 from typing import Any
 from typing import Literal
 
 from pydantic import Field
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import PositiveInt
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.primitives import ForwardPort
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
+
+
+class WorkspaceBackendFailureReason(UpperCaseStrEnum):
+    """Why a per-agent backend forward attempt failed.
+
+    Surfaced by the plugin so the minds-side health tracker can decide
+    whether to tick the agent toward STUCK.
+    """
+
+    CONNECT_ERROR = auto()
+    SSE_EOF = auto()
+    FIVEXX_RESPONSE = auto()
+    UNRESOLVED = auto()
 
 
 class BackendUrl(NonEmptyStr):
@@ -65,12 +80,10 @@ class WorkspaceBackendFailurePayload(FrozenModel):
 
     type: Literal["workspace_backend_failure"] = "workspace_backend_failure"
     agent_id: AgentId = Field(description="Agent whose backend failed")
-    reason: Literal["connect_error", "sse_eof", "5xx_response", "unresolved"] = Field(
-        description="Why the forward attempt failed"
-    )
+    reason: WorkspaceBackendFailureReason = Field(description="Why the forward attempt failed")
     status_code: int | None = Field(
         default=None,
-        description="HTTP status code returned by the backend (only set when reason is 5xx_response)",
+        description="HTTP status code returned by the backend (only set when reason is FIVEXX_RESPONSE)",
     )
 
 

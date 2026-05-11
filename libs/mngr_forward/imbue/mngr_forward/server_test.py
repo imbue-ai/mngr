@@ -11,6 +11,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from imbue.mngr.primitives import AgentId
@@ -513,9 +514,8 @@ def _make_forward_app_with_capture(
     preauth: str,
     *,
     backend_status: int = 200,
-    minds_origin: str | None = None,
     raise_error: type[Exception] | None = None,
-) -> tuple[object, io.StringIO, httpx.AsyncClient]:
+) -> tuple[FastAPI, io.StringIO, httpx.AsyncClient]:
     auth_store = FileAuthStore(data_directory=tmp_path)
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     resolver.add_known_agent(agent_id)
@@ -531,7 +531,6 @@ def _make_forward_app_with_capture(
         listen_host="127.0.0.1",
         listen_port=18421,
         preauth_cookie_value=preauth,
-        minds_origin=minds_origin,
     )
 
     async def _capture(request: httpx.Request) -> httpx.Response:
@@ -574,7 +573,7 @@ def test_subdomain_forward_emits_workspace_backend_failure_on_5xx(tmp_path: Path
     assert response.status_code == 503
     lines = _envelope_lines(env_out)
     assert len(lines) == 1
-    assert "workspace_backend_failure" in lines[0] or '"reason": "5xx_response"' in lines[0]
+    assert "workspace_backend_failure" in lines[0] or '"reason": "FIVEXX_RESPONSE"' in lines[0]
     assert str(agent_id) in lines[0]
 
 
@@ -605,43 +604,8 @@ def test_subdomain_forward_does_not_emit_failure_on_2xx(tmp_path: Path) -> None:
     assert _envelope_lines(env_out) == []
 
 
-def test_subdomain_forward_redirects_html_to_minds_recovery_on_503(tmp_path: Path) -> None:
-    """When minds_origin is configured, HTML callers get a 302 to the recovery page."""
-    agent_id = AgentId()
-    preauth = "preauth-cookie-redir"
-    captured: list[httpx.Request] = []
-    minds_origin = "http://localhost:9999"
-    app, env_out, mock_client = _make_forward_app_with_capture(
-        tmp_path,
-        captured,
-        agent_id,
-        preauth,
-        minds_origin=minds_origin,
-        raise_error=httpx.ConnectError,
-    )
-
-    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
-        app.state.http_client = mock_client
-        response = client.get(
-            "/some/page",
-            headers={
-                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
-                "accept": "text/html,application/xhtml+xml",
-            },
-        )
-
-    assert response.status_code == 302
-    location = response.headers["location"]
-    assert minds_origin in location
-    assert f"/agents/{agent_id}/recovery" in location
-    assert "return_to=" in location
-    # The connect failure should still produce a failure envelope so the tracker
-    # ticks toward STUCK even when the user is redirected to recovery.
-    assert len(_envelope_lines(env_out)) == 1
-
-
-def test_subdomain_forward_returns_plain_503_for_non_html_when_minds_origin_set(tmp_path: Path) -> None:
-    """Non-HTML callers (API clients) get the plain 503 instead of a redirect."""
+def test_subdomain_forward_returns_plain_503_for_non_html_on_connect_failure(tmp_path: Path) -> None:
+    """Non-HTML callers (API clients) get the plain 503 with no location header."""
     agent_id = AgentId()
     preauth = "preauth-cookie-json"
     captured: list[httpx.Request] = []
@@ -650,7 +614,6 @@ def test_subdomain_forward_returns_plain_503_for_non_html_when_minds_origin_set(
         captured,
         agent_id,
         preauth,
-        minds_origin="http://localhost:9999",
         raise_error=httpx.ConnectError,
     )
 

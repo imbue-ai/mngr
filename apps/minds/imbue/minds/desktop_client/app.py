@@ -4,7 +4,6 @@ import html
 import json
 import os
 import queue
-import subprocess
 import threading
 import time
 from collections.abc import AsyncGenerator
@@ -78,13 +77,12 @@ from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
-from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import workspace_accent
-from imbue.minds.desktop_client.ssh_tunnel import exec_remote_command
 from imbue.minds.desktop_client.workspace_server_health import AgentHealth
 from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.primitives import AIProvider
@@ -107,6 +105,17 @@ def _json_error(message: str, status_code: int) -> Response:
         media_type="application/json",
         status_code=status_code,
     )
+
+
+def _enqueue_health_change(
+    health_queue: "asyncio.Queue[tuple[str, AgentHealth]]",
+    change_event: asyncio.Event,
+    agent_id: AgentId,
+    status: AgentHealth,
+) -> None:
+    """Push a health-change event into ``health_queue`` and wake the SSE loop."""
+    health_queue.put_nowait((str(agent_id), status))
+    change_event.set()
 
 
 # -- Dependency injection helpers --
@@ -1188,7 +1197,7 @@ async def _handle_chrome_events(
             loop.call_soon_threadsafe(change_event.set)
 
         def _on_health_change(agent_id: AgentId, status: AgentHealth) -> None:
-            loop.call_soon_threadsafe(health_queue.put_nowait, (str(agent_id), status))
+            loop.call_soon_threadsafe(_enqueue_health_change, health_queue, change_event, agent_id, status)
 
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.add_on_change_callback(_on_change)
@@ -1312,22 +1321,48 @@ _RESTART_TMUX_WINDOW: Final[str] = "workspace_server"
 _RESTART_BLOCK_TIMEOUT_SECONDS: Final[float] = 15.0
 # How long a single workspace probe through the plugin is allowed to hang.
 _RESTART_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
+# Timeout for the ``mngr exec`` dispatch itself (must be > 0 and short --
+# the inner command is non-blocking, so anything beyond a few seconds means
+# the mngr CLI got stuck talking to its provider).
+_RESTART_DISPATCH_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
-def _build_restart_command(work_dir: Path | None) -> str:
-    """Compose the shell command the restart endpoint dispatches on the agent host.
+def _build_restart_shell_command() -> str:
+    """Compose the shell command that ``mngr exec`` runs on the agent host.
 
     The agent container's ``forever-claude-template`` runtime watches
     ``services.toml`` mtime. ``tmux kill-window`` kills the current
     workspace_server window; ``touch services.toml`` then re-triggers the
     watch loop which respawns it. Both run regardless of each other's
     success so a stale tmux state still produces a touch and vice versa.
+
+    ``mngr exec`` runs commands in the agent's work_dir by default, so
+    ``services.toml`` is referenced as a relative path.
     """
-    services_toml = (work_dir / "services.toml") if work_dir is not None else Path("/code/services.toml")
     return (
         f"tmux kill-window -t {_RESTART_TMUX_SESSION}:{_RESTART_TMUX_WINDOW} 2>/dev/null; "
-        f"touch {services_toml}"
+        f"touch services.toml"
     )
+
+
+def _build_mngr_exec_argv(
+    mngr_binary: str,
+    mngr_host_dir: Path,
+    agent_id: AgentId,
+    shell_command: str,
+) -> list[str]:
+    """Build the argv list for ``mngr exec`` to dispatch ``shell_command`` on ``agent_id``."""
+    # MNGR_HOST_DIR is set via env; kept as a param for callsite clarity.
+    del mngr_host_dir
+    return [
+        mngr_binary,
+        "exec",
+        str(agent_id),
+        shell_command,
+        "--timeout",
+        str(_RESTART_DISPATCH_TIMEOUT_SECONDS),
+        "--quiet",
+    ]
 
 
 def _handle_recovery_page(
@@ -1365,12 +1400,15 @@ async def _handle_restart_workspace_server_api(
     """Restart the workspace_server tmux window on the agent host.
 
     Dispatches the ``tmux kill-window`` + ``touch services.toml`` command
-    over paramiko SSH (for remote agents) or via a local subprocess (for
-    local agents) and then polls the workspace through the plugin until it
-    responds 200 or ``_RESTART_BLOCK_TIMEOUT_SECONDS`` elapses. On timeout,
-    returns 504 and leaves the tracker in RESTARTING -- the background
-    probe loop will flip it to HEALTHY whenever the workspace recovers.
+    via ``mngr exec`` (which internally routes through the mngr Host
+    abstraction, so local and remote agents are handled uniformly) and
+    then polls the workspace through the plugin until it responds 200 or
+    ``_RESTART_BLOCK_TIMEOUT_SECONDS`` elapses. On timeout, returns 504
+    and leaves the tracker in RESTARTING -- the background probe loop
+    will flip it to HEALTHY whenever the workspace recovers.
     """
+    # No per-agent host details needed; mngr exec routes by agent ID.
+    del backend_resolver
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return _json_error("Not authenticated", status_code=403)
     aid = AgentId(agent_id)
@@ -1379,30 +1417,44 @@ async def _handle_restart_workspace_server_api(
     if tracker is not None:
         tracker.mark_restarting(aid)
 
-    ssh_info = backend_resolver.get_ssh_info(aid)
-    work_dir = backend_resolver.get_work_dir(aid)
-    command = _build_restart_command(work_dir)
+    mngr_binary: str = request.app.state.mngr_binary
+    mngr_host_dir: Path = request.app.state.mngr_host_dir
+    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    if concurrency_group is None:
+        if tracker is not None:
+            tracker.mark_stuck(aid)
+        return _json_error("Cannot dispatch restart: no concurrency group available", status_code=503)
+    shell_command = _build_restart_shell_command()
+    argv = _build_mngr_exec_argv(
+        mngr_binary=mngr_binary,
+        mngr_host_dir=mngr_host_dir,
+        agent_id=aid,
+        shell_command=shell_command,
+    )
+    env = dict(os.environ)
+    env["MNGR_HOST_DIR"] = str(mngr_host_dir)
     loop = asyncio.get_running_loop()
 
-    def _dispatch() -> tuple[int, str]:
-        if ssh_info is not None:
-            return exec_remote_command(ssh_info=ssh_info, command=command)
-        completed = subprocess.run(
-            ["sh", "-c", command],
-            capture_output=True,
-            check=False,
-            timeout=10.0,
+    def _dispatch() -> tuple[int | None, str]:
+        finished = concurrency_group.run_process_to_completion(
+            argv,
+            timeout=_RESTART_DISPATCH_TIMEOUT_SECONDS + 5.0,
+            is_checked_after=False,
+            env=env,
         )
-        stderr_text = completed.stderr.decode("utf-8", errors="replace")
-        return completed.returncode, stderr_text
+        return finished.returncode, finished.stderr
 
     try:
         exit_status, stderr_text = await loop.run_in_executor(None, _dispatch)
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+    except (OSError, RuntimeError) as exc:
         logger.warning("Restart dispatch for {} failed: {}", aid, exc)
+        if tracker is not None:
+            tracker.mark_stuck(aid)
         return _json_error(f"Restart command failed: {exc}", status_code=502)
     if exit_status != 0:
         logger.warning("Restart command for {} exited {}: {}", aid, exit_status, stderr_text)
+        if tracker is not None:
+            tracker.mark_stuck(aid)
         return _json_error(f"Restart command exited {exit_status}: {stderr_text}", status_code=502)
 
     mngr_forward_port: int = request.app.state.mngr_forward_port or 0
@@ -2163,6 +2215,8 @@ def create_desktop_client(
     output_format: OutputFormat | None = None,
     root_concurrency_group: ConcurrencyGroup | None = None,
     workspace_health_tracker: WorkspaceServerHealthTracker | None = None,
+    mngr_binary: str = "mngr",
+    mngr_host_dir: Path | None = None,
 ) -> FastAPI:
     """Create the bare-origin minds FastAPI application.
 
@@ -2220,14 +2274,8 @@ def create_desktop_client(
     app.state.auth_output_format = output_format or OutputFormat.JSONL
     app.state.root_concurrency_group = root_concurrency_group
     app.state.workspace_health_tracker = workspace_health_tracker
-    if workspace_health_tracker is not None:
-        _start_workspace_health_probe_loop(
-            tracker=workspace_health_tracker,
-            backend_resolver=backend_resolver,
-            mngr_forward_port=mngr_forward_port,
-            mngr_forward_preauth_cookie=mngr_forward_preauth_cookie,
-            root_concurrency_group=root_concurrency_group,
-        )
+    app.state.mngr_binary = mngr_binary
+    app.state.mngr_host_dir = mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr"
     # Populated with the running loop by _managed_lifespan on startup. Defined
     # up-front as None so background callbacks fired before startup (e.g. mngr
     # events produced between consumer.start() and uvicorn.run()) see a
@@ -2337,7 +2385,7 @@ def create_desktop_client(
 _HEALTH_PROBE_INTERVAL_SECONDS: Final[float] = 2.0
 
 
-def _start_workspace_health_probe_loop(
+def start_workspace_health_probe_loop(
     tracker: WorkspaceServerHealthTracker,
     backend_resolver: BackendResolverInterface,
     mngr_forward_port: int,
@@ -2359,25 +2407,34 @@ def _start_workspace_health_probe_loop(
     if mngr_forward_port == 0 or not mngr_forward_preauth_cookie or root_concurrency_group is None:
         return
 
-    def _probe_loop() -> None:
-        while True:
-            for aid in tracker.snapshot_all():
-                if not isinstance(backend_resolver, MngrCliBackendResolver):
-                    # Static resolvers used by tests don't expose the same
-                    # subdomain routing, so probing them by ID is meaningless.
-                    continue
-                probe_status = probe_workspace_through_plugin(
-                    mngr_forward_port=mngr_forward_port,
-                    preauth_cookie=mngr_forward_preauth_cookie,
-                    agent_id=aid,
-                    probe_timeout_seconds=_RESTART_PROBE_TIMEOUT_SECONDS,
-                )
-                if probe_status == 200:
-                    tracker.record_success(aid)
-            threading.Event().wait(timeout=_HEALTH_PROBE_INTERVAL_SECONDS)
-
     root_concurrency_group.start_new_thread(
-        target=_probe_loop,
+        target=_run_workspace_health_probe_loop,
+        args=(tracker, backend_resolver, mngr_forward_port, mngr_forward_preauth_cookie, root_concurrency_group),
         name="workspace-server-health-probe",
         daemon=True,
     )
+
+
+def _run_workspace_health_probe_loop(
+    tracker: WorkspaceServerHealthTracker,
+    backend_resolver: BackendResolverInterface,
+    mngr_forward_port: int,
+    mngr_forward_preauth_cookie: str,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Loop body for the background workspace-server health probe thread."""
+    while not root_concurrency_group.is_shutting_down():
+        for aid in tracker.snapshot_all():
+            if not isinstance(backend_resolver, MngrCliBackendResolver):
+                # Static resolvers used by tests don't expose the same
+                # subdomain routing, so probing them by ID is meaningless.
+                continue
+            probe_status = probe_workspace_through_plugin(
+                mngr_forward_port=mngr_forward_port,
+                preauth_cookie=mngr_forward_preauth_cookie,
+                agent_id=aid,
+                probe_timeout_seconds=_RESTART_PROBE_TIMEOUT_SECONDS,
+            )
+            if probe_status == 200:
+                tracker.record_success(aid)
+        threading.Event().wait(timeout=_HEALTH_PROBE_INTERVAL_SECONDS)

@@ -152,6 +152,25 @@ class WorkspaceServerHealthTracker(MutableModel):
         if fire_health is not None:
             self._fire_on_change(agent_id, fire_health)
 
+    def mark_stuck(self, agent_id: AgentId) -> None:
+        """Force-transition ``agent_id`` to STUCK.
+
+        Used by the restart endpoint to roll back a RESTARTING transition
+        when the dispatch fails: without this, a failed dispatch would
+        leave the chrome banner permanently labelled "Restarting..." until
+        an unrelated success/failure rewrote the state.
+        """
+        aid_str = str(agent_id)
+        fire_health: AgentHealth | None = None
+        with self._lock:
+            record = self._records.setdefault(aid_str, _AgentRecord())
+            self._cancel_stuck_timer_locked(aid_str)
+            if record.health != AgentHealth.STUCK:
+                record.health = AgentHealth.STUCK
+                fire_health = AgentHealth.STUCK
+        if fire_health is not None:
+            self._fire_on_change(agent_id, fire_health)
+
     def mark_restarting(self, agent_id: AgentId) -> None:
         """Mark ``agent_id`` as RESTARTING (called from the restart endpoint).
 
