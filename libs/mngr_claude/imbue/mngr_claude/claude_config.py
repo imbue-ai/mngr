@@ -571,7 +571,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                             # don't fire stale signals.
                             "type": "command",
                             "command": (
-                                _SESSION_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
+                                SESSION_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
                                 ' _MNGR_SOURCE=$(echo "$_MNGR_HOOK_INPUT" | jq -r ".source // empty");'
                                 ' case "$_MNGR_SOURCE" in clear|compact)'
                                 " tmux wait-for -S \"mngr-submit-$(tmux display-message -p '#S')\" 2>/dev/null || true ;;"
