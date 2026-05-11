@@ -1,18 +1,16 @@
 """Shared I/O helpers for the plugin's PreToolUse:Agent hooks.
 
 Both ``hooks/spawn.py`` (PROXY mode) and ``hooks/deny.py`` (DENY mode)
-need the same handful of side-effecting helpers: read hook JSON from
-stdin, read an int env var, write a secure 0600 sidefile, write an
-executable 0755 wait-script, and emit a hook-protocol JSON response on
-stdout. Centralized here so the two hooks cannot drift on file modes
-or response framing.
+need the same handful of helpers: read an int env var, read hook JSON
+from stdin, and emit a hook-protocol JSON response (including the two
+canned deny-decision shapes) on stdout. Centralized here so the two
+hooks cannot drift on input validation or response framing.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import TextIO
@@ -70,31 +68,6 @@ def read_hook_stdin_json(stdin: TextIO, log_prefix: str) -> dict[str, Any] | Non
         logger.warning("{}: stdin JSON is not an object", log_prefix)
         return None
     return parsed
-
-
-def write_secure_file(path: Path, content: str) -> None:
-    """Write ``content`` to ``path`` with 0600 perms, creating parents as needed.
-
-    Used for prompt sidefiles which may carry user-supplied text and
-    should not be world- or group-readable.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
-    path.chmod(0o600)
-
-
-def write_executable_file(path: Path, content: str) -> None:
-    """Write ``content`` to ``path`` with 0755 perms, creating parents as needed.
-
-    Used for the per-Task-call wait-scripts that PROXY mode generates
-    for Haiku's Bash tool to invoke. DENY mode does not generate any
-    wait-script -- it points Claude at the ``mngr-subagents`` skill,
-    which teaches an explicit two-command protocol -- so this helper
-    is PROXY-mode-only today.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
-    path.chmod(0o755)
 
 
 def emit_json_response(stdout: TextIO, response: dict[str, Any]) -> None:
