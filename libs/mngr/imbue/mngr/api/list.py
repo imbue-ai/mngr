@@ -1,4 +1,3 @@
-import types
 import typing
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -44,6 +43,7 @@ from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
 from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.cel_utils import with_tolerant_paths
+from imbue.mngr.utils.pydantic_utils import unwrap_optional
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
@@ -59,7 +59,7 @@ def _walk_dict_paths(model: type[BaseModel], prefix: tuple[str, ...] = ()) -> li
     """
     paths: list[tuple[str, ...]] = []
     for name, field in model.model_fields.items():
-        annotation = _unwrap_optional(field.annotation)
+        annotation = unwrap_optional(field.annotation)
         if _is_dict_like(annotation):
             paths.append((*prefix, name))
             continue
@@ -69,16 +69,6 @@ def _walk_dict_paths(model: type[BaseModel], prefix: tuple[str, ...] = ()) -> li
         # Anything else (primitives, lists, tuples, datetimes, enums, ...) is
         # not a dict and not a model we can descend into, so we skip it.
     return paths
-
-
-def _unwrap_optional(annotation: Any) -> Any:
-    """If `annotation` is `X | None`, return `X`; otherwise return as-is."""
-    origin = typing.get_origin(annotation)
-    if origin is typing.Union or origin is types.UnionType:
-        non_none = [a for a in typing.get_args(annotation) if a is not type(None)]
-        if len(non_none) == 1:
-            return non_none[0]
-    return annotation
 
 
 def _is_dict_like(annotation: Any) -> bool:
