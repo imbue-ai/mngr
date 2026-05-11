@@ -40,7 +40,8 @@ class SubagentProxyPluginConfig(PluginConfig):
     mode: SubagentProxyMode = Field(
         default=SubagentProxyMode.PROXY,
         description="Whether to proxy Task calls through a mngr subagent (PROXY) "
-        "or deny them with copy-pasteable mngr commands (DENY).",
+        "or deny them with a short skill-pointer reason that directs Claude at "
+        "the mngr-subagents skill (DENY).",
     )
 
     def merge_with(self, override: "PluginConfig") -> "SubagentProxyPluginConfig":
