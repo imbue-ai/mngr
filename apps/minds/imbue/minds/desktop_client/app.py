@@ -4,6 +4,7 @@ import html
 import json
 import os
 import queue
+import subprocess
 import threading
 import time
 from collections.abc import AsyncGenerator
@@ -27,6 +28,7 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.config.data_types import WorkspacePaths
@@ -1511,7 +1513,13 @@ async def _handle_restart_workspace_server_api(
 
     try:
         exit_status, stderr_text = await loop.run_in_executor(None, _dispatch)
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, ConcurrencyGroupError) as exc:
+        # OSError covers fork/exec failures, RuntimeError covers the executor
+        # itself, TimeoutExpired fires when ``run_process_to_completion`` hits
+        # its ``timeout=`` argument, and ConcurrencyGroupError covers
+        # StrandTimedOutError / ProcessSetupError raised by the group when
+        # waiting on the strand. All of these are "dispatch failed" semantics
+        # and should produce the same structured 502 + mark_stuck.
         logger.warning("Restart dispatch for {} failed: {}", aid, exc)
         if tracker is not None:
             tracker.mark_stuck(aid)
