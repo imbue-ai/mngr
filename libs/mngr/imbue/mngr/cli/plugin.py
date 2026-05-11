@@ -19,7 +19,7 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
-from imbue.mngr.agents.agent_registry import list_registered_agent_types
+from imbue.mngr.agents.agent_registry import list_available_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.config import ConfigScope
@@ -394,15 +394,30 @@ def _plugin_list_impl(ctx: click.Context, **kwargs: Any) -> None:
     filtered_plugins = [p for p in all_plugins if p.is_enabled] if opts.is_active else all_plugins
 
     # Filter to a specific plugin kind if requested. Currently only
-    # "agent-type" is supported -- it intersects the plugin list with the
-    # set of names that have actually registered an agent type via the
-    # plugin hooks (see imbue.mngr.agents.agent_registry).
+    # "agent-type" is supported.
     if opts.kind == "agent-type":
-        agent_type_names = frozenset(list_registered_agent_types())
-        filtered_plugins = [p for p in filtered_plugins if p.name in agent_type_names]
+        filtered_plugins = _project_to_agent_type_entries(filtered_plugins, mngr_ctx.config)
 
     fields = _parse_fields(opts.fields)
     _emit_plugin_list(filtered_plugins, output_opts, fields)
+
+
+def _project_to_agent_type_entries(plugins: list[PluginInfo], config: MngrConfig) -> list[PluginInfo]:
+    """Return a PluginInfo list keyed by every available agent type name.
+
+    Plugin entry-point names do not always match the agent-type name they
+    register (e.g. the pi_coding plugin registers an agent type named
+    "pi-coding"), and user config can also define agent types under
+    [agent_types.X] that are not backed by a plugin entry point. We
+    delegate to ``list_available_agent_types`` -- the same source the
+    tab-completion cache uses -- and synthesize a minimal PluginInfo for
+    any name that does not have a matching entry in ``plugins``.
+    """
+    existing_by_name = {p.name: p for p in plugins}
+    return [
+        existing_by_name.get(name, PluginInfo(name=name, is_enabled=True))
+        for name in list_available_agent_types(config)
+    ]
 
 
 @plugin.command(name="add")

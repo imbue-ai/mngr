@@ -25,14 +25,17 @@ from imbue.mngr.cli.plugin import _parse_add_sources
 from imbue.mngr.cli.plugin import _parse_fields
 from imbue.mngr.cli.plugin import _parse_pypi_package_name
 from imbue.mngr.cli.plugin import _parse_remove_sources
+from imbue.mngr.cli.plugin import _project_to_agent_type_entries
 from imbue.mngr.cli.plugin import _read_package_name_from_pyproject
 from imbue.mngr.cli.plugin import _validate_plugin_name_is_known
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.errors import PluginSpecifierError
 from imbue.mngr.plugins import hookspecs
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import PluginName
 
@@ -775,3 +778,81 @@ def test_parse_remove_sources_invalid_name_raises_abort() -> None:
     opts = _make_plugin_cli_options(names=("not a valid!!spec$$",))
     with pytest.raises(AbortError, match="Invalid package name"):
         _parse_remove_sources(opts)
+
+
+# =============================================================================
+# Tests for _project_to_agent_type_entries (--kind agent-type filter)
+# =============================================================================
+
+
+def test_project_to_agent_type_entries_keeps_existing_metadata_when_names_match() -> None:
+    """When a plugin's entry-point name equals an agent-type name, reuse its full PluginInfo.
+
+    Most agent-type plugins (claude, opencode, codex) follow the convention of
+    naming their entry point identically to the registered agent type. For
+    those, we want the version/description we already gathered to flow through.
+    """
+    plugins = [
+        PluginInfo(name="codex", version="1.2.3", description="Codex agent", is_enabled=True),
+        PluginInfo(name="some-unrelated-plugin", version="9.0", description="Other", is_enabled=True),
+    ]
+    # No user-defined agent types.
+    config = MngrConfig()
+
+    result = _project_to_agent_type_entries(plugins, config)
+
+    by_name = {p.name: p for p in result}
+    # codex is a built-in agent type, so it must be present.
+    assert "codex" in by_name
+    # Metadata must come through from the existing PluginInfo entry.
+    assert by_name["codex"].version == "1.2.3"
+    assert by_name["codex"].description == "Codex agent"
+    # The unrelated plugin must NOT be in the result.
+    assert "some-unrelated-plugin" not in by_name
+
+
+def test_project_to_agent_type_entries_synthesizes_when_plugin_name_does_not_match() -> None:
+    """Agent-type names that don't match any plugin entry-point name still appear.
+
+    The pi_coding plugin (entry-point name 'pi_coding') registers an agent
+    type named 'pi-coding' (with a hyphen). The intersection of plugin names
+    and agent type names misses it, so we synthesize a minimal PluginInfo.
+    This test fakes the same shape via a user-config-defined type.
+    """
+    plugins = [
+        PluginInfo(name="some-unrelated-plugin", version="9.0", description="Other", is_enabled=True),
+    ]
+    config = MngrConfig(
+        agent_types={
+            AgentTypeName("only-in-config"): AgentTypeConfig(parent_type=AgentTypeName("codex")),
+        },
+    )
+
+    result = _project_to_agent_type_entries(plugins, config)
+
+    by_name = {p.name: p for p in result}
+    # The user-config-defined type appears even though no plugin has that name.
+    assert "only-in-config" in by_name
+    # Synthesized entries have no plugin-level metadata.
+    synthetic = by_name["only-in-config"]
+    assert synthetic.version is None
+    assert synthetic.description is None
+    assert synthetic.is_enabled is True
+
+
+def test_project_to_agent_type_entries_returns_sorted_output() -> None:
+    """Output must be sorted by name -- the install.sh menu and any human-readable display rely on it."""
+    plugins: list[PluginInfo] = []
+    config = MngrConfig(
+        agent_types={
+            AgentTypeName("zzz"): AgentTypeConfig(parent_type=AgentTypeName("codex")),
+            AgentTypeName("aaa"): AgentTypeConfig(parent_type=AgentTypeName("codex")),
+        },
+    )
+
+    result = _project_to_agent_type_entries(plugins, config)
+
+    names = [p.name for p in result]
+    assert names == sorted(names)
+    assert "aaa" in names
+    assert "zzz" in names

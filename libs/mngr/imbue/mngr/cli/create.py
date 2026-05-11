@@ -3,6 +3,7 @@ import shlex
 import sys
 from collections.abc import Callable
 from collections.abc import Iterator
+from collections.abc import Sequence
 from contextlib import contextmanager
 from contextlib import nullcontext
 from pathlib import Path
@@ -22,7 +23,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.agents.agent_registry import list_registered_agent_types
+from imbue.mngr.agents.agent_registry import list_available_agent_types
 from imbue.mngr.api.agent_addr import AgentAddress
 from imbue.mngr.api.agent_addr import parse_agent_address
 from imbue.mngr.api.connect import connect_to_agent
@@ -162,6 +163,7 @@ def _resolve_agent_type_name(
     type_flag: str | None,
     is_type_explicit: bool,
     positional_agent_type: str | None,
+    available_agent_types: Sequence[str],
 ) -> str:
     """Resolve the agent type name from CLI options.
 
@@ -175,6 +177,11 @@ def _resolve_agent_type_name(
     means nothing was supplied anywhere. ``is_type_explicit`` is True only
     when the user passed ``--type`` on the command line.
 
+    ``available_agent_types`` is the union of plugin-registered agent type
+    names (``list_registered_agent_types()``) and user-config-defined ones
+    (``mngr_ctx.config.agent_types`` keys). Used only to make the error
+    message concrete; never affects which value is returned.
+
     Precedence:
       1. an explicitly-set ``--type`` flag (``is_type_explicit`` is True),
       2. otherwise the positional agent type if given,
@@ -185,12 +192,13 @@ def _resolve_agent_type_name(
     if not is_type_explicit and positional_agent_type is not None:
         return positional_agent_type
     if type_flag is None:
-        registered = list_registered_agent_types()
-        registered_hint = f" Registered agent types: {', '.join(registered)}." if registered else ""
+        available_hint = (
+            f" Available agent types: {', '.join(available_agent_types)}." if available_agent_types else ""
+        )
         raise UserInputError(
             "No agent type provided. Pass --type <name>, give a positional AGENT_TYPE, "
             "or set a default with: mngr config set commands.create.type <name> --scope user "
-            "(or re-run scripts/install.sh)." + registered_hint
+            "(or re-run scripts/install.sh)." + available_hint
         )
     return type_flag
 
@@ -654,7 +662,12 @@ def create(ctx: click.Context, **kwargs) -> None:
         # Detect headless agent types and enforce the --foreground flag.
         # --foreground is required for headless types (makes the behavior explicit)
         # and rejected for non-headless types (it doesn't apply).
-        resolved_agent_type = _resolve_agent_type_name(opts.type, is_type_explicit, opts.positional_agent_type)
+        resolved_agent_type = _resolve_agent_type_name(
+            opts.type,
+            is_type_explicit,
+            opts.positional_agent_type,
+            list_available_agent_types(mngr_ctx.config),
+        )
         is_headless = is_streaming_headless_agent_type(resolved_agent_type)
 
         if is_headless and not opts.foreground:
