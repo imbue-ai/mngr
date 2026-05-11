@@ -205,6 +205,7 @@ class ForwardStreamManager(MutableModel):
             command=[self.mngr_binary, "observe", "--discovery-only", "--quiet"],
             on_output=self._on_observe_output,
             cwd=Path.home(),
+            is_checked_by_group=False,
         )
 
     def _all_managed_processes(self) -> list[RunningProcess]:
