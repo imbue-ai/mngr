@@ -78,6 +78,7 @@ mngr plugin list [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--active` | boolean | Show only currently enabled plugins | `False` |
 | `--fields` | text | Comma-separated list of fields to display (name, version, description, enabled) | None |
+| `--kind` | choice (`agent-type`) | Filter to plugins of a specific kind. Currently supports: agent-type | None |
 
 
 ## Examples
@@ -92,6 +93,12 @@ $ mngr plugin list
 
 ```bash
 $ mngr plugin list --active
+```
+
+**List installed agent-type plugins**
+
+```bash
+$ mngr plugin list --kind agent-type --active
 ```
 
 **Output as JSON**

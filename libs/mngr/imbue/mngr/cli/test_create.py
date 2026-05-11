@@ -1337,6 +1337,8 @@ def test_create_with_invalid_provider_name(
         [
             "--name",
             "test-invalid-provider",
+            "--type",
+            "command",
             "--provider",
             "nonexistent",
             "--source",

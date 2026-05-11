@@ -22,6 +22,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.api.agent_addr import AgentAddress
 from imbue.mngr.api.agent_addr import parse_agent_address
 from imbue.mngr.api.connect import connect_to_agent
@@ -157,9 +158,8 @@ def _split_address_and_target_path(raw: str) -> tuple[str, Path | None]:
     return address_part, path
 
 
-@pure
 def _resolve_agent_type_name(
-    type_flag: str,
+    type_flag: str | None,
     is_type_explicit: bool,
     positional_agent_type: str | None,
 ) -> str:
@@ -170,18 +170,28 @@ def _resolve_agent_type_name(
     a single agent type.
 
     ``type_flag`` is ``opts.type`` -- the value of ``--type`` after CLI,
-    config (``[commands.create]``), template (``[create_templates.X]``),
-    and click-default resolution. ``is_type_explicit`` is True only when
-    the user passed ``--type`` on the command line.
+    config (``[commands.create]``), and template (``[create_templates.X]``)
+    resolution. ``--type`` has no click-side default, so a value of None
+    means nothing was supplied anywhere. ``is_type_explicit`` is True only
+    when the user passed ``--type`` on the command line.
 
     Precedence:
       1. an explicitly-set ``--type`` flag (``is_type_explicit`` is True),
       2. otherwise the positional agent type if given,
-      3. otherwise ``type_flag`` (which falls back to the click default
-         ``"claude"`` when neither CLI nor config/template supplied a value).
+      3. otherwise ``type_flag`` (i.e. the value supplied by config/template).
+
+    Raises UserInputError if none of the three sources supplied a value.
     """
     if not is_type_explicit and positional_agent_type is not None:
         return positional_agent_type
+    if type_flag is None:
+        registered = list_registered_agent_types()
+        registered_hint = f" Registered agent types: {', '.join(registered)}." if registered else ""
+        raise UserInputError(
+            "No agent type provided. Pass --type <name>, give a positional AGENT_TYPE, "
+            "or set a default with: mngr config set commands.create.type <name> --scope user "
+            "(or re-run scripts/install.sh)." + registered_hint
+        )
     return type_flag
 
 
@@ -347,7 +357,16 @@ class _CreateCommand(click.Command):
     show_default=True,
     help="Auto-generated name style",
 )
-@optgroup.option("--type", default="claude", show_default=True, help="Which type of agent to run")
+@optgroup.option(
+    "--type",
+    default=None,
+    help=(
+        "Which type of agent to run. If not given, falls back to "
+        "[commands.create] type in your user settings. Set with: "
+        "mngr config set commands.create.type <name> --scope user "
+        "(or re-run scripts/install.sh)."
+    ),
+)
 # FOLLOWUP: hmm... I wonder if the name of this should be changed to something more like "window" to be more closely aligned with the tmux primitive it actually creates...
 #  more generally, we probably need to do a pass at refining *all* of these option names...
 @optgroup.option(

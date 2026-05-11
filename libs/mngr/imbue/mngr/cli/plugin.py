@@ -19,6 +19,7 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
+from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.config import ConfigScope
@@ -60,6 +61,7 @@ class PluginCliOptions(CommonCliOptions):
 
     is_active: bool = False
     fields: str | None = None
+    kind: str | None = None
     name: str | None = None
     names: tuple[str, ...] = ()
     scope: str | None = None
@@ -361,6 +363,12 @@ def plugin(ctx: click.Context, **kwargs: Any) -> None:
     default=None,
     help="Comma-separated list of fields to display (name, version, description, enabled)",
 )
+@click.option(
+    "--kind",
+    type=click.Choice(["agent-type"], case_sensitive=False),
+    default=None,
+    help="Filter to plugins of a specific kind. Currently supports: agent-type",
+)
 @add_common_options
 @click.pass_context
 def plugin_list(ctx: click.Context, **kwargs: Any) -> None:
@@ -384,6 +392,14 @@ def _plugin_list_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     # Filter to active plugins if requested
     filtered_plugins = [p for p in all_plugins if p.is_enabled] if opts.is_active else all_plugins
+
+    # Filter to a specific plugin kind if requested. Currently only
+    # "agent-type" is supported -- it intersects the plugin list with the
+    # set of names that have actually registered an agent type via the
+    # plugin hooks (see imbue.mngr.agents.agent_registry).
+    if opts.kind == "agent-type":
+        agent_type_names = frozenset(list_registered_agent_types())
+        filtered_plugins = [p for p in filtered_plugins if p.name in agent_type_names]
 
     fields = _parse_fields(opts.fields)
     _emit_plugin_list(filtered_plugins, output_opts, fields)
@@ -793,6 +809,7 @@ name, version, description, enabled.""",
     examples=(
         ("List all plugins", "mngr plugin list"),
         ("List only active plugins", "mngr plugin list --active"),
+        ("List installed agent-type plugins", "mngr plugin list --kind agent-type --active"),
         ("Output as JSON", "mngr plugin list --format json"),
         ("Show specific fields", "mngr plugin list --fields name,enabled"),
         ("Custom format template", "mngr plugin list --format '{name}\\t{enabled}'"),

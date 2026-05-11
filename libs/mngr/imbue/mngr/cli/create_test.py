@@ -781,9 +781,20 @@ def test_resolve_agent_type_name_positional_fallback() -> None:
     assert _resolve_agent_type_name("claude", False, "headless_claude") == "headless_claude"
 
 
-def test_resolve_agent_type_name_default() -> None:
-    """No positional and no explicit --type returns the --type default."""
-    assert _resolve_agent_type_name("claude", False, None) == "claude"
+def test_resolve_agent_type_name_returns_config_value_when_no_cli_signal() -> None:
+    """When neither --type nor a positional is given, the config/template-supplied value is used."""
+    assert _resolve_agent_type_name("from_config", False, None) == "from_config"
+
+
+def test_resolve_agent_type_name_raises_when_nothing_supplied() -> None:
+    """With no CLI, no positional, and no config-supplied value, the resolver must reject.
+
+    The click option no longer carries a source-level default; the user
+    is expected to either pass a value or have install.sh write one to
+    their user settings.
+    """
+    with pytest.raises(UserInputError, match="No agent type provided"):
+        _resolve_agent_type_name(None, False, None)
 
 
 def test_resolve_agent_type_name_positional_beats_config_supplied_type() -> None:
@@ -1107,11 +1118,16 @@ def test_create_foreground_with_non_headless_type_is_rejected(
     assert "not headless" in result.output
 
 
-def test_create_foreground_without_type_is_rejected(
+def test_create_without_any_type_is_rejected(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """--foreground without any agent type (default claude) should be rejected."""
+    """Invoking `mngr create` with no positional, no --type, and no config-supplied type must error.
+
+    There is no source-level default for --type; the installer is expected
+    to seed [commands.create] type into user settings. This test pins the
+    contract that the user gets a helpful error when nothing is set.
+    """
     result = cli_runner.invoke(
         create,
         ["--foreground"],
@@ -1119,7 +1135,7 @@ def test_create_foreground_without_type_is_rejected(
     )
 
     assert result.exit_code != 0
-    assert "--foreground" in result.output
+    assert "No agent type provided" in result.output
 
 
 # =============================================================================
