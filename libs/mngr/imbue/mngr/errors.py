@@ -266,6 +266,19 @@ class ResourceAllocationError(HostCreationError):
     """Failed to allocate resources for the host."""
 
 
+class DockerBuildTimeoutError(HostCreationError):
+    """Raised when `docker build` exceeds the configured build timeout."""
+
+    def __init__(self, provider_name: ProviderInstanceName, timeout_seconds: int) -> None:
+        self.provider_name = provider_name
+        self.timeout_seconds = timeout_seconds
+        super().__init__(f"docker build timed out after {timeout_seconds} seconds for provider '{provider_name}'.")
+        self.user_help_text = (
+            f"Increase build_timeout_seconds for this provider, e.g.:\n"
+            f"  mngr config set --scope user providers.{provider_name}.build_timeout_seconds 1800"
+        )
+
+
 class HostNameConflictError(ProviderError):
     """A host with this name already exists."""
 
