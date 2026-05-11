@@ -1,12 +1,17 @@
+import types
+import typing
 from collections.abc import Callable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from concurrent.futures import Future
 from datetime import datetime
 from datetime import timezone
 from threading import Lock
 from typing import Any
+from typing import Final
 
 from loguru import logger
+from pydantic import BaseModel
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -41,17 +46,60 @@ from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.cel_utils import with_tolerant_paths
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
-# Paths in the agent CEL context whose missing-key access should evaluate to a
-# clean False (and let `has()` report absence) rather than warn per agent.
-# Each is a schemaless dict on AgentDetails / HostDetails; their contents are
-# user- or plugin-supplied, so different agents legitimately have different
-# keys. See `with_tolerant_paths` in cel_utils.
-_AGENT_SCHEMALESS_PATHS: tuple[tuple[str, ...], ...] = (
-    ("labels",),
-    ("plugin",),
-    ("host", "tags"),
-    ("host", "plugin"),
-)
+
+def _walk_dict_paths(model: type[BaseModel], prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    """Yield every path through `model`'s pydantic field tree that terminates in a dict-typed field.
+
+    Recurses into nested model fields, unwraps `Optional[T]` to T, and treats
+    a `dict[...]` / `Mapping[...]` field as a leaf. Anything else (lists,
+    primitives, datetimes, etc.) is not a path target.
+
+    Used to compute `_AGENT_SCHEMALESS_PATHS` from the AgentDetails type tree
+    at module load time -- see the rationale on that constant.
+    """
+    paths: list[tuple[str, ...]] = []
+    for name, field in model.model_fields.items():
+        annotation = _unwrap_optional(field.annotation)
+        if _is_dict_like(annotation):
+            paths.append((*prefix, name))
+            continue
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            paths.extend(_walk_dict_paths(annotation, (*prefix, name)))
+            continue
+        # Anything else (primitives, lists, tuples, datetimes, enums, ...) is
+        # not a dict and not a model we can descend into, so we skip it.
+    return paths
+
+
+def _unwrap_optional(annotation: Any) -> Any:
+    """If `annotation` is `X | None`, return `X`; otherwise return as-is."""
+    origin = typing.get_origin(annotation)
+    if origin is typing.Union or origin is types.UnionType:
+        non_none = [a for a in typing.get_args(annotation) if a is not type(None)]
+        if len(non_none) == 1:
+            return non_none[0]
+    return annotation
+
+
+def _is_dict_like(annotation: Any) -> bool:
+    """True if `annotation` is `dict[...]` or `Mapping[...]` (or a subclass origin)."""
+    origin = typing.get_origin(annotation)
+    if origin is None:
+        return False
+    return origin is dict or (isinstance(origin, type) and issubclass(origin, Mapping))
+
+
+# CEL paths whose missing-key access should evaluate to a clean False (and let
+# `has()` report absence) rather than warn per agent. Derived at module load
+# time by walking the AgentDetails pydantic field tree: every `dict[...]`-typed
+# field is treated as schemaless because its contents are user- or
+# plugin-supplied, so different agents legitimately have different keys.
+#
+# Adding a new dict field to AgentDetails or HostDetails automatically opts it
+# into tolerance. If a future dict field is actually *schemaful* (typos should
+# warn), we'll need a marker to opt it out -- flag it at the time, none today.
+# See `with_tolerant_paths` in cel_utils for the tolerance semantics.
+_AGENT_SCHEMALESS_PATHS: Final[tuple[tuple[str, ...], ...]] = tuple(_walk_dict_paths(AgentDetails))
 
 
 class ErrorInfo(FrozenModel):
