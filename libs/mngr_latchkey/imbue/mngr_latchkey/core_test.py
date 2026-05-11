@@ -18,10 +18,13 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CredentialStatus
+from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyBinaryNotFoundError
+from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.core import LatchkeyNotInitializedError
+from imbue.mngr_latchkey.core import LatchkeyVersionError
 from imbue.mngr_latchkey.core import _cmdline_looks_like_latchkey_gateway
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
@@ -58,11 +61,98 @@ def test_plugin_data_dir_is_subdir_of_latchkey_directory(tmp_path: Path) -> None
     assert manager.plugin_data_dir == tmp_path / "mngr_latchkey"
 
 
-def test_ensure_gateway_started_raises_when_binary_missing(tmp_path: Path) -> None:
+def test_initialize_raises_when_binary_missing(tmp_path: Path) -> None:
+    """``initialize`` is the first thing to touch the binary (via ``--version``).
+
+    A missing binary surfaces immediately rather than waiting for the
+    first ``ensure_gateway_started`` call.
+    """
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(tmp_path / "definitely-does-not-exist"))
+    with pytest.raises(LatchkeyBinaryNotFoundError):
+        manager.initialize()
+
+
+def test_ensure_gateway_started_raises_when_binary_disappears_after_initialize(tmp_path: Path) -> None:
+    """``initialize`` succeeded but the binary was removed before spawn.
+
+    The spawn-time binary-missing check inside ``ensure_gateway_started``
+    still fires; the version check at ``initialize`` is just an earlier
+    line of defence.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
+    fake_binary.unlink()
     with pytest.raises(LatchkeyBinaryNotFoundError):
         manager.ensure_gateway_started()
+
+
+# -- initialize() version check ----------------------------------------------
+
+
+def _make_version_binary(tmp_path: Path, version_output: str, exit_code: int = 0) -> Path:
+    """Build a stub ``latchkey`` that responds to ``--version`` and nothing else.
+
+    Sufficient for the ``initialize`` version-gate tests, which never
+    drive the manager past the version check.
+    """
+    script = tmp_path / "latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f'assert sys.argv[1] == "--version", f"unexpected argv: {{sys.argv[1:]!r}}"\n'
+        f"print({version_output!r})\n"
+        f"sys.exit({exit_code})\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_initialize_accepts_exactly_minimum_version(tmp_path: Path) -> None:
+    binary = _make_version_binary(tmp_path, version_output=LATCHKEY_MIN_VERSION)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+    manager.initialize()
+
+
+def test_initialize_accepts_newer_version(tmp_path: Path) -> None:
+    binary = _make_version_binary(tmp_path, version_output="3.0.0")
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+    manager.initialize()
+
+
+def test_initialize_tolerates_leading_v_prefix(tmp_path: Path) -> None:
+    """Some CLIs print ``v2.9.0`` rather than the bare semver string."""
+    binary = _make_version_binary(tmp_path, version_output="v2.9.0")
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+    manager.initialize()
+
+
+def test_initialize_rejects_older_version(tmp_path: Path) -> None:
+    binary = _make_version_binary(tmp_path, version_output="2.8.5")
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+    with pytest.raises(LatchkeyVersionError) as exc_info:
+        manager.initialize()
+    # The error message must surface both versions so the user knows what
+    # they have and what they need.
+    assert "2.8.5" in str(exc_info.value)
+    assert LATCHKEY_MIN_VERSION in str(exc_info.value)
+
+
+def test_initialize_raises_when_version_output_unparseable(tmp_path: Path) -> None:
+    binary = _make_version_binary(tmp_path, version_output="this is not a version")
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+    with pytest.raises(LatchkeyError) as exc_info:
+        manager.initialize()
+    # Not a LatchkeyVersionError -- this is parsing failure, distinct from
+    # "too old".
+    assert not isinstance(exc_info.value, LatchkeyVersionError)
+
+
+def test_initialize_raises_when_version_command_exits_nonzero(tmp_path: Path) -> None:
+    binary = _make_version_binary(tmp_path, version_output="broken", exit_code=1)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+    with pytest.raises(LatchkeyError):
+        manager.initialize()
 
 
 def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
@@ -100,9 +190,15 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
     # of the requested file path -- it is not a real JWT, but it is
     # all the manager needs (it just hashes the password sentinel and
     # forwards the per-agent value to the agent).
+    # ``--version`` is what ``Latchkey.initialize`` runs at startup to
+    # gate on the minimum version; emit a string the version-parser is
+    # happy with and that satisfies ``LATCHKEY_MIN_VERSION``.
     script.write_text(
         "#!/usr/bin/env python3\n"
         "import sys\n"
+        'if sys.argv[1] == "--version":\n'
+        "    print('2.9.0')\n"
+        "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    sys.exit(0)\n"
         'if sys.argv[1:3] == ["gateway", "create-jwt"]:\n'
@@ -259,7 +355,8 @@ def test_initialize_discards_stale_record(tmp_path: Path) -> None:
         pid=2**31 - 1,
         started_at=datetime.now(timezone.utc),
     )
-    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(tmp_path / "missing"))
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     save_gateway_info(manager.plugin_data_dir, stale_info)
     manager.initialize()
     assert manager.get_gateway_info() is None
@@ -287,6 +384,9 @@ def test_concurrent_ensure_gateway_started_spawns_at_most_one_subprocess(tmp_pat
     script.write_text(
         "#!/usr/bin/env python3\n"
         "import os, socket, signal, sys, time\n"
+        'if sys.argv[1] == "--version":\n'
+        "    print('2.9.0')\n"
+        "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    sys.exit(0)\n"
         'if sys.argv[1:3] == ["gateway", "create-jwt"]:\n'
@@ -356,7 +456,8 @@ def test_stop_gateway_terminates_subprocess_and_removes_record(tmp_path: Path) -
 
 
 def test_stop_gateway_is_no_op_when_not_running(tmp_path: Path) -> None:
-    manager = Latchkey(latchkey_directory=tmp_path)
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
     manager.stop_gateway()
 
@@ -387,7 +488,13 @@ def test_derive_gateway_password_propagates_failure(tmp_path: Path) -> None:
     """A failed ``gateway create-jwt`` must surface as ``LatchkeyJwtMintError``."""
     script = tmp_path / "latchkey"
     script.write_text(
-        "#!/usr/bin/env python3\nimport sys\nsys.stderr.write('No encryption key available.\\n')\nsys.exit(1)\n"
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        'if sys.argv[1] == "--version":\n'
+        "    print('2.9.0')\n"
+        "    sys.exit(0)\n"
+        "sys.stderr.write('No encryption key available.\\n')\n"
+        "sys.exit(1)\n"
     )
     script.chmod(0o755)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
@@ -408,7 +515,14 @@ def test_create_permissions_override_jwt_returns_stripped_stdout(tmp_path: Path)
 
 def test_create_permissions_override_jwt_propagates_failure(tmp_path: Path) -> None:
     script = tmp_path / "latchkey"
-    script.write_text("#!/usr/bin/env python3\nimport sys; sys.exit(2)\n")
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        'if sys.argv[1] == "--version":\n'
+        "    print('2.9.0')\n"
+        "    sys.exit(0)\n"
+        "sys.exit(2)\n"
+    )
     script.chmod(0o755)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
     manager.initialize()
@@ -431,6 +545,9 @@ def test_create_permissions_override_jwt_clears_latchkey_gateway_env(
     script.write_text(
         "#!/usr/bin/env python3\n"
         "import os, sys\n"
+        'if sys.argv[1] == "--version":\n'
+        "    print('2.9.0')\n"
+        "    sys.exit(0)\n"
         f"open({str(report_path)!r}, 'w').write(os.environ.get('LATCHKEY_GATEWAY', '<unset>'))\n"
         "print('jwt')\n"
     )
@@ -448,6 +565,9 @@ def test_ensure_gateway_started_passes_password_to_subprocess(tmp_path: Path) ->
     script.write_text(
         "#!/usr/bin/env python3\n"
         "import os, socket, signal, sys\n"
+        'if sys.argv[1] == "--version":\n'
+        "    print('2.9.0')\n"
+        "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    sys.exit(0)\n"
         'if sys.argv[1:3] == ["gateway", "create-jwt"]:\n'
@@ -592,8 +712,13 @@ def test_discovery_handler_skips_reverse_tunnel_when_ssh_info_missing(tmp_path: 
 
 def test_discovery_handler_swallows_gateway_errors(tmp_path: Path) -> None:
     """A missing binary must not crash the discovery callback -- just log a warning."""
-    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(tmp_path / "missing"))
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
+    # Remove the binary so the discovery handler's call to
+    # ``ensure_gateway_started`` fails with ``LatchkeyBinaryNotFoundError``
+    # at spawn time, exercising the handler's swallow-and-warn path.
+    fake_binary.unlink()
     tunnel_manager = _RecordingTunnelManager()
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
         handler = LatchkeyDiscoveryHandler(
@@ -618,6 +743,9 @@ def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, count
     script.write_text(
         "#!/usr/bin/env python3\n"
         "import os, socket, signal, sys\n"
+        'if sys.argv[1] == "--version":\n'
+        "    print('2.9.0')\n"
+        "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    counter_path = os.environ['FAKE_LATCHKEY_COUNTER']\n"
         "    open(counter_path, 'a').write('1\\n')\n"
@@ -672,10 +800,16 @@ def test_ensure_browser_runs_once_on_first_spawn(tmp_path: Path, monkeypatch: py
 
 
 def test_ensure_browser_not_called_when_binary_missing(tmp_path: Path) -> None:
-    """If the binary is missing, the manager must raise without trying to
-    spawn ``ensure-browser`` (there's nothing to run)."""
-    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(tmp_path / "missing"))
+    """If the binary is missing at spawn time, the manager must raise
+    without trying to spawn ``ensure-browser`` (there's nothing to run).
+
+    Initialize against a working fake first so we pass the version
+    check, then remove the binary so the spawn-time check fires.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
+    fake_binary.unlink()
     with pytest.raises(LatchkeyBinaryNotFoundError):
         manager.ensure_gateway_started()
     assert not ensure_browser_log_path(manager.plugin_data_dir).exists()

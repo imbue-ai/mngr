@@ -33,6 +33,8 @@ from typing import Final
 
 import psutil
 from loguru import logger
+from packaging.version import InvalidVersion
+from packaging.version import Version
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -82,6 +84,16 @@ _GATEWAY_BIND_POLL_INTERVAL_SECONDS: Final[float] = 0.05
 _SERVICES_INFO_TIMEOUT_SECONDS: Final[float] = 15.0
 _CREATE_JWT_TIMEOUT_SECONDS: Final[float] = 15.0
 
+# ``latchkey --version`` is a print-and-exit; 5s is generous slack for
+# Node-runtime startup on cold filesystems.
+_VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 5.0
+
+# Minimum version of the upstream ``latchkey`` CLI this package will
+# operate against. The 2.9 line is what we develop the gateway /
+# permissions-override / password integration against; earlier versions
+# lack flags this code unconditionally passes.
+LATCHKEY_MIN_VERSION: Final[str] = "2.9.0"
+
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
 # this to the dynamic shared-gateway port on the desktop host, so the
@@ -114,6 +126,10 @@ class LatchkeyNotInitializedError(LatchkeyError, RuntimeError):
 
 class LatchkeyJwtMintError(LatchkeyError, RuntimeError):
     """Raised when ``latchkey gateway create-jwt`` fails to produce a JWT."""
+
+
+class LatchkeyVersionError(LatchkeyError, RuntimeError):
+    """Raised when the installed ``latchkey`` CLI is older than :data:`LATCHKEY_MIN_VERSION`."""
 
 
 class CredentialStatus(UpperCaseStrEnum):
@@ -439,17 +455,34 @@ class Latchkey(MutableModel):
         return _plugin_data_dir(self.latchkey_directory)
 
     def initialize(self) -> None:
-        """Load the persisted gateway info, adopting an existing live gateway if any.
+        """Validate the latchkey binary, then adopt or discard the persisted gateway info.
 
-        A dead record is removed from disk. A live, still-ours gateway is
-        adopted so subsequent calls to ``ensure_gateway_started`` are
-        no-ops.
+        Performs the following steps:
+
+        1. Runs ``latchkey --version`` and refuses to continue if the
+           installed CLI is older than :data:`LATCHKEY_MIN_VERSION`.
+           This is checked at ``initialize`` time (rather than at the
+           first ``ensure_gateway_started`` call) so misconfiguration
+           surfaces immediately, before any agent has had a chance to
+           be told to use the gateway.
+        2. Loads any persisted gateway record. A live, still-ours
+           gateway is adopted so subsequent ``ensure_gateway_started``
+           calls are no-ops; a dead record is removed from disk.
 
         Liveness probes include a TCP connect (up to
         ``_LIVENESS_CONNECT_TIMEOUT_SECONDS``), which is why they run
         outside the lock. ``initialize()`` is only expected to be called
         once before any concurrent use, so there is no real contention here.
+
+        Raises:
+            LatchkeyBinaryNotFoundError: when the configured binary is
+                not on ``PATH`` / does not exist.
+            LatchkeyVersionError: when the installed binary is older
+                than :data:`LATCHKEY_MIN_VERSION`.
+            LatchkeyError: for other ``latchkey --version`` failures
+                (non-zero exit, unparseable output, spawn error).
         """
+        self._check_minimum_version()
         plugin_dir = self.plugin_data_dir
         existing = load_gateway_info(plugin_dir)
         is_alive = existing is not None and _is_info_alive(existing)
@@ -735,6 +768,52 @@ class Latchkey(MutableModel):
         if not self._is_initialized:
             raise LatchkeyNotInitializedError(
                 "Latchkey.initialize() must be called before use",
+            )
+
+    def _check_minimum_version(self) -> None:
+        """Refuse to initialize if the installed latchkey CLI is too old.
+
+        Runs ``latchkey --version`` and parses the (single-line, possibly
+        ``v``-prefixed) version string with :class:`packaging.version.Version`.
+        See :data:`LATCHKEY_MIN_VERSION` for the required version.
+        """
+        if shutil.which(self.latchkey_binary) is None and not Path(self.latchkey_binary).is_file():
+            raise LatchkeyBinaryNotFoundError(f"Latchkey binary not found: {self.latchkey_binary}")
+
+        env = _build_local_latchkey_env(self.latchkey_directory)
+        cg = ConcurrencyGroup(name="latchkey-version")
+        try:
+            with cg:
+                result = cg.run_process_to_completion(
+                    command=[self.latchkey_binary, "--version"],
+                    timeout=_VERSION_CHECK_TIMEOUT_SECONDS,
+                    is_checked_after=False,
+                    env=env,
+                )
+        except ConcurrencyExceptionGroup as group:
+            if not group.only_exception_is_instance_of(ProcessSetupError):
+                raise
+            raise LatchkeyError(f"Failed to launch 'latchkey --version': {group}") from group
+        if result.returncode != 0:
+            raise LatchkeyError(
+                "'latchkey --version' exited {} : {}".format(
+                    result.returncode,
+                    result.stderr.strip() or result.stdout.strip(),
+                )
+            )
+        raw = result.stdout.strip()
+        # Tolerate an optional leading ``v`` (some CLIs print ``v2.9.0``);
+        # otherwise the string must be a valid PEP 440 version.
+        cleaned = raw.removeprefix("v")
+        try:
+            installed = Version(cleaned)
+        except InvalidVersion as e:
+            raise LatchkeyError(f"Could not parse 'latchkey --version' output {raw!r}: {e}") from e
+        minimum = Version(LATCHKEY_MIN_VERSION)
+        if installed < minimum:
+            raise LatchkeyVersionError(
+                f"Installed latchkey version {installed} is older than the required minimum {minimum}; "
+                f"upgrade the binary at {self.latchkey_binary}."
             )
 
     def _spawn_gateway(self, plugin_dir: Path) -> LatchkeyGatewayInfo:
