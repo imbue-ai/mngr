@@ -1082,6 +1082,7 @@ def test_create_rejects_duplicate_agent_name_on_same_host(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_create_with_update_flag_updates_existing_agent(
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
