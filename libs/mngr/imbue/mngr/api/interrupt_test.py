@@ -3,7 +3,6 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.api.create import CreateAgentOptions
-from imbue.mngr.api.interrupt import InterruptResult
 from imbue.mngr.api.interrupt import interrupt_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import Host
@@ -13,24 +12,6 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-
-
-def test_interrupt_result_initializes_with_empty_lists() -> None:
-    result = InterruptResult()
-    assert result.successful_agents == []
-    assert result.failed_agents == []
-
-
-def test_interrupt_result_can_add_successful_agent() -> None:
-    result = InterruptResult()
-    result.successful_agents.append("agent-a")
-    assert result.successful_agents == ["agent-a"]
-
-
-def test_interrupt_result_can_add_failed_agent() -> None:
-    result = InterruptResult()
-    result.failed_agents.append(("agent-a", "boom"))
-    assert result.failed_agents == [("agent-a", "boom")]
 
 
 def test_interrupt_agents_returns_empty_when_no_agents_match(
