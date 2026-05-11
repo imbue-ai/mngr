@@ -323,7 +323,7 @@ $ mngr create my-agent --template modal
 $ mngr create my-agent -t modal -t codex
 ```
 
-**Create a codex agent instead of claude**
+**Create a codex agent (overriding the configured default)**
 
 ```bash
 $ mngr create my-agent codex
