@@ -892,10 +892,12 @@ def test_plan_mode_propagates_to_subagent(
 # ============================================================================
 #
 # In deny mode the plugin replaces its proxy machinery with a single
-# PreToolUse:Agent hook that DENIES the Task tool with a copy-pasteable
-# `mngr create` invocation in the deny reason. Claude (the calling agent)
-# is expected to read the reason and either run the suggested commands
-# itself via Bash or report back to the user.
+# PreToolUse:Agent hook that DENIES the Task tool with a short
+# skill-pointer reason directing Claude at the `mngr-subagents` skill.
+# The skill (installed at `.claude/skills/mngr-subagents/SKILL.md`)
+# teaches the two-command `mngr create` + `subagent_wait` protocol
+# Claude is expected to run itself via Bash; the copy-pasteable commands
+# live in the skill, not in the deny reason.
 #
 # These tests verify the OBSERVABLE plugin behavior end-to-end:
 #   1. Provisioning installs only the deny hook (no spawn/cleanup/reap).
