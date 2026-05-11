@@ -177,18 +177,16 @@ class ProviderError(MngrError):
 
 
 class ProviderUnavailableError(ProviderError):
-    """Provider literally cannot operate on this machine right now.
+    """Provider cannot operate on this machine right now.
 
-    Catches the class of "the user enabled the provider, but the prerequisite
-    isn't there": binary missing on PATH, daemon down, credentials never
-    configured, network unreachable, transient 5xx. The discovery boundary
-    surfaces these as ``WarningInfo`` entries on ``ListResult.warnings`` --
-    they do not gate exit code, do not abort the listing, and other providers
-    still produce hosts.
+    Covers "the user enabled the provider but the prerequisite isn't there":
+    binary missing on PATH, daemon down, credentials never configured,
+    network unreachable, transient 5xx. The discovery boundary surfaces
+    these as ``WarningInfo`` entries on ``ListResult.warnings``; they do
+    not gate exit code or abort the listing.
 
-    For "credentials configured but rejected (401/403)", use
-    ``ProviderNotAuthorizedError`` instead -- those are the user-actionable
-    errors that surface as ``ProviderErrorInfo``.
+    For "credentials configured but rejected (401/403)", raise
+    ``ProviderNotAuthorizedError`` instead.
     """
 
     def __init__(self, provider_name: ProviderInstanceName, reason: str) -> None:
@@ -255,11 +253,9 @@ class ProviderInstanceNotFoundError(ProviderError):
 class ProviderNotAuthorizedError(ProviderError):
     """Provider's API rejected the configured credentials (401/403, expired token, etc.).
 
-    The user explicitly configured credentials and they are wrong/expired --
-    this is user-actionable and surfaces as ``ProviderErrorInfo`` on
-    ``ListResult.errors``, NOT as a warning. Compare with
-    ``ProviderCredentialsMissingError`` which means "no credentials configured
-    at all" -- a softer state that surfaces as a warning.
+    User-actionable: surfaces as ``ProviderErrorInfo`` on ``ListResult.errors``
+    and gates the exit code under ``--on-error abort``. For "no credentials
+    configured at all", raise ``ProviderCredentialsMissingError`` instead.
     """
 
     def __init__(self, provider_name: ProviderInstanceName, auth_help: str | None = None) -> None:
@@ -411,11 +407,9 @@ class PluginMngrError(MngrError):
 class ModalAuthError(ProviderNotAuthorizedError):
     """Modal API rejected the configured token (missing or invalid).
 
-    Re-parented from ``PluginMngrError`` so ``mngr list``'s discovery boundary
-    catches and reports it consistently with other provider auth failures
-    (Vultr 401/403, imbue_cloud 401/403). For the case "no Modal token
-    configured at all" providers should raise ``ProviderCredentialsMissingError``
-    instead so it surfaces as a warning rather than an error.
+    For "no Modal token configured at all", raise
+    ``ProviderCredentialsMissingError`` instead so it surfaces as a
+    warning rather than an error.
     """
 
     def __init__(self, provider_name: ProviderInstanceName) -> None:

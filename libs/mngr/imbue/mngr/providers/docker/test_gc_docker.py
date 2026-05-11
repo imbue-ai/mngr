@@ -41,8 +41,9 @@ pytestmark = [pytest.mark.timeout(120)]
 def test_gc_completes_when_docker_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
     """GC should complete without error when the Docker daemon is unreachable.
 
-    Docker's discover_hosts() catches ProviderUnavailableError internally and
-    returns an empty list, so gc() processes the provider without errors.
+    The discovery step raises ProviderDaemonNotRunningError; gc()'s
+    boundary catches that and skips the provider, so the GC run succeeds
+    with no errors and no actions taken.
     """
     offline_provider = make_offline_docker_provider(temp_mngr_ctx)
 

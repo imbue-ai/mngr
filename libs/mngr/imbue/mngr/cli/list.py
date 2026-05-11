@@ -431,9 +431,10 @@ def _list_streaming_template(
 ) -> None:
     """Streaming template output path: write one template-expanded line per agent.
 
-    Template format is for scripting (downstream parsers) -- skip the stderr
-    rendering of warnings/errors so they don't end up captured by tests or
-    pipes that read the combined stream. Errors still gate exit code.
+    Template format is for scripting; the stderr rendering of warnings
+    and errors is intentionally skipped so it doesn't end up captured by
+    pipes or tests that read a combined stream. Errors still gate the
+    exit code via ``_exit_for_errors``.
     """
     emitter = _StreamingTemplateEmitter(format_template=format_template, output=sys.stdout, limit=limit)
 
@@ -729,11 +730,10 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
             # JSONL is handled above with streaming, so this should be unreachable
             raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")
 
-    # Render warnings + errors to stderr ONLY for true human format (no
-    # template). JSON/JSONL already include them in the structured stdout;
-    # template format is for scripting (one line per agent) where stderr
-    # noise breaks downstream parsers. --quiet suppresses these via the
-    # loguru console handler being removed.
+    # Render warnings/errors to stderr only for plain HUMAN format. JSON
+    # and JSONL include them in the structured stdout; template format is
+    # for scripting and stays clean. --quiet drops these via the loguru
+    # console handler being removed.
     is_human_no_template = params.output_opts.output_format == OutputFormat.HUMAN and params.format_template is None
     if is_human_no_template:
         _render_warnings_to_stderr(result.warnings, ctx)
@@ -777,16 +777,16 @@ def _emit_jsonl_warning(warning: WarningInfo) -> None:
 
 
 def _render_warnings_to_stderr(warnings: list[WarningInfo], ctx: click.Context) -> None:
-    """Render WarningInfo entries to stderr per spec: one summary line by
-    default, per-warning detail at -v or higher.
+    """Render WarningInfo entries to stderr.
 
-    Reads the resolved (CLI-override-applied) console_level from
-    ``ctx.meta["logging_config"]`` -- ``mngr_ctx.config.logging`` reflects
-    the on-disk config only and would miss runtime ``-v``/``-q`` flags.
+    Default: one summary line listing the unavailable providers.
+    With ``-v`` / ``-vv``: one detail line per warning. Empty input is a
+    no-op. ``--quiet`` removes the console handler so loguru drops these
+    records before they reach stderr.
 
-    Empty input is a no-op so commands without unavailable providers stay
-    silent. ``--quiet`` removes the console handler entirely (loguru drops
-    these records before they reach stderr).
+    Reads the resolved console_level from ``ctx.meta["logging_config"]``
+    so runtime ``-v`` / ``-q`` flags are honored. (``mngr_ctx.config.logging``
+    holds only the on-disk config without CLI overrides.)
     """
     if not warnings:
         return
@@ -813,8 +813,9 @@ def _render_warnings_to_stderr(warnings: list[WarningInfo], ctx: click.Context) 
 def _render_errors_to_stderr(errors: list[ErrorInfo]) -> None:
     """Render ErrorInfo entries to stderr at ERROR level (red prefix).
 
-    ProviderErrorInfo carries provider_name as an attribute; bare ErrorInfo
-    doesn't, so the prefix is conditional via isinstance rather than getattr.
+    Prefixes the line with the provider name when the entry is a
+    ``ProviderErrorInfo``; bare ``ErrorInfo`` entries render without
+    a prefix.
     """
     for error in errors:
         prefix = f"{error.provider_name}: " if isinstance(error, ProviderErrorInfo) else ""
@@ -822,14 +823,14 @@ def _render_errors_to_stderr(errors: list[ErrorInfo]) -> None:
 
 
 def _exit_for_errors(ctx: click.Context, error_behavior: ErrorBehavior, result: ListResult) -> None:
-    """Apply the spec v2 exit-code semantics:
+    """Exit 1 only when ``--on-error abort`` and any errors were collected.
 
-    - ``--on-error abort`` (default): exit 1 if any errors; else exit 0.
-    - ``--on-error continue``: exit 0 always (caller is presumed to inspect
-      ``result.errors`` programmatically). Internal bugs (non-MngrError
-      exceptions) still propagate as exit 1 -- they never reach this helper.
+    - ``--on-error abort`` (default): exit 1 if ``result.errors`` is non-empty.
+    - ``--on-error continue``: exit 0 always; the caller inspects
+      ``result.errors`` programmatically. Internal bugs (non-MngrError
+      exceptions) propagate as exit 1 before reaching this helper.
 
-    Warnings never affect the exit code in either mode.
+    Warnings never affect the exit code.
     """
     if error_behavior == ErrorBehavior.ABORT and result.errors:
         ctx.exit(1)

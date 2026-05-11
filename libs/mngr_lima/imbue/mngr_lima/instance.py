@@ -774,11 +774,10 @@ sudo poweroff
         """
         prefix = self.mngr_ctx.config.prefix
 
-        # Both _ensure_lima_available() (raises ProviderUnavailableError) and
-        # limactl_list (raises LimaCommandError) signal that this provider
-        # cannot list anything. Let the failures propagate to the listing-
-        # pipeline boundary, where they become a ProviderErrorInfo under
-        # --on-error continue (or abort the run otherwise).
+        # _ensure_lima_available raises ProviderBinaryMissingError when
+        # limactl is missing; wrap LimaCommandError as ProviderUnavailableError
+        # for the same reason. The discovery boundary surfaces both as
+        # WarningInfo so the listing continues with other providers.
         self._ensure_lima_available()
         try:
             instances = limactl_list(cg)

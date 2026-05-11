@@ -263,14 +263,13 @@ class ImbueCloudProvider(BaseProviderInstance):
             return self._leased_hosts_cache
         account = self._require_account()
         token = self._get_access_token(account)
-        # Translate connector-unreachable into ProviderUnavailableError so the
-        # discovery boundary soft-skips this provider consistently with Lima
-        # limactl-missing and Docker daemon-down. The narrow catch is
-        # deliberate: ImbueCloudAuthError (401/403, wrong token) propagates as
-        # its own typed error so misconfigured credentials surface as a hard
-        # error rather than being silently skipped. The client layer can't
-        # raise ProviderUnavailableError directly because its constructor
-        # needs the provider instance name, which the client doesn't know.
+        # Wrap connector-unreachable as ProviderUnavailableError so the
+        # discovery boundary soft-skips this provider. The catch is narrow
+        # by design: ImbueCloudAuthError (401/403, wrong token) propagates
+        # as its own typed error and surfaces as a hard error. The client
+        # layer can't raise ProviderUnavailableError directly because its
+        # constructor needs the provider instance name, which the client
+        # doesn't know.
         try:
             self._leased_hosts_cache = self.client.list_hosts(token)
         except ImbueCloudConnectorError as exc:

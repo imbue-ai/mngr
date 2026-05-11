@@ -119,11 +119,10 @@ class WarningInfo(FrozenModel):
 
     @classmethod
     def build_for_provider(cls, exception: ProviderUnavailableError) -> "WarningInfo":
-        # provider_name is set by ProviderUnavailableError's __init__, but
-        # multi-inherited subclasses (e.g. ImbueCloudConnectorError) bypass
-        # it for legacy ctor calls and may not set the attribute. Use
-        # isinstance + getattr-equivalent via __dict__ to stay robust without
-        # tripping the no-getattr ratchet.
+        # Multi-inherited subclasses (e.g. ImbueCloudConnectorError) can be
+        # constructed via a sibling __init__ that doesn't set provider_name.
+        # Read via __dict__ to tolerate that without raising AttributeError
+        # or tripping the no-getattr ratchet.
         provider_name = exception.__dict__.get("provider_name")
         return cls(
             type=type(exception).__name__,
@@ -298,11 +297,8 @@ def _construct_and_discover_for_provider(
             provider.reset_caches()
         provider_results = provider.discover_hosts_and_agents(cg=mngr_ctx.concurrency_group, include_destroyed=True)
     except ProviderUnavailableError as e:
-        # The provider literally cannot operate on this machine right now
-        # (binary missing, daemon down, credentials never configured,
-        # transient network failure). Surface as a structured WarningInfo --
-        # never as an error -- so other providers continue producing hosts
-        # and exit code is unaffected. The CLI renders a one-line summary.
+        # Record as a WarningInfo (not an error) so other providers continue
+        # producing hosts and the listing's exit code is unaffected.
         warning_info = WarningInfo.build_for_provider(e)
         with results_lock:
             result.warnings.append(warning_info)
@@ -527,7 +523,7 @@ def _construct_discover_and_emit_for_provider(
             future.result()
 
     except ProviderUnavailableError as e:
-        # See _construct_and_discover_for_provider for the rationale.
+        # See _construct_and_discover_for_provider.
         warning_info = WarningInfo.build_for_provider(e)
         with results_lock:
             result.warnings.append(warning_info)

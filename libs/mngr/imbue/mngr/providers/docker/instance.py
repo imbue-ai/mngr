@@ -264,10 +264,9 @@ class DockerProviderInstance(BaseProviderInstance):
         via DOCKER_HOST, then the active Docker context, then the platform
         default.
 
-        Raises ProviderDaemonNotRunningError (a ProviderUnavailableError
-        subclass) instead of DockerException when the daemon is unreachable,
-        so the discovery boundary surfaces it as a warning consistently with
-        Lima limactl-missing.
+        Raises ``ProviderDaemonNotRunningError`` (a ``ProviderUnavailableError``)
+        when the daemon is unreachable so the discovery boundary surfaces
+        it as a warning rather than a hard error.
         """
         try:
             if self.config.host:
@@ -1362,9 +1361,9 @@ kill -TERM 1
         """Discover all Docker container hosts."""
         processed_host_ids: set[HostId] = set()
 
-        # _docker_client already wraps daemon-unreachable as ProviderDaemonNotRunningError.
-        # Wrap any other DockerException to match that typing so the listing-pipeline
-        # boundary (api/list.py) sees a single typed unavailability class.
+        # Surface every DockerException reaching this method as
+        # ProviderDaemonNotRunningError so the listing-pipeline boundary
+        # has a single typed unavailability class to classify.
         try:
             containers = self._list_containers()
             all_host_records = self._host_store.list_all_host_records()

@@ -242,10 +242,10 @@ def handle_modal_auth_error(func: Callable[P, T]) -> Callable[P, T]:
         try:
             return func(*args, **kwargs)
         except ModalProxyAuthError as e:
-            # The decorator only wraps ModalProviderInstance methods, so
-            # args[0] is the provider instance (typed `Any` because P.args
-            # is unconstrained at the decorator level). Cast to access
-            # .name without tripping the no-getattr ratchet.
+            # args[0] is the ModalProviderInstance (the decorator is only
+            # applied to its methods). Cast for typed attribute access
+            # without tripping the no-getattr ratchet; fall back to
+            # "modal" if the decorator is misapplied.
             instance = cast("ModalProviderInstance", args[0]) if args else None
             provider_name = instance.name if instance is not None else ProviderInstanceName("modal")
             raise ModalAuthError(provider_name) from e

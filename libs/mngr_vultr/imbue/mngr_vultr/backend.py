@@ -54,11 +54,9 @@ class VultrProvider(VpsDockerProvider):
     def _get_tagged_vps_ips(self) -> list[str]:
         """Get IPs of Vultr instances tagged with this provider's name."""
         if not self.vultr_client.api_key.get_secret_value():
-            # No API key configured -- treat as ProviderUnavailableError so
-            # the discovery boundary soft-skips Vultr (consistent with Lima
-            # limactl-missing and Docker daemon-down). Genuine 401/403
-            # responses from the Vultr API surface as VpsApiError and
-            # propagate as the existing typed error.
+            # No API key configured: surface as a warning so the listing
+            # continues with other providers. (401/403 responses from the
+            # Vultr API surface separately as VpsApiError.)
             raise ProviderCredentialsMissingError(
                 self.name,
                 "Vultr API key not configured. Set VULTR_API_KEY or providers.<name>.api_key.",

@@ -12,9 +12,9 @@ class ImbueCloudError(MngrError):
 class ImbueCloudConnectorError(ImbueCloudError, ProviderNetworkUnreachableError):
     """Connector returned an unexpected response (5xx, malformed, network).
 
-    Multi-inherits ``ProviderNetworkUnreachableError`` so the discovery
-    boundary surfaces it as a warning (provider-unavailable) consistent
-    with Lima limactl-missing and Docker daemon-down.
+    The ``ProviderNetworkUnreachableError`` parent makes the discovery
+    boundary classify this as a warning (provider-unavailable) rather
+    than a hard error.
     """
 
     def __init__(self, message: str, provider_name: str | None = None) -> None:
@@ -27,10 +27,10 @@ class ImbueCloudConnectorError(ImbueCloudError, ProviderNetworkUnreachableError)
 class ImbueCloudAuthError(ImbueCloudError, HostAuthenticationError, ProviderNotAuthorizedError):
     """Connector rejected the configured token (401/403).
 
-    Multi-inherits ``ProviderNotAuthorizedError`` so the discovery boundary
-    surfaces it as an error (user-actionable) consistent with Vultr/Modal
-    auth failures. Keeps ``HostAuthenticationError`` so existing per-host
-    catches still match.
+    The ``ProviderNotAuthorizedError`` parent makes the discovery boundary
+    classify this as a hard error (user-actionable). The
+    ``HostAuthenticationError`` parent lets per-host
+    ``except HostAuthenticationError`` clauses match.
     """
 
     def __init__(self, message: str, provider_name: str | None = None) -> None:
