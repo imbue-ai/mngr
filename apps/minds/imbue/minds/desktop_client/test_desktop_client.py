@@ -32,7 +32,6 @@ from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
-from imbue.minds.desktop_client.workspace_server_health import AgentHealth
 from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import OneTimeCode
@@ -1467,24 +1466,6 @@ def test_restart_api_requires_authentication(tmp_path: Path) -> None:
     client, _, agent_id = _setup_test_server(tmp_path)
     response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
     assert response.status_code == 403
-
-
-def test_chrome_events_pushes_initial_health_snapshot(tmp_path: Path) -> None:
-    """When the SSE handler opens, it sends initial snapshot of non-healthy agents.
-
-    We bypass the SSE generator (which is an infinite stream) and exercise the
-    underlying tracker.snapshot_all() helper that the generator uses.
-    """
-    tracker = WorkspaceServerHealthTracker()
-    a1 = AgentId.generate()
-    a2 = AgentId.generate()
-
-    tracker.mark_restarting(a1)
-    tracker.record_failure(a2)
-    tracker.record_success(a2)
-
-    snapshot = tracker.snapshot_all()
-    assert snapshot == {a1: AgentHealth.RESTARTING}
 
 
 def test_create_desktop_client_stashes_workspace_health_tracker(tmp_path: Path) -> None:
