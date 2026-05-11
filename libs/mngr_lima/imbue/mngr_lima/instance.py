@@ -774,12 +774,13 @@ sudo poweroff
         """
         prefix = self.mngr_ctx.config.prefix
 
-        # _ensure_lima_available raises ProviderBinaryMissingError when
-        # limactl is missing; wrap LimaCommandError as ProviderUnavailableError
-        # for the same reason. The discovery boundary surfaces both as
+        # _ensure_lima_available already raises ProviderBinaryMissingError
+        # (a ProviderUnavailableError) when limactl is missing; wrap
+        # LimaCommandError as ProviderUnavailableError so both shapes look
+        # the same to the discovery boundary, which surfaces them as
         # WarningInfo so the listing continues with other providers.
-        self._ensure_lima_available()
         try:
+            self._ensure_lima_available()
             instances = limactl_list(cg)
         except LimaCommandError as e:
             raise ProviderUnavailableError(self.name, str(e)) from e
