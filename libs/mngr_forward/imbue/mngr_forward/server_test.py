@@ -7,6 +7,7 @@ surfaces using ``starlette.testclient.TestClient``.
 """
 
 import io
+import json
 from pathlib import Path
 
 import httpx
@@ -573,8 +574,13 @@ def test_subdomain_forward_emits_workspace_backend_failure_on_5xx(tmp_path: Path
     assert response.status_code == 503
     lines = _envelope_lines(env_out)
     assert len(lines) == 1
-    assert "workspace_backend_failure" in lines[0] or '"reason": "FIVEXX_RESPONSE"' in lines[0]
-    assert str(agent_id) in lines[0]
+    envelope = json.loads(lines[0])
+    assert envelope["stream"] == "forward"
+    assert envelope["agent_id"] == str(agent_id)
+    payload = envelope["payload"]
+    assert payload["type"] == "workspace_backend_failure"
+    assert payload["reason"] == "FIVEXX_RESPONSE"
+    assert payload["status_code"] == 503
 
 
 def test_subdomain_forward_does_not_emit_failure_on_2xx(tmp_path: Path) -> None:
