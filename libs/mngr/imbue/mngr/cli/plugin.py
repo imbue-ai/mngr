@@ -406,26 +406,27 @@ def _project_to_agent_type_entries(plugins: list[PluginInfo], config: MngrConfig
     """Return a PluginInfo list keyed by every available agent type name.
 
     Plugin entry-point names do not always match the agent-type name they
-    register (e.g. the pi_coding plugin registers an agent type named
-    "pi-coding"), and user config can also define agent types under
-    [agent_types.X] that are not backed by a plugin entry point. We
-    delegate to ``list_available_agent_types`` -- the same source the
-    tab-completion cache uses -- and synthesize a minimal PluginInfo for
-    any name that does not have a matching entry in ``plugins``.
+    register (e.g. the pi_coding plugin -- entry-point name ``pi_coding``
+    -- registers an agent type named ``pi-coding``), and user config can
+    also define agent types under ``[agent_types.X]`` that are not backed
+    by a plugin entry point. We iterate ``list_available_agent_types`` --
+    the same source the tab-completion cache uses -- and reuse the
+    existing ``PluginInfo`` (with version/description) when an entry-point
+    name happens to match, otherwise synthesize a minimal entry.
 
-    The output is restricted so that earlier filtering on ``plugins`` (in
-    particular ``--active``) is preserved: an agent-type name backed by a
-    plugin only appears if that plugin is present in ``plugins``.
-    User-config-defined agent types (keys of ``config.agent_types``) are
-    always emitted -- they're not pluggy plugins and aren't gated by
-    plugin enable/disable.
+    ``--active`` filtering is honored upstream by ``pm.set_blocked``:
+    plugins disabled in config are blocked before
+    ``load_setuptools_entrypoints``, so their ``register_agent_type``
+    hookimpl never runs and their agent types are absent from
+    ``list_available_agent_types(config)``. The ``plugins`` argument is
+    therefore consulted only for metadata, not for filtering -- otherwise
+    agent types like ``pi-coding`` would be silently dropped because no
+    entry-point of that name exists.
     """
     existing_by_name = {p.name: p for p in plugins}
-    user_defined_names = {str(k) for k in config.agent_types.keys()}
     return [
         existing_by_name.get(name, PluginInfo(name=name, is_enabled=True))
         for name in list_available_agent_types(config)
-        if name in existing_by_name or name in user_defined_names
     ]
 
 

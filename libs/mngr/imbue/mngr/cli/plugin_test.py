@@ -6,6 +6,8 @@ import pluggy
 import pytest
 from loguru import logger
 
+from imbue.mngr.agents.agent_registry import _register_agent
+from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.cli.config import ConfigScope
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.plugin import PluginCliOptions
@@ -811,13 +813,11 @@ def test_project_to_agent_type_entries_keeps_existing_metadata_when_names_match(
     assert "some-unrelated-plugin" not in by_name
 
 
-def test_project_to_agent_type_entries_synthesizes_when_plugin_name_does_not_match() -> None:
-    """Agent-type names that don't match any plugin entry-point name still appear.
+def test_project_to_agent_type_entries_synthesizes_user_config_defined_types() -> None:
+    """Agent types defined under [agent_types.X] in user config appear with a synthesized PluginInfo.
 
-    The pi_coding plugin (entry-point name 'pi_coding') registers an agent
-    type named 'pi-coding' (with a hyphen). The intersection of plugin names
-    and agent type names misses it, so we synthesize a minimal PluginInfo.
-    This test fakes the same shape via a user-config-defined type.
+    These are not pluggy plugins (no entry point), so there is nothing in
+    ``plugins`` to reuse metadata from -- we synthesize a minimal entry.
     """
     plugins = [
         PluginInfo(name="some-unrelated-plugin", version="9.0", description="Other", is_enabled=True),
@@ -840,6 +840,39 @@ def test_project_to_agent_type_entries_synthesizes_when_plugin_name_does_not_mat
     assert synthetic.is_enabled is True
 
 
+def test_project_to_agent_type_entries_synthesizes_when_plugin_entry_point_name_differs_from_agent_type_name() -> None:
+    """Agent-type names that don't match any plugin entry-point name must still appear.
+
+    The pi_coding plugin (entry-point name 'pi_coding') registers an agent
+    type named 'pi-coding' (with a hyphen). 'pi-coding' is in
+    ``list_available_agent_types(config)`` but not in any plugin
+    entry-point name; the projection must synthesize a fresh PluginInfo
+    for it rather than dropping it. Without this, install.sh would never
+    offer pi-coding as a default even when the pi_coding plugin is the
+    only agent-type plugin installed.
+
+    We register an agent class with a hyphenated name to simulate this
+    shape without depending on the pi_coding plugin being installed.
+    """
+    _register_agent("name-with-hyphen", agent_class=BaseAgent)
+    plugins = [
+        # The "plugin entry-point" name is the underscored form.
+        PluginInfo(name="name_with_hyphen", version="1.0", description="Hyphen plugin", is_enabled=True),
+    ]
+    config = MngrConfig()
+
+    result = _project_to_agent_type_entries(plugins, config)
+
+    by_name = {p.name: p for p in result}
+    # The agent-type name (with hyphen) must be present despite the
+    # entry-point name (with underscore) not matching.
+    assert "name-with-hyphen" in by_name
+    # Synthesized entry, since the names don't match.
+    assert by_name["name-with-hyphen"].version is None
+    assert by_name["name-with-hyphen"].description is None
+    assert by_name["name-with-hyphen"].is_enabled is True
+
+
 def test_project_to_agent_type_entries_returns_sorted_output() -> None:
     """Output must be sorted by name -- the install.sh menu and any human-readable display rely on it."""
     plugins: list[PluginInfo] = []
@@ -858,20 +891,23 @@ def test_project_to_agent_type_entries_returns_sorted_output() -> None:
     assert "zzz" in names
 
 
-def test_project_to_agent_type_entries_respects_prior_filtering_of_plugins() -> None:
-    """An agent-type name whose plugin was filtered out (e.g. by --active) must not appear.
+def test_project_to_agent_type_entries_emits_every_available_type() -> None:
+    """Every name in list_available_agent_types(config) must be emitted.
 
-    Concretely: if the codex plugin's PluginInfo was dropped from the input
-    list (because the user passed --active and codex is disabled in their
-    config), the projection must not synthesize a fresh entry for "codex"
-    just because it's a registered agent type. The install.sh menu uses
-    `--kind agent-type --active` and would otherwise offer a disabled
-    plugin's agent type.
+    The projection's job is to surface the canonical set of agent types.
+    Filtering by enable/disable happens upstream via ``pm.set_blocked``:
+    plugins disabled in config are blocked before entry-points load, so
+    their ``register_agent_type`` hookimpl never fires and their types
+    are absent from ``list_available_agent_types(config)`` already.
+    The projection therefore must not apply a second filter that could
+    drop registered types.
     """
-    # 'codex' is a built-in agent type (registered via the codex_agent
-    # default plugin), so `list_available_agent_types(MngrConfig())` will
-    # include it. We deliberately omit it from the input `plugins` list to
-    # simulate it having been filtered out by --active.
+    # 'codex' and 'command' are built-in agent types (registered via the
+    # codex_agent / command_agent default plugins), so
+    # ``list_available_agent_types(MngrConfig())`` will include both.
+    # We deliberately omit codex from the input ``plugins`` list to make
+    # sure the projection still emits it -- the input is consulted only
+    # for metadata, not for filtering.
     plugins = [
         PluginInfo(name="command", version=None, description=None, is_enabled=True),
     ]
@@ -880,19 +916,17 @@ def test_project_to_agent_type_entries_respects_prior_filtering_of_plugins() -> 
     result = _project_to_agent_type_entries(plugins, config)
 
     names = {p.name for p in result}
-    # The filtered-out plugin's agent type must NOT be synthesized back in.
-    assert "codex" not in names
-    # The agent type from the surviving plugin must still appear.
+    # Both registered agent types appear, even though one was missing from `plugins`.
+    assert "codex" in names
     assert "command" in names
 
 
 def test_project_to_agent_type_entries_keeps_user_config_types_when_no_plugins_listed() -> None:
     """User-config-defined agent types are not pluggy plugins and must always appear.
 
-    Even if every plugin is filtered out by --active, user-config-defined
-    types under [agent_types.X] should still be listed -- they're defined
-    in the user's config, not by any plugin, so enable/disable doesn't
-    apply to them.
+    User-config-defined types under [agent_types.X] are not registered by
+    any plugin, so they must always be surfaced -- they have no enable
+    state to honor.
     """
     plugins: list[PluginInfo] = []
     config = MngrConfig(
@@ -905,6 +939,3 @@ def test_project_to_agent_type_entries_keeps_user_config_types_when_no_plugins_l
 
     names = {p.name for p in result}
     assert "my-custom" in names
-    # Plugin-registered types are absent because no plugins survived filtering.
-    assert "codex" not in names
-    assert "command" not in names
