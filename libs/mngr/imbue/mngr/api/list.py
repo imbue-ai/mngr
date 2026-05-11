@@ -118,12 +118,11 @@ class WarningInfo(FrozenModel):
     )
 
     @classmethod
-    def build_for_provider(cls, exception: ProviderUnavailableError) -> "WarningInfo":
-        # Multi-inherited subclasses (e.g. ImbueCloudConnectorError) can be
-        # constructed via a sibling __init__ that doesn't set provider_name.
-        # Read via __dict__ to tolerate that without raising AttributeError
-        # or tripping the no-getattr ratchet.
-        provider_name = exception.__dict__.get("provider_name")
+    def build_for_provider(
+        cls,
+        exception: ProviderUnavailableError,
+        provider_name: ProviderInstanceName,
+    ) -> "WarningInfo":
         return cls(
             type=type(exception).__name__,
             message=str(exception),
@@ -299,7 +298,7 @@ def _construct_and_discover_for_provider(
     except ProviderUnavailableError as e:
         # Record as a WarningInfo (not an error) so other providers continue
         # producing hosts and the listing's exit code is unaffected.
-        warning_info = WarningInfo.build_for_provider(e)
+        warning_info = WarningInfo.build_for_provider(e, provider_name)
         with results_lock:
             result.warnings.append(warning_info)
         if params.on_warning:
@@ -524,7 +523,7 @@ def _construct_discover_and_emit_for_provider(
 
     except ProviderUnavailableError as e:
         # See _construct_and_discover_for_provider.
-        warning_info = WarningInfo.build_for_provider(e)
+        warning_info = WarningInfo.build_for_provider(e, provider_name)
         with results_lock:
             result.warnings.append(warning_info)
         if params.on_warning:
