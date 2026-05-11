@@ -165,7 +165,14 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
 
     @abstractmethod
     def send_message(self, message: str) -> None:
-        """Send a message to the running agent via its stdin."""
+        """Send a message to the running agent.
+
+        Interactive agents deliver messages into the agent's tmux pane
+        (typically via `tmux send-keys`, with paste-detection
+        synchronization for agents that echo input). Headless agents do
+        not accept live messages and raise; their initial prompt is
+        staged on disk before launch instead.
+        """
         ...
 
     @abstractmethod
