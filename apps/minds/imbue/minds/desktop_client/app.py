@@ -1348,7 +1348,10 @@ _RESTART_TMUX_WINDOW: Final[str] = "workspace_server"
 # the recovery page eventually navigates regardless.
 _RESTART_BLOCK_TIMEOUT_SECONDS: Final[float] = 15.0
 # How long a single workspace probe through the plugin is allowed to hang.
-_RESTART_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
+# Shared by the restart endpoint's blocking poll loop and the background
+# workspace-health probe loop -- both want a short, snappy timeout so a
+# wedged workspace doesn't gate the recovery UI.
+_WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
 # Timeout for the ``mngr exec`` dispatch itself (must be > 0 and short --
 # the inner command is non-blocking, so anything beyond a few seconds means
 # the mngr CLI got stuck talking to its provider).
@@ -1548,14 +1551,14 @@ async def _handle_restart_workspace_server_api(
         end = time.monotonic() + _RESTART_BLOCK_TIMEOUT_SECONDS
         with make_workspace_probe_client(
             preauth_cookie=preauth_cookie,
-            probe_timeout_seconds=_RESTART_PROBE_TIMEOUT_SECONDS,
+            probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
         ) as probe_client:
             while time.monotonic() < end:
                 status = probe_workspace_through_plugin(
                     mngr_forward_port=mngr_forward_port,
                     preauth_cookie=preauth_cookie,
                     agent_id=aid,
-                    probe_timeout_seconds=_RESTART_PROBE_TIMEOUT_SECONDS,
+                    probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
                     client=probe_client,
                 )
                 if status == 200:
@@ -2522,7 +2525,7 @@ def _run_workspace_health_probe_loop(
         return
     with make_workspace_probe_client(
         preauth_cookie=mngr_forward_preauth_cookie,
-        probe_timeout_seconds=_RESTART_PROBE_TIMEOUT_SECONDS,
+        probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
     ) as probe_client:
         while not root_concurrency_group.is_shutting_down():
             for aid in tracker.snapshot_all():
@@ -2530,7 +2533,7 @@ def _run_workspace_health_probe_loop(
                     mngr_forward_port=mngr_forward_port,
                     preauth_cookie=mngr_forward_preauth_cookie,
                     agent_id=aid,
-                    probe_timeout_seconds=_RESTART_PROBE_TIMEOUT_SECONDS,
+                    probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
                     client=probe_client,
                 )
                 if probe_status == 200:
