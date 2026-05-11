@@ -1,9 +1,11 @@
 from collections.abc import Sequence
 from pathlib import Path
 from subprocess import TimeoutExpired
+from typing import Literal
 
 from loguru import logger
 from pydantic import Field
+from pydantic import TypeAdapter
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
@@ -16,11 +18,13 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import FIELD_COMMITS_AHEAD
 from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_source import now_utc
 
 
 class CommitsAheadField(FieldValue):
     """Number of commits ahead of the remote tracking branch."""
 
+    kind: Literal["commits_ahead"] = Field(default="commits_ahead", description="Discriminator tag")
     count: int | None = Field(description="Commits ahead count, None if unknown")
     has_work_dir: bool = Field(default=True, description="Whether the agent has a local work directory")
 
@@ -32,6 +36,9 @@ class CommitsAheadField(FieldValue):
         if self.count == 0:
             return CellDisplay(text="[up to date]")
         return CellDisplay(text=f"[{self.count} unpushed]")
+
+
+_COMMITS_AHEAD_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(CommitsAheadField)
 
 
 class GitInfoDataSource(FrozenModel):
@@ -50,8 +57,8 @@ class GitInfoDataSource(FrozenModel):
         return {FIELD_COMMITS_AHEAD: "GIT"}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        return {FIELD_COMMITS_AHEAD: CommitsAheadField}
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
+        return {FIELD_COMMITS_AHEAD: _COMMITS_AHEAD_ADAPTER}
 
     def compute(
         self,
@@ -70,17 +77,18 @@ class GitInfoDataSource(FrozenModel):
         # Get commits-ahead counts for all unique dirs in parallel
         commits_ahead_map = _get_all_commits_ahead(list(set(agent_work_dirs.values())), cg)
 
+        now = now_utc()
         fields: dict[AgentName, dict[str, FieldValue]] = {}
         for agent in agents:
             work_dir = agent_work_dirs.get(agent.name)
             if work_dir is not None:
                 count = commits_ahead_map.get(work_dir)
                 fields[agent.name] = {
-                    FIELD_COMMITS_AHEAD: CommitsAheadField(count=count, has_work_dir=True),
+                    FIELD_COMMITS_AHEAD: CommitsAheadField(count=count, has_work_dir=True, created=now),
                 }
             else:
                 fields[agent.name] = {
-                    FIELD_COMMITS_AHEAD: CommitsAheadField(count=None, has_work_dir=False),
+                    FIELD_COMMITS_AHEAD: CommitsAheadField(count=None, has_work_dir=False, created=now),
                 }
 
         return fields, []

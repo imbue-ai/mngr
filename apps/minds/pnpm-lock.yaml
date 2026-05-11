@@ -12,8 +12,8 @@ importers:
         specifier: ^1.6.0
         version: 1.6.4
       latchkey:
-        specifier: ^2.7.2
-        version: 2.7.2
+        specifier: ^2.8.0
+        version: 2.8.0
     devDependencies:
       '@todesktop/cli':
         specifier: ^1.8.0
@@ -271,8 +271,8 @@ packages:
     resolution: {integrity: sha512-RE815I4arJFtt+FVeU1Tgp9/Xvecacji8w/V6XtXsWWH/wz/eNkNbhb+ny/+PlVZjV0rxQpRSQKNKE3lcktHEA==}
     engines: {node: '>=10.10.0'}
 
-  '@imbue-ai/detent@1.1.5':
-    resolution: {integrity: sha512-xuZaQkRfhz+w7RfIYnEtcKd6QmvZ+Rw0VEBabTnoGLkLR5CHXcuS+idwPLp5YIB8WORAct5KetbsZm175WRArw==}
+  '@imbue-ai/detent@1.2.0':
+    resolution: {integrity: sha512-OW026DDLZk5M0oV7LS7Ds4vuNtsiTwcvul1cvuRdPubp9pNIP1AUJZNhv66Hh5AThvwReYNgD1WJMdhiwLyX0Q==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -317,35 +317,30 @@ packages:
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   '@napi-rs/keyring-linux-arm64-musl@1.2.0':
     resolution: {integrity: sha512-8TDymrpC4P1a9iDEaegT7RnrkmrJN5eNZh3Im3UEV5PPYGtrb82CRxsuFohthCWQW81O483u1bu+25+XA4nKUw==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   '@napi-rs/keyring-linux-riscv64-gnu@1.2.0':
     resolution: {integrity: sha512-awsB5XI1MYL7fwfjMDGmKOWvNgJEO7mM7iVEMS0fO39f0kVJnOSjlu7RHcXAF0LOx+0VfF3oxbWqJmZbvRCRHw==}
     engines: {node: '>= 10'}
     cpu: [riscv64]
     os: [linux]
-    libc: [glibc]
 
   '@napi-rs/keyring-linux-x64-gnu@1.2.0':
     resolution: {integrity: sha512-8E+7z4tbxSJXxIBqA+vfB1CGajpCDRyTyqXkBig5NtASrv4YXcntSo96Iah2QDR5zD3dSTsmbqJudcj9rKKuHQ==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   '@napi-rs/keyring-linux-x64-musl@1.2.0':
     resolution: {integrity: sha512-8RZ8yVEnmWr/3BxKgBSzmgntI7lNEsY7xouNfOsQkuVAiCNmxzJwETspzK3PQ2FHtDxgz5vHQDEBVGMyM4hUHA==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@napi-rs/keyring-win32-arm64-msvc@1.2.0':
     resolution: {integrity: sha512-AoqaDZpQ6KPE19VBLpxyORcp+yWmHI9Xs9Oo0PJ4mfHma4nFSLVdhAubJCxdlNptHe5va7ghGCHj3L9Akiv4cQ==}
@@ -1661,8 +1656,8 @@ packages:
   keyv@4.5.4:
     resolution: {integrity: sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw==}
 
-  latchkey@2.7.2:
-    resolution: {integrity: sha512-99Kj3G3KMN28FoAeTSV6pN8g/VBwYvnaiAmX02x1S29hqW5VFSHLhagLXhk1KoKbzR7B1LI8P09js2OZn/0MdA==}
+  latchkey@2.8.0:
+    resolution: {integrity: sha512-vIHys9jtkRXELJI02plzlbjRPI9SbS/lYvMoUsg4dBhcZcngpLs0fzelpoyEFh/oFd5dUmJ66G1ki4WMQshEqQ==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -2843,7 +2838,7 @@ snapshots:
 
   '@humanwhocodes/momoa@2.0.4': {}
 
-  '@imbue-ai/detent@1.1.5':
+  '@imbue-ai/detent@1.2.0':
     dependencies:
       '@cfworker/json-schema': 4.1.1
       commander: 14.0.3
@@ -4448,9 +4443,9 @@ snapshots:
     dependencies:
       json-buffer: 3.0.1
 
-  latchkey@2.7.2:
+  latchkey@2.8.0:
     dependencies:
-      '@imbue-ai/detent': 1.1.5
+      '@imbue-ai/detent': 1.2.0
       '@napi-rs/keyring': 1.2.0
       commander: 12.1.0
       playwright: 1.59.1

@@ -62,6 +62,10 @@ def test_prevent_builtin_exception_raises() -> None:
     rc.check_builtin_exception_raises(_DIR, snapshot(6))
 
 
+def test_prevent_silent_decode_error_catches() -> None:
+    rc.check_silent_decode_error_catches(_DIR, snapshot(1))
+
+
 # --- Import style ---
 
 
@@ -258,7 +262,7 @@ def test_prevent_cast_usage() -> None:
 
 
 def test_prevent_assert_isinstance() -> None:
-    rc.check_assert_isinstance(_DIR, snapshot(8))
+    rc.check_assert_isinstance(_DIR, snapshot(1))
 
 
 # --- Project-level checks ---
@@ -268,6 +272,7 @@ def test_prevent_code_in_init_files() -> None:
     rc.check_code_in_init_files(_DIR, snapshot(0))
 
 
+@pytest.mark.timeout(15)
 def test_no_type_errors() -> None:
     """Ensure the codebase has zero type errors."""
     check_no_type_errors(_DIR)

@@ -3,6 +3,7 @@ from collections.abc import Sequence
 
 from loguru import logger
 from pydantic import Field
+from pydantic import TypeAdapter
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.local_process import RunningProcess
@@ -12,6 +13,8 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import StringField
+from imbue.mngr_kanpan.data_source import now_utc
+from imbue.mngr_kanpan.data_source import oldest_created
 
 _SHELL_TIMEOUT_SECONDS = 30.0
 
@@ -22,6 +25,18 @@ class ShellCommandConfig(FrozenModel):
     name: str = Field(description="Human-readable name")
     header: str = Field(description="Column header text")
     command: str = Field(description="Shell command to run per agent")
+    inputs: tuple[str, ...] = Field(
+        default=(),
+        description="Field keys whose cached values this command actually consumes via "
+        "MNGR_FIELD_<KEY> env vars. Used for staleness propagation: the produced field's "
+        "`created` is the min of these inputs' `created` (taint propagation). When empty "
+        "(default), the produced field is stamped with the current time. Note that the "
+        "shell still receives MNGR_FIELD_<KEY> for every cached field regardless of this "
+        "list -- `inputs` only governs which keys feed into the staleness calculation.",
+    )
+
+
+_STRING_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(StringField)
 
 
 class ShellCommandDataSource(FrozenModel):
@@ -49,8 +64,8 @@ class ShellCommandDataSource(FrozenModel):
         return {self.field_key: self.config.header}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        return {self.field_key: StringField}
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
+        return {self.field_key: _STRING_ADAPTER}
 
     def compute(
         self,
@@ -82,12 +97,24 @@ class ShellCommandDataSource(FrozenModel):
             errors.append(f"Shell '{self.config.name}': {n_failed} process(es) timed out or failed")
             logger.debug("Shell '{}' concurrency group error: {}", self.config.name, exc)
 
+        # Shell output's `created` is the oldest `created` among the cached
+        # fields the operator declared as inputs (config.inputs). When inputs
+        # is empty, no cached field feeds into the result and `created=now`.
+        # The shell still sees every cached field as MNGR_FIELD_<KEY>, but
+        # only the declared inputs taint the staleness of the produced cell.
+        # This matches the rule that derived values inherit the oldest
+        # `created` of the inputs they actually use.
+        now = now_utc()
+        declared_inputs = self.config.inputs
         for agent_name, proc in processes:
             rc = proc.returncode
             if rc == 0:
                 stdout = proc.read_stdout().strip()
                 if stdout:
-                    fields[agent_name] = {self.field_key: StringField(value=stdout)}
+                    agent_cached = cached_fields.get(agent_name, {})
+                    input_fields = [agent_cached[key] for key in declared_inputs if key in agent_cached]
+                    created = oldest_created(*input_fields) if input_fields else now
+                    fields[agent_name] = {self.field_key: StringField(value=stdout, created=created)}
             else:
                 stderr = proc.read_stderr().strip()
                 msg = f"Shell '{self.config.name}' failed for {agent_name} (exit {rc})"

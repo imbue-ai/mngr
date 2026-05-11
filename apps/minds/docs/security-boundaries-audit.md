@@ -10,7 +10,7 @@ The minds desktop app uses a layered proxy architecture:
 
 2. **Desktop client** (FastAPI, `desktop_client/app.py`): Runs on `localhost:PORT`. Handles auth, agent discovery, and proxies `<agent-id>.localhost:PORT` subdomain requests to per-agent workspace servers.
 
-3. **Workspace server** (`minds_workspace_server/`): One per agent. Multiplexes agent services under `/service/<name>/...` paths. Handles cookie path rewriting, Service Worker registration, and HTML rewriting.
+3. **Workspace server** (`minds-workspace-server` CLI, source at `forever-claude-template/apps/system_interface/`): One per agent. Multiplexes agent services under `/service/<name>/...` paths. Handles cookie path rewriting, Service Worker registration, and HTML rewriting.
 
 4. **Agent services**: Individual HTTP servers (web UI, terminal, API, etc.) running inside each agent's container.
 

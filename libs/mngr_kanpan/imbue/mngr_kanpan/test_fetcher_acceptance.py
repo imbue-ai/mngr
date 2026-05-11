@@ -8,9 +8,12 @@ To run these tests locally:
     just test libs/mngr_kanpan/imbue/mngr_kanpan/test_fetcher_acceptance.py
 """
 
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pytest
+from pydantic import TypeAdapter
 
 from imbue.mngr.cli.testing import create_test_agent_state
 from imbue.mngr.config.data_types import MngrContext
@@ -55,8 +58,8 @@ class _FakeRemoteDataSource:
         return {FIELD_REPO_PATH: "FAKE"}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        return {FIELD_REPO_PATH: RepoPathField}
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
+        return {FIELD_REPO_PATH: TypeAdapter(RepoPathField)}
 
     def compute(
         self,
@@ -64,7 +67,17 @@ class _FakeRemoteDataSource:
         cached_fields: dict[AgentName, dict[str, FieldValue]],
         mngr_ctx: MngrContext,
     ) -> tuple[dict[AgentName, dict[str, FieldValue]], list[str]]:
-        return {AgentName("git-local-agent"): {FIELD_REPO_PATH: RepoPathField(path="should/not/appear")}}, []
+        return (
+            {
+                AgentName("git-local-agent"): {
+                    FIELD_REPO_PATH: RepoPathField(
+                        path="should/not/appear",
+                        created=datetime.now(tz=timezone.utc),
+                    )
+                }
+            },
+            [],
+        )
 
 
 @pytest.fixture

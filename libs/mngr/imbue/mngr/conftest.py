@@ -39,8 +39,6 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
-from imbue.mngr.register_guards_docker import register_docker_cli_guard
-from imbue.mngr.register_guards_docker import register_docker_sdk_guard
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import isolate_git
@@ -48,16 +46,9 @@ from imbue.mngr.utils.testing import isolate_tmux_server
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr.utils.testing import setup_mngr_test_environment
 from imbue.mngr.utils.testing import worker_test_ids
-from imbue.resource_guards.resource_guards import register_resource_guard
 
-# Register resource guards so that projects inheriting this conftest via
-# pytest_plugins (e.g. mngr_claude) get guards registered at import time.
-register_resource_guard("tmux")
-register_resource_guard("rsync")
-register_resource_guard("unison")
-register_resource_guard("modal")
-register_docker_cli_guard()
-register_docker_sdk_guard()
+# Resource guards (tmux, rsync, unison, modal, docker_cli, docker_sdk) are
+# registered automatically via the resource_guards entry point group.
 
 # The urwid import above triggers creation of deprecated module aliases.
 # These are the deprecated module aliases that urwid 3.x creates for backwards
@@ -308,6 +299,25 @@ def per_host_dir(temp_host_dir: Path) -> Path:
 def cli_runner() -> CliRunner:
     """Create a Click CLI runner for testing CLI commands."""
     return CliRunner()
+
+
+@pytest.fixture()
+def log_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru warning messages for assertion in tests.
+
+    Tolerates handler removal during the test (e.g. setup_logging() calls
+    logger.remove() which clears all handlers, so the handler we added may
+    no longer exist by the time teardown runs).
+    """
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
+    try:
+        yield messages
+    finally:
+        try:
+            logger.remove(handler_id)
+        except ValueError:
+            pass
 
 
 # =============================================================================

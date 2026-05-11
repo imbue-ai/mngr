@@ -10,7 +10,6 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
-from imbue.mngr.api.agent_addr import AgentAddress
 from imbue.mngr.api.agent_addr import parse_agent_address
 from imbue.mngr.cli.create import _create_agent
 from imbue.mngr.cli.create import _resolve_transfer_mode
@@ -21,6 +20,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import HostLocation
+from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
@@ -1289,17 +1290,40 @@ def test_transfer_defaults_to_git_mirror_for_existing_remote_host(
     temp_git_repo: Path,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """When targeting an existing host on a non-local provider, default should be git-mirror."""
-    address = AgentAddress(
-        agent_name=None,
+    """When the target is on a different host (here: remote), default to git-mirror."""
+    target_host = DiscoveredHost(
+        host_id=HostId.generate(),
         host_name=HostName("myhost"),
         provider_name=ProviderInstanceName("modal"),
     )
     source_location = HostLocation(host=local_host, path=temp_git_repo)
 
-    result = _resolve_transfer_mode(default_create_cli_opts, address, source_location, temp_mngr_ctx, target_path=None)
+    result = _resolve_transfer_mode(
+        default_create_cli_opts, target_host, source_location, temp_mngr_ctx, target_path=None
+    )
 
     assert result == TransferMode.GIT_MIRROR
+
+
+def test_transfer_defaults_to_git_worktree_for_same_remote_host(
+    default_create_cli_opts: CreateCliOptions,
+    local_host: Host,
+    temp_git_repo: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """When source and target resolve to the same host, default to git-worktree even if remote."""
+    target_host = DiscoveredHost(
+        host_id=local_host.id,
+        host_name=HostName("local"),
+        provider_name=ProviderInstanceName("local"),
+    )
+    source_location = HostLocation(host=local_host, path=temp_git_repo)
+
+    result = _resolve_transfer_mode(
+        default_create_cli_opts, target_host, source_location, temp_mngr_ctx, target_path=None
+    )
+
+    assert result == TransferMode.GIT_WORKTREE
 
 
 def test_create_with_invalid_provider_name(

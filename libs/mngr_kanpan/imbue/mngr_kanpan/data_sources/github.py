@@ -1,18 +1,23 @@
 import json
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from enum import auto
 from pathlib import Path
+from typing import Annotated
 from typing import Any
+from typing import Literal
 
 from loguru import logger
 from pydantic import Field
+from pydantic import TypeAdapter
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -24,6 +29,7 @@ from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FIELD_REPO_PATH
 from imbue.mngr_kanpan.data_source import FIELD_UNRESOLVED
 from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_source import now_utc
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
 from imbue.mngr_kanpan.data_sources.repo_paths import repo_path_from_labels
 from imbue.mngr_kanpan.data_types import DataSourceConfig
@@ -60,6 +66,7 @@ class CiStatus(UpperCaseStrEnum):
 class PrField(FieldValue):
     """GitHub pull request field value."""
 
+    kind: Literal["pr"] = Field(default="pr", description="Discriminator tag")
     number: int = Field(description="PR number")
     url: str = Field(description="PR URL")
     is_draft: bool = Field(description="Whether the PR is a draft")
@@ -81,6 +88,7 @@ class PrField(FieldValue):
 class CiField(FieldValue):
     """CI check status field value."""
 
+    kind: Literal["ci"] = Field(default="ci", description="Discriminator tag")
     status: CiStatus = Field(description="Aggregate CI check status")
 
     def display(self) -> CellDisplay:
@@ -92,18 +100,42 @@ class CiField(FieldValue):
         return {"MNGR_FIELD_CI_STATUS": str(self.status)}
 
 
+_CI_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(CiField)
+
+
 class CreatePrUrlField(FieldValue):
     """URL to create a new PR for a branch."""
 
+    kind: Literal["create_pr_url"] = Field(default="create_pr_url", description="Discriminator tag")
     url: str = Field(description="URL to create a PR")
 
     def display(self) -> CellDisplay:
         return CellDisplay(text="+PR", url=self.url)
 
 
+class PrFetchFailedField(FieldValue):
+    """Sentinel placed in the FIELD_PR slot when the repo's PR fetch failed
+    and no usable historical PR data is available to fall back to.
+
+    Routes the agent into BoardSection.PRS_FAILED. If a previous cycle
+    cached a PrField whose ``head_branch`` matches the agent's current
+    branch, that cached PrField is used instead of emitting this sentinel
+    (silent fallback). A cached PrField for a different branch is treated
+    as unusable -- the agent has moved on and the old PR would be
+    misattributed -- so this sentinel is emitted in that case too.
+    """
+
+    kind: Literal["pr_fetch_failed"] = Field(default="pr_fetch_failed", description="Discriminator tag")
+    repo: str = Field(description="Repo path that failed to load (e.g. 'org/repo')")
+
+    def display(self) -> CellDisplay:
+        return CellDisplay(text="?", color="light red")
+
+
 class ConflictsField(FieldValue):
     """Merge conflict status for a PR."""
 
+    kind: Literal["conflicts"] = Field(default="conflicts", description="Discriminator tag")
     has_conflicts: bool = Field(description="Whether the PR has merge conflicts")
 
     def display(self) -> CellDisplay:
@@ -112,15 +144,22 @@ class ConflictsField(FieldValue):
         return CellDisplay(text="no", color="light green")
 
 
+_CONFLICTS_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(ConflictsField)
+
+
 class UnresolvedField(FieldValue):
     """Unresolved review comment status for a PR."""
 
+    kind: Literal["unresolved"] = Field(default="unresolved", description="Discriminator tag")
     has_unresolved: bool = Field(description="Whether the PR has unresolved review comments")
 
     def display(self) -> CellDisplay:
         if self.has_unresolved:
             return CellDisplay(text="YES", color="light red")
         return CellDisplay(text="no", color="light green")
+
+
+_UNRESOLVED_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(UnresolvedField)
 
 
 class PrInfo(FrozenModel):
@@ -242,6 +281,7 @@ def _parse_gh_output(
     try:
         return json.loads(stdout)
     except (json.JSONDecodeError, TypeError) as e:
+        logger.warning("Failed to parse gh CLI JSON output: {}", e)
         return f"parse error: {e}"
 
 
@@ -295,6 +335,18 @@ def _parse_check_status(rollup: list[dict[str, Any]] | None) -> CiStatus:
     return CiStatus.PASSING
 
 
+# Discriminated-union adapter for the FIELD_PR slot. The slot is polymorphic --
+# a real PR is a PrField, a pushed-but-no-PR branch is a CreatePrUrlField, and
+# a fetch failure with no cached fallback is a PrFetchFailedField. The
+# `kind` Literal on each subclass is the discriminator, so pydantic picks the
+# right concrete class without order-sensitive trial validation.
+PrSlotField = Annotated[
+    PrField | CreatePrUrlField | PrFetchFailedField,
+    Field(discriminator="kind"),
+]
+_PR_SLOT_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(PrSlotField)
+
+
 class GitHubDataSourceConfig(DataSourceConfig):
     """Configuration for the GitHub data source."""
 
@@ -340,16 +392,16 @@ class GitHubDataSource(FrozenModel):
         return cols
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        types: dict[str, type[FieldValue]] = {}
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
+        types: dict[str, TypeAdapter[FieldValue]] = {}
         if self.config.pr:
-            types[FIELD_PR] = PrField
+            types[FIELD_PR] = _PR_SLOT_ADAPTER
         if self.config.ci:
-            types[FIELD_CI] = CiField
+            types[FIELD_CI] = _CI_ADAPTER
         if self.config.conflicts:
-            types[FIELD_CONFLICTS] = ConflictsField
+            types[FIELD_CONFLICTS] = _CONFLICTS_ADAPTER
         if self.config.unresolved:
-            types[FIELD_UNRESOLVED] = UnresolvedField
+            types[FIELD_UNRESOLVED] = _UNRESOLVED_ADAPTER
         return types
 
     def compute(
@@ -360,15 +412,28 @@ class GitHubDataSource(FrozenModel):
     ) -> tuple[dict[AgentName, dict[str, FieldValue]], Sequence[str]]:
         cg = mngr_ctx.concurrency_group
         errors: list[str] = []
+        now = now_utc()
 
-        # Resolve repo paths: prefer cached (from previous cycle), fall back to labels
+        # Resolve repo paths and per-agent staleness. Labels are world data
+        # (refreshed every list_agents call) so they are always at least as
+        # fresh as the cached RepoPathField (which is itself just
+        # repo_path_from_labels at some earlier T). Prefer labels for both
+        # value and freshness; fall back to the cache only when labels no
+        # longer carry a remote, in which case the cached value is the only
+        # information we have and its `created` correctly tags the result
+        # as stale.
         agent_repos: dict[AgentName, str] = {}
+        agent_created: dict[AgentName, datetime] = {}
         for agent in agents:
-            repo_path = _get_cached_repo_path(cached_fields, agent.name)
-            if repo_path is None:
-                repo_path = repo_path_from_labels(agent.labels)
-            if repo_path is not None:
-                agent_repos[agent.name] = repo_path
+            label_repo = repo_path_from_labels(agent.labels)
+            if label_repo is not None:
+                agent_repos[agent.name] = label_repo
+                agent_created[agent.name] = now
+                continue
+            cached_repo_field = _get_cached_repo_field(cached_fields, agent.name)
+            if cached_repo_field is not None:
+                agent_repos[agent.name] = cached_repo_field.path
+                agent_created[agent.name] = cached_repo_field.created
 
         # Collect unique repos
         all_repos: set[str] = set(agent_repos.values())
@@ -376,11 +441,11 @@ class GitHubDataSource(FrozenModel):
             return {}, errors
 
         # Fetch PRs for all unique repos in parallel
-        pr_by_repo_branch: dict[str, dict[str, _PrFieldInternal]] = {}
+        pr_by_repo_branch: dict[str, dict[str, _PrLookup]] = {}
         repo_pr_loaded: dict[str, bool] = {}
 
         with ThreadPoolExecutor(max_workers=min(len(all_repos), 8)) as executor:
-            for repo_path, pr_result in executor.map(lambda rp: _fetch_repo_prs(cg, rp), all_repos):
+            for repo_path, pr_result in executor.map(lambda rp: _fetch_repo_prs(cg, rp, now), all_repos):
                 if pr_result.error is None:
                     repo_index = _build_pr_branch_index(pr_result.prs)
                     if repo_index:
@@ -390,7 +455,12 @@ class GitHubDataSource(FrozenModel):
                     repo_pr_loaded[repo_path] = False
                     errors.append(pr_result.error)
 
-        # Build agent fields
+        # Build agent fields. The per-agent `created` reflects the staleness of
+        # the cached repo_path used to map the agent to its PR -- if that
+        # mapping is stale, the derived PR/CI/etc. fields are also stale.
+        # Agents missing from agent_repos (no label, no cache) are skipped:
+        # there is no PR data to build for them, and looking them up in
+        # agent_created would KeyError.
         fields: dict[AgentName, dict[str, FieldValue]] = {}
         for agent in agents:
             agent_repo = agent_repos.get(agent.name)
@@ -398,24 +468,48 @@ class GitHubDataSource(FrozenModel):
             agent_fields: dict[str, FieldValue] = {}
 
             if agent_repo is not None and branch is not None:
-                pr = _lookup_pr(pr_by_repo_branch, agent_repo, branch)
+                # `this_created` is the staleness time for any FIELD_PR/FIELD_CI
+                # we synthesize for this agent: it reflects how stale the
+                # repo_path lookup is (now if from labels, cached.created if
+                # we fell back to the cache).
+                this_created = agent_created[agent.name]
+                lookup = _lookup_pr(pr_by_repo_branch, agent_repo, branch)
                 agent_prs_loaded = repo_pr_loaded.get(agent_repo) is True
 
-                if pr is not None:
+                if lookup is not None:
                     if self.config.pr:
-                        agent_fields[FIELD_PR] = pr
+                        # The PR data was just fetched from gh, but we
+                        # attribute it to this agent via a (possibly stale)
+                        # repo_path lookup -- so the `created` of the cell
+                        # tracks the lookup's freshness, not the fetch's.
+                        agent_fields[FIELD_PR] = lookup.pr.model_copy_update(
+                            to_update(lookup.pr.field_ref().created, this_created),
+                        )
                     if self.config.ci:
-                        agent_fields[FIELD_CI] = CiField(status=pr.internal_check_status)
+                        agent_fields[FIELD_CI] = CiField(
+                            status=lookup.check_status,
+                            created=this_created,
+                        )
+                elif agent_prs_loaded:
+                    agent_fields[FIELD_PR] = CreatePrUrlField(
+                        url=_build_create_pr_url(agent_repo, branch),
+                        created=this_created,
+                    )
                 else:
-                    if agent_prs_loaded:
-                        agent_fields[FIELD_PR] = CreatePrUrlField(url=_build_create_pr_url(agent_repo, branch))
+                    agent_fields.update(
+                        _compute_failed_fetch_fields(
+                            cached_fields, agent.name, branch, agent_repo, this_created, self.config
+                        )
+                    )
 
             if agent_fields:
                 fields[agent.name] = agent_fields
 
         # Fetch conflicts and unresolved in a second pass (requires PR numbers)
         if self.config.conflicts or self.config.unresolved:
-            extra_fields, extra_errors = _fetch_pr_metadata(cg, agents, fields, agent_repos, self.config)
+            extra_fields, extra_errors = _fetch_pr_metadata(
+                cg, agents, fields, agent_repos, agent_created, self.config
+            )
             for agent_name, extra in extra_fields.items():
                 if agent_name in fields:
                     fields[agent_name].update(extra)
@@ -426,61 +520,77 @@ class GitHubDataSource(FrozenModel):
         return fields, errors
 
 
-class _PrFieldInternal(PrField):
-    """Internal PR field with check_status for CI field extraction."""
+class _PrLookup(FrozenModel):
+    """Internal record bundling a fetched PR with its CI status.
 
-    internal_check_status: CiStatus = Field(default=CiStatus.UNKNOWN, description="CI check status for internal use")
+    Used while building the per-repo PR index so the public PrField stays a
+    pure board-display value -- the CiStatus rides alongside instead of being
+    smuggled in as an extra PrField subclass field.
+    """
+
+    pr: PrField = Field(description="The fetched PR (canonical FIELD_PR value)")
+    check_status: CiStatus = Field(description="Aggregate CI check status from the same fetch")
 
 
 class _FetchPrsResult(FrozenModel):
-    """Result of fetching PRs from GitHub, using PrField."""
+    """Result of fetching PRs from GitHub."""
 
-    prs: tuple[_PrFieldInternal, ...] = Field(description="Fetched PRs as PrField objects")
+    prs: tuple[_PrLookup, ...] = Field(description="Fetched PRs paired with their CI status")
     error: str | None = Field(default=None, description="Error message if fetch failed")
 
 
-def _get_cached_repo_path(cached_fields: dict[AgentName, dict[str, FieldValue]], agent_name: AgentName) -> str | None:
-    """Get repo path from cached fields if available."""
+def _get_cached_repo_field(
+    cached_fields: dict[AgentName, dict[str, FieldValue]], agent_name: AgentName
+) -> RepoPathField | None:
+    """Get the cached RepoPathField (with its `created` timestamp) if available."""
     agent_cached = cached_fields.get(agent_name)
     if agent_cached is None:
         return None
     repo_field = agent_cached.get(FIELD_REPO_PATH)
     if isinstance(repo_field, RepoPathField):
-        return repo_field.path
+        return repo_field
     return None
 
 
-def _fetch_repo_prs(cg: ConcurrencyGroup, repo_path: str) -> tuple[str, _FetchPrsResult]:
-    """Fetch PRs for a single repo."""
+def _fetch_repo_prs(cg: ConcurrencyGroup, repo_path: str, fetched_at: datetime) -> tuple[str, _FetchPrsResult]:
+    """Fetch PRs for a single repo.
+
+    `fetched_at` stamps the produced PrField's `created` with the time of
+    this fetch. Per-agent code may override it with `this_created` to
+    reflect lookup-side staleness when attributing the PR to an agent
+    (see GitHubDataSource.compute).
+    """
     result = fetch_all_prs(cg, repo=repo_path)
-    # Convert PrInfo objects to PrField objects
-    pr_fields: list[_PrFieldInternal] = []
+    lookups: list[_PrLookup] = []
     for pr_info in result.prs:
-        pr_fields.append(
-            _PrFieldInternal(
-                number=pr_info.number,
-                url=pr_info.url,
-                is_draft=pr_info.is_draft,
-                title=pr_info.title,
-                state=PrState(str(pr_info.state)),
-                head_branch=pr_info.head_branch,
-                internal_check_status=CiStatus(str(pr_info.check_status)),
+        lookups.append(
+            _PrLookup(
+                pr=PrField(
+                    number=pr_info.number,
+                    url=pr_info.url,
+                    is_draft=pr_info.is_draft,
+                    title=pr_info.title,
+                    state=PrState(str(pr_info.state)),
+                    head_branch=pr_info.head_branch,
+                    created=fetched_at,
+                ),
+                check_status=CiStatus(str(pr_info.check_status)),
             )
         )
-    return repo_path, _FetchPrsResult(prs=tuple(pr_fields), error=result.error)
+    return repo_path, _FetchPrsResult(prs=tuple(lookups), error=result.error)
 
 
 @pure
-def _build_pr_branch_index(prs: tuple[_PrFieldInternal, ...]) -> dict[str, _PrFieldInternal]:
+def _build_pr_branch_index(prs: tuple[_PrLookup, ...]) -> dict[str, _PrLookup]:
     """Build a lookup dict from branch name to the most relevant PR.
 
     If multiple PRs share the same branch, prefers OPEN > MERGED > CLOSED.
     """
-    result: dict[str, _PrFieldInternal] = {}
-    for pr in prs:
-        existing = result.get(pr.head_branch)
-        if existing is None or _pr_priority(pr) > _pr_priority(existing):
-            result[pr.head_branch] = pr
+    result: dict[str, _PrLookup] = {}
+    for lookup in prs:
+        existing = result.get(lookup.pr.head_branch)
+        if existing is None or _pr_priority(lookup.pr) > _pr_priority(existing.pr):
+            result[lookup.pr.head_branch] = lookup
     return result
 
 
@@ -496,10 +606,10 @@ def _pr_priority(pr: PrField) -> int:
 
 @pure
 def _lookup_pr(
-    pr_by_repo_branch: dict[str, dict[str, _PrFieldInternal]],
+    pr_by_repo_branch: dict[str, dict[str, _PrLookup]],
     agent_repo: str,
     branch: str,
-) -> _PrFieldInternal | None:
+) -> _PrLookup | None:
     """Look up the PR for an agent by its repo and branch."""
     repo_prs = pr_by_repo_branch.get(agent_repo)
     return repo_prs.get(branch) if repo_prs is not None else None
@@ -511,11 +621,55 @@ def _build_create_pr_url(repo_path: str, branch: str) -> str:
     return f"https://github.com/{repo_path}/compare/{branch}?expand=1"
 
 
+@pure
+def _compute_failed_fetch_fields(
+    cached_fields: dict[AgentName, dict[str, FieldValue]],
+    agent_name: AgentName,
+    branch: str,
+    agent_repo: str,
+    this_created: datetime,
+    config: GitHubDataSourceConfig,
+) -> dict[str, FieldValue]:
+    """Build the FIELD_PR / FIELD_CI fields for an agent whose repo PR fetch failed.
+
+    Silently falls back to a cached PrField/CiField if available; otherwise
+    emits a PrFetchFailedField so the agent shows up under "PRs not loaded"
+    instead of being misclassified as "no PR yet".
+
+    Branch match: only reuse the cache when the cached PR's head_branch
+    equals the agent's current branch. Otherwise the agent has moved on to
+    a different branch since the cache was written, and showing the old
+    PR would misattribute it to the wrong branch.
+
+    Staleness: there is no TTL on the cached PR. If ``gh pr list`` keeps
+    failing for hours, we will keep showing the last-known PR row (number,
+    state, CI). The cached fields carry their own ``created`` so the TUI
+    will render them as stale once they age past the staleness threshold.
+    The PrFetchFailedField is stamped with ``this_created`` (the lookup
+    freshness for this agent) for the same taint-propagation reason as
+    the success path.
+    """
+    agent_fields: dict[str, FieldValue] = {}
+    cached_agent = cached_fields.get(agent_name, {})
+    cached_pr = cached_agent.get(FIELD_PR)
+    if isinstance(cached_pr, PrField) and cached_pr.head_branch == branch:
+        if config.pr:
+            agent_fields[FIELD_PR] = cached_pr
+        if config.ci:
+            cached_ci = cached_agent.get(FIELD_CI)
+            if isinstance(cached_ci, CiField):
+                agent_fields[FIELD_CI] = cached_ci
+    elif config.pr:
+        agent_fields[FIELD_PR] = PrFetchFailedField(repo=agent_repo, created=this_created)
+    return agent_fields
+
+
 def _fetch_pr_metadata(
     cg: ConcurrencyGroup,
     agents: tuple[AgentDetails, ...],
     fields: dict[AgentName, dict[str, FieldValue]],
     agent_repos: dict[AgentName, str],
+    agent_created: dict[AgentName, datetime],
     config: GitHubDataSourceConfig,
 ) -> tuple[dict[AgentName, dict[str, FieldValue]], list[str]]:
     """Fetch conflicts and unresolved comments for agents that have PRs."""
@@ -567,6 +721,9 @@ def _fetch_pr_metadata(
 
     for agent_name, repo, pr_number, conflict_proc, unresolved_proc in processes:
         agent_extra: dict[str, FieldValue] = {}
+        # Conflicts/unresolved are derived from the same cached repo_path -> agent
+        # mapping as PrField, so they inherit the same staleness.
+        this_created = agent_created[agent_name]
 
         if conflict_proc is not None:
             try:
@@ -574,7 +731,7 @@ def _fetch_pr_metadata(
                 if conflict_proc.returncode == 0:
                     stdout = conflict_proc.read_stdout()
                     has_conflicts = _parse_conflicts(stdout)
-                    agent_extra[FIELD_CONFLICTS] = ConflictsField(has_conflicts=has_conflicts)
+                    agent_extra[FIELD_CONFLICTS] = ConflictsField(has_conflicts=has_conflicts, created=this_created)
             except Exception as e:
                 logger.debug("Failed to check conflicts for PR #{} in {}: {}", pr_number, repo, e)
 
@@ -584,7 +741,9 @@ def _fetch_pr_metadata(
                 if unresolved_proc.returncode == 0:
                     stdout = unresolved_proc.read_stdout()
                     has_unresolved = _parse_unresolved(stdout, ignore_user=config.unresolved_ignore_user)
-                    agent_extra[FIELD_UNRESOLVED] = UnresolvedField(has_unresolved=has_unresolved)
+                    agent_extra[FIELD_UNRESOLVED] = UnresolvedField(
+                        has_unresolved=has_unresolved, created=this_created
+                    )
             except Exception as e:
                 logger.debug("Failed to check unresolved for PR #{} in {}: {}", pr_number, repo, e)
 
@@ -599,7 +758,8 @@ def _parse_conflicts(stdout: str) -> bool:
     try:
         data = json.loads(stdout)
         return data.get("mergeable") == "CONFLICTING"
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning("Failed to parse gh pr view --json mergeable output: {}", e)
         return False
 
 
@@ -653,5 +813,6 @@ def _parse_unresolved(stdout: str, ignore_user: str | None = None) -> bool:
                 return True
 
         return False
-    except (json.JSONDecodeError, TypeError, AttributeError):
+    except (json.JSONDecodeError, TypeError, AttributeError) as e:
+        logger.warning("Failed to parse gh pr view --json reviewThreads output: {}", e)
         return False

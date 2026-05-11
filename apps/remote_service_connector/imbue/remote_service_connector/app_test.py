@@ -20,12 +20,15 @@ from imbue.remote_service_connector.app import TunnelComponentTooLongError
 from imbue.remote_service_connector.app import TunnelNotFoundError
 from imbue.remote_service_connector.app import TunnelOwnershipError
 from imbue.remote_service_connector.app import _authenticate_supertokens
+from imbue.remote_service_connector.app import _default_email_getter
 from imbue.remote_service_connector.app import cf_check
 from imbue.remote_service_connector.app import cf_list_all_pages
 from imbue.remote_service_connector.app import extract_service_name
 from imbue.remote_service_connector.app import extract_username_from_tunnel_name
+from imbue.remote_service_connector.app import is_email_in_paid_account_allowlist
 from imbue.remote_service_connector.app import make_hostname
 from imbue.remote_service_connector.app import make_tunnel_name
+from imbue.remote_service_connector.app import require_paid_account
 from imbue.remote_service_connector.app import web_app
 from imbue.remote_service_connector.testing import FakePoolBackend
 from imbue.remote_service_connector.testing import FakeSuperTokensBackend
@@ -36,6 +39,8 @@ from imbue.remote_service_connector.testing import make_fake_tunnel_token
 
 _ADMIN_STUB_TOKEN = "admin-stub-jwt"
 _ADMIN_STUB_USERNAME = "testuser"
+_ADMIN_STUB_EMAIL = "testuser@example.com"
+_PAID_ACCOUNT_SUFFIXES_TEST_VALUE = "@example.com"
 
 
 def _admin_headers() -> dict[str, str]:
@@ -57,15 +62,20 @@ def _make_test_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
     Sets up the SuperTokens Bearer auth path so tests calling admin endpoints
     can authenticate with ``_admin_headers()`` without needing a real JWT.
+    Also primes ``PAID_ACCOUNT_SUFFIXES`` with a value that matches the stub
+    admin email so paid-feature endpoints (``/hosts/*``, ``/keys/*``) work
+    out of the box; tests that want to exercise the gate use
+    ``monkeypatch.setenv``/``delenv`` to override.
     """
     monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://fake-supertokens.example.com")
+    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", _PAID_ACCOUNT_SUFFIXES_TEST_VALUE)
     fake_ctx = make_fake_forwarding_ctx()
     monkeypatch.setattr(app_mod, "get_ctx", lambda: fake_ctx)
 
     def _stub_supertokens(token: str) -> AdminAuth:
         if token != _ADMIN_STUB_TOKEN:
             raise HTTPException(status_code=401, detail="Invalid token")
-        return AdminAuth(username=_ADMIN_STUB_USERNAME)
+        return AdminAuth(username=_ADMIN_STUB_USERNAME, email=_ADMIN_STUB_EMAIL)
 
     monkeypatch.setattr(app_mod, "_authenticate_supertokens", _stub_supertokens)
     return TestClient(web_app)
@@ -251,6 +261,56 @@ def test_set_service_auth_passes_allowed_idps() -> None:
     ctx.set_service_auth("alice--agent1", "alice", "web", policy)
     app_id = list(ctx.fake.access_apps.keys())[0]
     assert ctx.fake.access_apps[app_id]["allowed_idps"] == ["google-idp-uuid-123", "otp-idp-uuid-456"]
+
+
+def test_add_service_is_idempotent() -> None:
+    """Calling ``add_service`` twice for the same hostname should succeed without
+    creating a duplicate CNAME or duplicate ingress rule.
+
+    Real Cloudflare returns error 81053 ("DNS record already exists") on the
+    second ``create_cname`` call -- ``FakeCloudflareOps`` mirrors that. Before
+    this fix, the minds "Update sharing" flow re-ran ``add_service`` on every
+    submit and surfaced the connector's 400/81053 error to the user.
+    """
+    ctx = make_fake_forwarding_ctx(allowed_idps=["google-idp"])
+    ctx.create_tunnel("alice", "agent1")
+    ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
+    ctx.add_service("alice--agent1", "alice", "web", "http://localhost:9090")
+    assert len(ctx.fake.dns_records) == 1
+    services = ctx.list_services("alice--agent1", "alice")
+    assert len(services) == 1
+    assert services[0].service_url == "http://localhost:9090"
+
+
+def test_add_service_preserves_customized_service_auth_on_re_add() -> None:
+    """A second ``add_service`` after the user has set a custom service-level
+    auth policy must not reset that policy back to the tunnel default."""
+    ctx = make_fake_forwarding_ctx()
+    ctx.create_tunnel("alice", "agent1")
+    default_policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "owner@x.com"}}]}])
+    ctx.set_tunnel_auth("alice--agent1", default_policy)
+    ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
+
+    custom_policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "guest@y.com"}}]}])
+    ctx.set_service_auth("alice--agent1", "alice", "web", custom_policy)
+
+    ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
+    result = ctx.get_service_auth("alice--agent1", "alice", "web")
+    assert result is not None
+    assert result.rules == custom_policy.rules
+
+
+def test_add_service_rejects_cname_pointing_elsewhere() -> None:
+    """If a CNAME for the hostname exists but points at a different tunnel,
+    ``add_service`` must refuse rather than silently leak traffic."""
+    ctx = make_fake_forwarding_ctx()
+    ctx.create_tunnel("alice", "agent1")
+    hostname = make_hostname("web", "agent1", "alice", "example.com")
+    ctx.fake.dns_records.append(
+        {"id": "stray", "name": hostname, "content": "different-tunnel.cfargotunnel.com", "type": "CNAME"}
+    )
+    with pytest.raises(CloudflareApiError):
+        ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
 
 
 def test_remove_service_deletes_access_app() -> None:
@@ -500,9 +560,26 @@ def test_authenticate_supertokens_returns_admin_auth_with_user_id_prefix(
     result = _authenticate_supertokens(
         "valid-token",
         session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=True),
+        email_getter=lambda _user_id: "alice@example.com",
     )
     assert isinstance(result, AdminAuth)
     assert result.username == "a1b2c3d4e5f67890"
+    assert result.email == "alice@example.com"
+
+
+def test_authenticate_supertokens_returns_admin_auth_with_none_email_when_lookup_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful auth with no resolvable email leaves ``AdminAuth.email`` as None."""
+    user_id = "a1b2c3d4-e5f6-7890-abcd-1234567890ab"
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+    result = _authenticate_supertokens(
+        "valid-token",
+        session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=True),
+        email_getter=lambda _user_id: None,
+    )
+    assert isinstance(result, AdminAuth)
+    assert result.email is None
 
 
 def test_authenticate_supertokens_raises_401_when_email_not_verified(
@@ -515,6 +592,7 @@ def test_authenticate_supertokens_raises_401_when_email_not_verified(
         _authenticate_supertokens(
             "valid-token",
             session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=False),
+            email_getter=lambda _user_id: "alice@example.com",
         )
     assert exc_info.value.status_code == 401
     assert "verified" in exc_info.value.detail
@@ -534,7 +612,11 @@ def test_authenticate_supertokens_raises_401_when_email_verification_claim_missi
             return {}
 
     with pytest.raises(HTTPException) as exc_info:
-        _authenticate_supertokens("valid-token", session_getter=lambda **kwargs: _SessionNoClaim())
+        _authenticate_supertokens(
+            "valid-token",
+            session_getter=lambda **kwargs: _SessionNoClaim(),
+            email_getter=lambda _user_id: None,
+        )
     assert exc_info.value.status_code == 401
     assert "verified" in exc_info.value.detail
 
@@ -545,6 +627,7 @@ def test_authenticate_supertokens_raises_401_when_connection_uri_not_set() -> No
         _authenticate_supertokens(
             "any-token",
             session_getter=lambda **kwargs: _FakeSession("ignored"),
+            email_getter=lambda _user_id: None,
         )
     assert exc_info.value.status_code == 401
     assert "not configured" in exc_info.value.detail
@@ -591,6 +674,86 @@ def test_authenticate_supertokens_raises_401_on_general_error(
         _authenticate_supertokens("bad-token", session_getter=_raise)
     assert exc_info.value.status_code == 401
     assert exc_info.value.detail == "Invalid token"
+
+
+# -- _default_email_getter tests --
+
+
+class _FakeLoginMethod:
+    """Stand-in for a SuperTokens LoginMethod -- only ``email`` and ``verified`` are used."""
+
+    def __init__(self, email: str | None, verified: bool = True) -> None:
+        self.email = email
+        self.verified = verified
+
+
+class _FakeStUser:
+    """Stand-in for a SuperTokens User -- only the ``login_methods`` attribute is used."""
+
+    def __init__(self, login_methods: list[_FakeLoginMethod]) -> None:
+        self.login_methods = login_methods
+
+
+def test_default_email_getter_returns_first_verified_non_empty_email() -> None:
+    """The first login method with both a non-empty email and ``verified=True`` is returned."""
+    user = _FakeStUser([_FakeLoginMethod(None), _FakeLoginMethod(""), _FakeLoginMethod("alice@example.com")])
+    assert _default_email_getter("user-123", user_getter=lambda _user_id: user) == "alice@example.com"
+
+
+def test_default_email_getter_skips_unverified_emails() -> None:
+    """Unverified login methods are skipped; the first *verified* email is returned.
+
+    A user with both an unverified third-party login (``evil@gmail.com``) and a verified
+    emailpassword login (``alice@imbue.com``) must surface ``alice@imbue.com``, since the
+    paid-feature gate authorizes by domain ownership and only verified emails prove that.
+    """
+    user = _FakeStUser(
+        [
+            _FakeLoginMethod("evil@gmail.com", verified=False),
+            _FakeLoginMethod("alice@imbue.com", verified=True),
+        ]
+    )
+    assert _default_email_getter("user-123", user_getter=lambda _user_id: user) == "alice@imbue.com"
+
+
+def test_default_email_getter_returns_none_when_only_unverified_emails() -> None:
+    """When every login method is unverified, returns None even if emails are present."""
+    user = _FakeStUser(
+        [
+            _FakeLoginMethod("evil@gmail.com", verified=False),
+            _FakeLoginMethod("other@gmail.com", verified=False),
+        ]
+    )
+    assert _default_email_getter("user-123", user_getter=lambda _user_id: user) is None
+
+
+def test_default_email_getter_returns_none_when_no_login_method_has_email() -> None:
+    """When no login method has a non-empty email, returns None."""
+    user = _FakeStUser([_FakeLoginMethod(None), _FakeLoginMethod("")])
+    assert _default_email_getter("user-123", user_getter=lambda _user_id: user) is None
+
+
+def test_default_email_getter_returns_none_when_user_is_none() -> None:
+    """When the SDK reports no user for the id, returns None."""
+    assert _default_email_getter("user-123", user_getter=lambda _user_id: None) is None
+
+
+def test_default_email_getter_returns_none_on_general_error() -> None:
+    """When the SDK raises a GeneralError (e.g. transient core problem), it is swallowed and None is returned."""
+
+    def _raise(_user_id: str) -> None:
+        raise SuperTokensGeneralError("transient core problem")
+
+    assert _default_email_getter("user-123", user_getter=_raise) is None
+
+
+def test_default_email_getter_returns_none_on_session_error() -> None:
+    """When the SDK raises a SessionError, it is swallowed and None is returned."""
+
+    def _raise(_user_id: str) -> None:
+        raise SuperTokensSessionError("bad session")
+
+    assert _default_email_getter("user-123", user_getter=_raise) is None
 
 
 # -- Auth route tests --
@@ -1476,7 +1639,7 @@ def test_lease_host_returns_available_host(monkeypatch: pytest.MonkeyPatch) -> N
     )
     resp = client.post(
         "/hosts/lease",
-        json={"ssh_public_key": "ssh-ed25519 AAAA testkey", "version": "v0.1.0"},
+        json={"ssh_public_key": "ssh-ed25519 AAAA testkey", "attributes": {"version": "v0.1.0"}},
         headers=_admin_headers(),
     )
     assert resp.status_code == 200
@@ -1484,7 +1647,7 @@ def test_lease_host_returns_available_host(monkeypatch: pytest.MonkeyPatch) -> N
     assert body["host_db_id"] == "00000000-0000-0000-0000-000000000001"
     assert body["vps_ip"] == "10.0.0.1"
     assert body["agent_id"] == "agent-111"
-    assert body["version"] == "v0.1.0"
+    assert body["attributes"] == {"version": "v0.1.0"}
     # Verify SSH key was injected on both VPS and container
     assert len(backend.append_key_calls) == 2
     # Verify host was marked as leased
@@ -1497,7 +1660,7 @@ def test_lease_host_returns_503_when_pool_empty(monkeypatch: pytest.MonkeyPatch)
     client, _backend = _make_pool_test_client(monkeypatch)
     resp = client.post(
         "/hosts/lease",
-        json={"ssh_public_key": "ssh-ed25519 AAAA testkey", "version": "v0.1.0"},
+        json={"ssh_public_key": "ssh-ed25519 AAAA testkey", "attributes": {"version": "v0.1.0"}},
         headers=_admin_headers(),
     )
     assert resp.status_code == 503
@@ -1510,7 +1673,7 @@ def test_lease_host_returns_503_when_version_mismatch(monkeypatch: pytest.Monkey
     backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-000000000001"), version="v0.2.0")
     resp = client.post(
         "/hosts/lease",
-        json={"ssh_public_key": "ssh-ed25519 AAAA testkey", "version": "v0.1.0"},
+        json={"ssh_public_key": "ssh-ed25519 AAAA testkey", "attributes": {"version": "v0.1.0"}},
         headers=_admin_headers(),
     )
     assert resp.status_code == 503
@@ -1578,3 +1741,215 @@ def test_list_hosts_returns_leased_hosts(monkeypatch: pytest.MonkeyPatch) -> Non
     assert len(hosts) == 2
     host_ids = {h["host_db_id"] for h in hosts}
     assert host_ids == {"00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000003"}
+
+
+# -- PAID_ACCOUNT_SUFFIXES gate tests --
+
+
+@pytest.mark.parametrize(
+    ("email", "raw_suffixes", "expected"),
+    [
+        ("alice@imbue.com", "@imbue.com", True),
+        ("ALICE@IMBUE.COM", "@imbue.com", True),
+        ("alice@imbue.com", "@IMBUE.COM", True),
+        ("alice@imbue.com", "@example.com,@imbue.com", True),
+        ("alice@imbue.com", "@example.com, @imbue.com ", True),
+        ("alice@imbue.com", "@example.com", False),
+        ("alice@imbue.com", "", False),
+        ("alice@imbue.com", "  ,  ", False),
+        (None, "@imbue.com", False),
+        ("", "@imbue.com", False),
+        # Bare domain matches as a suffix even without a leading "@".
+        ("alice@imbue.com", "imbue.com", True),
+        # A specific personal address matches itself only.
+        ("bob@gmail.com", "bob@gmail.com", True),
+        ("eve@gmail.com", "bob@gmail.com", False),
+    ],
+)
+def test_is_email_in_paid_account_allowlist(
+    email: str | None,
+    raw_suffixes: str,
+    expected: bool,
+) -> None:
+    assert is_email_in_paid_account_allowlist(email, raw_suffixes) is expected
+
+
+def test_require_paid_account_allows_when_email_matches_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com,@example.com")
+    require_paid_account(AdminAuth(username="alice", email="alice@imbue.com"))
+
+
+def test_require_paid_account_raises_403_when_env_var_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PAID_ACCOUNT_SUFFIXES", raising=False)
+    with pytest.raises(HTTPException) as exc_info:
+        require_paid_account(AdminAuth(username="alice", email="alice@imbue.com"))
+    assert exc_info.value.status_code == 403
+    assert "not enabled" in exc_info.value.detail
+
+
+def test_require_paid_account_raises_403_when_env_var_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "")
+    with pytest.raises(HTTPException) as exc_info:
+        require_paid_account(AdminAuth(username="alice", email="alice@imbue.com"))
+    assert exc_info.value.status_code == 403
+    assert "not enabled" in exc_info.value.detail
+
+
+def test_require_paid_account_raises_403_when_email_does_not_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    with pytest.raises(HTTPException) as exc_info:
+        require_paid_account(AdminAuth(username="alice", email="alice@elsewhere.com"))
+    assert exc_info.value.status_code == 403
+    assert "not authorized" in exc_info.value.detail
+
+
+def test_require_paid_account_raises_403_when_email_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    with pytest.raises(HTTPException) as exc_info:
+        require_paid_account(AdminAuth(username="alice", email=None))
+    assert exc_info.value.status_code == 403
+    assert "email unavailable" in exc_info.value.detail
+
+
+def test_route_lease_host_returns_403_when_email_not_in_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pool-lease route enforces the PAID_ACCOUNT_SUFFIXES gate."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-000000000001"), version="v0.1.0")
+    # Stub email is testuser@example.com; the suffix below excludes it.
+    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    resp = client.post(
+        "/hosts/lease",
+        json={"ssh_public_key": "ssh-ed25519 AAAA testkey", "attributes": {"version": "v0.1.0"}},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 403
+    # Verify the gate fired before any DB / SSH side effects ran.
+    assert backend.pool_rows[0].status == "available"
+    assert backend.append_key_calls == []
+
+
+def test_route_lease_host_returns_403_when_paid_suffixes_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When PAID_ACCOUNT_SUFFIXES is unset, paid features are disabled and lease returns 403."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-000000000001"), version="v0.1.0")
+    monkeypatch.delenv("PAID_ACCOUNT_SUFFIXES", raising=False)
+    resp = client.post(
+        "/hosts/lease",
+        json={"ssh_public_key": "ssh-ed25519 AAAA testkey", "attributes": {"version": "v0.1.0"}},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 403
+    assert backend.pool_rows[0].status == "available"
+
+
+def test_route_release_host_returns_403_when_email_not_in_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000042"),
+        version="v0.1.0",
+        leased_to_user=_ADMIN_STUB_USERNAME,
+    )
+    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    resp = client.post("/hosts/00000000-0000-0000-0000-000000000042/release", headers=_admin_headers())
+    assert resp.status_code == 403
+    assert backend.pool_rows[0].status == "leased"
+
+
+def test_route_list_hosts_returns_403_when_email_not_in_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _backend = _make_pool_test_client(monkeypatch)
+    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    resp = client.get("/hosts", headers=_admin_headers())
+    assert resp.status_code == 403
+
+
+def test_route_create_litellm_key_returns_403_when_email_not_in_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The LiteLLM key-create route enforces the PAID_ACCOUNT_SUFFIXES gate.
+
+    The gate fires before any LiteLLM HTTP call, so this test does not need
+    to stub the LiteLLM proxy.
+    """
+    client = _make_test_client(monkeypatch)
+    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    resp = client.post("/keys/create", json={}, headers=_admin_headers())
+    assert resp.status_code == 403
+
+
+def test_route_list_litellm_keys_returns_403_when_email_not_in_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _make_test_client(monkeypatch)
+    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    resp = client.get("/keys", headers=_admin_headers())
+    assert resp.status_code == 403
+
+
+def test_route_get_litellm_key_returns_403_when_email_not_in_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _make_test_client(monkeypatch)
+    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    resp = client.get("/keys/some-key-id", headers=_admin_headers())
+    assert resp.status_code == 403
+
+
+def test_route_update_litellm_key_budget_returns_403_when_email_not_in_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _make_test_client(monkeypatch)
+    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    resp = client.put("/keys/some-key-id/budget", json={}, headers=_admin_headers())
+    assert resp.status_code == 403
+
+
+def test_route_delete_litellm_key_returns_403_when_email_not_in_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _make_test_client(monkeypatch)
+    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    resp = client.delete("/keys/some-key-id", headers=_admin_headers())
+    assert resp.status_code == 403
+
+
+def test_route_create_tunnel_is_not_gated_by_paid_account_suffixes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cloudflare forwarding (`/tunnels/*`) must work even when the user's email is not in the paid allowlist."""
+    client = _make_test_client(monkeypatch)
+    # Stub email is testuser@example.com; the env var below would normally
+    # block paid features, but the tunnel route should be unaffected.
+    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    assert resp.status_code == 200
+    assert resp.json()["tunnel_name"] == f"{_ADMIN_STUB_USERNAME}--agent1"
+
+
+def test_route_list_services_is_not_gated_by_paid_account_suffixes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tunnel services routes work for any verified email regardless of PAID_ACCOUNT_SUFFIXES."""
+    client = _make_test_client(monkeypatch)
+    monkeypatch.delenv("PAID_ACCOUNT_SUFFIXES", raising=False)
+    create_resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    assert create_resp.status_code == 200
+    list_resp = client.get(f"/tunnels/{_ADMIN_STUB_USERNAME}--agent1/services", headers=_admin_headers())
+    assert list_resp.status_code == 200

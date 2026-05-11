@@ -123,6 +123,7 @@ def test_editor_session_wait_for_result_returns_content_on_success(
         assert result == "Edited content"
 
 
+@pytest.mark.allow_warnings(match=r"^Editor exited with non-zero code: 1")
 def test_editor_session_wait_for_result_returns_none_on_non_zero_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -190,6 +191,7 @@ def test_editor_session_cleanup_terminates_running_process(
         assert session.is_running() is False
 
 
+@pytest.mark.allow_warnings(match=r"^Editor process did not terminate gracefully")
 def test_editor_session_cleanup_handles_stubborn_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

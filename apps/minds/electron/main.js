@@ -849,12 +849,28 @@ function handleChromeSSEEvent(evt) {
   } else if (evt.type === 'auth_status') {
     latestChromeState.authStatus = evt;
   } else if (evt.type === 'request_count') {
-    latestChromeState.requestCount = evt.count || 0;
-    // Requests panel HTML is static at load time. Refresh any visible panels
-    // so their cards reflect the new pending list. Debounced per-bundle so
-    // a burst of count changes coalesces into one reload per panel.
+    const prevCount = latestChromeState.requestCount;
+    const newCount = evt.count || 0;
+    // Backend defaults the setting to true, but treat a missing field the
+    // same way so older backends do not regress to no-auto-open.
+    const autoOpen = evt.auto_open !== false;
+    latestChromeState.requestCount = newCount;
+    // Auto-open only when the count actually went UP. Going down (e.g.
+    // user just approved/denied) should never reopen a panel the user
+    // closed, and equal counts mean nothing inbox-relevant changed.
+    const shouldAutoOpen = autoOpen && newCount > prevCount;
+    // Requests panel HTML is static at load time. Refresh visible panels
+    // so their cards reflect the new pending list, OR open hidden ones
+    // when shouldAutoOpen is set. ``openRequestsPanel`` reloads the panel
+    // itself for the visible-bundle case, so we never need to schedule a
+    // reload on top of an open call. Debounced per-bundle so a burst of
+    // count changes coalesces into one reload per panel.
     for (const b of bundles) {
-      scheduleRequestsPanelReload(b);
+      if (shouldAutoOpen && !b.requestsPanelVisible) {
+        openRequestsPanel(b);
+      } else {
+        scheduleRequestsPanelReload(b);
+      }
     }
   }
   broadcastChromeEvent(evt);
@@ -1230,6 +1246,7 @@ async function startBackendWithRetry() {
       (status) => broadcastStatusToLoadingWindows(status),
       (event) => handleNotification(event),
       (event) => handleAuthEvent(event),
+      (event) => handleMngrForwardStarted(event),
     );
 
     // Use `localhost` (not `127.0.0.1`) so the auth cookie, which is issued with
@@ -1395,6 +1412,41 @@ function handleNotification(event) {
   });
   notification.show();
 }
+
+// Pre-set the plugin's session cookie on `localhost:<mngr_forward_port>` so
+// the user is already authenticated to the `mngr forward` plugin before any
+// agent-subdomain navigation. The plugin's server treats a cookie value
+// matching the freshly-minted preauth token as authenticated -- see
+// `libs/mngr_forward/imbue/mngr_forward/cookie.py::verify_session_cookie`.
+//
+// Mirrors the cookie into the workspace content partition so any
+// chrome/iframe / WebContentsView using that partition is authenticated too.
+async function handleMngrForwardStarted(event) {
+  const port = event.mngr_forward_port;
+  const preauth = event.preauth_cookie;
+  if (!port || !preauth) {
+    console.warn('[startup] mngr_forward_started missing port or preauth_cookie:', event);
+    return;
+  }
+  const url = `http://localhost:${port}`;
+  const baseSpec = {
+    url,
+    name: 'mngr_forward_session',
+    value: preauth,
+    httpOnly: true,
+    sameSite: 'lax',
+    path: '/',
+  };
+  try {
+    await session.defaultSession.cookies.set(baseSpec);
+    const contentSession = session.fromPartition(CONTENT_PARTITION);
+    await contentSession.cookies.set(baseSpec);
+    console.log('[startup] mngr_forward_session cookie pre-set on', url);
+  } catch (err) {
+    console.warn('[startup] Failed to set mngr_forward_session cookie:', err);
+  }
+}
+
 
 function handleAuthEvent(event) {
   if (event.event === 'auth_success') {

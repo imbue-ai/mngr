@@ -195,6 +195,15 @@ def test_get_agent_class_raises_when_unknown_and_no_default() -> None:
         get_agent_class("nonexistent")
 
 
+def test_get_agent_class_unknown_includes_install_hint_for_known_plugin() -> None:
+    """Unknown agent types that match a cataloged plugin should suggest installing it."""
+    reset_agent_class_registry()
+    with pytest.raises(MngrError) as exc_info:
+        get_agent_class("claude")
+    formatted = exc_info.value.format_message()
+    assert "imbue-mngr-claude" in formatted
+
+
 # =============================================================================
 # resolve_agent_type tests
 # =============================================================================

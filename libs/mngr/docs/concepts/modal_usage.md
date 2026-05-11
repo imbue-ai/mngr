@@ -36,10 +36,11 @@ build_arg = ["file=path/to/Dockerfile", "context-dir=build/context/dir", "volume
 target_path = "/code/my-project"
 agent_args = ["--dangerously-skip-permissions"]
 pass_env = ["GH_TOKEN"]
+pass_host_env = ["EDITOR"]
 extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/<org>/<repo>.git && gh auth setup-git'"]
 ```
 
-`build_arg` entries are passed to the Modal sandbox builder as `key=value` pairs (see the [provider reference](../core_plugins/providers/modal.md#available-build-arguments) for the full list). `target_path` is where the agent runs commands -- if your Dockerfile copies the source to `/code/my-project`, set `target_path` to match. The `extra_window` creates a tmux window that trusts GitHub's host key, switches the remote to HTTPS (since the sandbox won't have your SSH keys), and configures git to authenticate via `gh` (which uses `GH_TOKEN`).
+`build_arg` entries are passed to the Modal sandbox builder as `key=value` pairs (see the [provider reference](../core_plugins/providers/modal.md#available-build-arguments) for the full list). `target_path` is where the agent runs commands -- if your Dockerfile copies the source to `/code/my-project`, set `target_path` to match. `pass_host_env = ["EDITOR"]` forwards your local `$EDITOR` into the sandbox so commands like `git commit` open the editor you actually use rather than whatever fallback the base image happens to provide. The `extra_window` creates a tmux window that trusts GitHub's host key, switches the remote to HTTPS (since the sandbox won't have your SSH keys), and configures git to authenticate via `gh` (which uses `GH_TOKEN`).
 
 See [Create Templates](../customization.md#create-templates) for the full set of template options.
 
