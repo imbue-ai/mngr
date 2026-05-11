@@ -86,6 +86,21 @@ def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: floa
     )
 
 
+def _probe_once(probe_client: httpx.Client, probe_url: str) -> int | None:
+    """Issue a single GET through ``probe_client`` and return the status code.
+
+    Returns ``None`` if the probe failed at the transport layer (connect
+    error, mid-stream EOF, read timeout). Module-private helper used by
+    ``probe_workspace_through_plugin``; hoisted out to satisfy the minds
+    project's no-inner-functions ratchet.
+    """
+    try:
+        response = probe_client.get(probe_url)
+    except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException):
+        return None
+    return response.status_code
+
+
 def probe_workspace_through_plugin(
     mngr_forward_port: int,
     preauth_cookie: str,
@@ -107,20 +122,12 @@ def probe_workspace_through_plugin(
     one-off / sporadic callers but wasteful in a loop.
     """
     probe_url = f"http://{agent_id}.localhost:{mngr_forward_port}/"
-
-    def _do_probe(probe_client: httpx.Client) -> int | None:
-        try:
-            response = probe_client.get(probe_url)
-        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException):
-            return None
-        return response.status_code
-
     if client is not None:
-        return _do_probe(client)
+        return _probe_once(client, probe_url)
     with make_workspace_probe_client(
         preauth_cookie=preauth_cookie, probe_timeout_seconds=probe_timeout_seconds
     ) as one_shot:
-        return _do_probe(one_shot)
+        return _probe_once(one_shot, probe_url)
 
 
 def _make_child_cg(name: str, parent: ConcurrencyGroup | None) -> ConcurrencyGroup:
