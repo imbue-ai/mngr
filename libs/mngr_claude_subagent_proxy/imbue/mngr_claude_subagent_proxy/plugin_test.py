@@ -508,7 +508,7 @@ def test_deny_mode_skips_project_stop_hook_check(
     be a regression vs. PROXY mode users who simply opt out of the
     proxy feature entirely.
     """
-    monkeypatch.delenv("MNGR_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS", raising=False)
+    monkeypatch.delenv("MNGR_CLAUDE_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS", raising=False)
     _seed_project_settings_with_unguarded_stop(work_dir)
     ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
