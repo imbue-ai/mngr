@@ -142,12 +142,22 @@ else
                     read -r -p "[1]: " choice </dev/tty || choice=""
                 fi
                 choice="${choice:-1}"
-                idx=$((choice - 1))
-                if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#agent_types[@]}" ]; then
-                    mngr config set commands.create.type "${agent_types[$idx]}" --scope user \
-                        || warn "Failed to set default agent type."
+                # Validate `choice` is a non-negative integer BEFORE using it
+                # in arithmetic. Under `set -euo pipefail`, a non-numeric
+                # value (e.g. the user typing the agent type name instead of
+                # a number) would be evaluated as a variable name in
+                # `$((...))` and crash the installer with an unbound-variable
+                # error.
+                if [[ ! "$choice" =~ ^[0-9]+$ ]]; then
+                    warn "Invalid choice '$choice' (expected a number). Set it later with: mngr config set commands.create.type <name> --scope user"
                 else
-                    warn "Invalid choice. Set it later with: mngr config set commands.create.type <name> --scope user"
+                    idx=$((choice - 1))
+                    if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#agent_types[@]}" ]; then
+                        mngr config set commands.create.type "${agent_types[$idx]}" --scope user \
+                            || warn "Failed to set default agent type."
+                    else
+                        warn "Invalid choice. Set it later with: mngr config set commands.create.type <name> --scope user"
+                    fi
                 fi
                 ;;
         esac
