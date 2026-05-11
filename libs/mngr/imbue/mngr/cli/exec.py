@@ -1,4 +1,3 @@
-import sys
 from typing import Any
 from typing import assert_never
 
@@ -7,8 +6,12 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.mngr.api.exec import ExecResult
+from imbue.mngr.api.exec import MissingOuterBehavior
 from imbue.mngr.api.exec import MultiExecResult
+from imbue.mngr.api.exec import OuterExecResult
+from imbue.mngr.api.exec import SkippedAgent
 from imbue.mngr.api.exec import exec_command_on_agents
+from imbue.mngr.api.exec import exec_command_on_outer_hosts
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -17,6 +20,7 @@ from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
+from imbue.mngr.cli.output_helpers import write_command_stdout_and_stderr
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
@@ -40,6 +44,8 @@ class ExecCliOptions(CommonCliOptions):
     timeout: float | None
     start: bool
     on_error: str
+    outer: bool
+    missing_outer: str
 
 
 @click.command(name="exec")
@@ -78,6 +84,28 @@ class ExecCliOptions(CommonCliOptions):
     default="continue",
     help="What to do when errors occur: abort (stop immediately) or continue (keep going)",
 )
+@optgroup.group("Outer Host")
+@optgroup.option(
+    "--outer/--no-outer",
+    "outer",
+    default=False,
+    show_default=True,
+    help=(
+        "Run the command on each agent's outer host (the underlying VPS / "
+        "docker daemon host / local machine that hosts the container) instead "
+        "of on the agent's own host. Targeted agents are deduped by outer "
+        "host, so the command runs once per unique outer."
+    ),
+)
+@optgroup.option(
+    "--missing-outer",
+    type=click.Choice(["abort", "warn", "ignore"], case_sensitive=False),
+    default="warn",
+    help=(
+        "Behavior when an --outer target has no accessible outer host: "
+        "abort (exit 1), warn (skip + warn), ignore (skip silently)."
+    ),
+)
 @add_common_options
 @click.pass_context
 def exec_command(ctx: click.Context, **kwargs: Any) -> None:
@@ -107,6 +135,21 @@ def _exec_impl(ctx: click.Context, **kwargs: Any) -> None:
         return
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
+
+    if opts.outer:
+        missing_outer = MissingOuterBehavior(opts.missing_outer.upper())
+        _run_outer_exec(
+            ctx=ctx,
+            mngr_ctx=mngr_ctx,
+            output_opts=output_opts,
+            agent_identifiers=agent_identifiers,
+            command=opts.command_arg,
+            cwd=opts.cwd,
+            timeout=opts.timeout,
+            error_behavior=error_behavior,
+            missing_outer=missing_outer,
+        )
+        return
 
     # For JSONL format, use streaming callbacks
     if output_opts.output_format == OutputFormat.JSONL:
@@ -143,6 +186,162 @@ def _exec_impl(ctx: click.Context, **kwargs: Any) -> None:
     is_any_failure = result.failed_agents or any(not r.success for r in result.successful_results)
     if is_any_failure:
         ctx.exit(1)
+
+
+def _emit_skipped_warning(skipped: SkippedAgent) -> None:
+    """Log a warning for an agent skipped because it has no outer host."""
+    logger.warning(
+        "agent {} has no outer host (provider={})",
+        skipped.agent_name,
+        skipped.provider_name,
+    )
+
+
+def _run_outer_exec(
+    ctx: click.Context,
+    mngr_ctx: Any,
+    output_opts: OutputOptions,
+    agent_identifiers: list[str],
+    command: str,
+    cwd: str | None,
+    timeout: float | None,
+    error_behavior: ErrorBehavior,
+    missing_outer: MissingOuterBehavior,
+) -> None:
+    """Run --outer mode: execute on each unique outer host and emit grouped output."""
+    if output_opts.output_format == OutputFormat.JSONL:
+        result = exec_command_on_outer_hosts(
+            mngr_ctx=mngr_ctx,
+            agent_identifiers=agent_identifiers,
+            command=command,
+            is_all=False,
+            cwd=cwd,
+            timeout_seconds=timeout,
+            error_behavior=error_behavior,
+            missing_outer=missing_outer,
+            on_outer_success=lambda r: _emit_jsonl_outer_result(r),
+            on_skip=_emit_skipped_warning if missing_outer == MissingOuterBehavior.WARN else None,
+            on_error=lambda agent_name, error: _emit_jsonl_error(agent_name, error),
+        )
+    else:
+        result = exec_command_on_outer_hosts(
+            mngr_ctx=mngr_ctx,
+            agent_identifiers=agent_identifiers,
+            command=command,
+            is_all=False,
+            cwd=cwd,
+            timeout_seconds=timeout,
+            error_behavior=error_behavior,
+            missing_outer=missing_outer,
+            on_skip=_emit_skipped_warning if missing_outer == MissingOuterBehavior.WARN else None,
+        )
+        _emit_outer_output(result, output_opts)
+
+    is_any_failure = bool(result.failed_agents) or any(not r.success for r in result.outer_results)
+    if is_any_failure:
+        ctx.exit(1)
+
+
+def _emit_jsonl_outer_result(result: OuterExecResult) -> None:
+    """Emit an outer-exec result event as a JSONL line."""
+    emit_event(
+        "outer_exec_result",
+        {
+            "outer_host": result.outer_host,
+            "agents": list(result.agents),
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "success": result.success,
+        },
+        OutputFormat.JSONL,
+    )
+
+
+def _emit_outer_output(result: MultiExecResult, output_opts: OutputOptions) -> None:
+    """Emit human/JSON output for outer-host execution results."""
+    if output_opts.format_template is not None:
+        items: list[dict[str, str]] = []
+        for r in result.outer_results:
+            items.append(
+                {
+                    "outer_host": r.outer_host,
+                    "agents": ",".join(r.agents),
+                    "stdout": r.stdout.rstrip("\n"),
+                    "stderr": r.stderr.rstrip("\n"),
+                    "success": str(r.success).lower(),
+                }
+            )
+        for agent_name, error in result.failed_agents:
+            items.append(
+                {
+                    "outer_host": "",
+                    "agents": agent_name,
+                    "stdout": "",
+                    "stderr": error,
+                    "success": "false",
+                }
+            )
+        emit_format_template_lines(output_opts.format_template, items)
+        return
+    match output_opts.output_format:
+        case OutputFormat.HUMAN:
+            _emit_human_outer_output(result)
+        case OutputFormat.JSON:
+            _emit_json_outer_output(result)
+        case OutputFormat.JSONL:
+            raise AssertionError("JSONL should be handled with streaming")
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _emit_human_outer_output(result: MultiExecResult) -> None:
+    """Emit human-readable output for outer-host exec results."""
+    for outer_result in result.outer_results:
+        is_multi = len(result.outer_results) + len(result.failed_agents) > 1
+        if is_multi:
+            agents_str = ", ".join(outer_result.agents)
+            write_human_line("--- {} (agents: {}) ---", outer_result.outer_host, agents_str)
+
+        write_command_stdout_and_stderr(outer_result.stdout, outer_result.stderr)
+
+        if outer_result.success:
+            write_human_line("Command succeeded on outer host {}", outer_result.outer_host)
+        else:
+            logger.error("Command failed on outer host {}", outer_result.outer_host)
+
+    for agent_name, error in result.failed_agents:
+        logger.error("Failed on agent {}: {}", agent_name, error)
+
+
+def _emit_json_outer_output(result: MultiExecResult) -> None:
+    """Emit JSON output for outer-host exec results."""
+    output_data = {
+        "outer_results": [
+            {
+                "outer_host": r.outer_host,
+                "agents": list(r.agents),
+                "stdout": r.stdout,
+                "stderr": r.stderr,
+                "success": r.success,
+            }
+            for r in result.outer_results
+        ],
+        "skipped_agents": [
+            {
+                "agent_id": str(s.agent_id),
+                "agent_name": str(s.agent_name),
+                "host_id": str(s.host_id),
+                "provider_name": str(s.provider_name),
+                "reason": s.reason,
+            }
+            for s in result.skipped_agents
+        ],
+        "failed_agents": [{"agent": name, "error": error} for name, error in result.failed_agents],
+        "total_executed": len(result.outer_results),
+        "total_skipped": len(result.skipped_agents),
+        "total_failed": len(result.failed_agents),
+    }
+    emit_final_json(output_data)
 
 
 def _emit_jsonl_exec_result(result: ExecResult) -> None:
@@ -212,17 +411,7 @@ def _emit_human_output(result: MultiExecResult) -> None:
         if is_multi:
             write_human_line("--- {} ---", exec_result.agent_name)
 
-        if exec_result.stdout:
-            sys.stdout.write(exec_result.stdout)
-            if not exec_result.stdout.endswith("\n"):
-                sys.stdout.write("\n")
-            sys.stdout.flush()
-
-        if exec_result.stderr:
-            sys.stderr.write(exec_result.stderr)
-            if not exec_result.stderr.endswith("\n"):
-                sys.stderr.write("\n")
-            sys.stderr.flush()
+        write_command_stdout_and_stderr(exec_result.stdout, exec_result.stderr)
 
         if exec_result.success:
             write_human_line("Command succeeded on agent {}", exec_result.agent_name)
@@ -256,7 +445,7 @@ def _emit_json_output(result: MultiExecResult) -> None:
 CommandHelpMetadata(
     key="exec",
     one_line_description="Execute a shell command on one or more agents' hosts",
-    synopsis="mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>] [--[no-]start]",
+    synopsis="mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>] [--[no-]start] [--[no-]outer] [--missing-outer <MODE>]",
     arguments_description=(
         "- `AGENTS`: Name(s) or ID(s) of the agent(s) whose host will run the command\n"
         "- `COMMAND`: Shell command to execute on the agent's host"

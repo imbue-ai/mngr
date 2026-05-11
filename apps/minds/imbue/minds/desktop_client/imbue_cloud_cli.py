@@ -68,6 +68,15 @@ class ImbueCloudAuthSession(FrozenModel):
     needs_email_verification: bool = False
 
 
+class ImbueCloudAuthAccount(FrozenModel):
+    """One entry from `mngr imbue_cloud auth list`."""
+
+    user_id: str
+    email: str
+    display_name: str | None = None
+    is_active: bool = False
+
+
 class LeasedHost(FrozenModel):
     """One row of `mngr imbue_cloud hosts list`."""
 
@@ -137,7 +146,7 @@ class ImbueCloudCli(MutableModel):
         command_repr: str,
         *,
         unavailable_signal: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> Any:
         if result.returncode == 0:
             return _parse_stdout_json(result.stdout, command_repr)
         exit_code = result.returncode if result.returncode is not None else 1
@@ -212,6 +221,25 @@ class ImbueCloudCli(MutableModel):
             cg_name="imbue-cloud-auth-status",
         )
         return self._expect_success(result, "auth status")
+
+    def auth_list(self) -> list[ImbueCloudAuthAccount]:
+        """Return the canonical list of signed-in accounts.
+
+        Wraps ``mngr imbue_cloud auth list`` and parses its JSON array
+        output into typed records. The plugin owns the SuperTokens
+        session store on disk; minds calls this whenever it needs
+        identity (UI rendering, bootstrap reconciliation, sharing
+        editor) instead of mirroring email/display_name into its own
+        files.
+        """
+        result = self._run(
+            ["auth", "list"],
+            cg_name="imbue-cloud-auth-list",
+        )
+        body = self._expect_success(result, "auth list")
+        if not isinstance(body, list):
+            return []
+        return [ImbueCloudAuthAccount.model_validate(entry) for entry in body if isinstance(entry, dict)]
 
     def auth_refresh(self, account: str) -> dict[str, Any]:
         result = self._run(

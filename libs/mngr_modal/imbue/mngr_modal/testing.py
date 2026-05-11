@@ -10,16 +10,16 @@ from pathlib import Path
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr_modal.backend import STATE_VOLUME_SUFFIX
-from imbue.mngr_modal.config import ModalMode
+from imbue.mngr.primitives import UserId
+from imbue.mngr_modal.backend import ModalProviderBackend
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.instance import HostRecord
-from imbue.mngr_modal.instance import ModalProviderApp
 from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_modal.instance import SandboxConfig
 from imbue.mngr_modal.instance import TAG_HOST_ID
@@ -46,20 +46,16 @@ def make_testing_provider(
     is_snapshotted_after_create: bool = False,
     is_host_volume_created: bool = True,
 ) -> ModalProviderInstance:
-    """Create a ModalProviderInstance backed by TestingModalInterface."""
-    environment_name = f"{mngr_ctx.config.prefix}test-user"
+    """Create a ``ModalProviderInstance`` backed by ``TestingModalInterface``.
 
-    app = modal_interface.app_lookup(app_name, create_if_missing=True, environment_name=environment_name)
-    volume_name = f"{app_name}{STATE_VOLUME_SUFFIX}"
-    volume = modal_interface.volume_from_name(
-        volume_name,
-        create_if_missing=True,
-        environment_name=environment_name,
-    )
-
+    Calls ``ModalProviderBackend._construct_modal_provider`` (the shared
+    factory body that production also uses) with the fake injected.
+    ``user_id="test-user"`` pins the environment-name format to
+    ``f"{prefix}test-user"``.
+    """
     config = ModalProviderConfig(
-        mode=ModalMode.TESTING,
         app_name=app_name,
+        user_id=UserId("test-user"),
         host_dir=mngr_ctx.config.default_host_dir,
         default_sandbox_timeout=300,
         default_cpu=0.5,
@@ -69,24 +65,15 @@ def make_testing_provider(
         is_host_volume_created=is_host_volume_created,
         ssh_connect_timeout=5.0,
     )
-
-    modal_app = ModalProviderApp(
-        app_name=app_name,
-        environment_name=environment_name,
-        app=app,
-        volume=volume,
-        modal_interface=modal_interface,
-        close_callback=lambda: None,
-        get_output_callback=lambda: "",
+    instance = ModalProviderBackend._construct_modal_provider(
+        ProviderInstanceName("modal-test"),
+        config,
+        mngr_ctx,
+        modal_interface,
     )
-
-    return ModalProviderInstance(
-        name=ProviderInstanceName("modal-test"),
-        host_dir=mngr_ctx.config.default_host_dir,
-        mngr_ctx=mngr_ctx,
-        config=config,
-        modal_app=modal_app,
-    )
+    if not isinstance(instance, ModalProviderInstance):
+        raise ConfigStructureError(f"Expected ModalProviderInstance, got {type(instance).__name__}")
+    return instance
 
 
 def make_snapshot(snap_id: str = "snap-1", name: str = "s1") -> SnapshotRecord:

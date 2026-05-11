@@ -55,7 +55,6 @@ from imbue.minds.desktop_client.latchkey.core import LATCHKEY_BINARY
 from imbue.minds.desktop_client.latchkey.core import Latchkey
 from imbue.minds.desktop_client.latchkey.core import LatchkeyDestructionHandler
 from imbue.minds.desktop_client.latchkey.core import LatchkeyDiscoveryHandler
-from imbue.minds.desktop_client.latchkey.core import LatchkeyReconcileCallback
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import LatchkeyServicesCatalogError
@@ -66,7 +65,6 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.sharing_handler import SharingRequestHandler
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
@@ -163,8 +161,7 @@ def run(
     )
     imbue_cloud_cli = ImbueCloudCli(parent_concurrency_group=root_concurrency_group)
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
-    session_store = MultiAccountSessionStore(data_dir=data_directory)
-    sharing_request_handler = SharingRequestHandler(session_store=session_store)
+    session_store = MultiAccountSessionStore(data_dir=data_directory, cli=imbue_cloud_cli)
     response_events = load_response_events(data_directory)
     request_inbox = RequestInbox()
     for resp in response_events:
@@ -174,16 +171,10 @@ def run(
     # surviving resolver from the plugin's stdout stream.
     mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
     mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
-    # ``MINDS_ALLOW_HOST_LOOPBACK=1`` opts into the plugin dialing host loopback
-    # without an SSH tunnel — needed for ``LaunchMode.DEV`` agents which run on
-    # the bare host. Off by default so the safer "refuse loopback fallback"
-    # path applies for everyone else (PR 1482).
-    allow_host_loopback = os.getenv("MINDS_ALLOW_HOST_LOOPBACK") == "1"
     forward_config = ForwardSubprocessConfig(
         port=mngr_forward_port,
         reverse_specs=(f"0:{port}",),
         mngr_host_dir=mngr_host_dir,
-        allow_host_loopback=allow_host_loopback,
     )
     consumer, preauth_cookie = start_mngr_forward(
         config=forward_config,
@@ -200,6 +191,7 @@ def run(
         paths=paths,
         server_port=port,
         imbue_cloud_cli=imbue_cloud_cli,
+        latchkey=latchkey,
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
         mngr_forward_port=mngr_forward_port,
@@ -217,17 +209,24 @@ def run(
     # Remote-agent ``minds_api_url`` writes happen via the plugin's
     # reverse_tunnel_established envelope.
     consumer.add_on_reverse_tunnel_established_callback(MindsApiUrlWriter(resolver=backend_resolver))
-    # Latchkey gateway lifecycle (separate spec migrates this to the plugin).
+    # Latchkey gateway lifecycle: a single shared ``latchkey gateway``
+    # subprocess serves every agent (lifetime is independent of any one
+    # agent), so the discovery callback's job is just to ensure the
+    # shared gateway is up and to (for remote agents) reverse-tunnel it
+    # into the container. Per-agent permission overrides ride on the JWT
+    # injected at ``mngr create`` time. The destruction callback exists
+    # solely to drop the per-agent reverse SSH tunnel when an agent goes
+    # away -- otherwise ``SSHTunnelManager`` keeps the entry in its
+    # registry and the 30s health-check loop spins paramiko transports
+    # against an SSH host that no longer exists, pegging a CPU.
     latchkey_discovery_handler = LatchkeyDiscoveryHandler(
         latchkey=latchkey,
         tunnel_manager=tunnel_manager,
         concurrency_group=root_concurrency_group,
     )
-    latchkey_destruction_handler = LatchkeyDestructionHandler(latchkey=latchkey)
+    latchkey_destruction_handler = LatchkeyDestructionHandler(tunnel_manager=tunnel_manager)
     consumer.add_on_agent_discovered_callback(latchkey_discovery_handler)
     consumer.add_on_agent_destroyed_callback(latchkey_destruction_handler)
-    reconcile_callback = LatchkeyReconcileCallback(latchkey=latchkey, resolver=backend_resolver)
-    backend_resolver.add_on_change_callback(reconcile_callback)
     tunnel_manager.start_reverse_tunnel_health_check()
 
     # Auto-disable an ``imbue_cloud_<slug>`` provider if its session is
@@ -277,7 +276,7 @@ def run(
         session_store=session_store,
         minds_config=minds_config,
         request_inbox=request_inbox,
-        request_event_handlers=(latchkey_permission_handler, sharing_request_handler),
+        request_event_handlers=(latchkey_permission_handler,),
         server_port=port,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,

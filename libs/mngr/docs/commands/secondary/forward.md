@@ -60,6 +60,7 @@ mngr forward [OPTIONS]
 | `--event-exclude` | text | CEL expression to exclude `mngr event` source streams (repeatable). | None |
 | `--preauth-cookie` | text | Pre-shared cookie value accepted in lieu of an OTP-issued cookie. | None |
 | `--open-browser`, `--no-open-browser` | boolean | Open the printed login URL in the system browser. | `False` |
+| `--allow-host-loopback` | boolean | Permit dialing host loopback (localhost / 127.0.0.0/8 / ::1) when an agent's registered URL is loopback and no SSH tunnel exists. Off by default: any agent whose SSH info hasn't been published returns a 502 instead of silently serving whatever else is bound to that port on the host. Pass this flag only for setups that intentionally run agents directly on the host. | `False` |
 
 ## Examples
 

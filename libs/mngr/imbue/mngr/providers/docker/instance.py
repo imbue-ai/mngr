@@ -1,12 +1,14 @@
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from functools import cached_property
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import Iterator
 from typing import Mapping
 from typing import Sequence
 from urllib.parse import urlparse
@@ -23,15 +25,20 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.errors import DockerBuildTimeoutError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
+from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -42,6 +49,7 @@ from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -623,12 +631,17 @@ kill -TERM 1
         `executable` defaults to DOCKER; pass DEPOT to use the depot.dev remote
         builder (only valid for build subcommands).
         """
-        return self.mngr_ctx.concurrency_group.run_process_to_completion(
+        # Defer the success/timeout/non-zero distinction to FinishedProcess.check(), which
+        # raises ProcessTimeoutError on timeout instead of a generic ProcessError.
+        result = self.mngr_ctx.concurrency_group.run_process_to_completion(
             [executable.value.lower()] + args,
             timeout=timeout,
             env=self._docker_env(),
             on_output=self._log_docker_creation_command_output,
+            is_checked_after=False,
         )
+        result.check()
+        return result
 
     def _log_docker_creation_command_output(self, line: str, is_stdout: bool) -> None:
         """Log output from docker subprocess calls, prefixing with [DOCKER]."""
@@ -642,8 +655,12 @@ kill -TERM 1
         # depot requires --load to import the resulting image into the local daemon.
         extra_args = ["--load"] if builder is DockerBuilder.DEPOT else []
         args = ["build", *extra_args, "-t", tag, *build_args]
+        timeout_seconds = self.config.build_timeout_seconds
         with log_span("Running {} build with {} args", builder.value.lower(), len(build_args)):
-            self._run_docker_creation_command(args, executable=builder)
+            try:
+                self._run_docker_creation_command(args, timeout=timeout_seconds, executable=builder)
+            except ProcessTimeoutError as e:
+                raise DockerBuildTimeoutError(provider_name=self.name, timeout_seconds=timeout_seconds) from e
         return tag
 
     def _build_default_image(self, tag: str) -> str:
@@ -1351,14 +1368,19 @@ kill -TERM 1
             logger.warning("Cannot list Docker hosts (Docker daemon unavailable?): {}", e)
             return []
 
-        # Map running containers by host_id
+        # Map running containers by host_id, and harvest host names from labels.
+        # We use this map below instead of h.get_name() so building DiscoveredHosts
+        # does not trigger a per-host SSH read of data.json.
         container_by_host_id: dict[HostId, docker.models.containers.Container] = {}
+        host_name_by_id: dict[HostId, HostName] = {}
         for container in containers:
             labels = container.labels or {}
             if LABEL_HOST_ID in labels:
                 try:
                     host_id = HostId(labels[LABEL_HOST_ID])
                     container_by_host_id[host_id] = container
+                    if LABEL_HOST_NAME in labels:
+                        host_name_by_id[host_id] = HostName(labels[LABEL_HOST_NAME])
                 except (KeyError, ValueError) as e:
                     logger.warning("Skipped container with invalid labels: {}", e)
 
@@ -1370,6 +1392,9 @@ kill -TERM 1
         for host_record in all_host_records:
             host_id = HostId(host_record.certified_host_data.host_id)
             processed_host_ids.add(host_id)
+            # Records always carry the canonical mngr-assigned name; prefer
+            # this over container labels (which can be stale) when both exist.
+            host_name_by_id[host_id] = HostName(host_record.certified_host_data.host_name)
 
             if host_id in container_by_host_id:
                 container = container_by_host_id[host_id]
@@ -1415,8 +1440,15 @@ kill -TERM 1
         for h, _ in hosts_with_state:
             self._evict_cached_host(h.id, replacement=h)
 
+        # Use names collected from records / labels so building the DiscoveredHost
+        # list does not trigger an SSH read of data.json per running host.
         return [
-            DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name, host_state=state)
+            DiscoveredHost(
+                host_id=h.id,
+                host_name=host_name_by_id.get(h.id) or h.get_name(),
+                provider_name=self.name,
+                host_state=state,
+            )
             for h, state in hosts_with_state
         ]
 
@@ -1728,6 +1760,87 @@ kill -TERM 1
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
         """Remove persisted agent data."""
         self._host_store.remove_persisted_agent_data(host_id, agent_id)
+
+    # =========================================================================
+    # Outer Host Access
+    # =========================================================================
+
+    def _outer_machine_id(self) -> str | None:
+        """Stable id for the actual outer machine (the docker daemon's host).
+
+        All containers managed by this provider share the same daemon and so
+        share the same outer. Returns None when the outer is not accessible
+        (e.g. tcp:// daemon).
+        """
+        url = self.config.host
+        if not url or url.startswith("unix://"):
+            return "local"
+        parsed = urlparse(url)
+        if parsed.scheme == "ssh":
+            if not parsed.hostname:
+                return None
+            user = parsed.username or "default"
+            port = parsed.port or 22
+            return f"ssh:{user}@{parsed.hostname}:{port}"
+        return None
+
+    def outer_host_id_for(self, host_id: HostId) -> str | None:
+        """Stable id for the outer of `host_id` -- shared across all containers on this daemon."""
+        if self._host_store.read_host_record(host_id, use_cache=False) is None:
+            raise HostNotFoundError(host_id)
+        machine = self._outer_machine_id()
+        if machine is None:
+            return None
+        return f"outer:{self.name}:{machine}"
+
+    @contextmanager
+    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+        """Open the outer host (the docker daemon's host machine).
+
+        - Local socket / unix:// → outer = the local machine.
+        - ssh://user@host[:port] → outer = the SSH-reachable VM (credentials
+          come from the user's ~/.ssh/config + ssh-agent).
+        - tcp://... → no accessible outer (returns None).
+
+        Raises HostNotFoundError if host_id is unknown to this provider.
+        """
+        if self._host_store.read_host_record(host_id, use_cache=False) is None:
+            raise HostNotFoundError(host_id)
+
+        outer = self._build_outer_host(host_id)
+        try:
+            yield outer
+        finally:
+            if outer is not None:
+                outer.disconnect()
+
+    def _build_outer_host(self, host_id: HostId) -> OuterHostInterface | None:
+        """Build an OuterHost (or None) for the docker daemon's host machine."""
+        docker_host_url = self.config.host
+        if not docker_host_url or docker_host_url.startswith("unix://"):
+            pyinfra_host = create_local_pyinfra_host()
+            return OuterHost(
+                id=host_id,
+                connector=PyinfraConnector(pyinfra_host),
+                mngr_ctx=self.mngr_ctx,
+            )
+        parsed = urlparse(docker_host_url)
+        if parsed.scheme == "ssh":
+            if not parsed.hostname:
+                logger.warning("Cannot parse hostname from DOCKER_HOST URL {}", docker_host_url)
+                return None
+            pyinfra_host = create_ssh_pyinfra_host_using_user_config(
+                hostname=parsed.hostname,
+                port=parsed.port,
+                user=parsed.username,
+            )
+            return OuterHost(
+                id=host_id,
+                connector=PyinfraConnector(pyinfra_host),
+                mngr_ctx=self.mngr_ctx,
+            )
+        # tcp://, http://, https://, or anything else: no SSH-accessible outer.
+        return None
 
     # =========================================================================
     # Lifecycle Methods

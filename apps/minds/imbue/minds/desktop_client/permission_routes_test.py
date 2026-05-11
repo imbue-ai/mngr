@@ -5,6 +5,7 @@ fake ``LatchkeyPermissionGrantHandler`` so the routes are exercised
 end-to-end without spawning any subprocesses.
 """
 
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -14,6 +15,10 @@ from fastapi.responses import Response
 from fastapi.testclient import TestClient
 from pydantic import Field
 
+from imbue.imbue_common.event_envelope import EventId
+from imbue.imbue_common.event_envelope import EventSource
+from imbue.imbue_common.event_envelope import EventType
+from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -31,6 +36,7 @@ from imbue.minds.desktop_client.latchkey.services_catalog import load_services_c
 from imbue.minds.desktop_client.latchkey.store import LatchkeyPermissionsConfig
 from imbue.minds.desktop_client.latchkey.store import permissions_path_for_agent
 from imbue.minds.desktop_client.latchkey.store import save_permissions
+from imbue.minds.desktop_client.request_events import REQUESTS_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestResponseEvent
@@ -38,9 +44,22 @@ from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
-from imbue.minds.desktop_client.request_events import create_sharing_request_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.mngr.primitives import AgentId
+
+_OTHER_REQUEST_TYPE = "OTHER"
+
+
+def _make_other_request_event(agent_id: str) -> RequestEvent:
+    """Build a generic RequestEvent with a custom ``request_type`` for dispatcher tests."""
+    return RequestEvent(
+        timestamp=IsoTimestamp("2026-01-01T00:00:00.000000Z"),
+        type=EventType("other_request"),
+        event_id=EventId(f"evt-{uuid.uuid4().hex}"),
+        source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+        agent_id=agent_id,
+        request_type=_OTHER_REQUEST_TYPE,
+    )
 
 
 class _RecordingHandler(LatchkeyPermissionGrantHandler):
@@ -397,22 +416,22 @@ def test_unauthenticated_grant_post_returns_403(tmp_path: Path) -> None:
 # -- Dispatch by request type --
 
 
-class _StubSharingHandler(RequestEventHandler):
+class _StubOtherHandler(RequestEventHandler):
     """Records the request events it is asked to grant or deny.
 
     Used to verify the unified ``/requests/{id}/{grant,deny}`` dispatcher
     forwards to the handler whose ``handles_request_type`` matches the
-    event, without exercising any of the real Cloudflare side effects.
+    event, without exercising any real handler side effects.
     """
 
     grant_event_ids: list[str] = Field(default_factory=list)
     deny_event_ids: list[str] = Field(default_factory=list)
 
     def handles_request_type(self) -> str:
-        return str(RequestType.SHARING)
+        return _OTHER_REQUEST_TYPE
 
     def kind_label(self) -> str:
-        return "sharing"
+        return "other"
 
     def display_name_for_event(self, req_event: RequestEvent) -> str:
         return ""
@@ -459,25 +478,25 @@ def _build_authenticated_client_with_handlers(
 
 def test_dispatcher_routes_grant_to_handler_matching_request_type(tmp_path: Path) -> None:
     """Two handlers registered; only the one whose handles_request_type matches must be called."""
-    sharing_request = create_sharing_request_event(agent_id=str(AgentId()), service_name="web")
+    other_request = _make_other_request_event(agent_id=str(AgentId()))
     permission_request = create_latchkey_permission_request_event(
         agent_id=str(AgentId()),
         service_name="slack",
         rationale="reason",
     )
-    inbox = RequestInbox().add_request(sharing_request).add_request(permission_request)
-    sharing_handler = _StubSharingHandler()
+    inbox = RequestInbox().add_request(other_request).add_request(permission_request)
+    other_handler = _StubOtherHandler()
     permission_handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client_with_handlers(
         tmp_path,
-        handlers=(sharing_handler, permission_handler),
+        handlers=(other_handler, permission_handler),
         inbox=inbox,
     )
 
-    # Granting a SHARING event must hit the sharing handler only.
-    sharing_response = client.post(f"/requests/{sharing_request.event_id}/grant")
-    assert sharing_response.status_code == 200
-    assert sharing_handler.grant_event_ids == [str(sharing_request.event_id)]
+    # Granting an OTHER event must hit the other handler only.
+    other_response = client.post(f"/requests/{other_request.event_id}/grant")
+    assert other_response.status_code == 200
+    assert other_handler.grant_event_ids == [str(other_request.event_id)]
     assert permission_handler.grant_calls == []
 
     # Granting a LATCHKEY_PERMISSION event must hit the permission handler only.
@@ -486,15 +505,15 @@ def test_dispatcher_routes_grant_to_handler_matching_request_type(tmp_path: Path
         data={"permissions": ["slack-read-all"]},
     )
     assert perm_response.status_code == 200
-    assert sharing_handler.grant_event_ids == [str(sharing_request.event_id)]
+    assert other_handler.grant_event_ids == [str(other_request.event_id)]
     assert len(permission_handler.grant_calls) == 1
 
 
 def test_dispatcher_returns_400_when_no_handler_claims_request_type(tmp_path: Path) -> None:
     """A request whose type no registered handler claims must produce a 400, not a 500."""
-    sharing_request = create_sharing_request_event(agent_id=str(AgentId()), service_name="web")
-    inbox = RequestInbox().add_request(sharing_request)
-    # Only the latchkey-permission handler is registered, so a sharing
+    other_request = _make_other_request_event(agent_id=str(AgentId()))
+    inbox = RequestInbox().add_request(other_request)
+    # Only the latchkey-permission handler is registered, so the OTHER
     # request has nowhere to go.
     permission_handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client_with_handlers(
@@ -503,6 +522,6 @@ def test_dispatcher_returns_400_when_no_handler_claims_request_type(tmp_path: Pa
         inbox=inbox,
     )
 
-    response = client.post(f"/requests/{sharing_request.event_id}/grant")
+    response = client.post(f"/requests/{other_request.event_id}/grant")
     assert response.status_code == 400
     assert permission_handler.grant_calls == []

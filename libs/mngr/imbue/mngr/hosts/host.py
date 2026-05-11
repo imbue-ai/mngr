@@ -13,26 +13,19 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
-from typing import IO
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
 from typing import assert_never
-from typing import cast
 from uuid import uuid4
 
 from loguru import logger
-from paramiko import ChannelException
-from paramiko import SFTPClient
 from paramiko import SSHException
 from paramiko import Transport
 from pydantic import Field
-from pydantic import PrivateAttr
 from pydantic import ValidationError
 from pyinfra.api.command import StringCommand
-from pyinfra.api.exceptions import ConnectError
 from pyinfra.connectors.util import CommandOutput
-from pyinfra.connectors.util import OutputLine
 from tenacity import retry
 from tenacity import retry_if_exception
 from tenacity import stop_after_attempt
@@ -56,7 +49,6 @@ from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import DuplicateAgentNameError
-from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -64,21 +56,21 @@ from imbue.mngr.errors import LockNotHeldError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.hosts.common import LOCAL_CONNECTOR_NAME
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.offline_host import BaseHost
+from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import HostResources
-from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import CreateWorkDirResult
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.host import PROVISIONING_FIELD_MAP
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ActivitySource
@@ -92,9 +84,6 @@ from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.env_utils import build_source_env_shell_commands
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
-from imbue.mngr.utils.git_utils import get_current_git_branch
-from imbue.mngr.utils.git_utils import get_git_author_info
-from imbue.mngr.utils.git_utils import get_git_remote_url
 from imbue.mngr.utils.name_generator import GENERIC_AGENT_NAME_HINT
 from imbue.mngr.utils.polling import wait_for
 
@@ -205,6 +194,30 @@ def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
     return host_dir / "agents" / str(agent_id)
 
 
+def _git_command_stdout(host: OnlineHostInterface, command: str, cwd: Path) -> str | None:
+    """Run a git command on a host and return its stripped stdout, or None if it failed or was empty.
+
+    Used to read git metadata (current branch, user.name, origin URL, etc.) without
+    branching on whether the host is local or remote.
+    """
+    result = host.execute_idempotent_command(command, cwd=cwd)
+    if not result.success:
+        return None
+    return result.stdout.strip() or None
+
+
+@pure
+def _is_same_machine(a: OnlineHostInterface, b: OnlineHostInterface) -> bool:
+    """Whether ``a`` and ``b`` share a filesystem so file ops do not need SSH.
+
+    True when the two hosts share a ``host_id``, or when both are local
+    (any two local hosts share the laptop's filesystem regardless of id).
+    """
+    if a.id == b.id:
+        return True
+    return a.is_local and b.is_local
+
+
 class HostLocation(FrozenModel):
     """A path on a specific host."""
 
@@ -216,88 +229,32 @@ class HostLocation(FrozenModel):
     )
 
 
-class Host(BaseHost, OnlineHostInterface):
+class Host(OuterHost, BaseHost, OnlineHostInterface):
     """Host implementation that proxies operations through a pyinfra connector.
 
     All operations (command execution, file read/write) are performed through
     the pyinfra connector, which handles both local and remote hosts transparently.
+
+    Inherits the safe-method primitives (file ops, command execution, SSH info)
+    from ``OuterHost``. Adds the agent / lifecycle / snapshot / tag machinery
+    that distinguishes a managed host from a raw outer host.
     """
 
-    connector: PyinfraConnector = Field(frozen=True, description="Pyinfra connector for host operations")
     provider_instance: ProviderInstanceInterface = Field(
         frozen=True, description="The provider instance managing this host"
     )
-    mngr_ctx: MngrContext = Field(frozen=True, repr=False, description="The mngr context")
 
-    # Set to True by disconnect() and model_copy_update() to prevent __del__
-    # from closing the paramiko client (which may be shared with a copy).
-    _explicitly_disconnected: bool = PrivateAttr(default=False)
-
-    @property
-    def is_local(self) -> bool:
-        """Check if this host uses the local connector."""
-        return self.connector.connector_cls_name == LOCAL_CONNECTOR_NAME
+    # is_local, _ensure_connected, _close_paramiko_client, disconnect, and __del__
+    # are inherited unchanged from OuterHost.
 
     def get_name(self) -> HostName:
-        """Return the human-readable name of this host."""
-        name = self.connector.name
-        # Strip the '@' prefix that pyinfra uses internally to signal local
-        # execution (via LocalConnector).  This is an implementation detail
-        # that should not leak into user-facing host names.
-        if name.startswith("@"):
-            name = name[1:]
-        return HostName(name)
+        """Return the mngr-assigned host name from certified data.
 
-    # =========================================================================
-    # Core Primitives (pyinfra-compatible signatures)
-    # =========================================================================
-
-    def _ensure_connected(self) -> None:
-        """Ensure the pyinfra host is connected."""
-        try:
-            if not self.connector.host.connected:
-                self.connector.host.connect(raise_exceptions=True)
-        except ConnectError as e:
-            if "authentication error" in str(e).lower():
-                raise HostAuthenticationError(f"Authentication failed when connecting to host: {e}") from e
-            else:
-                raise HostConnectionError(f"Failed to connect to host: {e}") from e
-
-    def _close_paramiko_client(self) -> None:
-        """Close the paramiko SSH client if one exists.
-
-        pyinfra's disconnect() only clears its SFTP cache and sets
-        connected=False. It does NOT close the underlying paramiko SSHClient.
-        When connect() is called again, pyinfra creates a new SSHClient
-        without closing the old one, leaking the TCP socket (and a
-        server-side sshd-session process). This method explicitly closes
-        the client to prevent that leak.
-
-        Safe to call on local connectors (no paramiko client) and on
-        already-closed clients.
+        Overrides OuterHost.get_name (which returns the connector hostname),
+        so callers get the friendly name set when the host was created
+        rather than the SSH endpoint.
         """
-        try:
-            client = self.connector.host.connector.client  # ty: ignore[unresolved-attribute]
-        except AttributeError:
-            return
-        if client is not None:
-            try:
-                client.close()
-            except (OSError, SSHException):
-                pass
-
-    def disconnect(self) -> None:
-        """Disconnect the pyinfra host if connected.
-
-        Closes the paramiko SSH client first (which pyinfra's disconnect
-        neglects to do), then calls pyinfra's disconnect to clear its
-        internal state.
-        """
-        self._close_paramiko_client()
-        if self.connector.host.connected:
-            self.connector.host.disconnect()
-            logger.trace("Disconnected pyinfra host {}", self.id)
-        self._explicitly_disconnected = True
+        return HostName(self.get_certified_data().host_name)
 
     def model_copy_update(self, *updates: Any) -> "Host":
         """Create a copy of this Host with updated fields.
@@ -309,20 +266,6 @@ class Host(BaseHost, OnlineHostInterface):
         result = super().model_copy_update(*updates)
         self._explicitly_disconnected = True
         return result
-
-    def __del__(self) -> None:
-        """Best-effort cleanup of the paramiko SSH client on garbage collection.
-
-        Only acts if disconnect() was never called explicitly and this Host
-        was never copied via model_copy_update (the copy shares the connector,
-        so closing the client here would kill the copy's connection).
-        """
-        if self._explicitly_disconnected:
-            return
-        try:
-            self._close_paramiko_client()
-        except (OSError, SSHException, AttributeError, TypeError):
-            logger.debug("Failed to close paramiko client during Host.__del__ for {}", self.id)
 
     @contextmanager
     def _notify_on_connection_error(self) -> Iterator[None]:
@@ -424,327 +367,9 @@ class Host(BaseHost, OnlineHostInterface):
             except (EOFError, SSHException) as e:
                 raise HostConnectionError("Could not execute command due to connection error") from e
 
-    @_retry_on_transient_ssh_error
-    def _run_shell_command_with_transient_retry(
-        self,
-        command: StringCommand,
-        pyinfra_kwargs: dict[str, Any],
-    ) -> tuple[bool, CommandOutput]:
-        """Inner retry loop for _run_shell_command.
-
-        Retries transient SSH errors (socket closed, channel refused, channel
-        closed, EOF) with the same backoff used by file operations.
-        """
-        self._ensure_connected()
-        # Save the transport used for this command so we can detect if it dies
-        # during execution (e.g. another thread disconnects the connection).
-        transport_before = _get_ssh_transport(self.connector.host)
-        try:
-            result = self.connector.host.run_shell_command(command, **pyinfra_kwargs)
-        except ChannelException as e:
-            logger.debug("Channel open refused while running command: {}, retrying without disconnect", e)
-            raise
-        except SSHException as e:
-            if "Channel closed" in str(e):
-                # "Channel closed" means a specific channel died, not the whole
-                # transport.  Do NOT disconnect -- same rationale as ChannelException.
-                logger.debug("Channel closed while running command: {}, retrying without disconnect", e)
-            else:
-                logger.debug("SSH error while running command: {}, disconnecting for retry", e)
-                self.connector.host.disconnect()
-            raise
-        except EOFError as e:
-            logger.debug("SSH error while running command: {}, disconnecting for retry", e)
-            self.connector.host.disconnect()
-            raise
-        except OSError as e:
-            if "Socket is closed" in str(e):
-                logger.debug("Socket closed while running command, disconnecting for retry")
-                self.connector.host.disconnect()
-            raise
-
-        # Detect ghost failures: pyinfra silently returns (False, output) when
-        # a channel dies mid-command (paramiko's recv_exit_status() returns -1).
-        # This happens when another thread disconnects the shared SSH connection.
-        # Check whether the transport we used is still alive; if not, retry.
-        success, _output = result
-        if not success and transport_before is not None and not transport_before.is_active():
-            logger.debug("Command failed and SSH transport is dead, disconnecting for retry")
-            self.connector.host.disconnect()
-            raise SSHException(
-                "Command returned failure with dead SSH transport "
-                "(likely channel closed during execution by concurrent disconnect)"
-            )
-
-        return result
-
-    def _run_shell_command_local(
-        self,
-        command: StringCommand,
-        *,
-        _timeout: int | None,
-        _success_exit_codes: tuple[int, ...] | None,
-        _env: dict[str, str] | None,
-        _chdir: str | None,
-        _shell_executable: str,
-    ) -> tuple[bool, CommandOutput]:
-        """Run a shell command on the local machine without going through pyinfra.
-
-        Bypasses pyinfra's LocalConnector to avoid gevent's thread-local Hub /
-        SIGCHLD child watcher constraint, which prevents calls from worker
-        threads on Linux. Returns the same (success, CommandOutput) shape that
-        the pyinfra path returns.
-        """
-        full_env: dict[str, str] | None = None
-        if _env is not None:
-            full_env = {**os.environ, **_env}
-        cwd_path = Path(_chdir) if _chdir is not None else None
-        finished = self.mngr_ctx.concurrency_group.run_process_to_completion(
-            [_shell_executable, "-c", command.get_raw_value()],
-            timeout=float(_timeout) if _timeout is not None else None,
-            is_checked_after=False,
-            cwd=cwd_path,
-            env=full_env,
-        )
-        success_codes: tuple[int, ...] = _success_exit_codes if _success_exit_codes else (0,)
-        success = finished.returncode in success_codes
-
-        lines: list[OutputLine] = []
-        for buffer_name, raw in (("stdout", finished.stdout), ("stderr", finished.stderr)):
-            if not raw:
-                continue
-            text = raw[:-1] if raw.endswith("\n") else raw
-            for line in text.split("\n"):
-                lines.append(OutputLine(buffer_name=buffer_name, line=line))
-        return success, CommandOutput(lines)
-
-    def _get_file(
-        self,
-        remote_filename: str,
-        filename_or_io: str | IO[bytes],
-        remote_temp_filename: str | None = None,
-    ) -> bool:
-        """Read a file from the host.
-
-        This is an internal-only method, in case you need to do something fancy
-
-        Prefer using read_file() instead whenever possible.
-
-        Raises FileNotFoundError if the remote file does not exist.
-        """
-        with self._notify_on_connection_error():
-            try:
-                return self._get_file_with_transient_retry(remote_filename, filename_or_io, remote_temp_filename)
-            except OSError as e:
-                if "Socket is closed" in str(e):
-                    raise HostConnectionError("Connection was closed while reading file") from e
-                raise
-            except (EOFError, SSHException) as e:
-                raise HostConnectionError("Could not read file due to connection error") from e
-
-    @_retry_on_transient_ssh_error
-    def _get_file_with_transient_retry(
-        self,
-        remote_filename: str,
-        filename_or_io: str | IO[bytes],
-        remote_temp_filename: str | None,
-    ) -> bool:
-        self._ensure_connected()
-        # Reset output IO for retry attempts (clear any partial data from a failed attempt)
-        if not isinstance(filename_or_io, str):
-            filename_or_io.seek(0)
-            filename_or_io.truncate(0)
-        try:
-            # For remote hosts, always use a dedicated paramiko SFTP channel
-            # instead of pyinfra's memoized one. pyinfra caches a single
-            # SFTPClient per connection, which is not thread-safe -- concurrent
-            # file operations deadlock. Using a fresh channel per call avoids
-            # this entirely.
-            if not self.is_local:
-                return self._get_file_via_paramiko(remote_filename, filename_or_io)
-            return self.connector.host.get_file(
-                remote_filename,
-                filename_or_io,
-                remote_temp_filename=remote_temp_filename,
-            )
-        except OSError as e:
-            # pyinfra raises OSError for missing files - convert to FileNotFoundError
-            error_msg = str(e)
-            if "No such file or directory" in error_msg or "cannot stat" in error_msg:
-                raise FileNotFoundError(f"File not found: {remote_filename}") from e
-            elif "Socket is closed" in error_msg:
-                logger.debug("Socket closed while reading {}, disconnecting for retry", remote_filename)
-                self.connector.host.disconnect()
-                raise
-            else:
-                raise
-        except ChannelException as e:
-            # ChannelException means the server refused to open a new channel
-            # (e.g. MaxSessions limit reached), but the transport is still alive.
-            # Do NOT disconnect -- that would kill other threads' in-flight SFTP
-            # operations on the shared transport, causing hangs.
-            logger.debug("Channel open refused while reading {}: {}, retrying without disconnect", remote_filename, e)
-            raise
-        except SSHException as e:
-            if "Channel closed" in str(e):
-                # "Channel closed" means a specific channel died, not the whole
-                # transport.  Do NOT disconnect -- same rationale as ChannelException.
-                logger.debug("Channel closed while reading {}: {}, retrying without disconnect", remote_filename, e)
-            else:
-                logger.debug("SSH error while reading {}: {}, disconnecting for retry", remote_filename, e)
-                self.connector.host.disconnect()
-            raise
-        except EOFError as e:
-            logger.debug("SSH error while reading {}: {}, disconnecting for retry", remote_filename, e)
-            self.connector.host.disconnect()
-            raise
-
-    def _get_file_via_paramiko(
-        self,
-        remote_filename: str,
-        filename_or_io: str | IO[bytes],
-    ) -> bool:
-        """Download a file using a dedicated paramiko SFTP channel.
-
-        Creates a fresh SFTPClient from the shared SSH transport for each call.
-        This is thread-safe because paramiko transports can multiplex channels.
-        """
-        transport = self._get_paramiko_transport()
-        sftp = self._create_sftp_client(transport)
-        if sftp is None:
-            raise HostConnectionError("Failed to create SFTP channel from transport")
-        try:
-            if isinstance(filename_or_io, str):
-                sftp.get(remote_filename, filename_or_io)
-            else:
-                sftp.getfo(remote_filename, filename_or_io)
-            return True
-        except IOError as e:
-            error_msg = str(e)
-            if "No such file" in error_msg or "not found" in error_msg.lower():
-                raise FileNotFoundError(f"File not found: {remote_filename}") from e
-            raise
-        finally:
-            sftp.close()
-
-    def _put_file(
-        self,
-        filename_or_io: str | IO[str] | IO[bytes],
-        remote_filename: str,
-        remote_temp_filename: str | None = None,
-    ) -> bool:
-        """Write a file to the host.
-
-        This is an internal-only method, in case you need to do something fancy
-
-        Prefer using write_file() or write_text_file() instead whenever possible.
-        """
-        with self._notify_on_connection_error():
-            try:
-                return self._put_file_with_transient_retry(filename_or_io, remote_filename, remote_temp_filename)
-            except OSError as e:
-                if "Socket is closed" in str(e):
-                    raise HostConnectionError("Connection was closed while writing file") from e
-                raise
-            except (EOFError, SSHException) as e:
-                raise HostConnectionError("Could not write file due to connection error") from e
-
-    @_retry_on_transient_ssh_error
-    def _put_file_with_transient_retry(
-        self,
-        filename_or_io: str | IO[str] | IO[bytes],
-        remote_filename: str,
-        remote_temp_filename: str | None,
-    ) -> bool:
-        self._ensure_connected()
-        # Reset input IO position for retry attempts
-        if not isinstance(filename_or_io, str):
-            filename_or_io.seek(0)
-        try:
-            # For remote hosts, always use a dedicated paramiko SFTP channel
-            # instead of pyinfra's memoized one. pyinfra caches a single
-            # SFTPClient per connection, which is not thread-safe -- concurrent
-            # file operations deadlock. Using a fresh channel per call avoids
-            # this entirely.
-            if not self.is_local:
-                return self._put_file_via_paramiko(filename_or_io, remote_filename)
-            return self.connector.host.put_file(
-                filename_or_io,
-                remote_filename,
-                remote_temp_filename=remote_temp_filename,
-            )
-        except OSError as e:
-            if "Socket is closed" in str(e):
-                logger.debug("Socket closed while writing {}, disconnecting for retry", remote_filename)
-                self.connector.host.disconnect()
-                raise
-            else:
-                raise
-        except ChannelException as e:
-            # ChannelException means the server refused to open a new channel
-            # (e.g. MaxSessions limit reached), but the transport is still alive.
-            # Do NOT disconnect -- that would kill other threads' in-flight SFTP
-            # operations on the shared transport, causing hangs.
-            logger.debug("Channel open refused while writing {}: {}, retrying without disconnect", remote_filename, e)
-            raise
-        except SSHException as e:
-            if "Channel closed" in str(e):
-                # "Channel closed" means a specific channel died, not the whole
-                # transport.  Do NOT disconnect -- same rationale as ChannelException.
-                logger.debug("Channel closed while writing {}: {}, retrying without disconnect", remote_filename, e)
-            else:
-                logger.debug("SSH error while writing {}: {}, disconnecting for retry", remote_filename, e)
-                self.connector.host.disconnect()
-            raise
-        except EOFError as e:
-            logger.debug("SSH error while writing {}: {}, disconnecting for retry", remote_filename, e)
-            self.connector.host.disconnect()
-            raise
-
-    def _get_paramiko_transport(self) -> object:
-        """Get the paramiko Transport from the SSH connector.
-
-        Raises HostConnectionError if the host does not have an SSH client
-        or the transport is not active.
-        """
-        try:
-            connector = cast(Any, self.connector.host.connector)
-            transport = connector.client.get_transport()
-        except AttributeError as e:
-            raise HostConnectionError(f"Host does not support SSH file transfer: {e}") from e
-        if transport is None:
-            raise HostConnectionError("No active SSH transport")
-        return transport
-
-    def _create_sftp_client(self, transport: object) -> SFTPClient | None:
-        """Create an SFTPClient from a paramiko Transport.
-
-        Extracted as a method so tests can override it without monkeypatching.
-        """
-        return SFTPClient.from_transport(transport)
-
-    def _put_file_via_paramiko(
-        self,
-        filename_or_io: str | IO[str] | IO[bytes],
-        remote_filename: str,
-    ) -> bool:
-        """Upload a file using a dedicated paramiko SFTP channel.
-
-        Creates a fresh SFTPClient from the shared SSH transport for each call.
-        This is thread-safe because paramiko transports can multiplex channels.
-        """
-        transport = self._get_paramiko_transport()
-        sftp = self._create_sftp_client(transport)
-        if sftp is None:
-            raise HostConnectionError("Failed to create SFTP channel from transport")
-        try:
-            if isinstance(filename_or_io, str):
-                sftp.put(filename_or_io, remote_filename)
-            else:
-                sftp.putfo(filename_or_io, remote_filename)
-            return True
-        finally:
-            sftp.close()
+    # _run_shell_command_with_transient_retry and _run_shell_command_local
+    # are inherited unchanged from OuterHost. _get_file*, _put_file*,
+    # _get_paramiko_transport, _create_sftp_client are also inherited.
 
     # =========================================================================
     # Convenience methods (built on core primitives)
@@ -802,102 +427,8 @@ class Host(BaseHost, OnlineHostInterface):
         #  then, just to be good, we should probably clean up after ourselves (the outputs and lock file)
         return self.execute_idempotent_command(command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
 
-    def read_file(self, path: Path) -> bytes:
-        """Read a file and return its contents as bytes.
-
-        Raises FileNotFoundError if the file does not exist.
-        """
-        # this shortcut reduces the number of file descriptors opened on local hosts and speeds things up considerably
-        if self.is_local:
-            return path.read_bytes()
-        else:
-            output = io.BytesIO()
-            self._get_file(str(path), output)
-            return output.getvalue()
-
-    # it'd be really nice to change the default for is_atomic to True, but it's actually a non-trivial performance impact the way it is implemented right now...
-    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
-        """Write bytes content to a file, creating parent directories as needed."""
-        if is_atomic:
-            write_path = path.parent / f".{path.name}.{uuid4().hex}.tmp"
-        else:
-            write_path = path
-
-        # Try to write first, only create parent directory if the write fails.
-        # This avoids an extra subprocess call for mkdir -p on every write.
-        if self.is_local:
-            try:
-                write_path.write_bytes(content)
-            except FileNotFoundError:
-                # Parent directory doesn't exist, create it and retry
-                write_path.parent.mkdir(parents=True, exist_ok=True)
-                write_path.write_bytes(content)
-        else:
-            try:
-                is_success = self._put_file(io.BytesIO(content), str(write_path))
-            except IOError:
-                # pyinfra/paramiko raises IOError when the parent directory doesn't exist
-                is_success = False
-            if not is_success:
-                # May have failed because parent directory doesn't exist, create it and retry
-                parent_dir = str(write_path.parent)
-                result = self.execute_idempotent_command(f"mkdir -p '{parent_dir}'")
-                if not result.success:
-                    raise MngrError(
-                        f"Failed to create parent directory '{parent_dir}' on host {self.id} because: {result.stderr}"
-                    )
-                is_success = self._put_file(io.BytesIO(content), str(write_path))
-                if not is_success:
-                    raise MngrError(f"Failed to write file '{str(write_path)}' on host {self.id}'")
-        if write_path != path:
-            # Move temp file to final location atomically
-            result = self.execute_idempotent_command(f"mv '{str(write_path)}' '{str(path)}'")
-            if not result.success:
-                raise MngrError(
-                    f"Failed to move temp file to final location on host {self.id} because: {result.stderr}"
-                )
-        if mode is not None:
-            self.execute_idempotent_command(f"chmod {mode} '{str(path)}'")
-
-    def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
-        """Read a file and return its contents as a string.
-
-        Raises FileNotFoundError if the file does not exist.
-        """
-        return self.read_file(path).decode(encoding)
-
-    def write_text_file(
-        self,
-        path: Path,
-        content: str,
-        encoding: str = "utf-8",
-        mode: str | None = None,
-    ) -> None:
-        """Write string content to a file, creating parent directories as needed."""
-        self.write_file(path, content.encode(encoding), mode=mode)
-
-    def _get_file_mtime(self, path: Path) -> datetime | None:
-        """Get the mtime of a file on the host."""
-        if self.is_local:
-            try:
-                mtime = path.stat().st_mtime
-                return datetime.fromtimestamp(mtime, tz=timezone.utc)
-            except (FileNotFoundError, OSError):
-                return None
-        result = self.execute_idempotent_command(
-            f"stat -c %Y '{str(path)}' 2>/dev/null || stat -f %m '{str(path)}' 2>/dev/null"
-        )
-        if result.success and result.stdout.strip():
-            try:
-                mtime = int(result.stdout.strip())
-                return datetime.fromtimestamp(mtime, tz=timezone.utc)
-            except ValueError:
-                pass
-        return None
-
-    def get_file_mtime(self, path: Path) -> datetime | None:
-        """Return the modification time of a file, or None if the file doesn't exist."""
-        return self._get_file_mtime(path)
+    # read_file, write_file, read_text_file, write_text_file, _get_file_mtime,
+    # and get_file_mtime are inherited unchanged from OuterHost.
 
     def _path_exists(self, path: Path) -> bool:
         """Check if a path exists on the host."""
@@ -938,22 +469,22 @@ class Host(BaseHost, OnlineHostInterface):
         joined_dirs = " ".join(f"'{str(p)}'" for p in paths)
         self.execute_idempotent_command(f"mkdir -p {joined_dirs}")
 
-    def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
-        """Get SSH connection info for this host if it's remote.
+    # get_ssh_connection_info is inherited from OuterHost.
 
-        Returns (user, hostname, port, private_key_path) if remote, None if local.
+    # =========================================================================
+    # Outer Host Access
+    # =========================================================================
+
+    @contextmanager
+    def outer_host(self) -> Iterator["OuterHostInterface | None"]:
+        """Open the outer host (the underlying machine that hosts this container/sandbox).
+
+        Delegates to ``self.provider_instance.outer_host_for(self.id)``. The
+        SSH connection (when applicable) is opened on ``__enter__`` and closed
+        on ``__exit__``.
         """
-        if self.is_local:
-            return None
-
-        host_data = self.connector.host.data
-        user = host_data.get("ssh_user", "root")
-        hostname = self.connector.host.name
-        port = host_data.get("ssh_port", 22)
-        key_path_str = host_data.get("ssh_key", "")
-        assert key_path_str, "SSH key path must be set for remote hosts"
-
-        return (user, hostname, port, Path(key_path_str))
+        with self.provider_instance.outer_host_for(self.id) as outer:
+            yield outer
 
     # =========================================================================
     # Activity Times
@@ -1107,9 +638,10 @@ class Host(BaseHost, OnlineHostInterface):
             #  It just means that the host is not yet properly initialized
             #  For hosts that are currently being created, that's fine, but otherwise this should count as a busted host
             #  Annoyingly we'll need to understand the difference (by checking to see if, eg, this host is locked)
+            # NB: must not call get_name() here -- Host.get_name() reads certified data, which would recurse.
             return CertifiedHostData(
                 host_id=str(self.id),
-                host_name=str(self.get_name()),
+                host_name="unknown-host-at-" + str(self.get_connector_host_name()),
                 created_at=now,
                 updated_at=now,
             )
@@ -1583,32 +1115,15 @@ class Host(BaseHost, OnlineHostInterface):
         new_branch_name = options.git.new_branch_name if options.git else None
         if options.git and options.git.base_branch:
             base_branch_name = options.git.base_branch
-        elif source_host.is_local:
-            base_branch_name = get_current_git_branch(source_path, self.mngr_ctx.concurrency_group) or "main"
         else:
-            result = source_host.execute_idempotent_command(
-                "git rev-parse --abbrev-ref HEAD",
-                cwd=source_path,
+            base_branch_name = (
+                _git_command_stdout(source_host, "git rev-parse --abbrev-ref HEAD", source_path) or "main"
             )
-            base_branch_name = result.stdout.strip() if result.success else "main"
 
         # Get git author info and origin remote URL from source repo
-        if source_host.is_local:
-            git_author_name, git_author_email = get_git_author_info(source_path, self.mngr_ctx.concurrency_group)
-            origin_url = get_git_remote_url(source_path, "origin", self.mngr_ctx.concurrency_group)
-        else:
-            name_result = source_host.execute_idempotent_command("git config user.name", cwd=source_path)
-            email_result = source_host.execute_idempotent_command("git config user.email", cwd=source_path)
-            git_author_name = (
-                name_result.stdout.strip() if name_result.success and name_result.stdout.strip() else None
-            )
-            git_author_email = (
-                email_result.stdout.strip() if email_result.success and email_result.stdout.strip() else None
-            )
-            origin_result = source_host.execute_idempotent_command("git remote get-url origin", cwd=source_path)
-            origin_url = (
-                origin_result.stdout.strip() if origin_result.success and origin_result.stdout.strip() else None
-            )
+        git_author_name = _git_command_stdout(source_host, "git config user.name", source_path)
+        git_author_email = _git_command_stdout(source_host, "git config user.email", source_path)
+        origin_url = _git_command_stdout(source_host, "git remote get-url origin", source_path)
 
         with info_span(
             "Transferring git repository...",
@@ -1716,29 +1231,32 @@ class Host(BaseHost, OnlineHostInterface):
     ) -> None:
         """Push git repo from source to target, mirroring branches and tags."""
         self._warn_if_submodules_detected(source_host, source_path)
+        same_machine = _is_same_machine(source_host, self)
         target_ssh_info = self.get_ssh_connection_info()
 
-        if target_ssh_info is None:
-            if source_host.is_local:
-                git_url = str(target_path / ".git")
-            else:
-                source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
-                if source_ssh_info is None:
-                    raise MngrError("Cannot determine SSH connection info for remote source host")
-                user, hostname, port, key_path = source_ssh_info
-                source_known_hosts = get_ssh_known_hosts_file(source_host)
-                with log_span("Fetching from remote source to local target"):
-                    git_ssh_cmd = build_ssh_transport_command(key_path, port, source_known_hosts)
-                    env = {"GIT_SSH_COMMAND": git_ssh_cmd}
-                    remote_url = f"ssh://{user}@{hostname}:{port}{source_path}/.git"
-                    try:
-                        self.mngr_ctx.concurrency_group.run_process_to_completion(
-                            ["git", "clone", "--mirror", remote_url, str(target_path / ".git")],
-                            env={**os.environ, **env},
-                        )
-                    except ProcessError as e:
-                        raise MngrError(f"Failed to clone from remote source: {e}") from e
-                    return
+        # Same-machine push uses a bare local-on-host URL with no SSH
+        # transport (covers both local-laptop-to-itself and
+        # remote-host-to-itself).
+        if same_machine:
+            git_url = str(target_path / ".git")
+        elif target_ssh_info is None:
+            source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
+            if source_ssh_info is None:
+                raise MngrError("Cannot determine SSH connection info for remote source host")
+            user, hostname, port, key_path = source_ssh_info
+            source_known_hosts = get_ssh_known_hosts_file(source_host)
+            with log_span("Fetching from remote source to local target"):
+                git_ssh_cmd = build_ssh_transport_command(key_path, port, source_known_hosts)
+                env = {"GIT_SSH_COMMAND": git_ssh_cmd}
+                remote_url = f"ssh://{user}@{hostname}:{port}{source_path}/.git"
+                try:
+                    self.mngr_ctx.concurrency_group.run_process_to_completion(
+                        ["git", "clone", "--mirror", remote_url, str(target_path / ".git")],
+                        env={**os.environ, **env},
+                    )
+                except ProcessError as e:
+                    raise MngrError(f"Failed to clone from remote source: {e}") from e
+                return
         else:
             user, hostname, port, key_path = target_ssh_info
             git_url = f"ssh://{user}@{hostname}:{port}{target_path}/.git"
@@ -1749,7 +1267,7 @@ class Host(BaseHost, OnlineHostInterface):
         # errors on git 2.45+ due to symbolic refs like refs/remotes/origin/HEAD.
         # --no-verify skips hooks, since they can sometimes fail on mirror pushes.
         env: dict[str, str] = {}
-        if target_ssh_info is not None:
+        if target_ssh_info is not None and not same_machine:
             user, hostname, port, key_path = target_ssh_info
             target_known_hosts = get_ssh_known_hosts_file(self)
             git_ssh_cmd = build_ssh_transport_command(key_path, port, target_known_hosts)
@@ -1760,7 +1278,15 @@ class Host(BaseHost, OnlineHostInterface):
         env["GIT_LFS_SKIP_PUSH"] = "1"
 
         with log_span("Pushing git repo to target: {}", git_url):
-            if source_host.is_local:
+            if same_machine:
+                # Run the push on the shared machine via the host interface.
+                refspecs = " ".join(shlex.quote(r) for r in GIT_MIRROR_PUSH_REFSPECS)
+                push_cmd = f"git push --no-verify --force --prune {shlex.quote(git_url)} {refspecs}"
+                result = source_host.execute_idempotent_command(push_cmd, cwd=source_path, env=env)
+                if not result.success:
+                    output = (result.stderr + "\n" + result.stdout).strip()
+                    raise MngrError(f"Failed to push git repo on same host: {output}")
+            elif source_host.is_local:
                 command_args = [
                     "git",
                     "-C",
@@ -2021,12 +1547,14 @@ class Host(BaseHost, OnlineHostInterface):
     ) -> None:
         """Run rsync to transfer files from source to target.
 
-        - If both are local, run rsync locally
-        - If source is local, push to target via SSH
-        - If target is local, pull from source via SSH
-        - If both are remote, sync via a local temp directory as intermediary
-          (pull from source, then push to target)
+        - If source and target are on the same machine, run rsync on that
+          machine between two local paths (no SSH)
+        - If source is local and target is remote, push to target via SSH
+        - If target is local and source is remote, pull from source via SSH
+        - If source and target are different remote hosts, sync via a local
+          temp directory as intermediary (pull from source, then push to target)
         """
+        same_machine = _is_same_machine(source_host, self)
 
         # Build rsync arguments
         rsync_args = ["rsync", "-rlpt"]
@@ -2034,17 +1562,46 @@ class Host(BaseHost, OnlineHostInterface):
             rsync_args.extend(["--exclude", ".git"])
         if extra_args:
             rsync_args.extend(shlex.split(extra_args))
+
+        # files_from points at a temp file on the laptop. For cross-host
+        # rsync (which always runs on the laptop) we can pass that path
+        # directly. For same-machine rsync we mirror it onto the host first
+        # so rsync running on the host can read it.
+        host_files_from: Path | None = None
         if files_from is not None:
-            rsync_args.extend(["--files-from", str(files_from)])
+            if same_machine:
+                paths = [p for p in files_from.read_text().splitlines() if p]
+                if not paths:
+                    return
+                host_files_from = self.host_dir / "tmp" / f"rsync-files-from-{uuid4().hex}.txt"
+                # write_file creates parent directories as needed.
+                self.write_file(host_files_from, ("\n".join(paths) + "\n").encode())
+                rsync_args.extend(["--files-from", str(host_files_from)])
+            else:
+                rsync_args.extend(["--files-from", str(files_from)])
 
         source_path_str = str(source_path).rstrip("/") + "/"
         target_path_str = str(target_path).rstrip("/") + "/"
 
-        if source_host.is_local and self.is_local:
-            # Local to local
+        # Same-machine rsync runs between two local paths on the shared
+        # machine via the host interface (no SSH, no laptop intermediary).
+        if same_machine:
             rsync_args.extend([source_path_str, target_path_str])
-            rsync_description = "rsync: local to local"
-        elif source_host.is_local and not self.is_local:
+            rsync_cmd = " ".join(shlex.quote(a) for a in rsync_args)
+            with log_span("rsync: same-host {} -> {}", source_path, target_path):
+                try:
+                    result = self.execute_idempotent_command(rsync_cmd)
+                    if not result.success:
+                        raise MngrError(f"rsync failed (same-host): {result.stderr}")
+                    logger.trace("Ran rsync command (same-host): {}", rsync_cmd)
+                finally:
+                    if host_files_from is not None:
+                        self.execute_idempotent_command(
+                            f"rm -f {shlex.quote(str(host_files_from))}", timeout_seconds=5.0
+                        )
+            return
+
+        if source_host.is_local and not self.is_local:
             # Local to remote
             target_ssh_info = self.get_ssh_connection_info()
             assert target_ssh_info is not None
@@ -2559,33 +2116,35 @@ class Host(BaseHost, OnlineHostInterface):
         """Validate and execute file transfers from the agent.
 
         First validates that all required files exist, then executes transfers.
+        Always emits a "Transferring agent files" log_span (with count=0 when
+        the agent declared no transfers) so timing is visible at -vv.
         """
-        if not transfers:
-            return
+        with log_span("Transferring agent files", count=len(transfers)):
+            if not transfers:
+                return
 
-        # Validate required files first
-        missing_required: list[Path] = []
-        for transfer in transfers:
-            if transfer.is_required and not transfer.local_path.exists():
-                missing_required.append(transfer.local_path)
+            # Validate required files first
+            missing_required: list[Path] = []
+            for transfer in transfers:
+                if transfer.is_required and not transfer.local_path.exists():
+                    missing_required.append(transfer.local_path)
 
-        if missing_required:
-            missing_str = ", ".join(str(p) for p in missing_required)
-            raise MngrError(f"Required files for provisioning not found: {missing_str}")
+            if missing_required:
+                missing_str = ", ".join(str(p) for p in missing_required)
+                raise MngrError(f"Required files for provisioning not found: {missing_str}")
 
-        # Execute transfers
-        for transfer in transfers:
-            if not transfer.local_path.exists():
-                # Optional file doesn't exist, skip it
-                logger.trace("Skipped optional file transfer (file not found): {}", transfer.local_path)
-                continue
+            for transfer in transfers:
+                if not transfer.local_path.exists():
+                    # Optional file doesn't exist, skip it
+                    logger.trace("Skipped optional file transfer (file not found): {}", transfer.local_path)
+                    continue
 
-            # Resolve relative remote paths to work_dir
-            remote_path = agent.work_dir / transfer.agent_path
+                # Resolve relative remote paths to work_dir
+                remote_path = agent.work_dir / transfer.agent_path
 
-            local_content = transfer.local_path.read_bytes()
-            self.write_file(remote_path, local_content)
-            logger.trace("Transferred agent file: {} -> {}", transfer.local_path, remote_path)
+                local_content = transfer.local_path.read_bytes()
+                self.write_file(remote_path, local_content)
+                logger.trace("Transferred agent file: {} -> {}", transfer.local_path, remote_path)
 
     def rename_agent(
         self,
@@ -2875,11 +2434,71 @@ class Host(BaseHost, OnlineHostInterface):
                     all_pids.extend(self._get_all_descendant_pids(pane_pid))
         return all_pids
 
+    def _collect_pids_by_agent_id_env(self, agent_id: AgentId) -> list[str]:
+        """Find all PIDs whose MNGR_AGENT_ID environment matches agent_id.
+
+        The agent's env file (sourced via `set -a`) exports MNGR_AGENT_ID into every
+        process spawned in its tmux session. Scanning by env var catches orphans
+        whose ancestor died abruptly (SIGKILL, OOM, segfault) -- their reparenting
+        to PID 1 hides them from the tmux pane / pgrep -P descendant walk.
+
+        Linux: walks /proc/<pid>/environ. The file is NUL-separated KEY=VALUE
+        records, so `grep -z` is used and `^` anchors at the start of each record
+        (see the inline comment below for why anchoring matters). macOS: ps -E
+        does not expose env for processes once they've reparented to launchd
+        (SIP restriction), so this is a best-effort no-op there -- the tree walk
+        handles the typical macOS case where the pane process is still alive.
+
+        Why an env-marker scan instead of a process-group / setsid mechanism: prior
+        attempts to manage the agent process tree via process groups have been
+        deliberately retired. setsid-wrapping the pane command was removed in
+        c4ac00242c (forked-and-exited intermediate caused a start_agents race),
+        and `kill -- -<pgid>` was abandoned in 4ebf66d2f4 because bash job control
+        in interactive panes puts every backgrounded process (e.g. `npm exec ... &`
+        spawned by claude) into its own pgrp, so the pane's pgrp does not cover the
+        descendants we need to kill. Env-marker inheritance survives both job
+        control and reparenting without re-introducing the issues those commits
+        fixed.
+        """
+        # AgentId is `agent-<32 hex chars>` (see RandomId), so the value is
+        # regex-safe and does not need escaping for grep BRE.
+        quoted_id = shlex.quote(str(agent_id))
+        # SELF excludes our own scan shell so a caller running inside an agent that
+        # happens to inherit the env doesn't kill itself.
+        #
+        # The grep pattern is anchored with `^` so it matches only env vars
+        # *named* MNGR_AGENT_ID. Under `grep -z`, `^` matches the start of each
+        # NUL-separated record (i.e. the start of each KEY=VALUE pair), so a
+        # hypothetical env var like `OTHER_MNGR_AGENT_ID=...` cannot trigger a
+        # false match. We use BRE (drop -F) because -F has no anchors.
+        #
+        # Trailing `; true` forces a clean exit: the for loop's exit code is the
+        # last iteration's `[ -r ... ] && grep ... && echo ...` chain, which is 1
+        # when the final PID doesn't match (the common case). Without `; true`,
+        # `result.success` would be False even when stdout contains real matches,
+        # and the env-scan fallback would silently no-op. We rely on stdout
+        # content alone -- the exit code carries no useful signal here.
+        cmd = (
+            f"AGENT_ID={quoted_id}; "
+            "SELF=$$; "
+            'if [ "$(uname -s)" = "Linux" ]; then '
+            "  for d in /proc/[0-9]*; do "
+            "    pid=${d##*/}; "
+            '    [ "$pid" = "$SELF" ] && continue; '
+            '    [ -r "$d/environ" ] && grep -qza "^MNGR_AGENT_ID=$AGENT_ID" "$d/environ" 2>/dev/null && echo "$pid"; '
+            "  done; "
+            "fi; true"
+        )
+        result = self.execute_idempotent_command(cmd)
+        if not result.stdout.strip():
+            return []
+        return [pid for pid in result.stdout.strip().split("\n") if pid.strip()]
+
     def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
         """Stop agents by killing all processes in their tmux sessions.
 
         This ensures all processes in all panes are terminated by:
-        1. Getting all PIDs (panes + descendants)
+        1. Getting all PIDs (panes + descendants + orphans matched by MNGR_AGENT_ID env)
         2. Sending SIGTERM to each individual process
         3. Waiting briefly, then sending SIGKILL to any survivors
         4. Finally killing the tmux session itself
@@ -2897,6 +2516,12 @@ class Host(BaseHost, OnlineHostInterface):
                 current_agents.append(agent)
                 session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
                 all_pids.extend(self._collect_session_pids(session_name))
+                # Also pick up orphans (e.g. children of an OOM-killed claude) that
+                # reparented to PID 1 and so are invisible to the pane-descendant walk.
+                all_pids.extend(self._collect_pids_by_agent_id_env(agent.id))
+
+            # Deduplicate while preserving order (a pid may appear in both lists).
+            all_pids = list(dict.fromkeys(all_pids))
 
             if all_pids:
                 pid_list = " ".join(all_pids)

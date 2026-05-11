@@ -58,7 +58,9 @@ test-offload args="":
     : "${MODAL_TOKEN_SECRET:?must be set}"
     just _generate-dockerignore
     trap "rm -f .dockerignore" EXIT
-    offload -c offload-modal.toml run --trace {{args}} || [[ $? -eq 2 ]]
+    offload -c offload-modal.toml run --trace \
+        --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
+        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
 
     # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
     MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
@@ -78,7 +80,9 @@ test-offload-acceptance args="":
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
     MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-acceptance.toml run --trace \
         --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" \
-        --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" {{args}} || [[ $? -eq 2 ]]
+        --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" \
+        --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
+        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
 
 # Run release tests on Modal via Offload (with Docker-in-Docker)
 test-offload-release args="":
@@ -99,7 +103,9 @@ test-offload-release args="":
         --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" \
         --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" \
         --env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" \
-        --env "IS_RELEASE=1" {{args}} || [[ $? -eq 2 ]]
+        --env "IS_RELEASE=1" \
+        --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
+        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
 
     # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
     MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
@@ -240,8 +246,9 @@ deploy-all env="production": (push-secrets env) (deploy-connector env) (deploy-l
 # env vars so the create-form auto-fills "repository", "name", and
 # "branch":
 #   MINDS_WORKSPACE_GIT_URL = .external_worktrees/forever-claude-template/
-#       (REQUIRED -- recipe fails if missing; run create-pool-hosts-dev
-#       first to set it up).
+#       (REQUIRED -- recipe fails if missing; create the worktree with
+#       `git -C ~/project/forever-claude-template worktree add` before
+#       running minds-start).
 #   MINDS_WORKSPACE_BRANCH  = the FCT worktree's current branch.
 #   MINDS_WORKSPACE_NAME    = "mindtest".
 # Override agent_name / branch via positional args:
@@ -273,8 +280,8 @@ minds-start agent_name="mindtest" branch="":
     fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
     if [ ! -e "$fct_wt/.git" ]; then
         echo "error: no FCT worktree at $fct_wt" >&2
-        echo "       run \`just create-pool-hosts-dev <count>\` first to set it up," >&2
-        echo "       or \`git worktree add\` it manually before re-running minds-start." >&2
+        echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
+        echo "       (e.g. base = josh/start-minds) before re-running minds-start." >&2
         exit 2
     fi
     if [ -f .env ]; then
@@ -375,158 +382,189 @@ propagate-changes agent_name mngr_host_dir="$HOME/.minds/mngr":
         --agent "$agent_name" \
         --user root --host 127.0.0.1 --port "$port" --key "$key"
 
-# Pool host provisioning. Two recipes with different "what mngr code runs
-# on the host?" semantics:
-#  - create-pool-hosts-dev: maintains a PERSISTENT FCT worktree at
-#    .external_worktrees/forever-claude-template/ on a branch named after
-#    this repo's current mngr branch (so e.g. work on `mngr/imbue-auth`
-#    here, see a parallel `mngr/imbue-auth` branch in FCT). On each run,
-#    rsyncs THIS repo's working tree into vendor/mngr just long enough to
-#    provision, then resets vendor/mngr to HEAD so any template-side
-#    commits the user makes in the worktree stay free of mngr churn.
-#  - create-pool-hosts: an EPHEMERAL temp checkout of FCT at a chosen
-#    tag, with vendor/mngr left untouched. Whatever vendor/mngr is
-#    committed at that tag is exactly what runs on the host. Cleaned up
-#    on exit.
+# Create a Cloudflare tunnel for the named agent's system_interface
+# service: locks the tunnel to the active imbue_cloud account, injects
+# the cloudflared token into the agent (via mngr exec), and registers
+# system_interface at http://localhost:8000 on the tunnel. Prints the
+# resulting public hostname. Idempotent: tunnels create returns the
+# existing tunnel if one already exists; service add no-ops if the same
+# DNS+target is already registered.
+# Forward system_interface for a minds-profile agent.
+forward-minds-system-interface agent_name: (_forward-system-interface agent_name "$HOME/.minds/mngr" "minds-")
 
-# Provision N Vultr pool hosts from a persistent FCT worktree, with this
-# repo's WORKING TREE mngr code rsynced into vendor/mngr for the duration
-# of provisioning. The worktree lives at .external_worktrees/forever-claude-template/
-# and tracks a branch named the same as your current mngr branch, so you
-# can iterate on template-side changes there without losing them between
-# runs. After provisioning succeeds, vendor/mngr is reset to HEAD.
-#
-# `version` defaults to the current mngr branch name so it matches what
-# `just minds-start` puts in MINDS_WORKSPACE_BRANCH (which the desktop
-# client sends as the `version` field on /hosts/lease). Override only for
-# unusual cases where you want to label a pool host differently.
-create-pool-hosts-dev count="1" env="production" version="" fct_repo="$HOME/project/forever-claude-template":
+# Same as forward-minds-system-interface but for the dev (devminds) profile.
+forward-devminds-system-interface agent_name: (_forward-system-interface agent_name "$HOME/.devminds/mngr" "devminds-")
+
+[private]
+_forward-system-interface agent_name mngr_host_dir mngr_prefix:
     #!/bin/bash
     set -ueo pipefail
-    fct_repo="{{fct_repo}}"
-    if [ ! -d "$fct_repo/.git" ]; then
-        echo "error: FCT not found at $fct_repo (override fct_repo=...)" >&2
-        exit 2
+    export MNGR_HOST_DIR="{{mngr_host_dir}}"
+    export MNGR_PREFIX="{{mngr_prefix}}"
+    AGENT_NAME="{{agent_name}}"
+
+    # Resolve agent name to its full agent_id from local mngr state. The
+    # tunnel layer truncates "agent-<hex>" to the first 16 hex chars for
+    # hostname uniqueness, so the full id is what we want here -- not the
+    # short name (which would let two agents with the same name across
+    # different hosts collide in the tunnel namespace).
+    AGENT_ID=$(uv run mngr list --format jsonl 2>/dev/null \
+        | jq -r --arg n "$AGENT_NAME" 'select(.resource_type == "agent" and .name == $n) | .id' \
+        | head -1)
+    if [ -z "$AGENT_ID" ]; then
+        echo "error: no agent named '$AGENT_NAME' found via 'mngr list' under MNGR_HOST_DIR=$MNGR_HOST_DIR" >&2
+        exit 1
     fi
-    if ! git -C "$fct_repo" rev-parse --verify origin/main >/dev/null 2>&1; then
-        echo "error: $fct_repo has no origin/main (try git fetch origin)" >&2
-        exit 2
+
+    EMAIL=$(uv run mngr imbue_cloud auth list \
+        | jq -r '.[] | select(.is_active) | .email')
+    if [ -z "$EMAIL" ]; then
+        echo "error: no active imbue_cloud account; run 'mngr imbue_cloud auth signin' first" >&2
+        exit 1
     fi
-    branch=$(git rev-parse --abbrev-ref HEAD)
-    if [ "$branch" = "HEAD" ]; then
-        echo "error: this repo is in detached HEAD; check out a branch first" >&2
-        exit 2
+
+    TUNNEL_JSON=$(uv run mngr imbue_cloud tunnels create "$AGENT_ID" \
+        --account "$EMAIL" \
+        --policy "$(jq -nc --arg e "$EMAIL" '{emails:[$e]}')")
+    TUNNEL_NAME=$(jq -r '.tunnel_name' <<<"$TUNNEL_JSON")
+    TOKEN=$(jq -r '.token' <<<"$TUNNEL_JSON")
+    if [ -z "$TUNNEL_NAME" ] || [ "$TOKEN" = "null" ]; then
+        echo "error: tunnels create did not return a usable tunnel/token:" >&2
+        echo "$TUNNEL_JSON" >&2
+        exit 1
     fi
-    version="{{version}}"
-    if [ -z "$version" ]; then
-        version="$branch"
-        echo "Defaulting pool_hosts.version to current mngr branch: $version"
+
+    # Inject the token where the agent's cloudflare-tunnel service
+    # (libs/cloudflare_tunnel/.../runner.py) watches for it. Strip any
+    # existing CLOUDFLARE_TUNNEL_TOKEN line first so we don't keep two
+    # copies, then atomic-rename so the watcher never observes a
+    # half-written file. CF tokens are base64url-y, so single-quoting
+    # the value is safe.
+    uv run mngr exec "$AGENT_ID" \
+        "mkdir -p runtime && { [ -f runtime/secrets ] && grep -Ev '^export[[:space:]]+CLOUDFLARE_TUNNEL_TOKEN=' runtime/secrets || true; printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\n' '$TOKEN'; } > runtime/secrets.tmp && mv runtime/secrets.tmp runtime/secrets"
+
+    URL=$(uv run mngr imbue_cloud tunnels services add \
+        "$TUNNEL_NAME" system_interface http://localhost:8000 \
+        | jq -r .hostname)
+    if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+        echo "error: services add did not return a hostname" >&2
+        exit 1
     fi
-    mkdir -p .external_worktrees
-    fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
-    # Ensure the FCT worktree exists at $fct_wt on a branch named $branch.
-    # Three cases: (1) no worktree, no FCT branch yet -- create both;
-    # (2) no worktree, FCT branch already exists -- reuse the branch;
-    # (3) worktree exists -- switch it to $branch (creating if needed).
-    if [ -d "$fct_wt" ] && git -C "$fct_wt" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        cur_branch=$(git -C "$fct_wt" rev-parse --abbrev-ref HEAD)
-        if [ "$cur_branch" != "$branch" ]; then
-            if git -C "$fct_wt" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1; then
-                git -C "$fct_wt" checkout "$branch"
-            else
-                git -C "$fct_wt" checkout -b "$branch" origin/main
-            fi
+
+    echo
+    echo "Forwarded system_interface for $AGENT_NAME ($AGENT_ID)"
+    echo "  URL:    https://$URL/"
+    echo "  Tunnel: $TUNNEL_NAME (locked to $EMAIL)"
+
+# Spin up a new PRIVATE personal GitHub repo as a full-history copy of
+# imbue-ai/forever-claude-template's main. Clones into
+# <parent_dir>/<repo_name> (default parent: $HOME/project), creates the
+# repo under whichever account `gh` is authenticated as, pushes main,
+# and prints a pre-filled URL for a fine-grained PAT scoped to it. See
+# .claude/skills/new-forever-claude-clone/SKILL.md for the rationale.
+# Create a new private personal repo from forever-claude-template.
+create-new-mind-repo repo_name parent_dir="$HOME/project":
+    #!/bin/bash
+    set -ueo pipefail
+    repo="{{repo_name}}"
+    parent="{{parent_dir}}"
+    fct="$HOME/project/forever-claude-template"
+
+    if ! command -v gh >/dev/null 2>&1; then
+        echo "error: gh CLI not found on PATH" >&2; exit 2
+    fi
+    if ! gh auth status >/dev/null 2>&1; then
+        echo "error: gh is not authenticated; run 'gh auth login' first" >&2; exit 2
+    fi
+    owner=$(gh api user --jq .login)
+    if [ -z "$owner" ]; then
+        echo "error: could not determine GitHub username from 'gh api user'" >&2; exit 2
+    fi
+    if [ ! -d "$fct/.git" ]; then
+        echo "error: $fct is not a git repo (skill expects forever-claude-template here)" >&2; exit 2
+    fi
+    if [ ! -d "$parent" ]; then
+        echo "error: parent directory '$parent' does not exist" >&2; exit 2
+    fi
+    target="$parent/$repo"
+    if [ -e "$target" ]; then
+        echo "error: $target already exists; refusing to overwrite" >&2; exit 2
+    fi
+    if gh repo view "$owner/$repo" >/dev/null 2>&1; then
+        echo "error: github repo $owner/$repo already exists; refusing to push into it" >&2; exit 2
+    fi
+
+    cd "$parent"
+    git clone git@github.com:imbue-ai/forever-claude-template.git "$repo"
+    cd "$repo"
+    git checkout main
+    git remote remove origin
+    gh repo create "$owner/$repo" --private --source=. --remote=origin --push
+
+    commits=$(git rev-list --count HEAD)
+    pat_url="https://github.com/settings/personal-access-tokens/new?name=${repo}&description=${repo}%20token&target_name=${owner}&expires_in=none&contents=write&metadata=read&pull_requests=write&issues=write&workflows=write"
+
+    echo
+    echo "Created $owner/$repo"
+    echo "  Web:    https://github.com/$owner/$repo"
+    echo "  Clone:  git@github.com:$owner/$repo.git"
+    echo "  Local:  $target"
+    echo "  Commits: $commits"
+    echo
+    echo "Create a fine-grained PAT scoped to this repo (no expiration, contents/PR/issues/workflows write):"
+    echo "  $pat_url"
+    echo
+    echo "After opening the link: GitHub does not accept repository selection via URL params,"
+    echo "so under 'Repository access' choose 'Only select repositories' and add $owner/$repo."
+    echo
+
+    if [ ! -t 0 ]; then
+        echo "(stdin is not a TTY; skipping interactive token prompt and LiteLLM key creation -- create .env manually if needed)"
+        exit 0
+    fi
+
+    echo "Paste the generated PAT here (input hidden), or press Enter to skip GH_TOKEN:"
+    gh_token=""
+    read -r -s gh_token || gh_token=""
+    echo
+
+    # Mint a LiteLLM virtual key for this repo and pull ANTHROPIC_API_KEY +
+    # ANTHROPIC_BASE_URL out of the JSON response (see
+    # libs/mngr_imbue_cloud/.../cli/keys.py:create_key -> emits {key, base_url}).
+    # Failures here are non-fatal: the GitHub repo is already created and
+    # pushed at this point, and the user can always create a key manually
+    # later via `mngr imbue_cloud keys litellm create`.
+    api_key=""
+    base_url=""
+    echo "Creating LiteLLM virtual key (alias: $repo)..."
+    litellm_output=""
+    if litellm_output=$(uv run --project {{justfile_directory()}} mngr imbue_cloud keys litellm create --alias "$repo" 2>&1); then
+        api_key=$(jq -r '.key // empty' <<<"$litellm_output" 2>/dev/null || echo "")
+        base_url=$(jq -r '.base_url // empty' <<<"$litellm_output" 2>/dev/null || echo "")
+        if [ -z "$api_key" ] || [ -z "$base_url" ]; then
+            echo "warning: LiteLLM create returned unexpected output; skipping ANTHROPIC_* vars" >&2
+            echo "$litellm_output" >&2
+            api_key=""
+            base_url=""
         fi
     else
-        if [ -e "$fct_wt" ]; then rm -rf "$fct_wt"; fi
-        if git -C "$fct_repo" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1; then
-            git -C "$fct_repo" worktree add "$fct_wt" "$branch"
-        else
-            git -C "$fct_repo" worktree add -b "$branch" "$fct_wt" origin/main
-        fi
+        echo "warning: 'mngr imbue_cloud keys litellm create' failed; skipping ANTHROPIC_* vars" >&2
+        echo "$litellm_output" >&2
+        api_key=""
+        base_url=""
     fi
-    target="$fct_wt/vendor/mngr"
-    if [ ! -d "$target" ]; then
-        echo "error: $target missing (FCT branch '$branch' lacks vendor/mngr)" >&2
-        exit 2
-    fi
-    # Replace vendor/mngr with this repo's working tree (tracked + untracked-not-ignored).
-    rm -rf "$target"
-    mkdir -p "$target"
-    tarball=$(mktemp)
-    trap 'rm -f "$tarball"' EXIT
-    echo "Snapshotting working tree into $target"
-    git ls-files -z -co --exclude-standard | tar --null -T - -cf "$tarball"
-    tar -xf "$tarball" -C "$target"
-    set -a
-    . .minds/{{env}}/.env
-    . .minds/{{env}}/neon.sh
-    set +a
-    uv run python apps/remote_service_connector/scripts/create_pool_hosts.py \
-        --count {{count}} --version "$version" \
-        --management-public-key-file .minds/{{env}}/pool_management_key/id_ed25519.pub \
-        --template-dir "$fct_wt"
-    # On success: restore vendor/mngr to whatever's checked in for $branch
-    # so the worktree stays "clean" wrt vendor/mngr and template-side
-    # commits don't carry mngr churn. A failure above leaves vendor/mngr
-    # in its rsynced state for debugging; re-run to overwrite.
-    echo "Resetting $target to HEAD."
-    git -C "$fct_wt" checkout HEAD -- vendor/mngr
-    git -C "$fct_wt" clean -fdx vendor/mngr
 
-# Provision N Vultr pool hosts from a TAGGED FCT release, untouched. The
-# vendor/mngr that ships in that tag is what runs on the host; this
-# recipe never modifies vendor/mngr. Defaults to the most recent FCT tag
-# whose tree contains vendor/mngr/ (older FCT tags predate that layout
-# and are skipped). Pass `fct_tag=<tag>` to pin to a specific tag.
-create-pool-hosts count="1" env="production" version="v0.1.0" fct_tag="" fct_repo="$HOME/project/forever-claude-template":
-    #!/bin/bash
-    set -ueo pipefail
-    fct_repo="{{fct_repo}}"
-    if [ ! -d "$fct_repo/.git" ]; then
-        echo "error: FCT not found at $fct_repo (override fct_repo=...)" >&2
-        exit 2
+    env_file="$target/.env"
+    if [ -z "$gh_token" ] && [ -z "$api_key" ]; then
+        echo "Nothing collected (no GH PAT, no LiteLLM key); skipped .env"
+        exit 0
     fi
-    fct_tag="{{fct_tag}}"
-    if [ -z "$fct_tag" ]; then
-        # Most recent tag (by version sort) whose tree contains vendor/mngr.
-        for t in $(git -C "$fct_repo" tag --sort=-version:refname); do
-            if git -C "$fct_repo" ls-tree -d "$t" vendor/mngr 2>/dev/null | grep -q .; then
-                fct_tag="$t"
-                break
-            fi
-        done
-        if [ -z "$fct_tag" ]; then
-            echo "error: no FCT tag with vendor/mngr/ in its tree." >&2
-            echo "       Tag a commit that has vendor/mngr/, or pass fct_tag=<tag>." >&2
-            exit 2
-        fi
-        echo "Defaulting to most recent FCT tag with vendor/mngr: $fct_tag"
-    fi
-    if ! git -C "$fct_repo" rev-parse --verify "${fct_tag}^{commit}" >/dev/null 2>&1; then
-        echo "error: '$fct_tag' is not a known git ref in $fct_repo" >&2
-        exit 2
-    fi
-    if ! git -C "$fct_repo" ls-tree -d "$fct_tag" vendor/mngr 2>/dev/null | grep -q .; then
-        echo "error: FCT tag '$fct_tag' does not contain vendor/mngr/" >&2
-        exit 2
-    fi
-    mkdir -p .external_worktrees
-    fct_temp="$(pwd)/.external_worktrees/forever-claude-template-strict-$$-$(date +%s)"
-    cleanup() {
-        git -C "$fct_repo" worktree remove --force "$fct_temp" 2>/dev/null || rm -rf "$fct_temp"
-    }
-    trap cleanup EXIT
-    echo "Creating temp FCT worktree at $fct_tag in $fct_temp"
-    git -C "$fct_repo" worktree add --detach "$fct_temp" "$fct_tag"
-    set -a
-    . .minds/{{env}}/.env
-    . .minds/{{env}}/neon.sh
-    set +a
-    uv run python apps/remote_service_connector/scripts/create_pool_hosts.py \
-        --count {{count}} --version {{version}} \
-        --management-public-key-file .minds/{{env}}/pool_management_key/id_ed25519.pub \
-        --template-dir "$fct_temp"
+    : > "$env_file"
+    chmod 600 "$env_file"
+    [ -n "$gh_token" ] && printf 'export GH_TOKEN=%s\n' "$gh_token" >> "$env_file"
+    [ -n "$api_key" ] && printf 'export ANTHROPIC_API_KEY=%s\n' "$api_key" >> "$env_file"
+    [ -n "$base_url" ] && printf 'export ANTHROPIC_BASE_URL=%s\n' "$base_url" >> "$env_file"
+    echo "Wrote $env_file (mode 600)"
 
 # Destroy and remove every host in the pool with status='released'.
 # Sources .minds/<env>/neon.sh for DATABASE_URL.

@@ -30,6 +30,8 @@ def test_exec_cli_options_fields() -> None:
         timeout=None,
         start=True,
         on_error="continue",
+        outer=False,
+        missing_outer="warn",
         output_format="human",
         quiet=False,
         verbose=0,
@@ -44,6 +46,8 @@ def test_exec_cli_options_fields() -> None:
     assert opts.timeout is None
     assert opts.start is True
     assert opts.on_error == "continue"
+    assert opts.outer is False
+    assert opts.missing_outer == "warn"
 
 
 def test_exec_requires_command(

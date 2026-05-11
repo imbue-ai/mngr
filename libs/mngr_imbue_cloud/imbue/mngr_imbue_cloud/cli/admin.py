@@ -141,10 +141,30 @@ def _run_ssh_command(
     return True
 
 
-def _get_agent_info(agent_name: str) -> dict[str, Any] | None:
-    """Query mngr list --format json and find the agent by name."""
+def _get_agent_info(agent_name: str, provider: str = "vultr") -> dict[str, Any] | None:
+    """Query mngr list --format json and find the agent by name.
+
+    Scopes to ``--provider <provider>`` (the bake only ever creates on vultr
+    today, so the default matches the call site) and passes ``--on-error
+    continue`` so unrelated stale hosts on the operator's machine -- e.g. a
+    pre-existing leased pool host whose container's ``/code/`` workdir has
+    been wiped -- do not abort the listing and lose the just-created agent's
+    record. The bake still treats "agent not in output" as a failure: that
+    path is handled by the normal "agent_info is None" check at the call
+    site, so genuine create failures are not papered over.
+    """
     result = _run_mngr_command(
-        ["list", "--format", "json", "--include", f'name == "{agent_name}"'],
+        [
+            "list",
+            "--format",
+            "json",
+            "--provider",
+            provider,
+            "--on-error",
+            "continue",
+            "--include",
+            f'name == "{agent_name}"',
+        ],
         timeout=60,
     )
     if result.returncode != 0:

@@ -17,10 +17,13 @@ This provider's responsibilities are then:
 """
 
 import json
+import shlex
 import time
 from collections.abc import Callable
+from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -46,6 +49,7 @@ from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CpuResources
@@ -57,6 +61,7 @@ from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
@@ -78,14 +83,12 @@ from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
-from imbue.mngr_imbue_cloud import vps_admin
 from imbue.mngr_imbue_cloud.auth_helper import get_active_token
 from imbue.mngr_imbue_cloud.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import get_provider_data_dir
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
-from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
@@ -715,49 +718,88 @@ class ImbueCloudProvider(BaseProviderInstance):
         )
         return self._build_host_object(leased_info)
 
+    def _resolve_container_id_on_outer(self, outer: OuterHostInterface, host_id: HostId) -> str | None:
+        """Look up the docker container id for the given inner host on its outer VPS.
+
+        Returns None when no container with that label exists. Containers are
+        identified by ``com.imbue.mngr.host-id=<host_id>`` (the canonical
+        ``LABEL_HOST_ID`` from ``mngr_vps_docker``).
+        """
+        result = outer.execute_idempotent_command(
+            f"docker ps -aq --filter label=com.imbue.mngr.host-id={shlex.quote(str(host_id))} | head -1"
+        )
+        if not result.success:
+            raise MngrError(f"failed to look up container for host {host_id} on outer: {result.stderr.strip()}")
+        container_id = result.stdout.strip()
+        return container_id or None
+
+    def _run_outer_docker_command(
+        self,
+        outer: OuterHostInterface,
+        docker_args: str,
+        *,
+        host_id: HostId,
+        label: str,
+    ) -> str:
+        """Run ``docker <docker_args>`` on the outer host; raise on non-zero exit."""
+        result = outer.execute_idempotent_command(f"docker {docker_args}")
+        if not result.success:
+            raise MngrError(
+                f"VPS root SSH command {label!r} failed for host {host_id}: "
+                f"stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}"
+            )
+        return result.stdout.strip()
+
     def stop_host(
         self,
         host: HostInterface | HostId,
         create_snapshot: bool = True,
         timeout_seconds: float = 60.0,
     ) -> None:
-        """Stop the docker container on the leased VPS via root SSH.
+        """Stop the docker container on the leased VPS via the outer host.
 
         The lease step authorized this provider's per-host SSH key on the VPS
-        root account at port 22, so we connect there and ``docker stop`` the
+        root account at port 22, so the outer host can ``docker stop`` the
         container labeled with this host_id. The lease and on-disk volume
         are preserved; ``start_host`` brings the container back later.
         """
         host_id = host.id if isinstance(host, HostInterface) else host
-        leased = self._find_leased(host_id)
-        if leased is None:
-            raise HostNotFoundError(host_id)
-        private_key_path, _ = self._host_keypair_paths(host_id)
-        if not private_key_path.exists():
-            raise ImbueCloudConnectorError(
-                f"stop_host: per-host SSH key for {host_id} is missing at {private_key_path}; "
-                f"this lease was created on a different machine."
+        # outer_host_for raises HostNotFoundError if the lease/key isn't found,
+        # so the yielded outer is always non-None for this provider.
+        with self.outer_host_for(host_id) as outer:
+            assert outer is not None
+            container_id = self._resolve_container_id_on_outer(outer, host_id)
+            if container_id is None:
+                logger.debug("stop_host: no container for host {}; nothing to do", host_id)
+                return
+            self._run_outer_docker_command(
+                outer, f"stop {shlex.quote(container_id)}", host_id=host_id, label="docker-stop"
             )
-        vps_admin.stop_container(leased.vps_ip, str(host_id), private_key_path)
+            logger.debug("Stopped container {} for host {}", container_id, host_id)
 
     def start_host(
         self,
         host: HostInterface | HostId,
         snapshot_id: SnapshotId | None = None,
     ) -> Host:
-        """Start the previously-stopped docker container via root SSH and return the Host."""
+        """Start the previously-stopped docker container via the outer host and return the Host."""
         host_id = host.id if isinstance(host, HostInterface) else host
         leased = self._find_leased(host_id)
         if leased is None:
             raise HostNotFoundError(host_id)
         if snapshot_id is not None:
             raise SnapshotsNotSupportedError(self.name)
-        private_key_path, _ = self._host_keypair_paths(host_id)
-        if not private_key_path.exists():
-            raise ImbueCloudConnectorError(
-                f"start_host: per-host SSH key for {host_id} is missing at {private_key_path}."
+        with self.outer_host_for(host_id) as outer:
+            assert outer is not None
+            container_id = self._resolve_container_id_on_outer(outer, host_id)
+            if container_id is None:
+                raise MngrError(
+                    f"start_host: no docker container with label com.imbue.mngr.host-id={host_id} on {leased.vps_ip}"
+                )
+            self._run_outer_docker_command(
+                outer, f"start {shlex.quote(container_id)}", host_id=host_id, label="docker-start"
             )
-        vps_admin.start_container(leased.vps_ip, str(host_id), private_key_path)
+            logger.debug("Started container {} for host {}", container_id, host_id)
         return self._build_host_object(leased)
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
@@ -773,16 +815,24 @@ class ImbueCloudProvider(BaseProviderInstance):
         if leased is None:
             logger.warning("destroy_host: no lease record for host {}; nothing to do", host_id)
             return
-        private_key_path, _ = self._host_keypair_paths(host_id)
-        if not private_key_path.exists():
+        try:
+            with self.outer_host_for(host_id) as outer:
+                assert outer is not None
+                container_id = self._resolve_container_id_on_outer(outer, host_id)
+                if container_id is None:
+                    logger.debug("destroy_host: no container for host {}; nothing to do", host_id)
+                else:
+                    self._run_outer_docker_command(
+                        outer, f"stop {shlex.quote(container_id)}", host_id=host_id, label="docker-stop"
+                    )
+                    logger.debug("Stopped container {} for host {}", container_id, host_id)
+        except HostNotFoundError:
             logger.warning(
-                "destroy_host: SSH key for host {} missing at {}; cannot stop container remotely. "
+                "destroy_host: SSH key for host {} is missing; cannot stop container remotely. "
                 "Run `mngr imbue_cloud hosts release` to release the lease instead.",
                 host_id,
-                private_key_path,
             )
             return
-        vps_admin.stop_container(leased.vps_ip, str(host_id), private_key_path)
         self.reset_caches()
 
     def delete_host(self, host: HostInterface) -> None:
@@ -797,12 +847,20 @@ class ImbueCloudProvider(BaseProviderInstance):
         host_db_id = self._resolve_host_db_id(host, host_id)
         leased = self._find_leased(host_id)
         if leased is not None:
-            private_key_path, _ = self._host_keypair_paths(host_id)
-            if private_key_path.exists():
-                try:
-                    vps_admin.remove_container(leased.vps_ip, str(host_id), private_key_path)
-                except ImbueCloudConnectorError as exc:
-                    logger.warning("delete_host: failed to remove container for host {}: {}", host_id, exc)
+            try:
+                with self.outer_host_for(host_id) as outer:
+                    assert outer is not None
+                    container_id = self._resolve_container_id_on_outer(outer, host_id)
+                    if container_id is not None:
+                        self._run_outer_docker_command(
+                            outer,
+                            f"rm -f -v {shlex.quote(container_id)}",
+                            host_id=host_id,
+                            label="docker-rm",
+                        )
+                        logger.debug("Removed container {} for host {}", container_id, host_id)
+            except (HostNotFoundError, MngrError) as exc:
+                logger.warning("delete_host: failed to remove container for host {}: {}", host_id, exc)
         if host_db_id is not None:
             account = self._require_account()
             token = self._get_access_token(account)
@@ -839,6 +897,49 @@ class ImbueCloudProvider(BaseProviderInstance):
     def on_connection_error(self, host_id: HostId) -> None:
         """A connection error doesn't change connector-side lease state; just clear our cache."""
         self.reset_caches()
+
+    def outer_host_id_for(self, host_id: HostId) -> str | None:
+        """Stable id for the outer (leased VPS) of host_id, keyed by VPS IP."""
+        leased = self._find_leased(host_id)
+        if leased is None:
+            raise HostNotFoundError(host_id)
+        return f"outer:{self.name}:{leased.vps_ip}"
+
+    @contextmanager
+    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+        """Open the outer host (the leased VPS itself, root@vps_ip:22).
+
+        Uses the per-host SSH key already on disk (the lease step authorized
+        this key on both the container's sshd and the VPS root account).
+        """
+        leased = self._find_leased(host_id)
+        if leased is None:
+            raise HostNotFoundError(host_id)
+        private_key_path, _ = self._host_keypair_paths(host_id)
+        if not private_key_path.exists():
+            raise HostNotFoundError(host_id)
+
+        known_hosts_path = self._host_known_hosts_path(host_id)
+        known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+        if not known_hosts_path.exists():
+            known_hosts_path.touch()
+
+        pyinfra_host = create_pyinfra_host(
+            hostname=leased.vps_ip,
+            port=22,
+            private_key_path=private_key_path,
+            known_hosts_path=known_hosts_path,
+            ssh_user="root",
+        )
+        outer = OuterHost(
+            id=host_id,
+            connector=PyinfraConnector(pyinfra_host),
+            mngr_ctx=self.mngr_ctx,
+        )
+        try:
+            yield outer
+        finally:
+            outer.disconnect()
 
     # ------------------------------------------------------------------
     # Snapshots / volumes / tags / rename: not supported

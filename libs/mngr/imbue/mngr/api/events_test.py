@@ -200,19 +200,59 @@ def events_host_target(
 
 
 def test_read_event_content_via_host(events_host_target: tuple[EventsTarget, Path]) -> None:
-    """Verify read_event_content works via host execute_command when volume is None.
-
-    Note: pyinfra's CommandOutput.stdout joins lines with newlines but drops
-    the final trailing newline, so host-based reads may differ from volume-based
-    reads in trailing whitespace.
-    """
+    """Verify read_event_content works via host execute_command when volume is None."""
     target, events_dir = events_host_target
     (events_dir / "test.log").write_text("hello from host\nsecond line\n")
 
     content = read_event_content(target, "test.log")
 
-    assert "hello from host" in content
-    assert "second line" in content
+    assert content == "hello from host\nsecond line\n"
+
+
+def test_read_event_content_via_host_preserves_no_trailing_newline(
+    events_host_target: tuple[EventsTarget, Path],
+) -> None:
+    """Files that genuinely don't end with ``\n`` must round-trip without one too."""
+    target, events_dir = events_host_target
+    # Mid-write style content: line1 complete, line2 still being appended.
+    (events_dir / "midwrite.log").write_bytes(b"line1\nline2_partial")
+
+    content = read_event_content(target, "midwrite.log")
+
+    assert content == "line1\nline2_partial"
+
+
+def test_read_event_content_via_host_handles_empty_file(
+    events_host_target: tuple[EventsTarget, Path],
+) -> None:
+    """An empty file must round-trip as the empty string, not the sentinel.
+
+    Regression guard: the sentinel-strip step must run for every read,
+    including ones where ``cat`` produced zero bytes.
+    """
+    target, events_dir = events_host_target
+    (events_dir / "empty.log").write_bytes(b"")
+
+    content = read_event_content(target, "empty.log")
+
+    assert content == ""
+
+
+def test_read_event_content_via_host_handles_only_newline(
+    events_host_target: tuple[EventsTarget, Path],
+) -> None:
+    """A file that is just ``\n`` must round-trip as ``\n``, not as ``""``.
+
+    Regression guard for the old bug: pyinfra's stdout would have
+    stripped the trailing ``\n`` and returned ``""``, indistinguishable
+    from an empty file.
+    """
+    target, events_dir = events_host_target
+    (events_dir / "just_newline.log").write_bytes(b"\n")
+
+    content = read_event_content(target, "just_newline.log")
+
+    assert content == "\n"
 
 
 def test_read_event_content_via_host_raises_for_missing_file(events_host_target: tuple[EventsTarget, Path]) -> None:

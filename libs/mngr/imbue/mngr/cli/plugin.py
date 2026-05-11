@@ -491,12 +491,19 @@ def _parse_remove_sources(opts: PluginCliOptions) -> list[_RemoveSource]:
 
 def _plugin_add_impl(ctx: click.Context) -> None:
     """Implementation of plugin add command."""
+    # ``mngr plugin add`` typically runs against a config that references the
+    # plugin about to be installed (e.g. user pre-declares ``[providers.modal]``
+    # then runs ``mngr plugin add imbue-mngr-modal``). ``strict=False`` keeps the
+    # command from erroring on unknown-field/unknown-backend references, and
+    # ``silent_unknown_fields=True`` suppresses the warnings that would
+    # otherwise be emitted for those references -- they're noise that resolves
+    # itself the moment the install completes.
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="plugin",
         command_class=PluginCliOptions,
-        # this is set so that, even if we cannot find an existing provider from our config, the command still works
         strict=False,
+        silent_unknown_fields=True,
     )
 
     # Validate arguments before checking uv tool receipt so users get clear
