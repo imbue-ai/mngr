@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 
@@ -457,6 +459,43 @@ def test_usage_command_picks_freshest_across_agents(
     assert len(payload["sources"]) == 1
     assert payload["sources"][0]["source"] == "claude"
     assert payload["sources"][0]["five_hour"]["used_percentage"] == 99.0
+
+
+def test_usage_command_suppresses_now_ago_warning_when_window_just_reset(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_host_dir: Path,
+    cli_profile_dir: Path,
+) -> None:
+    """Regression: when a snapshot was just written but a window just reset,
+    the stale-warning text was "snapshot last updated now ago" (grammatically
+    wrong; the snapshot is not actually old). The per-window line already
+    says "reset Xs ago" so the snapshot-age warning is also redundant here."""
+    # Plant an event whose timestamp is "right now" relative to test wall-clock,
+    # with a five_hour window whose resets_at is in the past. Use a Python int
+    # rather than the JSONL writer's nanosecond format so the test is robust to
+    # second-boundary jitter between event-write and CLI-invocation.
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    _plant_event(
+        temp_host_dir,
+        "agent-aaa",
+        {
+            "source": "claude/rate_limits",
+            "type": "rate_limit_snapshot",
+            "event_id": "evt-fresh",
+            "timestamp": now_iso,
+            "rate_limits": {
+                # resets_at in the far past triggers reset_stale=True; the just-written
+                # timestamp keeps age=0, which previously produced "now ago".
+                "five_hour": {"used_percentage": 37.0, "resets_at": 1000, "label": "5h"},
+            },
+        },
+    )
+    result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert "now ago" not in result.output
+    # The window-line "reset X ago" suffix still conveys the reset info.
+    assert "reset" in result.output
 
 
 def test_usage_command_human_format_multi_source(

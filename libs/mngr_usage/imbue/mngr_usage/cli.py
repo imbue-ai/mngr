@@ -477,7 +477,13 @@ def _emit_output(
                 section_had_percentage = _write_source_section(model, now, f"[{model.source_name}]")
                 any_with_percentage_anywhere = any_with_percentage_anywhere or section_had_percentage
                 if section_had_percentage and model.is_stale and model.snapshot_updated_at is not None:
-                    stale_sources.append((model.source_name, max(0, now - model.snapshot_updated_at)))
+                    age_seconds = max(0, now - model.snapshot_updated_at)
+                    # Skip the warning when the snapshot itself is fresh (age=0). is_stale can be
+                    # set by a just-past window reset, not snapshot age; the per-window "reset X
+                    # ago" suffix already conveys that and "snapshot last updated now ago" is
+                    # both grammatically wrong and untrue (the snapshot just updated).
+                    if age_seconds > 0:
+                        stale_sources.append((model.source_name, age_seconds))
             if not any_with_percentage_anywhere:
                 logger.warning(_NO_DATA_HINT)
             for source_name, age_seconds in stale_sources:
