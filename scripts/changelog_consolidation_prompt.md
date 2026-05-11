@@ -36,32 +36,59 @@ with the failing step number and error detail in `notes`.
 
 3. For each date in `Sections added`, read its bullet content from
    `UNABRIDGED_CHANGELOG.md` (the section is between `## <date>` and the
-   next `## ` line) and generate a concise, human-friendly summary as a
-   few markdown bullets — no preamble, no trailing prose. Group related
-   changes within a date. Use natural language.
+   next `## ` line) and generate a few concise, human-friendly bullets.
+   Each bullet MUST start with one of these Keep-a-Changelog categories
+   followed by `: ` and the description, e.g.:
 
-4. Insert each per-date summary into `CHANGELOG.md` under a `## <date>`
-   heading, in the same newest-first order as `Sections added`,
-   immediately above any pre-existing date sections (so dates remain in
-   reverse-chronological order). Preserve the existing file header.
+   ```
+   - Added: Nightly changelog consolidation cron with Pacific-time dating.
+   - Fixed: Race condition when two consolidation runs overlap.
+   - Changed: Renamed `_get_entry_added_datetime` to use first-parent committer date.
+   ```
 
-5. Configure git: `git config user.email "bot@imbue.com"`,
+   The allowed categories are exactly: `Added`, `Changed`, `Deprecated`,
+   `Removed`, `Fixed`, `Security`. Use `Changed` as the catch-all for
+   internal refactors, doc edits, or test-only tweaks that don't fit
+   the other categories. One change → one bullet; merge near-duplicate
+   bullets across dates if they describe the same user-visible effect.
+
+4. In `CHANGELOG.md`, locate the `## [Unreleased]` heading (it sits
+   directly below the file header). If it is missing, create it
+   immediately below the header. Group the bullets you generated in
+   step 3 (across all dates) by category and merge them into the
+   `[Unreleased]` section under `### <Category>` subheadings, in the
+   canonical order: Added, Changed, Deprecated, Removed, Fixed,
+   Security. Append to any existing bullets under each subheading; do
+   not delete or rewrite pre-existing bullets. (`scripts/release.py`
+   renames `[Unreleased]` to `[vX.Y.Z] - YYYY-MM-DD` at release time
+   and inserts a fresh empty `[Unreleased]` above it, so the section
+   accumulates across consolidation runs within a release window.)
+
+5. Refinement pass on `[Unreleased]`: re-read just that section as you
+   wrote it. Tighten any wordy bullets (cut filler words; keep names
+   of changed APIs/files); merge bullets that describe the same
+   user-visible change; confirm every bullet has a category prefix in
+   the exact `- <Category>: <description>` format. Make at most one
+   targeted edit per bullet — don't rewrite for the sake of rewriting.
+
+6. Configure git: `git config user.email "bot@imbue.com"`,
    `git config user.name "Changelog Bot"`, `gh auth setup-git`.
 
-6. Capture today's date in Pacific time: `RUN_DATE=$(TZ=America/Los_Angeles
+7. Capture today's date in Pacific time: `RUN_DATE=$(TZ=America/Los_Angeles
    date +%Y-%m-%d)`. This identifies *when this consolidation run
    happened*, distinct from the per-entry `## YYYY-MM-DD` section
-   headings (which identify when each entry was written). `git add -A`
-   and `git commit -m "Consolidate changelog entries (run <RUN_DATE>)"`.
+   headings in `UNABRIDGED_CHANGELOG.md` (which identify when each
+   entry was written). `git add -A` and `git commit -m "Consolidate
+   changelog entries (run <RUN_DATE>)"`.
 
-7. Capture the current branch name with `BRANCH=$(git rev-parse
+8. Capture the current branch name with `BRANCH=$(git rev-parse
    --abbrev-ref HEAD)` and push it: `git push --set-upstream origin
    "$BRANCH"`. The schedule's auto-merge step ran `git fetch && checkout
    && merge origin/main` before this agent started, so the per-run
    branch is forked off current `origin/main` and the eventual PR diff
    contains only the consolidation commit.
 
-8. Open a PR with `gh pr create --base main --title "Changelog
+9. Open a PR with `gh pr create --base main --title "Changelog
    consolidation (run <RUN_DATE>)" --body "Automated changelog
    consolidation run on <RUN_DATE>."`. Capture the URL from stdout
    into `PR_URL` while diverting stderr to a temp file, e.g.
@@ -72,6 +99,6 @@ with the failing step number and error detail in `notes`.
    non-zero, read `/tmp/gh_stderr` and emit a `failed` JSON object
    with that stderr content in `notes`.
 
-9. Emit your final JSON object: `{"status": "done", "pr_url":
-   "<PR_URL>", "notes": "Opened PR <PR_URL> for branch <BRANCH>."}`,
-   substituting the values from steps 7 and 8.
+10. Emit your final JSON object: `{"status": "done", "pr_url":
+    "<PR_URL>", "notes": "Opened PR <PR_URL> for branch <BRANCH>."}`,
+    substituting the values from steps 8 and 9.
