@@ -14,17 +14,22 @@ import base64
 import binascii
 import contextlib
 import functools
+import io
 import json
 import logging
 import os
+import shlex
 from collections.abc import Callable
 from collections.abc import Iterator
 from typing import Any
 from typing import NoReturn
 from typing import Protocol
+from uuid import UUID
 
 import httpx
 import modal
+import paramiko
+import psycopg2
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
@@ -256,6 +261,12 @@ class ServiceTokenInfo(BaseModel):
 
 class AdminAuth(BaseModel):
     username: str
+    # Verified email associated with the SuperTokens user, looked up at auth
+    # time so that paid-feature endpoints (host pool, LiteLLM keys) can gate
+    # access by ``PAID_ACCOUNT_SUFFIXES``. ``None`` when the SuperTokens
+    # user record has no email or when the lookup failed -- in that case the
+    # paid-feature gate denies access.
+    email: str | None = None
 
 
 class AgentAuth(BaseModel):
@@ -264,6 +275,84 @@ class AgentAuth(BaseModel):
 
 
 AuthResult = AdminAuth | AgentAuth
+
+
+# -- Host pool models --
+
+
+class LeaseHostRequest(BaseModel):
+    ssh_public_key: str = Field(description="SSH public key to authorize on the leased host")
+    attributes: dict[str, Any] = Field(
+        description=(
+            "Lease-attribute filter. Matches with PostgreSQL '@>' so only fields the request "
+            "explicitly sets are constrained; missing fields are unconstrained. Required."
+        ),
+    )
+
+
+class LeaseHostResponse(BaseModel):
+    host_db_id: UUID = Field(description="Database ID of the leased host")
+    vps_ip: str = Field(description="VPS IP address")
+    ssh_port: int = Field(description="SSH port on the VPS")
+    ssh_user: str = Field(description="SSH user on the VPS")
+    container_ssh_port: int = Field(description="SSH port mapped to the Docker container")
+    agent_id: str = Field(description="Pre-provisioned mngr agent ID")
+    host_id: str = Field(description="Host ID in the mngr provider")
+    attributes: dict[str, Any] = Field(description="Attributes the row was matched against")
+
+
+class ReleaseHostResponse(BaseModel):
+    status: str = Field(description="Release status (e.g. 'released')")
+
+
+class LeasedHostInfo(BaseModel):
+    host_db_id: UUID = Field(description="Database ID of the leased host")
+    vps_ip: str = Field(description="VPS IP address")
+    ssh_port: int = Field(description="SSH port on the VPS")
+    ssh_user: str = Field(description="SSH user on the VPS")
+    container_ssh_port: int = Field(description="SSH port mapped to the Docker container")
+    agent_id: str = Field(description="Pre-provisioned mngr agent ID")
+    host_id: str = Field(description="Host ID in the mngr provider")
+    attributes: dict[str, Any] = Field(description="Attributes attached to the lease row")
+    leased_at: str = Field(description="ISO 8601 timestamp when the host was leased")
+
+
+# -- LiteLLM key management models --
+
+
+class CreateKeyRequest(BaseModel):
+    key_alias: str | None = Field(default=None, description="Optional human-readable alias for the key")
+    max_budget: float | None = Field(default=None, description="Optional max budget in USD (no limit if unset)")
+    budget_duration: str | None = Field(
+        default=None, description="Optional budget reset duration (e.g. '1d', '1h', '1w', '1M')"
+    )
+    metadata: dict[str, str] | None = Field(
+        default=None, description="Optional metadata (e.g. agent_id, host_id) for resource tracking"
+    )
+
+
+class CreateKeyResponse(BaseModel):
+    key: str = Field(description="The generated LiteLLM virtual key")
+    base_url: str = Field(description="The LiteLLM proxy base URL for ANTHROPIC_BASE_URL")
+
+
+class KeyInfo(BaseModel):
+    token: str = Field(description="Hashed key token identifier")
+    key_alias: str | None = Field(default=None, description="Human-readable alias")
+    key_name: str | None = Field(default=None, description="Key name")
+    spend: float = Field(default=0.0, description="Total spend in USD")
+    max_budget: float | None = Field(default=None, description="Max budget in USD")
+    budget_duration: str | None = Field(default=None, description="Budget reset duration")
+    user_id: str | None = Field(default=None, description="User ID the key belongs to")
+
+
+class UpdateBudgetRequest(BaseModel):
+    max_budget: float | None = Field(default=None, description="New max budget in USD (null to remove limit)")
+    budget_duration: str | None = Field(default=None, description="New budget reset duration (null to remove)")
+
+
+class DeleteKeyResponse(BaseModel):
+    status: str = Field(description="Deletion status")
 
 
 # ---------------------------------------------------------------------------
@@ -829,9 +918,29 @@ class ForwardingCtx:
         tid = tunnel["id"]
         agent_id = extract_agent_id_prefix(tunnel_name, username)
         hostname = make_hostname(service_name, agent_id, username, self.domain)
-        self.ops.create_cname(hostname, f"{tid}.cfargotunnel.com")
+        cname_target = f"{tid}.cfargotunnel.com"
+        existing_dns = self.ops.list_dns_records(name=hostname)
+        if not existing_dns:
+            self.ops.create_cname(hostname, cname_target)
+        elif existing_dns[0].get("content") != cname_target:
+            raise CloudflareApiError(
+                status_code=409,
+                errors=[
+                    {
+                        "message": (
+                            f"DNS record for {hostname} already exists pointing to "
+                            f"{existing_dns[0].get('content')!r}, not {cname_target!r}"
+                        )
+                    }
+                ],
+            )
+        else:
+            # CNAME already points at this tunnel; idempotent re-add.
+            pass
         config = self.ops.get_tunnel_config(tid)
-        rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
+        rules = [
+            r for r in non_catchall_rules(config.get("config", {}).get("ingress", [])) if r.get("hostname") != hostname
+        ]
         rules.append(
             {
                 "hostname": hostname,
@@ -929,10 +1038,18 @@ class ForwardingCtx:
             logger.warning("Failed to delete Access Application for %s: %s", hostname, exc)
 
     def _apply_default_access_policy(self, tunnel_name: str, hostname: str) -> None:
-        """Apply the tunnel's default auth policy to a new service, if one is set."""
+        """Apply the tunnel's default auth policy to a new service, if one is set.
+
+        Skipped when an Access Application already exists for the hostname:
+        on a re-add the service may have a customized per-service policy from
+        a prior :meth:`set_service_auth` call, and re-applying the tunnel
+        default would clobber it.
+        """
         try:
             raw = self.ops.kv_get(tunnel_name)
             if raw is None:
+                return
+            if self.ops.get_access_app_by_domain(hostname) is not None:
                 return
             policy = AuthPolicy.model_validate_json(raw)
             access_app = self.ops.create_access_app(hostname, f"cf-fwd-{hostname}", allowed_idps=self.allowed_idps)
@@ -1060,9 +1177,46 @@ def _authenticate_agent(token: str, ops: CloudflareOps) -> AgentAuth:
 _USER_ID_PREFIX_LENGTH = 16
 
 
+def _default_email_getter(
+    user_id: str,
+    user_getter: Callable[[str], Any] = get_user,
+) -> str | None:
+    """Return the first **verified** email registered for the given SuperTokens user_id.
+
+    A SuperTokens user may have several login methods (email/password, OAuth
+    providers) with independent ``verified`` flags. Only login methods whose
+    ``verified`` flag is True are considered, since the paid-feature gate
+    authorizes by domain ownership and that requires the email to actually
+    have been verified. Returns the first matching email, or ``None`` if the
+    user has no verified email.
+
+    Only the SuperTokens SDK's typed errors (``SuperTokensSessionError``,
+    ``SuperTokensGeneralError``) are caught and turned into ``None`` (with a
+    warning log); any other exception (e.g. transport-level network errors
+    that escape the SDK) is allowed to propagate, so that truly unexpected
+    failures surface loudly rather than silently denying paid-feature access.
+
+    ``user_getter`` is exposed for tests so they can drive each branch
+    (``None`` user, missing emails, SDK exception) without monkeypatching the
+    SuperTokens SDK; production callers should rely on the default.
+    """
+    try:
+        user = user_getter(user_id)
+    except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
+        logger.warning("Failed to fetch SuperTokens user %s: %s", user_id[:8], exc)
+        return None
+    if user is None:
+        return None
+    for login_method in user.login_methods:
+        if login_method.email and login_method.verified:
+            return login_method.email
+    return None
+
+
 def _authenticate_supertokens(
     token: str,
     session_getter: Callable[..., Any] = get_session_without_request_response,
+    email_getter: Callable[[str], str | None] = _default_email_getter,
 ) -> AdminAuth:
     """Validate a SuperTokens JWT access token. Returns AdminAuth with user_id_prefix as username."""
     connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
@@ -1089,8 +1243,9 @@ def _authenticate_supertokens(
     user_id = session.get_user_id()
     # Derive 16-char hex prefix from UUID
     user_id_prefix = user_id.replace("-", "")[:_USER_ID_PREFIX_LENGTH]
+    email = email_getter(user_id)
 
-    return AdminAuth(username=user_id_prefix)
+    return AdminAuth(username=user_id_prefix, email=email)
 
 
 def _get_user_id_from_access_token(token: str) -> str:
@@ -1127,6 +1282,57 @@ def require_tunnel_access(auth: AuthResult, tunnel_name: str) -> str:
     return extract_username_from_tunnel_name(tunnel_name)
 
 
+_PAID_ACCOUNT_SUFFIXES_ENV = "PAID_ACCOUNT_SUFFIXES"
+
+
+def _parse_paid_account_suffixes(raw: str) -> tuple[str, ...]:
+    """Split a ``PAID_ACCOUNT_SUFFIXES`` value into a normalized tuple of suffixes."""
+    return tuple(s.strip().lower() for s in raw.split(",") if s.strip())
+
+
+def is_email_in_paid_account_allowlist(email: str | None, raw_suffixes: str) -> bool:
+    """Pure helper: does ``email`` match any of the comma-separated suffixes?
+
+    Suffix matching is case-insensitive. An empty/missing suffix list always
+    returns ``False`` (no email is allowed), and a missing email always
+    returns ``False``.
+    """
+    suffixes = _parse_paid_account_suffixes(raw_suffixes)
+    if not suffixes:
+        return False
+    if not email:
+        return False
+    email_lower = email.lower()
+    return any(email_lower.endswith(suffix) for suffix in suffixes)
+
+
+def require_paid_account(auth: AdminAuth) -> None:
+    """Enforce the ``PAID_ACCOUNT_SUFFIXES`` allowlist for paid features.
+
+    Raises ``HTTPException(403)`` when the env var is unset/empty (paid
+    features disabled on this server) or when ``auth.email`` does not end
+    with any of the configured suffixes. ``/tunnels/*`` (Cloudflare
+    forwarding) intentionally does NOT call this gate -- email-verified
+    accounts can still use forwarding regardless of the allowlist.
+    """
+    raw = os.environ.get(_PAID_ACCOUNT_SUFFIXES_ENV, "")
+    if not _parse_paid_account_suffixes(raw):
+        raise HTTPException(
+            status_code=403,
+            detail="Paid features (host pool, LiteLLM keys) are not enabled on this server",
+        )
+    if not auth.email:
+        raise HTTPException(
+            status_code=403,
+            detail="Account email unavailable; cannot authorize paid feature access",
+        )
+    if not is_email_in_paid_account_allowlist(auth.email, raw):
+        raise HTTPException(
+            status_code=403,
+            detail="Account is not authorized for paid features",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Shared context
 # ---------------------------------------------------------------------------
@@ -1159,7 +1365,7 @@ def raise_as_http(exc: Exception) -> NoReturn:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if isinstance(exc, TunnelComponentTooLongError):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    logger.exception("Unexpected error in endpoint handler")
+    logger.error("Unexpected error in endpoint handler", exc_info=exc)
     raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -1172,6 +1378,46 @@ def handle_endpoint_errors() -> Iterator[None]:
         raise
     except Exception as exc:
         raise_as_http(exc)
+
+
+# ---------------------------------------------------------------------------
+# Host pool helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_pool_db_connection() -> Any:
+    """Open a psycopg2 connection to the Neon pool database."""
+    database_url = os.environ["DATABASE_URL"]
+    return psycopg2.connect(database_url)
+
+
+def _append_authorized_key(
+    host: str,
+    port: int,
+    user: str,
+    management_key_pem: str,
+    public_key_to_add: str,
+) -> None:
+    """SSH into a host using the management key and append a public key to authorized_keys."""
+    private_key = paramiko.Ed25519Key.from_private_key(io.StringIO(management_key_pem))
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(hostname=host, port=port, username=user, pkey=private_key, timeout=15)
+        key_line = public_key_to_add.strip()
+        commands = (
+            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo {} >> ~/.ssh/authorized_keys && ".format(
+                shlex.quote(key_line)
+            )
+            + "chmod 600 ~/.ssh/authorized_keys"
+        )
+        _stdin, _stdout, stderr = client.exec_command(commands)
+        exit_status = _stdout.channel.recv_exit_status()
+        if exit_status != 0:
+            stderr_text = stderr.read().decode()
+            raise paramiko.SSHException(f"SSH command failed (exit {exit_status}): {stderr_text}")
+    finally:
+        client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1300,6 +1546,345 @@ def set_service_auth(request: Request, tunnel_name: str, service_name: str, body
         admin = require_admin(auth)
         get_ctx().set_service_auth(tunnel_name, admin.username, service_name, body)
         return {"status": "updated"}
+
+
+# ---------------------------------------------------------------------------
+# Host pool endpoints
+# ---------------------------------------------------------------------------
+
+
+@web_app.post("/hosts/lease")
+def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
+    """Lease an available host from the pool, injecting the caller's SSH public key."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes "
+                        "FROM pool_hosts "
+                        "WHERE status = 'available' AND attributes @> %s::jsonb "
+                        "ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+                        (json.dumps(body.attributes),),
+                    )
+                    row = cur.fetchone()
+                    if row is None:
+                        raise HTTPException(
+                            status_code=503,
+                            detail=(
+                                "No pre-created agents match the requested attributes. "
+                                "Please ask Josh to provision more, or relax the attribute filter."
+                            ),
+                        )
+                    host_db_id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes = row
+
+                    # Inject the user's SSH public key on VPS and container
+                    management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
+                    try:
+                        _append_authorized_key(vps_ip, ssh_port, ssh_user, management_key_pem, body.ssh_public_key)
+                        _append_authorized_key(
+                            vps_ip, container_ssh_port, ssh_user, management_key_pem, body.ssh_public_key
+                        )
+                    except (paramiko.SSHException, OSError) as exc:
+                        logger.warning("SSH key injection failed for host %s: %s", host_db_id, exc)
+                        raise HTTPException(
+                            status_code=502, detail=f"Failed to inject SSH key on host: {exc}"
+                        ) from exc
+
+                    cur.execute(
+                        "UPDATE pool_hosts SET status = 'leased', leased_to_user = %s, leased_at = NOW() "
+                        "WHERE id = %s",
+                        (admin.username, host_db_id),
+                    )
+        finally:
+            conn.close()
+        attrs_dict = attributes if isinstance(attributes, dict) else {}
+        return LeaseHostResponse(
+            host_db_id=host_db_id,
+            vps_ip=vps_ip,
+            ssh_port=ssh_port,
+            ssh_user=ssh_user,
+            container_ssh_port=container_ssh_port,
+            agent_id=agent_id,
+            host_id=host_id,
+            attributes=attrs_dict,
+        ).model_dump()
+
+
+@web_app.post("/hosts/{host_db_id}/release")
+def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
+    """Release a leased host back to the pool."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # ``str(host_db_id)`` because psycopg2 can't adapt the
+                # Python ``UUID`` type that FastAPI parsed from the path
+                # (it raises "can't adapt type 'UUID'").
+                cur.execute(
+                    "SELECT leased_to_user FROM pool_hosts WHERE id = %s AND status = 'leased'",
+                    (str(host_db_id),),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise HTTPException(status_code=404, detail="Leased host not found")
+                leased_to_user = row[0]
+                if leased_to_user != admin.username:
+                    raise HTTPException(status_code=403, detail="You do not own this host lease")
+                cur.execute(
+                    "UPDATE pool_hosts SET status = 'released', released_at = NOW() WHERE id = %s",
+                    (str(host_db_id),),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        return ReleaseHostResponse(status="released").model_dump()
+
+
+@web_app.get("/hosts")
+def list_leased_hosts(request: Request) -> list[dict[str, object]]:
+    """List all hosts currently leased by the authenticated user."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes, leased_at "
+                    "FROM pool_hosts "
+                    "WHERE status = 'leased' AND leased_to_user = %s",
+                    (admin.username,),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [
+            LeasedHostInfo(
+                host_db_id=r[0],
+                vps_ip=r[1],
+                ssh_port=r[2],
+                ssh_user=r[3],
+                container_ssh_port=r[4],
+                agent_id=r[5],
+                host_id=r[6],
+                attributes=r[7] if isinstance(r[7], dict) else {},
+                leased_at=str(r[8]) if r[8] is not None else "",
+            ).model_dump()
+            for r in rows
+        ]
+
+
+# ---------------------------------------------------------------------------
+# LiteLLM key management helpers
+# ---------------------------------------------------------------------------
+
+
+def _litellm_proxy_url() -> str:
+    """Return the LiteLLM proxy URL from environment. Raises 503 if not configured."""
+    url = os.environ.get("LITELLM_PROXY_URL")
+    if not url:
+        raise HTTPException(status_code=503, detail="LiteLLM proxy not configured")
+    return url.rstrip("/")
+
+
+def _litellm_master_key() -> str:
+    """Return the LiteLLM master key from environment. Raises 503 if not configured."""
+    key = os.environ.get("LITELLM_MASTER_KEY")
+    if not key:
+        raise HTTPException(status_code=503, detail="LiteLLM master key not configured")
+    return key
+
+
+def _litellm_request(
+    method: str,
+    path: str,
+    json_body: dict[str, object] | None = None,
+    params: dict[str, str] | None = None,
+) -> httpx.Response:
+    """Make an authenticated request to the LiteLLM proxy admin API."""
+    url = _litellm_proxy_url() + path
+    headers = {"Authorization": "Bearer {}".format(_litellm_master_key())}
+    response = httpx.request(
+        method=method,
+        url=url,
+        headers=headers,
+        json=json_body,
+        params=params,
+        timeout=60.0,
+    )
+    if response.status_code >= 400:
+        detail = response.text[:500]
+        logger.warning("LiteLLM API error: %s %s -> %s %s", method, path, response.status_code, detail)
+        raise HTTPException(status_code=response.status_code, detail="LiteLLM error: {}".format(detail))
+    return response
+
+
+def _litellm_base_url_for_agents() -> str:
+    """Return the base URL agents should use as ANTHROPIC_BASE_URL."""
+    return _litellm_proxy_url()
+
+
+# ---------------------------------------------------------------------------
+# LiteLLM key management endpoints
+# ---------------------------------------------------------------------------
+
+
+@web_app.post("/keys/create")
+def create_litellm_key(request: Request, body: CreateKeyRequest) -> dict[str, object]:
+    """Create a new LiteLLM virtual key for the authenticated user."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        token = request.headers.get("authorization", "")[7:]
+        user_id = _get_user_id_from_access_token(token)
+
+        litellm_body: dict[str, object] = {"user_id": user_id}
+        if body.key_alias is not None:
+            litellm_body["key_alias"] = body.key_alias
+        if body.max_budget is not None:
+            litellm_body["max_budget"] = body.max_budget
+        if body.budget_duration is not None:
+            litellm_body["budget_duration"] = body.budget_duration
+        if body.metadata is not None:
+            litellm_body["metadata"] = body.metadata
+
+        resp = _litellm_request("POST", "/key/generate", json_body=litellm_body)
+        data = resp.json()
+
+        return CreateKeyResponse(
+            key=data["key"],
+            base_url=_litellm_base_url_for_agents(),
+        ).model_dump()
+
+
+@web_app.get("/keys")
+def list_litellm_keys(request: Request) -> list[dict[str, object]]:
+    """List all LiteLLM virtual keys owned by the authenticated user."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        token = request.headers.get("authorization", "")[7:]
+        user_id = _get_user_id_from_access_token(token)
+
+        # Without ``return_full_object=true`` LiteLLM returns the keys as a
+        # bare list of token-id strings (and the ``KeyInfo`` mapping below
+        # would crash on ``entry.get(...)``); with it, each entry is a dict
+        # carrying alias / spend / budget / etc.
+        resp = _litellm_request(
+            "GET",
+            "/key/list",
+            params={"user_id": user_id, "return_full_object": "true"},
+        )
+        data = resp.json()
+
+        keys_raw = data if isinstance(data, list) else data.get("keys", [])
+        result: list[dict[str, object]] = []
+        for entry in keys_raw:
+            if not isinstance(entry, dict):
+                # Defensive: if LiteLLM ever flips back to bare token strings,
+                # surface what we have rather than 500ing.
+                result.append(KeyInfo(token=str(entry)).model_dump())
+                continue
+            result.append(
+                KeyInfo(
+                    token=entry.get("token", ""),
+                    key_alias=entry.get("key_alias"),
+                    key_name=entry.get("key_name"),
+                    spend=entry.get("spend", 0.0),
+                    max_budget=entry.get("max_budget"),
+                    budget_duration=entry.get("budget_duration"),
+                    user_id=entry.get("user_id"),
+                ).model_dump()
+            )
+        return result
+
+
+@web_app.get("/keys/{key_id}")
+def get_litellm_key_info(request: Request, key_id: str) -> dict[str, object]:
+    """Get info (including spend and budget) for a specific LiteLLM key."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        token = request.headers.get("authorization", "")[7:]
+        user_id = _get_user_id_from_access_token(token)
+
+        resp = _litellm_request("GET", "/key/info", params={"key": key_id})
+        data = resp.json()
+
+        info = data.get("info", data)
+        if info.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="Key does not belong to this user")
+
+        return KeyInfo(
+            token=info.get("token", ""),
+            key_alias=info.get("key_alias"),
+            key_name=info.get("key_name"),
+            spend=info.get("spend", 0.0),
+            max_budget=info.get("max_budget"),
+            budget_duration=info.get("budget_duration"),
+            user_id=info.get("user_id"),
+        ).model_dump()
+
+
+@web_app.put("/keys/{key_id}/budget")
+def update_litellm_key_budget(request: Request, key_id: str, body: UpdateBudgetRequest) -> dict[str, object]:
+    """Update the budget for a LiteLLM key owned by the authenticated user."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        token = request.headers.get("authorization", "")[7:]
+        user_id = _get_user_id_from_access_token(token)
+
+        # Verify ownership
+        info_resp = _litellm_request("GET", "/key/info", params={"key": key_id})
+        info_data = info_resp.json()
+        info = info_data.get("info", info_data)
+        if info.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="Key does not belong to this user")
+
+        update_body: dict[str, object] = {"key": key_id}
+        update_body["max_budget"] = body.max_budget
+        if body.budget_duration is not None:
+            update_body["budget_duration"] = body.budget_duration
+
+        _litellm_request("POST", "/key/update", json_body=update_body)
+
+        return {"status": "updated"}
+
+
+@web_app.delete("/keys/{key_id}")
+def delete_litellm_key(request: Request, key_id: str) -> dict[str, object]:
+    """Delete a LiteLLM key owned by the authenticated user."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        token = request.headers.get("authorization", "")[7:]
+        user_id = _get_user_id_from_access_token(token)
+
+        # Verify ownership
+        info_resp = _litellm_request("GET", "/key/info", params={"key": key_id})
+        info_data = info_resp.json()
+        info = info_data.get("info", info_data)
+        if info.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="Key does not belong to this user")
+
+        _litellm_request("POST", "/key/delete", json_body={"keys": [key_id]})
+
+        return DeleteKeyResponse(status="deleted").model_dump()
 
 
 # ---------------------------------------------------------------------------
@@ -1451,7 +2036,7 @@ async def auth_signup(body: SignUpRequest) -> AuthResponse:
             email=email,
         )
     except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
-        logger.error("SuperTokens SDK error during signup: %s", exc)
+        logger.error("SuperTokens SDK error during signup", exc_info=exc)
         return AuthResponse(status="ERROR", message="Auth backend unavailable")
     return AuthResponse(
         status="OK",
@@ -1495,7 +2080,7 @@ async def auth_signin(body: SignInRequest) -> AuthResponse:
                 email=email,
             )
     except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
-        logger.error("SuperTokens SDK error during signin: %s", exc)
+        logger.error("SuperTokens SDK error during signin", exc_info=exc)
         return AuthResponse(status="ERROR", message="Auth backend unavailable")
     return AuthResponse(
         status="OK",
@@ -1593,7 +2178,7 @@ async def auth_verify_email_page(request: Request) -> HTMLResponse:
     try:
         result = await verify_email_using_token(tenant_id=tenant_id, token=token)
     except (SuperTokensSessionError, SuperTokensGeneralError, ValueError) as exc:
-        logger.error("Email verification error: %s", exc)
+        logger.error("Email verification error", exc_info=exc)
         return HTMLResponse(_VERIFY_EMAIL_FAILED_HTML, status_code=400)
     if isinstance(result, VerifyEmailUsingTokenOkResult):
         return HTMLResponse(_VERIFY_EMAIL_SUCCESS_HTML)
@@ -1695,7 +2280,7 @@ async def auth_oauth_callback(body: OAuthCallbackRequest) -> AuthResponse:
         )
         oauth_user = await provider.get_user_info(oauth_tokens=oauth_tokens, user_context={})
     except (ValueError, KeyError, OSError) as exc:
-        logger.error("OAuth callback failed for %s: %s", body.provider_id, exc)
+        logger.error("OAuth callback failed for %s", body.provider_id, exc_info=exc)
         return AuthResponse(status="ERROR", message=str(exc))
 
     if oauth_user.email is None or oauth_user.email.id is None:
@@ -1758,7 +2343,9 @@ def auth_get_user(user_id: str) -> UserProviderInfo:
 
 _DEPLOY_ENV = os.environ.get("MNGR_DEPLOY_ENV", "production")
 
-image = modal.Image.debian_slim().pip_install("fastapi[standard]", "httpx", "supertokens-python")
+image = modal.Image.debian_slim().pip_install(
+    "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko"
+)
 app = modal.App(name=f"remote-service-connector-{_DEPLOY_ENV}", image=image)
 
 
@@ -1867,8 +2454,17 @@ def _init_supertokens() -> None:
     secrets=[
         modal.Secret.from_name(f"cloudflare-{_DEPLOY_ENV}"),
         modal.Secret.from_name(f"supertokens-{_DEPLOY_ENV}"),
+        modal.Secret.from_name(f"neon-{_DEPLOY_ENV}"),
+        modal.Secret.from_name(f"pool-ssh-{_DEPLOY_ENV}"),
+        modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}"),
+        modal.Secret.from_name(f"paid-accounts-{_DEPLOY_ENV}"),
         modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV}),
-    ]
+    ],
+    # Keep one container warm at all times so the desktop client (which
+    # hits this connector for auth, lease, and tunnel ops on every minds
+    # startup) doesn't pay a cold-boot penalty after a quiet period.
+    # Mirrors the litellm-proxy deployment in apps/modal_litellm/app.py.
+    min_containers=1,
 )
 @modal.asgi_app()
 def fastapi_app() -> FastAPI:

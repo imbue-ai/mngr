@@ -6,7 +6,7 @@ Key concepts in the minds system:
 
 - **template repository**: a git repository (e.g. forever-claude-template) that defines a workspace's entire runtime: Dockerfile, services, skills, scripts, and mngr configuration.
 
-- **desktop client**: a local process (`minds forward`) that handles authentication, agent creation, and reverse proxying. Multiplexes access to multiple workspaces through a single local endpoint.
+- **desktop client**: a local process (`minds run`) that handles authentication, agent creation, and reverse proxying. Multiplexes access to multiple workspaces through a single local endpoint.
 
 - **bootstrap service manager**: a process running inside each agent container that watches `services.toml` and starts/stops background services in tmux windows.
 
@@ -18,4 +18,4 @@ Key concepts in the minds system:
 
 - **service event**: a JSON line in `events/services/events.jsonl` that registers (or deregisters) a service name and URL. The desktop client's MngrStreamManager watches these events to discover agent backends.
 
-- **launch mode**: how the agent runs. DEV mode runs in-place on the local host. LOCAL mode runs in a Docker container. CLOUD mode is not yet implemented.
+- **launch mode**: how the agent runs. LOCAL mode runs in a Docker container on the user's machine. LIMA runs in a Lima VM. CLOUD runs in Docker on a Vultr VPS. IMBUE_CLOUD leases a pre-baked pool host via the imbue_cloud provider plugin.

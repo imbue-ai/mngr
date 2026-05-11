@@ -4,11 +4,15 @@ from abc import abstractmethod
 from pathlib import Path
 from typing import Never
 
+from loguru import logger
+
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.agent import AgentConfigT
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.polling import poll_until
 
@@ -20,6 +24,77 @@ TAIL_POLL_TIMEOUT: float = 300.0
 # override _startup_grace_seconds to increase this (e.g. Claude needs longer
 # due to nvm resolution and node startup).
 STARTUP_GRACE_SECONDS: float = 2.0
+
+
+def render_file_diagnostic(
+    host: OnlineHostInterface,
+    path: Path,
+    label: str,
+    *,
+    tail_chars: int | None = None,
+    show_path: bool = True,
+) -> str:
+    """Render a single-file diagnostic line (for silent-exit post-mortems).
+
+    Probes existence and size of ``path`` via ``host.get_file_mtime`` +
+    ``host.read_text_file``, and returns one rendered string summarising
+    what was found. Best-effort: filesystem / remote-host errors and
+    decode errors are trace-logged and folded into the rendered line so
+    they neither mask the caller's primary error nor disappear silently.
+
+    ``label`` is used verbatim as the line prefix (the caller chooses
+    their own label / indent style). When ``show_path`` is True, the
+    rendered path is included after the label (format ``{label}: {path}
+    -- ...``); when False, the path is omitted (format ``{label}: ...``)
+    for callers that already report the directory separately. When
+    ``tail_chars`` is not None, up to that many trailing characters of
+    the decoded file are appended after a ``, tail:\\n`` separator; when
+    None, only the char count is reported.
+
+    The returned string never contains trailing whitespace (``.rstrip()`` is
+    applied to the tail-bearing format).
+    """
+    prefix = f"{label}: {path} -- " if show_path else f"{label}: "
+    mtime_error: str | None = None
+    try:
+        mtime = host.get_file_mtime(path)
+    except (OSError, HostError) as e:
+        logger.trace("get_file_mtime({}) failed: {}", path, e)
+        mtime = None
+        mtime_error = str(e)
+    if mtime is None:
+        # Distinguish a genuinely-missing file ("does not exist") from a
+        # probe failure so triage isn't misled by a transient filesystem /
+        # remote-host error that just happens to look like a missing file.
+        if mtime_error is not None:
+            return f"{prefix}mtime probe failed: {mtime_error}"
+        return f"{prefix}does not exist"
+    try:
+        content = host.read_text_file(path)
+    except FileNotFoundError:
+        # Raced with deletion between mtime probe and read.
+        return f"{prefix}does not exist"
+    except (OSError, HostError, UnicodeDecodeError) as e:
+        # UnicodeDecodeError lives here (not OSError) because read_text_file
+        # decodes the file as UTF-8 and subprocess output isn't guaranteed
+        # to be valid UTF-8. Treating it as a read failure honours the
+        # best-effort contract documented above.
+        logger.trace("read_text_file({}) failed: {}", path, e)
+        return f"{prefix}exists, read failed: {e}"
+    # `content` is a decoded str, so len() counts characters, not bytes;
+    # label accordingly so triage isn't misled on non-ASCII output. Any
+    # tail slice is intentionally character-based (we're slicing decoded
+    # text, not raw bytes).
+    char_count = len(content)
+    # Skip the ", tail:\n..." suffix when there is nothing to tail. Emitting
+    # a dangling `tail:` with an empty body (the case for redirect files
+    # that were created but never written to) is visual noise and suggests
+    # output follows when there is none; match the no-tail-chars format so
+    # callers always see `N chars` when N is 0.
+    if tail_chars is None or char_count == 0:
+        return f"{prefix}{char_count} chars"
+    tail = content[-tail_chars:] if char_count > tail_chars else content
+    return f"{prefix}{char_count} chars, tail:\n{tail}".rstrip()
 
 
 class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
@@ -112,7 +187,7 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
         return stripped if stripped else None
 
     def _get_pane_error_message(self) -> str | None:
-        """Capture the tmux pane content as a last-resort error source."""
+        """Capture the tmux pane content as one of the no-output error detail sources."""
         content = self.capture_pane_content()
         if content is None:
             return None
@@ -124,18 +199,64 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
 
         Subclasses can override to check additional error sources (e.g.
         stdout JSON error results). Called by _raise_no_output_error after
-        stderr is checked and before the pane capture fallback.
+        stderr is checked and before the tmux pane capture.
         """
         return []
+
+    def _get_state_dir_diagnostic(self) -> str:
+        """Return an inventory of the stdout/stderr files plus the agent's lifecycle state.
+
+        Each stdout/stderr line reports existence, size, and tail; a trailing
+        ``lifecycle: ...`` line reports the current lifecycle state (or folds
+        in the probe error if the state cannot be read).
+
+        Called by :meth:`_raise_no_output_error` and unconditionally included
+        in every no-output error message, alongside stderr / extra sources /
+        tmux pane. Particularly useful when those other sources are empty
+        (e.g. claude exited silently), because it confirms whether the
+        redirect files were ever created, how big they are, and includes the
+        tail of each so release-test post-mortems aren't stuck at "exited
+        without producing output". Delegates per-file rendering to
+        :func:`render_file_diagnostic` so the format stays in lockstep with
+        other silent-exit diagnostics (e.g. HeadlessClaude's work-dir
+        inventory).
+
+        Always returns a non-empty string -- the iterated (stdout, stderr)
+        tuple is hard-coded and every rendered line is unconditionally
+        appended, so at least one line is guaranteed.
+        """
+        lines: list[str] = [
+            render_file_diagnostic(self.host, self._get_stdout_path(), "stdout", tail_chars=1024),
+            render_file_diagnostic(self.host, self._get_stderr_path(), "stderr", tail_chars=1024),
+        ]
+
+        # Include the current lifecycle state so we can distinguish
+        # "agent never started" from "agent exited without output" in
+        # post-mortems. DONE/STOPPED with 0-char stdout/stderr means the
+        # command ran and returned without ever producing output (e.g.
+        # claude CLI silently exiting on auth failure or TTY prompt).
+        try:
+            lifecycle = self.get_lifecycle_state()
+            lines.append(f"lifecycle: {lifecycle.value}")
+        except (OSError, HostError) as e:
+            logger.trace("get_lifecycle_state failed: {}", e)
+            # Fold the error into the rendered output rather than dropping
+            # it -- trace-level logging alone would effectively hide this
+            # information, defeating the purpose of the diagnostic.
+            lines.append(f"lifecycle: probe failed: {e}")
+
+        return "\n".join(lines)
 
     def _raise_no_output_error(self) -> Never:
         """Raise MngrError collecting all available error detail.
 
-        Checks stderr, then subclass-specific extra sources, then falls
-        back to tmux pane capture as a last resort. The pane capture is
-        always attempted when no other details are found, regardless of
-        whether redirect files exist -- shell redirects create empty files
-        even when the process fails immediately.
+        Gathers stderr, subclass-specific extra sources, the tmux pane
+        content, and the state-dir inventory. All sources are *always*
+        captured -- silent-exit post-mortems (e.g. test_ask_simple_query
+        with 0-char stdout/stderr) need every signal we can get. Shell
+        errors like "cat: .mngr-prompt: No such file" only appear in the
+        tmux pane because the redirect captures the claude process's
+        stdout/stderr, not the shell's own.
         """
         parts: list[str] = []
 
@@ -145,13 +266,14 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
 
         parts.extend(self._get_extra_error_sources())
 
-        if not parts:
-            pane_error = self._get_pane_error_message()
-            if pane_error:
-                parts.append(f"[tmux pane]\n{pane_error}")
+        pane_error = self._get_pane_error_message()
+        if pane_error:
+            parts.append(f"[tmux pane]\n{pane_error}")
+
+        # The state-dir diagnostic string is always non-empty, so `parts`
+        # is guaranteed to have at least one element at the raise below.
+        parts.append(f"[state-dir]\n{self._get_state_dir_diagnostic()}")
 
         subject = self._no_output_error_subject
-        if parts:
-            detail = "\n".join(parts)
-            raise MngrError(f"{subject} exited without producing output:\n{detail}")
-        raise MngrError(f"{subject} exited without producing output (no details available)")
+        detail = "\n".join(parts)
+        raise MngrError(f"{subject} exited without producing output:\n{detail}")

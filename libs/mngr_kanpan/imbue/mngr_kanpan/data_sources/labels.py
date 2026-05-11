@@ -1,6 +1,8 @@
 from collections.abc import Sequence
+from typing import Literal
 
 from pydantic import Field
+from pydantic import TypeAdapter
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import MngrContext
@@ -8,6 +10,7 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_source import now_utc
 
 
 class LabelColumnConfig(FrozenModel):
@@ -21,11 +24,15 @@ class LabelColumnConfig(FrozenModel):
 class _ColoredStringField(FieldValue):
     """String field with an optional color from a color map."""
 
+    kind: Literal["colored_string"] = Field(default="colored_string", description="Discriminator tag")
     value: str = Field(description="The string value")
     color: str | None = Field(default=None, description="Optional urwid color name")
 
     def display(self) -> CellDisplay:
         return CellDisplay(text=self.value, color=self.color)
+
+
+_COLORED_STRING_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(_ColoredStringField)
 
 
 class LabelsDataSource(FrozenModel):
@@ -51,8 +58,8 @@ class LabelsDataSource(FrozenModel):
         return {self.field_key: self.config.header}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        return {self.field_key: _ColoredStringField}
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
+        return {self.field_key: _COLORED_STRING_ADAPTER}
 
     def compute(
         self,
@@ -61,12 +68,13 @@ class LabelsDataSource(FrozenModel):
         mngr_ctx: MngrContext,
     ) -> tuple[dict[AgentName, dict[str, FieldValue]], Sequence[str]]:
         label_key = self.config.label_key
+        now = now_utc()
         fields: dict[AgentName, dict[str, FieldValue]] = {}
         for agent in agents:
             value = agent.labels.get(label_key, "")
             if value:
                 color = self.config.colors.get(value)
                 fields[agent.name] = {
-                    self.field_key: _ColoredStringField(value=value, color=color),
+                    self.field_key: _ColoredStringField(value=value, color=color, created=now),
                 }
         return fields, []

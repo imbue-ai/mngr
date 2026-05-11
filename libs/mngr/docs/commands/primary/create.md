@@ -10,9 +10,10 @@ mngr [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WIND
     [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>]
-    [--env <KEY=VALUE>] [--env-file <FILE>] [--grant <PERMISSION>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
+    [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--grant <PERMISSION>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
-    [--[no-]connect] [--[no-]auto-start] [--] [<AGENT_ARGS>...]
+    [--message <TEXT>] [--message-file <FILE>] [--edit-message]
+    [--[no-]connect] [--[no-]auto-start] [-y|--yes] [--] [<AGENT_ARGS>...]
 ```
 
 Create and run an agent.
@@ -33,13 +34,13 @@ command, use the built-in 'command' agent type:
 
 Headless agent types (those implementing StreamingHeadlessAgentMixin,
 like headless_command and headless_claude) require the --foreground flag.
-This runs the headless flow: creates a temporary directory, streams the
-agent's output to stdout, and destroys the agent when done. Source,
-provisioning, environment, and connection flags do not apply.
+The agent streams its output to stdout and is destroyed when done instead
+of being connected to.
 
-For local agents in git repos, mngr creates a git worktree that shares objects
-with your original repository. For remote agents, the repo is transferred
-by pushing all local branches and tags via git. Use --transfer to override the default.
+When the source and the agent are on the same host (local or a single remote
+provider host), mngr creates a git worktree that shares objects with the source
+repository. When they are on different hosts, the repo is transferred by
+pushing all local branches and tags via git. Use --transfer to override the default.
 
 Alias: c
 
@@ -74,7 +75,7 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | `--type` | text | Which type of agent to run [default: claude] | None |
 | `-w`, `--extra-window` | text | Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names | None |
 | `--label` | text | Agent label KEY=VALUE [repeatable] [experimental] | None |
-| `--project` | text | Project name for the agent (sets the 'project' label) [default: derived from git remote origin or folder name] | None |
+| `--project` | text | Project name for the agent (sets the 'project' label; '.' inherits from source agent's project label when --from references an agent, else uses the source's git remote origin, else the source's folder name) [default: .] | `.` |
 
 ## Host Options
 
@@ -102,7 +103,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--from`, `--source` | text | Source data for the agent [AGENT[@HOST[.PROVIDER]][:PATH] &#x7C; @HOST:PATH &#x7C; :PATH]. A bare name refers to an agent; use :PATH for a directory. Defaults to git root if omitted | None |
+| `--from`, `--source` | text | Source data for the agent [AGENT[@HOST[.PROVIDER]][:PATH] &#x7C; @HOST:PATH &#x7C; :PATH &#x7C; GIT_URL]. A bare name refers to an agent; use :PATH for a directory. GIT_URL (e.g. https://github.com/owner/repo or git@gitlab.com:owner/repo.git) is cloned to ~/.mngr/clones/<name>-<id>/ using local git auth. Defaults to git root if omitted | None |
 | `--rsync`, `--no-rsync` | boolean | Use rsync for file transfer [default: yes if rsync-args are present or if git is disabled] | None |
 | `--rsync-args` | text | Additional arguments to pass to rsync | None |
 
@@ -111,7 +112,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--target-path` | text | Directory to mount source inside agent host (alternative to :PATH in address). Incompatible with --transfer=none | None |
-| `--transfer` | choice (`none` &#x7C; `rsync` &#x7C; `git-mirror` &#x7C; `git-worktree`) | How to transfer the project into the agent. none: run in-place (no transfer). rsync: copy via rsync (non-git projects). git-mirror: push all local branches and tags via git (git projects). git-worktree: create a git worktree (git projects, local only). [default: git-worktree for local git repos, git-mirror for remote git repos, rsync for non-git] | None |
+| `--transfer` | choice (`none` &#x7C; `rsync` &#x7C; `git-mirror` &#x7C; `git-worktree`) | How to transfer the project into the agent. none: run in-place (no transfer). rsync: copy via rsync (non-git projects). git-mirror: push all local branches and tags via git (git projects). git-worktree: create a git worktree (git projects; source and target must be on the same host). [default: git-worktree when source and target are on the same host (local or remote), git-mirror for cross-host git repos, rsync for non-git] | None |
 
 ## Git Configuration
 
@@ -174,7 +175,7 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 | `--message` | text | Initial message to send after the agent starts | None |
 | `--message-file` | path | File containing initial message to send | None |
 | `--edit-message` | boolean | Open an editor to compose the initial message (uses $EDITOR). Editor runs in parallel with agent creation. If --message or --message-file is provided, their content is used as initial editor content. | `False` |
-| `--attach-command` | text | Command to run instead of attaching to main session | None |
+| `--session-command` | text | Command to run instead of attaching to main session | None |
 | `--connect-command` | text | Command to run instead of the builtin connect. MNGR_AGENT_NAME and MNGR_SESSION_NAME env vars are set. | None |
 
 ## Automation

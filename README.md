@@ -301,7 +301,7 @@ mngr <command> [options]
 ### For maintenance:
 
 - [`cleanup`](libs/mngr/docs/commands/secondary/cleanup.md): Clean up stopped agents and unused resources
-- [`events`](libs/mngr/docs/commands/secondary/events.md): View agent and host event files
+- [`event`](libs/mngr/docs/commands/secondary/event.md): View agent and host event files
 - [`gc`](libs/mngr/docs/commands/secondary/gc.md): Garbage collect unused resources
 
 ### For managing mngr itself:

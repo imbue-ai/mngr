@@ -221,7 +221,7 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
                 is_reconnect=True,
                 retry_count=mngr_ctx.config.retry.connect_retry_times,
                 retry_delay=mngr_ctx.config.retry.connect_retry_delay,
-                attach_command=None,
+                session_command=None,
                 is_unknown_host_allowed=False,
             )
             logger.info("Connecting to agent: {}", last_started_agent.name)

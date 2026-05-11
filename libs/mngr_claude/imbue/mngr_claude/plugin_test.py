@@ -1,4 +1,6 @@
 import json
+import os
+import shlex
 import subprocess
 from contextlib import contextmanager
 from datetime import datetime
@@ -11,6 +13,7 @@ from uuid import UUID
 
 import pluggy
 import pytest
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -76,6 +79,7 @@ from imbue.mngr_claude.plugin import _rewrite_known_marketplaces_paths
 from imbue.mngr_claude.plugin import _should_preserve_sessions
 from imbue.mngr_claude.plugin import _write_generated_files
 from imbue.mngr_claude.plugin import agent_field_generators
+from imbue.mngr_claude.plugin import approve_api_key_for_claude
 from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import on_before_create
 from imbue.mngr_claude.plugin import register_cli_options
@@ -332,7 +336,7 @@ def test_claude_agent_assemble_command_with_no_args(
     sid_export = _sid_export_for(uuid)
     # Local hosts should NOT have IS_SANDBOX set
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
+        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
     )
 
 
@@ -350,7 +354,7 @@ def test_claude_agent_assemble_command_with_agent_args(
     background_cmd = agent._build_background_tasks_command(session_name)
     sid_export = _sid_export_for(uuid)
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || claude --session-id {uuid} --model opus'
+        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || claude --session-id {uuid} --model opus'
     )
 
 
@@ -373,7 +377,7 @@ def test_claude_agent_assemble_command_with_cli_args_and_agent_args(
     background_cmd = agent._build_background_tasks_command(session_name)
     sid_export = _sid_export_for(uuid)
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" --verbose --model opus ) || claude --session-id {uuid} --verbose --model opus'
+        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" --verbose --model opus ) || claude --session-id {uuid} --verbose --model opus'
     )
 
 
@@ -395,7 +399,7 @@ def test_claude_agent_assemble_command_with_command_override(
     background_cmd = agent._build_background_tasks_command(session_name)
     sid_export = _sid_export_for(uuid)
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && custom-claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || custom-claude --session-id {uuid} --model opus'
+        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && custom-claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || custom-claude --session-id {uuid} --model opus'
     )
 
 
@@ -435,7 +439,107 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     sid_export = _sid_export_for(uuid)
     # Remote hosts SHOULD have IS_SANDBOX set
     assert command == CommandString(
-        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
+        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
+    )
+
+
+def test_claude_agent_assemble_command_quotes_agent_args_with_shell_metacharacters(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Agent args containing shell metacharacters must survive shell parsing as single tokens."""
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    prompt = "respond with only the word HELLO; echo pwned & rm -rf $HOME"
+
+    command = agent.assemble_command(host=host, agent_args=("--model", "opus", prompt), command_override=None)
+
+    # The command ends with "|| {create_cmd}" where create_cmd is the last shell statement.
+    # Split on "||" and shlex-parse the tail to confirm the prompt arrived intact.
+    create_cmd_segment = str(command).rsplit("||", 1)[1]
+    tokens = shlex.split(create_cmd_segment)
+    assert prompt in tokens, f"prompt should be a single token after shell parsing, got tokens={tokens!r}"
+
+
+def test_claude_agent_assemble_command_resume_branch_runs_when_session_jsonl_exists(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Regression: the resume guard must actually find an adopted session JSONL on disk.
+
+    The original bug was a ``find`` invocation without the ``.jsonl`` suffix
+    (``-name "$MAIN_CLAUDE_SESSION_ID"`` instead of ``-name "$MAIN_CLAUDE_SESSION_ID.jsonl"``).
+    Files on disk are named ``<session_id>.jsonl``, so the guard returned no
+    matches, the ``&&`` short-circuited, and the silent ``||`` fallback ran
+    ``claude --session-id <fresh agent uuid>`` instead of ``claude --resume <adopted_id>``.
+    The end-user symptom was that ``--adopt-session`` appeared to do nothing
+    and a brand-new session opened with no error.
+
+    This test executes the assembled shell pipeline against a stub ``claude``
+    binary that records its argv, with a real session ``.jsonl`` planted at
+    the location the resume path expects to find it. The argv recorded by
+    the stub must contain ``--resume <session_id>`` -- if it contains
+    ``--session-id <agent_uuid>`` instead, the regression is back.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    # Plant a real session file at the location the resume guard inspects.
+    config_dir = tmp_path / "claude-config"
+    project_dir = config_dir / "projects" / "some-encoded-project"
+    project_dir.mkdir(parents=True)
+    target_session_id = "adopted-sid-deadbeef"
+    (project_dir / f"{target_session_id}.jsonl").write_text('{"type":"message"}\n')
+
+    # Provide the session-id tracking file so $MAIN_CLAUDE_SESSION_ID resolves
+    # to the adopted id rather than the agent's UUID fallback.
+    state_dir = tmp_path / "agent-state"
+    (state_dir / "commands").mkdir(parents=True)
+    (state_dir / "claude_session_id").write_text(target_session_id)
+
+    # Stub the background-tasks script (the assembled command runs it
+    # backgrounded with &; we just need the path to exist and exit cleanly).
+    bg_script = state_dir / "commands" / "claude_background_tasks.sh"
+    bg_script.write_text("#!/bin/bash\nexit 0\n")
+    bg_script.chmod(0o755)
+
+    # Stub claude: write argv to a log and exit 0. Putting the stub on PATH
+    # ahead of the real claude (if any) ensures the assembled command's
+    # bare `claude` invocation hits our stub.
+    stub_dir = tmp_path / "stub_bin"
+    stub_dir.mkdir()
+    invocation_log = tmp_path / "claude_invocation.log"
+    stub_claude = stub_dir / "claude"
+    stub_claude.write_text(f"#!/bin/bash\nprintf '%s\\n' \"$@\" > {shlex.quote(str(invocation_log))}\nexit 0\n")
+    stub_claude.chmod(0o755)
+
+    command = agent.assemble_command(host=host, agent_args=("--print", "hi"), command_override=None)
+
+    env = {
+        "PATH": f"{stub_dir}:{os.environ.get('PATH', '')}",
+        "CLAUDE_CONFIG_DIR": str(config_dir),
+        "MNGR_AGENT_STATE_DIR": str(state_dir),
+        "HOME": str(tmp_path),
+    }
+    result = subprocess.run(
+        ["bash", "-c", str(command)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"Assembled pipeline failed with exit {result.returncode}.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+    assert invocation_log.exists(), (
+        f"Stub claude was never invoked. Pipeline output:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    invocation_args = invocation_log.read_text().splitlines()
+    assert "--resume" in invocation_args, (
+        "Resume branch did not fire. Stub claude was invoked with "
+        f"{invocation_args!r}, indicating the resume guard's `find` returned no "
+        "matches and the silent `||` fallback ran `claude --session-id <agent_uuid>` "
+        "instead. The adopted session is effectively lost."
+    )
+    assert target_session_id in invocation_args, (
+        f"Expected adopted session id {target_session_id!r} in claude argv, got {invocation_args!r}."
     )
 
 
@@ -566,7 +670,7 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
     assert "SessionStart" in config["hooks"]
     assert len(config["hooks"]["SessionStart"]) == 1
     hooks = config["hooks"]["SessionStart"][0]["hooks"]
-    assert len(hooks) == 3
+    assert len(hooks) == 4
 
     # First hook: creates session_started file for polling-based detection
     assert hooks[0]["type"] == "command"
@@ -575,7 +679,7 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
 
     # Second hook: echoes the base branch for the agent's context
     assert hooks[1]["type"] == "command"
-    assert "GIT_BASE_BRANCH" in hooks[1]["command"]
+    assert "MNGR_GIT_BASE_BRANCH" in hooks[1]["command"]
 
     # Third hook: tracks current session ID for session replacement detection
     session_id_hook = hooks[2]["command"]
@@ -594,6 +698,19 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
     # Should use atomic write (write to .tmp then mv) to prevent torn reads
     assert "claude_session_id.tmp" in session_id_hook
     assert "mv" in session_id_hook
+
+    # Fourth hook: signals tmux wait-for on /clear and /compact so that
+    # `mngr message agent -m /clear` does not time out. /clear and /compact
+    # are TUI-local slash commands that do not trigger UserPromptSubmit, so
+    # we mirror that hook's tmux wait-for signal here, filtered by source.
+    submit_signal_hook = hooks[3]["command"]
+    assert hooks[3]["type"] == "command"
+    assert "tmux wait-for -S" in submit_signal_hook
+    assert "mngr-submit-" in submit_signal_hook
+    # Should filter on source so normal startup/resume do not fire the signal
+    assert "clear" in submit_signal_hook
+    assert "compact" in submit_signal_hook
+    assert "_MNGR_SOURCE" in submit_signal_hook
 
 
 @pytest.mark.parametrize(
@@ -1482,26 +1599,6 @@ def test_auto_dismiss_dialogs_defaults_to_false() -> None:
     """Verify that auto_dismiss_dialogs defaults to False for ClaudeAgentConfig."""
     config = ClaudeAgentConfig()
     assert config.auto_dismiss_dialogs is False
-
-
-def test_on_before_provisioning_raises_for_worktree_on_remote_host(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """on_before_provisioning should raise PluginMngrError for worktree mode on remote hosts."""
-    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
-
-    # Use SimpleNamespace to simulate a non-local host. Creating a real remote host
-    # requires SSH infrastructure not available in unit tests. The method only reads
-    # host.is_local before raising.
-    non_local_host = cast(OnlineHostInterface, SimpleNamespace(is_local=False))
-
-    options = CreateAgentOptions(
-        agent_type=AgentTypeName("claude"),
-        transfer_mode=TransferMode.GIT_WORKTREE,
-    )
-
-    with pytest.raises(PluginMngrError, match="Git worktree transfer mode is not supported on remote hosts"):
-        agent.on_before_provisioning(host=non_local_host, options=options, mngr_ctx=temp_mngr_ctx)
 
 
 def test_on_before_provisioning_validates_trust_for_worktree(
@@ -3832,3 +3929,131 @@ def test_write_generated_files_breaks_symlink_before_writing(tmp_path: Path, tem
     assert symlink.read_text() == rewritten_content
     # The original source file must NOT be modified
     assert json.loads(source_file.read_text()) == {"original": True}
+
+
+# =============================================================================
+# modify_env_vars Tests
+# =============================================================================
+
+
+def test_modify_env_vars_sets_claude_config_dirs(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """modify_env_vars always writes CLAUDE_CONFIG_DIR and ORIGINAL_CLAUDE_CONFIG_DIR."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert env_vars["CLAUDE_CONFIG_DIR"] == str(agent.get_claude_config_dir())
+    # ORIGINAL_CLAUDE_CONFIG_DIR points at the user's real ~/.claude dir -- we
+    # only assert it is set to a non-empty string; the exact path depends on
+    # the running user's $HOME and is not load-bearing for this test.
+    assert env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"]
+
+
+# =============================================================================
+# approve_api_key_for_claude Tests
+# =============================================================================
+
+
+class _EnvVarFakeHost(FakeHost):
+    """``FakeHost`` extension that stores a host env-var dict so tests can simulate
+    the result of ``--host-env-file`` / ``--pass-host-env`` having been written.
+    """
+
+    host_env_vars: dict[str, str] = Field(default_factory=dict, description="Stand-in for /mngr/env contents")
+
+    def get_env_var(self, key: str) -> str | None:
+        return self.host_env_vars.get(key)
+
+    def get_env_vars(self) -> dict[str, str]:
+        return dict(self.host_env_vars)
+
+
+def _empty_create_agent_options() -> CreateAgentOptions:
+    return CreateAgentOptions(agent_type=AgentTypeName("claude"))
+
+
+def _create_agent_options_with_env_var(value: str) -> CreateAgentOptions:
+    return CreateAgentOptions(
+        agent_type=AgentTypeName("claude"),
+        environment=AgentEnvironmentOptions(env_vars=(EnvVar(key="ANTHROPIC_API_KEY", value=value),)),
+    )
+
+
+def test_approve_api_key_no_keys_anywhere_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    data: dict[str, object] = {}
+    host = cast(OnlineHostInterface, _EnvVarFakeHost())
+    approve_api_key_for_claude(data, host=host, options=_empty_create_agent_options())
+    assert "customApiKeyResponses" not in data
+
+
+def test_approve_api_key_picks_up_host_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The LOCAL/Docker minds path: ANTHROPIC_API_KEY arrives only via --host-env-file,
+    so the approval must consult ``host.get_env_var`` to find it."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    key = "sk-ant-api03-" + "a" * 80 + "host-env-trailing"
+    data: dict[str, object] = {}
+    host = cast(OnlineHostInterface, _EnvVarFakeHost(host_env_vars={"ANTHROPIC_API_KEY": key}))
+    approve_api_key_for_claude(data, host=host, options=_empty_create_agent_options())
+    approved = cast(dict[str, list[str]], data["customApiKeyResponses"])["approved"]
+    assert key[-20:] in approved
+
+
+def test_approve_api_key_picks_up_options_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The IMBUE_CLOUD lease path supplies ANTHROPIC_API_KEY via ``--env``; the
+    approval must walk ``options.environment.env_vars`` to pick that up."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    key = "sk-ant-api03-" + "b" * 80 + "options-env-trail"
+    data: dict[str, object] = {}
+    host = cast(OnlineHostInterface, _EnvVarFakeHost())
+    approve_api_key_for_claude(data, host=host, options=_create_agent_options_with_env_var(key))
+    approved = cast(dict[str, list[str]], data["customApiKeyResponses"])["approved"]
+    assert key[-20:] in approved
+
+
+def test_approve_api_key_picks_up_process_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``os.environ`` remains the source for the legacy IMBUE_CLOUD ``subprocess_env`` injection."""
+    key = "sk-ant-api03-" + "c" * 80 + "proc-env-trailing"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", key)
+    data: dict[str, object] = {}
+    host = cast(OnlineHostInterface, _EnvVarFakeHost())
+    approve_api_key_for_claude(data, host=host, options=_empty_create_agent_options())
+    approved = cast(dict[str, list[str]], data["customApiKeyResponses"])["approved"]
+    assert key[-20:] in approved
+
+
+def test_approve_api_key_collects_keys_from_every_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Different sources yield different keys; all suffixes should end up approved."""
+    proc_key = "sk-ant-api03-" + "1" * 80 + "proc-tail-end-here"
+    options_key = "sk-ant-api03-" + "2" * 80 + "options-tail-here"
+    host_key = "sk-ant-api03-" + "3" * 80 + "host-tail-end-here"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", proc_key)
+    data: dict[str, object] = {}
+    host = cast(OnlineHostInterface, _EnvVarFakeHost(host_env_vars={"ANTHROPIC_API_KEY": host_key}))
+    approve_api_key_for_claude(
+        data,
+        host=host,
+        options=_create_agent_options_with_env_var(options_key),
+    )
+    approved = cast(dict[str, list[str]], data["customApiKeyResponses"])["approved"]
+    assert proc_key[-20:] in approved
+    assert options_key[-20:] in approved
+    assert host_key[-20:] in approved
+
+
+def test_approve_api_key_no_host_argument_falls_back_to_process_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deploy-image caller passes neither ``host`` nor ``options``; the function still
+    has to honor ``os.environ`` so the deploy path keeps working."""
+    key = "sk-ant-api03-" + "d" * 80 + "deploy-tail-here"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", key)
+    data: dict[str, object] = {}
+    approve_api_key_for_claude(data)
+    approved = cast(dict[str, list[str]], data["customApiKeyResponses"])["approved"]
+    assert key[-20:] in approved

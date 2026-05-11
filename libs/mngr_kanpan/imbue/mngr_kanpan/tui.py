@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from datetime import timezone
 from typing import Any
+from typing import assert_never
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -37,11 +38,18 @@ from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
+from imbue.mngr_kanpan.data_source import now_utc
+from imbue.mngr_kanpan.data_types import ActionBuiltinCommand
+from imbue.mngr_kanpan.data_types import ActionBuiltinRole
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import CustomCommand
+from imbue.mngr_kanpan.data_types import KanpanCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
+from imbue.mngr_kanpan.data_types import MarkableBuiltinCommand
+from imbue.mngr_kanpan.data_types import MarkableBuiltinRole
+from imbue.mngr_kanpan.data_types import STALENESS_FRACTION_OF_REFRESH_INTERVAL
 from imbue.mngr_kanpan.fetcher import FetchResult
 from imbue.mngr_kanpan.fetcher import collect_data_sources
 from imbue.mngr_kanpan.fetcher import compute_section
@@ -52,6 +60,9 @@ from imbue.mngr_kanpan.fetcher import save_field_cache
 from imbue.mngr_kanpan.fetcher import toggle_agent_mute
 
 DEFAULT_REFRESH_INTERVAL_SECONDS: float = 600.0
+# Fallback used by the dataclass default and a couple of tests; runtime always
+# resolves the threshold from KanpanPluginConfig.effective_staleness_threshold_seconds().
+DEFAULT_STALENESS_THRESHOLD_SECONDS: float = STALENESS_FRACTION_OF_REFRESH_INTERVAL * DEFAULT_REFRESH_INTERVAL_SECONDS
 
 # Default column order when column_order is not explicitly configured.
 # User-configured label/shell columns are appended after these.
@@ -93,6 +104,11 @@ PALETTE = [
     ("muted", "dark gray", ""),
     ("muted_focus", "dark gray,standout", ""),
     ("section_muted", "dark gray", ""),
+    # Stale: applied per-cell when a field's `created` is older than
+    # `staleness_threshold_seconds`. Same color as muted so the visual
+    # language is "this is de-emphasized."
+    ("stale", "dark gray", ""),
+    ("stale_focus", "dark gray,standout", ""),
     ("error_text", "light red", ""),
     ("notification", "white", "dark magenta"),
 ]
@@ -125,7 +141,7 @@ _SECTION_SUFFIX: dict[BoardSection, str] = {
     BoardSection.PR_BEING_REVIEWED: "PR pending",
     BoardSection.PR_DRAFT: "draft PR",
     BoardSection.STILL_COOKING: "no PR yet",
-    BoardSection.PRS_FAILED: "PRs failed",
+    BoardSection.PRS_FAILED: "PRs not loaded",
     BoardSection.MUTED: "",
 }
 
@@ -148,13 +164,17 @@ _BUILTIN_COMMAND_KEY_MUTE = "m"
 _BUILTIN_COMMAND_KEY_UNMARK = "u"
 _BUILTIN_COMMAND_KEY_EXECUTE = "x"
 
-_BUILTIN_COMMANDS: dict[str, CustomCommand] = {
-    _BUILTIN_COMMAND_KEY_REFRESH: CustomCommand(name="refresh"),
-    _BUILTIN_COMMAND_KEY_PUSH: CustomCommand(name="mark push", markable="yellow"),
-    _BUILTIN_COMMAND_KEY_DELETE: CustomCommand(name="mark delete", markable="light red"),
-    _BUILTIN_COMMAND_KEY_MUTE: CustomCommand(name="mute"),
-    _BUILTIN_COMMAND_KEY_UNMARK: CustomCommand(name="unmark"),
-    _BUILTIN_COMMAND_KEY_EXECUTE: CustomCommand(name="execute"),
+_BUILTIN_COMMANDS: dict[str, ActionBuiltinCommand | MarkableBuiltinCommand] = {
+    _BUILTIN_COMMAND_KEY_REFRESH: ActionBuiltinCommand(role=ActionBuiltinRole.REFRESH, name="refresh"),
+    _BUILTIN_COMMAND_KEY_PUSH: MarkableBuiltinCommand(
+        role=MarkableBuiltinRole.PUSH, name="mark push", markable="yellow"
+    ),
+    _BUILTIN_COMMAND_KEY_DELETE: MarkableBuiltinCommand(
+        role=MarkableBuiltinRole.DELETE, name="mark delete", markable="light red"
+    ),
+    _BUILTIN_COMMAND_KEY_MUTE: ActionBuiltinCommand(role=ActionBuiltinRole.MUTE, name="mute"),
+    _BUILTIN_COMMAND_KEY_UNMARK: ActionBuiltinCommand(role=ActionBuiltinRole.UNMARK, name="unmark"),
+    _BUILTIN_COMMAND_KEY_EXECUTE: ActionBuiltinCommand(role=ActionBuiltinRole.EXECUTE, name="execute"),
 }
 
 _DEFAULT_MARK_COLOR = "light cyan"
@@ -166,10 +186,32 @@ _AGENT_LINE_ATTRS = (
     "check_failing",
     "check_pending",
     "muted",
+    "stale",
 )
 
 # Column layout configuration
 _COL_DIVIDER_CHARS = 2
+
+
+def _mark_color(cmd: KanpanCommand) -> str | None:
+    """Return the mark indicator color if ``cmd`` is markable, else ``None``.
+
+    ``ActionBuiltinCommand`` is never markable. ``MarkableBuiltinCommand``
+    always carries a color string. ``CustomCommand.markable`` is
+    ``bool | str``: ``False`` means not markable, ``True`` means markable
+    with the default color, a ``str`` means that explicit color.
+    """
+    if isinstance(cmd, ActionBuiltinCommand):
+        return None
+    if isinstance(cmd, MarkableBuiltinCommand):
+        return cmd.markable
+    match cmd.markable:
+        case str() as color:
+            return color
+        case bool() as is_markable:
+            return _DEFAULT_MARK_COLOR if is_markable else None
+        case _:
+            assert_never(cmd.markable)
 
 
 def _osc8_wrap_content(inner_content: Any, osc_open: bytes, osc_close: bytes) -> Any:
@@ -305,7 +347,7 @@ class _KanpanState(MutableModel):
     # Steady-state footer left text (restored after transient messages)
     steady_footer_text: str = "  Loading..."
     # All commands (builtins merged with user config), keyed by trigger key
-    commands: dict[str, CustomCommand] = {}
+    commands: dict[str, KanpanCommand] = {}
     # Monotonic timestamp of the last completed refresh (for cooldown logic)
     last_refresh_time: float = 0.0
     # Whether the current in-flight refresh is local-only (no GitHub API)
@@ -317,6 +359,7 @@ class _KanpanState(MutableModel):
     # Cooldown durations (loaded from plugin config)
     refresh_interval_seconds: float = DEFAULT_REFRESH_INTERVAL_SECONDS
     retry_cooldown_seconds: float = 60.0
+    staleness_threshold_seconds: float = DEFAULT_STALENESS_THRESHOLD_SECONDS
     # Palette attr names for mark indicators (e.g. "mark_d", "mark_p")
     mark_attr_names: tuple[str, ...] = ()
     # Column definitions (from data sources)
@@ -419,7 +462,7 @@ def _update_row_mark(state: _KanpanState, walker_idx: int, mark_key: str | None)
         return
     name_markup: str | tuple[Hashable, str] | list[str | tuple[Hashable, str]] = _get_name_cell_markup(entry, mark_key)
     if entry.section == BoardSection.MUTED:
-        name_markup = _flatten_markup_to_muted(name_markup)
+        name_markup = _flatten_markup_to_attr(name_markup, "muted")
     attr_map_widget = state.list_walker[walker_idx]
     row: _SelectableRow = attr_map_widget.original_widget
     name_text: Text = row.contents[0][0]
@@ -520,7 +563,7 @@ def _execute_marks(state: _KanpanState) -> None:
 class _BatchWorkItem(FrozenModel):
     name: AgentName
     key: str
-    cmd: CustomCommand
+    cmd: KanpanCommand
     entry: AgentBoardEntry | None
     batch_names: tuple[AgentName, ...] = ()
 
@@ -564,7 +607,10 @@ def _start_batch_execution(state: _KanpanState) -> None:
         cmd = state.commands.get(mark_key)
         if cmd is None:
             continue
-        if mark_key == _BUILTIN_COMMAND_KEY_DELETE:
+        # Only the builtin delete batches all marked agents into one `mngr
+        # destroy` call. A user-defined override of "d" (or any other key)
+        # runs per-agent via the individual-work path.
+        if isinstance(cmd, MarkableBuiltinCommand) and cmd.role == MarkableBuiltinRole.DELETE:
             delete_names.append(name)
         else:
             individual_work.append(_BatchWorkItem(name=name, key=mark_key, cmd=cmd, entry=entries_by_name.get(name)))
@@ -591,13 +637,20 @@ def _submit_batch_item(
     executor: ThreadPoolExecutor, item: _BatchWorkItem
 ) -> Future[subprocess.CompletedProcess[str]] | None:
     """Submit a single batch work item to the executor."""
-    if item.key == _BUILTIN_COMMAND_KEY_DELETE:
-        names = [str(n) for n in item.batch_names] if item.batch_names else [str(item.name)]
-        return executor.submit(_run_destroy, names)
-    if item.key == _BUILTIN_COMMAND_KEY_PUSH:
-        if item.entry is None or item.entry.work_dir is None:
-            return None
-        return executor.submit(_run_git_push, str(item.entry.work_dir))
+    if isinstance(item.cmd, MarkableBuiltinCommand):
+        match item.cmd.role:
+            case MarkableBuiltinRole.DELETE:
+                names = [str(n) for n in item.batch_names] if item.batch_names else [str(item.name)]
+                return executor.submit(_run_destroy, names)
+            case MarkableBuiltinRole.PUSH:
+                if item.entry is None or item.entry.work_dir is None:
+                    return None
+                return executor.submit(_run_git_push, str(item.entry.work_dir))
+            case _:
+                assert_never(item.cmd.role)
+    if isinstance(item.cmd, ActionBuiltinCommand):
+        # Non-markable builtins never reach batch dispatch.
+        return None
     if item.cmd.command:
         return executor.submit(_run_shell_command_sync, item.cmd.command, str(item.name))
     return None
@@ -700,7 +753,7 @@ def _apply_mute_to_entry(entry: AgentBoardEntry, is_muted: bool) -> AgentBoardEn
 
     Updates fields, cells, section, and is_muted so the board renders correctly.
     """
-    updated_fields = {**entry.fields, FIELD_MUTED: BoolField(value=is_muted)}
+    updated_fields = {**entry.fields, FIELD_MUTED: BoolField(value=is_muted, created=now_utc())}
     updated_cells = {key: field.display() for key, field in updated_fields.items()}
     updated_section = compute_section(updated_fields)
     ref = entry.field_ref()
@@ -768,27 +821,31 @@ def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[bool]
         loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_mute_persist_poll, data)
 
 
-def _dispatch_command(state: _KanpanState, key: str, cmd: CustomCommand) -> None:
+def _dispatch_command(state: _KanpanState, key: str, cmd: KanpanCommand) -> None:
     """Dispatch a command by key."""
-    if key == _BUILTIN_COMMAND_KEY_REFRESH and not cmd.command:
-        if state.loop is not None and state.refresh_future is None:
-            _start_refresh(state.loop, state)
-        return
-    if key == _BUILTIN_COMMAND_KEY_MUTE and not cmd.command:
-        _mute_focused_agent(state)
-        return
-    if key == _BUILTIN_COMMAND_KEY_UNMARK and not cmd.command:
-        _unmark_focused(state)
-        return
-    if key == _BUILTIN_COMMAND_KEY_EXECUTE and not cmd.command:
-        _execute_marks(state)
-        return
-    if cmd.markable:
+    if isinstance(cmd, MarkableBuiltinCommand):
         _toggle_mark(state, key)
         return
-    # Immediate shell command
-    if cmd.command:
-        _run_shell_command(state, cmd)
+    if isinstance(cmd, CustomCommand):
+        if _mark_color(cmd) is not None:
+            _toggle_mark(state, key)
+            return
+        if cmd.command:
+            _run_shell_command(state, cmd)
+        return
+    # cmd is ActionBuiltinCommand; match on role for exhaustive dispatch.
+    match cmd.role:
+        case ActionBuiltinRole.REFRESH:
+            if state.loop is not None and state.refresh_future is None:
+                _start_refresh(state.loop, state)
+        case ActionBuiltinRole.MUTE:
+            _mute_focused_agent(state)
+        case ActionBuiltinRole.UNMARK:
+            _unmark_focused(state)
+        case ActionBuiltinRole.EXECUTE:
+            _execute_marks(state)
+        case _:
+            assert_never(cmd.role)
 
 
 def _run_shell_command(state: _KanpanState, cmd: CustomCommand) -> None:
@@ -1067,17 +1124,29 @@ def _get_state_cell_markup(entry: AgentBoardEntry) -> str | tuple[Hashable, str]
     return (attr, text) if attr else text
 
 
-def _flatten_markup_to_muted(
+def _flatten_markup_to_attr(
     markup: str | tuple[Hashable, str] | list[str | tuple[Hashable, str]],
+    attr: str,
 ) -> tuple[Hashable, str]:
-    """Flatten rich urwid text markup to a plain string wrapped in the 'muted' attribute."""
+    """Flatten rich urwid text markup to a plain string wrapped in the given attribute."""
     if isinstance(markup, list):
         plain = "".join(seg if isinstance(seg, str) else seg[1] for seg in markup)
     elif isinstance(markup, tuple):
         plain = markup[1]
     else:
         plain = markup
-    return ("muted", plain)
+    return (attr, plain)
+
+
+@pure
+def _is_field_stale(
+    field: FieldValue,
+    now: datetime,
+    staleness_threshold_seconds: float,
+) -> bool:
+    """Whether a field's `created` is older than the staleness threshold."""
+    age_seconds = (now - field.created).total_seconds()
+    return age_seconds > staleness_threshold_seconds
 
 
 def _get_name_cell_markup(
@@ -1271,8 +1340,17 @@ def _build_agent_row(
     widths: dict[str, int],
     column_defs: list[_ColumnDef],
     mark: str | None = None,
+    *,
+    now: datetime,
+    staleness_threshold_seconds: float,
 ) -> _SelectableRow:
-    """Build a columnar urwid widget for a single agent row."""
+    """Build a columnar urwid widget for a single agent row.
+
+    Per-cell staleness flatten: when the field backing a column has a
+    `created` older than `staleness_threshold_seconds`, that cell renders
+    as ('stale', text). Whole-row muted flatten still wins over per-cell
+    stale flatten -- a muted row stays uniformly grey regardless.
+    """
     raw_markup: dict[str, str | tuple[Hashable, str] | list[str | tuple[Hashable, str]]] = {
         defn.name: defn.markup_fn(entry) for defn in column_defs
     }
@@ -1281,10 +1359,17 @@ def _build_agent_row(
     # Muted agents: flatten all markup to gray
     if entry.section == BoardSection.MUTED:
         cell_markup: dict[str, str | tuple[Hashable, str] | list[str | tuple[Hashable, str]]] = {
-            k: _flatten_markup_to_muted(v) for k, v in raw_markup.items()
+            k: _flatten_markup_to_attr(v, "muted") for k, v in raw_markup.items()
         }
     else:
-        cell_markup = raw_markup
+        # Per-cell stale flatten for non-muted rows
+        cell_markup = {}
+        for k, v in raw_markup.items():
+            field = entry.fields.get(k)
+            if field is not None and _is_field_stale(field, now, staleness_threshold_seconds):
+                cell_markup[k] = _flatten_markup_to_attr(v, "stale")
+            else:
+                cell_markup[k] = v
 
     cols: list[tuple[int, Text] | Text] = []
     for defn in column_defs:
@@ -1313,7 +1398,6 @@ def _format_section_heading(section: BoardSection, count: int) -> list[str | tup
     return [(attr, prefix), f" ({count})"]
 
 
-@pure
 def _build_board_widgets(
     snapshot: BoardSnapshot | None,
     column_defs: list[_ColumnDef],
@@ -1321,8 +1405,16 @@ def _build_board_widgets(
     mark_attr_names: tuple[str, ...] = (),
     col_attr_names: tuple[str, ...] = (),
     section_order: tuple[BoardSection, ...] = BOARD_SECTION_ORDER,
+    staleness_threshold_seconds: float = DEFAULT_STALENESS_THRESHOLD_SECONDS,
+    now: datetime | None = None,
 ) -> tuple[SimpleFocusListWalker[AttrMap | Text | Divider | Columns], dict[int, AgentBoardEntry]]:
-    """Build the urwid widget list from a BoardSnapshot, grouped by section."""
+    """Build the urwid widget list from a BoardSnapshot, grouped by section.
+
+    `now` defaults to the current UTC time when None; pass an explicit value
+    in tests for determinism. Reads the wall clock when `now` is None, so this
+    function is intentionally not @pure.
+    """
+    effective_now = now if now is not None else now_utc()
     index_to_entry: dict[int, AgentBoardEntry] = {}
     walker: SimpleFocusListWalker[AttrMap | Text | Divider | Columns] = SimpleFocusListWalker([])
 
@@ -1357,7 +1449,14 @@ def _build_board_widgets(
 
         for entry in entries:
             mark = marks.get(entry.name) if marks else None
-            item = _build_agent_row(entry, col_widths, column_defs, mark)
+            item = _build_agent_row(
+                entry,
+                col_widths,
+                column_defs,
+                mark,
+                now=effective_now,
+                staleness_threshold_seconds=staleness_threshold_seconds,
+            )
             idx = len(walker)
             focus_map: dict[str | None, str] = {None: "reversed"}
             for attr in _AGENT_LINE_ATTRS + mark_attr_names + col_attr_names:
@@ -1398,6 +1497,7 @@ def _refresh_display(state: _KanpanState) -> None:
         state.mark_attr_names,
         state.col_attr_names,
         state.section_order,
+        staleness_threshold_seconds=state.staleness_threshold_seconds,
     )
     state.list_walker = walker
     state.frame.body = ListBox(walker)
@@ -1422,7 +1522,13 @@ def _on_auto_refresh_alarm(loop: MainLoop, state: _KanpanState) -> None:
 
 
 def _load_user_commands(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
-    """Load user-defined commands from plugin config."""
+    """Load user-defined commands from plugin config.
+
+    Values may arrive as either `CustomCommand` instances (when the caller
+    constructed the config directly) or raw dicts (when the TOML loader used
+    `model_construct`, which bypasses Pydantic's recursive validation and
+    leaves nested dict-typed fields in their raw form).
+    """
     config = mngr_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
     result: dict[str, CustomCommand] = {}
     for key, value in config.commands.items():
@@ -1433,9 +1539,9 @@ def _load_user_commands(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
     return result
 
 
-def _build_command_map(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
+def _build_command_map(mngr_ctx: MngrContext) -> dict[str, KanpanCommand]:
     """Build the unified command map: builtins merged with user config."""
-    commands = dict(_BUILTIN_COMMANDS)
+    commands: dict[str, KanpanCommand] = dict(_BUILTIN_COMMANDS)
     user_commands = _load_user_commands(mngr_ctx)
     commands.update(user_commands)
     return {key: cmd for key, cmd in commands.items() if cmd.enabled}
@@ -1443,15 +1549,15 @@ def _build_command_map(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
 
 @pure
 def _build_mark_palette(
-    commands: dict[str, CustomCommand],
+    commands: dict[str, KanpanCommand],
 ) -> tuple[list[tuple[str, str, str]], tuple[str, ...]]:
     """Build palette entries and attr names for markable commands."""
     entries: list[tuple[str, str, str]] = []
     attr_names: list[str] = []
     for key, cmd in commands.items():
-        if not cmd.markable:
+        color = _mark_color(cmd)
+        if color is None:
             continue
-        color = cmd.markable if isinstance(cmd.markable, str) else _DEFAULT_MARK_COLOR
         attr = f"mark_{key}"
         entries.append((attr, color, ""))
         entries.append((f"{attr}_focus", f"{color},standout", ""))
@@ -1474,9 +1580,13 @@ def run_kanpan(
 
     # Build footer keybindings
     mark_keys = {_BUILTIN_COMMAND_KEY_UNMARK}
-    mark_parts = [f"{key}: {cmd.name}" for key, cmd in commands.items() if cmd.markable or key in mark_keys]
+    mark_parts = [
+        f"{key}: {cmd.name}" for key, cmd in commands.items() if _mark_color(cmd) is not None or key in mark_keys
+    ]
     mark_parts.append("U: unmark all")
-    action_parts = [f"{key}: {cmd.name}" for key, cmd in commands.items() if not cmd.markable and key not in mark_keys]
+    action_parts = [
+        f"{key}: {cmd.name}" for key, cmd in commands.items() if _mark_color(cmd) is None and key not in mark_keys
+    ]
     action_parts.append("q: quit")
     keybindings = "  ".join(mark_parts + ["|"] + action_parts) + "  "
 
@@ -1518,6 +1628,7 @@ def run_kanpan(
         commands=commands,
         refresh_interval_seconds=plugin_config.refresh_interval_seconds,
         retry_cooldown_seconds=plugin_config.retry_cooldown_seconds,
+        staleness_threshold_seconds=plugin_config.effective_staleness_threshold_seconds(),
         mark_attr_names=mark_attr_names,
         column_defs=column_defs,
         data_sources=data_sources,

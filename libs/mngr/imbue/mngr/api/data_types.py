@@ -41,7 +41,7 @@ class ConnectionOptions(FrozenModel):
         default="5s",
         description="Delay between retries (e.g., 5s, 1m)",
     )
-    attach_command: str | None = Field(
+    session_command: str | None = Field(
         default=None,
         description="Command to run instead of attaching to main session",
     )
@@ -68,6 +68,17 @@ class GcResult(MutableModel):
     work_dirs_destroyed: list[WorkDirInfo] = Field(
         default_factory=list,
         description="Work directories that were destroyed",
+    )
+    source_dirs_destroyed: list[WorkDirInfo] = Field(
+        default_factory=list,
+        description="Source repositories (e.g. mngr-managed git clones) that were destroyed",
+    )
+    source_dirs_kept_due_to_unpushed_branches: list[WorkDirInfo] = Field(
+        default_factory=list,
+        description=(
+            "Source repositories that were left in place because they still have local branches "
+            "not present on any remote. Delete the branches (or push them) to allow future GC."
+        ),
     )
     machines_deleted: list[DiscoveredHost] = Field(
         default_factory=list,

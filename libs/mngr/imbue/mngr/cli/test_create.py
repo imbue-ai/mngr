@@ -10,7 +10,6 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
-from imbue.mngr.api.agent_addr import AgentAddress
 from imbue.mngr.api.agent_addr import parse_agent_address
 from imbue.mngr.cli.create import _create_agent
 from imbue.mngr.cli.create import _resolve_transfer_mode
@@ -21,6 +20,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import HostLocation
+from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
@@ -789,7 +790,7 @@ ensure_clean = false
             ],
             obj=plugin_manager,
             catch_exceptions=False,
-            env={"MNGR_PROJECT_DIR": str(mngr_dir)},
+            env={"MNGR_PROJECT_CONFIG_DIR": str(mngr_dir)},
         )
 
         assert result.exit_code == 0, f"CLI failed with: {result.output}"
@@ -847,7 +848,7 @@ ensure_clean = false
             ],
             obj=plugin_manager,
             catch_exceptions=False,
-            env={"MNGR_PROJECT_DIR": str(mngr_dir)},
+            env={"MNGR_PROJECT_CONFIG_DIR": str(mngr_dir)},
         )
 
         assert result.exit_code == 0, f"CLI failed with: {result.output}"
@@ -905,7 +906,7 @@ ensure_clean = false
             "130006",
         ],
         obj=plugin_manager,
-        env={"MNGR_PROJECT_DIR": str(mngr_dir)},
+        env={"MNGR_PROJECT_CONFIG_DIR": str(mngr_dir)},
     )
 
     assert result.exit_code != 0
@@ -1289,17 +1290,40 @@ def test_transfer_defaults_to_git_mirror_for_existing_remote_host(
     temp_git_repo: Path,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """When targeting an existing host on a non-local provider, default should be git-mirror."""
-    address = AgentAddress(
-        agent_name=None,
+    """When the target is on a different host (here: remote), default to git-mirror."""
+    target_host = DiscoveredHost(
+        host_id=HostId.generate(),
         host_name=HostName("myhost"),
         provider_name=ProviderInstanceName("modal"),
     )
     source_location = HostLocation(host=local_host, path=temp_git_repo)
 
-    result = _resolve_transfer_mode(default_create_cli_opts, address, source_location, temp_mngr_ctx, target_path=None)
+    result = _resolve_transfer_mode(
+        default_create_cli_opts, target_host, source_location, temp_mngr_ctx, target_path=None
+    )
 
     assert result == TransferMode.GIT_MIRROR
+
+
+def test_transfer_defaults_to_git_worktree_for_same_remote_host(
+    default_create_cli_opts: CreateCliOptions,
+    local_host: Host,
+    temp_git_repo: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """When source and target resolve to the same host, default to git-worktree even if remote."""
+    target_host = DiscoveredHost(
+        host_id=local_host.id,
+        host_name=HostName("local"),
+        provider_name=ProviderInstanceName("local"),
+    )
+    source_location = HostLocation(host=local_host, path=temp_git_repo)
+
+    result = _resolve_transfer_mode(
+        default_create_cli_opts, target_host, source_location, temp_mngr_ctx, target_path=None
+    )
+
+    assert result == TransferMode.GIT_WORKTREE
 
 
 def test_create_with_invalid_provider_name(
@@ -1358,3 +1382,55 @@ def test_create_with_idle_timeout_rejected_on_local_provider(
     )
     assert result.exit_code != 0
     assert "not supported" in result.output.lower() or "remote provider" in result.output.lower()
+
+
+@pytest.mark.acceptance
+@pytest.mark.tmux
+@pytest.mark.timeout(300)
+def test_cli_create_from_git_url(
+    cli_runner: CliRunner,
+    temp_host_dir: Path,
+    mngr_test_prefix: str,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """create --source <git URL> clones the repo and produces an agent with the repo contents.
+
+    Uses this project's own public GitHub URL. Network access is required; the
+    assertion is against a long-stable top-level file (CLAUDE.md) so the test
+    does not break on repo layout churn.
+    """
+    agent_name = f"test-git-url-{int(time.time())}"
+    session_name = f"{mngr_test_prefix}{agent_name}"
+
+    with tmux_session_cleanup(session_name):
+        result = cli_runner.invoke(
+            create,
+            [
+                "--name",
+                agent_name,
+                "--type",
+                "command",
+                "--source",
+                "https://github.com/imbue-ai/mngr",
+                "--no-connect",
+                "--",
+                "sleep",
+                "963823",
+            ],
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0, f"CLI failed with: {result.output}"
+
+        clones_dir = temp_host_dir / "clones"
+        clone_entries = list(clones_dir.iterdir())
+        assert any(p.name.startswith(f"{agent_name}-") for p in clone_entries), (
+            f"Expected a clone under {clones_dir}, got {clone_entries}"
+        )
+
+        worktrees_dir = temp_host_dir / "worktrees"
+        worktree_entries = list(worktrees_dir.iterdir())
+        matching_worktrees = [p for p in worktree_entries if p.name.startswith(f"{agent_name}-")]
+        assert matching_worktrees, f"Expected a worktree under {worktrees_dir}, got {worktree_entries}"
+        assert (matching_worktrees[0] / "CLAUDE.md").exists()

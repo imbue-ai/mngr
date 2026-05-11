@@ -2169,6 +2169,9 @@ log "=== Shutdown script completed ==="
         # Track the host state determined during discovery so we don't need to
         # call h.get_state() (which would SSH into the host) at the end.
         discovery_state: dict[HostId, HostState] = {}
+        # Track host names from records / sandbox tags so we don't need to call
+        # h.get_name() (which would SSH into the host to read certified data) at the end.
+        host_name_by_id: dict[HostId, HostName] = {}
         processed_host_ids: set[HostId] = set()
 
         # Fetch sandboxes and host records in parallel since they are independent.
@@ -2192,6 +2195,8 @@ log "=== Shutdown script completed ==="
                 tags = sandbox.get_tags()
                 host_id = HostId(tags[TAG_HOST_ID])
                 running_sandbox_by_host_id[host_id] = sandbox
+                if TAG_HOST_NAME in tags:
+                    host_name_by_id[host_id] = HostName(tags[TAG_HOST_NAME])
             except (KeyError, ValueError) as e:
                 logger.warning("Skipped sandbox with invalid tags: {}", e)
                 continue
@@ -2204,6 +2209,9 @@ log "=== Shutdown script completed ==="
             for host_record in all_host_records:
                 host_id = HostId(host_record.certified_host_data.host_id)
                 processed_host_ids.add(host_id)
+                # Records always carry the canonical mngr-assigned name; prefer
+                # this over sandbox tags (which can be stale) when both exist.
+                host_name_by_id[host_id] = HostName(host_record.certified_host_data.host_name)
                 host_futures_with_records.append(
                     executor.submit(
                         self._construct_host_from_record_for_discovery,
@@ -2248,10 +2256,12 @@ log "=== Shutdown script completed ==="
         for host in hosts:
             self._evict_cached_host(host.id, replacement=host)
 
+        # Use names collected from host records / sandbox tags so building the
+        # DiscoveredHost list does not trigger an SSH read of data.json per host.
         return [
             DiscoveredHost(
                 host_id=h.id,
-                host_name=h.get_name(),
+                host_name=host_name_by_id.get(h.id) or h.get_name(),
                 provider_name=self.name,
                 host_state=discovery_state.get(h.id),
             )
@@ -2463,6 +2473,7 @@ log "=== Shutdown script completed ==="
             with trace_span("Reading host record for {}", host_ref.host_id, _is_trace_span_enabled=False):
                 host_record = self._read_host_record(host_ref.host_id)
 
+            host: HostInterface | None = None
             try:
                 with trace_span("Getting host for {}", host_ref.host_id, _is_trace_span_enabled=False):
                     host = self._get_host(host_ref.host_id, host_record)
@@ -2489,6 +2500,9 @@ log "=== Shutdown script completed ==="
                     e,
                 )
                 return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+            finally:
+                if host is not None:
+                    host.disconnect()
 
             # Build HostDetails from cached host record + SSH-collected data
             with trace_span("Assembling host details for {}", host_ref.host_id, _is_trace_span_enabled=False):

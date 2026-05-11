@@ -73,18 +73,6 @@ def test_kanpan_command_converts_project_to_include_filter(
     assert patched_run_kanpan[0]["include_filters"] == ('labels.project == "mngr"',)
 
 
-def test_kanpan_command_ors_multiple_projects(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-    patched_run_kanpan: list[dict[str, Any]],
-) -> None:
-    result = cli_runner.invoke(
-        kanpan, ["--project", "mngr", "--project", "other"], obj=plugin_manager, catch_exceptions=False
-    )
-    assert result.exit_code == 0
-    assert patched_run_kanpan[0]["include_filters"] == ('labels.project == "mngr" || labels.project == "other"',)
-
-
 def test_kanpan_command_fails_fast_on_invalid_cel(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,

@@ -40,6 +40,7 @@ from imbue.mngr.config.provider_config_registry import list_registered_provider_
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UnknownBackendError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.plugin_catalog import get_plugin_install_hint
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -71,13 +72,14 @@ def load_config(
     disabled_plugins: Sequence[str] | None = None,
     is_interactive: bool = False,
     strict: bool | None = None,
+    silent_unknown_fields: bool = False,
 ) -> MngrContext:
     """Load and merge configuration from all sources.
 
     Precedence (lowest to highest):
     1. User config (~/.{root_name}/profiles/<profile_id>/settings.toml)
-    2. Project config (.{root_name}/settings.toml at context_dir, git root, or MNGR_PROJECT_DIR)
-    3. Local config (.{root_name}/settings.local.toml at context_dir, git root, or MNGR_PROJECT_DIR)
+    2. Project config (.{root_name}/settings.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
+    3. Local config (.{root_name}/settings.local.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
     4. Environment variables (MNGR_ROOT_NAME, MNGR_PREFIX, MNGR_HOST_DIR)
     5. CLI arguments (handled by caller)
 
@@ -87,7 +89,7 @@ def load_config(
 
     Explicit MNGR_PREFIX/MNGR_HOST_DIR values override MNGR_ROOT_NAME-derived defaults.
 
-    MNGR_PROJECT_DIR overrides where project settings are found. When set, project
+    MNGR_PROJECT_CONFIG_DIR overrides where project settings are found. When set, project
     and local config files are loaded from that directory instead of .{root_name}/
     at the git root.
 
@@ -116,14 +118,11 @@ def load_config(
         providers={},
         plugins={},
         logging=LoggingConfig(),
-        commands={"create": CommandDefaults(defaults={"pass_host_env": ["EDITOR"]})},
+        commands={},
     )
 
     if strict is None:
-        # When MNGR_ALLOW_UNKNOWN_CONFIG is set, unknown fields in config files produce
-        # warnings instead of errors.  This is useful during development when a branch
-        # adds a new config field but other branches don't know about it yet.
-        strict = not parse_bool_env(os.environ.get("MNGR_ALLOW_UNKNOWN_CONFIG", ""))
+        strict = resolve_strict_from_env()
 
     # Load and merge config files in precedence order (user, project, local)
     for raw in (
@@ -132,7 +131,11 @@ def load_config(
         load_local_config(context_dir, root_name, concurrency_group),
     ):
         if raw is not None:
-            config = config.merge_with(parse_config(raw, disabled_plugins=config_disabled_plugins, strict=strict))
+            config = config.merge_with(
+                parse_config(
+                    raw, disabled_plugins=config_disabled_plugins, strict=strict, silent=silent_unknown_fields
+                )
+            )
 
     # Apply environment variable overrides
     prefix = os.environ.get("MNGR_PREFIX")
@@ -219,7 +222,14 @@ def load_config(
     # Validate and apply defaults using normal constructor
     final_config = MngrConfig.model_validate(config_dict)
 
-    # check whether we're in pytest
+    # Check whether we're in pytest. The expected way to hit this branch is a
+    # poorly-scoped test whose subprocess mngr picked up the repo's
+    # .mngr/settings.toml because MNGR_ROOT_NAME / MNGR_HOST_DIR aren't pointed
+    # at a tmp directory. The shared plugin test fixtures handle that
+    # scoping; if they aren't available for a given test, use MNGR_ALLOW_PYTEST
+    # as the explicit opt-in instead of stripping PYTEST_CURRENT_TEST or
+    # setting is_allowed_in_pytest=True in the repo config (both dodge the
+    # guard without actually fixing the isolation).
     if not final_config.is_allowed_in_pytest and "PYTEST_CURRENT_TEST" in os.environ:
         if os.environ.get("MNGR_ALLOW_PYTEST") != "1":
             raise ConfigParseError(
@@ -238,7 +248,7 @@ def load_config(
         # pytest -- that's the actual leak-prevention gate.
 
     # Resolve project root for use as cwd in pre-command scripts.
-    # Note: MNGR_PROJECT_DIR is NOT used here because it points to the config
+    # Note: MNGR_PROJECT_CONFIG_DIR is NOT used here because it points to the config
     # directory (containing settings.toml), not the project root.
     project_root = context_dir or find_git_worktree_root(start=None, cg=concurrency_group)
 
@@ -288,12 +298,51 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
 # =============================================================================
 
 
+def resolve_strict_from_env() -> bool:
+    """Return the strict policy implied by the MNGR_ALLOW_UNKNOWN_CONFIG env var.
+
+    Strict (True) is the default. When MNGR_ALLOW_UNKNOWN_CONFIG is set to a
+    truthy value, unknown fields produce warnings instead of errors, which is
+    useful when older mngr installations encounter newer config files.
+
+    Centralized here so that ``load_config`` and ``setup_command_context`` agree
+    on the policy and the env var is read in exactly one place.
+    """
+    return not parse_bool_env(os.environ.get("MNGR_ALLOW_UNKNOWN_CONFIG", ""))
+
+
+def _normalize_field_keys(raw: dict[str, Any], context: str) -> dict[str, Any]:
+    """Replace hyphens with underscores in dict keys.
+
+    TOML conventionally uses hyphens (`pass-env`), but Python dataclasses use
+    underscores (`pass_env`). Normalize so both forms map to the same field.
+    Raises ConfigParseError if normalization would create a duplicate key.
+
+    Always returns a fresh dict, so callers can freely mutate the result
+    (e.g. via `del` in `_check_unknown_fields` or `pop` in `parse_config`)
+    without affecting the caller's input.
+    """
+    result: dict[str, Any] = {}
+    seen_originals: dict[str, str] = {}
+    for key, value in raw.items():
+        normalized = key.replace("-", "_")
+        if normalized in result:
+            raise ConfigParseError(
+                f"Config in {context} has both '{seen_originals[normalized]}' and '{key}' "
+                f"which both normalize to '{normalized}'. Use one or the other."
+            )
+        result[normalized] = value
+        seen_originals[normalized] = key
+    return result
+
+
 def _check_unknown_fields(
     raw_config: dict[str, Any],
     model_class: type[BaseModel],
     context: str,
     *,
     strict: bool = True,
+    silent: bool = False,
     extra_hint: str | None = None,
 ) -> None:
     """Check for unknown fields in raw_config and either raise or warn.
@@ -301,6 +350,10 @@ def _check_unknown_fields(
     When strict=True, raises ConfigParseError (used by config set to catch typos).
     When strict=False, logs a warning and removes the unknown fields so that config files
     written for newer versions of mngr don't break older versions.
+    When silent=True (and strict=False), suppress the warning entirely. Used by
+    ``mngr plugin add``, where the config is expected to reference plugins that
+    are not yet installed; the warnings are noise that resolve themselves once
+    the install completes.
 
     `extra_hint` is appended to the error/warning message after the field listing
     when there are unknown fields. Used to suggest causes (e.g. a missing plugin).
@@ -312,7 +365,8 @@ def _check_unknown_fields(
         full_msg = f"{base_msg}\n{extra_hint}" if extra_hint else base_msg
         if strict:
             raise ConfigParseError(full_msg)
-        logger.warning(full_msg)
+        if not silent:
+            logger.warning(full_msg)
         for key in unknown:
             del raw_config[key]
 
@@ -322,6 +376,7 @@ def _parse_providers(
     disabled_plugins: frozenset[str],
     *,
     strict: bool = True,
+    silent: bool = False,
 ) -> dict[ProviderInstanceName, ProviderInstanceConfig]:
     """Parse provider configs using the registry.
 
@@ -336,6 +391,7 @@ def _parse_providers(
     known_backends = set(list_registered_provider_backend_names())
 
     for name, raw_config in raw_providers.items():
+        raw_config = _normalize_field_keys(raw_config, f"providers.{name}")
         backend = raw_config.get("backend") or name
         plugin = raw_config.get("plugin") or backend
         if plugin in disabled_plugins:
@@ -363,18 +419,13 @@ def _parse_providers(
                     f" block. Currently disabled plugins: {', '.join(sorted(disabled_plugins))}"
                 )
             else:
-                msg += (
-                    f" The plugin package that provides the"
-                    f" '{backend}' backend may not be installed. If you installed mngr"
-                    f" as a tool, try reinstalling with the plugin package"
-                    f" (e.g. --with 'imbue-mngr-{backend}')."
-                )
+                msg += f" {get_plugin_install_hint(backend)}"
             if strict:
                 raise ConfigParseError(msg) from e
-            else:
+            if not silent:
                 logger.warning(msg)
-                continue
-        _check_unknown_fields(raw_config, config_class, f"providers.{name}", strict=strict)
+            continue
+        _check_unknown_fields(raw_config, config_class, f"providers.{name}", strict=strict, silent=silent)
         providers[ProviderInstanceName(name)] = config_class.model_construct(**raw_config)
 
     return providers
@@ -448,6 +499,7 @@ def _parse_agent_types(
     disabled_plugins: frozenset[str],
     *,
     strict: bool = True,
+    silent: bool = False,
 ) -> dict[AgentTypeName, AgentTypeConfig]:
     """Parse agent type configs using the registry.
 
@@ -455,6 +507,10 @@ def _parse_agent_types(
     Agent type blocks whose plugin is disabled are silently skipped.
     """
     agent_types: dict[AgentTypeName, AgentTypeConfig] = {}
+
+    # Normalize hyphens in field names up front so _has_disabled_ancestor can
+    # read normalized `plugin` / `parent_type` fields as it walks the chain.
+    raw_types = {name: _normalize_field_keys(raw, f"agent_types.{name}") for name, raw in raw_types.items()}
 
     for name, raw_config in raw_types.items():
         # Custom types with a parent_type should use the parent's config class,
@@ -496,6 +552,7 @@ def _parse_agent_types(
             config_class,
             f"agent_types.{name}",
             strict=strict,
+            silent=silent,
             extra_hint=extra_hint,
         )
         normalized_config = _normalize_tuple_fields_for_construct(raw_config)
@@ -508,6 +565,7 @@ def _parse_plugins(
     raw_plugins: dict[str, dict[str, Any]],
     *,
     strict: bool = True,
+    silent: bool = False,
 ) -> dict[PluginName, PluginConfig]:
     """Parse plugin configs using the registry.
 
@@ -516,8 +574,9 @@ def _parse_plugins(
     plugins: dict[PluginName, PluginConfig] = {}
 
     for name, raw_config in raw_plugins.items():
+        raw_config = _normalize_field_keys(raw_config, f"plugins.{name}")
         config_class = get_plugin_config_class(name)
-        _check_unknown_fields(raw_config, config_class, f"plugins.{name}", strict=strict)
+        _check_unknown_fields(raw_config, config_class, f"plugins.{name}", strict=strict, silent=silent)
         plugins[PluginName(name)] = config_class.model_construct(**raw_config)
 
     return plugins
@@ -589,21 +648,23 @@ def block_disabled_plugins(pm: pluggy.PluginManager, disabled_names: frozenset[s
             pm.set_blocked(name)
 
 
-def _parse_retry_config(raw_retry: dict[str, Any], *, strict: bool = True) -> RetryConfig:
+def _parse_retry_config(raw_retry: dict[str, Any], *, strict: bool = True, silent: bool = False) -> RetryConfig:
     """Parse retry config.
 
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
-    _check_unknown_fields(raw_retry, RetryConfig, "retry", strict=strict)
+    raw_retry = _normalize_field_keys(raw_retry, "retry")
+    _check_unknown_fields(raw_retry, RetryConfig, "retry", strict=strict, silent=silent)
     return RetryConfig.model_construct(**raw_retry)
 
 
-def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True) -> LoggingConfig:
+def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True, silent: bool = False) -> LoggingConfig:
     """Parse logging config.
 
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
-    _check_unknown_fields(raw_logging, LoggingConfig, "logging", strict=strict)
+    raw_logging = _normalize_field_keys(raw_logging, "logging")
+    _check_unknown_fields(raw_logging, LoggingConfig, "logging", strict=strict, silent=silent)
     return LoggingConfig.model_construct(**raw_logging)
 
 
@@ -624,8 +685,10 @@ def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, Comman
     commands: dict[str, CommandDefaults] = {}
 
     for command_name, raw_defaults in raw_commands.items():
-        # Make a mutable copy so we don't mutate the caller's dict
-        defaults_copy = dict(raw_defaults)
+        # Normalize hyphens to underscores so TOML-style `pass-env` matches `pass_env`.
+        # _normalize_field_keys always returns a fresh dict, so the pop() below
+        # cannot mutate the caller's input.
+        defaults_copy = _normalize_field_keys(raw_defaults, f"commands.{command_name}")
         default_subcommand = defaults_copy.pop("default_subcommand", None)
         commands[command_name] = CommandDefaults.model_construct(
             defaults=defaults_copy,
@@ -648,6 +711,7 @@ def _parse_create_templates(raw_templates: dict[str, dict[str, Any]]) -> dict[Cr
     templates: dict[CreateTemplateName, CreateTemplate] = {}
 
     for template_name, raw_options in raw_templates.items():
+        raw_options = _normalize_field_keys(raw_options, f"create_templates.{template_name}")
         # make sure the options don't define anything that cannot be handled:
         for field in raw_options.keys():
             if field not in CreateCliOptions.model_fields:
@@ -665,6 +729,7 @@ def parse_config(
     disabled_plugins: frozenset[str],
     *,
     strict: bool = True,
+    silent: bool = False,
 ) -> MngrConfig:
     """Parse a raw config dict into MngrConfig.
 
@@ -673,7 +738,11 @@ def parse_config(
     When strict=True (default), raises ConfigParseError for unknown fields.
     When strict=False, logs a warning and ignores unknown fields (used when
     MNGR_ALLOW_UNKNOWN_CONFIG is set to allow forward-compatible config files).
+    When silent=True (and strict=False), suppresses the warning entirely. Used by
+    ``mngr plugin add``, where the config is expected to reference plugins that
+    are not yet installed.
     """
+    raw = _normalize_field_keys(raw, "top-level config")
     # Build kwargs with None for unset scalar fields
     kwargs: dict[str, Any] = {}
     kwargs["prefix"] = raw.pop("prefix", None)
@@ -684,22 +753,28 @@ def parse_config(
     kwargs["connect_command"] = raw.pop("connect_command", None)
     kwargs["is_remote_agent_installation_allowed"] = raw.pop("is_remote_agent_installation_allowed", None)
     kwargs["agent_types"] = (
-        _parse_agent_types(raw.pop("agent_types", {}), disabled_plugins=disabled_plugins, strict=strict)
+        _parse_agent_types(raw.pop("agent_types", {}), disabled_plugins=disabled_plugins, strict=strict, silent=silent)
         if "agent_types" in raw
         else {}
     )
     kwargs["providers"] = (
-        _parse_providers(raw.pop("providers", {}), disabled_plugins=disabled_plugins, strict=strict)
+        _parse_providers(raw.pop("providers", {}), disabled_plugins=disabled_plugins, strict=strict, silent=silent)
         if "providers" in raw
         else {}
     )
-    kwargs["plugins"] = _parse_plugins(raw.pop("plugins", {}), strict=strict) if "plugins" in raw else {}
+    kwargs["plugins"] = (
+        _parse_plugins(raw.pop("plugins", {}), strict=strict, silent=silent) if "plugins" in raw else {}
+    )
     kwargs["commands"] = _parse_commands(raw.pop("commands", {})) if "commands" in raw else {}
     kwargs["create_templates"] = (
         _parse_create_templates(raw.pop("create_templates", {})) if "create_templates" in raw else {}
     )
-    kwargs["retry"] = _parse_retry_config(raw.pop("retry", {}), strict=strict) if "retry" in raw else None
-    kwargs["logging"] = _parse_logging_config(raw.pop("logging", {}), strict=strict) if "logging" in raw else None
+    kwargs["retry"] = (
+        _parse_retry_config(raw.pop("retry", {}), strict=strict, silent=silent) if "retry" in raw else None
+    )
+    kwargs["logging"] = (
+        _parse_logging_config(raw.pop("logging", {}), strict=strict, silent=silent) if "logging" in raw else None
+    )
     kwargs["is_nested_tmux_allowed"] = raw.pop("is_nested_tmux_allowed", None)
     kwargs["headless"] = raw.pop("headless", None)
     kwargs["is_error_reporting_enabled"] = raw.pop("is_error_reporting_enabled", None)
@@ -712,7 +787,8 @@ def parse_config(
     if len(raw) > 0:
         if strict:
             raise ConfigParseError(f"Unknown configuration fields: {list(raw.keys())}")
-        logger.warning("Unknown configuration fields: {}", list(raw.keys()))
+        if not silent:
+            logger.warning("Unknown configuration fields: {}", list(raw.keys()))
 
     # Use model_construct to bypass field defaults
     return MngrConfig.model_construct(**kwargs)

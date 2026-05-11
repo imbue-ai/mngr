@@ -1,7 +1,9 @@
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
+from collections.abc import Iterator
 from concurrent.futures import Future
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -14,7 +16,6 @@ from pydantic import Field
 from pyinfra.api.host import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
@@ -30,6 +31,7 @@ from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -48,6 +50,7 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.utils.name_generator import generate_host_name
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
 def _compute_idle_seconds(
@@ -227,6 +230,28 @@ def _build_agent_details_from_offline_ref(
         host=host_details,
         plugin={},
     )
+
+
+@contextmanager
+def connected_host(
+    provider: "ProviderInstanceInterface",
+    host_id: HostId,
+) -> Iterator[HostInterface]:
+    """Connect to a host and disconnect when done, releasing the connection."""
+    host = provider.get_host(host_id)
+    try:
+        yield host
+    finally:
+        host.disconnect()
+
+
+def _discover_agents_on_host(
+    provider: "ProviderInstanceInterface",
+    host_id: HostId,
+) -> list[DiscoveredAgent]:
+    """Discover agents on a host, disconnecting afterward."""
+    with connected_host(provider, host_id) as host:
+        return host.discover_agents()
 
 
 class ProviderInstanceInterface(MutableModel, ABC):
@@ -410,10 +435,12 @@ class ProviderInstanceInterface(MutableModel, ABC):
         logger.trace("Loaded {} host(s) from provider {}", len(host_refs), self.name)
 
         future_by_host_ref: dict[DiscoveredHost, Future[list[DiscoveredAgent]]] = {}
-        with ConcurrencyGroupExecutor(parent_cg=cg, name=f"load_agents_{self.name}", max_workers=32) as executor:
+        with mngr_executor(parent_cg=cg, name=f"load_agents_{self.name}", max_workers=32) as executor:
             for host_ref in host_refs:
                 future_by_host_ref[host_ref] = executor.submit(
-                    self.get_host(host_ref.host_id).discover_agents,
+                    _discover_agents_on_host,
+                    self,
+                    host_ref.host_id,
                 )
 
         return {host_ref: future.result() for host_ref, future in future_by_host_ref.items()}
@@ -442,8 +469,10 @@ class ProviderInstanceInterface(MutableModel, ABC):
         operation (e.g., one SSH command) instead of making many individual calls.
         """
         is_authentication_failure = False
+        initial_host: HostInterface | None = None
         try:
             host = self.get_host(host_ref.host_id)
+            initial_host = host
             # this is inside the try block so that, if the host appears to be online but transitions to offline, we properly fall back to offline data
             host_details, ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
 
@@ -505,6 +534,10 @@ class ProviderInstanceInterface(MutableModel, ABC):
             agent_details_list = [
                 _build_agent_details_from_offline_ref(agent_ref, host_details) for agent_ref in agent_refs
             ]
+
+        finally:
+            if initial_host is not None:
+                initial_host.disconnect()
 
         return host_details, agent_details_list
 
@@ -679,3 +712,52 @@ class ProviderInstanceInterface(MutableModel, ABC):
 
         The default implementation is a no-op for providers that don't need this.
         """
+
+    # =========================================================================
+    # Outer Host Access
+    # =========================================================================
+
+    def outer_host_id_for(self, host_id: HostId) -> str | None:
+        """Return a stable identifier for the actual outer host of ``host_id``.
+
+        Used by ``mngr exec --outer`` to dedup *before* opening any
+        connections: two inner hosts whose ``outer_host_id_for`` returns the
+        same string are guaranteed to share the same outer machine. For
+        example, all docker containers on the same daemon share one outer
+        and should produce the same id; each VPS-Docker instance has its
+        own outer (per VPS IP).
+
+        Returns ``None`` when this provider has no accessible outer (e.g.
+        modal sandboxes, the local provider, the ssh provider, or
+        docker-over-tcp daemons). Raises ``HostNotFoundError`` for unknown ids.
+
+        The id is for grouping only and should be cheap to compute (no SSH
+        connection). Providers that override ``outer_host_for`` MUST also
+        override this method to return a non-None id so the dedup logic
+        works.
+
+        The default implementation returns ``None`` (consistent with the
+        default ``outer_host_for`` returning ``None``).
+        """
+        return None
+
+    @contextmanager
+    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+        """Open the outer host for the inner host with the given id.
+
+        Yields an ``OuterHostInterface`` for the underlying machine that hosts
+        the inner host (container/sandbox), or ``None`` when no outer host is
+        accessible (e.g. modal sandboxes, the local provider, the ssh provider,
+        or docker-over-tcp daemons).
+
+        Raises ``HostNotFoundError`` if the given ``host_id`` is unknown to this
+        provider. Outer-host construction is a pure function of (provider,
+        host_id) and does not depend on the inner host being reachable.
+
+        Each ``with`` entry produces a fresh outer-host instance and a fresh
+        SSH connection (when applicable); the connection is closed on exit.
+
+        The default implementation yields ``None``. Providers that have an
+        accessible outer host override this method (and ``outer_host_id_for``).
+        """
+        yield None

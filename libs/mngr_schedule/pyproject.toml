@@ -23,6 +23,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
+exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
@@ -57,6 +58,7 @@ omit = [
   "test_*.py",
   "*/tests/*",
   "*/conftest.py",
+  "*/testing.py",
   # Modal cron runner and verification run on Modal and require infrastructure to test
   "*/implementations/modal/cron_runner.py",
   "*/implementations/modal/verification.py",

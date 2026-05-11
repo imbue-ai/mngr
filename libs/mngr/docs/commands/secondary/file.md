@@ -160,7 +160,7 @@ mngr file put [OPTIONS] TARGET PATH
 - [mngr exec](../primary/exec.md) - Execute a shell command on an agent's host
 - [mngr push](../primary/push.md) - Push files or git commits to an agent
 - [mngr pull](../primary/pull.md) - Pull files or git commits from an agent
-- [mngr events](./events.md) - View agent and host event files
+- [mngr event](./event.md) - View agent and host event files
 
 ## Examples
 

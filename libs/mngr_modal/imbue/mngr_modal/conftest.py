@@ -12,6 +12,7 @@ import modal.exception
 import pluggy
 import pytest
 import toml
+from loguru import logger
 from modal.environments import delete_environment
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -20,9 +21,9 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
+from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
+from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
-from imbue.mngr.utils.testing import TEST_ENV_PATTERN
-from imbue.mngr.utils.testing import TEST_ENV_PREFIX
 from imbue.mngr.utils.testing import delete_modal_apps_in_environment
 from imbue.mngr.utils.testing import delete_modal_environment
 from imbue.mngr.utils.testing import delete_modal_volumes_in_environment
@@ -274,11 +275,12 @@ def modal_test_session_cleanup(
     modal_test_session_user_id: UserId,
 ) -> Generator[None, None, None]:
     """Session-scoped fixture that cleans up the Modal environment at session end."""
-    yield
     prefix = f"{modal_test_session_env_name}-"
     environment_name = f"{prefix}{modal_test_session_user_id}"
     if len(environment_name) > 64:
         environment_name = environment_name[:64]
+    register_modal_test_environment(environment_name)
+    yield
     delete_modal_apps_in_environment(environment_name)
     delete_modal_volumes_in_environment(environment_name)
     delete_modal_environment(environment_name)
@@ -345,7 +347,8 @@ def _get_leaked_modal_apps() -> list[tuple[str, str]]:
             for app in apps
             if app.get("Description", "") in worker_modal_app_names and app.get("State", "") != "stopped"
         ]
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
+        logger.warning("Failed to list leaked modal apps: {}", e)
         return []
 
 
@@ -371,7 +374,8 @@ def _get_leaked_modal_volumes() -> list[str]:
             return []
         volumes = json.loads(result.stdout)
         return [v.get("Name", "") for v in volumes if v.get("Name", "") in worker_modal_volume_names]
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
+        logger.warning("Failed to list leaked modal volumes: {}", e)
         return []
 
 
@@ -397,7 +401,8 @@ def _get_leaked_modal_environments() -> list[str]:
             return []
         envs = json.loads(result.stdout)
         return [e.get("name", "") for e in envs if e.get("name", "") in worker_modal_environment_names]
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
+        logger.warning("Failed to list leaked modal environments: {}", e)
         return []
 
 
@@ -413,7 +418,9 @@ def _delete_modal_environments(environment_names: list[str]) -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def modal_session_cleanup() -> Generator[None, None, None]:
-    """Detect and clean up leaked Modal resources at the end of the test session."""
+    """Detect and clean up leaked Modal resources at the end of the test session.
+    ``autouse=True`` made it run cleanup after other non-autouse session fixtures.
+    """
     yield
     errors: list[str] = []
     leaked_apps = _get_leaked_modal_apps()

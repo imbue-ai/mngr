@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [rename|mv] <CURRENT> <NEW-NAME> [--dry-run] [--host]
+mngr [rename|mv] <CURRENT> <NEW-NAME> [--dry-run] [--host] [-l KEY=VALUE ...]
 ```
 
 Rename an agent or host [experimental].
@@ -38,6 +38,12 @@ mngr rename [OPTIONS] CURRENT NEW-NAME
 | ---- | ---- | ----------- | ------- |
 | `--dry-run` | boolean | Show what would be renamed without actually renaming | `False` |
 | `--host` | boolean | Rename a host instead of an agent [future] | `False` |
+
+## Labels
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `-l`, `--label` | text | Apply a KEY=VALUE label in the same atomic write as the rename (repeatable). Avoids the race where an external observer sees the renamed agent before separate `mngr label` calls have applied labels. | None |
 
 ## Common
 

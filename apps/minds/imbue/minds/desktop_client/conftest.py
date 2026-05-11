@@ -4,12 +4,18 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import ServiceLogRecord
 from imbue.minds.desktop_client.backend_resolver import parse_agents_from_json
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_records
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthAccount
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -18,6 +24,81 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 
 DEFAULT_SERVICE_NAME: ServiceName = ServiceName("web")
+
+
+class FakeImbueCloudCli(ImbueCloudCli):
+    """In-memory test double for :class:`ImbueCloudCli`.
+
+    Tests register accounts via :meth:`set_accounts` /
+    :meth:`add_account`; only :meth:`auth_list` is exercised. Other
+    subprocess-driven methods on the real CLI keep their default
+    implementations and will spawn ``mngr imbue_cloud …`` if a test
+    invokes them, so prefer narrower stubs when those paths matter.
+    """
+
+    accounts_to_return: list[ImbueCloudAuthAccount] = Field(default_factory=list)
+
+    def auth_list(self) -> list[ImbueCloudAuthAccount]:
+        return list(self.accounts_to_return)
+
+    def set_accounts(self, accounts: list[ImbueCloudAuthAccount]) -> None:
+        self.accounts_to_return = list(accounts)
+
+    def add_account(
+        self,
+        user_id: str,
+        email: str,
+        display_name: str | None = None,
+        is_active: bool = False,
+    ) -> None:
+        self.accounts_to_return.append(
+            ImbueCloudAuthAccount(
+                user_id=user_id,
+                email=email,
+                display_name=display_name,
+                is_active=is_active,
+            )
+        )
+
+    def remove_account(self, user_id: str) -> None:
+        self.accounts_to_return = [a for a in self.accounts_to_return if a.user_id != user_id]
+
+
+def make_fake_imbue_cloud_cli() -> FakeImbueCloudCli:
+    """Build a :class:`FakeImbueCloudCli` rooted at a fresh ``ConcurrencyGroup``."""
+    return FakeImbueCloudCli(parent_concurrency_group=ConcurrencyGroup(name="fake-imbue-cloud-cli"))
+
+
+def make_session_store_for_test(data_dir: Path, cli: ImbueCloudCli | None = None) -> MultiAccountSessionStore:
+    """Build a :class:`MultiAccountSessionStore` with a fake CLI by default."""
+    return MultiAccountSessionStore(data_dir=data_dir, cli=cli or make_fake_imbue_cloud_cli())
+
+
+@pytest.fixture
+def root_concurrency_group() -> Iterator[ConcurrencyGroup]:
+    """Root ``ConcurrencyGroup`` for tests that construct an ``AgentCreator``.
+
+    ``AgentCreator.root_concurrency_group`` is required (in production it is
+    owned by ``start_desktop_client`` and brackets the FastAPI lifespan); this
+    fixture enters an equivalent group for the test's duration and exits it
+    cleanly afterwards so any strand tracking / shutdown semantics match.
+    """
+    cg = ConcurrencyGroup(name="test-root")
+    with cg:
+        yield cg
+
+
+@pytest.fixture
+def notification_dispatcher() -> NotificationDispatcher:
+    """``NotificationDispatcher`` wired to the tkinter channel in tests.
+
+    Tests generally do not exercise the dispatch path; this fixture just
+    satisfies the required ``AgentCreator.notification_dispatcher`` field.
+    Pass ``is_electron=False`` so no ``emit_event`` JSONL lines leak into the
+    test's stdout. ``NotificationDispatcher.create`` skips tkinter setup when
+    ``tkinter_module`` is ``None``, which is what we want for unit tests.
+    """
+    return NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False)
 
 
 @pytest.fixture

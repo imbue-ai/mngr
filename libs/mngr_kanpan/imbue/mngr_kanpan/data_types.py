@@ -1,6 +1,8 @@
 from enum import auto
 from pathlib import Path
+from typing import Annotated
 from typing import Any
+from typing import Literal
 
 from pydantic import Field
 
@@ -67,8 +69,15 @@ class DataSourceConfig(FrozenModel):
 
 
 class CustomCommand(FrozenModel):
-    """A command definition for the kanpan board (builtin or user-defined)."""
+    """A user-defined command for the kanpan board.
 
+    The ``kind`` discriminator distinguishes this from the builtin command
+    shapes in ``KanpanCommand``; user TOML configs always parse as this
+    shape and so cannot reach the builtin-specific dispatch paths
+    (``mngr destroy`` for delete, ``git push`` for push).
+    """
+
+    kind: Literal["user"] = "user"
     name: str = Field(description="Display name shown in the status bar")
     command: str = Field(
         default="",
@@ -81,6 +90,70 @@ class CustomCommand(FrozenModel):
         description="If truthy, pressing the key marks agents for batch execution with x instead of running immediately."
         " Set to a color name (e.g. 'light red') to customize the mark indicator color.",
     )
+
+
+class ActionBuiltinRole(UpperCaseStrEnum):
+    """Identifies a non-markable builtin action that runs immediately on key press.
+
+    Dispatch in ``_dispatch_command`` uses ``match`` over this enum with
+    ``assert_never`` so the type checker flags any missing branch when a
+    new action role is added.
+    """
+
+    REFRESH = auto()
+    MUTE = auto()
+    UNMARK = auto()
+    EXECUTE = auto()
+
+
+class MarkableBuiltinRole(UpperCaseStrEnum):
+    """Identifies a markable builtin whose key press toggles a mark.
+
+    Batch dispatch in ``_submit_batch_item`` uses ``match`` over this enum
+    with ``assert_never`` so the type checker flags any missing branch when
+    a new markable role is added.
+    """
+
+    PUSH = auto()
+    DELETE = auto()
+
+
+class ActionBuiltinCommand(FrozenModel):
+    """A non-markable kanpan builtin (refresh, mute, unmark, execute).
+
+    Constructed only internally in ``tui._BUILTIN_COMMANDS``. The
+    ``markable`` field is not modelled here: by construction these are
+    never markable.
+    """
+
+    kind: Literal["action_builtin"] = "action_builtin"
+    role: ActionBuiltinRole = Field(description="Which action this is; drives dispatch in tui._dispatch_command.")
+    name: str = Field(description="Display name shown in the status bar")
+    enabled: bool = Field(default=True, description="Whether this builtin is active")
+
+
+class MarkableBuiltinCommand(FrozenModel):
+    """A markable kanpan builtin (push, delete).
+
+    Constructed only internally in ``tui._BUILTIN_COMMANDS``. Markable is a
+    required color string by construction; key press toggles a mark, and
+    later ``_submit_batch_item`` dispatches based on ``role``.
+    """
+
+    kind: Literal["markable_builtin"] = "markable_builtin"
+    role: MarkableBuiltinRole = Field(description="Which markable builtin this is; drives batch dispatch.")
+    name: str = Field(description="Display name shown in the status bar")
+    enabled: bool = Field(default=True, description="Whether this builtin is active")
+    markable: str = Field(description="Mark indicator color (e.g. 'light red').")
+
+
+KanpanCommand = Annotated[CustomCommand | ActionBuiltinCommand | MarkableBuiltinCommand, Field(discriminator="kind")]
+
+# When `staleness_threshold_seconds` is unset, use this fraction of
+# `refresh_interval_seconds` so values that weren't updated in the last cycle
+# show as stale, but values that were just refreshed within their cycle don't
+# briefly grey out near the cycle boundary.
+STALENESS_FRACTION_OF_REFRESH_INTERVAL = 0.9
 
 
 class KanpanPluginConfig(PluginConfig):
@@ -112,6 +185,13 @@ class KanpanPluginConfig(PluginConfig):
         default=60.0,
         description="Minimum seconds before retrying after a failed full refresh",
     )
+    staleness_threshold_seconds: float | None = Field(
+        default=None,
+        description="Field values whose `created` timestamp is older than this many seconds "
+        "are rendered greyed-out to indicate they may be out of date. "
+        "When unset (default), resolves to 90% of `refresh_interval_seconds` so that anything "
+        "that wasn't updated in the last refresh cycle shows as stale. Set explicitly to override.",
+    )
     data_sources: dict[str, dict[str, Any]] = Field(
         default_factory=dict,
         description="Data source configurations keyed by source name (e.g. 'github', 'repo_paths'). "
@@ -137,6 +217,14 @@ class KanpanPluginConfig(PluginConfig):
         description="[deprecated] After-refresh hooks - use data sources instead",
     )
 
+    def effective_staleness_threshold_seconds(self) -> float:
+        """Resolved staleness threshold: explicit value, or
+        ``STALENESS_FRACTION_OF_REFRESH_INTERVAL * refresh_interval_seconds``.
+        """
+        if self.staleness_threshold_seconds is not None:
+            return self.staleness_threshold_seconds
+        return STALENESS_FRACTION_OF_REFRESH_INTERVAL * self.refresh_interval_seconds
+
     def merge_with(self, override: "PluginConfig") -> "KanpanPluginConfig":
         """Merge this config with an override config."""
         if not isinstance(override, KanpanPluginConfig):
@@ -155,6 +243,11 @@ class KanpanPluginConfig(PluginConfig):
             if override.retry_cooldown_seconds is not None
             else self.retry_cooldown_seconds
         )
+        merged_staleness_threshold = (
+            override.staleness_threshold_seconds
+            if override.staleness_threshold_seconds is not None
+            else self.staleness_threshold_seconds
+        )
         merged_data_sources = {**self.data_sources, **override.data_sources}
         merged_shell_commands = {**self.shell_commands, **override.shell_commands}
         merged_columns = {**self.columns, **override.columns}
@@ -167,6 +260,7 @@ class KanpanPluginConfig(PluginConfig):
             section_order=merged_section_order,
             refresh_interval_seconds=merged_refresh_interval,
             retry_cooldown_seconds=merged_auto_cooldown,
+            staleness_threshold_seconds=merged_staleness_threshold,
             data_sources=merged_data_sources,
             shell_commands=merged_shell_commands,
             columns=merged_columns,

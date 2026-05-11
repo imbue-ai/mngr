@@ -1,7 +1,9 @@
 from collections.abc import Sequence
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import Field
+from pydantic import TypeAdapter
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
@@ -11,11 +13,13 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import FIELD_REPO_PATH
 from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_source import now_utc
 
 
 class RepoPathField(FieldValue):
     """GitHub repository path (owner/repo) for an agent."""
 
+    kind: Literal["repo_path"] = Field(default="repo_path", description="Discriminator tag")
     path: str = Field(description="GitHub owner/repo path")
 
     def display(self) -> CellDisplay:
@@ -56,6 +60,9 @@ def repo_path_from_labels(labels: dict[str, str]) -> str | None:
     return _parse_github_repo_path(remote_url)
 
 
+_REPO_PATH_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(RepoPathField)
+
+
 class RepoPathsDataSource(FrozenModel):
     """Computes repo_path field from agent remote labels.
 
@@ -76,8 +83,8 @@ class RepoPathsDataSource(FrozenModel):
         return {FIELD_REPO_PATH: "REPO"}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
-        return {FIELD_REPO_PATH: RepoPathField}
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
+        return {FIELD_REPO_PATH: _REPO_PATH_ADAPTER}
 
     def compute(
         self,
@@ -85,9 +92,10 @@ class RepoPathsDataSource(FrozenModel):
         cached_fields: dict[AgentName, dict[str, FieldValue]],
         mngr_ctx: MngrContext,
     ) -> tuple[dict[AgentName, dict[str, FieldValue]], Sequence[str]]:
+        now = now_utc()
         fields: dict[AgentName, dict[str, FieldValue]] = {}
         for agent in agents:
             repo_path = repo_path_from_labels(agent.labels)
             if repo_path is not None:
-                fields[agent.name] = {FIELD_REPO_PATH: RepoPathField(path=repo_path)}
+                fields[agent.name] = {FIELD_REPO_PATH: RepoPathField(path=repo_path, created=now)}
         return fields, []

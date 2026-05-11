@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
@@ -29,6 +30,7 @@ from imbue.mngr.api.find import resolve_agent_reference
 from imbue.mngr.api.find import resolve_host_reference
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import VolumeFileType
@@ -37,11 +39,14 @@ from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
+from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
+from imbue.mngr.utils.jsonl_warn import split_complete_lines
 
 FOLLOW_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 SOURCE_SCAN_INTERVAL_SECONDS: Final[float] = 10.0
 ONLINE_CHECK_INTERVAL_SECONDS: Final[float] = 30.0
 _EVENTS_JSONL_FILENAME: Final[str] = "events.jsonl"
+_EVENTS_READ_SENTINEL: Final[str] = "__MNGR_EVENTS_READ_SENTINEL_8b2e6f31__"
 
 
 # =============================================================================
@@ -287,16 +292,44 @@ def _read_event_content_via_host(
     event_file_name: str,
     display_name: str,
 ) -> str:
-    """Read event content by executing cat on the online host."""
+    """Read event content by executing cat on the online host.
+
+    Wraps the ``cat`` invocation as ``{ cat <file> && printf '%s' <sentinel>; }``
+    so the file's true trailing-newline state survives pyinfra's
+    line-rejoin pipeline. Pyinfra's ``CommandOutput.stdout`` is constructed as
+    ``"\n".join(lines)`` after each line is ``rstrip("\n")``-ed, which means
+    a file that ends with ``\n`` and one that does not produce identical
+    ``stdout`` strings. That ambiguity makes the follow-mode tail loop's
+    ``split_complete_lines`` partial-write guard misclassify the most recent
+    line as in-flight (because there is no visible terminating ``\n`` after it)
+    and hold it back until a later line forces it out, producing a perpetual
+    one-event lag.
+
+    By appending a known sentinel after ``cat``, we force pyinfra to emit
+    the trailing newline (if any) as a real ``\n`` between the file's last
+    line and the sentinel line. Stripping the sentinel back off recovers
+    the file's exact byte tail.
+    """
     logger.trace("Reading event file '{}' for {} via host", event_file_name, display_name)
     file_path = events_path / event_file_name
     result = online_host.execute_idempotent_command(
-        f"cat {shlex.quote(str(file_path))}",
+        "{{ cat {file} && printf '%s' {sentinel}; }}".format(
+            file=shlex.quote(str(file_path)),
+            sentinel=shlex.quote(_EVENTS_READ_SENTINEL),
+        ),
         timeout_seconds=30.0,
     )
     if not result.success:
         raise MngrError(f"Failed to read event file '{event_file_name}': {result.stderr}")
-    return result.stdout
+    if not result.stdout.endswith(_EVENTS_READ_SENTINEL):
+        raise MngrError(
+            "Event file {!r} read did not include the EOF sentinel; output was "
+            "truncated or pyinfra mangled the trailing line. Last 200 chars: {!r}".format(
+                event_file_name,
+                result.stdout[-200:],
+            )
+        )
+    return result.stdout.removesuffix(_EVENTS_READ_SENTINEL)
 
 
 # =============================================================================
@@ -325,34 +358,25 @@ def filter_sources_by_name(
 
 
 @pure
-def parse_event_line(line: str, source_hint: str) -> EventRecord | None:
-    """Parse a single JSONL line into an EventRecord.
+def _record_from_event_data(data: Mapping[str, Any], stripped_line: str, source_hint: str) -> EventRecord:
+    """Build an EventRecord from already-parsed JSON data, applying source-hint correction.
 
-    Returns None if the line cannot be parsed (malformed JSON, missing required fields).
-    Always uses source_hint (derived from the file path) as the authoritative source;
-    if the event JSON contains a different source, it is corrected and the mismatch
-    is recorded in the returned EventRecord's original_source field.
-    Generates a deterministic fallback event_id from the line hash if missing.
+    The input is a Mapping rather than a dict so the type system enforces that
+    this function never mutates caller-owned state: the returned EventRecord's
+    `data` field is always a fresh dict.
+
+    Raises ``MalformedJsonlLineError`` when the event JSON is missing required
+    envelope fields. Whichever process is producing the bad event needs to be
+    fixed -- silently dropping it would just hide the underlying problem.
     """
-    stripped = line.strip()
-    if not stripped:
-        return None
-    try:
-        data = json.loads(stripped)
-    except json.JSONDecodeError:
-        logger.trace("Skipped malformed JSONL line: {}", stripped[:100])
-        return None
-    if not isinstance(data, dict):
-        return None
-
     timestamp = data.get("timestamp", "")
     if not timestamp:
-        return None
+        raise MalformedJsonlLineError(f"Missing required 'timestamp' field in event JSON: {stripped_line[:200]!r}")
 
     event_id = data.get("event_id", "")
     if not event_id:
         # Generate deterministic fallback from line content
-        event_id = "hash-" + hashlib.sha256(stripped.encode()).hexdigest()[:24]
+        event_id = "hash-" + hashlib.sha256(stripped_line.encode()).hexdigest()[:24]
 
     # The source_hint (derived from the file path) is always authoritative.
     # If the event JSON contains a different source, we correct it and record
@@ -368,21 +392,43 @@ def parse_event_line(line: str, source_hint: str) -> EventRecord | None:
             event_id,
         )
 
-    source = source_hint
-    data["source"] = source
-
-    # Re-serialize raw_line if the source was corrected so downstream
-    # consumers (e.g. CLI output) see the correct source
-    corrected_raw_line = json.dumps(data, separators=(",", ":")) if original_source is not None else stripped
+    corrected_data = {**data, "source": source_hint}
+    # Re-serialize raw_line only when the JSON had a wrong source field;
+    # backfilling a missing source doesn't require re-serializing because the
+    # original line is still a faithful representation of the event.
+    if original_source is not None:
+        corrected_raw_line = json.dumps(corrected_data, separators=(",", ":"))
+    else:
+        corrected_raw_line = stripped_line
 
     return EventRecord(
         raw_line=corrected_raw_line,
         timestamp=timestamp,
         event_id=event_id,
-        source=source,
-        data=data,
+        source=source_hint,
+        data=corrected_data,
         original_source=original_source,
     )
+
+
+@pure
+def parse_event_line(line: str, source_hint: str) -> EventRecord:
+    """Parse a single JSONL line into an EventRecord.
+
+    Raises ``json.JSONDecodeError`` on malformed JSON and
+    ``MalformedJsonlLineError`` when the line is valid JSON but is not a JSON
+    object or is missing required envelope fields. Garbage input is treated as
+    a real failure, not a soft skip: callers reading a multi-line stream where
+    end-of-file partial writes are expected should use ``MalformedJsonLineWarner``
+    instead of calling this directly.
+    """
+    stripped = line.strip()
+    data = json.loads(stripped)
+    if not isinstance(data, dict):
+        raise MalformedJsonlLineError(
+            f"Expected JSON object on event line but got {type(data).__name__}: {stripped[:200]!r}"
+        )
+    return _record_from_event_data(data, stripped, source_hint)
 
 
 def _create_source_mismatch_warning(original_source: str, correct_source: str) -> EventRecord:
@@ -612,6 +658,14 @@ def _read_events_from_file(
     """Read and parse all events from a single JSONL file.
 
     Returns (events, byte_length) where byte_length is the size of the raw content.
+
+    Note: this function intentionally does NOT hold back a trailing partial line via
+    split_complete_lines. The via-host code path reads through pyinfra, whose
+    CommandOutput.stdout strips the trailing newline (it joins lines with "\\n"),
+    so any partial-line detection here would misclassify a complete final line as
+    partial and silently drop it. The follow-tail loop in _tail_source_thread_remote
+    has its own partial-line guard (it reads bytes directly from a volume, not via
+    pyinfra), so partial-write robustness during streaming is preserved there.
     """
     try:
         content = read_event_content(target, relative_file_path)
@@ -620,10 +674,13 @@ def _read_events_from_file(
         return [], 0
 
     events: list[EventRecord] = []
+    warner = MalformedJsonLineWarner(source_description=f"event file '{relative_file_path}'")
     for line in content.split("\n"):
-        record = parse_event_line(line, source_hint)
-        if record is not None:
-            events.append(record)
+        parsed = warner.parse(line)
+        if parsed is None:
+            continue
+        data, stripped = parsed
+        events.append(_record_from_event_data(data, stripped, source_hint))
 
     return events, len(content.encode("utf-8"))
 
@@ -952,6 +1009,7 @@ def _tail_source_thread_local(
 ) -> None:
     """Thread function that tails a local events.jsonl via pygtail."""
     offset_file = _pygtail_offset_file_path(source_path, offset_dir_path)
+    warner = MalformedJsonLineWarner(source_description=f"event file '{events_file_path}'")
 
     while not stop_event.is_set():
         try:
@@ -975,9 +1033,11 @@ def _tail_source_thread_local(
             for line in tail:
                 if stop_event.is_set():
                     break
-                record = parse_event_line(line, source_path)
-                if record is None:
+                parsed = warner.parse(line)
+                if parsed is None:
                     continue
+                data, stripped = parsed
+                record = _record_from_event_data(data, stripped, source_path)
                 if not _event_passes_cel_filters(record, cel_include_filters, cel_exclude_filters):
                     continue
                 event_queue.put(record)
@@ -1000,6 +1060,9 @@ def _tail_source_thread_remote(
     """Thread function that polls a remote source for new events."""
     byte_offset = initial_byte_offset
     relative_file_path = f"{source_path}/{_EVENTS_JSONL_FILENAME}" if source_path else _EVENTS_JSONL_FILENAME
+    warner = MalformedJsonLineWarner(
+        source_description=f"remote event file '{relative_file_path}' on {target.display_name}"
+    )
 
     while not stop_event.is_set():
         try:
@@ -1013,20 +1076,30 @@ def _tail_source_thread_remote(
         current_length = len(content_bytes)
 
         if current_length < byte_offset:
-            # File was rotated -- re-read from beginning, dedup via event_ids
+            # File was rotated -- re-read from beginning, dedup via event_ids.
+            # Drop any malformed line still buffered in the warner: it came from
+            # the now-rotated file's tail, so treating it as mid-file corruption
+            # in the new file would be misleading.
             logger.debug("Remote event file for source '{}' was rotated", source_path)
             byte_offset = 0
+            warner.reset()
 
         if current_length > byte_offset:
             new_content = content_bytes[byte_offset:].decode("utf-8", errors="replace")
-            for line in new_content.split("\n"):
-                record = parse_event_line(line, source_path)
-                if record is None:
+            # Only consume up to the last newline; any trailing partial line is
+            # left in the file for the next poll so a mid-flush write doesn't
+            # cause the line to be split and silently lost.
+            lines, bytes_consumed = split_complete_lines(new_content)
+            for line in lines:
+                parsed = warner.parse(line)
+                if parsed is None:
                     continue
+                data, stripped = parsed
+                record = _record_from_event_data(data, stripped, source_path)
                 if not _event_passes_cel_filters(record, cel_include_filters, cel_exclude_filters):
                     continue
                 event_queue.put(record)
-            byte_offset = current_length
+            byte_offset += bytes_consumed
 
         stop_event.wait(timeout=FOLLOW_POLL_INTERVAL_SECONDS)
 

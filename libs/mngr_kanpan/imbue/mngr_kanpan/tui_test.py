@@ -4,11 +4,16 @@ import subprocess
 import threading
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import TypeAdapter
+from pydantic import ValidationError
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.widget.attr_map import AttrMap
 from urwid.widget.filler import Filler
@@ -26,11 +31,16 @@ from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_sources.git_info import CommitsAheadField
 from imbue.mngr_kanpan.data_sources.github import CiField
 from imbue.mngr_kanpan.data_sources.github import CiStatus
+from imbue.mngr_kanpan.data_types import ActionBuiltinCommand
+from imbue.mngr_kanpan.data_types import ActionBuiltinRole
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import CustomCommand
+from imbue.mngr_kanpan.data_types import KanpanCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
+from imbue.mngr_kanpan.data_types import MarkableBuiltinCommand
+from imbue.mngr_kanpan.data_types import MarkableBuiltinRole
 from imbue.mngr_kanpan.testing import make_board_snapshot
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_config
 from imbue.mngr_kanpan.testing import make_pr_field
@@ -49,6 +59,7 @@ from imbue.mngr_kanpan.tui import _KanpanInputHandler
 from imbue.mngr_kanpan.tui import _KanpanState
 from imbue.mngr_kanpan.tui import _assemble_column_defs
 from imbue.mngr_kanpan.tui import _batch_item_label
+from imbue.mngr_kanpan.tui import _build_agent_row
 from imbue.mngr_kanpan.tui import _build_board_widgets
 from imbue.mngr_kanpan.tui import _build_command_map
 from imbue.mngr_kanpan.tui import _build_data_source_column_defs
@@ -63,11 +74,12 @@ from imbue.mngr_kanpan.tui import _execute_next_in_batch
 from imbue.mngr_kanpan.tui import _field_cell_markup
 from imbue.mngr_kanpan.tui import _field_cell_text
 from imbue.mngr_kanpan.tui import _finish_batch_execution
-from imbue.mngr_kanpan.tui import _flatten_markup_to_muted
+from imbue.mngr_kanpan.tui import _flatten_markup_to_attr
 from imbue.mngr_kanpan.tui import _format_section_heading
 from imbue.mngr_kanpan.tui import _get_focused_entry
 from imbue.mngr_kanpan.tui import _get_name_cell_markup
 from imbue.mngr_kanpan.tui import _get_state_attr
+from imbue.mngr_kanpan.tui import _is_field_stale
 from imbue.mngr_kanpan.tui import _is_focus_on_first_selectable
 from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
@@ -335,14 +347,14 @@ def test_assemble_column_defs_default_order_includes_default_columns() -> None:
 
 
 def test_build_mark_palette_no_markable() -> None:
-    commands = {"r": CustomCommand(name="refresh")}
+    commands: dict[str, KanpanCommand] = {"r": CustomCommand(name="refresh")}
     entries, names = _build_mark_palette(commands)
     assert entries == []
     assert names == ()
 
 
 def test_build_mark_palette_markable() -> None:
-    commands = {"d": CustomCommand(name="delete", markable="light red")}
+    commands: dict[str, KanpanCommand] = {"d": CustomCommand(name="delete", markable="light red")}
     entries, names = _build_mark_palette(commands)
     assert len(entries) == 2
     assert "mark_d" in names
@@ -493,7 +505,7 @@ class _MockDataSource:
         return {"mock_field": "MOCK", "another_field": "ANOTHER"}
 
     @property
-    def field_types(self) -> dict[str, type[FieldValue]]:
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
         return {}
 
     def compute(
@@ -549,19 +561,125 @@ def test_build_field_color_palette_no_colors() -> None:
 # =============================================================================
 
 
-def test_flatten_markup_to_muted_string() -> None:
-    result = _flatten_markup_to_muted("hello")
+def test_flatten_markup_to_attr_muted_string() -> None:
+    result = _flatten_markup_to_attr("hello", "muted")
     assert result == ("muted", "hello")
 
 
-def test_flatten_markup_to_muted_tuple() -> None:
-    result = _flatten_markup_to_muted(("some_attr", "text"))
+def test_flatten_markup_to_attr_muted_tuple() -> None:
+    result = _flatten_markup_to_attr(("some_attr", "text"), "muted")
     assert result == ("muted", "text")
 
 
-def test_flatten_markup_to_muted_list() -> None:
-    result = _flatten_markup_to_muted([("attr", "a"), "b"])
+def test_flatten_markup_to_attr_muted_list() -> None:
+    result = _flatten_markup_to_attr([("attr", "a"), "b"], "muted")
     assert result == ("muted", "ab")
+
+
+# =============================================================================
+# Staleness flatten + freshness predicate
+# =============================================================================
+
+
+def test_flatten_markup_to_attr_stale_string() -> None:
+    assert _flatten_markup_to_attr("hello", "stale") == ("stale", "hello")
+
+
+def test_flatten_markup_to_attr_stale_tuple() -> None:
+    assert _flatten_markup_to_attr(("some_attr", "text"), "stale") == ("stale", "text")
+
+
+def test_flatten_markup_to_attr_stale_list() -> None:
+    assert _flatten_markup_to_attr([("attr", "a"), "b"], "stale") == ("stale", "ab")
+
+
+def test_is_field_stale_old_field() -> None:
+    now = datetime(2027, 1, 1, 0, 0, 1, tzinfo=timezone.utc)
+    field = CommitsAheadField(count=3, has_work_dir=True, created=now - timedelta(seconds=3600))
+    assert _is_field_stale(field, now, staleness_threshold_seconds=1800.0) is True
+
+
+def test_is_field_stale_fresh_field() -> None:
+    now = datetime(2027, 1, 1, 0, 0, 2, tzinfo=timezone.utc)
+    field = CommitsAheadField(count=3, has_work_dir=True, created=now - timedelta(seconds=60))
+    assert _is_field_stale(field, now, staleness_threshold_seconds=1800.0) is False
+
+
+def test_is_field_stale_at_threshold_boundary_is_not_stale() -> None:
+    """Exactly at the threshold is not yet stale (strict >)."""
+    now = datetime(2027, 1, 1, 0, 0, 3, tzinfo=timezone.utc)
+    field = CommitsAheadField(count=3, has_work_dir=True, created=now - timedelta(seconds=1800))
+    assert _is_field_stale(field, now, staleness_threshold_seconds=1800.0) is False
+
+
+# =============================================================================
+# _build_agent_row staleness rendering
+# =============================================================================
+
+
+def _make_ci_def() -> _ColumnDef:
+    """Build a column def for the CI field, mirroring runtime construction."""
+    return _ColumnDef(
+        name=FIELD_CI,
+        header="CI",
+        text_fn=_FieldCellTextFn(field_key=FIELD_CI),
+        markup_fn=_FieldCellMarkupFn(field_key=FIELD_CI),
+        flexible=False,
+    )
+
+
+def _ci_widget_attr(row: Any) -> str | None:
+    """Return the attribute name of the 'failing' CI cell in a built row, or None."""
+    for widget, _options in row.contents:
+        if not isinstance(widget, Text):
+            continue
+        text, attribs = widget.get_text()
+        if text == "failing":
+            return attribs[0][0] if attribs else None
+    return None
+
+
+def test_build_agent_row_stale_field_uses_stale_attr() -> None:
+    now = datetime(2027, 1, 1, 0, 0, 4, tzinfo=timezone.utc)
+    ci = CiField(status=CiStatus.FAILING, created=now - timedelta(seconds=3600))
+    entry = _make_entry(
+        section=BoardSection.STILL_COOKING,
+        fields={FIELD_CI: ci},
+        cells={FIELD_CI: ci.display()},
+    )
+    column_defs = [*_BUILTIN_COLUMN_DEFS, _make_ci_def()]
+    widths = _compute_board_column_widths((entry,), column_defs)
+    row = _build_agent_row(entry, widths, column_defs, now=now, staleness_threshold_seconds=1800.0)
+    assert _ci_widget_attr(row) == "stale"
+
+
+def test_build_agent_row_fresh_field_keeps_color_attr() -> None:
+    now = datetime(2027, 1, 1, 0, 0, 5, tzinfo=timezone.utc)
+    ci = CiField(status=CiStatus.FAILING, created=now - timedelta(seconds=60))
+    entry = _make_entry(
+        section=BoardSection.STILL_COOKING,
+        fields={FIELD_CI: ci},
+        cells={FIELD_CI: ci.display()},
+    )
+    column_defs = [*_BUILTIN_COLUMN_DEFS, _make_ci_def()]
+    widths = _compute_board_column_widths((entry,), column_defs)
+    row = _build_agent_row(entry, widths, column_defs, now=now, staleness_threshold_seconds=1800.0)
+    assert _ci_widget_attr(row) == "field_ci_light_red"
+
+
+def test_build_agent_row_muted_section_overrides_stale() -> None:
+    """A muted row stays uniformly muted even if its fields are stale."""
+    now = datetime(2027, 1, 1, 0, 0, 6, tzinfo=timezone.utc)
+    ci = CiField(status=CiStatus.FAILING, created=now - timedelta(seconds=3600))
+    entry = _make_entry(
+        section=BoardSection.MUTED,
+        fields={FIELD_CI: ci},
+        cells={FIELD_CI: ci.display()},
+    )
+    column_defs = [*_BUILTIN_COLUMN_DEFS, _make_ci_def()]
+    widths = _compute_board_column_widths((entry,), column_defs)
+    row = _build_agent_row(entry, widths, column_defs, now=now, staleness_threshold_seconds=1800.0)
+    assert _ci_widget_attr(row) == "muted"
 
 
 # =============================================================================
@@ -572,16 +690,31 @@ def test_flatten_markup_to_muted_list() -> None:
 def test_carry_forward_fields_merges() -> None:
     old_entry = _make_entry(
         name="a",
-        fields={"pr": make_pr_field(), "commits_ahead": CommitsAheadField(count=3, has_work_dir=True)},
+        fields={
+            "pr": make_pr_field(created=datetime(2027, 1, 1, 0, 0, 7, tzinfo=timezone.utc)),
+            "commits_ahead": CommitsAheadField(
+                count=3, has_work_dir=True, created=datetime(2027, 1, 1, 0, 0, 8, tzinfo=timezone.utc)
+            ),
+        },
         cells={
-            "pr": make_pr_field().display(),
-            "commits_ahead": CommitsAheadField(count=3, has_work_dir=True).display(),
+            "pr": make_pr_field(created=datetime(2027, 1, 1, 0, 0, 9, tzinfo=timezone.utc)).display(),
+            "commits_ahead": CommitsAheadField(
+                count=3, has_work_dir=True, created=datetime(2027, 1, 1, 0, 0, 10, tzinfo=timezone.utc)
+            ).display(),
         },
     )
     new_entry = _make_entry(
         name="a",
-        fields={"commits_ahead": CommitsAheadField(count=5, has_work_dir=True)},
-        cells={"commits_ahead": CommitsAheadField(count=5, has_work_dir=True).display()},
+        fields={
+            "commits_ahead": CommitsAheadField(
+                count=5, has_work_dir=True, created=datetime(2027, 1, 1, 0, 0, 11, tzinfo=timezone.utc)
+            )
+        },
+        cells={
+            "commits_ahead": CommitsAheadField(
+                count=5, has_work_dir=True, created=datetime(2027, 1, 1, 0, 0, 12, tzinfo=timezone.utc)
+            ).display()
+        },
     )
     old_snapshot = make_board_snapshot(entries=(old_entry,))
     new_snapshot = make_board_snapshot(entries=(new_entry,))
@@ -627,7 +760,7 @@ def test_field_cell_markup_fn_call() -> None:
 
 def test_field_cell_markup_ci_failing_uses_color_attr() -> None:
     """CI FAILING cell has color='light red', so markup uses field_ci_light_red attr."""
-    ci = CiField(status=CiStatus.FAILING)
+    ci = CiField(status=CiStatus.FAILING, created=datetime(2027, 1, 1, 0, 0, 13, tzinfo=timezone.utc))
     cell = ci.display()
     entry = _make_entry(
         fields={FIELD_CI: ci},
@@ -641,7 +774,7 @@ def test_field_cell_markup_ci_failing_uses_color_attr() -> None:
 
 def test_field_cell_markup_ci_pending_uses_color_attr() -> None:
     """CI PENDING cell has color='yellow', so markup uses field_ci_yellow attr."""
-    ci = CiField(status=CiStatus.PENDING)
+    ci = CiField(status=CiStatus.PENDING, created=datetime(2027, 1, 1, 0, 0, 14, tzinfo=timezone.utc))
     cell = ci.display()
     entry = _make_entry(
         fields={FIELD_CI: ci},
@@ -655,7 +788,7 @@ def test_field_cell_markup_ci_pending_uses_color_attr() -> None:
 
 def test_field_cell_markup_ci_passing_uses_color_attr() -> None:
     """CI PASSING cell has color='light green', so markup uses field_ci_light_green attr."""
-    ci = CiField(status=CiStatus.PASSING)
+    ci = CiField(status=CiStatus.PASSING, created=datetime(2027, 1, 1, 0, 0, 15, tzinfo=timezone.utc))
     cell = ci.display()
     entry = _make_entry(
         fields={FIELD_CI: ci},
@@ -886,7 +1019,7 @@ def test_prune_orphaned_marks_with_orphans() -> None:
 
 def test_dispatch_command_markable_key_toggles_mark() -> None:
     entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
-    commands = {"d": CustomCommand(name="delete", markable="light red")}
+    commands: dict[str, KanpanCommand] = {"d": CustomCommand(name="delete", markable="light red")}
     state = _make_state_with_walker((entry,))
     state.commands = commands
     state.mark_attr_names = ("mark_d",)
@@ -902,25 +1035,46 @@ def test_dispatch_command_unmark_key_removes_mark() -> None:
     state.marks[AgentName("agent-a")] = "d"
     agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(agent_idx)
-    unmark_cmd = CustomCommand(name="unmark")
+    unmark_cmd = ActionBuiltinCommand(role=ActionBuiltinRole.UNMARK, name="unmark")
     state.commands = {_BUILTIN_COMMAND_KEY_UNMARK: unmark_cmd}
     _dispatch_command(state, _BUILTIN_COMMAND_KEY_UNMARK, unmark_cmd)
     assert AgentName("agent-a") not in state.marks
 
 
-def test_dispatch_command_execute_key_with_marks() -> None:
-    # Register a real "d" command so _start_batch_execution has work to submit.
-    # With loop=None, the future is submitted but never polled, so executing stays True.
-    mark_cmd = CustomCommand(name="do-thing", command="echo hi")
-    state = _make_state(commands={"d": mark_cmd})
-    state.marks = {AgentName("a"): "d"}
-    execute_cmd = CustomCommand(name="execute")
+def test_dispatch_command_execute_key_with_marks(tmp_path: Path) -> None:
+    # Use a non-builtin key ("z") so the test isn't entangled with builtin
+    # dispatch semantics. The command touches a marker file, and we assert it
+    # appears after executor shutdown -- proving the command actually ran
+    # (rather than just that state.executing was set).
+    marker = tmp_path / "executed"
+    assert not marker.exists()
+    mark_cmd = CustomCommand(name="do-thing", command=f"touch {marker}")
+    state = _make_state(commands={"z": mark_cmd})
+    state.marks = {AgentName("a"): "z"}
+    execute_cmd = ActionBuiltinCommand(role=ActionBuiltinRole.EXECUTE, name="execute")
     _dispatch_command(state, _BUILTIN_COMMAND_KEY_EXECUTE, execute_cmd)
-    # Should start batch execution (sets executing=True)
+    # Should start batch execution (sets executing=True; with loop=None the
+    # future is submitted but never polled, so executing stays True).
     assert state.executing is True
-    # Clean up the executor to avoid resource warnings
-    if state.executor is not None:
-        state.executor.shutdown(wait=False)
+    assert state.executor is not None
+    state.executor.shutdown(wait=True)
+    assert marker.exists()
+
+
+def test_dispatch_command_execute_user_override_of_delete_runs_shell(tmp_path: Path) -> None:
+    # Overriding the builtin "d" (delete) must route to the user's shell
+    # command, not to the hardcoded `mngr destroy` runner.
+    marker = tmp_path / "ran"
+    assert not marker.exists()
+    override = CustomCommand(name="my-delete", command=f"touch {marker}", markable="light red")
+    state = _make_state(commands={_BUILTIN_COMMAND_KEY_DELETE: override})
+    state.marks = {AgentName("a"): _BUILTIN_COMMAND_KEY_DELETE}
+    execute_cmd = ActionBuiltinCommand(role=ActionBuiltinRole.EXECUTE, name="execute")
+    _dispatch_command(state, _BUILTIN_COMMAND_KEY_EXECUTE, execute_cmd)
+    assert state.executing is True
+    assert state.executor is not None
+    state.executor.shutdown(wait=True)
+    assert marker.exists()
 
 
 # =============================================================================
@@ -973,6 +1127,34 @@ def test_load_user_commands_from_dict() -> None:
     ctx = make_mngr_ctx_with_config(config)
     result = _load_user_commands(ctx)
     assert "c" in result
+
+
+def test_load_user_commands_from_raw_dict_via_model_construct() -> None:
+    # Regression: the mngr config loader uses `model_construct` which bypasses
+    # Pydantic's recursive validation, leaving `commands` entries as raw dicts
+    # rather than `CustomCommand` instances. `_load_user_commands` must handle
+    # both shapes.
+    config = KanpanPluginConfig.model_construct(
+        commands={"c": {"name": "dict-cmd", "command": "echo hi"}},
+    )
+    ctx = make_mngr_ctx_with_config(config)
+    result = _load_user_commands(ctx)
+    assert "c" in result
+    assert isinstance(result["c"], CustomCommand)
+    assert result["c"].name == "dict-cmd"
+
+
+def test_load_user_commands_rejects_builtin_kind_in_raw_dict() -> None:
+    # A user cannot hijack the builtin-dispatch path (e.g. `mngr destroy`) by
+    # setting `kind = "builtin"` in their TOML config. `CustomCommand.kind` is
+    # `Literal["user"]`, so Pydantic validation rejects the raw dict when
+    # `_load_user_commands` constructs a `CustomCommand` from it.
+    config = KanpanPluginConfig.model_construct(
+        commands={"c": {"kind": "builtin", "name": "sneaky"}},
+    )
+    ctx = make_mngr_ctx_with_config(config)
+    with pytest.raises(ValidationError):
+        _load_user_commands(ctx)
 
 
 def test_build_command_map_includes_builtins() -> None:
@@ -1308,7 +1490,7 @@ def test_submit_batch_item_push_with_work_dir(tmp_path: Path) -> None:
     item = _BatchWorkItem(
         name=AgentName("agent-a"),
         key=_BUILTIN_COMMAND_KEY_PUSH,
-        cmd=CustomCommand(name="push"),
+        cmd=MarkableBuiltinCommand(role=MarkableBuiltinRole.PUSH, name="push", markable="yellow"),
         entry=entry,
     )
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -1322,7 +1504,7 @@ def test_submit_batch_item_push_no_work_dir() -> None:
     item = _BatchWorkItem(
         name=AgentName("agent-a"),
         key=_BUILTIN_COMMAND_KEY_PUSH,
-        cmd=CustomCommand(name="push"),
+        cmd=MarkableBuiltinCommand(role=MarkableBuiltinRole.PUSH, name="push", markable="yellow"),
         entry=entry,
     )
     with ThreadPoolExecutor(max_workers=1) as pool:

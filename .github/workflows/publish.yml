@@ -52,56 +52,16 @@ jobs:
             uv run scripts/verify_publish.py
           fi
 
-      - name: Build resource-guards
-        run: pyproject-build libs/resource_guards -o dist/
-
-      - name: Build imbue-common
-        run: pyproject-build libs/imbue_common -o dist/
-
-      - name: Build concurrency-group
-        run: pyproject-build libs/concurrency_group -o dist/
-
-      - name: Build imbue-mngr
-        run: pyproject-build libs/mngr -o dist/
-
-      - name: Build modal-proxy
-        run: pyproject-build libs/modal_proxy -o dist/
-
-      - name: Build imbue-mngr-modal
-        run: pyproject-build libs/mngr_modal -o dist/
-
-      - name: Build imbue-mngr-claude
-        run: pyproject-build libs/mngr_claude -o dist/
-
-      - name: Build imbue-mngr-pair
-        run: pyproject-build libs/mngr_pair -o dist/
-
-      - name: Build imbue-mngr-opencode
-        run: pyproject-build libs/mngr_opencode -o dist/
-
-      - name: Build imbue-mngr-kanpan
-        run: pyproject-build libs/mngr_kanpan -o dist/
-
-      - name: Build imbue-mngr-tutor
-        run: pyproject-build libs/mngr_tutor -o dist/
-
-      - name: Build imbue-mngr-notifications
-        run: pyproject-build libs/mngr_notifications -o dist/
-
-      - name: Build imbue-mngr-file
-        run: pyproject-build libs/mngr_file -o dist/
-
-      - name: Build imbue-mngr-pi-coding
-        run: pyproject-build libs/mngr_pi_coding -o dist/
-
-      - name: Build imbue-mngr-recursive
-        run: pyproject-build libs/mngr_recursive -o dist/
-
-      - name: Build imbue-mngr-ttyd
-        run: pyproject-build libs/mngr_ttyd -o dist/
-
-      - name: Build imbue-mngr-wait
-        run: pyproject-build libs/mngr_wait -o dist/
+      - name: Build all packages
+        run: |
+          set -euo pipefail
+          pkg_dirs_output=$(uv run scripts/verify_publish.py --list-package-dirs)
+          mapfile -t pkg_dirs <<< "$pkg_dirs_output"
+          for pkg_dir in "${pkg_dirs[@]}"; do
+            echo "::group::Build $pkg_dir"
+            pyproject-build "$pkg_dir" -o dist/
+            echo "::endgroup::"
+          done
 
       - name: Publish packages to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
