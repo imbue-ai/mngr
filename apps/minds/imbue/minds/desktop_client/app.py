@@ -1347,13 +1347,15 @@ def _build_restart_shell_command() -> str:
 
 def _build_mngr_exec_argv(
     mngr_binary: str,
-    mngr_host_dir: Path,
     agent_id: AgentId,
     shell_command: str,
 ) -> list[str]:
-    """Build the argv list for ``mngr exec`` to dispatch ``shell_command`` on ``agent_id``."""
-    # MNGR_HOST_DIR is set via env; kept as a param for callsite clarity.
-    del mngr_host_dir
+    """Build the argv list for ``mngr exec`` to dispatch ``shell_command`` on ``agent_id``.
+
+    ``MNGR_HOST_DIR`` selection lives at the call-site (it is injected as
+    an env var on the subprocess), so it is intentionally not a parameter
+    here.
+    """
     return [
         mngr_binary,
         "exec",
@@ -1427,7 +1429,6 @@ async def _handle_restart_workspace_server_api(
     shell_command = _build_restart_shell_command()
     argv = _build_mngr_exec_argv(
         mngr_binary=mngr_binary,
-        mngr_host_dir=mngr_host_dir,
         agent_id=aid,
         shell_command=shell_command,
     )

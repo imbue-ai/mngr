@@ -1384,7 +1384,6 @@ def test_build_mngr_exec_argv_includes_agent_id_and_command() -> None:
     aid = AgentId.generate()
     argv = _build_mngr_exec_argv(
         mngr_binary="/usr/local/bin/mngr",
-        mngr_host_dir=Path("/tmp/mngr-host"),
         agent_id=aid,
         shell_command="echo hello",
     )
