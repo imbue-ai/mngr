@@ -161,16 +161,11 @@ def test_deny_does_not_require_state_dir_or_parent_name(
 
 
 @pytest.mark.parametrize(
-    ("case", "raw_stdin"),
-    [
-        ("empty", ""),
-        ("malformed_json", "{not json"),
-        ("non_object_json", "[1, 2, 3]"),
-        ("empty_object", "{}"),
-    ],
+    "raw_stdin",
+    ["", "{not json", "[1, 2, 3]", "{}"],
+    ids=["empty", "malformed_json", "non_object_json", "empty_object"],
 )
 def test_deny_emits_skill_pointer_for_any_stdin(
-    case: str,
     raw_stdin: str,
     tmp_path: Path,
     hook_env: pytest.MonkeyPatch,
@@ -182,8 +177,6 @@ def test_deny_emits_skill_pointer_for_any_stdin(
     malformed, non-dict JSON, and well-formed-but-empty all get the
     same skill-pointer reason.
     """
-    # `case` is consumed by parametrize as the test id; not used in the body.
-    del case
     hook_env.chdir(tmp_path)
     stdin_buffer = io.StringIO(raw_stdin)
     stdout_buffer = io.StringIO()
