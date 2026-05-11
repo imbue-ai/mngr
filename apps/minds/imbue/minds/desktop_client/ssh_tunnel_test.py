@@ -13,9 +13,9 @@ from imbue.minds.desktop_client.ssh_tunnel import ReverseTunnelInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.desktop_client.ssh_tunnel import _ForwardedTunnelHandler
-from imbue.minds.desktop_client.ssh_tunnel import _relay_data
 from imbue.minds.desktop_client.ssh_tunnel import _ssh_connection_is_active
 from imbue.minds.desktop_client.ssh_tunnel import _ssh_connection_transport
+from imbue.mngr_forward.relay import relay_data
 
 
 class FakeChannelFromSocket:
@@ -145,7 +145,7 @@ def test_ssh_connection_transport_raises_when_none() -> None:
         _ssh_connection_transport(client)
 
 
-# -- _relay_data tests --
+# -- relay_data tests --
 
 
 def test_relay_data_forwards_between_socket_pair() -> None:
@@ -154,7 +154,7 @@ def test_relay_data_forwards_between_socket_pair() -> None:
     channel_sock, relay_sock_b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
 
     fake_channel = FakeChannelFromSocket.create(relay_sock_b)
-    relay_thread = threading.Thread(target=_relay_data, args=(relay_sock_a, fake_channel), daemon=True)
+    relay_thread = threading.Thread(target=relay_data, args=(relay_sock_a, fake_channel), daemon=True)
     relay_thread.start()
 
     app_sock.settimeout(3.0)
@@ -232,7 +232,9 @@ class _FakeReverseTunnelManager(SSHTunnelManager):
         ssh_info: RemoteSSHInfo,
         local_port: int,
         remote_port: int = 0,
+        agent_id: str | None = None,
     ) -> int:
+        del agent_id
         self._setup_calls.append((ssh_info, local_port, remote_port))
         if self._setup_raise is not None:
             raise self._setup_raise("simulated failure")

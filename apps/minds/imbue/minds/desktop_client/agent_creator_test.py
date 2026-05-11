@@ -76,8 +76,8 @@ def test_make_host_name_appends_host_suffix() -> None:
     assert _make_host_name(AgentName("alpha")) == "alpha-host"
 
 
-def test_build_mngr_create_command_injects_latchkey_for_non_dev_modes() -> None:
-    """Container/VM/VPS/leased modes get the constant agent-side LATCHKEY_GATEWAY URL.
+def test_build_mngr_create_command_injects_constant_agent_side_latchkey_url() -> None:
+    """Every mode gets the constant agent-side LATCHKEY_GATEWAY URL.
 
     The reverse tunnel that ``LatchkeyDiscoveryHandler`` sets up post-discovery bridges
     the agent's loopback at ``AGENT_SIDE_LATCHKEY_PORT`` to whichever host-side gateway
@@ -96,21 +96,6 @@ def test_build_mngr_create_command_injects_latchkey_for_non_dev_modes() -> None:
     assert expected in command
 
 
-def test_build_mngr_create_command_omits_latchkey_for_dev_mode_without_url() -> None:
-    """DEV with no explicit URL gets no latchkey wiring.
-
-    There's no constant agent-side URL to fall back on for DEV (no
-    reverse tunnel), so the caller is responsible for computing the
-    live gateway URL when it wants DEV agents to use latchkey.
-    """
-    command, _ = _build_mngr_create_command(launch_mode=LaunchMode.DEV, agent_name=AgentName("hello"))
-    joined = " ".join(command)
-    assert "LATCHKEY_GATEWAY" not in joined
-    # ``LATCHKEY_DISABLE_COUNTING`` is part of the latchkey wiring, so it's
-    # also absent when latchkey is not wired (DEV without explicit URL).
-    assert "LATCHKEY_DISABLE_COUNTING" not in joined
-
-
 def test_build_mngr_create_command_disables_latchkey_counting_when_wired() -> None:
     """Whenever latchkey is wired into the workspace, the workspace-side
     ``latchkey`` CLI runs in client mode against the host-side gateway.
@@ -118,39 +103,12 @@ def test_build_mngr_create_command_disables_latchkey_counting_when_wired() -> No
     set ``LATCHKEY_DISABLE_COUNTING=1`` to avoid double-counting every
     agent as a separate goatcounter.com user.
     """
-    # Non-DEV mode: gets the constant agent-side URL by default, so latchkey is wired.
     for mode in (LaunchMode.LOCAL, LaunchMode.LIMA, LaunchMode.CLOUD):
         command, _ = _build_mngr_create_command(launch_mode=mode, agent_name=AgentName("hello"))
         assert "LATCHKEY_DISABLE_COUNTING=1" in command, f"{mode} command missing disable-counting env: {command}"
-    # DEV with explicit URL: latchkey is wired, so disable-counting is too.
-    command, _ = _build_mngr_create_command(
-        launch_mode=LaunchMode.DEV,
-        agent_name=AgentName("hello"),
-        latchkey_gateway_url="http://127.0.0.1:54321",
-    )
-    assert "LATCHKEY_DISABLE_COUNTING=1" in command
 
 
-def test_build_mngr_create_command_injects_latchkey_for_dev_mode_with_explicit_url() -> None:
-    """DEV with an explicit live gateway URL gets the full latchkey wiring.
-
-    The caller (``AgentCreator._maybe_compute_latchkey_gateway_url``)
-    queries the live gateway info for DEV, since DEV has no reverse
-    tunnel and must talk directly to the gateway's host port.
-    """
-    command, _ = _build_mngr_create_command(
-        launch_mode=LaunchMode.DEV,
-        agent_name=AgentName("hello"),
-        latchkey_gateway_url="http://127.0.0.1:54321",
-        latchkey_gateway_password="sup3rs3cret",
-        latchkey_permissions_override_jwt="eyJhbGc.fake.jwt",
-    )
-    assert "LATCHKEY_GATEWAY=http://127.0.0.1:54321" in command
-    assert "LATCHKEY_GATEWAY_PASSWORD=sup3rs3cret" in command
-    assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=eyJhbGc.fake.jwt" in command
-
-
-def test_build_mngr_create_command_explicit_url_overrides_constant_for_non_dev() -> None:
+def test_build_mngr_create_command_explicit_url_overrides_constant() -> None:
     """Passing ``latchkey_gateway_url`` overrides the default for any mode."""
     command, _ = _build_mngr_create_command(
         launch_mode=LaunchMode.LOCAL,
@@ -175,16 +133,6 @@ def test_build_mngr_create_command_injects_latchkey_password_when_supplied() -> 
     assert "LATCHKEY_GATEWAY_PASSWORD=sup3rs3cret" in command
 
 
-def test_build_mngr_create_command_omits_latchkey_password_for_dev_mode() -> None:
-    """DEV mode skips all latchkey env injection (no tunnel, no gateway wiring)."""
-    command, _ = _build_mngr_create_command(
-        launch_mode=LaunchMode.DEV,
-        agent_name=AgentName("hello"),
-        latchkey_gateway_password="sup3rs3cret",
-    )
-    assert not any(arg.startswith("LATCHKEY_GATEWAY_PASSWORD=") for arg in command)
-
-
 def test_build_mngr_create_command_injects_latchkey_jwt_when_supplied() -> None:
     """The permissions-override JWT is injected at create time so the
     agent's env file has it from the very first service start. This is
@@ -198,15 +146,6 @@ def test_build_mngr_create_command_injects_latchkey_jwt_when_supplied() -> None:
         latchkey_permissions_override_jwt="eyJhbGc.fake.jwt",
     )
     assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=eyJhbGc.fake.jwt" in command
-
-
-def test_build_mngr_create_command_omits_latchkey_jwt_for_dev_mode() -> None:
-    command, _ = _build_mngr_create_command(
-        launch_mode=LaunchMode.DEV,
-        agent_name=AgentName("hello"),
-        latchkey_permissions_override_jwt="eyJhbGc.fake.jwt",
-    )
-    assert not any(arg.startswith("LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=") for arg in command)
 
 
 def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() -> None:
@@ -263,7 +202,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     assert "GH_TOKEN" not in joined
     assert "--pass-host-env" not in command
     # IMBUE_CLOUD now uses the symmetric ``--template main --template imbue_cloud``
-    # shape (mirroring how DEV/LOCAL/LIMA/CLOUD use ``--template main --template <provider>``).
+    # shape (mirroring how LOCAL/LIMA/CLOUD use ``--template main --template <provider>``).
     # The provider-specific knobs (idle_mode, pass_host_env) live in the
     # ``imbue_cloud`` template instead of being inlined here.
     assert "--template" in command
@@ -279,7 +218,6 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
     """Secret forwarding lives in FCT, not minds. The command line never carries
     ``--pass-(host-)env`` flags or secret values for any compute mode."""
     for mode, account in (
-        (LaunchMode.DEV, None),
         (LaunchMode.LOCAL, None),
         (LaunchMode.LIMA, None),
         (LaunchMode.CLOUD, None),
