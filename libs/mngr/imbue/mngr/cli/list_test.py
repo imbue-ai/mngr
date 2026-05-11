@@ -1625,8 +1625,7 @@ def test_list_command_json_format_with_errors_only(
         catch_exceptions=False,
     )
     assert result.exit_code == 1
-    json_line = next(line for line in result.output.splitlines() if line.strip().startswith("{"))
-    data = json.loads(json_line)
+    data = json.loads(result.stdout.strip())
     assert data["agents"] == []
     assert len(data["errors"]) == 1
     assert data["errors"][0]["exception_type"] == "MngrError"
@@ -1654,9 +1653,7 @@ def test_list_command_json_format_with_partial_agents_and_errors(
         catch_exceptions=False,
     )
     assert result.exit_code == 1
-    # Extract the JSON document from output, which may also contain loguru warnings.
-    output_after_warnings = result.output[result.output.find("{") :]
-    data = json.loads(output_after_warnings)
+    data = json.loads(result.stdout)
     assert len(data["agents"]) == 1
     assert data["agents"][0]["name"] == "alpha"
     assert len(data["errors"]) == 1
@@ -1679,9 +1676,9 @@ def test_list_command_jsonl_format_with_errors_only(
         catch_exceptions=False,
     )
     assert result.exit_code == 1
-    json_lines = [line for line in result.output.splitlines() if line.strip().startswith("{")]
-    assert len(json_lines) == 1
-    parsed = json.loads(json_lines[0])
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1
+    parsed = json.loads(lines[0])
     assert parsed["event"] == "error"
     assert parsed["message"] == "failed to load provider"
 
