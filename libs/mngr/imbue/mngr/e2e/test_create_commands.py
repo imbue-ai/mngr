@@ -77,8 +77,9 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
-# Flaky: collateral damage from a leaked `mngr observe` process that
-# minds_workspace_server's AgentManager spawns and doesn't always clean up.
+# Flaky: collateral damage from a leaked `mngr observe` process that the
+# system_interface workspace server's AgentManager spawns and doesn't always
+# clean up (now lives in forever-claude-template/apps/system_interface).
 # session_cleanup attributes the leak to whichever test runs last in the
 # offload sandbox; this one happens to draw the short straw. Real fix lives
 # in workspace_server's observe lifecycle, not here.

@@ -6,6 +6,9 @@ Modal credentials or SSH connections.
 """
 
 import contextlib
+import json
+import subprocess
+import sys
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -40,12 +43,12 @@ from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
 from imbue.mngr_modal.backend import ModalAppContextHandle
 from imbue.mngr_modal.backend import ModalProviderBackend
+from imbue.mngr_modal.backend import STATE_VOLUME_SUFFIX
 from imbue.mngr_modal.backend import _create_environment
 from imbue.mngr_modal.backend import _enter_ephemeral_app_context_with_env_retry
 from imbue.mngr_modal.backend import _exit_modal_app_context
 from imbue.mngr_modal.backend import _lookup_persistent_app_with_env_retry
 from imbue.mngr_modal.backend import register_provider_backend
-from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
@@ -926,80 +929,123 @@ def test_on_connection_error_clears_caches(
 
 
 # ---------------------------------------------------------------------------
-# Build Provider Instance Tests
+# Modal Name Derivation Tests
 # ---------------------------------------------------------------------------
 
 
-def test_build_provider_instance_testing_mode(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    config = ModalProviderConfig(
-        mode=ModalMode.TESTING,
-        app_name="build-test",
-        host_dir=temp_mngr_ctx.config.default_host_dir,
-    )
-    instance = ModalProviderBackend.build_provider_instance(
-        name=ProviderInstanceName("test"),
-        config=config,
-        mngr_ctx=temp_mngr_ctx,
-    )
-    assert isinstance(instance, ModalProviderInstance)
-    assert instance.app_name == "build-test"
-
-    # Clean up the app registry
-    ModalProviderBackend.close_app("build-test")
-
-
-def test_build_provider_instance_environment_name_derived_from_prefix(
+def test_derive_modal_names_environment_name_derived_from_prefix(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """Verify that the Modal environment name is prefix + user_id.
 
-    This test is trivial but necessary for the validity of the prefix check in
-    make_modal_provider_real (conftest.py): we validate the prefix against
-    TEST_ENV_PATTERN as a proxy for the Modal environment name. That proxy is
-    only valid if environment_name == f"{prefix}{user_id}" remains the formula
-    in build_provider_instance. If this test breaks, the prefix check no longer
+    Necessary for the validity of the prefix check in make_modal_provider_real
+    (conftest.py): we validate the prefix against TEST_ENV_PATTERN as a proxy
+    for the Modal environment name. That proxy is only valid if
+    ``environment_name == f"{prefix}{user_id}"`` remains the formula in
+    ``_derive_modal_names``. If this test breaks, the prefix check no longer
     guarantees correct environment naming.
     """
     config = ModalProviderConfig(
-        mode=ModalMode.TESTING,
         app_name="env-name-test",
         host_dir=temp_mngr_ctx.config.default_host_dir,
     )
-    instance = ModalProviderBackend.build_provider_instance(
-        name=ProviderInstanceName("test"),
-        config=config,
-        mngr_ctx=temp_mngr_ctx,
+    environment_name, _, _ = ModalProviderBackend._derive_modal_names(
+        ProviderInstanceName("test"),
+        config,
+        temp_mngr_ctx,
     )
-    assert isinstance(instance, ModalProviderInstance)
-
-    expected_env_name = f"{temp_mngr_ctx.config.prefix}{temp_mngr_ctx.get_profile_user_id()}"
-    if len(expected_env_name) > MODAL_NAME_MAX_LENGTH:
-        expected_env_name = expected_env_name[:MODAL_NAME_MAX_LENGTH]
-    assert instance.environment_name == expected_env_name
-
-    ModalProviderBackend.close_app("env-name-test")
+    expected = f"{temp_mngr_ctx.config.prefix}{temp_mngr_ctx.get_profile_user_id()}"
+    if len(expected) > MODAL_NAME_MAX_LENGTH:
+        expected = expected[:MODAL_NAME_MAX_LENGTH]
+    assert environment_name == expected
 
 
-def test_build_provider_instance_truncates_long_names(
+def test_derive_modal_names_truncates_long_app_name(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     config = ModalProviderConfig(
-        mode=ModalMode.TESTING,
         app_name="a" * 100,
         host_dir=temp_mngr_ctx.config.default_host_dir,
     )
-    instance = ModalProviderBackend.build_provider_instance(
-        name=ProviderInstanceName("test"),
-        config=config,
-        mngr_ctx=temp_mngr_ctx,
+    _, app_name, _ = ModalProviderBackend._derive_modal_names(
+        ProviderInstanceName("test"),
+        config,
+        temp_mngr_ctx,
+    )
+    # App name must leave room for the state-volume suffix.
+    assert len(app_name) <= MODAL_NAME_MAX_LENGTH
+
+
+def test_construct_modal_provider_accepts_injected_modal_interface(
+    temp_mngr_ctx: MngrContext,
+    testing_modal: TestingModalInterface,
+) -> None:
+    """``ModalProviderBackend._construct_modal_provider`` builds a working
+    ``ModalProviderInstance`` against an injected ``TestingModalInterface``.
+    Locks in that the factory has no implementation-specific branches: any
+    code path that bypasses ``modal_interface.enable_output_capture(...)``
+    (e.g. by calling a Modal-SDK-specific function directly) would crash
+    the fake here.
+    """
+    config = ModalProviderConfig(
+        app_name="di-injected",
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        is_persistent=False,
+        is_snapshotted_after_create=False,
+    )
+    apps_before = len(testing_modal._apps)
+    instance = ModalProviderBackend._construct_modal_provider(
+        ProviderInstanceName("test"),
+        config,
+        temp_mngr_ctx,
+        testing_modal,
     )
     assert isinstance(instance, ModalProviderInstance)
-    # App name should be truncated to max_app_name_length
-    assert len(instance.app_name) <= 64
+    assert instance.app_name == "di-injected"
+    # Behavioral check: the factory created a new app on the *injected* fake
+    # (proving the dependency actually flowed through, rather than the factory
+    # silently constructing its own DirectModalInterface and ignoring us).
+    assert len(testing_modal._apps) > apps_before
+    # Look up the state volume through the public interface to confirm it
+    # was created on the same fake (would raise NotFoundError if absent).
+    testing_modal.volume_from_name(
+        f"di-injected{STATE_VOLUME_SUFFIX}",
+        create_if_missing=False,
+        environment_name=instance.environment_name,
+    )
 
-    ModalProviderBackend.close_app(instance.app_name)
+
+def test_production_import_does_not_load_modal_proxy_testing() -> None:
+    """Importing ``mngr_modal.backend`` must not pull
+    ``imbue.modal_proxy.testing`` into ``sys.modules``.
+
+    The wheel build excludes ``**/testing.py`` -- a production-side import
+    of it would crash packaged consumers with ``ModuleNotFoundError``.
+    Runs in a fresh subprocess so prior tests' imports don't pollute
+    state. If this fails, find the top-level
+    ``from imbue.modal_proxy.testing import ...`` somewhere in the
+    transitive import graph of ``mngr_modal.backend``.
+    """
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import imbue.mngr_modal.backend as _; "
+            "import sys, json; "
+            "print(json.dumps('imbue.modal_proxy.testing' in sys.modules))",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    loaded = json.loads(completed.stdout.strip())
+    assert loaded is False, (
+        "imbue.mngr_modal.backend pulled imbue.modal_proxy.testing into the "
+        "production import graph. modal_proxy/testing.py is excluded from the "
+        "modal_proxy wheel, so this would crash any packaged consumer at "
+        "module load. Find and remove the top-level "
+        "`from imbue.modal_proxy.testing import ...`."
+    )
 
 
 # ---------------------------------------------------------------------------

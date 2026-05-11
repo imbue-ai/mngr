@@ -1,4 +1,5 @@
 # Workspace-Account Association and Request Inbox
+> Note: minds_workspace_server has since been moved out of mngr to `forever-claude-template/apps/system_interface/`. Path references to `apps/minds_workspace_server/...` describe state at the time this spec was written.
 
 > **Status (2026-05-06):** the sharing-request half of this spec has been
 > reverted. The "Share" button in a workspace now opens a static

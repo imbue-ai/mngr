@@ -1,0 +1,107 @@
+name: TMR
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_paths:
+        description: "Test paths (space-separated, passed as positional args before --)"
+        required: true
+        default: "libs/mngr/imbue/mngr/e2e/test_basic.py"
+      pytest_args:
+        description: "Pytest args after `--` (must be valid bash; quote values containing spaces, e.g. `-m \"foo and bar\"`)"
+        required: true
+        default: "-m release"
+      agent_type:
+        description: "Agent type (e.g. yolo, claude)"
+        required: true
+        default: "yolo"
+
+jobs:
+  tmr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code@2.1.116
+
+      - name: Configure git identity
+        run: |
+          git config user.email "dev@imbue.com"
+          git config user.name "imbue-dev"
+
+      - name: Run TMR orchestrator
+        run: |
+          mkdir -p tmr-report
+          # The "yolo" agent type is normally defined in the user's personal
+          # mngr config; CI has no such config, so we synthesize it inline via
+          # `-S` overrides. parent_type=claude inherits the claude defaults,
+          # and cli_args adds --dangerously-skip-permissions so non-interactive
+          # agents do not hang on per-tool permission prompts.
+          uv run --project libs/mngr_tmr mngr tmr -vv \
+            -S 'agent_types.yolo.parent_type="claude"' \
+            -S 'agent_types.yolo.cli_args=["--dangerously-skip-permissions"]' \
+            --agent-type "${{ inputs.agent_type }}" \
+            --provider modal \
+            --env "MODAL_TOKEN_ID=${MODAL_TOKEN_ID}" \
+            --env "MODAL_TOKEN_SECRET=${MODAL_TOKEN_SECRET}" \
+            --env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
+            --output-html tmr-report/index.html \
+            --output-format jsonl \
+            ${{ inputs.test_paths }} \
+            -- ${{ inputs.pytest_args }} \
+            | tee tmr-report/events.jsonl
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tmr-report
+          path: tmr-report/
+          retention-days: 30
+
+      - name: Push integrator branch and open PR
+        if: success()
+        run: |
+          set -euo pipefail
+          branch=$(jq -r 'select(.event == "integrator_branch") | .branch_name' < tmr-report/events.jsonl | tail -n 1)
+          if [ -z "$branch" ]; then
+            echo "No integrator branch was produced (no fixes to integrate); skipping PR."
+            exit 0
+          fi
+          echo "Integrator branch: $branch"
+          git push --set-upstream origin "$branch"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "TMR: $branch" \
+            --body "Automated PR from TMR workflow run [#${{ github.run_id }}]($run_url).
+
+          The HTML report is attached as the \`tmr-report\` artifact on that run; download and open \`index.html\` in a browser." \
+            --draft
