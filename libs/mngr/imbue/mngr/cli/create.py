@@ -159,6 +159,7 @@ def _split_address_and_target_path(raw: str) -> tuple[str, Path | None]:
     return address_part, path
 
 
+@pure
 def _resolve_agent_type_name(
     type_flag: str | None,
     is_type_explicit: bool,
