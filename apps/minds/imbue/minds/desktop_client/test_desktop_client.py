@@ -1405,14 +1405,62 @@ def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
     client, auth_store, agent_id = _setup_test_server(tmp_path)
     _authenticate_client(client, auth_store)
 
+    # Use a legitimate localhost-subdomain return_to (the real plugin-emitted form).
+    safe_return_to = f"http://{agent_id}.localhost:8421/some/path"
     response = client.get(
-        f"/agents/{agent_id}/recovery?return_to=http://target/",
+        f"/agents/{agent_id}/recovery?return_to={safe_return_to}",
         follow_redirects=False,
     )
     assert response.status_code == 200
     assert str(agent_id) in response.text
-    assert "http://target/" in response.text
+    assert safe_return_to in response.text
     assert "Restart workspace server" in response.text
+
+
+def test_recovery_page_drops_open_redirect_return_to(tmp_path: Path) -> None:
+    """A return_to pointing at a non-localhost host must be dropped, not rendered.
+
+    Otherwise the recovery page would be an open-redirect: an attacker could
+    craft ``?return_to=https://evil.com/`` and the page would navigate the
+    user there after a successful restart.
+    """
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client, auth_store)
+
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to=https://evil.com/phish",
+        follow_redirects=False,
+    )
+    assert response.status_code == 200
+    assert "evil.com" not in response.text
+    # The data-return-to attribute should be empty so the page falls back to reload().
+    assert 'data-return-to=""' in response.text
+
+
+def test_recovery_page_drops_protocol_relative_return_to(tmp_path: Path) -> None:
+    """Protocol-relative URLs like ``//evil.com/`` must not be treated as relative."""
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client, auth_store)
+
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to=//evil.com/phish",
+        follow_redirects=False,
+    )
+    assert response.status_code == 200
+    assert "evil.com" not in response.text
+
+
+def test_recovery_page_allows_relative_return_to(tmp_path: Path) -> None:
+    """A same-origin relative path must be preserved."""
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client, auth_store)
+
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to=/agents/{agent_id}/",
+        follow_redirects=False,
+    )
+    assert response.status_code == 200
+    assert f"/agents/{agent_id}/" in response.text
 
 
 def test_restart_api_requires_authentication(tmp_path: Path) -> None:

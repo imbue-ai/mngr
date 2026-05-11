@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 from typing import Final
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import Depends
@@ -1381,6 +1382,43 @@ def _build_mngr_exec_argv(
     ]
 
 
+def _sanitize_recovery_return_to(raw: str) -> str:
+    """Return a safe value for the recovery page's ``return_to`` parameter.
+
+    The recovery page navigates the user back to ``return_to`` after a
+    successful restart. Without validation, this is an open-redirect
+    primitive: a crafted URL like ``?return_to=https://evil.com/`` would
+    cause the page to navigate to an attacker-controlled site.
+
+    The only legitimate values are:
+      - Relative URLs starting with ``/`` (same-origin).
+      - Absolute URLs whose host is ``localhost`` or ends in ``.localhost``
+        (the convention used by the mngr_forward subdomain plugin, where
+        each agent is served at ``<agent-id>.localhost:<port>``).
+
+    Anything else is dropped (returned as ``""``) and the recovery page
+    falls back to ``window.location.reload()``.
+    """
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return ""
+    # Relative URL with no scheme/host -- must start with a single '/' so we
+    # don't accidentally allow protocol-relative URLs ("//evil.com/path"),
+    # which urlparse parses with netloc="evil.com".
+    if not parsed.scheme and not parsed.netloc:
+        return raw if raw.startswith("/") and not raw.startswith("//") else ""
+    # Absolute URL: allow only http(s) on localhost / *.localhost hosts.
+    if parsed.scheme not in ("http", "https"):
+        return ""
+    host = parsed.hostname or ""
+    if host == "localhost" or host.endswith(".localhost"):
+        return raw
+    return ""
+
+
 def _handle_recovery_page(
     agent_id: str,
     request: Request,
@@ -1397,7 +1435,7 @@ def _handle_recovery_page(
         ws_name = info.agent_name if info else str(agent_id)
     tracker: WorkspaceServerHealthTracker | None = request.app.state.workspace_health_tracker
     initial_status = tracker.get_health(aid).value if tracker is not None else AgentHealth.HEALTHY.value
-    return_to = request.query_params.get("return_to", "")
+    return_to = _sanitize_recovery_return_to(request.query_params.get("return_to", ""))
     html_body = render_recovery_page(
         agent_id=aid,
         ws_name=ws_name,
