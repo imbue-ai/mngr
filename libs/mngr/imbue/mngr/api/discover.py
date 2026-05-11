@@ -73,11 +73,6 @@ def _discover_provider_hosts_and_agents(
     try:
         provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
     except ProviderUnavailableError as exc:
-        # Surface unavailability as a warning so the user notices when an
-        # enabled provider isn't installed/reachable. Other providers
-        # still contribute hosts. Misconfigurations (wrong credentials)
-        # are ProviderNotAuthorizedError and fall through to the broad
-        # except below as a ProviderDiscoveryError.
         logger.warning("Skipping provider {} (unavailable): {}", provider.name, exc)
         return
     except Exception as exc:

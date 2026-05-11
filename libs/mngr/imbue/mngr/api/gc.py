@@ -167,10 +167,8 @@ def _discover_hosts_for_gc(
                 cg=mngr_ctx.concurrency_group,
             )
         except ProviderUnavailableError as e:
-            # Surface unavailability as a warning so the user notices when
-            # an enabled provider isn't installed/reachable. The provider
-            # is excluded from `result`, so downstream gc_* helpers never
-            # see it (otherwise they'd treat its volumes as orphaned).
+            # Excluded from `result` so downstream gc_* helpers don't
+            # treat this provider's volumes as orphaned.
             logger.warning("Skipping provider {} during GC (unavailable): {}", provider.name, e)
             continue
         except MngrError as e:
