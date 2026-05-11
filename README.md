@@ -90,7 +90,7 @@ It's built on primitives you already know (SSH, git, tmux, docker), and
 `mngr` is designed to be:
 
 - **Simple** — one command launches an agent locally or on Modal; sensible defaults throughout
-- **Fast** — agents start in under 2 seconds
+- **Fast** — light agent types (e.g. `command`, `opencode`) start in under 2 seconds; Claude agents take ~5 seconds end-to-end (the extra time syncs a per-agent Claude config directory)
 - **Cost-transparent** — free CLI; agents auto-shutdown when idle; pay only for inference and compute
 - **Secure** — SSH key isolation, network allowlists, full container control
 - **Composable** — shared hosts, snapshot and fork agent state, direct exec, push/pull/pair
@@ -123,20 +123,23 @@ mngr --help
 
 **mngr is fast:**
 ```bash
+# Claude agent (default), end-to-end including per-agent Claude config sync:
 > time mngr create local-hello  --message "Just say hello" --no-connect
 Done.
 
-real    0m1.472s
-user    0m1.181s
-sys     0m0.227s
+real    0m5.5s
+
+# Light agent types (`command`, `opencode`, etc.) skip the Claude config sync:
+> time mngr create local-cmd  --type command --no-connect -- echo hello
+Done.
+
+real    0m1.5s
 
 > time mngr list
 NAME           STATE       HOST        PROVIDER    HOST STATE  PROJECT
 local-hello    RUNNING     localhost   local       RUNNING     mngr
 
-real    0m1.773s
-user    0m0.955s
-sys     0m0.166s
+real    0m1.7s
 ```
 
 **mngr is free, *and* the cheapest way to run remote agents (they shut down when idle):**
