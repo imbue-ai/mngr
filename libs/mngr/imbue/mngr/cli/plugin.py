@@ -412,11 +412,20 @@ def _project_to_agent_type_entries(plugins: list[PluginInfo], config: MngrConfig
     delegate to ``list_available_agent_types`` -- the same source the
     tab-completion cache uses -- and synthesize a minimal PluginInfo for
     any name that does not have a matching entry in ``plugins``.
+
+    The output is restricted so that earlier filtering on ``plugins`` (in
+    particular ``--active``) is preserved: an agent-type name backed by a
+    plugin only appears if that plugin is present in ``plugins``.
+    User-config-defined agent types (keys of ``config.agent_types``) are
+    always emitted -- they're not pluggy plugins and aren't gated by
+    plugin enable/disable.
     """
     existing_by_name = {p.name: p for p in plugins}
+    user_defined_names = {str(k) for k in config.agent_types.keys()}
     return [
         existing_by_name.get(name, PluginInfo(name=name, is_enabled=True))
         for name in list_available_agent_types(config)
+        if name in existing_by_name or name in user_defined_names
     ]
 
 

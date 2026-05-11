@@ -856,3 +856,55 @@ def test_project_to_agent_type_entries_returns_sorted_output() -> None:
     assert names == sorted(names)
     assert "aaa" in names
     assert "zzz" in names
+
+
+def test_project_to_agent_type_entries_respects_prior_filtering_of_plugins() -> None:
+    """An agent-type name whose plugin was filtered out (e.g. by --active) must not appear.
+
+    Concretely: if the codex plugin's PluginInfo was dropped from the input
+    list (because the user passed --active and codex is disabled in their
+    config), the projection must not synthesize a fresh entry for "codex"
+    just because it's a registered agent type. The install.sh menu uses
+    `--kind agent-type --active` and would otherwise offer a disabled
+    plugin's agent type.
+    """
+    # 'codex' is a built-in agent type (registered via the codex_agent
+    # default plugin), so `list_available_agent_types(MngrConfig())` will
+    # include it. We deliberately omit it from the input `plugins` list to
+    # simulate it having been filtered out by --active.
+    plugins = [
+        PluginInfo(name="command", version=None, description=None, is_enabled=True),
+    ]
+    config = MngrConfig()
+
+    result = _project_to_agent_type_entries(plugins, config)
+
+    names = {p.name for p in result}
+    # The filtered-out plugin's agent type must NOT be synthesized back in.
+    assert "codex" not in names
+    # The agent type from the surviving plugin must still appear.
+    assert "command" in names
+
+
+def test_project_to_agent_type_entries_keeps_user_config_types_when_no_plugins_listed() -> None:
+    """User-config-defined agent types are not pluggy plugins and must always appear.
+
+    Even if every plugin is filtered out by --active, user-config-defined
+    types under [agent_types.X] should still be listed -- they're defined
+    in the user's config, not by any plugin, so enable/disable doesn't
+    apply to them.
+    """
+    plugins: list[PluginInfo] = []
+    config = MngrConfig(
+        agent_types={
+            AgentTypeName("my-custom"): AgentTypeConfig(parent_type=AgentTypeName("codex")),
+        },
+    )
+
+    result = _project_to_agent_type_entries(plugins, config)
+
+    names = {p.name for p in result}
+    assert "my-custom" in names
+    # Plugin-registered types are absent because no plugins survived filtering.
+    assert "codex" not in names
+    assert "command" not in names
