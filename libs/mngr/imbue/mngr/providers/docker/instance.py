@@ -32,7 +32,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import DockerBuildTimeoutError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import ProviderDaemonNotRunningError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
@@ -264,16 +264,17 @@ class DockerProviderInstance(BaseProviderInstance):
         via DOCKER_HOST, then the active Docker context, then the platform
         default.
 
-        Raises ProviderUnavailableError (a MngrError subclass) instead of
-        DockerException when the daemon is unreachable, so callers that catch
-        MngrError handle the failure gracefully.
+        Raises ProviderDaemonNotRunningError (a ProviderUnavailableError
+        subclass) instead of DockerException when the daemon is unreachable,
+        so the discovery boundary surfaces it as a warning consistently with
+        Lima limactl-missing.
         """
         try:
             if self.config.host:
                 return docker.DockerClient(base_url=self.config.host)
             return create_docker_client()
         except docker.errors.DockerException as e:
-            raise ProviderUnavailableError(self.name, str(e)) from e
+            raise ProviderDaemonNotRunningError(self.name, str(e)) from e
 
     @cached_property
     def _state_volume(self) -> DockerVolume:
@@ -1361,15 +1362,14 @@ kill -TERM 1
         """Discover all Docker container hosts."""
         processed_host_ids: set[HostId] = set()
 
-        # _docker_client already wraps daemon-unreachable as ProviderUnavailableError.
+        # _docker_client already wraps daemon-unreachable as ProviderDaemonNotRunningError.
         # Wrap any other DockerException to match that typing so the listing-pipeline
-        # boundary (api/list.py) sees a single typed error class for "Docker is not
-        # available", recorded as ProviderErrorInfo under --on-error continue.
+        # boundary (api/list.py) sees a single typed unavailability class.
         try:
             containers = self._list_containers()
             all_host_records = self._host_store.list_all_host_records()
         except docker.errors.DockerException as e:
-            raise ProviderUnavailableError(self.name, str(e)) from e
+            raise ProviderDaemonNotRunningError(self.name, str(e)) from e
 
         # Map running containers by host_id, and harvest host names from labels.
         # We use this map below instead of h.get_name() so building DiscoveredHosts

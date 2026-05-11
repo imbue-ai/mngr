@@ -101,11 +101,40 @@ class AgentErrorInfo(ErrorInfo):
         )
 
 
+class WarningInfo(FrozenModel):
+    """Non-fatal warning surfaced from a provider during listing.
+
+    Populated when a provider raises ``ProviderUnavailableError`` (binary
+    missing, daemon down, credentials never configured, transient network
+    failure). Independent of ``--on-error``: warnings never gate exit code.
+    Surfaced via ``ListResult.warnings`` for programmatic consumers and
+    via the CLI's one-line warning summary for human consumers.
+    """
+
+    type: str = Field(description="The class name of the unavailability, e.g. 'ProviderBinaryMissingError'")
+    message: str = Field(description="Human-readable warning message")
+    provider_name: ProviderInstanceName | None = Field(
+        default=None, description="Provider instance that emitted the warning"
+    )
+
+    @classmethod
+    def build_for_provider(cls, exception: ProviderUnavailableError) -> "WarningInfo":
+        return cls(
+            type=type(exception).__name__,
+            message=str(exception),
+            provider_name=exception.provider_name,
+        )
+
+
 class ListResult(MutableModel):
     """Result of listing agents."""
 
     agents: list[AgentDetails] = Field(default_factory=list, description="List of agents with their full information")
     errors: list[ErrorInfo] = Field(default_factory=list, description="Errors encountered while listing")
+    warnings: list[WarningInfo] = Field(
+        default_factory=list,
+        description="Non-fatal warnings (provider unavailable) encountered while listing",
+    )
 
 
 class _ListAgentsParams(FrozenModel):
@@ -117,6 +146,7 @@ class _ListAgentsParams(FrozenModel):
     error_behavior: ErrorBehavior
     on_agent: Callable[[AgentDetails], None] | None
     on_error: Callable[[ErrorInfo], None] | None
+    on_warning: Callable[[WarningInfo], None] | None = None
     field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = Field(
         default_factory=dict,
     )
@@ -140,6 +170,8 @@ def list_agents(
     on_agent: Callable[[AgentDetails], None] | None = None,
     # Optional callback invoked immediately when each error is encountered (for streaming)
     on_error: Callable[[ErrorInfo], None] | None = None,
+    # Optional callback invoked immediately when a provider is unavailable (for streaming jsonl)
+    on_warning: Callable[[WarningInfo], None] | None = None,
     # whether to force the providers to refresh their caches and get new data. Only needed if calling this multiple
     # times within the same process
     reset_caches: bool = False,
@@ -170,6 +202,7 @@ def list_agents(
             error_behavior=error_behavior,
             on_agent=on_agent,
             on_error=on_error,
+            on_warning=on_warning,
             field_generators=field_generators,
         )
 
@@ -260,16 +293,15 @@ def _construct_and_discover_for_provider(
         provider_results = provider.discover_hosts_and_agents(cg=mngr_ctx.concurrency_group, include_destroyed=True)
     except ProviderUnavailableError as e:
         # The provider literally cannot operate on this machine right now
-        # (binary missing, daemon down, network unreachable). This is a
-        # deployment fact, not a misconfiguration -- log at DEBUG and skip
-        # the provider gracefully so other providers still produce hosts.
-        # DEBUG (not WARNING) matches the established convention for "expected
-        # provider-unavailable" cases (see e.g. the prior Lima discover code)
-        # and keeps stderr clean for the common "Lima not installed" scenario.
-        # Misconfigurations (wrong/missing credentials) raise
-        # ProviderNotAuthorizedError or similar and surface loudly through
-        # the broad-except below.
-        logger.debug("Skipping provider {} (unavailable): {}", provider_name, e)
+        # (binary missing, daemon down, credentials never configured,
+        # transient network failure). Surface as a structured WarningInfo --
+        # never as an error -- so other providers continue producing hosts
+        # and exit code is unaffected. The CLI renders a one-line summary.
+        warning_info = WarningInfo.build_for_provider(e)
+        with results_lock:
+            result.warnings.append(warning_info)
+        if params.on_warning:
+            params.on_warning(warning_info)
         return
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
@@ -489,11 +521,10 @@ def _construct_discover_and_emit_for_provider(
             future.result()
 
     except ProviderUnavailableError as e:
-        # See _construct_and_discover_for_provider for the rationale: machines
-        # missing a provider's prerequisite (binary, daemon) skip gracefully
-        # at DEBUG so other providers still produce hosts and stderr stays
-        # clean for the common case.
-        logger.debug("Skipping provider {} (unavailable): {}", provider_name, e)
+        # See _construct_and_discover_for_provider for the rationale.
+        warning_info = WarningInfo.build_for_provider(e)
+        with results_lock:
+            result.warnings.append(warning_info)
         return
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:

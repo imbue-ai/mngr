@@ -177,11 +177,18 @@ class ProviderError(MngrError):
 
 
 class ProviderUnavailableError(ProviderError):
-    """Provider backend is not reachable (e.g. Docker daemon not running).
+    """Provider literally cannot operate on this machine right now.
 
-    Commands that query multiple providers catch this and continue with
-    the providers that *are* available, so a single offline backend does
-    not block the entire operation.
+    Catches the class of "the user enabled the provider, but the prerequisite
+    isn't there": binary missing on PATH, daemon down, credentials never
+    configured, network unreachable, transient 5xx. The discovery boundary
+    surfaces these as ``WarningInfo`` entries on ``ListResult.warnings`` --
+    they do not gate exit code, do not abort the listing, and other providers
+    still produce hosts.
+
+    For "credentials configured but rejected (401/403)", use
+    ``ProviderNotAuthorizedError`` instead -- those are the user-actionable
+    errors that surface as ``ProviderErrorInfo``.
     """
 
     def __init__(self, provider_name: ProviderInstanceName, reason: str) -> None:
@@ -194,6 +201,27 @@ class ProviderUnavailableError(ProviderError):
             f"Ensure the provider backend is running (e.g. start Docker), or disable the provider:\n"
             f"  mngr config set --scope user providers.{provider_name}.is_enabled false"
         )
+
+
+class ProviderBinaryMissingError(ProviderUnavailableError):
+    """A required CLI binary (e.g. ``limactl``, ``docker``) is not on PATH."""
+
+
+class ProviderDaemonNotRunningError(ProviderUnavailableError):
+    """A required daemon (Docker daemon, etc.) is not reachable."""
+
+
+class ProviderCredentialsMissingError(ProviderUnavailableError):
+    """Credentials for this provider were never configured (empty/missing key/token).
+
+    For credentials that ARE configured but the provider's API rejects them
+    (401/403), use ``ProviderNotAuthorizedError`` instead.
+    """
+
+
+class ProviderNetworkUnreachableError(ProviderUnavailableError):
+    """The provider's external service is unreachable or returned a transient
+    failure (network error, 5xx, malformed response)."""
 
 
 class ProviderDiscoveryError(ProviderError):
@@ -225,7 +253,14 @@ class ProviderInstanceNotFoundError(ProviderError):
 
 
 class ProviderNotAuthorizedError(ProviderError):
-    """Provider instance is not authorized/authenticated."""
+    """Provider's API rejected the configured credentials (401/403, expired token, etc.).
+
+    The user explicitly configured credentials and they are wrong/expired --
+    this is user-actionable and surfaces as ``ProviderErrorInfo`` on
+    ``ListResult.errors``, NOT as a warning. Compare with
+    ``ProviderCredentialsMissingError`` which means "no credentials configured
+    at all" -- a softer state that surfaces as a warning.
+    """
 
     def __init__(self, provider_name: ProviderInstanceName, auth_help: str | None = None) -> None:
         self.provider_name = provider_name
@@ -373,16 +408,24 @@ class PluginMngrError(MngrError):
     """
 
 
-class ModalAuthError(PluginMngrError):
-    """Modal authentication failed due to missing or invalid token."""
+class ModalAuthError(ProviderNotAuthorizedError):
+    """Modal API rejected the configured token (missing or invalid).
 
-    def __init__(self) -> None:
+    Re-parented from ``PluginMngrError`` so ``mngr list``'s discovery boundary
+    catches and reports it consistently with other provider auth failures
+    (Vultr 401/403, imbue_cloud 401/403). For the case "no Modal token
+    configured at all" providers should raise ``ProviderCredentialsMissingError``
+    instead so it surfaces as a warning rather than an error.
+    """
+
+    def __init__(self, provider_name: ProviderInstanceName) -> None:
         super().__init__(
-            "Modal authentication failed. Token missing or invalid. "
-            "You can disable the modal plugin by running "
-            "'mngr config set --scope user plugins.modal.enabled false', "
-            "or by passing --disable-plugin modal to individual commands. "
-            "To configure modal credentials, see https://modal.com/docs/reference/modal.config"
+            provider_name,
+            auth_help=(
+                "Modal authentication failed. Token missing or invalid. "
+                "Run 'modal token new' to authenticate, or disable the provider:\n"
+                f"  mngr config set --scope user providers.{provider_name}.is_enabled false"
+            ),
         )
 
 

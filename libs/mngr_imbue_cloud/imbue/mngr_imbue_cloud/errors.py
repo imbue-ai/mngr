@@ -1,20 +1,43 @@
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderNetworkUnreachableError
+from imbue.mngr.errors import ProviderNotAuthorizedError
+from imbue.mngr.primitives import ProviderInstanceName
 
 
 class ImbueCloudError(MngrError):
     """Base class for all imbue_cloud plugin errors."""
 
 
-class ImbueCloudConnectorError(ImbueCloudError):
-    """Raised when the remote_service_connector returns an unexpected response."""
+class ImbueCloudConnectorError(ImbueCloudError, ProviderNetworkUnreachableError):
+    """Connector returned an unexpected response (5xx, malformed, network).
+
+    Multi-inherits ``ProviderNetworkUnreachableError`` so the discovery
+    boundary surfaces it as a warning (provider-unavailable) consistent
+    with Lima limactl-missing and Docker daemon-down.
+    """
+
+    def __init__(self, message: str, provider_name: str | None = None) -> None:
+        if provider_name is not None:
+            ProviderNetworkUnreachableError.__init__(self, ProviderInstanceName(provider_name), message)
+        else:
+            ImbueCloudError.__init__(self, message)
 
 
-class ImbueCloudAuthError(ImbueCloudError, HostAuthenticationError):
-    """Raised when authentication is missing or refresh fails."""
+class ImbueCloudAuthError(ImbueCloudError, HostAuthenticationError, ProviderNotAuthorizedError):
+    """Connector rejected the configured token (401/403).
 
-    def __init__(self, message: str) -> None:
-        ImbueCloudError.__init__(self, message)
+    Multi-inherits ``ProviderNotAuthorizedError`` so the discovery boundary
+    surfaces it as an error (user-actionable) consistent with Vultr/Modal
+    auth failures. Keeps ``HostAuthenticationError`` so existing per-host
+    catches still match.
+    """
+
+    def __init__(self, message: str, provider_name: str | None = None) -> None:
+        if provider_name is not None:
+            ProviderNotAuthorizedError.__init__(self, ProviderInstanceName(provider_name), auth_help=message)
+        else:
+            ImbueCloudError.__init__(self, message)
 
 
 class ImbueCloudLeaseUnavailableError(ImbueCloudError):

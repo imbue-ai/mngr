@@ -1,10 +1,11 @@
 from imbue.mngr.errors import HostCreationError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderBinaryMissingError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import ProviderInstanceName
 
 
-class LimaNotInstalledError(ProviderUnavailableError):
+class LimaNotInstalledError(ProviderBinaryMissingError):
     """Raised when limactl is not found on PATH."""
 
     def __init__(self, provider_name: ProviderInstanceName) -> None:

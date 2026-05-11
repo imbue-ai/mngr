@@ -14,7 +14,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import ProviderCredentialsMissingError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import HostId
@@ -59,7 +59,7 @@ class VultrProvider(VpsDockerProvider):
             # limactl-missing and Docker daemon-down). Genuine 401/403
             # responses from the Vultr API surface as VpsApiError and
             # propagate as the existing typed error.
-            raise ProviderUnavailableError(
+            raise ProviderCredentialsMissingError(
                 self.name,
                 "Vultr API key not configured. Set VULTR_API_KEY or providers.<name>.api_key.",
             )
@@ -146,7 +146,7 @@ class VultrProvider(VpsDockerProvider):
                     return cached_record
 
         if not self.vultr_client.api_key.get_secret_value():
-            raise ProviderUnavailableError(
+            raise ProviderCredentialsMissingError(
                 self.name,
                 "Vultr API key not configured. Set VULTR_API_KEY or providers.<name>.api_key.",
             )
