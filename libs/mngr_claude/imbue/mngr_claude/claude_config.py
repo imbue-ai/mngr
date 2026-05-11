@@ -93,11 +93,21 @@ def get_user_claude_config_dir() -> Path:
     credentials or settings) should call this function instead.
 
     Resolution order:
-    1. $ORIGINAL_CLAUDE_CONFIG_DIR (set by mngr when creating agents)
+    1. $ORIGINAL_CLAUDE_CONFIG_DIR (set by mngr when creating agents), but
+       only if that path actually exists as a directory on disk.
     2. Falls back to get_claude_config_dir() ($CLAUDE_CONFIG_DIR or ~/.claude/)
+
+    The directory-existence check on $ORIGINAL_CLAUDE_CONFIG_DIR handles
+    nested-sandbox scenarios (e.g. a Linux lima VM running on a macOS host):
+    the env var is inherited from when the agent was first created on the
+    host, so it points at a host path like /Users/<user>/.claude that does
+    not exist inside the VM. Treating that as if the var were unset lets
+    callers (most importantly the credentials provisioner) fall through to
+    the per-agent CLAUDE_CONFIG_DIR, which is where the live credentials
+    actually live in that scenario.
     """
     original = os.environ.get("ORIGINAL_CLAUDE_CONFIG_DIR")
-    if original:
+    if original and Path(original).is_dir():
         return Path(original)
     return get_claude_config_dir()
 
@@ -492,7 +502,13 @@ def build_readiness_hooks_config() -> dict[str, Any]:
     files that signal agent state.
 
     - SessionStart: creates 'session_started' file AND tracks the current session ID
-      (writes to claude_session_id and appends to claude_session_id_history)
+      (writes to claude_session_id and appends to claude_session_id_history). Also
+      signals the tmux wait-for channel that ``mngr message`` waits on, but ONLY
+      when the session start was triggered by ``/clear`` or ``/compact``. These
+      are TUI-local slash commands that do NOT trigger UserPromptSubmit, so
+      without this signal ``mngr message agent -m /clear`` would time out at
+      ``enter_submission_timeout_seconds`` even though /clear actually executed.
+      Filtering on source ensures normal startup/resume don't fire stale signals.
     - UserPromptSubmit: creates 'active' file, removes 'permissions_waiting', signals tmux wait-for
     - PermissionRequest: creates 'permissions_waiting' file (Claude is waiting for permission approval)
     - PostToolUse: removes 'permissions_waiting' file (tool completed, permission resolved)
@@ -543,6 +559,23 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                                 ' echo "$_MNGR_NEW_SID" > "$MNGR_AGENT_STATE_DIR/claude_session_id.tmp"'
                                 ' && mv "$MNGR_AGENT_STATE_DIR/claude_session_id.tmp" "$MNGR_AGENT_STATE_DIR/claude_session_id";'
                                 ' echo "$_MNGR_NEW_SID${_MNGR_SOURCE:+ $_MNGR_SOURCE}" >> "$MNGR_AGENT_STATE_DIR/claude_session_id_history"'
+                            ),
+                        },
+                        {
+                            # /clear and /compact do not trigger UserPromptSubmit
+                            # (they are TUI-local commands), so without this hook
+                            # `mngr message agent -m /clear` would time out at
+                            # `enter_submission_timeout_seconds` even though /clear
+                            # ran successfully. Mirror the UserPromptSubmit signal
+                            # here, gated on source so that normal startup/resume
+                            # don't fire stale signals.
+                            "type": "command",
+                            "command": (
+                                _SESSION_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
+                                ' _MNGR_SOURCE=$(echo "$_MNGR_HOOK_INPUT" | jq -r ".source // empty");'
+                                ' case "$_MNGR_SOURCE" in clear|compact)'
+                                " tmux wait-for -S \"mngr-submit-$(tmux display-message -p '#S')\" 2>/dev/null || true ;;"
+                                " esac"
                             ),
                         },
                     ]

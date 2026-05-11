@@ -671,9 +671,11 @@ def test_get_user_claude_config_dir_defaults_to_config_dir() -> None:
 
 
 def test_get_user_claude_config_dir_respects_original_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """With ORIGINAL_CLAUDE_CONFIG_DIR set, returns that path even if CLAUDE_CONFIG_DIR differs."""
+    """With ORIGINAL_CLAUDE_CONFIG_DIR set and existing on disk, returns that path even if CLAUDE_CONFIG_DIR differs."""
     user_dir = tmp_path / "user-claude"
+    user_dir.mkdir()
     agent_dir = tmp_path / "agent-claude"
+    agent_dir.mkdir()
     monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(user_dir))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(agent_dir))
     result = get_user_claude_config_dir()
@@ -688,6 +690,68 @@ def test_get_user_claude_config_dir_falls_back_to_claude_config_dir(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom_dir))
     result = get_user_claude_config_dir()
     assert result == custom_dir
+
+
+def test_get_user_claude_config_dir_falls_back_when_original_does_not_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If ORIGINAL_CLAUDE_CONFIG_DIR points at a non-existent directory, fall back to CLAUDE_CONFIG_DIR.
+
+    This is the nested-sandbox case: ORIGINAL_CLAUDE_CONFIG_DIR was inherited
+    from the host (e.g. /Users/<user>/.claude on macOS) but we are now running
+    inside a Linux VM where that path does not exist. The per-agent
+    CLAUDE_CONFIG_DIR is where the live config (and credentials) actually
+    live, so we treat ORIGINAL as if it were unset.
+    """
+    bogus_user_dir = tmp_path / "does-not-exist-on-disk"
+    agent_dir = tmp_path / "agent-claude"
+    agent_dir.mkdir()
+    monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(bogus_user_dir))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(agent_dir))
+
+    result = get_user_claude_config_dir()
+
+    assert result == agent_dir
+
+
+def test_get_user_claude_config_dir_falls_back_when_original_is_a_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If ORIGINAL_CLAUDE_CONFIG_DIR points at a non-directory, fall back to CLAUDE_CONFIG_DIR."""
+    not_a_dir = tmp_path / "regular-file"
+    not_a_dir.write_text("not a directory")
+    agent_dir = tmp_path / "agent-claude"
+    agent_dir.mkdir()
+    monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(not_a_dir))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(agent_dir))
+
+    result = get_user_claude_config_dir()
+
+    assert result == agent_dir
+
+
+def test_get_user_claude_config_dir_credentials_fallback_resolves_to_per_agent_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: nested-sandbox scenario resolves .credentials.json from the per-agent dir.
+
+    Reproduces the bug fixed by this change: ORIGINAL_CLAUDE_CONFIG_DIR points
+    at a host path that doesn't exist inside the VM, the per-agent
+    CLAUDE_CONFIG_DIR holds the live .credentials.json, and callers that
+    resolve credentials via get_user_claude_config_dir() / ".credentials.json"
+    must end up pointing at the per-agent file.
+    """
+    bogus_host_dir = tmp_path / "Users" / "someone" / ".claude"
+    agent_dir = tmp_path / "agent-claude"
+    agent_dir.mkdir()
+    (agent_dir / ".credentials.json").write_text('{"token": "abc"}')
+    monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(bogus_host_dir))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(agent_dir))
+
+    resolved = get_user_claude_config_dir() / ".credentials.json"
+
+    assert resolved.exists()
+    assert resolved.read_text() == '{"token": "abc"}'
 
 
 # Tests for find_user_claude_config
