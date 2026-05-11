@@ -51,7 +51,6 @@ def _run_deny(
 
 def test_deny_emits_short_skill_pointer_reason(
     tmp_path: Path,
-    state_dir: Path,
     hook_env: pytest.MonkeyPatch,
 ) -> None:
     """Golden path: deny reason is a one-liner pointing at the mngr-subagents skill.
@@ -99,7 +98,6 @@ def test_deny_does_not_create_any_sidefiles(
 
 def test_deny_reason_does_not_branch_on_run_in_background(
     tmp_path: Path,
-    state_dir: Path,
     hook_env: pytest.MonkeyPatch,
 ) -> None:
     """The deny reason is identical regardless of any tool_input field.
@@ -128,7 +126,6 @@ def test_deny_reason_does_not_branch_on_run_in_background(
 
 def test_deny_reason_is_uniform_regardless_of_tool_input(
     tmp_path: Path,
-    state_dir: Path,
     hook_env: pytest.MonkeyPatch,
 ) -> None:
     """Every Task-call shape gets the same deny reason; no per-call customization."""
@@ -176,7 +173,6 @@ def test_deny_emits_skill_pointer_for_any_stdin(
     case: str,
     raw_stdin: str,
     tmp_path: Path,
-    state_dir: Path,
     hook_env: pytest.MonkeyPatch,
 ) -> None:
     """The deny reason is uniform for any stdin shape.
@@ -201,7 +197,6 @@ def test_deny_emits_skill_pointer_for_any_stdin(
 
 def test_deny_at_max_depth_emits_depth_limit_deny(
     tmp_path: Path,
-    state_dir: Path,
     hook_env: pytest.MonkeyPatch,
 ) -> None:
     """At/above ``MNGR_MAX_SUBAGENT_DEPTH``, deny mode emits a depth-limit reason.
@@ -228,7 +223,6 @@ def test_deny_at_max_depth_emits_depth_limit_deny(
 
 def test_deny_below_max_depth_emits_skill_pointer_reason(
     tmp_path: Path,
-    state_dir: Path,
     hook_env: pytest.MonkeyPatch,
 ) -> None:
     """Below the depth limit, deny mode emits the normal skill-pointer reason."""
@@ -244,7 +238,6 @@ def test_deny_below_max_depth_emits_skill_pointer_reason(
 
 def test_deny_never_allows_passthrough(
     tmp_path: Path,
-    state_dir: Path,
     hook_env: pytest.MonkeyPatch,
 ) -> None:
     """No code path in the deny hook may emit permissionDecision=allow.
