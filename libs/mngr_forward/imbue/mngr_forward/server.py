@@ -376,7 +376,10 @@ async def _forward_workspace_http(
         _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
         return _service_unavailable_response(request)
     except httpx.ReadError:
-        _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
+        # ReadError fires after the connection was established, so this is a
+        # mid-response failure (same shape as SSE_EOF on the streaming path),
+        # not a connect-time failure.
+        _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.SSE_EOF, None)
         return Response(status_code=502, content="Backend connection lost")
     except httpx.TimeoutException:
         return Response(status_code=504, content="Backend timed out")

@@ -18,6 +18,17 @@ class WorkspaceBackendFailureReason(UpperCaseStrEnum):
 
     Surfaced by the plugin so the minds-side health tracker can decide
     whether to tick the agent toward STUCK.
+
+    - ``CONNECT_ERROR``: the plugin could not establish a connection to
+      the backend (httpx.ConnectError / RemoteProtocolError before any
+      response bytes).
+    - ``SSE_EOF``: the backend dropped the response stream after some
+      bytes had already been delivered. Despite the name (motivated by
+      the SSE forwarding path that originally surfaced this), it also
+      covers non-SSE mid-response read failures.
+    - ``FIVEXX_RESPONSE``: the backend returned a 502/503/504. Other 5xx
+      codes (e.g. application-layer 500s) are *not* tagged as failures.
+    - ``UNRESOLVED``: the backend resolver had no entry for the agent.
     """
 
     CONNECT_ERROR = auto()
