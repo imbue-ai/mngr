@@ -1,0 +1,4 @@
+- `mngr transcript` learned to slice the transcript by conversational turn. Each `user_message` marks a turn boundary; framework-injected stop-hook events are already excluded by the common-transcript producer.
+- New flags: `--turn N` (1-indexed; negative counts from the end, `--turn -1` is the in-progress turn, `--turn -2` is the previous completed turn), `--last-completed-turn` (shortcut for `--turn -2`), `--count-turns` (prints the integer count), and `--list-turns` (summary respecting `--format`).
+- The `TARGET` positional argument is now optional. When omitted, `mngr transcript` resolves the current agent from the `MNGR_AGENT_ID` environment variable that mngr exports into every agent's shell. This lets in-agent hooks call `mngr transcript --last-completed-turn --format jsonl` with no extra context.
+- Turn flags are mutually exclusive with each other and with `--head`/`--tail`; they compose with `--role` (turn is computed first, then role-filtered).

@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from typing import Any
 from typing import assert_never
@@ -25,13 +26,20 @@ from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 class TranscriptCliOptions(CommonCliOptions):
     """Options passed from the CLI to the transcript command."""
 
-    target: str
+    target: str | None
     role: tuple[str, ...]
     tail: int | None
     head: int | None
+    turn: int | None
+    last_completed_turn: bool
+    count_turns: bool
+    list_turns: bool
 
 
 _COMMON_TRANSCRIPT_SUFFIX = "common_transcript"
+_USER_MESSAGE_TYPE = "user_message"
+_LIST_TURNS_PREVIEW_CHARS = 80
+_AGENT_ID_ENV_VAR = "MNGR_AGENT_ID"
 
 
 def _find_common_transcript_source(target: EventsTarget) -> str:
@@ -105,6 +113,97 @@ def _get_event_role(event: dict[str, Any]) -> str | None:
             return None
 
 
+def _user_message_indices(events: list[dict[str, Any]]) -> list[int]:
+    """Return the indices (into events) of every user_message event.
+
+    Stop-hook injections and other framework-meta events are already
+    reclassified to ``tool_result`` (with ``tool_name == "meta"``) by the
+    common_transcript producer, so a plain ``type == "user_message"`` check
+    is sufficient.
+    """
+    return [i for i, event in enumerate(events) if event.get("type") == _USER_MESSAGE_TYPE]
+
+
+def _resolve_turn_index(turn: int, turn_count: int) -> int:
+    """Normalize a 1-indexed or negative turn argument to a 0-based index into the user_message list.
+
+    Raises UserInputError if ``turn`` is 0, out of range, or the transcript has no turns.
+    """
+    if turn_count == 0:
+        raise UserInputError("Transcript has no turns (no user_message events).")
+    if turn == 0:
+        raise UserInputError("--turn is 1-indexed; use --turn 1 for the first turn or --turn -1 for the last.")
+    if turn > 0:
+        if turn > turn_count:
+            raise UserInputError(f"--turn {turn} out of range; transcript has {turn_count} turn(s).")
+        return turn - 1
+    if -turn > turn_count:
+        raise UserInputError(f"--turn {turn} out of range; transcript has {turn_count} turn(s).")
+    return turn_count + turn
+
+
+def _slice_for_turn(
+    events: list[dict[str, Any]], turn_starts: list[int], zero_based_turn: int
+) -> list[dict[str, Any]]:
+    """Return events from turn_starts[zero_based_turn] (inclusive) to turn_starts[zero_based_turn + 1] (exclusive).
+
+    If the turn is the last one, the slice runs to end-of-transcript.
+    """
+    start = turn_starts[zero_based_turn]
+    if zero_based_turn + 1 < len(turn_starts):
+        end = turn_starts[zero_based_turn + 1]
+        return events[start:end]
+    return events[start:]
+
+
+def _build_turn_summary(events: list[dict[str, Any]], turn_starts: list[int]) -> list[dict[str, Any]]:
+    """Build summary records for --list-turns, one per turn boundary."""
+    summaries: list[dict[str, Any]] = []
+    for ordinal, event_index in enumerate(turn_starts, start=1):
+        event = events[event_index]
+        content = str(event.get("content", ""))
+        preview = " ".join(content.split())
+        if len(preview) > _LIST_TURNS_PREVIEW_CHARS:
+            preview = preview[:_LIST_TURNS_PREVIEW_CHARS] + "..."
+        summaries.append(
+            {
+                "turn": ordinal,
+                "timestamp": event.get("timestamp", ""),
+                "event_id": event.get("event_id", ""),
+                "content_preview": preview,
+            }
+        )
+    return summaries
+
+
+def _emit_turn_summary(summaries: list[dict[str, Any]], output_opts: OutputOptions) -> None:
+    """Emit turn-summary records in the requested format."""
+    match output_opts.output_format:
+        case OutputFormat.JSONL:
+            for s in summaries:
+                sys.stdout.write(json.dumps(s, separators=(",", ":")) + "\n")
+            sys.stdout.flush()
+
+        case OutputFormat.JSON:
+            sys.stdout.write(json.dumps(summaries, indent=2) + "\n")
+            sys.stdout.flush()
+
+        case OutputFormat.HUMAN:
+            if not summaries:
+                sys.stdout.write("(no turns)\n")
+                sys.stdout.flush()
+                return
+            header = f"{'#':>4}  {'timestamp':<24}  preview"
+            sys.stdout.write(header + "\n")
+            sys.stdout.write("-" * len(header) + "\n")
+            for s in summaries:
+                sys.stdout.write(f"{s['turn']:>4}  {str(s['timestamp']):<24}  {s['content_preview']}\n")
+            sys.stdout.flush()
+
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _format_event_human(event: dict[str, Any]) -> str:
     """Format a single transcript event for human-readable display."""
     event_type = event.get("type", "unknown")
@@ -172,8 +271,44 @@ def _emit_transcript(
             assert_never(unreachable)
 
 
+def _resolve_target_identifier(target: str | None) -> str:
+    """Return the explicit target if given, else fall back to MNGR_AGENT_ID.
+
+    Raises UserInputError if neither is available.
+    """
+    if target is not None and target != "":
+        return target
+    env_target = os.environ.get(_AGENT_ID_ENV_VAR)
+    if env_target:
+        return env_target
+    raise UserInputError(
+        f"No target given and `{_AGENT_ID_ENV_VAR}` is not set. Pass an agent name/ID, or run inside an agent context."
+    )
+
+
+def _validate_turn_options(opts: TranscriptCliOptions) -> None:
+    """Reject incompatible combinations of head/tail and the turn-family flags."""
+    if opts.head is not None and opts.tail is not None:
+        raise UserInputError("Cannot specify both --head and --tail")
+
+    turn_flags = [
+        ("--turn", opts.turn is not None),
+        ("--last-completed-turn", opts.last_completed_turn),
+        ("--count-turns", opts.count_turns),
+        ("--list-turns", opts.list_turns),
+    ]
+    active_turn_flags = [name for name, is_active in turn_flags if is_active]
+    if len(active_turn_flags) > 1:
+        raise UserInputError(
+            f"Cannot specify more than one of {', '.join(active_turn_flags)}; these flags are mutually exclusive."
+        )
+    if active_turn_flags and (opts.head is not None or opts.tail is not None):
+        slicing = "--head" if opts.head is not None else "--tail"
+        raise UserInputError(f"Cannot combine {active_turn_flags[0]} with {slicing}.")
+
+
 @click.command(name="transcript")
-@click.argument("target")
+@click.argument("target", default=None, required=False)
 @optgroup.group("Filtering")
 @optgroup.option(
     "--role",
@@ -193,6 +328,35 @@ def _emit_transcript(
     default=None,
     help="Show only the first N transcript events",
 )
+@optgroup.group("Turns")
+@optgroup.option(
+    "--turn",
+    type=int,
+    default=None,
+    help=(
+        "Extract a single turn by 1-indexed position. Negative indices count from the end "
+        "(--turn -1 is the last/in-progress turn, --turn -2 is the previous completed turn). "
+        "A 'turn' is the slice from one user_message (inclusive) up to the next user_message (exclusive)."
+    ),
+)
+@optgroup.option(
+    "--last-completed-turn",
+    is_flag=True,
+    default=False,
+    help="Extract the most recent completed turn (equivalent to --turn -2).",
+)
+@optgroup.option(
+    "--count-turns",
+    is_flag=True,
+    default=False,
+    help="Print the number of turns in the transcript and exit.",
+)
+@optgroup.option(
+    "--list-turns",
+    is_flag=True,
+    default=False,
+    help="List each turn's number, timestamp, and a content preview instead of the events themselves.",
+)
 @add_common_options
 @click.pass_context
 def transcript(ctx: click.Context, **kwargs: Any) -> None:
@@ -203,12 +367,12 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
         is_format_template_supported=False,
     )
 
-    if opts.head is not None and opts.tail is not None:
-        raise UserInputError("Cannot specify both --head and --tail")
+    _validate_turn_options(opts)
+    target_identifier = _resolve_target_identifier(opts.target)
 
     # Resolve the target agent
     target = resolve_events_target(
-        identifier=opts.target,
+        identifier=target_identifier,
         mngr_ctx=mngr_ctx,
     )
 
@@ -222,10 +386,42 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
     except (MngrError, OSError) as e:
         raise MngrError(f"Failed to read transcript for {target.display_name}: {e}") from e
 
-    # Parse and filter events
+    # For turn-aware operations we need unfiltered events to compute boundaries,
+    # then apply role filtering to the resulting slice. For other operations we
+    # can filter at parse time.
+    turn_mode = opts.turn is not None or opts.last_completed_turn or opts.count_turns or opts.list_turns
+    parse_roles: tuple[str, ...] = () if turn_mode else opts.role
     all_events = _parse_transcript_events(
-        content, roles=opts.role, source_description=f"transcript file '{event_file_name}' for {target.display_name}"
+        content,
+        roles=parse_roles,
+        source_description=f"transcript file '{event_file_name}' for {target.display_name}",
     )
+
+    if opts.count_turns:
+        count = len(_user_message_indices(all_events))
+        sys.stdout.write(f"{count}\n")
+        sys.stdout.flush()
+        return
+
+    if opts.list_turns:
+        summaries = _build_turn_summary(all_events, _user_message_indices(all_events))
+        _emit_turn_summary(summaries, output_opts)
+        return
+
+    if opts.turn is not None or opts.last_completed_turn:
+        turn_starts = _user_message_indices(all_events)
+        if opts.last_completed_turn:
+            if len(turn_starts) < 2:
+                raise UserInputError(f"No completed turn yet (only {len(turn_starts)} user message(s) in transcript).")
+            zero_based = len(turn_starts) - 2
+        else:
+            assert opts.turn is not None
+            zero_based = _resolve_turn_index(opts.turn, len(turn_starts))
+        sliced = _slice_for_turn(all_events, turn_starts, zero_based)
+        if opts.role:
+            sliced = [e for e in sliced if _get_event_role(e) in opts.role]
+        _emit_transcript(sliced, output_opts)
+        return
 
     # Apply head/tail
     if opts.head is not None:
@@ -243,17 +439,35 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="transcript",
     one_line_description="View the message transcript for an agent",
-    synopsis="mngr transcript TARGET [--role ROLE] [--tail N] [--head N] [--format human|json|jsonl]",
-    arguments_description="- `TARGET`: Agent name or ID whose transcript to view",
+    synopsis=(
+        "mngr transcript [TARGET] [--role ROLE] [--tail N | --head N | --turn N | --last-completed-turn"
+        " | --count-turns | --list-turns] [--format human|json|jsonl]"
+    ),
+    arguments_description=(
+        "- `TARGET`: Agent name or ID whose transcript to view. Optional when "
+        "the command runs inside an agent context that exports `MNGR_AGENT_ID`."
+    ),
     description="""View the common transcript for an agent. The transcript contains
 user messages, assistant messages, and tool call/result summaries in a
 common, agent-agnostic format.
 
 The command automatically finds the correct transcript file regardless
-of the agent type (e.g. claude, codex).
+of the agent type (e.g. claude, codex). If TARGET is omitted, the
+command resolves the current agent from the `MNGR_AGENT_ID` environment
+variable that mngr exports into every agent's shell.
 
 Use --role to filter by message role (user, assistant, tool). This
 option is repeatable to include multiple roles.
+
+Turn-aware options operate on conversational turns, where each
+`user_message` event marks a turn boundary. They are mutually exclusive
+with each other and with --head / --tail:
+  - --turn N: extract a single turn. Positive N is 1-indexed from the
+    start; negative N counts from the end (--turn -1 = last/in-progress,
+    --turn -2 = previous completed).
+  - --last-completed-turn: shortcut for --turn -2.
+  - --count-turns: print just the turn count and exit.
+  - --list-turns: summary table of turn boundaries (respects --format).
 
 Use --format to control output:
   - human (default): nicely formatted, readable output
@@ -266,6 +480,13 @@ Use --format to control output:
         ("View last 20 events", "mngr transcript my-agent --tail 20"),
         ("Output as JSONL for piping", "mngr transcript my-agent --format jsonl"),
         ("Output as JSON", "mngr transcript my-agent --format json"),
+        ("Count turns in the transcript", "mngr transcript my-agent --count-turns"),
+        (
+            "Extract the previous completed turn (from inside an agent)",
+            "mngr transcript --last-completed-turn --format jsonl",
+        ),
+        ("Extract the second turn", "mngr transcript my-agent --turn 2 --format jsonl"),
+        ("List all turn boundaries", "mngr transcript my-agent --list-turns"),
     ),
     see_also=(
         ("event", "View all events from an agent or host"),
