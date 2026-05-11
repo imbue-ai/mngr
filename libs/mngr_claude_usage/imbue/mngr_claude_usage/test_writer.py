@@ -114,6 +114,18 @@ def test_writer_skips_on_garbage_input(writer_path: Path, events_file: Path) -> 
     assert not events_file.exists()
 
 
+def test_writer_passes_through_non_object_rate_limits(writer_path: Path, events_file: Path) -> None:
+    """If the statusline schema ever sends a non-object `rate_limits` (string,
+    array, etc.), the writer must not crash under `set -euo pipefail`. The
+    value is written through unchanged so the CLI reader's isinstance(dict)
+    check can filter it downstream."""
+    payload = json.dumps({"rate_limits": "unexpected"})
+    result = _run_writer(writer_path, payload, events_file)
+    assert result.returncode == 0, result.stderr
+    event = _read_last_event(events_file)
+    assert event["rate_limits"] == "unexpected"
+
+
 def test_writer_appends_one_event_per_render(writer_path: Path, events_file: Path) -> None:
     """Successive renders accumulate as separate event lines."""
     for pct in (10.0, 20.0, 30.0):
