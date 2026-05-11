@@ -79,7 +79,6 @@ addopts = [
   "--cov=imbue.mngr_tmr",
   "--cov=imbue.skitwright",
   "--cov=imbue.minds",
-  "--cov=imbue.minds_workspace_server",
   "--cov=imbue.slack_exporter",
   "--cov=imbue.remote_service_connector",
   "--cov=imbue.concurrency_group",

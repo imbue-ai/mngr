@@ -360,7 +360,6 @@ def _build_mngr_create_command(
     host's pre-baked id anyway, and pre-generating one led to bugs (e.g.
     keying gateway state under a fictional id).
 
-    DEV mode: --template main --template dev (runs in-place on local provider)
     LOCAL mode: --template main --template docker (runs in Docker container)
     LIMA mode: --template main --template lima (runs in Lima VM)
     CLOUD mode: --template main --template vultr (runs in Docker on a Vultr VPS)
@@ -369,12 +368,12 @@ def _build_mngr_create_command(
         ``agent_name``); ``imbue_cloud_*`` arguments encode the lease
         attributes (--build-arg).
 
-    For modes that create a separate host (LOCAL, LIMA, CLOUD, IMBUE_CLOUD),
-    the agent address uses ``agent_name@{agent_name}-host`` so hosts are
-    clearly attributable. ``--reuse`` and ``--update`` are passed for the
-    non-IMBUE_CLOUD modes so re-deploying resets the agent on the same
-    host instead of failing on a duplicate name (IMBUE_CLOUD's lease
-    flow is one-shot per pool host, so reuse is not meaningful there).
+    Every mode creates a separate host, so the agent address uses
+    ``agent_name@{agent_name}-host`` so hosts are clearly attributable.
+    ``--reuse`` and ``--update`` are passed for the non-IMBUE_CLOUD modes
+    so re-deploying resets the agent on the same host instead of failing
+    on a duplicate name (IMBUE_CLOUD's lease flow is one-shot per pool
+    host, so reuse is not meaningful there).
 
     Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``, ``GH_TOKEN``)
     are forwarded by the FCT template's own ``pass_(host_)env`` declarations,
@@ -392,8 +391,6 @@ def _build_mngr_create_command(
     ``None`` or an empty dict to opt the agent out of latchkey wiring.
     """
     match launch_mode:
-        case LaunchMode.DEV:
-            address = str(agent_name)
         case LaunchMode.LOCAL:
             address = f"{agent_name}@{_make_host_name(agent_name)}.docker"
         case LaunchMode.LIMA:
@@ -453,11 +450,6 @@ def _build_mngr_create_command(
     # while runtime-only knobs that vary per-invocation (``--new-host``,
     # ``-b lease_attributes``) stay inline.
     match launch_mode:
-        case LaunchMode.DEV:
-            # Local (same-machine) mode: the agent inherits the bootstrap-set
-            # MNGR_HOST_DIR/MNGR_PREFIX via os.environ directly, so no
-            # host-env plumbing is needed.
-            mngr_command.extend(["--template", "main", "--template", "dev"])
         case LaunchMode.LOCAL:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "docker"])
             mngr_command.extend(_remote_host_env_flags())
@@ -642,7 +634,7 @@ def run_mngr_create(
     ``anthropic_api_key`` / ``anthropic_base_url`` / ``gh_token`` are placed
     into the subprocess env (not argv) so they don't show up in ``ps`` output;
     the FCT template's own ``pass_(host_)env`` declarations cause mngr to
-    forward them onto the host (or the DEV agent) as appropriate.
+    forward them onto the host as appropriate.
 
     Returns ``(api_key, canonical_agent_id)``. The canonical id is parsed
     out of the ``"event": "created"`` JSONL line that ``mngr create``
@@ -849,7 +841,7 @@ class AgentCreator(MutableModel):
           interactively in the workspace.
 
         ``gh_token`` is optional; when provided it's forwarded to the host
-        (or the agent in DEV mode) as ``GH_TOKEN``.
+        as ``GH_TOKEN``.
 
         For ``LaunchMode.IMBUE_CLOUD``, the agent runs on a leased pool host
         via the ``imbue_cloud_<account-slug>`` provider; the plugin's
@@ -959,7 +951,7 @@ class AgentCreator(MutableModel):
 
         For ``ai_provider == IMBUE_CLOUD``, mints a LiteLLM key (via the
         plugin CLI) and forwards ``ANTHROPIC_API_KEY``/``ANTHROPIC_BASE_URL``
-        onto the host (or DEV agent) via the subprocess env + matching
+        onto the host via the subprocess env + matching
         ``--pass-(host-)env`` flags. For ``API_KEY``, forwards the
         user-supplied key as ``ANTHROPIC_API_KEY``. For ``SUBSCRIPTION``,
         injects neither.
@@ -1103,15 +1095,15 @@ class AgentCreator(MutableModel):
                 # the post-create ``mngr provision --env`` step (which
                 # was fragile and could silently leave
                 # ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` missing in
-                # the agent env). For DEV mode the helper also starts the
-                # gateway up front so we can bake its dynamic port into
-                # ``LATCHKEY_GATEWAY`` (no reverse tunnel exists for DEV,
-                # so the agent talks straight to the gateway's host port).
+                # the agent env). Every launch mode is ``is_tunneled=True``
+                # since the only on-host launch mode (DEV) was removed --
+                # all remaining modes reach the gateway via the reverse
+                # tunnel ``LatchkeyDiscoveryHandler`` sets up post-discovery.
                 latchkey_setup = prepare_agent_latchkey(
                     self.latchkey,
-                    is_tunneled=launch_mode is not LaunchMode.DEV,
+                    is_tunneled=True,
                 )
-                self._log_latchkey_setup(launch_mode, latchkey_setup, log_queue)
+                self._log_latchkey_setup(latchkey_setup, log_queue)
 
                 parsed_name = AgentName(agent_name)
                 log_queue.put("[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value))
@@ -1209,7 +1201,6 @@ class AgentCreator(MutableModel):
 
     def _log_latchkey_setup(
         self,
-        launch_mode: LaunchMode,
         setup: AgentLatchkeySetup,
         log_queue: queue.Queue[str],
     ) -> None:
@@ -1221,8 +1212,6 @@ class AgentCreator(MutableModel):
         latchkey wiring succeeded or degraded.
         """
         if not setup.env:
-            if self.latchkey is not None and launch_mode is LaunchMode.DEV:
-                log_queue.put("[minds] Warning: latchkey wiring skipped for DEV agent (gateway start failed)")
             return
         components: list[str] = []
         if "LATCHKEY_GATEWAY_PASSWORD" not in setup.env and self.latchkey is not None:

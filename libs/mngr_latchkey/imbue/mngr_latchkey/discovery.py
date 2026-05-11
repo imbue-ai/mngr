@@ -1,13 +1,17 @@
-"""Agent-discovery callback that wires the shared gateway into each agent.
+"""Agent-lifecycle callbacks that wire the shared gateway into each agent.
 
-For every agent reported by an mngr discovery stream, this handler:
+Exposes two callables:
 
-1. Ensures the shared ``latchkey gateway`` subprocess is up on the
-   desktop host.
-2. For agents reachable only via SSH (containers, VMs, VPS), opens a
-   reverse port-forward so the agent's loopback
-   ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT`` reaches the host-side
-   gateway. DEV agents already run on the bare host and need no tunnel.
+* :class:`LatchkeyDiscoveryHandler` -- on every agent discovery, ensures
+  the shared ``latchkey gateway`` subprocess is up and (for agents
+  reachable via SSH) opens a reverse port-forward so the agent's
+  loopback ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT`` reaches the host-side
+  gateway. Agents discovered without SSH info are expected to reach the
+  gateway via whatever direct route already exists.
+* :class:`LatchkeyDestructionHandler` -- on every agent destruction,
+  tears down the reverse tunnel that belongs to that agent so the
+  manager's health-check loop doesn't keep spinning paramiko transports
+  against an SSH host that no longer exists.
 
 Tunnel setup is dispatched onto a worker thread via the supplied
 ``ConcurrencyGroup`` so the discovery-stream reader thread is never
@@ -29,6 +33,7 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
@@ -48,9 +53,11 @@ class LatchkeyDiscoveryHandler(MutableModel):
     subprocess is running on the desktop host. Agents that reach the
     desktop via SSH (containers, VMs, VPS) also get a reverse tunnel that
     exposes the host-side gateway on the agent's own
-    ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``. DEV-mode agents run on the
-    bare host and need no tunnel; their ``LATCHKEY_GATEWAY`` env var
-    points directly at the dynamic host port.
+    ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``. Agents discovered without SSH
+    info (e.g. local-provider agents in tests, or any discovery that
+    arrives before the host SSH event) skip the reverse-tunnel step and
+    are expected to reach the gateway via whatever direct route already
+    exists.
     """
 
     latchkey: Latchkey = Field(description="Latchkey wrapper that owns the shared gateway subprocess")
@@ -71,8 +78,10 @@ class LatchkeyDiscoveryHandler(MutableModel):
             return
 
         if ssh_info is None:
-            # DEV-mode agent runs on the bare host; it reaches the gateway
-            # directly on its dynamic host port, so no tunnel is needed.
+            # No SSH info for this agent (e.g. local-provider agent in tests,
+            # or a discovery event that fired before the host SSH event); we
+            # cannot set up a reverse tunnel, so just ensure the gateway is up
+            # and let the agent reach it via whatever direct route exists.
             return
 
         agent_id_str = str(agent_id)
@@ -105,6 +114,13 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 ssh_info=ssh_info,
                 local_port=host_side_port,
                 remote_port=AGENT_SIDE_LATCHKEY_PORT,
+                # Tag the tunnel with the owning agent so the destruction
+                # handler can ask the manager to drop it via
+                # ``remove_reverse_tunnels_for_agent``. Without this the
+                # tunnel registry leaks across destroyed agents and the
+                # 30s health check loop spins paramiko transports against
+                # ports that no longer exist.
+                agent_id=str(agent_id),
             )
         except (SSHTunnelError, OSError, paramiko.SSHException) as e:
             logger.warning(
@@ -116,3 +132,24 @@ class LatchkeyDiscoveryHandler(MutableModel):
         finally:
             with self._pending_lock:
                 self._pending_remote_agents.discard(str(agent_id))
+
+
+class LatchkeyDestructionHandler(FrozenModel):
+    """Destruction callback that drops the destroyed agent's reverse tunnel.
+
+    The Latchkey gateway is shared across all agents and must outlive any
+    single agent, so we do not stop it here. But the per-agent reverse
+    SSH tunnel set up by ``LatchkeyDiscoveryHandler`` does need to go
+    away: otherwise ``SSHTunnelManager`` keeps the entry in its registry
+    and the 30s health-check loop spins paramiko transports against an
+    SSH host that no longer exists, pegging a CPU.
+    """
+
+    tunnel_manager: SSHTunnelManager = Field(
+        description="Manager whose reverse tunnels for the destroyed agent must be torn down"
+    )
+
+    def __call__(self, agent_id: AgentId) -> None:
+        removed = self.tunnel_manager.remove_reverse_tunnels_for_agent(str(agent_id))
+        if removed:
+            logger.debug("Removed {} reverse tunnel(s) for destroyed agent {}", removed, agent_id)

@@ -220,6 +220,10 @@ class OuterHost(OuterHostInterface):
 
     def get_name(self) -> HostName:
         """Return the human-readable name of this host."""
+        return self.get_connector_host_name()
+
+    def get_connector_host_name(self) -> HostName:
+        """Return the literal hostname/address used by the pyinfra connector."""
         name = self.connector.name
         if name.startswith("@"):
             name = name[1:]
@@ -236,7 +240,11 @@ class OuterHost(OuterHostInterface):
             if not self.connector.host.connected:
                 self.connector.host.connect(raise_exceptions=True)
         except ConnectError as e:
-            if "authentication error" in str(e).lower():
+            message = str(e).lower()
+            # Missing/unverifiable host keys are a trust failure: we have no basis to
+            # authenticate the remote sshd, so this is an authentication problem rather
+            # than a generic connectivity one.
+            if "authentication error" in message or "no host key for" in message:
                 raise HostAuthenticationError(f"Authentication failed when connecting to host: {e}") from e
             else:
                 raise HostConnectionError(f"Failed to connect to host: {e}") from e

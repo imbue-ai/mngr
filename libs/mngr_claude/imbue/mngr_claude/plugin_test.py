@@ -670,7 +670,7 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
     assert "SessionStart" in config["hooks"]
     assert len(config["hooks"]["SessionStart"]) == 1
     hooks = config["hooks"]["SessionStart"][0]["hooks"]
-    assert len(hooks) == 3
+    assert len(hooks) == 4
 
     # First hook: creates session_started file for polling-based detection
     assert hooks[0]["type"] == "command"
@@ -698,6 +698,19 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
     # Should use atomic write (write to .tmp then mv) to prevent torn reads
     assert "claude_session_id.tmp" in session_id_hook
     assert "mv" in session_id_hook
+
+    # Fourth hook: signals tmux wait-for on /clear and /compact so that
+    # `mngr message agent -m /clear` does not time out. /clear and /compact
+    # are TUI-local slash commands that do not trigger UserPromptSubmit, so
+    # we mirror that hook's tmux wait-for signal here, filtered by source.
+    submit_signal_hook = hooks[3]["command"]
+    assert hooks[3]["type"] == "command"
+    assert "tmux wait-for -S" in submit_signal_hook
+    assert "mngr-submit-" in submit_signal_hook
+    # Should filter on source so normal startup/resume do not fire the signal
+    assert "clear" in submit_signal_hook
+    assert "compact" in submit_signal_hook
+    assert "_MNGR_SOURCE" in submit_signal_hook
 
 
 @pytest.mark.parametrize(
@@ -1586,26 +1599,6 @@ def test_auto_dismiss_dialogs_defaults_to_false() -> None:
     """Verify that auto_dismiss_dialogs defaults to False for ClaudeAgentConfig."""
     config = ClaudeAgentConfig()
     assert config.auto_dismiss_dialogs is False
-
-
-def test_on_before_provisioning_raises_for_worktree_on_remote_host(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """on_before_provisioning should raise PluginMngrError for worktree mode on remote hosts."""
-    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
-
-    # Use SimpleNamespace to simulate a non-local host. Creating a real remote host
-    # requires SSH infrastructure not available in unit tests. The method only reads
-    # host.is_local before raising.
-    non_local_host = cast(OnlineHostInterface, SimpleNamespace(is_local=False))
-
-    options = CreateAgentOptions(
-        agent_type=AgentTypeName("claude"),
-        transfer_mode=TransferMode.GIT_WORKTREE,
-    )
-
-    with pytest.raises(PluginMngrError, match="Git worktree transfer mode is not supported on remote hosts"):
-        agent.on_before_provisioning(host=non_local_host, options=options, mngr_ctx=temp_mngr_ctx)
 
 
 def test_on_before_provisioning_validates_trust_for_worktree(

@@ -25,9 +25,11 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.errors import DockerBuildTimeoutError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -629,12 +631,17 @@ kill -TERM 1
         `executable` defaults to DOCKER; pass DEPOT to use the depot.dev remote
         builder (only valid for build subcommands).
         """
-        return self.mngr_ctx.concurrency_group.run_process_to_completion(
+        # Defer the success/timeout/non-zero distinction to FinishedProcess.check(), which
+        # raises ProcessTimeoutError on timeout instead of a generic ProcessError.
+        result = self.mngr_ctx.concurrency_group.run_process_to_completion(
             [executable.value.lower()] + args,
             timeout=timeout,
             env=self._docker_env(),
             on_output=self._log_docker_creation_command_output,
+            is_checked_after=False,
         )
+        result.check()
+        return result
 
     def _log_docker_creation_command_output(self, line: str, is_stdout: bool) -> None:
         """Log output from docker subprocess calls, prefixing with [DOCKER]."""
@@ -648,8 +655,12 @@ kill -TERM 1
         # depot requires --load to import the resulting image into the local daemon.
         extra_args = ["--load"] if builder is DockerBuilder.DEPOT else []
         args = ["build", *extra_args, "-t", tag, *build_args]
+        timeout_seconds = self.config.build_timeout_seconds
         with log_span("Running {} build with {} args", builder.value.lower(), len(build_args)):
-            self._run_docker_creation_command(args, executable=builder)
+            try:
+                self._run_docker_creation_command(args, timeout=timeout_seconds, executable=builder)
+            except ProcessTimeoutError as e:
+                raise DockerBuildTimeoutError(provider_name=self.name, timeout_seconds=timeout_seconds) from e
         return tag
 
     def _build_default_image(self, tag: str) -> str:
@@ -1357,14 +1368,19 @@ kill -TERM 1
             logger.warning("Cannot list Docker hosts (Docker daemon unavailable?): {}", e)
             return []
 
-        # Map running containers by host_id
+        # Map running containers by host_id, and harvest host names from labels.
+        # We use this map below instead of h.get_name() so building DiscoveredHosts
+        # does not trigger a per-host SSH read of data.json.
         container_by_host_id: dict[HostId, docker.models.containers.Container] = {}
+        host_name_by_id: dict[HostId, HostName] = {}
         for container in containers:
             labels = container.labels or {}
             if LABEL_HOST_ID in labels:
                 try:
                     host_id = HostId(labels[LABEL_HOST_ID])
                     container_by_host_id[host_id] = container
+                    if LABEL_HOST_NAME in labels:
+                        host_name_by_id[host_id] = HostName(labels[LABEL_HOST_NAME])
                 except (KeyError, ValueError) as e:
                     logger.warning("Skipped container with invalid labels: {}", e)
 
@@ -1376,6 +1392,9 @@ kill -TERM 1
         for host_record in all_host_records:
             host_id = HostId(host_record.certified_host_data.host_id)
             processed_host_ids.add(host_id)
+            # Records always carry the canonical mngr-assigned name; prefer
+            # this over container labels (which can be stale) when both exist.
+            host_name_by_id[host_id] = HostName(host_record.certified_host_data.host_name)
 
             if host_id in container_by_host_id:
                 container = container_by_host_id[host_id]
@@ -1421,8 +1440,15 @@ kill -TERM 1
         for h, _ in hosts_with_state:
             self._evict_cached_host(h.id, replacement=h)
 
+        # Use names collected from records / labels so building the DiscoveredHost
+        # list does not trigger an SSH read of data.json per running host.
         return [
-            DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name, host_state=state)
+            DiscoveredHost(
+                host_id=h.id,
+                host_name=host_name_by_id.get(h.id) or h.get_name(),
+                provider_name=self.name,
+                host_state=state,
+            )
             for h, state in hosts_with_state
         ]
 

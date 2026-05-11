@@ -165,7 +165,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     assert "GH_TOKEN" not in joined
     assert "--pass-host-env" not in command
     # IMBUE_CLOUD now uses the symmetric ``--template main --template imbue_cloud``
-    # shape (mirroring how DEV/LOCAL/LIMA/CLOUD use ``--template main --template <provider>``).
+    # shape (mirroring how LOCAL/LIMA/CLOUD use ``--template main --template <provider>``).
     # The provider-specific knobs (idle_mode, pass_host_env) live in the
     # ``imbue_cloud`` template instead of being inlined here.
     assert "--template" in command
@@ -181,7 +181,6 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
     """Secret forwarding lives in FCT, not minds. The command line never carries
     ``--pass-(host-)env`` flags or secret values for any compute mode."""
     for mode, account in (
-        (LaunchMode.DEV, None),
         (LaunchMode.LOCAL, None),
         (LaunchMode.LIMA, None),
         (LaunchMode.CLOUD, None),

@@ -70,6 +70,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import resolve_latchkey_binary
+from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo as LatchkeyRemoteSSHInfo
 from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
@@ -164,16 +165,10 @@ def run(
     # surviving resolver from the plugin's stdout stream.
     mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
     mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
-    # ``MINDS_ALLOW_HOST_LOOPBACK=1`` opts into the plugin dialing host loopback
-    # without an SSH tunnel — needed for ``LaunchMode.DEV`` agents which run on
-    # the bare host. Off by default so the safer "refuse loopback fallback"
-    # path applies for everyone else (PR 1482).
-    allow_host_loopback = os.getenv("MINDS_ALLOW_HOST_LOOPBACK") == "1"
     forward_config = ForwardSubprocessConfig(
         port=mngr_forward_port,
         reverse_specs=(f"0:{port}",),
         mngr_host_dir=mngr_host_dir,
-        allow_host_loopback=allow_host_loopback,
     )
     consumer, preauth_cookie = start_mngr_forward(
         config=forward_config,
@@ -210,17 +205,22 @@ def run(
     consumer.add_on_reverse_tunnel_established_callback(MindsApiUrlWriter(resolver=backend_resolver))
     # Latchkey gateway lifecycle: a single shared ``latchkey gateway``
     # subprocess serves every agent (lifetime is independent of any one
-    # agent), so there is no per-agent destruction or reconcile step --
-    # the discovery callback's job is just to ensure the shared gateway
-    # is up and to (for remote agents) reverse-tunnel it into the
-    # container. Per-agent permission overrides ride on the JWT injected
-    # at ``mngr create`` time.
+    # agent), so the discovery callback's job is just to ensure the
+    # shared gateway is up and to (for remote agents) reverse-tunnel it
+    # into the container. Per-agent permission overrides ride on the JWT
+    # injected at ``mngr create`` time. The destruction callback exists
+    # solely to drop the per-agent reverse SSH tunnel when an agent goes
+    # away -- otherwise ``SSHTunnelManager`` keeps the entry in its
+    # registry and the 30s health-check loop spins paramiko transports
+    # against an SSH host that no longer exists, pegging a CPU.
     latchkey_discovery_handler = LatchkeyDiscoveryHandler(
         latchkey=latchkey,
         tunnel_manager=tunnel_manager,
         concurrency_group=root_concurrency_group,
     )
+    latchkey_destruction_handler = LatchkeyDestructionHandler(tunnel_manager=tunnel_manager)
     consumer.add_on_agent_discovered_callback(_LatchkeyDiscoveryAdapter(handler=latchkey_discovery_handler))
+    consumer.add_on_agent_destroyed_callback(latchkey_destruction_handler)
     tunnel_manager.start_reverse_tunnel_health_check()
 
     # Auto-disable an ``imbue_cloud_<slug>`` provider if its session is

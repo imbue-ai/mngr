@@ -105,15 +105,6 @@ class ForwardSubprocessConfig(FrozenModel):
     )
     mngr_binary: str = Field(default=MNGR_BINARY, description="Path to mngr binary")
     mngr_host_dir: Path = Field(default=_DEFAULT_MNGR_HOST_DIR, description="MNGR_HOST_DIR for the subprocess")
-    allow_host_loopback: bool = Field(
-        default=False,
-        description=(
-            "Pass --allow-host-loopback to the plugin. Required for LaunchMode.DEV testing where the "
-            "agent runs on the bare host and has no SSH tunnel. Off by default so a stale or "
-            "delayed-arrival ssh_info on a remote agent does not let the plugin silently dial host "
-            "loopback at the registered port (PR 1482)."
-        ),
-    )
 
 
 class EnvelopeStreamConsumer(MutableModel):
@@ -694,8 +685,6 @@ def start_mngr_forward(
         "--format",
         "jsonl",
     ]
-    if config.allow_host_loopback:
-        command.append("--allow-host-loopback")
     for include in config.agent_include:
         command.extend(["--agent-include", include])
     for spec in config.reverse_specs:
