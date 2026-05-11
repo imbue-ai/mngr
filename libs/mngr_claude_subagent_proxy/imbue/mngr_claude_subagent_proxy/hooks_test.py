@@ -45,7 +45,6 @@ def _mode_bits(path: Path) -> int:
 
 
 def test_spawn_rewrites_input(
-    tmp_path: Path,
     hook_env: pytest.MonkeyPatch,
     state_dir: Path,
 ) -> None:
@@ -216,7 +215,6 @@ def test_wait_script_traps_env_file_cleanup_on_failure() -> None:
 
 
 def test_spawn_depth_limit_denies_with_reason(
-    tmp_path: Path,
     hook_env: pytest.MonkeyPatch,
     state_dir: Path,
 ) -> None:
@@ -252,9 +250,8 @@ def test_spawn_depth_limit_denies_with_reason(
         assert entries == []
 
 
-def test_spawn_passes_through_without_env(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> None:
+def test_spawn_passes_through_without_env(clean_env: pytest.MonkeyPatch) -> None:
     """Missing state-dir env var causes an allow pass-through."""
-    del tmp_path  # unused
     del clean_env  # the fixture's job is the env cleanup
     stdin_buffer = io.StringIO(json.dumps({"tool_use_id": "tid", "tool_input": {"prompt": "hi"}}))
     stdout_buffer = io.StringIO()
@@ -266,7 +263,6 @@ def test_spawn_passes_through_without_env(tmp_path: Path, clean_env: pytest.Monk
 
 
 def test_rewrite_substitutes_output_and_cleans_up(
-    tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
     state_dir: Path,
 ) -> None:
@@ -338,7 +334,6 @@ def test_rewrite_substitutes_output_and_cleans_up(
 
 
 def test_rewrite_missing_result_preserves_subagent(
-    tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
     state_dir: Path,
 ) -> None:
@@ -401,7 +396,6 @@ def test_rewrite_missing_result_preserves_subagent(
     ids=["running", "waiting"],
 )
 def test_rewrite_live_lifecycle_preserves_subagent(
-    tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
     live_state: AgentLifecycleState,
     state_dir: Path,
@@ -452,7 +446,6 @@ def test_rewrite_live_lifecycle_preserves_subagent(
 
 
 def test_rewrite_preserves_subagent_when_mngr_list_errors(
-    tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
     state_dir: Path,
 ) -> None:
@@ -502,7 +495,6 @@ def test_rewrite_preserves_subagent_when_mngr_list_errors(
 
 
 def test_rewrite_ignores_unmapped_tool_use_id(
-    tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
     state_dir: Path,
 ) -> None:
@@ -549,7 +541,6 @@ def test_reap_fast_path_empty_state(
 
 
 def test_reap_with_work_spawns_background_child(
-    tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
     state_dir: Path,
 ) -> None:
@@ -579,7 +570,6 @@ def test_reap_with_work_spawns_background_child(
 
 
 def test_reap_background_worker_cleans_up_missing_agent(
-    tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
     state_dir: Path,
 ) -> None:
@@ -719,7 +709,6 @@ def test_guard_per_agent_plugin_cache_noop_when_cache_missing(tmp_path: Path) ->
 
 
 def test_reap_run_invokes_per_agent_plugin_cache_guard(
-    tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
     state_dir: Path,
 ) -> None:
