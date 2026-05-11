@@ -202,9 +202,9 @@ def _write_mngr_subagents_skill(host: OnlineHostInterface, work_dir: Path) -> No
 
     Used in DENY mode to give Claude the full context for delegating to
     mngr-managed subagents. The deny hook's ``permissionDecisionReason``
-    is intentionally short -- a one-liner pointing at this skill plus
-    the per-Task-call wait-script -- so the verbose protocol is loaded
-    on demand by Claude rather than crowding every Task transcript.
+    is intentionally short -- a one-liner pointing at this skill -- so
+    the verbose two-command spawn-and-wait protocol is loaded on demand
+    by Claude rather than crowding every Task transcript.
     """
     skill_dir = work_dir / ".claude" / "skills" / "mngr-subagents"
     host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(skill_dir))}", timeout_seconds=5.0)
@@ -507,12 +507,14 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
     Behavior depends on ``SubagentProxyPluginConfig.mode``:
     - ``PROXY`` (default): install spawn / cleanup / SessionStart hooks,
       write the mngr-proxy agent definition, guard project Stop hooks.
-    - ``DENY``: install only the deny hook. None of the other plumbing
-      runs (no PostToolUse, no SessionStart reaper, no Stop-hook guard,
-      no project settings.json check). The deny hook itself never
-      directly invokes ``mngr create`` -- only the wait-script it
-      generates does, and only when Claude runs it via Bash -- so the
-      cascade-destroy / reaper machinery has nothing to track.
+    - ``DENY``: install only the deny hook and write the
+      ``mngr-subagents`` skill under ``.claude/skills/``. None of the
+      other plumbing runs (no PostToolUse, no SessionStart reaper, no
+      Stop-hook guard, no project settings.json check). The deny hook
+      never invokes ``mngr create`` and does not generate per-Task
+      wait-scripts; Claude reads the skill and runs the two-command
+      spawn-and-wait protocol itself via Bash, so the cascade-destroy
+      / reaper machinery has nothing to track.
     """
     if not isinstance(agent.agent_config, ClaudeAgentConfig):
         return

@@ -86,8 +86,11 @@ def write_secure_file(path: Path, content: str) -> None:
 def write_executable_file(path: Path, content: str) -> None:
     """Write ``content`` to ``path`` with 0755 perms, creating parents as needed.
 
-    Used for the per-Task-call wait-scripts that the runner (Haiku in
-    PROXY mode, Claude in DENY mode) invokes via Bash.
+    Used for the per-Task-call wait-scripts that PROXY mode generates
+    for Haiku's Bash tool to invoke. DENY mode does not generate any
+    wait-script -- it points Claude at the ``mngr-subagents`` skill,
+    which teaches an explicit two-command protocol -- so this helper
+    is PROXY-mode-only today.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)

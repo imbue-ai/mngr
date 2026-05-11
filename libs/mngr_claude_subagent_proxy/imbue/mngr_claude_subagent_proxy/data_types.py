@@ -20,14 +20,14 @@ class SubagentProxyMode(UpperCaseStrEnum):
     end-turn body.
 
     DENY: deny every Task call with a short permissionDecisionReason
-    that points Claude at a per-Task wait-script (and the
-    ``mngr-subagents`` skill for context). The wait-script internally
-    runs ``mngr create`` for an mngr-managed subagent and prints its
-    reply; Claude is expected to invoke it via the Bash tool and use
-    the script's stdout as if it were the Task tool's tool_result.
-    Nothing is spawned by the deny hook itself; no PostToolUse /
-    SessionStart hooks are installed; no Stop-hook guarding or
-    settings.json check runs.
+    that points Claude at the ``mngr-subagents`` skill. The skill
+    teaches an explicit two-command spawn-and-wait protocol Claude
+    runs itself via the Bash tool (``mngr create`` then
+    ``python -m imbue.mngr_claude_subagent_proxy.subagent_wait``) and
+    treats subagent_wait's stdout as the Task tool's tool_result.
+    Nothing is spawned by the deny hook itself, no per-Task
+    wait-script is generated, no PostToolUse / SessionStart hooks are
+    installed, and no Stop-hook guarding or settings.json check runs.
     """
 
     PROXY = auto()

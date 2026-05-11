@@ -1130,6 +1130,7 @@ def test_deny_mode_settings_file_is_minimal_compared_to_proxy_mode(
 # Note: there is intentionally no DENY-mode background-Task release
 # test. The deny reason no longer branches on run_in_background --
 # Claude Code's Bash tool already accepts run_in_background=true, so a
-# Task call that wanted backgrounding can just bash the wait-script
-# that way. A separate DENY-specific test would have asserted that we
-# surface a redundant --spawn-only flag, which we deliberately do not.
+# Task call that wanted backgrounding can just run the skill's
+# subagent_wait command that way. A separate DENY-specific test would
+# have asserted that we surface a redundant --spawn-only flag, which
+# we deliberately do not.
