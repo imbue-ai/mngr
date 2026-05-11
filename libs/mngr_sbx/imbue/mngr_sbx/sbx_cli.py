@@ -132,7 +132,8 @@ def sbx_list(
                 continue
             try:
                 obj = json.loads(stripped_line)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                logger.warning("Skipping invalid JSONL line from 'sbx ls --json': {}", e)
                 continue
             if isinstance(obj, dict):
                 records.append(obj)

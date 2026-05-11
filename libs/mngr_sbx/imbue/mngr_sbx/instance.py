@@ -394,6 +394,10 @@ kill -TERM 1
                 extras.append(value)
             elif key == "template":
                 template = value
+            else:
+                # Unrecognized keys are intentionally passed through to sbx create as start_args
+                # by the caller; nothing to do here.
+                continue
         return workspace, tuple(extras), template or self.config.default_template
 
     # =========================================================================
