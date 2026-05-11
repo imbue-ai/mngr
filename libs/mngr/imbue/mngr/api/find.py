@@ -477,7 +477,8 @@ def find_and_maybe_start_agent_by_name_or_id(
         whether the agent process is running).
 
     Raises AgentNotFoundError if the agent cannot be found by ID.
-    Raises UserInputError if the agent cannot be found by name or if multiple agents match.
+    Raises UserInputError if the agent identifier is not a valid agent name (and not a valid
+    agent ID), if the agent cannot be found by name, or if multiple agents match.
     """
 
     # Try parsing as an AgentId first
