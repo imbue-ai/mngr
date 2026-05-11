@@ -117,7 +117,7 @@ _DEFAULT_GIT_URL: Final[str] = os.getenv(
 _DEFAULT_AGENT_NAME: Final[str] = os.getenv("MINDS_WORKSPACE_NAME", "assistant")
 
 
-_DEFAULT_BRANCH: Final[str] = os.getenv("MINDS_WORKSPACE_BRANCH", "pilot_2")
+_DEFAULT_BRANCH: Final[str] = os.getenv("MINDS_WORKSPACE_BRANCH", "pilot")
 
 
 @pure
