@@ -2,7 +2,7 @@
 
 Invoked by ``hooks/cleanup.py`` and ``hooks/reap.py`` as::
 
-    python -m imbue.mngr_subagent_proxy.hooks.destroy_worker <target_name>
+    python -m imbue.mngr_claude_subagent_proxy.hooks.destroy_worker <target_name>
 
 The module intentionally does as little as possible: resolve the agent
 by name and call ``execute_cleanup`` with ``CleanupAction.DESTROY``.
@@ -14,7 +14,7 @@ import sys
 
 from loguru import logger
 
-from imbue.mngr_subagent_proxy.hooks.mngr_api import destroy_agent_sync
+from imbue.mngr_claude_subagent_proxy.hooks.mngr_api import destroy_agent_sync
 
 
 def main() -> None:

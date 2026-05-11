@@ -1,4 +1,4 @@
-"""Project-level conftest for mngr_subagent_proxy.
+"""Project-level conftest for mngr_claude_subagent_proxy.
 
 Registers the shared pytest hooks (for --slow-tests-to-file, --coverage-to-file,
 etc.) and inherits fixtures from mngr's conftest, matching the pattern used by

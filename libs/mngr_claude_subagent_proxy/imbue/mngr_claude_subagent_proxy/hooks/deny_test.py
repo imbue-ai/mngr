@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from imbue.mngr_subagent_proxy.hooks import deny as deny_hook
+from imbue.mngr_claude_subagent_proxy.hooks import deny as deny_hook
 
 
 def _hook_input(

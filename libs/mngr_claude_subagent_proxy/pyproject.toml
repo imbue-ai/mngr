@@ -1,5 +1,5 @@
 [project]
-name = "imbue-mngr-subagent-proxy"
+name = "imbue-mngr-claude-subagent-proxy"
 version = "0.1.0"
 description = "mngr plugin that owns Claude Code subagents"
 readme = "README.md"
@@ -15,7 +15,7 @@ dev = [
 ]
 
 [project.entry-points.mngr]
-subagent_proxy = "imbue.mngr_subagent_proxy.plugin"
+claude_subagent_proxy = "imbue.mngr_claude_subagent_proxy.plugin"
 
 [build-system]
 requires = ["hatchling"]
@@ -23,6 +23,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
+exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
@@ -39,7 +40,7 @@ timeout_func_only = true
 junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
-  "--cov=imbue.mngr_subagent_proxy",
+  "--cov=imbue.mngr_claude_subagent_proxy",
   "--cov-report=term-missing",
   "--cov-report=xml",
   "--durations=20",

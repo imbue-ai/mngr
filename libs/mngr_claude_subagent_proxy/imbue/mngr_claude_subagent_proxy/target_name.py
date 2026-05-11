@@ -3,7 +3,7 @@
 Both PROXY mode (``hooks/spawn.py``) and DENY mode (``hooks/deny.py``)
 synthesize a per-Task-call mngr agent name of the shape
 ``<parent_name>--subagent-<slug>-<tid_suffix>`` so users can find them
-with ``mngr list`` filters and so the ``mngr_subagent_proxy=child`` label
+with ``mngr list`` filters and so the ``mngr_claude_subagent_proxy_parent_id=${MNGR_AGENT_ID:-}`` label
 convention is honored consistently across modes.
 
 Kept here so neither mode has to depend on the other.

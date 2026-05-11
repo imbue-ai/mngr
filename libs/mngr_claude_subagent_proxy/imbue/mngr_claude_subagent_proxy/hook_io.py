@@ -132,7 +132,7 @@ def emit_depth_limit_deny(stdout: TextIO, depth: int, max_depth: int) -> None:
     is provisioned with.
     """
     reason = (
-        f"mngr_subagent_proxy: subagent depth limit ({depth}/{max_depth}) reached. "
+        f"mngr_claude_subagent_proxy: subagent depth limit ({depth}/{max_depth}) reached. "
         "Cannot spawn nested Task tools beyond this depth."
     )
     emit_pre_tool_deny(stdout, reason)

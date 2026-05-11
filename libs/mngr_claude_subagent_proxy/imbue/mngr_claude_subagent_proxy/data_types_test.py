@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from imbue.mngr_subagent_proxy.data_types import SubagentProxyMode
-from imbue.mngr_subagent_proxy.data_types import SubagentProxyPluginConfig
+from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyMode
+from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyPluginConfig
 
 
 def test_default_mode_is_proxy() -> None:

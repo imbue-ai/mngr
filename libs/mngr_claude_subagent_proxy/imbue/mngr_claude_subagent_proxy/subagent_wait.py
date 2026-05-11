@@ -17,7 +17,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.plugin import get_preserved_sessions_dir_for_host
-from imbue.mngr_subagent_proxy.mngr_binary import get_mngr_command
+from imbue.mngr_claude_subagent_proxy.mngr_binary import get_mngr_command
 
 _POLL_INTERVAL_SECONDS: Final[float] = 0.2
 _SESSION_ID_RECHECK_SECONDS: Final[float] = 2.0
@@ -375,7 +375,7 @@ def _write_heartbeat(location: AgentLocation, now: float) -> None:
     there.
     """
     try:
-        sys.stderr.write(f"mngr_subagent_proxy.heartbeat: {now}\n")
+        sys.stderr.write(f"mngr_claude_subagent_proxy.heartbeat: {now}\n")
         sys.stderr.flush()
     except OSError as e:
         logger.warning("Failed to write stderr heartbeat: {}", e)
@@ -662,7 +662,9 @@ def wait_for_subagent(target_name: str, watermark_file: Path | None = None) -> s
         time.sleep(_POLL_INTERVAL_SECONDS)
 
 
-_USAGE: Final[str] = "Usage: python -m imbue.mngr_subagent_proxy.subagent_wait <target_name> [--watermark-file <path>]"
+_USAGE: Final[str] = (
+    "Usage: python -m imbue.mngr_claude_subagent_proxy.subagent_wait <target_name> [--watermark-file <path>]"
+)
 
 
 def _parse_args(argv: list[str]) -> tuple[str, Path | None]:

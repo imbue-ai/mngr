@@ -1,5 +1,5 @@
 """Shared logic for wrapping user-installed Stop / SubagentStop hooks
-with the ``MNGR_SUBAGENT_PROXY_CHILD`` env-conditional guard.
+with the ``MNGR_CLAUDE_SUBAGENT_PROXY_CHILD`` env-conditional guard.
 
 Lives in its own module (not ``plugin.py``) so the SessionStart hook
 in ``hooks/reap.py`` can apply the same wrap to per-agent plugin caches
@@ -22,7 +22,7 @@ from typing import Final
 
 from loguru import logger
 
-PROXY_CHILD_GUARD_PREFIX: Final[str] = '[ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; '
+PROXY_CHILD_GUARD_PREFIX: Final[str] = '[ -n "$MNGR_CLAUDE_SUBAGENT_PROXY_CHILD" ] && exit 0; '
 
 # Substrings that mark a hook command as mngr-managed (readiness, credential
 # sync, subagent-proxy, wait pipeline). Anything whose command doesn't contain
@@ -32,7 +32,7 @@ PROXY_CHILD_GUARD_PREFIX: Final[str] = '[ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && e
 MNGR_MANAGED_HOOK_MARKERS: Final[tuple[str, ...]] = (
     "$MNGR_AGENT_STATE_DIR",
     "MAIN_CLAUDE_SESSION_ID",
-    "imbue.mngr_subagent_proxy.hooks.",
+    "imbue.mngr_claude_subagent_proxy.hooks.",
     "sync_keychain_credentials.py",
     "wait_for_stop_hook.sh",
     # Auto-allow PermissionRequest emitter installed by
@@ -45,7 +45,7 @@ MNGR_MANAGED_HOOK_MARKERS: Final[tuple[str, ...]] = (
 def wrap_with_proxy_child_guard(command: str) -> str:
     """Prepend the guard so the command no-ops inside spawned subagents.
 
-    The wait-script sets MNGR_SUBAGENT_PROXY_CHILD=1 in the spawned
+    The wait-script sets MNGR_CLAUDE_SUBAGENT_PROXY_CHILD=1 in the spawned
     subagent's env. Wrapping every non-mngr Stop/SubagentStop command
     with this guard means: in the parent (env unset) the command runs
     normally; in a spawned subagent (env set) it exits 0 immediately.
@@ -132,7 +132,7 @@ def guard_stop_hooks_in_file(path: Path) -> None:
         return
     if not guard_user_stop_hooks_against_proxy_children(data):
         return
-    logger.info("Wrapped Stop hooks in {} with MNGR_SUBAGENT_PROXY_CHILD guard", path)
+    logger.info("Wrapped Stop hooks in {} with MNGR_CLAUDE_SUBAGENT_PROXY_CHILD guard", path)
     try:
         path.write_text(json.dumps(data, indent=2) + "\n")
     except OSError as e:

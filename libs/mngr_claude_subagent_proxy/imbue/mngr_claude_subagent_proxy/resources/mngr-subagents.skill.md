@@ -5,8 +5,8 @@ description: How to delegate work to a mngr-managed subagent via Bash on this ag
 
 # mngr subagents
 
-The `mngr_subagent_proxy` plugin is configured in DENY mode on this
-agent. The native `Task` tool is intentionally disabled. Use this
+The `mngr_claude_subagent_proxy` plugin is configured in DENY mode on
+this agent. The native `Task` tool is intentionally disabled. Use this
 skill instead of calling `Task` whenever you would normally delegate
 to a subagent. The protocol below replaces the entire `Task` workflow.
 
@@ -16,7 +16,8 @@ Two Bash commands. First, spawn:
 
     uv run mngr create '<slug>:<parent_cwd>' \
         --type claude --transfer=none --no-ensure-clean --no-connect --reuse \
-        --label mngr_subagent_proxy=child \
+        --label "mngr_claude_subagent_proxy_parent_name=${MNGR_AGENT_NAME:-}" \
+        --label "mngr_claude_subagent_proxy_parent_id=${MNGR_AGENT_ID:-}" \
         --env MNGR_SUBAGENT_DEPTH=$((${MNGR_SUBAGENT_DEPTH:-0}+1)) \
         --message-file <prompt_file>
 
@@ -30,8 +31,12 @@ Two Bash commands. First, spawn:
 - `<prompt_file>` is a file containing the prompt you would have
   passed to `Task`. Write it with the `Write` tool first; this avoids
   shell-escaping every newline / backtick / quote in the prompt body.
-- `--label mngr_subagent_proxy=child` tags it so it hides from
-  `mngr list` and gets reaped on parent destroy.
+- The two `mngr_claude_subagent_proxy_parent_*` labels carry parent
+  linkage so the user can filter the child out of `mngr list`
+  (`--exclude 'has(labels.mngr_claude_subagent_proxy_parent_name)'`)
+  and identify which parent spawned it. Leave the literal
+  `${MNGR_AGENT_NAME:-}` / `${MNGR_AGENT_ID:-}` expansions in the
+  command -- the shell substitutes them at run time.
 - `--env MNGR_SUBAGENT_DEPTH=...` propagates the parent's nesting
   depth (incremented by one) to the child so the plugin's depth-limit
   guard fires after `MNGR_MAX_SUBAGENT_DEPTH` levels of nesting.
@@ -43,7 +48,7 @@ Two Bash commands. First, spawn:
 
 Second, block until the subagent ends its turn and capture its reply:
 
-    uv run python -m imbue.mngr_subagent_proxy.subagent_wait <slug>
+    uv run python -m imbue.mngr_claude_subagent_proxy.subagent_wait <slug>
 
 This prints a single line of the form `END_TURN:<reply>` on success.
 Strip the literal `END_TURN:` prefix; the rest is the subagent's
@@ -72,15 +77,15 @@ is idempotent under `--reuse`, so you do not need to repeat it.
 
 Independent of the wait, the user (or you, on request) can:
 
-    mngr connect <slug>                                       # interactive TUI
-    mngr transcript <slug>                                    # full message log
-    mngr list --include 'labels.mngr_subagent_proxy == "child"'
+    mngr connect <slug>                                                              # interactive TUI
+    mngr transcript <slug>                                                           # full message log
+    mngr list --include 'has(labels.mngr_claude_subagent_proxy_parent_name)'         # all proxy children
 
 ## What NOT to do
 
 - Do not retry `Task` after a deny -- the plugin will deny it again.
 - Do not `tail -f` the subagent's output file or invent your own
   polling. `subagent_wait` is the supported wait primitive.
-- Do not skip the `--label mngr_subagent_proxy=child` flag; without
-  it, the subagent will not hide from `mngr list` and will not be
-  reaped automatically.
+- Do not skip the `mngr_claude_subagent_proxy_parent_*` labels; without
+  them, the subagent will not be identifiable as a proxy child via
+  `mngr list` filters and will not be reaped automatically.

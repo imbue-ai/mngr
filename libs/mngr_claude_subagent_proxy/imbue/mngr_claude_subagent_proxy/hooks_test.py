@@ -19,11 +19,11 @@ import pytest
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.testing import make_test_agent_details
-from imbue.mngr_subagent_proxy import _stop_hook_guard
-from imbue.mngr_subagent_proxy.hook_io import parse_int_env
-from imbue.mngr_subagent_proxy.hooks import cleanup as cleanup_hook
-from imbue.mngr_subagent_proxy.hooks import reap as reap_hook
-from imbue.mngr_subagent_proxy.hooks import spawn as spawn_hook
+from imbue.mngr_claude_subagent_proxy import _stop_hook_guard
+from imbue.mngr_claude_subagent_proxy.hook_io import parse_int_env
+from imbue.mngr_claude_subagent_proxy.hooks import cleanup as cleanup_hook
+from imbue.mngr_claude_subagent_proxy.hooks import reap as reap_hook
+from imbue.mngr_claude_subagent_proxy.hooks import spawn as spawn_hook
 
 
 def _fake_list_with_state(target_name: str, state: AgentLifecycleState) -> dict[str, AgentDetails]:
@@ -114,10 +114,19 @@ def test_spawn_rewrites_input(
     assert script_contents.startswith("#!/usr/bin/env bash")
     assert "uv run mngr create" in script_contents
     assert "--type mngr-proxy-child" in script_contents
-    assert "--label mngr_subagent_proxy=child" in script_contents
+    # Parent linkage and tool_use_id are persisted as labels so the user
+    # (or operator scripts) can query parent <-> child relationships via
+    # `mngr list --format json` / CEL filters without reading subagent_map/.
+    assert '--label "mngr_claude_subagent_proxy_parent_name=${MNGR_AGENT_NAME:-}"' in script_contents
+    assert '--label "mngr_claude_subagent_proxy_parent_id=${MNGR_AGENT_ID:-}"' in script_contents
+    assert "--label mngr_claude_subagent_proxy_tool_use_id=" in script_contents
+    # Legacy `mngr_claude_subagent_proxy=child` label was redundant once the
+    # parent_name/parent_id labels exist (top-level agents have no
+    # parent_name label, so its presence already identifies a subagent).
+    assert "--label mngr_claude_subagent_proxy=child" not in script_contents
     # --reuse so partial-create failures are recoverable on retry.
     assert "--reuse" in script_contents
-    assert "uv run python -m imbue.mngr_subagent_proxy.subagent_wait" in script_contents
+    assert "uv run python -m imbue.mngr_claude_subagent_proxy.subagent_wait" in script_contents
 
     assert _mode_bits(prompt_file) == 0o600
     assert _mode_bits(map_file) == 0o600
@@ -625,7 +634,7 @@ def test_spawn_env_vars_from_real_os_env(clean_env: pytest.MonkeyPatch) -> None:
 
 # guard_per_agent_plugin_cache wraps every Stop / SubagentStop command in
 # the per-agent Claude Code plugin cache with the
-# MNGR_SUBAGENT_PROXY_CHILD env-conditional guard.
+# MNGR_CLAUDE_SUBAGENT_PROXY_CHILD env-conditional guard.
 #
 # Found live: a spawned proxy child was running the imbue-code-guardian
 # stop_hook_orchestrator -- and being held responsible for the parent's
@@ -681,7 +690,7 @@ def test_guard_per_agent_plugin_cache_wraps_unguarded_stop_hooks(tmp_path: Path)
     for p in paths:
         data = json.loads(p.read_text())
         cmd = data["hooks"]["Stop"][0]["hooks"][0]["command"]
-        assert cmd.startswith('[ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; '), (
+        assert cmd.startswith('[ -n "$MNGR_CLAUDE_SUBAGENT_PROXY_CHILD" ] && exit 0; '), (
             f"Stop-hook command in {p} is not guarded after pass: {cmd!r}"
         )
 
@@ -690,7 +699,7 @@ def test_guard_per_agent_plugin_cache_wraps_unguarded_stop_hooks(tmp_path: Path)
     for p in paths:
         cmd = json.loads(p.read_text())["hooks"]["Stop"][0]["hooks"][0]["command"]
         # Exactly one guard prefix -- verify it doesn't appear twice.
-        assert cmd.count('[ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; ') == 1, (
+        assert cmd.count('[ -n "$MNGR_CLAUDE_SUBAGENT_PROXY_CHILD" ] && exit 0; ') == 1, (
             f"Idempotency broken: command was double-wrapped: {cmd!r}"
         )
 
@@ -741,7 +750,7 @@ def test_reap_run_invokes_per_agent_plugin_cache_guard(
     reap_hook.run(io.StringIO(""), spawn_background_callable=lambda: None)
 
     cmd = json.loads(cache_hooks.read_text())["hooks"]["Stop"][0]["hooks"][0]["command"]
-    assert cmd.startswith('[ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; '), (
+    assert cmd.startswith('[ -n "$MNGR_CLAUDE_SUBAGENT_PROXY_CHILD" ] && exit 0; '), (
         f"reap.run did not guard the per-agent plugin cache. Command after run: {cmd!r}. "
         f"The SessionStart wrap of the cache must run before the orphan-reap fast path."
     )

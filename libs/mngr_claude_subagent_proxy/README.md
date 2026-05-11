@@ -1,4 +1,4 @@
-# imbue-mngr-subagent-proxy
+# imbue-mngr-claude-subagent-proxy
 
 > ⚠️ **EXPERIMENTAL.** This plugin intercepts Claude Code's built-in
 > `Task` tool and reroutes subagent execution through mngr-managed
@@ -40,7 +40,7 @@ mode = "PROXY"   # default: route Task calls through a mngr-managed subagent
   wait-script.
 - **Wait-script** invokes `mngr create` for the real subagent (registered
   type `mngr-proxy-child`), then `python -m
-  imbue.mngr_subagent_proxy.subagent_wait` which tails the subagent's
+  imbue.mngr_claude_subagent_proxy.subagent_wait` which tails the subagent's
   Claude transcript JSONL until a terminal `stop_reason` (`end_turn`,
   `stop_sequence`, or `max_tokens`). Body is printed to stdout followed
   by a `MNGR_PROXY_END_OF_OUTPUT` sentinel.
@@ -110,14 +110,14 @@ The plugin handles this at provisioning time by walking three
 locations and prepending an env-conditional guard to every
 non-mngr Stop / SubagentStop command:
 
-    [ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; <original>
+    [ -n "$MNGR_CLAUDE_SUBAGENT_PROXY_CHILD" ] && exit 0; <original>
 
-The wait-script sets `MNGR_SUBAGENT_PROXY_CHILD=1` in the spawned
+The wait-script sets `MNGR_CLAUDE_SUBAGENT_PROXY_CHILD=1` in the spawned
 subagent's env, so guarded hooks no-op there. The parent's env does
 not have the var set, so the guard falls through and the original hook
 runs normally. Wrapping is idempotent and skips mngr-managed commands
 (recognized by `MAIN_CLAUDE_SESSION_ID`, `$MNGR_AGENT_STATE_DIR`,
-`wait_for_stop_hook.sh`, `imbue.mngr_subagent_proxy.hooks.`,
+`wait_for_stop_hook.sh`, `imbue.mngr_claude_subagent_proxy.hooks.`,
 `sync_keychain_credentials.py`).
 
 The three locations the plugin auto-guards:
@@ -144,9 +144,9 @@ Claude agent that has un-guarded user Stop / SubagentStop hooks in
 
 - Edit the file to start each Stop command with the guard:
 
-      [ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; <original>
+      [ -n "$MNGR_CLAUDE_SUBAGENT_PROXY_CHILD" ] && exit 0; <original>
 
-- Or set `MNGR_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS=1` in
+- Or set `MNGR_CLAUDE_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS=1` in
   the env to bypass the check (intended as a temporary escape hatch;
   you'll likely see runaway autofix loops inside subagents).
 
@@ -154,7 +154,7 @@ Claude agent that has un-guarded user Stop / SubagentStop hooks in
 
 Top-level vs. subagent semantics for `Stop` and `SubagentStop` aren't
 trivially translatable: a user's `SubagentStop` hook may want to fire
-when a mngr-managed subagent completes. mngr_subagent_proxy currently
+when a mngr-managed subagent completes. mngr_claude_subagent_proxy currently
 treats both Stop and SubagentStop the same way (env-conditional no-op
 on proxy children). If you have nuanced needs, write the env-guard
 yourself with a more specific predicate.
@@ -180,22 +180,39 @@ correctness; the child IS doing useful work. This lives in
 mngr_claude's readiness-hook semantics, not this plugin, and is not
 on the roadmap to fix.
 
-## Hiding proxy children from `mngr list`
+## Labels and `mngr list` queries
 
-Spawned proxy children are tagged with the label
-`mngr_subagent_proxy=child`. To suppress them from listings:
+Spawned proxy children are tagged with three labels at create time:
 
-    uv run mngr list --exclude 'labels.mngr_subagent_proxy == "child"'
+| Label | Value |
+|---|---|
+| `mngr_claude_subagent_proxy_parent_name` | The parent agent's `MNGR_AGENT_NAME` |
+| `mngr_claude_subagent_proxy_parent_id` | The parent agent's `MNGR_AGENT_ID` |
+| `mngr_claude_subagent_proxy_tool_use_id` | The originating Claude Code `tool_use_id` |
 
-The inverse — show only proxy children — is useful for debugging:
+Top-level agents have none of these labels, so the presence of
+`mngr_claude_subagent_proxy_parent_name` (or `_parent_id`) is the
+authoritative signal "this is a proxy child".
 
-    uv run mngr list --include 'labels.mngr_subagent_proxy == "child"'
+Useful queries (`mngr list` accepts CEL `--include` / `--exclude`):
 
-Combine with other filters as usual, e.g. only top-level agents that
-are currently running:
+    # Hide proxy children from listings.
+    uv run mngr list --exclude 'has(labels.mngr_claude_subagent_proxy_parent_name)'
 
+    # Show ONLY proxy children.
+    uv run mngr list --include 'has(labels.mngr_claude_subagent_proxy_parent_name)'
+
+    # All children of a specific parent.
+    uv run mngr list --include 'labels.mngr_claude_subagent_proxy_parent_name == "my-parent"'
+
+    # Orphaned children whose parent is gone -- combine the labels
+    # query with `mngr list` of all current names to subtract:
+    uv run mngr list --include 'has(labels.mngr_claude_subagent_proxy_parent_name)' --format json \
+        | jq '.agents[] | .labels.mngr_claude_subagent_proxy_parent_name' | sort -u
+
+    # Combine with other filters, e.g. running top-level agents only:
     uv run mngr list \
-        --exclude 'labels.mngr_subagent_proxy == "child"' \
+        --exclude 'has(labels.mngr_claude_subagent_proxy_parent_name)' \
         --include 'state == "RUNNING"'
 
 ## DENY mode
@@ -205,8 +222,8 @@ machinery for a single `PreToolUse:Agent` hook plus a Claude skill.
 The hook denies every Task call with a short, uniform
 `permissionDecisionReason`:
 
-    mngr_subagent_proxy is in deny mode: the Task tool is disabled for
-    this agent. Use a mngr-managed subagent instead -- see the
+    mngr_claude_subagent_proxy is in deny mode: the Task tool is disabled
+    for this agent. Use a mngr-managed subagent instead -- see the
     `mngr-subagents` skill for the two-command spawn-and-wait protocol.
 
 Claude (the calling agent) loads the `mngr-subagents` skill from the
@@ -215,11 +232,12 @@ protocol:
 
     uv run mngr create '<slug>:<parent_cwd>' \
         --type claude --transfer=none --no-ensure-clean --no-connect --reuse \
-        --label mngr_subagent_proxy=child \
+        --label "mngr_claude_subagent_proxy_parent_name=${MNGR_AGENT_NAME:-}" \
+        --label "mngr_claude_subagent_proxy_parent_id=${MNGR_AGENT_ID:-}" \
         --env MNGR_SUBAGENT_DEPTH=$((${MNGR_SUBAGENT_DEPTH:-0}+1)) \
         --message-file <prompt_file>
 
-    uv run python -m imbue.mngr_subagent_proxy.subagent_wait <slug>
+    uv run python -m imbue.mngr_claude_subagent_proxy.subagent_wait <slug>
 
 Claude writes its own prompt file via the `Write` tool, picks a slug,
 runs `mngr create`, then blocks on `subagent_wait` (or backgrounds the
@@ -255,8 +273,10 @@ What deny mode does NOT install or run (vs. PROXY):
 - No sidefiles of any kind under `$MNGR_AGENT_STATE_DIR/`.
 
 Children spawned in deny mode (by Claude following the skill's
-protocol) carry the `mngr_subagent_proxy=child` label so they still
-hide from `mngr list --exclude 'labels.mngr_subagent_proxy == "child"'`.
+protocol) carry the same `mngr_claude_subagent_proxy_parent_*` labels
+as PROXY-mode children, so they hide from
+`mngr list --exclude 'has(labels.mngr_claude_subagent_proxy_parent_name)'`
+and can be listed with the inverse filter.
 
 ## Depth limit
 
@@ -269,7 +289,7 @@ Override via `--env MNGR_MAX_SUBAGENT_DEPTH=N` at parent create time.
 Per `CLAUDE.md`, release tests in `test_real_claude_subagent.py` do
 NOT run in CI. To run them locally:
 
-    just test libs/mngr_subagent_proxy/imbue/mngr_subagent_proxy/test_real_claude_subagent.py
+    just test libs/mngr_claude_subagent_proxy/imbue/mngr_claude_subagent_proxy/test_real_claude_subagent.py
 
 They require `ANTHROPIC_API_KEY` (or `MNGR_TEST_REAL_CLAUDE_JSON`) and
 spawn real Claude agents.
