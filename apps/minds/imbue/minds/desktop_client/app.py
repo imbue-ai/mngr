@@ -1525,6 +1525,13 @@ async def _handle_restart_workspace_server_api(
     mngr_forward_port: int = request.app.state.mngr_forward_port or 0
     preauth_cookie: str | None = request.app.state.mngr_forward_preauth_cookie
     if mngr_forward_port == 0 or not preauth_cookie:
+        # Plugin probing is disabled, so we cannot verify recovery. Treat the
+        # successful dispatch as success optimistically so the chrome banner
+        # clears -- otherwise the tracker would stay in RESTARTING forever
+        # (the background probe loop is also a no-op when the plugin is
+        # disabled, so nothing else will ever clear it).
+        if tracker is not None:
+            tracker.record_success(aid)
         return Response(status_code=200, content="{}", media_type="application/json")
 
     def _probe_until_ready() -> bool:
