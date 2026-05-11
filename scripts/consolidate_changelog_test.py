@@ -192,9 +192,12 @@ def test_get_entry_added_datetime_returns_merge_commit_date(tmp_path: Path) -> N
     subprocess.run(["git", "commit", "-q", "-m", "add foo"], cwd=repo, check=True, env=feat_env)
 
     # Merge feature into main with a later committer date (the "PR merged" time).
+    # Author date is deliberately set to the feature-branch date so the test
+    # would fail if the helper read %aI instead of %cI.
     subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True, env=env)
-    # 2026-05-08T18:00:00Z = 2026-05-08T11:00:00 PT
-    merge_env = {**env, "GIT_AUTHOR_DATE": "2026-05-08T18:00:00Z", "GIT_COMMITTER_DATE": "2026-05-08T18:00:00Z"}
+    # 2026-05-08T18:00:00Z = 2026-05-08T11:00:00 PT (committer/PR-merge time)
+    # 2026-05-03T12:00:00Z = 2026-05-03 PT (author time, would map to wrong day)
+    merge_env = {**env, "GIT_AUTHOR_DATE": "2026-05-03T12:00:00Z", "GIT_COMMITTER_DATE": "2026-05-08T18:00:00Z"}
     subprocess.run(
         ["git", "merge", "-q", "--no-ff", "-m", "merge feature", "feature"],
         cwd=repo,
