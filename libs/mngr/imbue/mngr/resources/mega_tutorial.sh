@@ -13,9 +13,10 @@ set -euo pipefail
 
 # running mngr create is strictly better than running claude!
 # (if you use the alias `mngr c`, it's no more letters to type :-D)
-# running this command launches claude (Claude Code) immediately *in a new worktree*
+# running this command launches your default agent immediately *in a new worktree*
 mngr create
-# the defaults are the following: agent=claude, provider=local, project=current dir
+# the defaults are the following: agent=your configured default (set during `scripts/install.sh`,
+# stored under `[commands.create] type` in user settings), provider=local, project=current dir
 
 # you can run the agent in-place (directly in your source directory) without any transfer:
 mngr create my-task --transfer=none
@@ -26,7 +27,9 @@ mngr create my-task --transfer=none
 mngr create my-task
 # that command gives the agent a name of "my-task". If you don't specify a name, mngr will generate a random one for you.
 
-# you can use a short form for most commands (like create) as well--the above command is the same as these:
+# you can name the agent type explicitly as a positional argument, or use the short form for the
+# command itself (`mngr c` is an alias for `mngr create`). For example, when claude is your default
+# agent type, `mngr c my-task` is equivalent to `mngr create my-task claude`:
 mngr create my-task claude
 mngr c my-task
 
@@ -37,12 +40,13 @@ mngr c my-task
 # you can also specify a different agent (ex: codex)
 mngr create my-task codex
 
-# you can specify the arguments to the *agent* (ie, send args to claude rather than mngr)
+# you can specify the arguments to the *agent* (ie, send args to the agent rather than mngr)
 # by using `--` to separate the agent arguments from the mngr arguments:
 mngr create my-task -- --model opus
-# that command launches claude with the "opus" model instead of the default
+# that command passes the "--model opus" flag to your default agent (e.g. claude, when claude
+# is configured as the default)
 
-# you can also launch claude remotely in Modal:
+# you can also launch your default agent remotely in Modal:
 mngr create my-task --provider modal
 # see more details below in "CREATING AGENTS REMOTELY" for relevant options
 
