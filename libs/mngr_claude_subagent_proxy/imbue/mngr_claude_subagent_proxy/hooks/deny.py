@@ -25,7 +25,6 @@ plugin README's "DENY mode" section.
 
 from __future__ import annotations
 
-import os
 import sys
 from typing import Final
 from typing import TextIO
@@ -55,8 +54,6 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
     ``MNGR_MAX_SUBAGENT_DEPTH`` (default 3) the hook emits a deny
     citing the depth, NOT the usual "use a mngr subagent" deny.
     """
-    os.umask(0o077)
-
     depth = parse_int_env("MNGR_SUBAGENT_DEPTH", 0)
     max_depth = parse_int_env("MNGR_MAX_SUBAGENT_DEPTH", DEFAULT_MAX_SUBAGENT_DEPTH)
     if depth >= max_depth:
