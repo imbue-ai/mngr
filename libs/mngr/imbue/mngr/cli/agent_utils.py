@@ -7,6 +7,7 @@ from imbue.mngr.api.agent_addr import discover_by_address
 from imbue.mngr.api.agent_addr import find_agent_by_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import find_and_maybe_start_agent_by_name_or_id
+from imbue.mngr.api.find import parse_host_qualifier
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.cli.connect import select_agent_interactively
 from imbue.mngr.cli.output_helpers import emit_info
@@ -18,7 +19,6 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat
 
 
@@ -26,7 +26,7 @@ from imbue.mngr.primitives import OutputFormat
 def _host_matches_filter(host_ref: DiscoveredHost, host_filter: str) -> bool:
     """Check if a host reference matches the given filter string.
 
-    The filter can be either a HostId (UUID) or a HostName.
+    The filter can be a HostId, a HostName, or a `host.provider` form.
     """
     # Try matching as HostId first
     try:
@@ -36,9 +36,13 @@ def _host_matches_filter(host_ref: DiscoveredHost, host_filter: str) -> bool:
     except ValueError:
         pass
 
-    # Try matching as HostName
-    filter_as_name = HostName(host_filter)
-    return host_ref.host_name == filter_as_name
+    # Otherwise interpret the filter as `[HOST][.PROVIDER]`
+    filter_host_name, filter_provider_name = parse_host_qualifier(host_filter)
+    if filter_host_name is not None and host_ref.host_name != filter_host_name:
+        return False
+    if filter_provider_name is not None and host_ref.provider_name != filter_provider_name:
+        return False
+    return filter_host_name is not None or filter_provider_name is not None
 
 
 @pure

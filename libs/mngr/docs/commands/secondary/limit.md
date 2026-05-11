@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--grant <PERM>] [--revoke <PERM>]
+mngr [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--grant <PERM>] [--revoke <PERM>]
 ```
 
 Configure limits for agents and hosts [experimental].

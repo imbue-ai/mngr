@@ -46,7 +46,7 @@ mngr kanpan [OPTIONS]
 | `--active` | boolean | Show only active agents (anything not archived/destroyed/crashed/failed) | `False` |
 | `--local` | boolean | Show only local agents (alias for --include 'host.provider == "local"') | `False` |
 | `--remote` | boolean | Show only remote agents (alias for --exclude 'host.provider == "local"') | `False` |
-| `--project` | text | Show only agents with this project label (repeatable) | None |
+| `--project` | text | Show only agents with this project label (repeatable; '.' expands to the current project) | None |
 | `--label` | text | Show only agents with this label (format: KEY=VALUE, repeatable) [experimental] | None |
 | `--host-label` | text | Show only agents on hosts with this host label (format: KEY=VALUE, repeatable) | None |
 

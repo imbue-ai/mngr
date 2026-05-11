@@ -17,6 +17,7 @@ from pyinfra.api.command import StringCommand
 from pyinfra.api.host import Host as PyinfraHost
 from pyinfra.connectors.util import CommandOutput
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
@@ -186,6 +187,7 @@ def test_discover_agents_skips_missing_data_json(
     assert refs == []
 
 
+@pytest.mark.allow_warnings(match=r"^Could not load agent reference from")
 def test_discover_agents_skips_invalid_json(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -203,6 +205,7 @@ def test_discover_agents_skips_invalid_json(
     assert refs == []
 
 
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
 def test_discover_agents_skips_missing_id(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -221,6 +224,7 @@ def test_discover_agents_skips_missing_id(
     assert refs == []
 
 
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
 def test_discover_agents_skips_missing_name(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -239,6 +243,7 @@ def test_discover_agents_skips_missing_name(
     assert refs == []
 
 
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
 def test_discover_agents_skips_invalid_id(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -257,6 +262,7 @@ def test_discover_agents_skips_invalid_id(
     assert refs == []
 
 
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
 def test_discover_agents_skips_invalid_name(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -296,6 +302,7 @@ def test_discover_agents_loads_multiple_agents(
     assert ref_ids == set(agent_ids)
 
 
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
 def test_discover_agents_skips_bad_records_but_loads_good_ones(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
@@ -1527,7 +1534,7 @@ def test_get_file_wraps_ssh_exception_in_host_connection_error(
             self,
             remote_filename: str,
             filename_or_io: str | IO[bytes],
-            remote_temp_filename: str | None,
+            remote_temp_filename: str | None = None,
         ) -> bool:
             raise SSHException("connection lost")
 
@@ -1929,11 +1936,32 @@ def test_host_get_reported_activity_content_returns_none_for_non_boot_type(
 # =========================================================================
 
 
-def test_host_get_name_strips_at_prefix_for_local_host(
+def test_host_get_connector_host_name_strips_at_prefix_for_local_host(
     local_host: Host,
 ) -> None:
-    """get_name() should strip pyinfra's internal '@' prefix from local host names."""
-    assert local_host.get_name() == HostName("local")
+    """get_connector_host_name() should strip pyinfra's internal '@' prefix from local host names."""
+    assert local_host.get_connector_host_name() == HostName("local")
+
+
+def test_host_get_name_returns_certified_host_name_not_connector(
+    local_host: Host,
+) -> None:
+    """get_name() must return the mngr-assigned name from data.json, not the connector hostname.
+
+    Regression test for the duplicate-host-name warning that fired on local Docker:
+    multiple containers all share the connector hostname '127.0.0.1', so sourcing
+    DiscoveredHost.host_name from the connector caused spurious duplicates. Now
+    get_name() reads from certified data, which is unique per host.
+    """
+    initial = local_host.get_certified_data()
+    renamed = initial.model_copy_update(
+        to_update(initial.field_ref().host_name, "my-friendly-name"),
+    )
+    local_host.set_certified_data(renamed)
+
+    assert local_host.get_name() == HostName("my-friendly-name")
+    # Connector name is independent and still reachable for diagnostics.
+    assert local_host.get_connector_host_name() == HostName("local")
 
 
 # =========================================================================
@@ -1948,7 +1976,8 @@ def test_host_get_certified_data_returns_defaults_when_no_file(
     host = local_host
     data = host.get_certified_data()
     assert data.host_id == str(host.id)
-    # The validator normalizes 'local' (from get_name()) to 'localhost'.
+    # Fallback uses 'unknown-host-at-' + connector hostname; the validator
+    # normalizes the local-host alias 'unknown-host-at-local' to 'localhost'.
     assert data.host_name == LOCAL_HOST_NAME
 
 
@@ -2708,6 +2737,7 @@ def test_apply_work_dir_extra_paths_share_same_host_creates_symlink(
     assert target.resolve() == (source_dir / ".venv").resolve()
 
 
+@pytest.mark.allow_warnings(match=r"^work_dir_extra_paths: source path does not exist, skipping")
 def test_apply_work_dir_extra_paths_share_same_host_source_missing_warns(
     local_host: Host,
     source_and_work_dirs: tuple[Path, Path],

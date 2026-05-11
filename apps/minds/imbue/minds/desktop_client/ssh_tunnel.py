@@ -1,14 +1,8 @@
-import hashlib
-import os
-import select
-import shlex
 import socket
-import sys
-import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Final
-from urllib.parse import urlparse
 
 import paramiko
 from loguru import logger
@@ -17,24 +11,19 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
-
-_BUFFER_SIZE: Final[int] = 65536
-
-_SELECT_TIMEOUT_SECONDS: Final[float] = 1.0
-
-_SHUTDOWN_POLL_SECONDS: Final[float] = 0.2
-
-_SOCKET_POLL_SECONDS: Final[float] = 0.01
+from imbue.mngr_forward.relay import relay_data
 
 _REVERSE_TUNNEL_HEALTH_CHECK_SECONDS: Final[float] = 30.0
 
-# Maximum AF_UNIX socket path length, conservative across macOS and Linux.
-# macOS sun_path is 104 bytes, Linux is 108. Python's socket.bind rejects
-# paths >= sizeof(sun_path) (it wants room for a NUL terminator), so the
-# usable max is 103 on macOS and 107 on Linux. We use 103 to be portable.
-_MAX_AF_UNIX_PATH_LENGTH: Final[int] = 103
+# Per-tunnel backoff for the health-check repair loop. After each failed
+# repair attempt the next attempt is scheduled at ``min(2 ** failures, cap)``
+# seconds in the future. The retry continues forever (with the per-tunnel
+# wait saturating at the 5-minute backoff ceiling) so a tunnel whose
+# target is temporarily unreachable -- e.g. the user's laptop went offline
+# overnight -- still recovers when the target comes back, instead of being
+# permanently dropped.
+_REVERSE_TUNNEL_BACKOFF_CAP_SECONDS: Final[float] = 300.0
 
 
 class RemoteSSHInfo(FrozenModel):
@@ -75,63 +64,73 @@ class ReverseTunnelInfo(FrozenModel):
     requested_remote_port: int = Field(
         default=0,
         description=(
-            "Remote port originally requested from the remote sshd. ``0`` means a dynamically "
-            "assigned port (the default, used by the minds API tunnel); a fixed value is used "
-            "by per-agent tunnels that need a well-known port inside the container (e.g. the "
-            "Latchkey gateway on ``AGENT_SIDE_LATCHKEY_PORT``). The health check re-requests "
-            "this same value when re-establishing a broken tunnel."
+            "Remote port originally requested from the remote sshd. The Latchkey gateway uses "
+            "``AGENT_SIDE_LATCHKEY_PORT`` (a fixed value) so the in-container env var "
+            "``LATCHKEY_GATEWAY=http://127.0.0.1:<fixed-port>`` keeps working across tunnel "
+            "re-establishments. The health check re-requests this same value when re-establishing "
+            "a broken tunnel."
         ),
     )
-    agent_state_dirs: list[str] = Field(
-        description="$MNGR_AGENT_STATE_DIR paths on the remote host for all agents sharing this tunnel"
+    agent_id: str | None = Field(
+        default=None,
+        description=(
+            "Stringified ID of the agent that owns this tunnel, when known. Tagged by the caller "
+            "of ``setup_reverse_tunnel`` (currently ``LatchkeyDiscoveryHandler``) and read by "
+            "``remove_reverse_tunnels_for_agent`` (currently invoked from "
+            "``LatchkeyDestructionHandler``) so all tunnels belonging to a destroyed agent can be "
+            "torn down together. ``None`` when the caller does not associate the tunnel with a "
+            "specific agent."
+        ),
+    )
+
+
+class _TunnelFailureState(MutableModel):
+    """Per-tunnel backoff bookkeeping for the health-check repair loop.
+
+    Held by ``SSHTunnelManager._failure_state`` keyed by the same
+    ``(conn_key, local_port)`` tuple as ``_reverse_tunnels``. Tunnels with
+    ``consecutive_failures == 0`` (the steady-state "healthy" case) need not
+    appear here at all; entries are created on first failure and removed on
+    successful repair or when the tunnel itself is dropped.
+    """
+
+    consecutive_failures: int = Field(
+        default=0,
+        description="Number of consecutive failed repair attempts since the last success",
+    )
+    next_attempt_at: float = Field(
+        default=0.0,
+        description=(
+            "Earliest ``time.monotonic()`` value at which the health check should retry this "
+            "tunnel. Tunnels whose ``next_attempt_at`` is in the future are skipped this tick."
+        ),
     )
 
 
 class SSHTunnelManager(MutableModel):
-    """Manages SSH tunnels to remote agent backends via paramiko.
+    """Manages SSH reverse-port-forward tunnels for the surviving Latchkey path.
 
     For each unique SSH host, maintains a paramiko SSHClient connection.
-    For each unique (SSH host, remote endpoint) pair, creates a Unix domain
-    socket in a secure temporary directory that forwards connections through
-    SSH direct-tcpip channels.
+    Reverse port forwards are keyed by ``(conn_key, local_port)`` so a single
+    SSH host can carry multiple concurrent tunnels (e.g. per-agent Latchkey
+    gateways on a fixed in-container port). Reverse tunnels are health-checked
+    every ~30s and re-established if broken.
 
-    Also supports reverse port forwarding so that remote agents can reach
-    the local minds server. Reverse tunnels are health-checked periodically
-    and re-established if broken.
-
-    The Unix sockets are created in a temporary directory with 0o700 permissions.
-    Other users cannot access the sockets, and same-user processes would need
-    to discover the randomly generated directory path.
+    Forward (direct-tcpip) tunnels used to live here too -- those moved to
+    the ``mngr_forward`` plugin's own SSHTunnelManager in Phase 2 and are no
+    longer needed in minds.
     """
 
-    _tmpdir: tempfile.TemporaryDirectory[str] | None = PrivateAttr(default=None)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _connections: dict[str, paramiko.SSHClient] = PrivateAttr(default_factory=dict)
-    _tunnel_socket_paths: dict[str, Path] = PrivateAttr(default_factory=dict)
-    _tunnel_threads: dict[str, threading.Thread] = PrivateAttr(default_factory=dict)
     _shutdown_event: threading.Event = PrivateAttr(default_factory=threading.Event)
-    # Reverse tunnels are keyed by ``(conn_key, local_port)`` so that a single
-    # SSH host can host multiple concurrent tunnels for different purposes --
-    # e.g. one for the minds API (``local_port == server_port``) and one per
-    # agent for the Latchkey gateway (``local_port == per_agent_gateway_port``).
     _reverse_tunnels: dict[tuple[str, int], ReverseTunnelInfo] = PrivateAttr(default_factory=dict)
     _reverse_tunnel_setup_locks: dict[str, threading.Lock] = PrivateAttr(default_factory=dict)
     _health_check_thread: threading.Thread | None = PrivateAttr(default=None)
-
-    def _get_tmpdir(self) -> Path:
-        """Get or create the secure temporary directory for Unix sockets.
-
-        On macOS, $TMPDIR is a long per-user path under /var/folders/... that
-        can push AF_UNIX socket paths over the 104-byte sun_path limit. We use
-        /tmp directly on Darwin to keep socket paths short. The directory is
-        chmodded to 0o700 and contains only 0o600 sockets, so sharing /tmp with
-        other users on the machine is safe.
-        """
-        if self._tmpdir is None:
-            base_dir = "/tmp" if sys.platform == "darwin" else None
-            self._tmpdir = tempfile.TemporaryDirectory(prefix="minds-ssh-", dir=base_dir)
-            os.chmod(self._tmpdir.name, 0o700)
-        return Path(self._tmpdir.name)
+    # Failure bookkeeping for the per-tunnel exponential backoff used by the
+    # health-check loop. Created lazily on first failure for a given tunnel
+    # key and removed on success or when the tunnel itself is dropped.
+    _failure_state: dict[tuple[str, int], _TunnelFailureState] = PrivateAttr(default_factory=dict)
 
     def _get_or_create_connection(self, ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
         """Get or create an SSH connection to the given host.
@@ -155,53 +154,6 @@ class SSHTunnelManager(MutableModel):
         self._connections[conn_key] = client
         return client
 
-    def get_tunnel_socket_path(
-        self,
-        ssh_info: RemoteSSHInfo,
-        remote_host: str,
-        remote_port: int,
-    ) -> Path:
-        """Get or create a Unix socket that tunnels to the given remote endpoint.
-
-        Returns the path to a Unix domain socket. Connecting to this socket
-        will forward traffic through an SSH tunnel to (remote_host, remote_port)
-        on the remote host identified by ssh_info.
-        """
-        tunnel_key = f"{ssh_info.host}:{ssh_info.port}->{remote_host}:{remote_port}"
-
-        with self._lock:
-            existing_path = self._tunnel_socket_paths.get(tunnel_key)
-            existing_thread = self._tunnel_threads.get(tunnel_key)
-            if existing_path is not None and existing_thread is not None and existing_thread.is_alive():
-                return existing_path
-
-            client = self._get_or_create_connection(ssh_info)
-            transport = _ssh_connection_transport(client)
-            # Use a short hash of tunnel_key for the filename. Encoding the full
-            # tunnel_key produces paths that can exceed AF_UNIX's 104-byte
-            # sun_path limit on macOS, especially with long hostnames or IPv6
-            # addresses. 12 hex chars (48 bits) is ample to avoid collisions
-            # between tunnels within a single manager instance.
-            tunnel_id = hashlib.blake2b(tunnel_key.encode(), digest_size=6).hexdigest()
-            socket_path = self._get_tmpdir() / f"t-{tunnel_id}.sock"
-
-            if socket_path.exists():
-                socket_path.unlink()
-
-            thread = threading.Thread(
-                target=_tunnel_accept_loop,
-                args=(socket_path, transport, remote_host, remote_port, self._shutdown_event),
-                daemon=True,
-                name=f"ssh-tunnel-{tunnel_key}",
-            )
-            thread.start()
-
-            _wait_for_socket(socket_path)
-
-            self._tunnel_socket_paths[tunnel_key] = socket_path
-            self._tunnel_threads[tunnel_key] = thread
-            return socket_path
-
     def _get_reverse_tunnel_setup_lock(self, conn_key: str) -> threading.Lock:
         """Get or create a per-host setup lock for reverse tunnels."""
         with self._lock:
@@ -213,8 +165,8 @@ class SSHTunnelManager(MutableModel):
         self,
         ssh_info: RemoteSSHInfo,
         local_port: int,
-        agent_state_dir: str | None = None,
         remote_port: int = 0,
+        agent_id: str | None = None,
     ) -> int:
         """Set up a reverse port forward so the remote host can reach the local server.
 
@@ -224,11 +176,6 @@ class SSHTunnelManager(MutableModel):
         remote sshd actually bound (equal to ``remote_port`` when it is
         non-zero, or the dynamically assigned port when it is 0).
 
-        Pass ``agent_state_dir`` for tunnels whose remote URL should be written
-        into a per-agent state directory (minds API); leave it as ``None`` for
-        tunnels that deliver their endpoint via a constant URL injected at
-        ``mngr create`` time (Latchkey gateway).
-
         Reuses an existing tunnel identified by the ``(conn_key, local_port)``
         key so that multiple callers targeting the same local service share a
         single tunnel. Different ``local_port``s on the same SSH host produce
@@ -236,6 +183,12 @@ class SSHTunnelManager(MutableModel):
 
         Concurrent calls for the same host are serialized via a per-host lock to
         prevent establishing duplicate reverse tunnels.
+
+        ``agent_id`` (optional) tags the resulting ``ReverseTunnelInfo`` with the
+        owning agent's stringified ID so callers can later ask the manager to
+        tear down all tunnels belonging to a destroyed agent via
+        ``remove_reverse_tunnels_for_agent``. Pass ``None`` (the default) when
+        the tunnel is not associated with a specific agent.
         """
         conn_key = f"{ssh_info.host}:{ssh_info.port}"
         tunnel_key = (conn_key, local_port)
@@ -249,14 +202,6 @@ class SSHTunnelManager(MutableModel):
                     # Verify the transport is still alive
                     client = self._connections.get(conn_key)
                     if client is not None and _ssh_connection_is_active(client):
-                        # Register this agent's state dir if not already tracked
-                        if agent_state_dir is not None and agent_state_dir not in existing.agent_state_dirs:
-                            self._reverse_tunnels[tunnel_key] = existing.model_copy_update(
-                                to_update(
-                                    existing.field_ref().agent_state_dirs,
-                                    existing.agent_state_dirs + [agent_state_dir],
-                                )
-                            )
                         return existing.remote_port
 
                 client = self._get_or_create_connection(ssh_info)
@@ -268,8 +213,8 @@ class SSHTunnelManager(MutableModel):
             # ``handler=None`` path puts every channel on a single transport-
             # wide queue keyed only by arrival order, which silently cross-
             # routes connections when multiple reverse tunnels share one
-            # transport (e.g. the minds API tunnel and a Latchkey gateway
-            # tunnel to the same agent host).
+            # transport (e.g. multiple Latchkey gateway tunnels to the same
+            # agent host).
             handler = _ForwardedTunnelHandler(local_port=local_port, shutdown_event=self._shutdown_event)
             assigned_remote_port = transport.request_port_forward("127.0.0.1", remote_port, handler=handler)
             logger.info(
@@ -283,55 +228,15 @@ class SSHTunnelManager(MutableModel):
                 local_port=local_port,
                 remote_port=assigned_remote_port,
                 requested_remote_port=remote_port,
-                agent_state_dirs=[agent_state_dir] if agent_state_dir is not None else [],
+                agent_id=agent_id,
             )
             with self._lock:
                 self._reverse_tunnels[tunnel_key] = tunnel_info
+                # Successful setup clears any prior failure bookkeeping so the
+                # next health-check tick treats the tunnel as healthy.
+                self._failure_state.pop(tunnel_key, None)
 
             return assigned_remote_port
-
-    def write_api_url_to_remote(
-        self,
-        ssh_info: RemoteSSHInfo,
-        agent_state_dir: str,
-        url: str,
-    ) -> None:
-        """Write the minds API URL to a file on the remote host via SSH."""
-        with self._lock:
-            client = self._get_or_create_connection(ssh_info)
-
-        shell_dir = _shell_quote_remote_path(agent_state_dir)
-        quoted_url = shlex.quote(url)
-        command = f"mkdir -p {shell_dir} && printf '%s' {quoted_url} > {shell_dir}/minds_api_url"
-        try:
-            _stdin, stdout, stderr = client.exec_command(command, timeout=10.0)
-            _stdin.close()
-            try:
-                exit_status = stdout.channel.recv_exit_status()
-                if exit_status != 0:
-                    error_output = stderr.read().decode().strip()
-                    logger.warning(
-                        "Failed to write API URL to remote {}: exit={}, stderr={}",
-                        ssh_info.host,
-                        exit_status,
-                        error_output,
-                    )
-            finally:
-                stdout.channel.close()
-                stdout.close()
-                stderr.close()
-        except (paramiko.SSHException, OSError) as e:
-            logger.warning("Failed to write API URL to remote {}: {}", ssh_info.host, e)
-
-    @staticmethod
-    def write_api_url_to_local(
-        agent_state_dir: Path,
-        url: str,
-    ) -> None:
-        """Write the minds API URL to a file on the local filesystem."""
-        agent_state_dir.mkdir(parents=True, exist_ok=True)
-        url_file = agent_state_dir / "minds_api_url"
-        url_file.write_text(url)
 
     def start_reverse_tunnel_health_check(self) -> None:
         """Start a background thread that checks reverse tunnels every 30 seconds."""
@@ -348,20 +253,46 @@ class SSHTunnelManager(MutableModel):
         """Check all reverse tunnels and re-establish any that are broken.
 
         Called once per health-check iteration. Broken tunnels are re-established
-        with the same originally-requested remote port, and URL files on the
-        remote hosts are updated with the new remote port for tunnels that
-        track agent state dirs.
+        with the same originally-requested remote port (so the in-container env
+        var that names the gateway URL keeps pointing at a working endpoint).
+
+        Failed repair attempts back off exponentially (per tunnel, capped at
+        ``_REVERSE_TUNNEL_BACKOFF_CAP_SECONDS``) so the manager does not pay
+        for a fresh paramiko handshake against a permanently-gone target on
+        every 30s tick. The retry continues indefinitely so that a tunnel
+        whose target is temporarily unreachable still recovers once the
+        target comes back. A successful repair clears the backoff state.
         """
         with self._lock:
             tunnels = dict(self._reverse_tunnels)
 
+        now = time.monotonic()
         for tunnel_key, tunnel_info in tunnels.items():
             conn_key, _local_port = tunnel_key
             with self._lock:
                 client = self._connections.get(conn_key)
+                failure_state = self._failure_state.get(tunnel_key)
 
             is_alive = client is not None and _ssh_connection_is_active(client)
             if is_alive:
+                # Underlying SSH connection is alive again. The most likely
+                # path here is that a *sibling* tunnel sharing the same
+                # conn_key got repaired in this very loop (or earlier),
+                # which recreated the SSH client. ``setup_reverse_tunnel``
+                # clears failure_state only for the specific tunnel_key it
+                # just set up, so siblings observing is_alive=True would
+                # otherwise carry stale failure_state into the next break
+                # and back off from the cap instead of from zero. Drop any
+                # lingering bookkeeping so this tunnel's next failure
+                # starts a fresh schedule.
+                if failure_state is not None:
+                    with self._lock:
+                        self._failure_state.pop(tunnel_key, None)
+                continue
+
+            if failure_state is not None and failure_state.next_attempt_at > now:
+                # Still inside the backoff window from the last failure;
+                # skip this tick to avoid hammering a dead target.
                 continue
 
             logger.info(
@@ -370,32 +301,12 @@ class SSHTunnelManager(MutableModel):
                 tunnel_info.local_port,
             )
             try:
-                first_dir: str | None = tunnel_info.agent_state_dirs[0] if tunnel_info.agent_state_dirs else None
                 new_remote_port = self.setup_reverse_tunnel(
                     ssh_info=tunnel_info.ssh_info,
                     local_port=tunnel_info.local_port,
-                    agent_state_dir=first_dir,
                     remote_port=tunnel_info.requested_remote_port,
+                    agent_id=tunnel_info.agent_id,
                 )
-                # Re-register remaining agent state dirs so they are tracked
-                # in the new tunnel's ReverseTunnelInfo (setup_reverse_tunnel
-                # appends dirs to an existing active tunnel without creating a new one).
-                for extra_dir in tunnel_info.agent_state_dirs[1:]:
-                    self.setup_reverse_tunnel(
-                        ssh_info=tunnel_info.ssh_info,
-                        local_port=tunnel_info.local_port,
-                        agent_state_dir=extra_dir,
-                        remote_port=tunnel_info.requested_remote_port,
-                    )
-                # Update the URL file for all agents sharing this tunnel (no-op
-                # for tunnels with no tracked dirs, e.g. the Latchkey gateway).
-                new_url = f"http://127.0.0.1:{new_remote_port}"
-                for agent_state_dir in tunnel_info.agent_state_dirs:
-                    self.write_api_url_to_remote(
-                        ssh_info=tunnel_info.ssh_info,
-                        agent_state_dir=agent_state_dir,
-                        url=new_url,
-                    )
                 logger.info(
                     "Reverse tunnel re-established to {} (local {}) on remote port {}",
                     conn_key,
@@ -403,29 +314,145 @@ class SSHTunnelManager(MutableModel):
                     new_remote_port,
                 )
             except (paramiko.SSHException, OSError, SSHTunnelError) as e:
-                logger.warning(
-                    "Failed to re-establish reverse tunnel to {} (local {}): {}",
-                    conn_key,
-                    tunnel_info.local_port,
-                    e,
-                )
+                self._record_repair_failure(tunnel_key, conn_key, tunnel_info, e)
+
+    def _record_repair_failure(
+        self,
+        tunnel_key: tuple[str, int],
+        conn_key: str,
+        tunnel_info: ReverseTunnelInfo,
+        error: Exception,
+    ) -> None:
+        """Record backoff state after a failed repair (the retry itself is
+        driven from ``_check_and_repair_tunnels``).
+
+        Split out of ``_check_and_repair_tunnels`` for readability; the only
+        caller is the ``except`` arm of the repair loop, which catches
+        ``paramiko.SSHException``, ``OSError``, and our own ``SSHTunnelError``.
+        The retry continues forever -- the backoff is capped at
+        ``_REVERSE_TUNNEL_BACKOFF_CAP_SECONDS`` so a permanently-gone target
+        only costs one paramiko handshake every five minutes, but a target
+        that comes back online still gets repaired.
+
+        Once the exponential schedule has reached the cap, the failure
+        counter stops incrementing. Otherwise an agent that fails forever
+        would compute an ever-growing ``2 ** failures`` per tick (e.g.
+        ~30K-digit bigints after a year of one-failure-per-five-minutes)
+        before clamping it back down to the cap, which is wasted work.
+        """
+        with self._lock:
+            failure_state = self._failure_state.get(tunnel_key)
+            if failure_state is None:
+                failure_state = _TunnelFailureState()
+                self._failure_state[tunnel_key] = failure_state
+            # Stop incrementing once the exponential schedule has already
+            # reached the cap; further increments would just keep
+            # recomputing larger ``2 ** failures`` values that immediately
+            # get clamped back down.
+            if 2**failure_state.consecutive_failures < _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS:
+                failure_state.consecutive_failures += 1
+            backoff_seconds = min(float(2**failure_state.consecutive_failures), _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS)
+            failure_state.next_attempt_at = time.monotonic() + backoff_seconds
+            failures = failure_state.consecutive_failures
+
+        logger.warning(
+            "Failed to re-establish reverse tunnel to {} (local {}): {} (failure {}, backoff {:.0f}s)",
+            conn_key,
+            tunnel_info.local_port,
+            error,
+            failures,
+            backoff_seconds,
+        )
 
     def _reverse_tunnel_health_check_loop(self) -> None:
         """Periodically check reverse tunnels and re-establish broken ones."""
         while not self._shutdown_event.wait(timeout=_REVERSE_TUNNEL_HEALTH_CHECK_SECONDS):
             self._check_and_repair_tunnels()
 
+    def remove_reverse_tunnels_for_agent(self, agent_id: str) -> int:
+        """Tear down every reverse tunnel associated with ``agent_id``.
+
+        Cancels each matching port forward on the underlying SSH transport,
+        drops the tunnel from the registry, and clears any backoff
+        bookkeeping. If the SSH client for a given host has no remaining
+        tunnels after removal, that client is closed too -- otherwise its
+        paramiko transport thread would keep polling forever even though no
+        live tunnel uses it.
+
+        Returns the number of tunnels removed. Safe to call when no tunnel
+        for ``agent_id`` exists (returns ``0``).
+        """
+        with self._lock:
+            keys = [tunnel_key for tunnel_key, info in self._reverse_tunnels.items() if info.agent_id == agent_id]
+        return self._drop_tunnel_keys(tuple(keys))
+
+    def _drop_tunnel_keys(self, tunnel_keys: tuple[tuple[str, int], ...]) -> int:
+        """Internal shared cleanup used by ``remove_reverse_tunnels_for_agent`` and the backoff drop path.
+
+        For each ``(conn_key, local_port)`` in ``tunnel_keys``: cancel its
+        reverse port forward (best-effort -- the transport may already be
+        dead), drop it from ``_reverse_tunnels``, drop its backoff entry.
+        For each conn_key whose last tunnel is being removed, close and
+        forget the SSH client so its transport thread exits.
+        """
+        if not tunnel_keys:
+            return 0
+
+        with self._lock:
+            removed_infos: list[tuple[tuple[str, int], ReverseTunnelInfo]] = []
+            for tunnel_key in tunnel_keys:
+                info = self._reverse_tunnels.pop(tunnel_key, None)
+                self._failure_state.pop(tunnel_key, None)
+                if info is not None:
+                    removed_infos.append((tunnel_key, info))
+            # A conn_key whose every remaining tunnel was just removed has
+            # no further use for its SSH client; pop it now so we can close
+            # it outside the lock.
+            affected_conn_keys = {tunnel_key[0] for tunnel_key, _ in removed_infos}
+            still_in_use_conn_keys = {tunnel_key[0] for tunnel_key in self._reverse_tunnels}
+            orphaned_conn_keys = affected_conn_keys - still_in_use_conn_keys
+            orphaned_clients: dict[str, paramiko.SSHClient] = {}
+            for conn_key in orphaned_conn_keys:
+                client = self._connections.pop(conn_key, None)
+                if client is not None:
+                    orphaned_clients[conn_key] = client
+            # Snapshot remaining clients for shared-host tunnel cancellation
+            # so we don't reach back into ``_connections`` after dropping the
+            # lock (another thread could mutate the dict in the meantime).
+            remaining_clients: dict[str, paramiko.SSHClient] = {
+                conn_key: client for conn_key, client in self._connections.items() if conn_key in affected_conn_keys
+            }
+
+        for tunnel_key, info in removed_infos:
+            conn_key, _local_port = tunnel_key
+            client = orphaned_clients.get(conn_key) or remaining_clients.get(conn_key)
+            # Best-effort cancel -- if the transport is already dead this is
+            # a no-op. We still want to ask paramiko nicely first so an alive
+            # remote sshd actually frees the bound port.
+            if client is not None:
+                try:
+                    transport = client.get_transport()
+                    if transport is not None and transport.is_active():
+                        transport.cancel_port_forward("127.0.0.1", info.remote_port)
+                except (paramiko.SSHException, OSError) as e:
+                    logger.trace("Error cancelling reverse port forward during removal: {}", e)
+
+        for client in orphaned_clients.values():
+            try:
+                client.close()
+            except (OSError, paramiko.SSHException) as e:
+                logger.trace("Error closing orphaned SSH connection during removal: {}", e)
+
+        return len(removed_infos)
+
     def cleanup(self) -> None:
-        """Shut down all tunnels (forward and reverse) and SSH connections."""
+        """Cancel all reverse port forwards and close SSH connections."""
         self._shutdown_event.set()
 
         # Wait for health check thread
         if self._health_check_thread is not None:
             self._health_check_thread.join(timeout=5.0)
             self._health_check_thread = None
-
-        for thread in self._tunnel_threads.values():
-            thread.join(timeout=5.0)
 
         # Cancel reverse port forwards
         for tunnel_key, tunnel_info in self._reverse_tunnels.items():
@@ -439,6 +466,7 @@ class SSHTunnelManager(MutableModel):
                 except (paramiko.SSHException, OSError) as e:
                     logger.trace("Error cancelling reverse port forward: {}", e)
         self._reverse_tunnels.clear()
+        self._failure_state.clear()
 
         for client in self._connections.values():
             try:
@@ -447,15 +475,16 @@ class SSHTunnelManager(MutableModel):
                 logger.trace("Error closing SSH connection during cleanup: {}", e)
 
         self._connections.clear()
-        self._tunnel_socket_paths.clear()
-        self._tunnel_threads.clear()
 
-        if self._tmpdir is not None:
-            try:
-                self._tmpdir.cleanup()
-            except OSError as e:
-                logger.trace("Error cleaning up tunnel tmpdir: {}", e)
-            self._tmpdir = None
+
+def open_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
+    """Open a paramiko SSH client to the given host using the cached known_hosts.
+
+    Public wrapper around the internal ``_create_ssh_client`` helper. Used
+    by ``forward_cli.MindsApiUrlWriter`` to write ``minds_api_url`` on
+    remote agent hosts without depending on a private symbol.
+    """
+    return _create_ssh_client(ssh_info)
 
 
 def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
@@ -484,128 +513,6 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     )
 
     return client
-
-
-def _wait_for_socket(socket_path: Path, timeout: float = 2.0) -> None:
-    """Wait for a Unix domain socket file to appear.
-
-    Raises SSHTunnelError if the socket does not appear within the timeout.
-    Uses threading.Event.wait for polling instead of time.sleep.
-    """
-    poll_event = threading.Event()
-    deadline = threading.Event()
-    timer = threading.Timer(timeout, deadline.set)
-    timer.start()
-    try:
-        while not deadline.is_set():
-            if socket_path.exists():
-                return
-            poll_event.wait(timeout=_SOCKET_POLL_SECONDS)
-    finally:
-        timer.cancel()
-    raise SSHTunnelError(f"SSH tunnel socket did not appear within {timeout}s at {socket_path}")
-
-
-def _tunnel_accept_loop(
-    sock_path: Path,
-    transport: paramiko.Transport,
-    remote_host: str,
-    remote_port: int,
-    shutdown_event: threading.Event,
-) -> None:
-    """Accept connections on a Unix domain socket and forward them via SSH.
-
-    For each accepted connection, opens a paramiko direct-tcpip channel to
-    (remote_host, remote_port) on the remote SSH host, then relays data
-    bidirectionally between the local socket and the SSH channel.
-    """
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        server.bind(str(sock_path))
-        os.chmod(str(sock_path), 0o600)
-        server.listen(8)
-        server.settimeout(_SHUTDOWN_POLL_SECONDS)
-
-        while not shutdown_event.is_set():
-            try:
-                client_sock, _ = server.accept()
-            except socket.timeout:
-                continue
-            except OSError as e:
-                logger.warning("Accept loop socket error, stopping tunnel: {}", e)
-                break
-
-            try:
-                channel = transport.open_channel(
-                    "direct-tcpip",
-                    (remote_host, remote_port),
-                    ("127.0.0.1", 0),
-                )
-            except (paramiko.SSHException, OSError) as e:
-                logger.warning("Failed to open SSH channel to {}:{}: {}", remote_host, remote_port, e)
-                client_sock.close()
-                if not transport.is_active():
-                    logger.warning("SSH transport is dead, stopping tunnel accept loop")
-                    break
-                continue
-
-            threading.Thread(
-                target=_relay_data,
-                args=(client_sock, channel),
-                daemon=True,
-                name=f"ssh-relay-{remote_host}:{remote_port}",
-            ).start()
-    finally:
-        server.close()
-        try:
-            os.unlink(str(sock_path))
-        except OSError as e:
-            logger.trace("Error unlinking tunnel socket: {}", e)
-
-
-def _relay_step(sock: socket.socket, channel: paramiko.Channel) -> bool:
-    """Perform one relay step: transfer available data between sock and channel.
-
-    Returns True to continue relaying, False when either end has closed.
-    """
-    r, _, _ = select.select([sock, channel], [], [], _SELECT_TIMEOUT_SECONDS)
-
-    if sock in r:
-        data = sock.recv(_BUFFER_SIZE)
-        if not data:
-            return False
-        channel.sendall(data)
-
-    if channel in r:
-        if channel.recv_ready():
-            data = channel.recv(_BUFFER_SIZE)
-            if not data:
-                return False
-            sock.sendall(data)
-
-    return True
-
-
-def _relay_data(sock: socket.socket, channel: paramiko.Channel) -> None:
-    """Relay data bidirectionally between a local socket and a paramiko channel.
-
-    Uses select() to multiplex reads from both ends. Terminates when either
-    end closes or an error occurs.
-    """
-    try:
-        while _relay_step(sock, channel):
-            pass
-    except (OSError, EOFError, paramiko.SSHException) as e:
-        logger.trace("SSH tunnel relay ended: {}", e)
-    finally:
-        try:
-            channel.close()
-        except (OSError, paramiko.SSHException) as e:
-            logger.trace("Error closing SSH channel in relay: {}", e)
-        try:
-            sock.close()
-        except OSError as e:
-            logger.trace("Error closing socket in relay: {}", e)
 
 
 class _ForwardedTunnelHandler(FrozenModel):
@@ -660,46 +567,8 @@ class _ForwardedTunnelHandler(FrozenModel):
                 logger.trace("Error closing channel after failed local connect: {}", close_err)
             return
         threading.Thread(
-            target=_relay_data,
+            target=relay_data,
             args=(local_sock, channel),
             daemon=True,
             name=f"reverse-relay-127.0.0.1:{self.local_port}",
         ).start()
-
-
-def _shell_quote_remote_path(path: str) -> str:
-    """Produce a shell-safe argument for a remote path, preserving tilde expansion.
-
-    shlex.quote wraps strings in single quotes, which prevents tilde expansion on
-    the remote shell. Paths starting with '~/' are rewritten to use '$HOME/'
-    in a double-quoted string so the remote shell expands the variable correctly.
-    The remainder of the path after '~/' is the agent ID (UUID format: alphanumeric
-    and hyphens), which is safe to embed in a double-quoted shell string.
-    """
-    if path == "~" or path.startswith("~/"):
-        rest = path[1:]
-        return f'"$HOME{rest}"'
-    return shlex.quote(path)
-
-
-def parse_url_host_port(url: str) -> tuple[str, int]:
-    """Extract host and port from a URL.
-
-    Returns (host, port) tuple. Defaults port to 80 for http:// and 443
-    for https:// if not specified in the URL.
-    """
-    parsed = urlparse(url)
-    host = parsed.hostname or "127.0.0.1"
-    # Normalize localhost to 127.0.0.1 to avoid IPv6 resolution issues.
-    # SSH channels don't do dual-stack fallback like curl, so if the remote
-    # resolves localhost to ::1 but the server only listens on 127.0.0.1,
-    # the channel open fails.
-    if host == "localhost":
-        host = "127.0.0.1"
-    if parsed.port is not None:
-        port = parsed.port
-    elif parsed.scheme == "https":
-        port = 443
-    else:
-        port = 80
-    return host, port

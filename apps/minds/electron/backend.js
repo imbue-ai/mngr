@@ -118,7 +118,7 @@ function waitForPortFree(port, timeoutMs = 6000, intervalMs = 200) {
  * Returns a promise that resolves with { loginUrl, port } when the backend
  * is ready, or rejects if the process exits before emitting the URL.
  */
-function startBackend(onProgress, onNotification, onAuthEvent) {
+function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStarted) {
   return new Promise((resolve, reject) => {
     let isResolved = false;
 
@@ -153,7 +153,7 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
           'run', '--package', 'minds',
           'minds', '-vv', '--format', 'jsonl',
           '--log-file', path.join(logDir, 'minds-events.jsonl'),
-          'forward',
+          'run',
           '--host', '127.0.0.1',
           '--port', String(port),
           '--no-browser',
@@ -182,7 +182,7 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
           'run', '--project', pyprojectDir,
           'minds', '--format', 'jsonl',
           '--log-file', path.join(logDir, 'minds-events.jsonl'),
-          'forward',
+          'run',
           '--host', '127.0.0.1',
           '--port', String(port),
           '--no-browser',
@@ -244,6 +244,8 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
               onNotification(event);
             } else if ((event.event === 'auth_success' || event.event === 'auth_required') && onAuthEvent) {
               onAuthEvent(event);
+            } else if (event.event === 'mngr_forward_started' && onMngrForwardStarted) {
+              onMngrForwardStarted(event);
             }
           } catch {
             // Not valid JSON -- just log it

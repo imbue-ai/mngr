@@ -11,6 +11,7 @@ from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr_tmr.cli import _TmrCommand
 from imbue.mngr_tmr.cli import _emit_agents_launched
+from imbue.mngr_tmr.cli import _emit_integrator_branch
 from imbue.mngr_tmr.cli import _emit_report_path
 from imbue.mngr_tmr.cli import _emit_test_count
 from imbue.mngr_tmr.cli import tmr
@@ -84,6 +85,27 @@ def test_emit_test_count_jsonl() -> None:
 
 def test_emit_agents_launched_json() -> None:
     _emit_agents_launched(5, OutputOptions(output_format=OutputFormat.JSON))
+
+
+def test_emit_integrator_branch_human() -> None:
+    _emit_integrator_branch("mngr-tmr/integrated-abc123", _human_output_opts())
+
+
+def test_emit_integrator_branch_json() -> None:
+    _emit_integrator_branch("mngr-tmr/integrated-abc123", OutputOptions(output_format=OutputFormat.JSON))
+
+
+def test_emit_integrator_branch_jsonl(capsys: Any) -> None:
+    _emit_integrator_branch("mngr-tmr/integrated-abc123", OutputOptions(output_format=OutputFormat.JSONL))
+    captured = capsys.readouterr()
+    assert '"event": "integrator_branch"' in captured.out
+    assert '"branch_name": "mngr-tmr/integrated-abc123"' in captured.out
+
+
+def test_emit_integrator_branch_none_emits_nothing(capsys: Any) -> None:
+    _emit_integrator_branch(None, OutputOptions(output_format=OutputFormat.JSONL))
+    captured = capsys.readouterr()
+    assert captured.out == ""
 
 
 def _invoke_tmr_command(

@@ -19,7 +19,7 @@ Each workspace is created from a template repository (or local directory). The r
 
 ## Configuration
 
-All configuration lives in the template repository's `.mngr/settings.toml`. The desktop client passes `--template main` plus a mode-specific template (`--template dev` for DEV mode, `--template docker` for LOCAL mode) when running `mngr create`. The template's settings file defines everything the agent needs.
+All configuration lives in the template repository's `.mngr/settings.toml`. The desktop client passes `--template main` plus a mode-specific template (`--template docker` for LOCAL, `--template lima` for LIMA, `--template vultr` for CLOUD, or `--template imbue_cloud` for IMBUE_CLOUD) when running `mngr create`. The template's settings file defines everything the agent needs.
 
 ## Data and services
 
@@ -52,7 +52,7 @@ Within each workspace's dockview UI, a Share action per service opens a modal th
 
 # Command line interface
 
-- `minds forward` (starts the local desktop client for accessing and creating workspaces)
+- `minds run` (starts the local desktop client for accessing and creating workspaces)
 
 # Deferred items
 

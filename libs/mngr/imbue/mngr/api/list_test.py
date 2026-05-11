@@ -23,14 +23,16 @@ from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import HostErrorInfo
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.api.list import ProviderErrorInfo
+from imbue.mngr.api.list import _AGENT_SCHEMALESS_PATHS
 from imbue.mngr.api.list import _ListAgentsParams
 from imbue.mngr.api.list import _apply_cel_filters
 from imbue.mngr.api.list import _collect_and_emit_details_for_host
-from imbue.mngr.api.list import _discover_and_emit_details_for_provider
+from imbue.mngr.api.list import _construct_discover_and_emit_for_provider
 from imbue.mngr.api.list import _handle_listing_error
 from imbue.mngr.api.list import _maybe_write_full_discovery_snapshot
 from imbue.mngr.api.list import _process_host_with_error_handling
 from imbue.mngr.api.list import agent_details_to_cel_context
+from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -63,6 +65,7 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
 from imbue.mngr.providers.registry import _backend_registry
+from imbue.mngr.utils.cel_utils import TolerantMapType
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.testing import capture_loguru
 
@@ -511,6 +514,108 @@ def test_agent_details_to_cel_context_idle_uses_most_recent_activity() -> None:
     # SSH activity (10 min ago) is the most recent, so idle should be ~600s.
     assert "idle" in context
     assert 580 < context["idle"] < 620
+
+
+@pytest.mark.parametrize(
+    "exclude_expr",
+    [
+        'labels.mngr_subagent_proxy == "child"',
+        'plugin.some_plugin_field == "x"',
+        'host.tags.foo == "x"',
+        'host.plugin.some_plugin_field == "x"',
+    ],
+)
+def test_apply_cel_filters_no_warning_for_missing_key_on_schemaless_field(exclude_expr: str) -> None:
+    """Filtering on a missing key under any schemaless field must not warn.
+
+    `labels`, `plugin`, `host.tags`, `host.plugin` are all schemaless dicts,
+    and `_apply_cel_filters` must apply tolerance uniformly across all of
+    them so that an `--exclude 'labels.X == "Y"'`-style filter quietly
+    evaluates to false on agents without that key, rather than logging a
+    per-agent warning.
+    """
+    agent = _make_agent_details("test-agent", _make_host_details())
+    # All four schemaless fields default to empty dict, so the missing key
+    # in the filter is genuinely missing.
+    assert agent.labels == {}
+    assert agent.plugin == {}
+    assert agent.host.tags == {}
+    assert agent.host.plugin == {}
+
+    include_filters, exclude_filters = compile_cel_filters(
+        include_filters=(),
+        exclude_filters=(exclude_expr,),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result = _apply_cel_filters(agent, include_filters, exclude_filters)
+    assert result is True
+    assert "Error evaluating" not in log_output.getvalue()
+
+
+@pytest.mark.parametrize("path", list(_AGENT_SCHEMALESS_PATHS))
+def test_apply_cel_filters_wraps_each_schemaless_path_with_tolerant_map(path: tuple[str, ...]) -> None:
+    """The agent CEL context built by `build_agent_cel_context` has TolerantMapType
+    at each schemaless path; siblings stay strict.
+    """
+    agent = _make_agent_details("test-agent", _make_host_details())
+    cel_context = build_agent_cel_context(agent)
+
+    target: Any = cel_context
+    for step in path:
+        target = target[step]
+    assert isinstance(target, TolerantMapType)
+
+
+@pytest.mark.parametrize(
+    "exclude_expr",
+    [
+        'host.providr == "local"',
+        'host.providr.contains("local")',
+        "host.providr > 5",
+    ],
+)
+def test_apply_cel_filters_warns_on_typoed_strict_field(exclude_expr: str) -> None:
+    """A typoed strict-field path surfaces a warning so users can see the typo.
+
+    Counterpart to test_apply_cel_filters_no_warning_for_missing_key_on_schemaless_field:
+    schemaless fields stay quiet on missing keys, but a missing-strict-field
+    access -- whether via equality, method call, or ordered comparison -- raises
+    out of the filter loop's evaluate() call and is logged.
+    """
+    agent = _make_agent_details("test-agent", _make_host_details())
+    include_filters, exclude_filters = compile_cel_filters(
+        include_filters=(),
+        exclude_filters=(exclude_expr,),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result = _apply_cel_filters(agent, include_filters, exclude_filters)
+    # Exclude filter errored, so the agent is still included.
+    assert result is True
+    assert "Error evaluating" in log_output.getvalue()
+
+
+def test_apply_cel_filters_has_macro_correctly_reports_label_presence() -> None:
+    """`has(labels.X)` must return True only when X is actually set on the agent.
+
+    Without this, `--include 'has(labels.foo)'` would silently match every agent.
+    """
+    host_details = _make_host_details()
+    base_with = _make_agent_details("with-label", host_details)
+    agent_with_label = base_with.model_copy_update(
+        to_update(base_with.field_ref().labels, {"project": "mngr"}),
+    )
+    agent_without_label = _make_agent_details("without-label", host_details)
+
+    include_filters, exclude_filters = compile_cel_filters(
+        include_filters=("has(labels.project)",),
+        exclude_filters=(),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result_with = _apply_cel_filters(agent_with_label, include_filters, exclude_filters)
+        result_without = _apply_cel_filters(agent_without_label, include_filters, exclude_filters)
+    assert result_with is True
+    assert result_without is False
+    assert "Error evaluating" not in log_output.getvalue()
 
 
 def test_agent_details_to_cel_context_exposes_host_provider_under_both_names() -> None:
@@ -1212,6 +1317,45 @@ class _MismatchedProviderBackend(ProviderBackendInterface):
         )
 
 
+_RAISING_DISCOVERY_BACKEND_NAME = ProviderBackendName("test-raising-discovery-backend")
+
+
+class _RaisingDiscoveryProviderBackend(ProviderBackendInterface):
+    """Backend that creates a _RaisingDiscoveryProviderInstance."""
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _RAISING_DISCOVERY_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend whose provider raises during discovery"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        return _RaisingDiscoveryProviderInstance(
+            name=name,
+            host_dir=mngr_ctx.config.default_host_dir,
+            mngr_ctx=mngr_ctx,
+        )
+
+
 def _make_list_params(
     error_behavior: ErrorBehavior = ErrorBehavior.CONTINUE,
     on_error: Any = None,
@@ -1234,20 +1378,12 @@ def _make_list_params(
 
 
 # =============================================================================
-# Lines 199-205: Outer MngrError catch in list_agents (CONTINUE mode)
+# Provider instantiation errors honor --on-error in get_all_provider_instances
 # =============================================================================
 
 
-def test_list_agents_continue_mode_captures_top_level_mngr_error(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """list_agents with CONTINUE mode catches a top-level MngrError and records it.
-
-    Adding a provider with an unknown backend to the config causes
-    get_all_provider_instances to raise MngrError (UnknownBackendError).
-    In CONTINUE mode, this must be caught and recorded as an error rather
-    than propagated to the caller.
-    """
+def _make_broken_provider_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
+    """Build a MngrContext with a configured provider that has an unknown backend."""
     failing_config = ProviderInstanceConfig(backend=ProviderBackendName("nonexistent-backend-xyz"))
     updated_config = temp_mngr_ctx.config.model_copy_update(
         to_update(
@@ -1255,21 +1391,53 @@ def test_list_agents_continue_mode_captures_top_level_mngr_error(
             {ProviderInstanceName("broken-provider"): failing_config},
         ),
     )
-    failing_ctx = temp_mngr_ctx.model_copy_update(
+    return temp_mngr_ctx.model_copy_update(
         to_update(temp_mngr_ctx.field_ref().config, updated_config),
     )
 
-    captured_errors: list[ErrorInfo] = []
+
+@pytest.mark.allow_warnings(match=r"Error discovering agents for provider")
+def test_list_agents_streaming_continue_mode_records_failing_provider_error(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """In streaming CONTINUE mode, a provider that fails to instantiate becomes a
+    ProviderErrorInfo in result.errors -- other providers are still listed.
+
+    Streaming mode constructs each provider in its own thread. The broken
+    provider's failure is captured as a per-provider error without aborting
+    the listing.
+    """
+    failing_ctx = _make_broken_provider_ctx(temp_mngr_ctx)
+
+    result = list_agents(
+        mngr_ctx=failing_ctx,
+        is_streaming=True,
+        error_behavior=ErrorBehavior.CONTINUE,
+    )
+
+    provider_errors = [e for e in result.errors if isinstance(e, ProviderErrorInfo)]
+    assert len(provider_errors) == 1
+    assert provider_errors[0].provider_name == ProviderInstanceName("broken-provider")
+    assert "nonexistent-backend-xyz" in provider_errors[0].message
+
+
+@pytest.mark.allow_warnings(match=r"Error discovering agents for provider")
+def test_list_agents_batch_continue_mode_records_failing_provider_error(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """In batch CONTINUE mode, a provider that fails to instantiate is recorded
+    as a per-provider error in result.errors and the listing proceeds with the
+    remaining providers.
+    """
+    failing_ctx = _make_broken_provider_ctx(temp_mngr_ctx)
+
     result = list_agents(
         mngr_ctx=failing_ctx,
         is_streaming=False,
         error_behavior=ErrorBehavior.CONTINUE,
-        on_error=lambda e: captured_errors.append(e),
     )
 
     assert len(result.errors) == 1
-    assert len(captured_errors) == 1
-    assert captured_errors[0] is result.errors[0]
     assert "nonexistent-backend-xyz" in result.errors[0].message
 
 
@@ -1281,16 +1449,7 @@ def test_list_agents_abort_mode_propagates_top_level_mngr_error(
     The same unknown-backend configuration triggers an error, but in ABORT
     mode it must propagate rather than be swallowed.
     """
-    failing_config = ProviderInstanceConfig(backend=ProviderBackendName("nonexistent-backend-xyz"))
-    updated_config = temp_mngr_ctx.config.model_copy_update(
-        to_update(
-            temp_mngr_ctx.config.field_ref().providers,
-            {ProviderInstanceName("broken-provider"): failing_config},
-        ),
-    )
-    failing_ctx = temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().config, updated_config),
-    )
+    failing_ctx = _make_broken_provider_ctx(temp_mngr_ctx)
 
     with pytest.raises(MngrError, match="nonexistent-backend-xyz"):
         list_agents(
@@ -1445,124 +1604,114 @@ def test_list_agents_batch_abort_mode_raises_for_mismatched_provider_name(
 # =============================================================================
 
 
-def test_discover_and_emit_details_for_provider_continue_mode_records_error(
+def _make_raising_provider_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
+    """Build a MngrContext that has one configured provider whose discovery raises."""
+    provider_config = ProviderInstanceConfig(backend=_RAISING_DISCOVERY_BACKEND_NAME)
+    updated_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(
+            temp_mngr_ctx.config.field_ref().providers,
+            {ProviderInstanceName("raising-provider"): provider_config},
+        ),
+    )
+    return temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().config, updated_config),
+    )
+
+
+@pytest.mark.allow_warnings(match=r"Error discovering agents for provider")
+def test_construct_discover_and_emit_for_provider_continue_mode_records_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_discover_and_emit_details_for_provider records a ProviderErrorInfo in CONTINUE mode.
+    """_construct_discover_and_emit_for_provider records a ProviderErrorInfo in CONTINUE mode.
 
-    When the provider raises MngrError from discover_hosts_and_agents, the
-    error must be caught and stored as a ProviderErrorInfo on the result, and
-    the on_error callback must be called.
+    When the provider raises MngrError from discover_hosts_and_agents, the error
+    must be caught and stored as a ProviderErrorInfo on the result, and the
+    on_error callback must be called.
     """
-    provider = _RaisingDiscoveryProviderInstance(
-        name=ProviderInstanceName("raising-provider"),
-        host_dir=temp_mngr_ctx.config.default_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-    )
-    result = ListResult()
-    lock = Lock()
-    captured_errors: list[ErrorInfo] = []
-    params = _make_list_params(
-        error_behavior=ErrorBehavior.CONTINUE,
-        on_error=lambda e: captured_errors.append(e),
-    )
+    _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME] = _RaisingDiscoveryProviderBackend
+    _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        mngr_ctx = _make_raising_provider_ctx(temp_mngr_ctx)
+        result = ListResult()
+        lock = Lock()
+        captured_errors: list[ErrorInfo] = []
+        params = _make_list_params(
+            error_behavior=ErrorBehavior.CONTINUE,
+            on_error=lambda e: captured_errors.append(e),
+        )
 
-    _discover_and_emit_details_for_provider(
-        provider=provider,
-        params=params,
-        result=result,
-        results_lock=lock,
-        cg=temp_mngr_ctx.concurrency_group,
-    )
-
-    assert len(result.errors) == 1
-    assert isinstance(result.errors[0], ProviderErrorInfo)
-    assert result.errors[0].provider_name == ProviderInstanceName("raising-provider")
-    assert "simulated discovery failure from test" in result.errors[0].message
-    assert len(captured_errors) == 1
-    assert captured_errors[0] is result.errors[0]
-
-
-def test_discover_and_emit_details_for_provider_abort_mode_propagates_error(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """_discover_and_emit_details_for_provider re-raises the MngrError in ABORT mode."""
-    provider = _RaisingDiscoveryProviderInstance(
-        name=ProviderInstanceName("raising-provider"),
-        host_dir=temp_mngr_ctx.config.default_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-    )
-    result = ListResult()
-    lock = Lock()
-    params = _make_list_params(error_behavior=ErrorBehavior.ABORT)
-
-    with pytest.raises(MngrError, match="simulated discovery failure from test"):
-        _discover_and_emit_details_for_provider(
-            provider=provider,
+        _construct_discover_and_emit_for_provider(
+            provider_name=ProviderInstanceName("raising-provider"),
+            mngr_ctx=mngr_ctx,
             params=params,
             result=result,
             results_lock=lock,
-            cg=temp_mngr_ctx.concurrency_group,
+            reset_caches=False,
         )
 
-    assert result.errors == []
+        assert len(result.errors) == 1
+        assert isinstance(result.errors[0], ProviderErrorInfo)
+        assert result.errors[0].provider_name == ProviderInstanceName("raising-provider")
+        assert "simulated discovery failure from test" in result.errors[0].message
+        assert len(captured_errors) == 1
+        assert captured_errors[0] is result.errors[0]
+    finally:
+        del _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME]
+        del _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME]
 
 
-def test_discover_and_emit_details_for_provider_success_path_processes_agents(
+def test_construct_discover_and_emit_for_provider_abort_mode_propagates_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_discover_and_emit_details_for_provider processes hosts and agents when discovery succeeds.
+    """_construct_discover_and_emit_for_provider re-raises the MngrError in ABORT mode."""
+    _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME] = _RaisingDiscoveryProviderBackend
+    _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        mngr_ctx = _make_raising_provider_ctx(temp_mngr_ctx)
+        result = ListResult()
+        lock = Lock()
+        params = _make_list_params(error_behavior=ErrorBehavior.ABORT)
 
-    Uses a MockProviderInstance with a host and agents configured via mock data.
-    This exercises the success path (lines 353-376): warn_on_duplicate_host_names,
-    the host-submission loop, and future.result() teardown.
+        with pytest.raises(MngrError, match="simulated discovery failure from test"):
+            _construct_discover_and_emit_for_provider(
+                provider_name=ProviderInstanceName("raising-provider"),
+                mngr_ctx=mngr_ctx,
+                params=params,
+                result=result,
+                results_lock=lock,
+                reset_caches=False,
+            )
+
+        assert result.errors == []
+    finally:
+        del _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME]
+        del _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME]
+
+
+def test_construct_discover_and_emit_for_provider_success_path_processes_agents(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """_construct_discover_and_emit_for_provider processes hosts and agents when discovery succeeds.
+
+    Uses the local provider (registered by default) and tests the success path:
+    construction, discovery, and host submission to the executor all complete
+    without errors. The local provider has no agents in a fresh tmpdir so
+    no agent details are emitted, but result.errors must be empty.
     """
-    host_id = HostId.generate()
-    provider = MockProviderInstance(
-        name=ProviderInstanceName("test-provider"),
-        host_dir=temp_mngr_ctx.config.default_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-    )
-    certified_data = CertifiedHostData(
-        host_id=str(host_id),
-        host_name="streaming-host",
-        created_at=datetime.now(timezone.utc) - timedelta(hours=1),
-        updated_at=datetime.now(timezone.utc),
-    )
-    offline_host = make_offline_host(certified_data, provider, temp_mngr_ctx)
-    provider.mock_hosts.append(offline_host)
-
-    agent_id = AgentId.generate()
-    provider.mock_agent_data = [
-        {
-            "id": str(agent_id),
-            "name": "streaming-agent",
-            "type": "generic",
-            "command": "sleep 1",
-            "work_dir": "/tmp",
-        }
-    ]
-
     result = ListResult()
     lock = Lock()
-    collected_agents: list[AgentDetails] = []
-    params = _make_list_params(
-        error_behavior=ErrorBehavior.CONTINUE,
-        on_agent=lambda a: collected_agents.append(a),
-    )
+    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE)
 
-    _discover_and_emit_details_for_provider(
-        provider=provider,
+    _construct_discover_and_emit_for_provider(
+        provider_name=ProviderInstanceName("local"),
+        mngr_ctx=temp_mngr_ctx,
         params=params,
         result=result,
         results_lock=lock,
-        cg=temp_mngr_ctx.concurrency_group,
+        reset_caches=False,
     )
 
     assert result.errors == []
-    assert len(result.agents) == 1
-    assert str(result.agents[0].name) == "streaming-agent"
-    assert len(collected_agents) == 1
 
 
 # =============================================================================
@@ -1877,6 +2026,7 @@ def test_collect_and_emit_details_for_host_no_filter_adds_all_agents(
 # =============================================================================
 
 
+@pytest.mark.allow_warnings(match=r"Error processing host")
 def test_process_host_with_error_handling_continue_mode_records_host_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:

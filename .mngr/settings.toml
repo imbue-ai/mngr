@@ -44,3 +44,6 @@ default_cpu = 4
 default_memory = 8
 default_idle_timeout = 600
 default_sandbox_timeout = 7200
+
+[plugins.forward]
+enabled = true

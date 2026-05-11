@@ -1,9 +1,6 @@
 # offload configuration for running mngr tests on Modal
 [offload]
 max_parallel = 50
-# Per-batch timeout; 0.8.1 strictly enforces this (0.7.x was laxer). 60s
-# wasn't enough for a handful of slower unit/integration batches under
-# Modal sandbox cold-start, so give them 5 minutes of headroom.
 test_timeout_secs = 300
 stream_output = true
 sandbox_project_root = "/code/mngr"
@@ -18,8 +15,14 @@ dockerfile = "libs/mngr/imbue/mngr/resources/Dockerfile"
 #
 # pyproject.toml + uv.lock are here because Python deps are installed
 # at image build time via `uv sync --all-packages` in the mngr Dockerfile.
+# Per-package pyproject.toml files are also included: changes to per-package
+# metadata (entry points, optional deps, build-system requires) make `uv run`
+# in the sandbox consider editable installs stale and try to rebuild them,
+# which fails because the sandbox runs with network disabled. Rebuilding the
+# checkpoint image regenerates editable-install dist-info to match the new
+# source so `uv run` finds nothing to rebuild.
 # If dep churn starts invalidating the checkpoint too often, the
-# alternative is to drop these two from build_inputs and add a second
+# alternative is to drop these from build_inputs and add a second
 # `uv sync` call at sandbox startup (e.g. via offload's sandbox_init_cmd
 # or the CMD) on top of the existing build-time one -- the Dockerfile
 # RUN still provides the baseline install, and the startup sync picks
@@ -29,6 +32,8 @@ build_inputs = [
     "libs/mngr/imbue/mngr/resources/Dockerfile",
     "pyproject.toml",
     "uv.lock",
+    "libs/*/pyproject.toml",
+    "apps/*/pyproject.toml",
 ]
 
 [framework]
@@ -41,8 +46,11 @@ retry_count = 0
 filters = "-m 'not acceptance and not release and not flaky'"
 
 [groups.flaky]
-retry_count = 10
+retry_count = 4
 filters = "-m 'flaky and not acceptance and not release'"
+
+[history]
+path = "offload-history-modal.jsonl"
 
 [report]
 output_dir = "test-results"

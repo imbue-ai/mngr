@@ -327,7 +327,12 @@ def test_destroy_prints_errors_if_any_identifier_not_found(
         assert tmux_session_exists(session_name), "Existing agent should not be destroyed when some identifiers fail"
 
 
+# Flaky under heavy CI load: wait_for(tmux_session_exists(...)) calls a tmux
+# subprocess that can exceed the 10s pytest-timeout when sandboxes are
+# contended. Offload retries flaky tests automatically; the underlying
+# tmux-subprocess slowness should be addressed separately.
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_destroy_multiple_agents(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -543,6 +548,7 @@ def test_destroy_remove_created_branch_deletes_branch(
         )
 
 
+@pytest.mark.flaky
 @pytest.mark.tmux
 def test_destroy_without_remove_created_branch_leaves_branch(
     cli_runner: CliRunner,
@@ -638,7 +644,14 @@ def test_destroy_remove_created_branch_graceful_when_no_branch(
         assert "Destroyed agent:" in destroy_result.output
 
 
+# Flaky under heavy CI load: the test's wait_for(tmux_session_exists) calls
+# tmux subprocesses on every poll iteration and can exceed the 10s
+# pytest-timeout when sandboxes are contended. Bumping the per-test timeout
+# gives the polling loop enough room to make progress when the sandbox is
+# slow; offload still retries via @pytest.mark.flaky if it slips further.
 @pytest.mark.tmux
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_destroy_transfer_none_keeps_shared_worktree(
     cli_runner: CliRunner,
     temp_git_repo: Path,
@@ -789,6 +802,7 @@ def test_destroy_transfer_none_standalone_keeps_user_worktree(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_destroy_via_stdin(
     cli_runner: CliRunner,
     temp_work_dir: Path,

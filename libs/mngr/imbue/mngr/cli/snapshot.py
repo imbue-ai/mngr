@@ -8,6 +8,7 @@ from loguru import logger
 from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import group_agents_by_host
+from imbue.mngr.api.find import parse_host_qualifier
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import add_common_options
@@ -36,7 +37,6 @@ from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
@@ -94,18 +94,23 @@ def _find_host_across_providers(
     host_identifier: str,
     mngr_ctx: MngrContext,
 ) -> tuple[HostId, ProviderInstanceName] | None:
-    """Find a host by ID or name across all providers.
+    """Find a host by ID, name, or `host.provider` form across all providers.
 
     Returns (host_id, provider_name) if found, or None if no provider has a matching host.
     """
+    host_name, provider_name = parse_host_qualifier(host_identifier)
     for provider in get_all_provider_instances(mngr_ctx):
+        if provider_name is not None and provider.name != provider_name:
+            continue
+        if host_name is None:
+            continue
         try:
-            host = provider.get_host(HostId(host_identifier))
+            host = provider.get_host(HostId(str(host_name)))
             return host.id, provider.name
         except (HostNotFoundError, ValueError):
             pass
         try:
-            host = provider.get_host(HostName(host_identifier))
+            host = provider.get_host(host_name)
             return host.id, provider.name
         except (HostNotFoundError, ValueError):
             pass
