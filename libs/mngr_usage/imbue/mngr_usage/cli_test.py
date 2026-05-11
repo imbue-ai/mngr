@@ -259,6 +259,9 @@ def test_render_model_marks_past_reset_as_stale() -> None:
         windows={"five_hour": WindowSnapshot(used_percentage=11.0, resets_at=900)},
     )
     model = _build_render_model(snapshot, max_age=300, now=1000)
+    # Age=1 (<300) so only the past-reset cause should fire.
+    assert model.has_past_reset is True
+    assert model.is_age_stale is False
     assert model.is_stale is True
 
 
@@ -269,6 +272,9 @@ def test_render_model_age_stale() -> None:
         windows={"five_hour": WindowSnapshot(used_percentage=11.0, resets_at=2000)},
     )
     model = _build_render_model(snapshot, max_age=300, now=1000)
+    # Reset is in the future so only the age cause should fire.
+    assert model.is_age_stale is True
+    assert model.has_past_reset is False
     assert model.is_stale is True
 
 
@@ -279,6 +285,8 @@ def test_render_model_fresh() -> None:
         windows={"five_hour": WindowSnapshot(used_percentage=11.0, resets_at=2000)},
     )
     model = _build_render_model(snapshot, max_age=300, now=1000)
+    assert model.is_age_stale is False
+    assert model.has_past_reset is False
     assert model.is_stale is False
 
 
