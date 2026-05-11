@@ -497,6 +497,10 @@ def _plugin_add_impl(ctx: click.Context) -> None:
         command_class=PluginCliOptions,
         # this is set so that, even if we cannot find an existing provider from our config, the command still works
         strict=False,
+        # the config is expected to reference plugins about to be installed, so the
+        # "unknown agent_types field" / "unknown provider backend" warnings are not
+        # useful here -- silence them
+        silent=True,
     )
 
     # Validate arguments before checking uv tool receipt so users get clear

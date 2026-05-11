@@ -226,6 +226,28 @@ def test_parse_providers_warns_on_unknown_fields_when_not_strict(log_warnings: l
     assert any("typo_field" in msg and "providers.my-local" in msg for msg in log_warnings)
 
 
+def test_parse_providers_silent_drops_unknown_fields_without_warning(log_warnings: list[str]) -> None:
+    """_parse_providers with strict=False, silent=True should drop unknown fields silently.
+
+    Used by `mngr plugin add` where the config is expected to reference plugins
+    about to be installed.
+    """
+    raw = {"my-local": {"backend": "local", "typo_field": "value"}}
+    result = _parse_providers(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    assert ProviderInstanceName("my-local") in result
+    assert "typo_field" not in result[ProviderInstanceName("my-local")].model_dump()
+    assert not any("typo_field" in msg for msg in log_warnings)
+
+
+def test_parse_providers_silent_drops_unknown_backend_without_warning(log_warnings: list[str]) -> None:
+    """_parse_providers with strict=False, silent=True should silently skip provider blocks
+    whose backend is unknown (the plugin is not yet installed)."""
+    raw = {"modal": {"backend": "modal"}}
+    result = _parse_providers(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    assert ProviderInstanceName("modal") not in result
+    assert not any("unknown backend" in msg.lower() for msg in log_warnings)
+
+
 def test_parse_providers_skips_disabled_plugin() -> None:
     """_parse_providers should skip provider blocks whose plugin is disabled."""
     raw = {"modal": {"backend": "modal"}}
@@ -329,6 +351,21 @@ def test_parse_agent_types_warns_on_unknown_fields_when_not_strict(log_warnings:
     assert result[AgentTypeName("claude")].cli_args == ("--verbose",)
     assert "bogus_option" not in result[AgentTypeName("claude")].model_dump()
     assert any("bogus_option" in msg and "agent_types.claude" in msg for msg in log_warnings)
+
+
+def test_parse_agent_types_silent_drops_unknown_fields_without_warning(log_warnings: list[str]) -> None:
+    """_parse_agent_types with strict=False, silent=True should drop unknown fields silently.
+
+    Used by `mngr plugin add` where agent_types in the existing config may
+    reference plugin-specific fields (e.g. `is_fast` from mngr_claude) that
+    aren't valid until the plugin is installed.
+    """
+    raw = {"claude": {"cli_args": "--verbose", "bogus_option": True}}
+    result = _parse_agent_types(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    assert AgentTypeName("claude") in result
+    assert result[AgentTypeName("claude")].cli_args == ("--verbose",)
+    assert "bogus_option" not in result[AgentTypeName("claude")].model_dump()
+    assert not any("bogus_option" in msg for msg in log_warnings)
 
 
 class _TestParentConfig(AgentTypeConfig):
