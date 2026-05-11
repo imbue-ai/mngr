@@ -1833,7 +1833,7 @@ _CREATE_HELP_METADATA = CommandHelpMetadata(
   - `NAME@HOST.PROVIDER --new-host` -- agent on a new host with the given name
   - `NAME:PATH` -- agent with a target path for the working directory
   - `:PATH` -- auto-named agent with a target path (equivalent to omitting the name)
-- `AGENT_TYPE`: Which type of agent to run (default: `claude`). Can also be specified via `--type`
+- `AGENT_TYPE`: Which type of agent to run. Can also be specified via `--type`. If neither is given, falls back to `[commands.create] type` in your user settings (set during installation by `scripts/install.sh`).
 - `AGENT_ARGS`: Additional arguments passed to the agent""",
     description="""This command sets up an agent's working directory, optionally provisions a
 new host (or uses an existing one), runs the specified agent process, and
@@ -1844,9 +1844,14 @@ or an rsync copy (for non-git projects). Specify a host in the agent address
 (e.g. NAME@HOST.PROVIDER) to target a remote host, or use NAME@.PROVIDER
 to create a new one.
 
-The agent type defaults to 'claude' if not specified. Arguments after --
-are passed directly to the agent command. To run an arbitrary shell
-command, use the built-in 'command' agent type:
+If --type is not given and no positional agent type is supplied, mngr
+falls back to `[commands.create] type` in your user settings.
+`scripts/install.sh` prompts for this default during installation; you
+can also set it later with
+`mngr config set commands.create.type <name> --scope user`.
+
+Arguments after -- are passed directly to the agent command. To run an
+arbitrary shell command, use the built-in 'command' agent type:
 `mngr create my-task --type command -- sleep 3600`.
 
 Headless agent types (those implementing StreamingHeadlessAgentMixin,
