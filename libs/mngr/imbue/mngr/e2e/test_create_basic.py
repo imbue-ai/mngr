@@ -156,10 +156,11 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
 @pytest.mark.modal
 def test_create_with_agent_args(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
-    # you can specify the arguments to the *agent* (ie, send args to claude rather than mngr)
+    # you can specify the arguments to the *agent* (ie, send args to the agent rather than mngr)
     # by using `--` to separate the agent arguments from the mngr arguments:
     mngr create my-task -- --model opus
-    # that command launches claude with the "opus" model instead of the default
+    # that command passes the "--model opus" flag to your default agent (e.g. claude, when claude
+    # is configured as the default)
     """)
     # `--` is consumed by _CreateCommand.parse_args the first time it appears,
     # so everything after it becomes agent_args and is joined with spaces into
