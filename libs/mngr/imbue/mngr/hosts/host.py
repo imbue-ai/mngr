@@ -78,6 +78,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.env_utils import build_source_env_shell_commands
@@ -243,8 +244,17 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         frozen=True, description="The provider instance managing this host"
     )
 
-    # is_local, get_name, _ensure_connected, _close_paramiko_client,
-    # disconnect, and __del__ are inherited unchanged from OuterHost.
+    # is_local, _ensure_connected, _close_paramiko_client, disconnect, and __del__
+    # are inherited unchanged from OuterHost.
+
+    def get_name(self) -> HostName:
+        """Return the mngr-assigned host name from certified data.
+
+        Overrides OuterHost.get_name (which returns the connector hostname),
+        so callers get the friendly name set when the host was created
+        rather than the SSH endpoint.
+        """
+        return HostName(self.get_certified_data().host_name)
 
     def model_copy_update(self, *updates: Any) -> "Host":
         """Create a copy of this Host with updated fields.
@@ -628,9 +638,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             #  It just means that the host is not yet properly initialized
             #  For hosts that are currently being created, that's fine, but otherwise this should count as a busted host
             #  Annoyingly we'll need to understand the difference (by checking to see if, eg, this host is locked)
+            # NB: must not call get_name() here -- Host.get_name() reads certified data, which would recurse.
             return CertifiedHostData(
                 host_id=str(self.id),
-                host_name=str(self.get_name()),
+                host_name="unknown-host-at-" + str(self.get_connector_host_name()),
                 created_at=now,
                 updated_at=now,
             )

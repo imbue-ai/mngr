@@ -145,7 +145,7 @@ def list_agents(
     include_filters: tuple[str, ...] = (),
     # CEL expressions - exclude agents matching these
     exclude_filters: tuple[str, ...] = (),
-    # If specified, only list agents from these providers (NOT IMPLEMENTED YET)
+    # If specified, only list agents from these providers
     provider_names: tuple[str, ...] | None = None,
     # How to handle errors (abort or continue)
     error_behavior: ErrorBehavior = ErrorBehavior.ABORT,
