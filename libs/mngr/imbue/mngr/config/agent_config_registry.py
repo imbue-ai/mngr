@@ -35,11 +35,23 @@ def get_agent_config_class(agent_type: str) -> type[AgentTypeConfig]:
     """Get the config class for an agent type.
 
     Returns the base AgentTypeConfig if no specific type is registered.
+    Callers that need to distinguish "registered concrete class" from
+    "fallback to base" should use is_agent_type_registered alongside this.
     """
     key = AgentTypeName(agent_type)
     if key not in _agent_config_registry:
         return AgentTypeConfig
     return _agent_config_registry[key]
+
+
+def is_agent_type_registered(agent_type: str) -> bool:
+    """Return True iff a concrete config class is registered for this agent type.
+
+    Use this when the caller needs to distinguish a fallback from a hit on
+    get_agent_config_class -- e.g., to surface "plugin not installed" hints
+    in error messages.
+    """
+    return AgentTypeName(agent_type) in _agent_config_registry
 
 
 def list_registered_agent_config_types() -> list[str]:

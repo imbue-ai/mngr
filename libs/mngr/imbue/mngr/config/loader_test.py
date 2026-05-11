@@ -337,6 +337,56 @@ class _TestParentConfig(AgentTypeConfig):
     extra_field: bool = Field(default=False)
 
 
+def test_parse_agent_types_error_hints_at_missing_plugin_for_unknown_type() -> None:
+    """When an unknown agent type carries plugin-specific fields, the error
+    should hint that the plugin may not be installed instead of looking like
+    a field typo. Mirrors imbue-ai/mngr#1073."""
+    reset_agent_config_registry()
+    try:
+        # `claude` is unregistered (no mngr_claude plugin) but the config
+        # carries claude-specific fields.
+        raw = {"claude": {"is_fast": True, "auto_dismiss_dialogs": False}}
+        with pytest.raises(ConfigParseError) as exc_info:
+            _parse_agent_types(raw, disabled_plugins=frozenset())
+        msg = str(exc_info.value)
+        assert "Unknown fields in agent_types.claude" in msg
+        # The hint names the agent type and the missing-plugin cause
+        assert "plugin that provides agent type 'claude' is not installed" in msg
+        assert "misspelled" in msg
+    finally:
+        reset_agent_config_registry()
+
+
+@pytest.mark.allow_warnings(match=r"Unknown fields in agent_types\.claude")
+def test_parse_agent_types_warning_hints_at_missing_plugin_for_unknown_type(log_warnings: list[str]) -> None:
+    """Same hint should also appear in the warning path (strict=False)."""
+    reset_agent_config_registry()
+    try:
+        raw = {"claude": {"is_fast": True}}
+        _parse_agent_types(raw, disabled_plugins=frozenset(), strict=False)
+        joined = "\n".join(log_warnings)
+        assert "Unknown fields in agent_types.claude" in joined
+        assert "plugin that provides agent type 'claude' is not installed" in joined
+    finally:
+        reset_agent_config_registry()
+
+
+def test_parse_agent_types_no_hint_when_type_is_registered() -> None:
+    """When the agent type IS registered but a field is mistyped, the hint
+    should NOT appear (this really is a field typo)."""
+    reset_agent_config_registry()
+    try:
+        register_agent_config("claude", _TestParentConfig)
+        raw = {"claude": {"definitely_not_a_field": True}}
+        with pytest.raises(ConfigParseError) as exc_info:
+            _parse_agent_types(raw, disabled_plugins=frozenset())
+        msg = str(exc_info.value)
+        assert "Unknown fields in agent_types.claude" in msg
+        assert "plugin that provides agent type" not in msg
+    finally:
+        reset_agent_config_registry()
+
+
 def test_parse_agent_types_uses_parent_type_config_class() -> None:
     """Custom types with parent_type should use the parent's config class for field validation."""
     reset_agent_config_registry()

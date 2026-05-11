@@ -13,6 +13,8 @@ from pydantic import BaseModel
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
+from imbue.mngr.config.agent_config_registry import is_agent_type_registered
+from imbue.mngr.config.agent_config_registry import list_registered_agent_config_types
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import AGENT_TYPE_CONCAT_TUPLE_FIELDS
@@ -336,21 +338,26 @@ def _check_unknown_fields(
     context: str,
     *,
     strict: bool = True,
+    hint: str | None = None,
 ) -> None:
     """Check for unknown fields in raw_config and either raise or warn.
 
     When strict=True, raises ConfigParseError (used by config set to catch typos).
     When strict=False, logs a warning and removes the unknown fields so that config files
     written for newer versions of mngr don't break older versions.
+    When a hint is supplied, it is appended to the error message / warning text --
+    used to suggest e.g. "the plugin that provides this type may not be installed".
     """
     known_fields = set(model_class.model_fields.keys())
     unknown = set(raw_config.keys()) - known_fields
     if unknown:
+        base_msg = f"Unknown fields in {context}: {sorted(unknown)}. Valid fields: {sorted(known_fields)}"
         if strict:
-            raise ConfigParseError(
-                f"Unknown fields in {context}: {sorted(unknown)}. Valid fields: {sorted(known_fields)}"
-            )
-        logger.warning("Unknown fields in {}: {}. Valid fields: {}", context, sorted(unknown), sorted(known_fields))
+            raise ConfigParseError(f"{base_msg}\n{hint}" if hint else base_msg)
+        if hint:
+            logger.warning("{}\n{}", base_msg, hint)
+        else:
+            logger.warning("{}", base_msg)
         for key in unknown:
             del raw_config[key]
 
@@ -477,6 +484,22 @@ def _has_disabled_ancestor(
     return False
 
 
+def _missing_agent_type_hint(agent_type: str) -> str:
+    """Build the hint shown when `agent_types.<name>` references an unregistered type.
+
+    Mirrors the wording the GH issue (#1073) requested: name the most common
+    root causes so the user does not interpret the error as a field typo.
+    """
+    registered = list_registered_agent_config_types()
+    registered_str = ", ".join(registered) if registered else "(none registered)"
+    return (
+        f"This may be because:\n"
+        f"  - The plugin that provides agent type '{agent_type}' is not installed\n"
+        f"  - '{agent_type}' is misspelled (registered types: {registered_str})\n"
+        f"  - One or more field names are misspelled"
+    )
+
+
 def _parse_agent_types(
     raw_types: dict[str, dict[str, Any]],
     disabled_plugins: frozenset[str],
@@ -504,8 +527,14 @@ def _parse_agent_types(
         # any ancestor depends on a disabled plugin.
         if _has_disabled_ancestor(name, raw_types, disabled_plugins):
             continue
-        config_class = get_agent_config_class(parent_type if parent_type is not None else name)
-        _check_unknown_fields(raw_config, config_class, f"agent_types.{name}", strict=strict)
+        type_for_lookup = parent_type if parent_type is not None else name
+        config_class = get_agent_config_class(type_for_lookup)
+        # When the resolved type name is not registered, the config class fell
+        # back to the base AgentTypeConfig. Any plugin-specific fields will look
+        # "unknown" -- name the likely root cause so the user does not interpret
+        # the error as a field typo.
+        hint = _missing_agent_type_hint(type_for_lookup) if not is_agent_type_registered(type_for_lookup) else None
+        _check_unknown_fields(raw_config, config_class, f"agent_types.{name}", strict=strict, hint=hint)
         normalized_config = _normalize_tuple_fields_for_construct(raw_config)
         agent_types[AgentTypeName(name)] = config_class.model_construct(**normalized_config)
 
