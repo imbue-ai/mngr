@@ -331,29 +331,41 @@ def _window_to_template_values(window: WindowSnapshot, now: int) -> dict[str, st
 
 
 class _UsageRenderModel(FrozenModel):
-    """Top-level view used both for JSON output and template rendering."""
+    """Top-level view used both for JSON output and template rendering.
+
+    Two separate staleness flags so the warning emitter can pick the right
+    text for each cause (avoiding "snapshot last updated now ago" when the
+    snapshot itself just updated but a window already reset).
+    """
 
     source_name: str
     now: int
-    is_stale: bool
+    is_age_stale: bool
+    has_past_reset: bool
     snapshot_updated_at: int | None
     windows: dict[str, WindowSnapshot]
+
+    @property
+    def is_stale(self) -> bool:
+        """Combined flag retained for JSON / format-template surfaces."""
+        return self.is_age_stale or self.has_past_reset
 
 
 def _build_render_model(snapshot: UsageSnapshot, max_age: int, now: int) -> _UsageRenderModel:
     """Assemble the renderable view for a snapshot.
 
-    Stale if either:
-    - snapshot updated_at is older than max_age (no fresh event in a while), OR
-    - any populated window's resets_at is in the past (the limit refreshed;
-      cached used_percentage is from the prior window).
+    Two staleness causes, tracked separately so the warning text matches:
+    - ``is_age_stale``: snapshot updated_at is older than max_age (no fresh
+      event in a while).
+    - ``has_past_reset``: any populated window's resets_at is in the past
+      (the limit refreshed; cached used_percentage is from the prior window).
+      The snapshot itself may be brand-new in this case.
     """
-    age_stale = (now - snapshot.updated_at) > max_age
-    reset_stale = any(snap.resets_at is not None and snap.resets_at < now for snap in snapshot.windows.values())
     return _UsageRenderModel(
         source_name=snapshot.source_name,
         now=now,
-        is_stale=age_stale or reset_stale,
+        is_age_stale=(now - snapshot.updated_at) > max_age,
+        has_past_reset=any(snap.resets_at is not None and snap.resets_at < now for snap in snapshot.windows.values()),
         snapshot_updated_at=snapshot.updated_at,
         windows=snapshot.windows,
     )
@@ -445,7 +457,8 @@ def _emit_output(
             empty = _UsageRenderModel(
                 source_name="",
                 now=now,
-                is_stale=True,
+                is_age_stale=True,
+                has_past_reset=False,
                 snapshot_updated_at=None,
                 windows={},
             )
@@ -470,27 +483,36 @@ def _emit_output(
             if not snapshots_with_models:
                 return
             any_with_percentage_anywhere = False
-            stale_sources: list[tuple[str, int]] = []
+            # Two distinct stale reasons, tracked separately so the warning text matches the cause:
+            #   age_stale_sources: snapshot file hasn't been refreshed in a while.
+            #   reset_stale_sources: at least one window's resets_at is in the past, so the
+            #     cached used_percentage is from the now-elapsed window. The snapshot may
+            #     itself be brand-new (age 0); the staleness is in the data, not the file.
+            age_stale_sources: list[tuple[str, int]] = []
+            reset_stale_sources: list[str] = []
             for index, (_, model) in enumerate(snapshots_with_models):
                 if index > 0:
                     write_human_line("")
                 section_had_percentage = _write_source_section(model, now, f"[{model.source_name}]")
                 any_with_percentage_anywhere = any_with_percentage_anywhere or section_had_percentage
-                if section_had_percentage and model.is_stale and model.snapshot_updated_at is not None:
-                    age_seconds = max(0, now - model.snapshot_updated_at)
-                    # Skip the warning when the snapshot itself is fresh (age=0). is_stale can be
-                    # set by a just-past window reset, not snapshot age; the per-window "reset X
-                    # ago" suffix already conveys that and "snapshot last updated now ago" is
-                    # both grammatically wrong and untrue (the snapshot just updated).
-                    if age_seconds > 0:
-                        stale_sources.append((model.source_name, age_seconds))
+                if not section_had_percentage or model.snapshot_updated_at is None:
+                    continue
+                if model.is_age_stale:
+                    age_stale_sources.append((model.source_name, max(0, now - model.snapshot_updated_at)))
+                if model.has_past_reset:
+                    reset_stale_sources.append(model.source_name)
             if not any_with_percentage_anywhere:
                 logger.warning(_NO_DATA_HINT)
-            for source_name, age_seconds in stale_sources:
+            for source_name, age_seconds in age_stale_sources:
                 logger.warning(
                     "[{}] snapshot last updated {} ago",
                     source_name,
                     _format_duration(age_seconds),
+                )
+            for source_name in reset_stale_sources:
+                logger.warning(
+                    "[{}] a window already reset; the cached percentage is from the previous window",
+                    source_name,
                 )
         case _ as unreachable:
             assert_never(unreachable)
