@@ -9,16 +9,16 @@
 mngr usage [OPTIONS]
 ```
 
-Show Claude Code rolling-window quota usage (5h, 7d, overage).
+Show rolling-window usage / quota data from agent statusline events.
 
-Reports Claude Code's rolling 5-hour, 7-day, and overage quota windows.
+Reports rolling-window usage / quota data captured by an agent's
+statusline.
 
-The data is sourced from the JSON snapshot Claude Code feeds to its statusline
-on every render; a small shim installed at each agent's
-<work_dir>/.claude/settings.local.json captures it into a shared cache under
-your profile_dir. `mngr usage` is purely a reader -- the cache is populated by
-interactive Claude sessions as a side effect of normal use, with no API
-cost.
+This command is agent-agnostic: it walks ``<host_dir>/agents/*/events/<source>/
+rate_limits/events.jsonl`` and renders the most recent event. The pattern
+mirrors how ``mngr transcript`` discovers ``common_transcript`` events --
+writer plugins emit events to the conventional path; ``mngr usage`` discovers
+them automatically without any agent-specific knowledge.
 
 **Usage:**
 
@@ -57,7 +57,7 @@ mngr usage [OPTIONS]
 $ mngr usage
 ```
 
-**Treat the cache as stale after 60s (warning only)**
+**Treat the snapshot as stale after 60s (warning only)**
 
 ```bash
 $ mngr usage --max-age 60
