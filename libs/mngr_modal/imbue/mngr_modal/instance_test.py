@@ -321,11 +321,15 @@ def test_handle_modal_auth_error_decorator_converts_auth_error_to_modal_auth_err
             cg=expired_credentials_modal_provider.mngr_ctx.concurrency_group
         )
 
-    # Verify the error message contains helpful information
+    # Verify the error message contains helpful information.
+    # Spec v2 reworded the actionable hint to use the standard
+    # `mngr config set ... is_enabled false` disable pattern (consistent
+    # with other ProviderNotAuthorizedError subclasses), and replaced the
+    # docs URL with `modal token new`.
     error_message = str(exc_info.value)
     assert "Modal authentication failed" in error_message
-    assert "--disable-plugin modal" in error_message
-    assert "https://modal.com/docs/reference/modal.config" in error_message
+    assert "modal token new" in error_message
+    assert "is_enabled false" in error_message
 
 
 # =============================================================================

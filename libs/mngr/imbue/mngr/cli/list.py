@@ -725,11 +725,14 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
             # JSONL is handled above with streaming, so this should be unreachable
             raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")
 
-    # Render warnings + errors to stderr (suppressed by --quiet via loguru
-    # console handler removal). JSON/JSONL output already includes them
-    # structurally; this is the human-readable side channel.
-    _render_warnings_to_stderr(result.warnings, ctx)
-    _render_errors_to_stderr(result.errors)
+    # Render warnings + errors to stderr ONLY for human format. JSON/JSONL
+    # already include them in the structured stdout, so duplicating them on
+    # stderr would (a) be redundant and (b) corrupt tests that capture
+    # output and parse it as JSON. --quiet suppresses these via the loguru
+    # console handler being removed.
+    if params.output_opts.output_format == OutputFormat.HUMAN:
+        _render_warnings_to_stderr(result.warnings, ctx)
+        _render_errors_to_stderr(result.errors)
     _exit_for_errors(ctx, params.error_behavior, result)
 
 
