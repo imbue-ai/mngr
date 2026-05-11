@@ -19,25 +19,28 @@ The lifecycle for a new agent has three latchkey-aware steps:
    :class:`LatchkeyDiscoveryHandler` ensures the shared gateway is up
    and reverse-tunnels it into the agent for non-DEV launches.
 
-The helpers degrade gracefully: each one logs a warning and returns
-sentinels (``None`` env values, ``None`` paths) on failure so a
-latchkey misconfiguration does not abort agent creation. The agent
-will simply lack working latchkey wiring.
+Both helpers raise on failure (``LatchkeyError`` from the upstream
+CLI, ``LatchkeyStoreError`` from on-disk persistence). Callers decide
+whether to fail agent creation or just surface a warning -- the helpers
+themselves don't make that policy call.
+
+The one place ``prepare_agent_latchkey`` *does* tolerate an absent
+dependency is when ``latchkey`` itself is ``None``: that's a degraded
+test / no-password-gateway mode where we still produce the constant
+agent-side gateway URL but skip the password / JWT / opaque-handle
+steps that need a working ``Latchkey``.
 """
 
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
-from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
-from imbue.mngr_latchkey.core import LatchkeyError
-from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_agent
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
@@ -63,37 +66,31 @@ class AgentLatchkeySetup(FrozenModel):
       via ``mngr create --env KEY=VALUE`` flags).
     * Pass ``opaque_permissions_path`` back to
       :func:`finalize_agent_permissions` once the canonical agent id is
-      known.
-
-    Both fields are populated independently. If JWT minting fails but
-    the gateway is up, ``env`` will still carry ``LATCHKEY_GATEWAY``
-    (and ``LATCHKEY_GATEWAY_PASSWORD`` if available) while
-    ``opaque_permissions_path`` is ``None``; the agent will then fall
-    back to the gateway's deny-all default permissions instead of its
-    own.
+      known (skipped when ``opaque_permissions_path`` is ``None``, which
+      happens only in the no-``Latchkey`` degraded mode).
     """
 
     env: Mapping[str, str] = Field(
         description=(
-            "Environment variables to inject into the agent. Always contains "
-            f"``{ENV_LATCHKEY_GATEWAY}`` when latchkey wiring succeeds, plus "
-            f"``{ENV_LATCHKEY_GATEWAY_PASSWORD}`` when password derivation "
-            f"succeeds, plus ``{ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE}`` "
-            "when JWT minting succeeds. ``LATCHKEY_DISABLE_COUNTING=1`` is "
-            "set whenever any latchkey env var is set. Empty when latchkey "
-            "wiring is unavailable for this agent (e.g. gateway failed to "
-            "start)."
+            "Environment variables to inject into the agent. Contains "
+            f"``{ENV_LATCHKEY_GATEWAY}`` and ``{ENV_LATCHKEY_DISABLE_COUNTING}`` "
+            "whenever a gateway URL is available, plus "
+            f"``{ENV_LATCHKEY_GATEWAY_PASSWORD}`` and "
+            f"``{ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE}`` whenever a real "
+            "``Latchkey`` is supplied. Empty only in the on-host degraded "
+            "mode (``latchkey=None`` with ``is_tunneled=False``) where no "
+            "live gateway port is knowable."
         ),
     )
     opaque_permissions_path: Path | None = Field(
         default=None,
         description=(
             "Path to the agent's freshly-allocated opaque permissions handle "
-            "(``<data_dir>/latchkey/permissions/<uuid>.json``), materialized "
+            "(``<plugin_data_dir>/permissions/<uuid>.json``), materialized "
             "with deny-all baseline rules. Pass to "
             ":func:`finalize_agent_permissions` once the canonical agent id "
-            "is known. ``None`` when JWT minting failed or no Latchkey was "
-            "supplied."
+            "is known. ``None`` when no ``Latchkey`` was supplied; otherwise "
+            "always set on a successful return."
         ),
     )
 
@@ -120,32 +117,41 @@ def prepare_agent_latchkey(
       gateway *now* to learn its dynamic port and bake it into
       ``LATCHKEY_GATEWAY``.
 
-    ``latchkey=None`` is a degraded mode where we still inject the
-    gateway URL for tunneled agents (since that URL is a fixed constant
-    and useful in tests / non-password-protected setups) but skip the
-    password and JWT. For ``is_tunneled=False`` with ``latchkey=None``
-    there is no live port to inject and we return empty env entirely.
+    ``latchkey=None`` is a degraded mode for tests / no-password-gateway
+    setups: we still inject the constant agent-side gateway URL when
+    ``is_tunneled=True`` (the URL alone is meaningful) but skip the
+    password and JWT entirely. For ``is_tunneled=False`` with
+    ``latchkey=None`` there is no live port to inject either, so we
+    return empty env.
 
-    Failures (no Latchkey, gateway start failed, password derivation
-    failed, JWT mint failed) degrade rather than raise: the returned
-    ``env`` carries whichever vars succeeded, and missing pieces are
-    simply absent.
+    Raises:
+        LatchkeyError: when ``ensure_gateway_started`` /
+            ``derive_gateway_password`` / ``create_permissions_override_jwt``
+            fails on the supplied ``Latchkey``. Callers that want graceful
+            degradation should catch and fall back to an empty
+            :class:`AgentLatchkeySetup` themselves -- this function does
+            not make that policy call.
+        LatchkeyStoreError: when materializing the opaque permissions
+            file fails.
     """
-    gateway_url = _resolve_gateway_url(latchkey, is_tunneled=is_tunneled)
-    if gateway_url is None:
+    if is_tunneled:
+        gateway_url = f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
+    elif latchkey is None:
+        # No live port to inject and no Latchkey to ask -- caller asked
+        # for the empty case.
         return AgentLatchkeySetup(env={}, opaque_permissions_path=None)
+    else:
+        info = latchkey.ensure_gateway_started()
+        gateway_url = f"http://{info.host}:{info.port}"
 
     env: dict[str, str] = {ENV_LATCHKEY_GATEWAY: gateway_url}
     opaque_path: Path | None = None
 
     if latchkey is not None:
-        password = _derive_gateway_password_or_warn(latchkey)
-        if password is not None:
-            env[ENV_LATCHKEY_GATEWAY_PASSWORD] = password
-
-        opaque_path, jwt = _prepare_opaque_permissions_handle(latchkey)
-        if jwt is not None:
-            env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] = jwt
+        env[ENV_LATCHKEY_GATEWAY_PASSWORD] = latchkey.derive_gateway_password()
+        opaque_path = new_opaque_permissions_path(latchkey.plugin_data_dir)
+        save_permissions(opaque_path, LatchkeyPermissionsConfig())
+        env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] = latchkey.create_permissions_override_jwt(opaque_path)
 
     # Always set the disable-counting flag whenever we're injecting a
     # gateway URL, so each agent doesn't get counted as a separate user
@@ -163,8 +169,9 @@ def finalize_agent_permissions(
     """Replace the opaque permissions handle with a symlink to the canonical agent path.
 
     No-op when ``opaque_permissions_path`` is ``None`` -- that's the
-    sentinel :func:`prepare_agent_latchkey` returns when JWT minting
-    failed, in which case there is nothing to finalize.
+    sentinel :func:`prepare_agent_latchkey` returns in the
+    no-``Latchkey`` degraded mode, in which case there is nothing to
+    finalize.
 
     Raises :class:`LatchkeyStoreError` if the linking fails. Callers
     decide whether to surface the failure or carry on: if the link
@@ -178,61 +185,3 @@ def finalize_agent_permissions(
     if opaque_permissions_path is None:
         return
     link_opaque_permissions_to_agent(latchkey.plugin_data_dir, opaque_permissions_path, agent_id)
-
-
-# -- Internals ----------------------------------------------------------------
-
-
-def _resolve_gateway_url(latchkey: Latchkey | None, *, is_tunneled: bool) -> str | None:
-    """Return the URL the agent should use as ``LATCHKEY_GATEWAY``.
-
-    Tunneled agents always get the constant agent-side loopback URL
-    regardless of what port the host-side gateway happens to listen on,
-    even when ``latchkey is None`` -- the URL alone is meaningful for
-    tests and non-password-protected gateways. DEV / on-host agents need
-    the gateway's live dynamic port, so we must ensure the gateway is up
-    here, which requires a real ``Latchkey``.
-    """
-    if is_tunneled:
-        return f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
-    if latchkey is None:
-        return None
-    try:
-        info = latchkey.ensure_gateway_started()
-    except LatchkeyError as e:
-        logger.warning("Failed to start latchkey gateway for on-host agent: {}", e)
-        return None
-    return f"http://{info.host}:{info.port}"
-
-
-def _derive_gateway_password_or_warn(latchkey: Latchkey) -> str | None:
-    """Wrap :meth:`Latchkey.derive_gateway_password`, downgrading errors to warnings."""
-    try:
-        return latchkey.derive_gateway_password()
-    except (LatchkeyError, LatchkeyJwtMintError) as e:
-        logger.warning("Failed to derive latchkey gateway password: {}", e)
-        return None
-
-
-def _prepare_opaque_permissions_handle(
-    latchkey: Latchkey,
-) -> tuple[Path | None, str | None]:
-    """Allocate an opaque permissions handle and mint its override JWT.
-
-    Returns ``(opaque_path, jwt)`` on success. On JWT-mint failure the
-    just-created file is unlinked (best-effort) so we don't litter
-    the plugin data directory with orphan handles for agents that will
-    never be able to use them, and ``(None, None)`` is returned.
-    """
-    opaque_path = new_opaque_permissions_path(latchkey.plugin_data_dir)
-    save_permissions(opaque_path, LatchkeyPermissionsConfig())
-    try:
-        jwt = latchkey.create_permissions_override_jwt(opaque_path)
-    except (LatchkeyError, LatchkeyJwtMintError) as e:
-        logger.warning("Failed to mint latchkey permissions-override JWT: {}", e)
-        try:
-            opaque_path.unlink()
-        except OSError:
-            pass
-        return None, None
-    return opaque_path, jwt

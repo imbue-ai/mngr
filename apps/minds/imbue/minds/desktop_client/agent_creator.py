@@ -59,6 +59,7 @@ from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import finalize_agent_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 
 # Inlined to avoid pulling the ``imbue-mngr-forward`` package into minds'
@@ -1100,11 +1101,16 @@ class AgentCreator(MutableModel):
                 # since the only on-host launch mode (DEV) was removed --
                 # all remaining modes reach the gateway via the reverse
                 # tunnel ``LatchkeyDiscoveryHandler`` sets up post-discovery.
-                latchkey_setup = prepare_agent_latchkey(
-                    self.latchkey,
-                    is_tunneled=True,
-                )
-                self._log_latchkey_setup(latchkey_setup, log_queue)
+                #
+                # ``prepare_agent_latchkey`` raises on infrastructure
+                # failures (latchkey CLI broken, on-disk write failed,
+                # etc.). Minds tolerates those by falling back to an
+                # empty setup so the agent still comes up -- it just
+                # won't authenticate to a password-protected gateway and
+                # won't have its own permissions file. The user can
+                # recover by fixing the latchkey installation and
+                # re-creating the agent.
+                latchkey_setup = self._prepare_latchkey_or_warn(log_queue)
 
                 parsed_name = AgentName(agent_name)
                 log_queue.put("[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value))
@@ -1217,27 +1223,27 @@ class AgentCreator(MutableModel):
         finally:
             log_queue.put(LOG_SENTINEL)
 
-    def _log_latchkey_setup(
+    def _prepare_latchkey_or_warn(
         self,
-        setup: AgentLatchkeySetup,
         log_queue: queue.Queue[str],
-    ) -> None:
-        """Surface the result of ``prepare_agent_latchkey`` to the creation log.
+    ) -> AgentLatchkeySetup:
+        """Run :func:`prepare_agent_latchkey` and downgrade its errors to warnings.
 
-        ``prepare_agent_latchkey`` already logs failures via ``loguru`` at
-        warning level; this just mirrors a one-line summary into the
-        per-creation log queue so the user sees in the UI whether
-        latchkey wiring succeeded or degraded.
+        The plugin raises on infrastructure failures so the caller can
+        decide. Minds's policy is to fall back to an empty setup -- the
+        agent still comes up without latchkey wiring, and the user can
+        fix the latchkey installation and re-create the agent.
         """
-        if not setup.env:
-            return
-        components: list[str] = []
-        if "LATCHKEY_GATEWAY_PASSWORD" not in setup.env and self.latchkey is not None:
-            components.append("password derivation failed")
-        if setup.opaque_permissions_path is None and self.latchkey is not None:
-            components.append("per-agent permissions JWT failed")
-        if components:
-            log_queue.put("[minds] Warning: latchkey partially wired ({})".format(", ".join(components)))
+        try:
+            return prepare_agent_latchkey(self.latchkey, is_tunneled=True)
+        except LatchkeyError as e:
+            logger.warning("Failed to prepare latchkey wiring: {}", e)
+            log_queue.put("[minds] Warning: latchkey wiring skipped: {}".format(e))
+            return AgentLatchkeySetup(env={}, opaque_permissions_path=None)
+        except LatchkeyStoreError as e:
+            logger.warning("Failed to materialize latchkey permissions handle: {}", e)
+            log_queue.put("[minds] Warning: latchkey wiring skipped: {}".format(e))
+            return AgentLatchkeySetup(env={}, opaque_permissions_path=None)
 
     def _build_redirect_url(self, agent_id: AgentId) -> str:
         """Build the absolute URL the UI should navigate to after creation.

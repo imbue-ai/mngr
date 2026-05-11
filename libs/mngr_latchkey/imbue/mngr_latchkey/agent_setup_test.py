@@ -159,51 +159,48 @@ def test_prepare_full_wiring_on_host_uses_live_port(tmp_path: Path) -> None:
     assert setup.env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] == "header.payload.signature"
 
 
-def test_prepare_on_host_gateway_start_failure_returns_empty(tmp_path: Path) -> None:
+def test_prepare_on_host_gateway_start_failure_propagates(tmp_path: Path) -> None:
+    """Gateway-start failures bubble up to the caller; the helper does not swallow them."""
     fake = _FakeLatchkey(latchkey_directory=tmp_path)
     fake.configure(
         gateway_error=LatchkeyError("boom"),
         password="hunter2",
         jwt="header.payload.signature",
     )
-    setup = prepare_agent_latchkey(fake, is_tunneled=False)
-    assert setup.env == {}
-    assert setup.opaque_permissions_path is None
+    with pytest.raises(LatchkeyError):
+        prepare_agent_latchkey(fake, is_tunneled=False)
 
 
-def test_prepare_password_derivation_failure_skips_password(tmp_path: Path) -> None:
-    """A password-derivation failure must not block the rest of the wiring.
-
-    The agent still gets ``LATCHKEY_GATEWAY`` (and the JWT) -- the only
-    consequence is that a password-protected gateway will reject this
-    agent. That's a clearer failure mode than aborting agent creation.
-    """
+def test_prepare_password_derivation_failure_propagates(tmp_path: Path) -> None:
+    """Password-derivation failures bubble up to the caller."""
     fake = _FakeLatchkey(latchkey_directory=tmp_path)
     fake.configure(
         gateway_url="http://127.0.0.1:55555",
         password_error=LatchkeyJwtMintError("nope"),
         jwt="header.payload.signature",
     )
-    setup = prepare_agent_latchkey(fake, is_tunneled=True)
-    assert ENV_LATCHKEY_GATEWAY in setup.env
-    assert ENV_LATCHKEY_GATEWAY_PASSWORD not in setup.env
-    assert setup.env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] == "header.payload.signature"
+    with pytest.raises(LatchkeyJwtMintError):
+        prepare_agent_latchkey(fake, is_tunneled=True)
 
 
-def test_prepare_jwt_mint_failure_skips_override_and_cleans_up(tmp_path: Path) -> None:
+def test_prepare_jwt_mint_failure_propagates(tmp_path: Path) -> None:
+    """JWT-mint failures bubble up to the caller.
+
+    The opaque permissions file may or may not have been materialized
+    at the point the exception fires; we don't make any guarantee
+    about cleanup -- the caller can either retry the whole prepare
+    (which writes a fresh opaque path) or accept the orphan file. The
+    files are tiny and live under the user's own latchkey directory,
+    so leaking one occasionally is not a concern.
+    """
     fake = _FakeLatchkey(latchkey_directory=tmp_path)
     fake.configure(
         gateway_url="http://127.0.0.1:55555",
         password="hunter2",
         jwt_error=LatchkeyJwtMintError("nope"),
     )
-    setup = prepare_agent_latchkey(fake, is_tunneled=True)
-    assert setup.env[ENV_LATCHKEY_GATEWAY_PASSWORD] == "hunter2"
-    assert ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE not in setup.env
-    assert setup.opaque_permissions_path is None
-    # The orphan opaque file should have been unlinked, not left behind.
-    opaque_dir = opaque_permissions_dir(fake.plugin_data_dir)
-    assert not opaque_dir.exists() or list(opaque_dir.iterdir()) == []
+    with pytest.raises(LatchkeyJwtMintError):
+        prepare_agent_latchkey(fake, is_tunneled=True)
 
 
 # -- finalize_agent_permissions ----------------------------------------------
