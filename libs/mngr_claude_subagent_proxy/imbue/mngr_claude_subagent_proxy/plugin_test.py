@@ -474,8 +474,11 @@ def test_deny_mode_writes_mngr_subagents_skill(
     # depth-limit guard.
     assert "MNGR_SUBAGENT_DEPTH" in body
     # Permission dialogs and backgrounding are documented secondary
-    # concerns; pin them so the skill keeps that coverage.
-    assert "NEED_PERMISSION" in body
+    # concerns; pin them so the skill keeps that coverage. The skill
+    # describes the permission case using the literal prefix that
+    # subagent_wait actually emits (PERMISSION_REQUIRED:<slug>), not
+    # the PROXY-mode wait-script's NEED_PERMISSION translation.
+    assert "PERMISSION_REQUIRED" in body
     assert "run_in_background" in body
 
 
