@@ -422,6 +422,7 @@ class ForwardStreamManager(MutableModel):
                 ],
                 on_output=lambda line, is_stdout, _aid=agent_id: self._on_event_output(line, is_stdout, _aid),
                 cwd=Path.home(),
+                is_checked_by_group=False,
             )
             with self._lock:
                 self._events_processes[aid_str] = process
