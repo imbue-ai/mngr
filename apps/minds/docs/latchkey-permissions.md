@@ -80,25 +80,27 @@ latchkey 2.8.0 features:
   hard-coded sentinel path and SHA-256-hashes the resulting JWT. That
   way the password is stable across desktop-client restarts without
   minds having to persist it in plaintext anywhere.
-* **Per-agent permission overrides.** When an agent is created, minds
-  allocates an opaque
-  `~/.minds/latchkey/permissions/<uuid>.json` handle, materializes it
-  with empty `rules` (deny-all baseline), and mints a
-  permissions-override JWT pointing at that path via
+* **Per-host permission overrides.** When an agent is created, minds
+  knows the agent's host name up-front (`{agent_name}-host`), so it
+  materializes
+  `~/.minds/latchkey/hosts/<host_name>/latchkey_permissions.json` with
+  empty `rules` (deny-all baseline) if it doesn't already exist and
+  mints a permissions-override JWT pointing at that path via
   `latchkey gateway create-jwt`. The JWT is injected into the agent's
-  environment as `LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE` *at*
-  `mngr create` *time*, so the agent's first ever `latchkey` call
-  already carries it in the
+  host environment as `LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE` *at*
+  `mngr create` *time* (via `--host-env`), so the agent's first ever
+  `latchkey` call already carries it in the
   `X-Latchkey-Gateway-Permissions-Override` header.
 
-  After `mngr create` returns the canonical agent id, minds replaces
-  the opaque file with a symlink pointing at
-  `~/.minds/agents/<agent_id>/latchkey_permissions.json`. The agent-id
-  path is the canonical location -- the desktop client's permission-grant
-  flow writes to it as before -- and the gateway reads through the
-  symlink to see those grants. This indirection lets minds mint and
-  inject the JWT before the agent id is known, eliminating a
-  previously-fragile post-create injection step.
+  After `mngr create` returns the canonical `host_id`, minds compares
+  it against the value recorded in
+  `~/.minds/latchkey/hosts/<host_name>/host-id`. A mismatch (or no
+  recorded value) means the host with that name has been recreated
+  since the last permission grant, so the permissions file is cleared
+  -- preventing the freshly-created host from inheriting permissions a
+  previous tenant of the same name had been granted. The new `host_id`
+  is then written into `host-id` so subsequent re-deployments of the
+  same host can be detected as such and preserve grants.
 
 The gateway's *default* permissions config
 (`~/.minds/latchkey_default_permissions.json`) is materialized with

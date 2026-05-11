@@ -15,9 +15,12 @@ from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostName
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.store import load_permissions
-from imbue.mngr_latchkey.store import permissions_path_for_agent
+from imbue.mngr_latchkey.store import permissions_path_for_host
+
+_HOST_NAME = HostName("test-host")
 
 
 def _make_recording_binary(tmp_path: Path, name: str, *, exit_code: int = 0, stderr: str = "") -> Path:
@@ -188,6 +191,7 @@ def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=agent_id,
+        host_name=_HOST_NAME,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all", "slack-write-all"),
     )
@@ -198,7 +202,7 @@ def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(
     # Auth browser must not have been invoked.
     assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
     # Permissions file reflects the new rule.
-    config = load_permissions(permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id))
+    config = load_permissions(permissions_path_for_host(tmp_path / "mngr_latchkey", _HOST_NAME))
     assert config.rules == ({"slack-api": ["slack-read-all", "slack-write-all"]},)
     # Response event was written and mngr message sent.
     responses = load_response_events(tmp_path)
@@ -218,6 +222,7 @@ def test_grant_with_missing_credentials_invokes_auth_browser(tmp_path: Path) -> 
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=agent_id,
+        host_name=_HOST_NAME,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -234,6 +239,7 @@ def test_grant_with_invalid_credentials_also_invokes_auth_browser(tmp_path: Path
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=AgentId(),
+        host_name=_HOST_NAME,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -273,6 +279,7 @@ def test_grant_with_unknown_credentials_invokes_auth_browser(tmp_path: Path) -> 
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=AgentId(),
+        host_name=_HOST_NAME,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -293,6 +300,7 @@ def test_grant_treats_failed_browser_flow_as_deny_with_distinct_message(tmp_path
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=agent_id,
+        host_name=_HOST_NAME,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -301,7 +309,7 @@ def test_grant_treats_failed_browser_flow_as_deny_with_distinct_message(tmp_path
     assert "sign-in" in result.message.lower()
     assert "user cancelled" in result.message
     # latchkey_permissions.json must NOT have been written.
-    assert not permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id).exists()
+    assert not permissions_path_for_host(tmp_path / "mngr_latchkey", _HOST_NAME).exists()
     # A DENIED response event was appended (no separate AUTH_FAILED status).
     responses = load_response_events(tmp_path)
     assert len(responses) == 1
@@ -318,6 +326,7 @@ def test_grant_rejects_empty_granted_permissions(tmp_path: Path) -> None:
         handler.grant(
             request_event_id="evt-abc",
             agent_id=AgentId(),
+            host_name=_HOST_NAME,
             service_info=_SLACK_SERVICE_INFO,
             granted_permissions=(),
         )
@@ -333,6 +342,7 @@ def test_grant_rejects_permissions_outside_catalog(tmp_path: Path) -> None:
         handler.grant(
             request_event_id="evt-abc",
             agent_id=AgentId(),
+            host_name=_HOST_NAME,
             service_info=_SLACK_SERVICE_INFO,
             granted_permissions=("not-a-real-permission",),
         )
@@ -347,17 +357,19 @@ def test_grant_replaces_existing_rule_for_same_scope(tmp_path: Path) -> None:
     handler.grant(
         request_event_id="evt-1",
         agent_id=agent_id,
+        host_name=_HOST_NAME,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
     handler.grant(
         request_event_id="evt-2",
         agent_id=agent_id,
+        host_name=_HOST_NAME,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all", "slack-write-all"),
     )
 
-    config = load_permissions(permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id))
+    config = load_permissions(permissions_path_for_host(tmp_path / "mngr_latchkey", _HOST_NAME))
     assert config.rules == ({"slack-api": ["slack-read-all", "slack-write-all"]},)
 
 
@@ -377,6 +389,7 @@ def test_grant_refuses_when_browser_auth_unsupported_and_returns_set_example(tmp
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=agent_id,
+        host_name=_HOST_NAME,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -395,7 +408,7 @@ def test_grant_refuses_when_browser_auth_unsupported_and_returns_set_example(tmp
     # The request must remain pending: no response event, no permissions
     # file, no mngr message.
     assert load_response_events(tmp_path) == []
-    assert not permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id).exists()
+    assert not permissions_path_for_host(tmp_path / "mngr_latchkey", _HOST_NAME).exists()
     assert not (tmp_path / "mngr_report.jsonl").exists()
 
 
@@ -410,6 +423,7 @@ def test_grant_falls_back_to_generic_example_when_latchkey_omits_one(tmp_path: P
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=AgentId(),
+        host_name=_HOST_NAME,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -442,6 +456,7 @@ def test_grant_prefixes_set_example_with_latchkey_directory_when_pinned(tmp_path
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=AgentId(),
+        host_name=_HOST_NAME,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -477,6 +492,7 @@ def test_grant_prefixes_set_example_with_pinned_latchkey_directory(tmp_path: Pat
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=AgentId(),
+        host_name=_HOST_NAME,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -521,6 +537,7 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
     first = handler.grant(
         request_event_id="evt-abc",
         agent_id=agent_id,
+        host_name=_HOST_NAME,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -532,6 +549,7 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
     second = handler.grant(
         request_event_id="evt-abc",
         agent_id=agent_id,
+        host_name=_HOST_NAME,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -611,7 +629,7 @@ def test_deny_writes_response_event_without_touching_permissions_file(tmp_path: 
     assert len(responses) == 1
     assert responses[0].status == str(RequestStatus.DENIED)
     # No permissions file should have been created.
-    assert not permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id).exists()
+    assert not permissions_path_for_host(tmp_path / "mngr_latchkey", _HOST_NAME).exists()
     # The auth-browser binary must not have been invoked either.
     assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
 

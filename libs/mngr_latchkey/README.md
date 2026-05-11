@@ -3,10 +3,13 @@
 Latchkey gateway management for [mngr](https://github.com/imbue-ai/mngr).
 
 This package owns the lifecycle of a single shared `latchkey gateway`
-subprocess and the per-agent state that points the gateway at each
-agent's own permissions file. It is a plain Python library: import
-the classes and call them directly; there is no `mngr` CLI surface
-yet.
+subprocess and the per-host state that points the gateway at each
+host's own permissions file. Per-host state is keyed by the canonical
+host name and accompanied by a `host-id` file so a host with the same
+name that has been recreated since the last permission grant has its
+stale grants cleared automatically. It is a plain Python library:
+import the classes and call them directly; there is no `mngr` CLI
+surface yet.
 
 ## Python API
 
@@ -28,15 +31,16 @@ latchkey = Latchkey(
 )
 latchkey.initialize()
 
-# (a) Pre-create env vars + opaque permissions handle for a new agent.
-setup = prepare_agent_latchkey(latchkey, is_tunneled=True)
+# (a) Pre-create env vars + per-host permissions file for a new agent.
+setup = prepare_agent_latchkey(latchkey, host_name, is_tunneled=True)
 # setup.env: LATCHKEY_GATEWAY[_PASSWORD,_PERMISSIONS_OVERRIDE,_DISABLE_COUNTING]
-# setup.opaque_permissions_path: pass to finalize_agent_permissions later
 
-# ... mngr create returns the canonical agent id ...
+# ... mngr create returns the canonical host id ...
 
-# (b) Point the opaque handle at the canonical agent permissions path.
-finalize_agent_permissions(latchkey, setup.opaque_permissions_path, agent_id)
+# (b) Reconcile the per-host ``host-id`` file. If the recorded value
+# differs from ``host_id`` (or no file exists yet) the prior
+# permissions are treated as stale and cleared.
+finalize_agent_permissions(latchkey, host_name, host_id)
 # Raises LatchkeyStoreError on failure -- callers decide whether to abort
 # or just surface a warning.
 

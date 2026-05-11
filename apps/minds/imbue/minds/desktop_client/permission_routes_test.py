@@ -20,6 +20,7 @@ from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
 from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.agent_creator import make_host_name_for_agent
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -41,10 +42,12 @@ from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.primitives import AgentName
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostName
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
-from imbue.mngr_latchkey.store import permissions_path_for_agent
+from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import save_permissions
 
 _OTHER_REQUEST_TYPE = "OTHER"
@@ -80,6 +83,7 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
         self,
         request_event_id: str,
         agent_id: AgentId,
+        host_name: HostName,
         service_info: ServicePermissionInfo,
         granted_permissions: Sequence[str],
     ) -> GrantResult:
@@ -87,6 +91,7 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
             {
                 "request_event_id": request_event_id,
                 "agent_id": str(agent_id),
+                "host_name": str(host_name),
                 "service_name": service_info.name,
                 "granted_permissions": tuple(granted_permissions),
             }
@@ -172,7 +177,12 @@ def _build_authenticated_client(
 ) -> TestClient:
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    # Seed the resolver with every pending request's agent_id so the
+    # routes can resolve ``agent_id -> host_name`` via
+    # ``get_agent_display_info``.
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(req.agent_id): {} for req in inbox.get_pending_requests()}
+    )
     paths = WorkspacePaths(data_dir=tmp_path)
 
     app = create_desktop_client(
@@ -364,9 +374,12 @@ def test_post_permission_grant_unknown_service_returns_400(tmp_path: Path) -> No
 
 def test_get_permission_request_page_pre_checks_existing_grants(tmp_path: Path) -> None:
     agent_id = AgentId()
+    # The static resolver maps agent_id -> agent_name = str(agent_id), so
+    # the per-host file lives under ``hosts/{agent_id}-host/``.
+    host_name = make_host_name_for_agent(AgentName(str(agent_id)))
     # Pre-populate latchkey_permissions.json so the dialog should pre-check those.
     save_permissions(
-        permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id),
+        permissions_path_for_host(tmp_path / "mngr_latchkey", host_name),
         LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-chat-read"]},)),
     )
     request = create_latchkey_permission_request_event(
@@ -460,7 +473,9 @@ def _build_authenticated_client_with_handlers(
 ) -> TestClient:
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(req.agent_id): {} for req in inbox.get_pending_requests()}
+    )
     paths = WorkspacePaths(data_dir=tmp_path)
     app = create_desktop_client(
         auth_store=auth_store,

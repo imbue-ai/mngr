@@ -39,6 +39,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
+from imbue.minds.desktop_client.agent_creator import make_host_name_for_agent
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.services_catalog import IMPLICIT_DEFAULT_PERMISSIONS
@@ -54,7 +55,9 @@ from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import append_response_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.primitives import AgentName
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostName
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
@@ -62,7 +65,7 @@ from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import granted_permissions_for_scope
 from imbue.mngr_latchkey.store import load_permissions
-from imbue.mngr_latchkey.store import permissions_path_for_agent
+from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import save_permissions
 from imbue.mngr_latchkey.store import set_permissions_for_scope
 
@@ -200,6 +203,29 @@ def _resolve_workspace_name(
     return info.agent_name if info else fallback
 
 
+def _resolve_host_name(
+    backend_resolver: BackendResolverInterface,
+    agent_id: AgentId,
+) -> HostName | None:
+    """Return the host name for an agent, or ``None`` when discovery has not seen it.
+
+    Minds uses the deterministic ``{agent_name}-host`` convention
+    (see :func:`make_host_name_for_agent`), so we only need the
+    agent name from discovery to build the host name. ``None`` means
+    the resolver does not know the agent yet -- callers fall back to
+    a no-op or an over-restrictive default rather than reading or
+    writing the wrong host's permissions file.
+    """
+    info = backend_resolver.get_agent_display_info(agent_id)
+    if info is None:
+        return None
+    try:
+        agent_name = AgentName(info.agent_name)
+    except ValueError:
+        return None
+    return make_host_name_for_agent(agent_name)
+
+
 def _render_unknown_service_page(request_id: str, service_name: str) -> Response:
     """Render a deny-only page when the service isn't in the catalog.
 
@@ -267,10 +293,16 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         self,
         request_event_id: str,
         agent_id: AgentId,
+        host_name: HostName,
         service_info: ServicePermissionInfo,
         granted_permissions: Sequence[str],
     ) -> GrantResult:
         """Apply a grant, falling back to a manual-credentials flow when needed.
+
+        ``host_name`` identifies the per-host permissions file the JWT
+        minted at agent-creation time points at. The caller (typically
+        :meth:`apply_grant_request` or a test) is responsible for
+        resolving it from ``agent_id`` -- see :func:`_resolve_host_name`.
 
         The HTTP layer mirrors any non-None ``response_event`` into the
         in-memory inbox so it doesn't have to reload from disk, and
@@ -348,7 +380,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         # event so the agent can never observe a GRANTED response without
         # the corresponding rule being in effect.
         self._apply_grant_to_permissions_file(
-            agent_id=agent_id,
+            host_name=host_name,
             scope_schemas=service_info.scope_schemas,
             granted_permissions=granted_permissions,
         )
@@ -427,7 +459,8 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
 
         parsed_id = AgentId(req_event.agent_id)
         ws_name = _resolve_workspace_name(backend_resolver, parsed_id, fallback=req_event.agent_id)
-        pre_checked = self._initial_checked_permissions(parsed_id, service_info)
+        host_name = _resolve_host_name(backend_resolver, parsed_id)
+        pre_checked = self._initial_checked_permissions(host_name, service_info)
 
         # Match ``grant()``: ``latchkey auth browser`` runs only when
         # credentials are not VALID AND the service either advertises a
@@ -480,12 +513,21 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
 
         request_event_id = str(req_event.event_id)
         parsed_agent_id = AgentId(req_event.agent_id)
+        backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+        host_name = _resolve_host_name(backend_resolver, parsed_agent_id)
+        if host_name is None:
+            return _json_error(
+                f"Could not determine host for agent '{parsed_agent_id}'; the agent may not be "
+                "discovered yet. Wait for the agent to come online and try again.",
+                status_code=400,
+            )
         try:
             grant_result = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: self.grant(
                     request_event_id=request_event_id,
                     agent_id=parsed_agent_id,
+                    host_name=host_name,
                     service_info=service_info,
                     granted_permissions=granted_permissions,
                 ),
@@ -547,22 +589,29 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
 
     def _initial_checked_permissions(
         self,
-        agent_id: AgentId,
+        host_name: HostName | None,
         service_info: ServicePermissionInfo,
     ) -> tuple[str, ...]:
         """Pick the initial checkbox state for the dialog.
 
-        If any permissions are already granted for this service, those
-        are used so the dialog doubles as a revoke UI; otherwise the
-        implicit catch-all default (``any``) is pre-checked.
+        If any permissions are already granted for this service on the
+        agent's host, those are used so the dialog doubles as a revoke
+        UI; otherwise the implicit catch-all default (``any``) is
+        pre-checked.
+
+        ``host_name=None`` (the agent hasn't been discovered yet) falls
+        back to the implicit defaults rather than reading the wrong
+        host's file.
         """
-        path = permissions_path_for_agent(self.latchkey.plugin_data_dir, agent_id)
+        if host_name is None:
+            return IMPLICIT_DEFAULT_PERMISSIONS
+        path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_name)
         try:
             config = load_permissions(path)
         except LatchkeyStoreError as e:
             logger.warning(
-                "Could not load permissions for {}; using implicit defaults: {}",
-                agent_id,
+                "Could not load permissions for host {}; using implicit defaults: {}",
+                host_name,
                 e,
             )
             return IMPLICIT_DEFAULT_PERMISSIONS
@@ -577,11 +626,11 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
 
     def _apply_grant_to_permissions_file(
         self,
-        agent_id: AgentId,
+        host_name: HostName,
         scope_schemas: Sequence[str],
         granted_permissions: Sequence[str],
     ) -> None:
-        path = permissions_path_for_agent(self.latchkey.plugin_data_dir, agent_id)
+        path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_name)
         try:
             existing = load_permissions(path)
         except LatchkeyStoreError as e:

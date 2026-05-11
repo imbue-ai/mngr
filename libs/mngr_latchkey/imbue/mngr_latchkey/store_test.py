@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
@@ -17,15 +18,16 @@ from imbue.mngr_latchkey.store import delete_gateway_info
 from imbue.mngr_latchkey.store import gateway_info_path
 from imbue.mngr_latchkey.store import gateway_log_path
 from imbue.mngr_latchkey.store import granted_permissions_for_scope
-from imbue.mngr_latchkey.store import link_opaque_permissions_to_agent
+from imbue.mngr_latchkey.store import host_data_dir
+from imbue.mngr_latchkey.store import host_id_path_for_host
 from imbue.mngr_latchkey.store import load_gateway_info
 from imbue.mngr_latchkey.store import load_permissions
-from imbue.mngr_latchkey.store import new_opaque_permissions_path
-from imbue.mngr_latchkey.store import opaque_permissions_dir
-from imbue.mngr_latchkey.store import permissions_path_for_agent
+from imbue.mngr_latchkey.store import permissions_path_for_host
+from imbue.mngr_latchkey.store import read_stored_host_id
 from imbue.mngr_latchkey.store import save_gateway_info
 from imbue.mngr_latchkey.store import save_permissions
 from imbue.mngr_latchkey.store import set_permissions_for_scope
+from imbue.mngr_latchkey.store import write_stored_host_id
 
 
 def _make_record() -> LatchkeyGatewayInfo:
@@ -84,118 +86,65 @@ def test_default_permissions_path_is_top_level(tmp_path: Path) -> None:
     assert path == tmp_path / "latchkey_default_permissions.json"
 
 
-# -- Opaque permissions handle tests --
+# -- Per-host permissions tests --
 
 
-def test_opaque_permissions_dir_lives_under_data_dir(tmp_path: Path) -> None:
-    assert opaque_permissions_dir(tmp_path) == tmp_path / "permissions"
+_HOST_NAME = HostName("alpha-host")
 
 
-def test_new_opaque_permissions_path_is_unique_uuid_named(tmp_path: Path) -> None:
-    a = new_opaque_permissions_path(tmp_path)
-    b = new_opaque_permissions_path(tmp_path)
-    # Both live under the opaque dir.
-    assert a.parent == opaque_permissions_dir(tmp_path)
-    assert b.parent == a.parent
-    # Suffix is .json, basename is hex-only (UUID4 with dashes stripped).
-    assert a.suffix == ".json"
-    assert all(c in "0123456789abcdef" for c in a.stem)
-    assert len(a.stem) == 32
-    # Distinct allocations don't collide.
-    assert a != b
-    # Paths returned are not yet materialized -- the caller writes the file.
-    assert not a.exists()
-    assert not b.exists()
+def test_host_data_dir_lives_under_data_dir(tmp_path: Path) -> None:
+    assert host_data_dir(tmp_path, _HOST_NAME) == tmp_path / "hosts" / "alpha-host"
 
 
-def test_new_opaque_permissions_path_creates_parent_dir(tmp_path: Path) -> None:
-    """The opaque dir is created lazily so callers don't have to mkdir themselves."""
-    assert not opaque_permissions_dir(tmp_path).exists()
-    new_opaque_permissions_path(tmp_path)
-    assert opaque_permissions_dir(tmp_path).is_dir()
+def test_permissions_path_for_host_uses_hosts_subdir(tmp_path: Path) -> None:
+    path = permissions_path_for_host(tmp_path, _HOST_NAME)
+    assert path == tmp_path / "hosts" / "alpha-host" / "latchkey_permissions.json"
 
 
-def test_link_opaque_permissions_promotes_baseline_to_agent_path(tmp_path: Path) -> None:
-    """First creation: opaque baseline file becomes the agent's canonical permissions file.
-
-    The baseline (deny-all empty rules) is moved to
-    ``permissions_path_for_agent(...)`` and ``opaque_path`` is replaced
-    by a symlink so the JWT minted for it keeps resolving.
-    """
-    opaque_path = new_opaque_permissions_path(tmp_path)
-    save_permissions(opaque_path, LatchkeyPermissionsConfig())
-
-    agent_id = AgentId()
-    agent_path = permissions_path_for_agent(tmp_path, agent_id)
-    assert not agent_path.exists()
-
-    link_opaque_permissions_to_agent(tmp_path, opaque_path, agent_id)
-
-    # The agent-keyed file now has the deny-all baseline.
-    assert agent_path.is_file()
-    assert not agent_path.is_symlink()
-    assert json.loads(agent_path.read_text()) == {"rules": []}
-    # The opaque path is a symlink to the agent path.
-    assert opaque_path.is_symlink()
-    assert opaque_path.resolve() == agent_path.resolve()
-    # Reading via the opaque path follows the symlink.
-    assert json.loads(opaque_path.read_text()) == {"rules": []}
+def test_host_id_path_for_host_lives_next_to_permissions(tmp_path: Path) -> None:
+    path = host_id_path_for_host(tmp_path, _HOST_NAME)
+    assert path == tmp_path / "hosts" / "alpha-host" / "host-id"
 
 
-def test_link_opaque_permissions_preserves_existing_grants_on_recreation(tmp_path: Path) -> None:
-    """Re-creation case: ``agent_path`` already has prior grants; keep them."""
-    agent_id = AgentId()
-    agent_path = permissions_path_for_agent(tmp_path, agent_id)
-    # Pre-existing grants from a prior incarnation of this agent.
-    save_permissions(
-        agent_path,
-        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
-    )
-
-    opaque_path = new_opaque_permissions_path(tmp_path)
-    # Deny-all baseline -- this is what AgentCreator materializes before
-    # the canonical agent id is known.
-    save_permissions(opaque_path, LatchkeyPermissionsConfig())
-
-    link_opaque_permissions_to_agent(tmp_path, opaque_path, agent_id)
-
-    # Pre-existing grants are preserved (the deny-all baseline is discarded).
-    assert agent_path.is_file()
-    assert not agent_path.is_symlink()
-    assert json.loads(agent_path.read_text()) == {"rules": [{"slack-api": ["slack-read-all"]}]}
-    # Opaque path is a symlink and reads back the existing grants.
-    assert opaque_path.is_symlink()
-    assert json.loads(opaque_path.read_text()) == {"rules": [{"slack-api": ["slack-read-all"]}]}
+def test_read_stored_host_id_returns_none_when_missing(tmp_path: Path) -> None:
+    assert read_stored_host_id(tmp_path, _HOST_NAME) is None
 
 
-def test_link_opaque_permissions_survives_save_permissions_atomic_replace(tmp_path: Path) -> None:
-    """``save_permissions`` writes via tmp+rename; the symlink target name is unchanged so the link stays valid."""
-    opaque_path = new_opaque_permissions_path(tmp_path)
-    save_permissions(opaque_path, LatchkeyPermissionsConfig())
-    agent_id = AgentId()
-    link_opaque_permissions_to_agent(tmp_path, opaque_path, agent_id)
-    agent_path = permissions_path_for_agent(tmp_path, agent_id)
-
-    # Simulate a permission grant being persisted.
-    save_permissions(
-        agent_path,
-        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
-    )
-
-    # The symlink still resolves and the grant is visible through it.
-    assert opaque_path.is_symlink()
-    assert json.loads(opaque_path.read_text()) == {"rules": [{"slack-api": ["slack-read-all"]}]}
+def test_write_and_read_host_id_roundtrip(tmp_path: Path) -> None:
+    host_id = HostId()
+    write_stored_host_id(tmp_path, _HOST_NAME, host_id)
+    assert read_stored_host_id(tmp_path, _HOST_NAME) == host_id
 
 
-def test_link_opaque_permissions_target_is_absolute(tmp_path: Path) -> None:
-    """Symlink target is absolute so it survives directory moves of the symlink itself."""
-    opaque_path = new_opaque_permissions_path(tmp_path)
-    save_permissions(opaque_path, LatchkeyPermissionsConfig())
-    agent_id = AgentId()
-    link_opaque_permissions_to_agent(tmp_path, opaque_path, agent_id)
+def test_write_stored_host_id_uses_mode_0o600(tmp_path: Path) -> None:
+    host_id = HostId()
+    write_stored_host_id(tmp_path, _HOST_NAME, host_id)
+    mode = host_id_path_for_host(tmp_path, _HOST_NAME).stat().st_mode & 0o777
+    assert mode == 0o600
 
-    target = os.readlink(opaque_path)
-    assert os.path.isabs(target)
+
+def test_write_stored_host_id_overwrites_existing(tmp_path: Path) -> None:
+    first = HostId()
+    second = HostId()
+    write_stored_host_id(tmp_path, _HOST_NAME, first)
+    write_stored_host_id(tmp_path, _HOST_NAME, second)
+    assert read_stored_host_id(tmp_path, _HOST_NAME) == second
+
+
+def test_read_stored_host_id_returns_none_for_empty_file(tmp_path: Path) -> None:
+    """An empty file is treated as absent so the caller clears stale permissions."""
+    path = host_id_path_for_host(tmp_path, _HOST_NAME)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("")
+    assert read_stored_host_id(tmp_path, _HOST_NAME) is None
+
+
+def test_read_stored_host_id_returns_none_for_malformed_content(tmp_path: Path) -> None:
+    """Malformed content (not a valid ``HostId``) is treated as absent."""
+    path = host_id_path_for_host(tmp_path, _HOST_NAME)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not-a-valid-host-id")
+    assert read_stored_host_id(tmp_path, _HOST_NAME) is None
 
 
 # -- Permissions config tests --
@@ -253,7 +202,7 @@ def test_load_permissions_rejects_non_string_permission_values(tmp_path: Path) -
 
 
 def test_save_permissions_uses_mode_0o600(tmp_path: Path) -> None:
-    path = tmp_path / "agents" / "agent-id" / "latchkey_permissions.json"
+    path = tmp_path / "hosts" / "alpha-host" / "latchkey_permissions.json"
     save_permissions(path, LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))
 
     mode = path.stat().st_mode & 0o777
@@ -374,12 +323,6 @@ def test_granted_permissions_for_scope_returns_existing_grants() -> None:
         "slack-write-messages",
     )
     assert granted_permissions_for_scope(config, scope="github-rest-api") == ("github-read-all",)
-
-
-def test_permissions_path_for_agent_uses_agents_subdir(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    path = permissions_path_for_agent(tmp_path, agent_id)
-    assert path == tmp_path / "agents" / str(agent_id) / "latchkey_permissions.json"
 
 
 def test_save_then_load_round_trip_preserves_rule_order(tmp_path: Path) -> None:

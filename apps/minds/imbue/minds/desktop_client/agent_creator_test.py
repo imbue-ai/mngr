@@ -26,10 +26,10 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
-from imbue.minds.desktop_client.agent_creator import _make_host_name
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
+from imbue.minds.desktop_client.agent_creator import make_host_name_for_agent
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -71,16 +71,18 @@ def test_redact_url_credentials_in_text_strips_embedded_userinfo() -> None:
 
 
 def test_make_host_name_appends_host_suffix() -> None:
-    assert _make_host_name(AgentName("alpha")) == "alpha-host"
+    assert make_host_name_for_agent(AgentName("alpha")) == "alpha-host"
 
 
-def test_build_mngr_create_command_lifts_latchkey_env_to_env_flags() -> None:
-    """``_build_mngr_create_command`` lifts each entry of ``latchkey_env`` into a ``--env`` flag.
+def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> None:
+    """``_build_mngr_create_command`` lifts each entry of ``latchkey_env`` into a ``--host-env`` flag.
 
     The shape of the env (which keys are set, which URL is used, etc.) is decided
     upstream by ``prepare_agent_latchkey``; this command-builder just plumbs
     whatever it gets through to ``mngr create``. The plugin's
-    ``agent_setup_test.py`` covers all the per-mode permutations.
+    ``agent_setup_test.py`` covers all the per-mode permutations. The
+    values land on the agent's *host* (via ``--host-env``) so the
+    host-side latchkey wiring in the FCT template can read them.
     """
     command, _ = _build_mngr_create_command(
         launch_mode=LaunchMode.LOCAL,
@@ -92,10 +94,17 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_env_flags() -> None:
             "LATCHKEY_DISABLE_COUNTING": "1",
         },
     )
-    assert "LATCHKEY_GATEWAY=http://127.0.0.1:1989" in command
-    assert "LATCHKEY_GATEWAY_PASSWORD=sup3rs3cret" in command
-    assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=eyJhbGc.fake.jwt" in command
-    assert "LATCHKEY_DISABLE_COUNTING=1" in command
+    # Each entry shows up as a ``--host-env KEY=VALUE`` pair (not ``--env``).
+    indexes = [i for i, arg in enumerate(command) if arg == "--host-env"]
+    host_env_values = {command[i + 1] for i in indexes}
+    assert "LATCHKEY_GATEWAY=http://127.0.0.1:1989" in host_env_values
+    assert "LATCHKEY_GATEWAY_PASSWORD=sup3rs3cret" in host_env_values
+    assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=eyJhbGc.fake.jwt" in host_env_values
+    assert "LATCHKEY_DISABLE_COUNTING=1" in host_env_values
+    # And specifically, no LATCHKEY_* entry was lifted into ``--env``.
+    env_indexes = [i for i, arg in enumerate(command) if arg == "--env"]
+    env_values = [command[i + 1] for i in env_indexes]
+    assert all("LATCHKEY" not in value for value in env_values)
 
 
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:

@@ -16,7 +16,8 @@ from urllib.parse import urlsplit
 import pytest
 from pydantic import PrivateAttr
 
-from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_DISABLE_COUNTING
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY
@@ -29,10 +30,15 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
-from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import host_id_path_for_host
 from imbue.mngr_latchkey.store import load_permissions
-from imbue.mngr_latchkey.store import opaque_permissions_dir
-from imbue.mngr_latchkey.store import permissions_path_for_agent
+from imbue.mngr_latchkey.store import permissions_path_for_host
+from imbue.mngr_latchkey.store import read_stored_host_id
+from imbue.mngr_latchkey.store import save_permissions
+from imbue.mngr_latchkey.store import write_stored_host_id
+
+_HOST_NAME = HostName("alpha-host")
 
 
 class _FakeLatchkey(Latchkey):
@@ -117,12 +123,11 @@ def test_prepare_no_latchkey_tunneled_returns_constant_url(tmp_path: Path) -> No
     latchkey wrapper -- tests and non-password-protected gateways can
     still receive traffic at that URL.
     """
-    setup = prepare_agent_latchkey(None, is_tunneled=True)
+    setup = prepare_agent_latchkey(None, _HOST_NAME, is_tunneled=True)
     assert setup.env[ENV_LATCHKEY_GATEWAY] == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
     assert setup.env[ENV_LATCHKEY_DISABLE_COUNTING] == "1"
     assert ENV_LATCHKEY_GATEWAY_PASSWORD not in setup.env
     assert ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE not in setup.env
-    assert setup.opaque_permissions_path is None
 
 
 def test_prepare_no_latchkey_on_host_returns_empty(tmp_path: Path) -> None:
@@ -131,32 +136,50 @@ def test_prepare_no_latchkey_on_host_returns_empty(tmp_path: Path) -> None:
     On-host agents need the gateway's live port; without a Latchkey
     wrapper there is nothing to query.
     """
-    setup = prepare_agent_latchkey(None, is_tunneled=False)
+    setup = prepare_agent_latchkey(None, _HOST_NAME, is_tunneled=False)
     assert setup.env == {}
-    assert setup.opaque_permissions_path is None
 
 
 def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     fake = _full_fake(tmp_path)
-    setup = prepare_agent_latchkey(fake, is_tunneled=True)
+    setup = prepare_agent_latchkey(fake, _HOST_NAME, is_tunneled=True)
     assert setup.env[ENV_LATCHKEY_GATEWAY] == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
     assert setup.env[ENV_LATCHKEY_GATEWAY_PASSWORD] == "hunter2"
     assert setup.env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] == "header.payload.signature"
     assert setup.env[ENV_LATCHKEY_DISABLE_COUNTING] == "1"
-    assert setup.opaque_permissions_path is not None
-    # The opaque path lives under the plugin's data subdir and was
-    # materialized with deny-all baseline rules.
-    assert setup.opaque_permissions_path.parent == opaque_permissions_dir(fake.plugin_data_dir)
-    assert load_permissions(setup.opaque_permissions_path).rules == ()
+    # The per-host permissions file was materialized with deny-all baseline.
+    permissions_path = permissions_path_for_host(fake.plugin_data_dir, _HOST_NAME)
+    assert permissions_path.is_file()
+    assert load_permissions(permissions_path).rules == ()
 
 
 def test_prepare_full_wiring_on_host_uses_live_port(tmp_path: Path) -> None:
     """On-host (DEV) agents get the gateway's live host:port pair."""
     fake = _full_fake(tmp_path)
-    setup = prepare_agent_latchkey(fake, is_tunneled=False)
+    setup = prepare_agent_latchkey(fake, _HOST_NAME, is_tunneled=False)
     assert setup.env[ENV_LATCHKEY_GATEWAY] == "http://127.0.0.1:55555"
     assert setup.env[ENV_LATCHKEY_GATEWAY_PASSWORD] == "hunter2"
     assert setup.env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] == "header.payload.signature"
+
+
+def test_prepare_preserves_existing_permissions_file(tmp_path: Path) -> None:
+    """A pre-existing permissions file is *not* overwritten by prepare.
+
+    Re-deploying the same host (same ``host_id``) should keep prior
+    grants intact -- :func:`finalize_agent_permissions` is the only
+    place that clears them, and only when the recorded ``host-id``
+    doesn't match.
+    """
+    fake = _full_fake(tmp_path)
+    permissions_path = permissions_path_for_host(fake.plugin_data_dir, _HOST_NAME)
+    save_permissions(
+        permissions_path,
+        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
+    )
+
+    prepare_agent_latchkey(fake, _HOST_NAME, is_tunneled=True)
+
+    assert load_permissions(permissions_path).rules == ({"slack-api": ["slack-read-all"]},)
 
 
 def test_prepare_on_host_gateway_start_failure_propagates(tmp_path: Path) -> None:
@@ -168,7 +191,7 @@ def test_prepare_on_host_gateway_start_failure_propagates(tmp_path: Path) -> Non
         jwt="header.payload.signature",
     )
     with pytest.raises(LatchkeyError):
-        prepare_agent_latchkey(fake, is_tunneled=False)
+        prepare_agent_latchkey(fake, _HOST_NAME, is_tunneled=False)
 
 
 def test_prepare_password_derivation_failure_propagates(tmp_path: Path) -> None:
@@ -180,19 +203,11 @@ def test_prepare_password_derivation_failure_propagates(tmp_path: Path) -> None:
         jwt="header.payload.signature",
     )
     with pytest.raises(LatchkeyJwtMintError):
-        prepare_agent_latchkey(fake, is_tunneled=True)
+        prepare_agent_latchkey(fake, _HOST_NAME, is_tunneled=True)
 
 
 def test_prepare_jwt_mint_failure_propagates(tmp_path: Path) -> None:
-    """JWT-mint failures bubble up to the caller.
-
-    The opaque permissions file may or may not have been materialized
-    at the point the exception fires; we don't make any guarantee
-    about cleanup -- the caller can either retry the whole prepare
-    (which writes a fresh opaque path) or accept the orphan file. The
-    files are tiny and live under the user's own latchkey directory,
-    so leaking one occasionally is not a concern.
-    """
+    """JWT-mint failures bubble up to the caller."""
     fake = _FakeLatchkey(latchkey_directory=tmp_path)
     fake.configure(
         gateway_url="http://127.0.0.1:55555",
@@ -200,52 +215,83 @@ def test_prepare_jwt_mint_failure_propagates(tmp_path: Path) -> None:
         jwt_error=LatchkeyJwtMintError("nope"),
     )
     with pytest.raises(LatchkeyJwtMintError):
-        prepare_agent_latchkey(fake, is_tunneled=True)
+        prepare_agent_latchkey(fake, _HOST_NAME, is_tunneled=True)
 
 
 # -- finalize_agent_permissions ----------------------------------------------
 
 
-def test_finalize_links_opaque_to_canonical(tmp_path: Path) -> None:
+def test_finalize_records_host_id_on_first_call(tmp_path: Path) -> None:
+    """First finalize for a host writes the canonical host-id alongside the permissions file."""
     fake = _full_fake(tmp_path)
-    setup = prepare_agent_latchkey(fake, is_tunneled=True)
-    assert setup.opaque_permissions_path is not None
-    agent_id = AgentId()
+    prepare_agent_latchkey(fake, _HOST_NAME, is_tunneled=True)
+    host_id = HostId()
 
-    finalize_agent_permissions(fake, setup.opaque_permissions_path, agent_id)
+    finalize_agent_permissions(fake, _HOST_NAME, host_id)
 
-    # The opaque path is now a symlink pointing at the canonical agent path.
-    canonical = permissions_path_for_agent(fake.plugin_data_dir, agent_id)
-    assert canonical.is_file()
-    assert setup.opaque_permissions_path.is_symlink()
-    assert setup.opaque_permissions_path.resolve() == canonical.resolve()
+    assert read_stored_host_id(fake.plugin_data_dir, _HOST_NAME) == host_id
 
 
-def test_finalize_with_none_path_is_a_noop(tmp_path: Path) -> None:
-    """``opaque_permissions_path=None`` is what ``prepare_agent_latchkey`` returns on JWT-mint failure."""
+def test_finalize_is_a_noop_when_host_id_matches(tmp_path: Path) -> None:
+    """Re-running with the same host_id preserves prior grants."""
     fake = _full_fake(tmp_path)
-    finalize_agent_permissions(fake, None, AgentId())
-    assert not (fake.plugin_data_dir / "agents").exists()
+    host_id = HostId()
+    permissions_path = permissions_path_for_host(fake.plugin_data_dir, _HOST_NAME)
+    save_permissions(
+        permissions_path,
+        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
+    )
+    write_stored_host_id(fake.plugin_data_dir, _HOST_NAME, host_id)
+
+    finalize_agent_permissions(fake, _HOST_NAME, host_id)
+
+    assert load_permissions(permissions_path).rules == ({"slack-api": ["slack-read-all"]},)
+    assert read_stored_host_id(fake.plugin_data_dir, _HOST_NAME) == host_id
 
 
-def test_finalize_propagates_link_errors(tmp_path: Path) -> None:
-    """Linking failures bubble up to the caller; the helper does not swallow them.
+def test_finalize_clears_permissions_on_host_id_mismatch(tmp_path: Path) -> None:
+    """A different host_id means the host was recreated; prior grants are stale."""
+    fake = _full_fake(tmp_path)
+    permissions_path = permissions_path_for_host(fake.plugin_data_dir, _HOST_NAME)
+    save_permissions(
+        permissions_path,
+        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
+    )
+    old_id = HostId()
+    new_id = HostId()
+    write_stored_host_id(fake.plugin_data_dir, _HOST_NAME, old_id)
 
-    Callers (e.g. minds) decide whether to fail agent creation or just
-    surface a warning; the plugin's job is just to report what happened.
+    finalize_agent_permissions(fake, _HOST_NAME, new_id)
+
+    assert load_permissions(permissions_path).rules == ()
+    assert read_stored_host_id(fake.plugin_data_dir, _HOST_NAME) == new_id
+
+
+def test_finalize_clears_permissions_when_no_host_id_recorded(tmp_path: Path) -> None:
+    """Absent host-id file is treated like a mismatch.
+
+    The permissions file may contain rules from a previous tenant of the
+    same host name (e.g. left over from before the host-id check was
+    introduced) -- clear them defensively.
     """
     fake = _full_fake(tmp_path)
-    # Pass an opaque path the helper cannot operate on (it doesn't
-    # exist), forcing ``link_opaque_permissions_to_agent`` to raise.
-    missing_path = tmp_path / "definitely-not-there.json"
-    with pytest.raises(LatchkeyStoreError):
-        finalize_agent_permissions(fake, missing_path, AgentId())
+    permissions_path = permissions_path_for_host(fake.plugin_data_dir, _HOST_NAME)
+    save_permissions(
+        permissions_path,
+        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
+    )
+    assert not host_id_path_for_host(fake.plugin_data_dir, _HOST_NAME).is_file()
+    new_id = HostId()
+
+    finalize_agent_permissions(fake, _HOST_NAME, new_id)
+
+    assert load_permissions(permissions_path).rules == ()
+    assert read_stored_host_id(fake.plugin_data_dir, _HOST_NAME) == new_id
 
 
 # -- AgentLatchkeySetup model -------------------------------------------------
 
 
-def test_agent_latchkey_setup_default_opaque_path_is_none() -> None:
+def test_agent_latchkey_setup_env_is_a_mapping() -> None:
     setup = AgentLatchkeySetup(env={})
-    assert setup.opaque_permissions_path is None
     assert isinstance(setup.env, Mapping)
