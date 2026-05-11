@@ -340,8 +340,10 @@ def test_stage_deploy_files_creates_subdirs_with_claude_defaults(
 
     project_dir = staging_dir / "project"
     assert project_dir.exists()
-    # project/ should only contain the .keep placeholder (no user files staged)
-    assert sorted(p.name for p in project_dir.iterdir()) == [".keep"]
+    # project/ stays empty when no plugin stages relative-path files; the
+    # cron_runner Dockerfile guards `cp` with `if [ -d /staging/project ]`,
+    # so an empty (and therefore Modal-omitted) dir is fine.
+    assert list(project_dir.iterdir()) == []
 
 
 def test_stage_deploy_files_stages_project_files(

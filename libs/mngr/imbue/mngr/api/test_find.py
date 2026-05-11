@@ -81,8 +81,7 @@ def test_resolve_source_location_resolves_host_and_path(
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {host_ref: []}
 
     parsed = ParsedSourceLocation(
-        agent=None,
-        host=str(host_id),
+        host_name=HostName(str(host_id)),
         path=str(temp_work_dir),
     )
     result = resolve_source_location(

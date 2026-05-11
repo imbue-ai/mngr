@@ -1,0 +1,44 @@
+{% extends 'base.html' %}
+{% import '_macros.html' as ui %}
+{% block title %}Destroying: {{ agent_name }}{% endblock %}
+{% block body_class %}bg-zinc-50 text-zinc-900 font-sans antialiased page-workspace{% endblock %}
+{% block body_style %}--workspace-accent: {{ accent }};{% endblock %}
+{% block content %}
+  {% call ui.page_container() %}
+    <div id="destroying-page" data-agent-id="{{ agent_id }}" data-pid="{{ pid }}" data-initial-status="{{ status }}">
+      <h1 class="text-xl font-semibold text-zinc-900 leading-tight">Destroying {{ agent_name }}</h1>
+      <p class="text-xs text-zinc-400 mb-4">{{ agent_id }} &middot; pid {{ pid }}</p>
+
+      <div id="destroying-status" class="my-4 flex items-center gap-2">
+        {% if status == 'running' %}
+          {{ ui.spinner() }}
+          <span id="status-text" class="text-zinc-700">Running...</span>
+        {% elif status == 'failed' %}
+          <span class="inline-flex items-center px-2 py-0.5 rounded text-sm font-medium bg-red-100 text-red-800">
+            Failed
+          </span>
+        {% else %}
+          <span class="inline-flex items-center px-2 py-0.5 rounded text-sm font-medium bg-emerald-100 text-emerald-800">
+            Done
+          </span>
+        {% endif %}
+      </div>
+
+      <h2 class="text-sm font-medium text-zinc-600 mt-6 mb-2">Log</h2>
+      <div id="destroying-log"
+           class="p-3 bg-zinc-900 text-zinc-200 font-mono text-xs rounded-xl max-h-[420px] overflow-y-auto whitespace-pre-wrap border border-zinc-900"></div>
+
+      <div id="destroying-actions" class="mt-6 flex gap-3 hidden">
+        {{ ui.btn_button('Retry', variant='primary', id='destroying-retry-btn') }}
+        {{ ui.btn_button('Dismiss', variant='secondary', id='destroying-dismiss-btn') }}
+      </div>
+
+      <div class="mt-8">
+        <a href="/" class="text-blue-600 hover:underline">&larr; Back to projects</a>
+      </div>
+    </div>
+  {% endcall %}
+{% endblock %}
+{% block scripts %}
+  <script src="/_static/destroying.js" defer></script>
+{% endblock %}

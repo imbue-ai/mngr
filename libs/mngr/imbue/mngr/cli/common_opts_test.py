@@ -494,6 +494,7 @@ def test_apply_config_defaults_raises_on_unknown_param_names(mngr_test_prefix: s
         apply_config_defaults(ctx, config, "create", strict=True)
 
 
+@pytest.mark.allow_warnings(match=r"Unknown parameter 'definitely_not_a_real_param'")
 def test_apply_config_defaults_warns_on_unknown_param_when_lax(
     mngr_test_prefix: str,
     log_warnings: list[str],
@@ -1153,6 +1154,7 @@ def test_setup_command_context_raises_on_unknown_command_param_by_default(
     assert "bogus_typo_param" in result.output
 
 
+@pytest.mark.allow_warnings(match=r"Unknown parameter 'bogus_typo_param'")
 def test_setup_command_context_warns_on_unknown_command_param_when_lax(
     cli_runner: CliRunner,
     tmp_path: Path,

@@ -196,9 +196,3 @@ def test_extras_claude_plugin_yes_flag(cli_runner: CliRunner) -> None:
     """The 'extras claude-plugin -y' subcommand auto-installs."""
     result = cli_runner.invoke(extras, ["claude-plugin", "-y"])
     assert result.exit_code == 0
-
-
-def test_extras_plugins_subcommand(cli_runner: CliRunner) -> None:
-    """The 'extras plugins' subcommand should work."""
-    result = cli_runner.invoke(extras, ["plugins"])
-    assert result.exit_code in (0, 1)

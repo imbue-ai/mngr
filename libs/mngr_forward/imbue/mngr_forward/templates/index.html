@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>mngr forward</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1c1c1c; }
+    h1 { font-size: 1.25rem; margin-bottom: 0.5rem; }
+    .meta { color: #6b6b6b; font-size: 0.85rem; margin-bottom: 1.5rem; }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li { padding: 0.5rem 0.75rem; border-bottom: 1px solid #ececec; display: flex; gap: 0.75rem; align-items: baseline; }
+    a { color: #0b5fff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .unresolved { color: #999; }
+    .unresolved a { color: #999; pointer-events: none; cursor: default; }
+    .reason { color: #999; font-size: 0.8rem; }
+  </style>
+</head>
+<body>
+  <h1>Discovered agents</h1>
+  <p class="meta">Click an entry to navigate to <code>&lt;agent-id&gt;.localhost:{{ port }}/</code>.</p>
+  {% if not agents %}
+    <p>No agents discovered yet.</p>
+  {% else %}
+    <ul>
+      {% for entry in agents %}
+        <li class="{% if entry.is_unresolved %}unresolved{% endif %}">
+          <a href="/goto/{{ entry.agent_id }}/">{{ entry.agent_id }}</a>
+          {% if entry.is_unresolved %}<span class="reason">{{ entry.reason }}</span>{% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</body>
+</html>

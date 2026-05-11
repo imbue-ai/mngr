@@ -286,7 +286,7 @@ def _emit_json_output(result: MessageResult) -> None:
 CommandHelpMetadata(
     key="message",
     one_line_description="Send a message to one or more agents",
-    synopsis="mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [-m <MESSAGE>] [--message-file <FILE>]",
+    synopsis="mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [-m <MESSAGE>] [--message-file <FILE>] [--[no-]start] [--on-error <MODE>]",
     description="""Agent IDs can be specified as positional arguments for convenience. The
 message is sent to the agent's stdin.
 

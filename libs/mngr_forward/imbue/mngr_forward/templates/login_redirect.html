@@ -1,0 +1,17 @@
+{#
+  JS-only redirect to /authenticate. Kept minimal so prefetching doesn't
+  consume the one-time code before the user actually navigates.
+  The one_time_code is emitted via tojson + encodeURIComponent because
+  Jinja's HTML autoescape is not a JS-string escaper.
+#}
+<!DOCTYPE html>
+<html>
+<head><title>Authenticating...</title></head>
+<body>
+<p>Authenticating...</p>
+<script>
+var code = {{ one_time_code | tojson }};
+window.location.href = '/authenticate?one_time_code=' + encodeURIComponent(code);
+</script>
+</body>
+</html>

@@ -10,6 +10,7 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_source import now_utc
 
 
 class LabelColumnConfig(FrozenModel):
@@ -67,12 +68,13 @@ class LabelsDataSource(FrozenModel):
         mngr_ctx: MngrContext,
     ) -> tuple[dict[AgentName, dict[str, FieldValue]], Sequence[str]]:
         label_key = self.config.label_key
+        now = now_utc()
         fields: dict[AgentName, dict[str, FieldValue]] = {}
         for agent in agents:
             value = agent.labels.get(label_key, "")
             if value:
                 color = self.config.colors.get(value)
                 fields[agent.name] = {
-                    self.field_key: _ColoredStringField(value=value, color=color),
+                    self.field_key: _ColoredStringField(value=value, color=color, created=now),
                 }
         return fields, []

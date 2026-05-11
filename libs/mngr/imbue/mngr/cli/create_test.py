@@ -576,6 +576,25 @@ def test_parse_project_name_returns_explicit_project(
     assert result == "explicit-project"
 
 
+def test_parse_project_name_treats_dot_as_default_derivation(
+    default_create_cli_opts: CreateCliOptions,
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """`--project .` (the default) triggers the source-based derivation chain, not a literal '.'."""
+    some_dir = tmp_path / "some-source"
+    some_dir.mkdir()
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
+    resolved = ResolvedSource(location=HostLocation(host=local_host, path=some_dir))
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().project, "."),
+    )
+
+    result = _parse_project_name(resolved, opts, remote_url=None)
+
+    assert result == "some-source"
+
+
 def test_parse_project_name_inherits_from_source_agent(
     default_create_cli_opts: CreateCliOptions,
     local_provider: LocalProviderInstance,
@@ -824,10 +843,10 @@ def test_create_headless_streams_output(
     """Creating a headless_command agent with --foreground should stream output.
 
     Registers a custom headless_command-based agent type with a specific command
-    via settings.toml (since --command is not a CLI flag). Uses an explicit
-    --source + --transfer=none to avoid depending on being inside a git repo
-    and to skip transfer (the shared path would otherwise try to rsync the
-    source dir, which is slow and unnecessary for a one-line ``echo`` agent).
+    via settings.toml. Uses an explicit --source + --transfer=none to avoid
+    depending on being inside a git repo and to skip transfer (the shared path
+    would otherwise try to rsync the source dir, which is slow and unnecessary
+    for a one-line ``echo`` agent).
     """
     profile_dir = get_or_create_profile_dir(temp_host_dir)
     _write_agent_type_command_to_settings(
@@ -1003,7 +1022,7 @@ def test_create_headless_allows_no_forms_of_boolean_pair_flags(
     Matches the --no-connect treatment: headless already does not
     connect/reconnect/reuse/update/start-on-boot, so the --no-* form is a
     redundant-but-compatible assertion, not a conflict. Pairs each
-    allowed flag with --attach-command (still rejected) so the validator
+    allowed flag with --session-command (still rejected) so the validator
     runs and we can confirm the allowed flag is not in the error listing.
     """
     result = cli_runner.invoke(
@@ -1013,14 +1032,14 @@ def test_create_headless_allows_no_forms_of_boolean_pair_flags(
             "headless_command",
             "--foreground",
             no_form_flag,
-            "--attach-command",
+            "--session-command",
             "tmux attach",
         ],
         obj=plugin_manager,
     )
 
     assert result.exit_code != 0
-    assert "--attach-command" in result.output
+    assert "--session-command" in result.output
     assert no_form_flag not in result.output
 
 
@@ -1227,6 +1246,7 @@ def test_parse_agent_opts_includes_labels(
     result, _ = _parse_agent_opts(
         opts=opts,
         address=AgentAddress(),
+        target_host=None,
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
@@ -1252,6 +1272,7 @@ def test_parse_agent_opts_label_invalid_format_raises(
         _parse_agent_opts(
             opts=opts,
             address=AgentAddress(),
+            target_host=None,
             initial_message=None,
             source_location=source_location,
             mngr_ctx=temp_mngr_ctx,
@@ -1271,6 +1292,7 @@ def test_parse_agent_opts_empty_labels_by_default(
     result, _ = _parse_agent_opts(
         opts=default_create_cli_opts,
         address=AgentAddress(),
+        target_host=None,
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
@@ -1296,6 +1318,7 @@ def test_parse_agent_opts_with_agent_id(
     result, _ = _parse_agent_opts(
         opts=opts,
         address=AgentAddress(),
+        target_host=None,
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
@@ -1317,6 +1340,7 @@ def test_parse_agent_opts_agent_id_none_by_default(
     result, _ = _parse_agent_opts(
         opts=default_create_cli_opts,
         address=AgentAddress(),
+        target_host=None,
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
@@ -1342,6 +1366,7 @@ def test_parse_agent_opts_matching_type_and_positional_ok(
     result, _ = _parse_agent_opts(
         opts=opts,
         address=AgentAddress(),
+        target_host=None,
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,

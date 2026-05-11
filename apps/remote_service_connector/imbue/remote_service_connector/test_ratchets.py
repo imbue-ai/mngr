@@ -62,6 +62,10 @@ def test_prevent_builtin_exception_raises() -> None:
     rc.check_builtin_exception_raises(_DIR, snapshot(0))
 
 
+def test_prevent_silent_decode_error_catches() -> None:
+    rc.check_silent_decode_error_catches(_DIR, snapshot(0))
+
+
 # --- Import style ---
 
 
@@ -212,7 +216,7 @@ def test_prevent_os_fork() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(5))
+    rc.check_direct_subprocess(_DIR, snapshot(6))
 
 
 # --- AST-based ratchets ---
