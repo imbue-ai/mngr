@@ -50,6 +50,7 @@ from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
 from imbue.minds.desktop_client.forward_cli import LocalAgentDiscoveryHandler
 from imbue.minds.desktop_client.forward_cli import MindsApiUrlWriter
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
+from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.core import LATCHKEY_BINARY
 from imbue.minds.desktop_client.latchkey.core import Latchkey
@@ -166,6 +167,7 @@ def run(
         port=mngr_forward_port,
         reverse_specs=(f"0:{port}",),
         mngr_host_dir=mngr_host_dir,
+        minds_origin=f"http://localhost:{port}",
     )
     consumer, preauth_cookie = start_mngr_forward(
         config=forward_config,
@@ -227,6 +229,15 @@ def run(
         _ImbueCloudAuthErrorDisabler(consumer=consumer, session_store=session_store)
     )
 
+    # Workspace-server health tracker: feeds on backend failures observed by
+    # the plugin. Constructed here (instead of inside create_desktop_client)
+    # so the envelope-failure callback is registered before consumer.start()
+    # below; otherwise early failures would dispatch against an empty list.
+    workspace_health_tracker = WorkspaceServerHealthTracker()
+    consumer.add_on_workspace_backend_failure_callback(
+        lambda agent_id, _reason, _status: workspace_health_tracker.record_failure(agent_id)
+    )
+
     # All callbacks registered -- now safe to start the envelope reader
     # threads. Doing this earlier (e.g. inside ``start_mngr_forward``)
     # would open a race window where envelopes arriving before the
@@ -273,6 +284,7 @@ def run(
         mngr_forward_preauth_cookie=preauth_cookie,
         output_format=output_format,
         root_concurrency_group=root_concurrency_group,
+        workspace_health_tracker=workspace_health_tracker,
     )
 
     if not no_browser:

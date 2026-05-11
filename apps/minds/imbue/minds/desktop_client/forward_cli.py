@@ -71,6 +71,7 @@ OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
 OnAgentDestroyedCallback = Callable[[AgentId], None]
 OnReverseTunnelEstablishedCallback = Callable[["ReverseTunnelEstablishedInfo"], None]
 OnProviderErrorCallback = Callable[[str, str, str], None]
+OnWorkspaceBackendFailureCallback = Callable[[AgentId, str, int | None], None]
 
 
 class ReverseTunnelEstablishedInfo(FrozenModel):
@@ -105,6 +106,14 @@ class ForwardSubprocessConfig(FrozenModel):
     )
     mngr_binary: str = Field(default=MNGR_BINARY, description="Path to mngr binary")
     mngr_host_dir: Path = Field(default=_DEFAULT_MNGR_HOST_DIR, description="MNGR_HOST_DIR for the subprocess")
+    minds_origin: str | None = Field(
+        default=None,
+        description=(
+            "Origin of the minds-side HTTP server (e.g. http://localhost:8420). When set, the plugin "
+            "302-redirects HTML 503s to <origin>/agents/<id>/recovery so the user lands on minds' "
+            "recovery page instead of the plugin's auto-refresh fallback."
+        ),
+    )
 
 
 class EnvelopeStreamConsumer(MutableModel):
@@ -131,6 +140,7 @@ class EnvelopeStreamConsumer(MutableModel):
         default_factory=list
     )
     _on_provider_error_callbacks: list[OnProviderErrorCallback] = PrivateAttr(default_factory=list)
+    _on_workspace_backend_failure_callbacks: list[OnWorkspaceBackendFailureCallback] = PrivateAttr(default_factory=list)
     _process: subprocess.Popen[bytes] | None = PrivateAttr(default=None)
     _has_notified_exit: bool = PrivateAttr(default=False)
     _intentional_shutdown: bool = PrivateAttr(default=False)
@@ -151,6 +161,18 @@ class EnvelopeStreamConsumer(MutableModel):
         """Register a callback fired for each ``reverse_tunnel_established`` envelope."""
         with self._lock:
             self._on_reverse_tunnel_established_callbacks.append(callback)
+
+    def add_on_workspace_backend_failure_callback(self, callback: OnWorkspaceBackendFailureCallback) -> None:
+        """Register a callback fired for each ``workspace_backend_failure`` forward-stream envelope.
+
+        The callback receives ``(agent_id, reason, status_code)``. ``reason``
+        is one of the literals defined on ``WorkspaceBackendFailurePayload``
+        (``connect_error`` / ``sse_eof`` / ``5xx_response`` / ``unresolved``);
+        ``status_code`` is set only when ``reason == "5xx_response"``.
+        Used by minds to feed its ``WorkspaceServerHealthTracker``.
+        """
+        with self._lock:
+            self._on_workspace_backend_failure_callbacks.append(callback)
 
     def add_on_provider_error_callback(self, callback: OnProviderErrorCallback) -> None:
         """Register a callback fired for each ``DiscoveryErrorEvent`` attributable to a provider.
@@ -546,6 +568,25 @@ class EnvelopeStreamConsumer(MutableModel):
                     callback(info)
                 except (OSError, RuntimeError, paramiko.SSHException) as e:
                     logger.warning("reverse_tunnel_established callback failed for {}: {}", info.agent_id, e)
+        elif payload_type == "workspace_backend_failure":
+            try:
+                agent_id = AgentId(str(payload["agent_id"]))
+                reason = str(payload["reason"])
+            except (KeyError, ValueError, TypeError) as e:
+                logger.warning("Could not parse workspace_backend_failure payload: {}", e)
+                return
+            raw_status_code = payload.get("status_code")
+            try:
+                status_code: int | None = int(raw_status_code) if raw_status_code is not None else None
+            except (ValueError, TypeError):
+                status_code = None
+            with self._lock:
+                callbacks = list(self._on_workspace_backend_failure_callbacks)
+            for callback in callbacks:
+                try:
+                    callback(agent_id, reason, status_code)
+                except (OSError, RuntimeError, ValueError) as e:
+                    logger.warning("workspace_backend_failure callback failed for {}: {}", agent_id, e)
         elif payload_type in ("login_url", "listening"):
             logger.debug("Forward stream payload {}: {}", payload_type, payload)
         else:
@@ -689,6 +730,8 @@ def start_mngr_forward(
         command.extend(["--agent-include", include])
     for spec in config.reverse_specs:
         command.extend(["--reverse", spec])
+    if config.minds_origin is not None:
+        command.extend(["--minds-origin", config.minds_origin])
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(config.mngr_host_dir)
     logger.info("Spawning `mngr forward` subprocess: {}", " ".join(_redact_secrets(command)))

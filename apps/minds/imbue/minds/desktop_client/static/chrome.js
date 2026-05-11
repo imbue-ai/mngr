@@ -62,6 +62,7 @@
       swatch.classList.add('hidden');
       document.documentElement.style.removeProperty('--workspace-accent');
       currentTitleAgentId = null;
+      refreshHealthBanner();
       return;
     }
     currentTitleAgentId = agentId;
@@ -69,6 +70,65 @@
       if (currentTitleAgentId !== agentId) return;
       document.documentElement.style.setProperty('--workspace-accent', c);
       swatch.classList.remove('hidden');
+    });
+    refreshHealthBanner();
+  }
+
+  // -- Workspace-server health banner ---------------------------------------
+  //
+  // SSE pushes ``workspace_server_status`` events whenever an agent transitions
+  // between healthy / stuck / restarting. We mirror the latest per-agent status
+  // here and show the banner only for the currently-displayed agent.
+  var healthStatusByAgent = {};
+  var healthBannerEl = document.getElementById('workspace-health-banner');
+  var healthBannerTextEl = document.getElementById('workspace-health-banner-text');
+
+  function refreshHealthBanner() {
+    if (!healthBannerEl) return;
+    var aid = currentTitleAgentId;
+    var status = aid ? healthStatusByAgent[aid] : null;
+    if (status === 'stuck') {
+      healthBannerTextEl.textContent = 'Workspace server unresponsive. Click to restart.';
+      healthBannerEl.classList.remove('hidden');
+    } else if (status === 'restarting') {
+      healthBannerTextEl.textContent = 'Restarting workspace server...';
+      healthBannerEl.classList.remove('hidden');
+    } else {
+      healthBannerEl.classList.add('hidden');
+    }
+  }
+
+  function openRecoveryForCurrentAgent() {
+    var aid = currentTitleAgentId;
+    if (!aid) return;
+    var returnTo = '';
+    if (isElectron) {
+      returnTo = mngrForwardOrigin + '/goto/' + aid + '/';
+    } else {
+      try { returnTo = document.getElementById('content-frame').contentWindow.location.href; } catch (e) {}
+      if (!returnTo) returnTo = mngrForwardOrigin + '/goto/' + aid + '/';
+    }
+    var url = '/agents/' + encodeURIComponent(aid) + '/recovery?return_to=' + encodeURIComponent(returnTo);
+    navigateContent(url);
+  }
+
+  function handleWorkspaceServerStatus(agentId, status) {
+    if (!agentId) return;
+    if (status === 'healthy') {
+      delete healthStatusByAgent[agentId];
+    } else {
+      healthStatusByAgent[agentId] = status;
+    }
+    refreshHealthBanner();
+  }
+
+  if (healthBannerEl) {
+    healthBannerEl.addEventListener('click', openRecoveryForCurrentAgent);
+    healthBannerEl.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openRecoveryForCurrentAgent();
+      }
     });
   }
 
@@ -207,6 +267,7 @@
       if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
       if (data.type === 'auth_status') updateAuthUI(data);
       if (data.type === 'request_count') updateRequestsBadge(data.count);
+      if (data.type === 'workspace_server_status') handleWorkspaceServerStatus(data.agent_id, data.status);
     } catch (e) {}
   }
 

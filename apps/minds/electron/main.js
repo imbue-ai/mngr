@@ -1562,17 +1562,33 @@ ipcMain.on('navigate-to-request', (event, agentId, eventId) => {
 ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || !agentId) return;
-  // Don't offer "Open in new window" if the sender's window is already on this workspace
-  if (bundle.currentWorkspaceId === agentId) return;
-  const menu = Menu.buildFromTemplate([
-    {
+  const isCurrent = bundle.currentWorkspaceId === agentId;
+  const recoveryUrl = toAbsoluteUrl('/agents/' + encodeURIComponent(agentId) + '/recovery');
+  const workspaceUrl = workspaceUrlForAgent(agentId);
+  const template = [];
+  // Don't offer "Open in new window" if the sender's window is already on this workspace.
+  if (!isCurrent) {
+    template.push({
       label: 'Open in new window',
       click: () => {
-        openOrFocusWorkspace(agentId, workspaceUrlForAgent(agentId));
+        openOrFocusWorkspace(agentId, workspaceUrl);
         closeSidebar(bundle);
       },
+    });
+    template.push({ type: 'separator' });
+  }
+  template.push({
+    label: 'Restart workspace server',
+    click: () => {
+      const returnTo = workspaceUrl || '';
+      const url = recoveryUrl + (returnTo ? ('?return_to=' + encodeURIComponent(returnTo)) : '');
+      if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+        bundle.contentView.webContents.loadURL(url);
+      }
+      closeSidebar(bundle);
     },
-  ]);
+  });
+  const menu = Menu.buildFromTemplate(template);
   // sidebar coords are relative to the sidebar view, which sits at (0, TITLEBAR_HEIGHT)
   const px = Math.round(x || 0);
   const py = Math.round((y || 0) + TITLEBAR_HEIGHT);

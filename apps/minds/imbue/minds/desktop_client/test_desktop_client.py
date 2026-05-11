@@ -11,8 +11,11 @@ from starlette.testclient import TestClient
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.app import _build_restart_command
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import create_desktop_client
+from imbue.minds.desktop_client.workspace_server_health import AgentHealth
+from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -1364,3 +1367,78 @@ def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path
     resolver._fire_on_refresh(str(agent_id), raw_line)
 
     assert received == []
+
+
+# -- workspace-server restart + recovery tests --
+
+
+def test_build_restart_command_uses_provided_work_dir() -> None:
+    cmd = _build_restart_command(Path("/work/dir"))
+    assert "tmux kill-window -t imbue-agent:workspace_server" in cmd
+    assert "touch /work/dir/services.toml" in cmd
+
+
+def test_build_restart_command_defaults_to_code_services_toml_when_unknown() -> None:
+    cmd = _build_restart_command(None)
+    assert "touch /code/services.toml" in cmd
+
+
+def test_recovery_page_requires_authentication(tmp_path: Path) -> None:
+    client, _, agent_id = _setup_test_server(tmp_path)
+    response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
+    assert response.status_code == 401
+
+
+def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client, auth_store)
+
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to=http://target/",
+        follow_redirects=False,
+    )
+    assert response.status_code == 200
+    assert str(agent_id) in response.text
+    assert "http://target/" in response.text
+    assert "Restart workspace server" in response.text
+
+
+def test_restart_api_requires_authentication(tmp_path: Path) -> None:
+    client, _, agent_id = _setup_test_server(tmp_path)
+    response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
+    assert response.status_code == 403
+
+
+def test_chrome_events_pushes_initial_health_snapshot(tmp_path: Path) -> None:
+    """When the SSE handler opens, it sends initial snapshot of non-healthy agents.
+
+    We bypass the SSE generator (which is an infinite stream) and exercise the
+    underlying tracker.snapshot_all() helper that the generator uses.
+    """
+    tracker = WorkspaceServerHealthTracker()
+    a1 = AgentId.generate()
+    a2 = AgentId.generate()
+
+    tracker.mark_restarting(a1)
+    tracker.record_failure(a2)
+    tracker.record_success(a2)
+
+    snapshot = tracker.snapshot_all()
+    assert snapshot == {a1: AgentHealth.RESTARTING}
+
+
+def test_create_desktop_client_stashes_workspace_health_tracker(tmp_path: Path) -> None:
+    """create_desktop_client should expose the tracker on app.state for handlers."""
+    auth_dir = tmp_path / "auth"
+    auth_store = FileAuthStore(data_directory=auth_dir)
+    tracker = WorkspaceServerHealthTracker()
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        workspace_health_tracker=tracker,
+    )
+
+    assert app.state.workspace_health_tracker is tracker

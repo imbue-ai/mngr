@@ -13,6 +13,7 @@ from imbue.minds.desktop_client.ssh_tunnel import ReverseTunnelInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.desktop_client.ssh_tunnel import _ForwardedTunnelHandler
+from imbue.minds.desktop_client.ssh_tunnel import _run_command_on_client
 from imbue.minds.desktop_client.ssh_tunnel import _ssh_connection_is_active
 from imbue.minds.desktop_client.ssh_tunnel import _ssh_connection_transport
 from imbue.mngr_forward.relay import relay_data
@@ -633,3 +634,74 @@ def test_setup_reverse_tunnel_registers_per_forward_handler(tmp_path: Path) -> N
         assert handler is not None, "request_port_forward must be called with a handler"
         assert callable(handler)
     manager.cleanup()
+
+
+# -- _run_command_on_client tests --
+
+
+class _FakeChannel:
+    def __init__(self, exit_status: int) -> None:
+        self._exit_status = exit_status
+
+    def recv_exit_status(self) -> int:
+        return self._exit_status
+
+
+class _FakeStream:
+    def __init__(self, data: bytes = b"", channel: _FakeChannel | None = None) -> None:
+        self._data = data
+        self.channel = channel
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    def read(self) -> bytes:
+        return self._data
+
+
+class _FakeExecClient:
+    """Stub paramiko-like client returning canned exec_command outputs."""
+
+    def __init__(self, exit_status: int, stderr_bytes: bytes) -> None:
+        self._exit_status = exit_status
+        self._stderr_bytes = stderr_bytes
+        self.exec_calls: list[tuple[str, float]] = []
+
+    def exec_command(self, command: str, timeout: float) -> tuple[_FakeStream, _FakeStream, _FakeStream]:
+        self.exec_calls.append((command, timeout))
+        channel = _FakeChannel(exit_status=self._exit_status)
+        stdin = _FakeStream()
+        stdout = _FakeStream(channel=channel)
+        stderr = _FakeStream(data=self._stderr_bytes)
+        return stdin, stdout, stderr
+
+
+def test_run_command_on_client_returns_exit_status_and_decoded_stderr() -> None:
+    client = _FakeExecClient(exit_status=0, stderr_bytes=b"")
+    exit_status, stderr_text = _run_command_on_client(
+        cast(paramiko.SSHClient, client), "touch /tmp/x", timeout_seconds=5.0
+    )
+    assert exit_status == 0
+    assert stderr_text == ""
+    assert client.exec_calls == [("touch /tmp/x", 5.0)]
+
+
+def test_run_command_on_client_decodes_stderr_with_replace() -> None:
+    # Invalid UTF-8 byte; "replace" mode must not raise.
+    client = _FakeExecClient(exit_status=2, stderr_bytes=b"bad\xffend")
+    exit_status, stderr_text = _run_command_on_client(
+        cast(paramiko.SSHClient, client), "ls /missing", timeout_seconds=1.0
+    )
+    assert exit_status == 2
+    assert "bad" in stderr_text
+    assert "end" in stderr_text
+
+
+def test_run_command_on_client_propagates_nonzero_exit() -> None:
+    client = _FakeExecClient(exit_status=127, stderr_bytes=b"not found")
+    exit_status, stderr_text = _run_command_on_client(
+        cast(paramiko.SSHClient, client), "asdf", timeout_seconds=1.0
+    )
+    assert exit_status == 127
+    assert stderr_text == "not found"

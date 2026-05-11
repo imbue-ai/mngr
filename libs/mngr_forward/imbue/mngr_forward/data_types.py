@@ -54,7 +54,29 @@ class ReverseTunnelEstablishedPayload(FrozenModel):
     ssh_port: PositiveInt = Field(description="SSH port on ssh_host")
 
 
-ForwardPayload = LoginUrlPayload | ListeningPayload | ReverseTunnelEstablishedPayload
+class WorkspaceBackendFailurePayload(FrozenModel):
+    """Emitted when the plugin observes a per-agent backend failure.
+
+    The plugin's role is observation only: it surfaces the kind of failure
+    it saw (connect error, mid-SSE EOF, 5xx response) so the minds-side
+    ``WorkspaceServerHealthTracker`` can apply policy (e.g. 5s
+    HEALTHY -> STUCK transition).
+    """
+
+    type: Literal["workspace_backend_failure"] = "workspace_backend_failure"
+    agent_id: AgentId = Field(description="Agent whose backend failed")
+    reason: Literal["connect_error", "sse_eof", "5xx_response", "unresolved"] = Field(
+        description="Why the forward attempt failed"
+    )
+    status_code: int | None = Field(
+        default=None,
+        description="HTTP status code returned by the backend (only set when reason is 5xx_response)",
+    )
+
+
+ForwardPayload = (
+    LoginUrlPayload | ListeningPayload | ReverseTunnelEstablishedPayload | WorkspaceBackendFailurePayload
+)
 
 
 class ForwardEnvelope(FrozenModel):

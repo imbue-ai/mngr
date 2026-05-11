@@ -50,6 +50,7 @@ from imbue.mngr_forward.cookie import create_session_cookie
 from imbue.mngr_forward.cookie import create_subdomain_auth_token
 from imbue.mngr_forward.cookie import verify_session_cookie
 from imbue.mngr_forward.cookie import verify_subdomain_auth_token
+from imbue.mngr_forward.data_types import WorkspaceBackendFailurePayload
 from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.primitives import FORWARD_SUBDOMAIN_PATTERN
 from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
@@ -67,6 +68,13 @@ _SUBDOMAIN_AUTH_PATH: Final[str] = "/_subdomain_auth"
 _EXCLUDED_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset(
     {"transfer-encoding", "content-encoding", "content-length"}
 )
+
+# HTTP status codes that the plugin surfaces as ``workspace_backend_failure``
+# events with ``reason="5xx_response"``. Limiting to the "infrastructure"
+# subset (Bad Gateway / Service Unavailable / Gateway Timeout) avoids
+# surfacing a wedged Python backend's stack-trace 500s as health-recovery
+# events, which would be too aggressive.
+_INFRASTRUCTURE_5XX_STATUSES: Final[frozenset[int]] = frozenset({502, 503, 504})
 
 # WebSocket close-reasons are capped at 123 bytes by RFC 6455. Keep messages
 # short; full diagnostic detail goes to ``logger.warning`` instead.
@@ -296,6 +304,9 @@ async def _forward_workspace_http(
     request: Request,
     backend_url: str,
     http_client: httpx.AsyncClient,
+    agent_id: AgentId,
+    envelope_writer: EnvelopeWriter,
+    minds_origin: str | None,
 ) -> Response:
     base = backend_url.rstrip("/")
     path = request.url.path.lstrip("/")
@@ -327,7 +338,8 @@ async def _forward_workspace_http(
         try:
             backend_response = await http_client.send(backend_request, stream=True)
         except httpx.ConnectError:
-            return _service_unavailable_response(request)
+            _emit_backend_failure(envelope_writer, agent_id, "connect_error", None)
+            return _service_unavailable_response(request, agent_id, minds_origin)
         except httpx.TimeoutException:
             return Response(status_code=504, content="Backend stream timed out")
 
@@ -337,6 +349,7 @@ async def _forward_workspace_http(
                     yield chunk
             except (httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
                 logger.warning("Backend SSE stream failed for {}: {}", request.url.path, e)
+                _emit_backend_failure(envelope_writer, agent_id, "sse_eof", None)
             finally:
                 await backend_response.aclose()
 
@@ -357,14 +370,19 @@ async def _forward_workspace_http(
     except (httpx.ConnectError, httpx.RemoteProtocolError):
         # Workspace-server may not yet be listening, or it may have closed the
         # connection before sending headers (typical during startup). HTML
-        # navigations get the auto-refreshing retry page so the user lands on
-        # something useful instead of a hard 502; non-HTML callers get a plain
-        # 503 they can interpret programmatically.
-        return _service_unavailable_response(request)
+        # navigations 302-redirect to the minds recovery page (when minds origin
+        # is configured) so the user lands on something useful; non-HTML callers
+        # get a plain 503 they can interpret programmatically.
+        _emit_backend_failure(envelope_writer, agent_id, "connect_error", None)
+        return _service_unavailable_response(request, agent_id, minds_origin)
     except httpx.ReadError:
+        _emit_backend_failure(envelope_writer, agent_id, "connect_error", None)
         return Response(status_code=502, content="Backend connection lost")
     except httpx.TimeoutException:
         return Response(status_code=504, content="Backend timed out")
+
+    if backend_response.status_code in _INFRASTRUCTURE_5XX_STATUSES:
+        _emit_backend_failure(envelope_writer, agent_id, "5xx_response", backend_response.status_code)
 
     response = Response(content=backend_response.content, status_code=backend_response.status_code)
     for header_key, header_value in backend_response.headers.multi_items():
@@ -374,9 +392,44 @@ async def _forward_workspace_http(
     return response
 
 
-def _service_unavailable_response(request: Request) -> Response:
-    """Return a 503 with the auto-refreshing HTML page for HTML navigations."""
-    if "text/html" in request.headers.get("accept", ""):
+def _emit_backend_failure(
+    envelope_writer: EnvelopeWriter,
+    agent_id: AgentId,
+    reason: str,
+    status_code: int | None,
+) -> None:
+    """Emit a ``workspace_backend_failure`` envelope on best-effort basis.
+
+    The plugin never lets envelope-emission errors break a forwarded
+    request -- if stdout is gone (parent died) we just log and continue.
+    """
+    try:
+        payload = WorkspaceBackendFailurePayload(agent_id=agent_id, reason=reason, status_code=status_code)
+        envelope_writer.emit_workspace_backend_failure(payload)
+    except (OSError, ValueError) as e:
+        logger.trace("Could not emit workspace_backend_failure envelope for {}: {}", agent_id, e)
+
+
+def _service_unavailable_response(
+    request: Request,
+    agent_id: AgentId,
+    minds_origin: str | None,
+) -> Response:
+    """Return a 302 to the minds recovery page (HTML) or a plain 503 (non-HTML).
+
+    When ``minds_origin`` is set and the request accepts HTML, redirect
+    the browser to ``<minds_origin>/agents/<id>/recovery?return_to=<url>``
+    so the user lands on minds' recovery UI. When ``minds_origin`` is
+    unset (legacy fixtures, plugin run standalone), fall back to the
+    auto-refresh HTML the plugin used to serve directly.
+    """
+    accepts_html = "text/html" in request.headers.get("accept", "")
+    if accepts_html and minds_origin:
+        return_to = str(request.url)
+        encoded_return_to = quote(return_to, safe="")
+        location = f"{minds_origin.rstrip('/')}/agents/{agent_id}/recovery?return_to={encoded_return_to}"
+        return Response(status_code=302, headers={"Location": location})
+    if accepts_html:
         return HTMLResponse(
             content=(
                 "<!doctype html><html><head>"
@@ -442,6 +495,8 @@ async def _handle_workspace_forward_http(
     preauth_cookie_value: str | None,
     listen_port: int,
     allow_host_loopback: bool,
+    envelope_writer: EnvelopeWriter,
+    minds_origin: str | None,
 ) -> Response:
     host_header = request.headers.get("host", "")
     agent_id = _parse_workspace_subdomain(host_header)
@@ -460,7 +515,8 @@ async def _handle_workspace_forward_http(
 
     target = resolver.resolve(agent_id)
     if target is None:
-        return _service_unavailable_response(request)
+        _emit_backend_failure(envelope_writer, agent_id, "unresolved", None)
+        return _service_unavailable_response(request, agent_id, minds_origin)
 
     backend_url = str(target.url)
     try:
@@ -493,7 +549,14 @@ async def _handle_workspace_forward_http(
         )
 
     active_client = tunnel_client or http_client
-    return await _forward_workspace_http(request=request, backend_url=backend_url, http_client=active_client)
+    return await _forward_workspace_http(
+        request=request,
+        backend_url=backend_url,
+        http_client=active_client,
+        agent_id=agent_id,
+        envelope_writer=envelope_writer,
+        minds_origin=minds_origin,
+    )
 
 
 async def _handle_workspace_forward_websocket(
@@ -741,6 +804,7 @@ def create_forward_app(
     preauth_cookie_value: str | None = None,
     on_listening: Callable[[], None] | None = None,
     allow_host_loopback: bool = False,
+    minds_origin: str | None = None,
 ) -> FastAPI:
     """Create the FastAPI app for ``mngr forward``.
 
@@ -766,6 +830,7 @@ def create_forward_app(
     app.state.listen_port = listen_port
     app.state.preauth_cookie_value = preauth_cookie_value
     app.state.allow_host_loopback = allow_host_loopback
+    app.state.minds_origin = minds_origin
 
     @app.middleware("http")
     async def _subdomain_routing_middleware(request: Request, call_next: Any) -> Response:
@@ -784,6 +849,8 @@ def create_forward_app(
             preauth_cookie_value=preauth_cookie_value,
             listen_port=listen_port,
             allow_host_loopback=allow_host_loopback,
+            envelope_writer=envelope_writer,
+            minds_origin=minds_origin,
         )
 
     @app.get("/login")

@@ -72,6 +72,33 @@ from imbue.mngr.primitives import AgentId
 _MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 
 
+def probe_workspace_through_plugin(
+    mngr_forward_port: int,
+    preauth_cookie: str,
+    agent_id: AgentId,
+    probe_timeout_seconds: float,
+) -> int | None:
+    """Issue a single probe through the plugin to the agent's workspace_server.
+
+    Returns the HTTP status code observed (any 200 means ready), or ``None``
+    if the probe failed at the transport layer (connect error, mid-stream
+    EOF, read timeout). Shared by ``_wait_for_workspace_ready`` (creation
+    flow) and the workspace-health tracker's background probe loop so both
+    paths agree on what "ready" means.
+    """
+    probe_url = f"http://{agent_id}.localhost:{mngr_forward_port}/"
+    with httpx.Client(
+        timeout=probe_timeout_seconds,
+        follow_redirects=False,
+        cookies={_MNGR_FORWARD_SESSION_COOKIE_NAME: preauth_cookie},
+    ) as client:
+        try:
+            response = client.get(probe_url)
+        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException):
+            return None
+        return response.status_code
+
+
 def _make_child_cg(name: str, parent: ConcurrencyGroup | None) -> ConcurrencyGroup:
     """Create a ``ConcurrencyGroup`` named ``name`` that is a child of ``parent``.
 
@@ -1347,40 +1374,31 @@ class AgentCreator(MutableModel):
             logger.debug("Workspace readiness probe disabled (port=0 or empty preauth); skipping")
             return
 
-        probe_url = f"http://{agent_id}.localhost:{self.mngr_forward_port}/"
         deadline = time.monotonic() + self.workspace_ready_timeout_seconds
         log_queue.put("[minds] Waiting for workspace server to be ready...")
         last_status: int | None = None
-        last_error: str | None = None
         attempt = 0
-        with httpx.Client(
-            timeout=self.workspace_ready_probe_timeout_seconds,
-            follow_redirects=False,
-            cookies={_MNGR_FORWARD_SESSION_COOKIE_NAME: self.mngr_forward_preauth_cookie},
-        ) as client:
-            while time.monotonic() < deadline:
-                attempt += 1
-                try:
-                    response = client.get(probe_url)
-                    last_status = response.status_code
-                    if response.status_code == 200:
-                        logger.debug(
-                            "Workspace ready for {} after {} probe(s)",
-                            agent_id,
-                            attempt,
-                        )
-                        log_queue.put("[minds] Workspace server is ready.")
-                        return
-                except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as e:
-                    last_error = f"{type(e).__name__}: {e}"
-                threading.Event().wait(timeout=self.workspace_ready_poll_interval_seconds)
+        while time.monotonic() < deadline:
+            attempt += 1
+            status = probe_workspace_through_plugin(
+                mngr_forward_port=self.mngr_forward_port,
+                preauth_cookie=self.mngr_forward_preauth_cookie,
+                agent_id=agent_id,
+                probe_timeout_seconds=self.workspace_ready_probe_timeout_seconds,
+            )
+            if status is not None:
+                last_status = status
+                if status == 200:
+                    logger.debug("Workspace ready for {} after {} probe(s)", agent_id, attempt)
+                    log_queue.put("[minds] Workspace server is ready.")
+                    return
+            threading.Event().wait(timeout=self.workspace_ready_poll_interval_seconds)
         logger.warning(
             "Workspace readiness probe for {} timed out after {:.0f}s "
-            "(last status={}, last error={}); publishing redirect anyway",
+            "(last status={}); publishing redirect anyway",
             agent_id,
             self.workspace_ready_timeout_seconds,
             last_status,
-            last_error,
         )
         log_queue.put(
             "[minds] Warning: workspace did not become ready within "
