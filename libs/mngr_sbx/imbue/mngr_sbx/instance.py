@@ -799,6 +799,14 @@ kill -TERM 1
         for cleanup purposes.
         """
         prefix = self.mngr_ctx.config.prefix
+        local_records = self._host_store.list_all_host_records()
+
+        # If we have no local records, we can short-circuit without invoking the sbx CLI at all.
+        # This keeps test runs that never created an sbx host from tripping the sbx resource
+        # guard (and avoids burning network/auth on a provider the caller isn't actually using).
+        if not local_records:
+            return []
+
         live_status_by_name: dict[str, str] = {}
         try:
             self._ensure_sbx_available()
@@ -813,7 +821,7 @@ kill -TERM 1
             logger.warning("Failed to list sbx sandboxes: {}", e)
 
         discovered: list[DiscoveredHost] = []
-        for record in self._host_store.list_all_host_records():
+        for record in local_records:
             host_id = HostId(record.certified_host_data.host_id)
             host_name = HostName(record.certified_host_data.host_name)
             keeper_pid = read_keeper_pid(self._provider_dir, host_id)
