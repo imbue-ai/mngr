@@ -147,20 +147,17 @@ def test_deny_reason_is_uniform_regardless_of_tool_input(
 
 def test_deny_does_not_require_state_dir_or_parent_name(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    clean_env: pytest.MonkeyPatch,
 ) -> None:
     """Deny mode runs cleanly without MNGR_AGENT_STATE_DIR / MNGR_AGENT_NAME.
 
     The deny hook does no per-agent IO -- it just emits a constant
     skill-pointer reason -- so it should not depend on any mngr
-    environment variables. Pin that contract.
+    environment variables. Pin that contract by using ``clean_env``
+    (which delenv()s the full set of subagent-proxy env vars) rather
+    than the seeded ``hook_env``.
     """
-    monkeypatch.delenv("MNGR_AGENT_STATE_DIR", raising=False)
-    monkeypatch.delenv("MNGR_AGENT_NAME", raising=False)
-    monkeypatch.delenv("MNGR_SUBAGENT_DEPTH", raising=False)
-    monkeypatch.delenv("MNGR_MAX_SUBAGENT_DEPTH", raising=False)
-
-    response = _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=monkeypatch)
+    response = _run_deny(_hook_input(), cwd_for_test=tmp_path, monkeypatch=clean_env)
 
     assert response["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "mngr-subagents" in response["hookSpecificOutput"]["permissionDecisionReason"]
