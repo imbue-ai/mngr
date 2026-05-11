@@ -19,9 +19,6 @@ dependencies = [
     "pydantic>=2.0",
 ]
 
-[project.entry-points.mngr]
-latchkey = "imbue.mngr_latchkey.plugin"
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

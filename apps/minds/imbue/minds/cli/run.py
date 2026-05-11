@@ -68,8 +68,8 @@ from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.output import emit_event
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
+from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
-from imbue.mngr_latchkey.core import resolve_latchkey_binary
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo as LatchkeyRemoteSSHInfo
@@ -298,11 +298,13 @@ def _try_load_latchkey_services_catalog() -> dict[str, ServicePermissionInfo]:
 
 
 def _build_latchkey(data_directory: Path) -> Latchkey:
-    # The latchkey-binary path comes from the plugin's standard
-    # ``MNGR_LATCHKEY_BINARY`` env var (set by the Electron shell to the
-    # bundled CLI's path) so the in-process API and any subprocess
-    # ``mngr latchkey ...`` invocation agree on which binary to talk to.
-    latchkey_binary = resolve_latchkey_binary()
+    # The latchkey-binary path is supplied by the Electron shell (which
+    # bundles its own copy of latchkey under the app resources) via
+    # ``MINDS_LATCHKEY_BINARY``. We fall back to ``"latchkey"`` on PATH
+    # when the env var is not set, e.g. when minds is invoked outside
+    # the Electron shell.
+    binary_override = os.environ.get("MINDS_LATCHKEY_BINARY")
+    latchkey_binary = binary_override if binary_override else LATCHKEY_BINARY
     # Single rooted directory for both upstream latchkey's credential
     # store (passed as ``LATCHKEY_DIRECTORY``) and the plugin's own
     # ``mngr_latchkey/`` metadata subdir. ``MINDS_LATCHKEY_DIRECTORY``

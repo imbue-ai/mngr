@@ -18,14 +18,11 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CredentialStatus
-from imbue.mngr_latchkey.core import ENV_LATCHKEY_BINARY
-from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyBinaryNotFoundError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.core import LatchkeyNotInitializedError
 from imbue.mngr_latchkey.core import _cmdline_looks_like_latchkey_gateway
-from imbue.mngr_latchkey.core import resolve_latchkey_binary
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo
@@ -37,27 +34,6 @@ from imbue.mngr_latchkey.store import load_gateway_info
 from imbue.mngr_latchkey.store import save_gateway_info
 
 _POLL_INTERVAL_SECONDS = 0.05
-
-
-def test_resolve_latchkey_binary_prefers_explicit_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(ENV_LATCHKEY_BINARY, "/from/env")
-    assert resolve_latchkey_binary("/from/override") == "/from/override"
-
-
-def test_resolve_latchkey_binary_falls_back_to_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(ENV_LATCHKEY_BINARY, "/from/env")
-    assert resolve_latchkey_binary() == "/from/env"
-
-
-def test_resolve_latchkey_binary_falls_back_to_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(ENV_LATCHKEY_BINARY, raising=False)
-    assert resolve_latchkey_binary() == LATCHKEY_BINARY
-
-
-def test_resolve_latchkey_binary_treats_empty_env_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Empty string in env should not silently win over the PATH default."""
-    monkeypatch.setenv(ENV_LATCHKEY_BINARY, "")
-    assert resolve_latchkey_binary() == LATCHKEY_BINARY
 
 
 def test_cmdline_matcher_accepts_plausible_latchkey_gateway() -> None:

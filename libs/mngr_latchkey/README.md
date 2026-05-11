@@ -2,35 +2,11 @@
 
 Latchkey gateway management for [mngr](https://github.com/imbue-ai/mngr).
 
-This plugin owns the lifecycle of a single shared `latchkey gateway`
+This package owns the lifecycle of a single shared `latchkey gateway`
 subprocess and the per-agent state that points the gateway at each
-agent's own permissions file. It exposes both a CLI command and a
-Python API so other code (e.g. the minds desktop client) can drive
-the same gateway and the same permissions store.
-
-## CLI
-
-```bash
-mngr latchkey ensure-gateway [--latchkey-dir PATH] [--latchkey-binary PATH]
-```
-
-Idempotent. Starts the shared `latchkey gateway` if it is not already
-running; otherwise adopts the existing one. Persists its record under
-the supplied directory (default: `<profile>/latchkey` inside the active
-mngr profile directory) so subsequent in-process API users on the same
-machine see the same gateway. The same directory is also used as the
-spawned subprocess's `LATCHKEY_DIRECTORY` (credential / config store).
-
-The `latchkey` CLI binary is looked up in this order:
-
-1. `--latchkey-binary <path>` flag.
-2. `MNGR_LATCHKEY_BINARY` env var.
-3. `latchkey` on `PATH`.
-
-The env var lets a wrapping process (e.g. an Electron app that ships
-its own latchkey copy) point both the in-process `Latchkey` API and
-this CLI at the same bundled binary without having to pass a flag on
-every invocation.
+agent's own permissions file. It is a plain Python library: import
+the classes and call them directly; there is no `mngr` CLI surface
+yet.
 
 ## Python API
 
@@ -40,30 +16,49 @@ from imbue.mngr_latchkey.agent_setup import (
     prepare_agent_latchkey,
     finalize_agent_permissions,
 )
-from imbue.mngr_latchkey.tunnel import LatchkeyTunnelManager
+from imbue.mngr_latchkey.discovery import (
+    LatchkeyDiscoveryHandler,
+    LatchkeyDestructionHandler,
+)
+from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
 
-latchkey = Latchkey(latchkey_directory=data_dir / "latchkey")
-latchkey.initialize(data_dir=data_dir)
+latchkey = Latchkey(
+    latchkey_binary="/path/to/latchkey",  # default: "latchkey" on PATH
+    latchkey_directory=root_dir,
+)
+latchkey.initialize()
 
 # (a) Pre-create env vars + opaque permissions handle for a new agent.
-setup = prepare_agent_latchkey(latchkey, data_dir=data_dir, is_tunneled=True)
+setup = prepare_agent_latchkey(latchkey, is_tunneled=True)
 # setup.env: LATCHKEY_GATEWAY[_PASSWORD,_PERMISSIONS_OVERRIDE,_DISABLE_COUNTING]
 # setup.opaque_permissions_path: pass to finalize_agent_permissions later
 
 # ... mngr create returns the canonical agent id ...
 
 # (b) Point the opaque handle at the canonical agent permissions path.
-finalize_agent_permissions(data_dir, setup.opaque_permissions_path, agent_id)
+finalize_agent_permissions(latchkey, setup.opaque_permissions_path, agent_id)
+# Raises LatchkeyStoreError on failure -- callers decide whether to abort
+# or just surface a warning.
 
-# (c) For tunneled agents (containers, VMs, VPS), open a reverse SSH
-# tunnel from the agent's loopback into the host-side gateway.
-tunnel_manager = LatchkeyTunnelManager()
-tunnel_manager.start_health_check()
-tunnel_manager.setup_for_agent(latchkey, ssh_info)
+# (c) Plug the discovery and destruction handlers into your agent
+# discovery stream so reverse tunnels are opened on discovery and
+# closed on destruction.
+tunnel_manager = SSHTunnelManager()
+tunnel_manager.start_reverse_tunnel_health_check()
+on_discovered = LatchkeyDiscoveryHandler(
+    latchkey=latchkey, tunnel_manager=tunnel_manager, concurrency_group=cg
+)
+on_destroyed = LatchkeyDestructionHandler(tunnel_manager=tunnel_manager)
 ```
+
+The `latchkey_directory` is used both as the upstream `LATCHKEY_DIRECTORY`
+for spawned `latchkey` subprocesses and as the root of this package's own
+metadata subdirectory (`<latchkey_directory>/mngr_latchkey/`, accessible
+via `Latchkey.plugin_data_dir`).
 
 ## Permissions config
 
-The plugin owns the `latchkey_permissions.json` schema (a subset of
+The package owns the `latchkey_permissions.json` schema (a subset of
 detent's rule format). UI surfaces (such as the minds permission
-dialog) read and update it via the helpers in `store.py`.
+dialog) read and update it via the helpers in
+`imbue.mngr_latchkey.store`.
