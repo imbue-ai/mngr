@@ -221,12 +221,14 @@ def _merge_subagent_proxy_deny_hooks(host: OnlineHostInterface, work_dir: Path) 
     """Merge the deny-mode hook into the agent's .claude/settings.local.json.
 
     Deny mode installs a single PreToolUse:Agent hook that denies Task
-    calls with copy-pasteable mngr instructions. It does NOT install
-    PostToolUse / SessionStart hooks (no spawned children to clean
-    up), does NOT walk the user's plugin hooks dirs to install Stop-hook
-    guards (no proxy children to guard against), and does NOT check the
-    project ``settings.json`` for un-guarded Stop hooks (same reason).
-    The surface is deliberately much smaller than PROXY mode.
+    calls with a short skill-pointer reason pointing at the
+    ``mngr-subagents`` skill (installed alongside, under
+    ``.claude/skills/``). It does NOT install PostToolUse / SessionStart
+    hooks (no spawned children to clean up), does NOT walk the user's
+    plugin hooks dirs to install Stop-hook guards (no proxy children to
+    guard against), and does NOT check the project ``settings.json`` for
+    un-guarded Stop hooks (same reason). The surface is deliberately
+    much smaller than PROXY mode.
     """
     settings_path = work_dir / ".claude" / "settings.local.json"
     existing_settings: dict[str, Any] = {}
