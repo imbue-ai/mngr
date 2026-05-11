@@ -86,7 +86,9 @@ def test_create_in_place(e2e: E2eSession) -> None:
 @pytest.mark.modal
 def test_create_short_forms(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
-    # you can use a short form for most commands (like create) as well--the above command is the same as these:
+    # you can name the agent type explicitly as a positional argument, or use the short form for the
+    # command itself (`mngr c` is an alias for `mngr create`). For example, when claude is your default
+    # agent type, `mngr c my-task` is equivalent to `mngr create my-task claude`:
     mngr create my-task claude
     mngr c my-task
     """)
@@ -94,7 +96,7 @@ def test_create_short_forms(e2e: E2eSession) -> None:
     # for the real claude agent so the test doesn't need claude installed.
     result_full = e2e.run(
         "mngr create my-task --type command --no-ensure-clean -- sleep 100072",
-        comment="you can use a short form for most commands (like create) as well",
+        comment="you can name the agent type explicitly as a positional argument, or use the short form",
     )
     expect(result_full).to_succeed()
 
@@ -102,7 +104,7 @@ def test_create_short_forms(e2e: E2eSession) -> None:
     # Pinned sleep value distinct from the one above so leaked processes trace back to this call.
     result_short = e2e.run(
         "mngr c my-other-task --type command --no-ensure-clean -- sleep 100117",
-        comment="the above command is the same as these",
+        comment="`mngr c my-task` is equivalent to `mngr create my-task claude` when claude is the default",
     )
     expect(result_short).to_succeed()
 
