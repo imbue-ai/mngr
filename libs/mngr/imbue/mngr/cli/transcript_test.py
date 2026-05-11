@@ -1,6 +1,7 @@
 import json
 
 import pluggy
+import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.cli.testing import create_agent_with_events_dir
@@ -9,15 +10,23 @@ from imbue.mngr.cli.transcript import TranscriptCliOptions
 from imbue.mngr.cli.transcript import _format_event_human
 from imbue.mngr.cli.transcript import _get_event_role
 from imbue.mngr.cli.transcript import _parse_transcript_events
+from imbue.mngr.cli.transcript import _resolve_target_identifier
+from imbue.mngr.cli.transcript import _resolve_turn_index
+from imbue.mngr.cli.transcript import _user_message_indices
 from imbue.mngr.cli.transcript import transcript
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.utils.testing import capture_loguru
 
 
 def _make_transcript_opts(
-    target: str = "my-agent",
+    target: str | None = "my-agent",
     role: tuple[str, ...] = (),
     tail: int | None = None,
     head: int | None = None,
+    turn: int | None = None,
+    last_completed_turn: bool = False,
+    count_turns: bool = False,
+    list_turns: bool = False,
 ) -> TranscriptCliOptions:
     return TranscriptCliOptions(
         output_format="human",
@@ -31,7 +40,40 @@ def _make_transcript_opts(
         role=role,
         tail=tail,
         head=head,
+        turn=turn,
+        last_completed_turn=last_completed_turn,
+        count_turns=count_turns,
+        list_turns=list_turns,
     )
+
+
+def _make_numbered_user_assistant_events(turn_count: int) -> list[dict[str, str | list | bool]]:
+    """Build a transcript with N turns; each turn is a user_message + assistant_message."""
+    events: list[dict[str, str | list | bool]] = []
+    for i in range(turn_count):
+        events.append(
+            {
+                "timestamp": f"2026-01-01T00:00:{i * 2:02d}Z",
+                "type": "user_message",
+                "event_id": f"u{i}",
+                "source": "claude/common_transcript",
+                "role": "user",
+                "content": f"prompt-{i}",
+            }
+        )
+        events.append(
+            {
+                "timestamp": f"2026-01-01T00:00:{i * 2 + 1:02d}Z",
+                "type": "assistant_message",
+                "event_id": f"a{i}",
+                "source": "claude/common_transcript",
+                "role": "assistant",
+                "text": f"reply-{i}",
+                "tool_calls": [],
+                "model": "test-model",
+            }
+        )
+    return events
 
 
 # =============================================================================
@@ -472,3 +514,415 @@ def test_transcript_cli_no_transcript_gives_error(
     )
     assert result.exit_code != 0
     assert "No common transcript found" in result.output
+
+
+# =============================================================================
+# Turn-helper unit tests
+# =============================================================================
+
+
+def test_user_message_indices_picks_up_user_messages_only() -> None:
+    events = _make_numbered_user_assistant_events(3)
+    assert _user_message_indices(events) == [0, 2, 4]
+
+
+def test_user_message_indices_ignores_meta_tool_results() -> None:
+    """Stop-hook injections are reclassified to tool_result(tool_name='meta') upstream.
+
+    They must not affect turn counts.
+    """
+    events: list[dict] = [
+        {"type": "user_message", "content": "real prompt", "event_id": "u1"},
+        {"type": "assistant_message", "text": "ok", "event_id": "a1"},
+        {"type": "tool_result", "tool_name": "meta", "output": "Stop hook feedback...", "event_id": "m1"},
+        {"type": "user_message", "content": "second prompt", "event_id": "u2"},
+        {"type": "assistant_message", "text": "ok", "event_id": "a2"},
+    ]
+    assert _user_message_indices(events) == [0, 3]
+
+
+def test_resolve_turn_index_positive_one_indexed() -> None:
+    assert _resolve_turn_index(1, 4) == 0
+    assert _resolve_turn_index(4, 4) == 3
+
+
+def test_resolve_turn_index_negative_python_style() -> None:
+    assert _resolve_turn_index(-1, 4) == 3
+    assert _resolve_turn_index(-4, 4) == 0
+
+
+def test_resolve_turn_index_rejects_zero() -> None:
+    with pytest.raises(UserInputError, match="1-indexed"):
+        _resolve_turn_index(0, 4)
+
+
+def test_resolve_turn_index_rejects_out_of_range_positive() -> None:
+    with pytest.raises(UserInputError, match="out of range"):
+        _resolve_turn_index(5, 4)
+
+
+def test_resolve_turn_index_rejects_out_of_range_negative() -> None:
+    with pytest.raises(UserInputError, match="out of range"):
+        _resolve_turn_index(-5, 4)
+
+
+def test_resolve_turn_index_empty_transcript() -> None:
+    with pytest.raises(UserInputError, match="no turns"):
+        _resolve_turn_index(1, 0)
+
+
+# =============================================================================
+# Auto-discovery (MNGR_AGENT_ID) unit tests
+# =============================================================================
+
+
+def test_resolve_target_identifier_prefers_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MNGR_AGENT_ID", "from-env")
+    assert _resolve_target_identifier("explicit-target") == "explicit-target"
+
+
+def test_resolve_target_identifier_falls_back_to_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MNGR_AGENT_ID", "from-env")
+    assert _resolve_target_identifier(None) == "from-env"
+
+
+def test_resolve_target_identifier_treats_empty_string_as_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MNGR_AGENT_ID", "from-env")
+    assert _resolve_target_identifier("") == "from-env"
+
+
+def test_resolve_target_identifier_errors_when_neither_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MNGR_AGENT_ID", raising=False)
+    with pytest.raises(UserInputError, match="MNGR_AGENT_ID"):
+        _resolve_target_identifier(None)
+
+
+# =============================================================================
+# CLI: mutual exclusivity
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--turn", "1", "--last-completed-turn"],
+        ["--turn", "1", "--count-turns"],
+        ["--turn", "1", "--list-turns"],
+        ["--last-completed-turn", "--count-turns"],
+        ["--last-completed-turn", "--list-turns"],
+        ["--count-turns", "--list-turns"],
+    ],
+)
+def test_transcript_cli_rejects_two_turn_flags_together(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    flags: list[str],
+) -> None:
+    result = cli_runner.invoke(transcript, ["my-agent", *flags], obj=plugin_manager)
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--turn", "1", "--head", "5"],
+        ["--turn", "1", "--tail", "5"],
+        ["--last-completed-turn", "--head", "5"],
+        ["--count-turns", "--tail", "5"],
+        ["--list-turns", "--head", "5"],
+    ],
+)
+def test_transcript_cli_rejects_turn_flag_combined_with_head_or_tail(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    flags: list[str],
+) -> None:
+    result = cli_runner.invoke(transcript, ["my-agent", *flags], obj=plugin_manager)
+    assert result.exit_code != 0
+    assert "Cannot combine" in result.output
+
+
+# =============================================================================
+# CLI: --count-turns / --list-turns / --turn integration
+# =============================================================================
+
+
+def test_transcript_cli_count_turns_returns_integer(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    events = _make_numbered_user_assistant_events(3)
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="count-turns-test", events=events)
+
+    result = cli_runner.invoke(transcript, ["count-turns-test", "--count-turns"], obj=plugin_manager)
+    assert result.exit_code == 0
+    assert result.output.strip() == "3"
+
+
+def test_transcript_cli_count_turns_ignores_meta_tool_results(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    """Meta-reclassified stop-hook events must not be counted as turns."""
+    events: list[dict] = [
+        {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "type": "user_message",
+            "event_id": "u1",
+            "source": "claude/common_transcript",
+            "role": "user",
+            "content": "first prompt",
+        },
+        {
+            "timestamp": "2026-01-01T00:00:01Z",
+            "type": "tool_result",
+            "event_id": "meta1",
+            "source": "claude/common_transcript",
+            "tool_name": "meta",
+            "tool_call_id": "meta-xyz",
+            "output": "Stop hook feedback...",
+            "is_error": False,
+        },
+        {
+            "timestamp": "2026-01-01T00:00:02Z",
+            "type": "user_message",
+            "event_id": "u2",
+            "source": "claude/common_transcript",
+            "role": "user",
+            "content": "second prompt",
+        },
+    ]
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="count-meta-test", events=events)
+
+    result = cli_runner.invoke(transcript, ["count-meta-test", "--count-turns"], obj=plugin_manager)
+    assert result.exit_code == 0
+    assert result.output.strip() == "2"
+
+
+def test_transcript_cli_count_turns_empty_transcript_is_zero(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="count-empty-test", events=[])
+    result = cli_runner.invoke(transcript, ["count-empty-test", "--count-turns"], obj=plugin_manager)
+    assert result.exit_code == 0
+    assert result.output.strip() == "0"
+
+
+def test_transcript_cli_list_turns_jsonl(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    events = _make_numbered_user_assistant_events(2)
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="list-turns-jsonl-test", events=events)
+
+    result = cli_runner.invoke(
+        transcript, ["list-turns-jsonl-test", "--list-turns", "--format", "jsonl"], obj=plugin_manager
+    )
+    assert result.exit_code == 0
+    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    assert len(lines) == 2
+    first = json.loads(lines[0])
+    assert first == {
+        "turn": 1,
+        "timestamp": "2026-01-01T00:00:00Z",
+        "event_id": "u0",
+        "content_preview": "prompt-0",
+    }
+    second = json.loads(lines[1])
+    assert second["turn"] == 2
+    assert second["event_id"] == "u1"
+
+
+def test_transcript_cli_list_turns_human_includes_header(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    events = _make_numbered_user_assistant_events(2)
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="list-turns-human-test", events=events)
+
+    result = cli_runner.invoke(transcript, ["list-turns-human-test", "--list-turns"], obj=plugin_manager)
+    assert result.exit_code == 0
+    assert "preview" in result.output
+    assert "prompt-0" in result.output
+    assert "prompt-1" in result.output
+
+
+def test_transcript_cli_list_turns_truncates_long_preview(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    long_content = "a" * 200
+    events = [
+        {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "type": "user_message",
+            "event_id": "u0",
+            "source": "claude/common_transcript",
+            "role": "user",
+            "content": long_content,
+        }
+    ]
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="list-turns-trunc-test", events=events)
+
+    result = cli_runner.invoke(
+        transcript, ["list-turns-trunc-test", "--list-turns", "--format", "jsonl"], obj=plugin_manager
+    )
+    assert result.exit_code == 0
+    parsed = json.loads(result.output.strip())
+    assert parsed["content_preview"].endswith("...")
+    assert len(parsed["content_preview"]) == 80 + len("...")
+
+
+def test_transcript_cli_turn_positive_extracts_correct_slice(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    events = _make_numbered_user_assistant_events(3)
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="turn-positive-test", events=events)
+
+    result = cli_runner.invoke(
+        transcript, ["turn-positive-test", "--turn", "2", "--format", "jsonl"], obj=plugin_manager
+    )
+    assert result.exit_code == 0
+    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    assert len(lines) == 2
+    assert json.loads(lines[0])["event_id"] == "u1"
+    assert json.loads(lines[1])["event_id"] == "a1"
+
+
+def test_transcript_cli_turn_negative_one_returns_in_progress_turn(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    events = _make_numbered_user_assistant_events(3)
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="turn-neg-one-test", events=events)
+
+    result = cli_runner.invoke(
+        transcript, ["turn-neg-one-test", "--turn", "-1", "--format", "jsonl"], obj=plugin_manager
+    )
+    assert result.exit_code == 0
+    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    assert len(lines) == 2
+    assert json.loads(lines[0])["event_id"] == "u2"
+    assert json.loads(lines[1])["event_id"] == "a2"
+
+
+def test_transcript_cli_last_completed_turn_matches_negative_two(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    events = _make_numbered_user_assistant_events(3)
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="last-completed-test", events=events)
+
+    result = cli_runner.invoke(
+        transcript, ["last-completed-test", "--last-completed-turn", "--format", "jsonl"], obj=plugin_manager
+    )
+    assert result.exit_code == 0
+    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    assert len(lines) == 2
+    assert json.loads(lines[0])["event_id"] == "u1"
+    assert json.loads(lines[1])["event_id"] == "a1"
+
+
+def test_transcript_cli_last_completed_turn_errors_with_one_user_message(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    events = _make_numbered_user_assistant_events(1)
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="last-completed-one-test", events=events)
+
+    result = cli_runner.invoke(transcript, ["last-completed-one-test", "--last-completed-turn"], obj=plugin_manager)
+    assert result.exit_code != 0
+    assert "No completed turn" in result.output
+
+
+def test_transcript_cli_turn_out_of_range_gives_clear_error(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    events = _make_numbered_user_assistant_events(2)
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="turn-oor-test", events=events)
+
+    result = cli_runner.invoke(transcript, ["turn-oor-test", "--turn", "5"], obj=plugin_manager)
+    assert result.exit_code != 0
+    assert "out of range" in result.output
+    assert "transcript has 2 turn" in result.output
+
+
+def test_transcript_cli_turn_composes_with_role_filter(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    events = _make_numbered_user_assistant_events(2)
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="turn-role-test", events=events)
+
+    result = cli_runner.invoke(
+        transcript,
+        ["turn-role-test", "--turn", "1", "--role", "assistant", "--format", "jsonl"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code == 0
+    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    assert len(lines) == 1
+    assert json.loads(lines[0])["event_id"] == "a0"
+
+
+# =============================================================================
+# CLI: auto-discovery via MNGR_AGENT_ID
+# =============================================================================
+
+
+def test_transcript_cli_uses_mngr_agent_id_when_target_omitted(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="env-discovery-test")
+    monkeypatch.setenv("MNGR_AGENT_ID", "env-discovery-test")
+
+    result = cli_runner.invoke(transcript, ["--format", "jsonl"], obj=plugin_manager)
+    assert result.exit_code == 0
+    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    assert len(lines) == 3
+
+
+def test_transcript_cli_errors_when_target_omitted_and_no_env(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MNGR_AGENT_ID", raising=False)
+
+    result = cli_runner.invoke(transcript, [], obj=plugin_manager)
+    assert result.exit_code != 0
+    assert "MNGR_AGENT_ID" in result.output
