@@ -54,7 +54,6 @@ from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
-from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
 from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
@@ -75,6 +74,11 @@ from imbue.mngr_sbx.host_store import HostRecord
 from imbue.mngr_sbx.host_store import SbxHostConfig
 from imbue.mngr_sbx.host_store import SbxHostStore
 from imbue.mngr_sbx.host_store import sandbox_name_for_host
+from imbue.mngr_sbx.keeper import ensure_keeper_alive
+from imbue.mngr_sbx.keeper import is_keeper_alive
+from imbue.mngr_sbx.keeper import read_keeper_pid
+from imbue.mngr_sbx.keeper import spawn_keeper
+from imbue.mngr_sbx.keeper import stop_keeper
 from imbue.mngr_sbx.sbx_cli import check_sbx_authenticated
 from imbue.mngr_sbx.sbx_cli import sbx_create
 from imbue.mngr_sbx.sbx_cli import sbx_exec
@@ -202,7 +206,10 @@ class SbxProviderInstance(BaseProviderInstance):
         timeout: float = 180.0,
     ) -> tuple[int | None, str, str]:
         """Run a shell snippet inside an sbx sandbox via ``sbx exec``."""
-        return sbx_exec(
+        logger.debug(
+            "sbx exec sandbox={} user={} cmd_len={} cmd_head={!r}", sandbox_name, user, len(command), command[:200]
+        )
+        rc, stdout, stderr = sbx_exec(
             self.mngr_ctx.concurrency_group,
             self.name,
             sandbox_name,
@@ -211,11 +218,53 @@ class SbxProviderInstance(BaseProviderInstance):
             detach=detach,
             timeout=timeout,
         )
+        logger.debug("sbx exec result rc={} stdout_len={} stderr_len={}", rc, len(stdout), len(stderr))
+        return rc, stdout, stderr
 
     def _check_and_install_packages(self, sandbox_name: str) -> None:
-        """Ensure sshd, tmux, rsync, etc. are installed inside the sandbox."""
-        check_install_cmd = build_check_and_install_packages_command(str(self.host_dir))
-        returncode, stdout, stderr = self._exec_in_sandbox(sandbox_name, check_install_cmd)
+        """Ensure sshd, tmux, rsync, etc. are installed inside the sandbox.
+
+        sbx's docker-agent image kicks off an ``apt-get update`` on every sandbox
+        start, which holds the dpkg lock for ~20-40 seconds. We deal with this in
+        two ways:
+
+        1. Inject ``DPkg::Lock::Timeout=180`` into our apt invocations via
+           ``APT_LISTCHANGES_FRONTEND=none`` + an apt.conf snippet, so our calls
+           wait for the lock instead of bombing out.
+        2. Still try to wait for the boot-time ``apt-get update`` to finish first,
+           but only briefly. The lock timeout is the real safety net.
+
+        We bypass mngr's shared ``build_check_and_install_packages_command`` here
+        because it doesn't take a lock-timeout flag.
+        """
+        prelude = (
+            "set -e; "
+            # Wait up to 4 minutes for the boot-time apt update to drop both the lists lock and the
+            # dpkg lock. We need *both* clear because `apt-get install` reads /var/lib/apt/lists
+            # and writes /var/lib/dpkg. Polling the lock files directly works without needing fuser
+            # or lsof installed.
+            "for _ in $(seq 1 240); do "
+            "  if "
+            "    ! pgrep -fl 'apt-get update' >/dev/null 2>&1 && "
+            "    ! pgrep -fl 'apt-get install' >/dev/null 2>&1 && "
+            "    ! pgrep -fl 'dpkg' >/dev/null 2>&1; "
+            "  then break; fi; "
+            "  sleep 1; "
+            "done; "
+            # Belt-and-braces: tell apt to wait for the dpkg lock if a leftover process is still mid-transaction.
+            "mkdir -p /etc/apt/apt.conf.d; "
+            "printf 'DPkg::Lock::Timeout \"120\";\\n' > /etc/apt/apt.conf.d/99-mngr-sbx-lock-timeout; "
+            "export DEBIAN_FRONTEND=noninteractive; "
+        )
+        host_dir_str = str(self.host_dir)
+        # Skip our own `apt-get update`: the sbx docker-agent image runs one on boot, so the
+        # package cache is fresh. Avoiding the redundant update sidesteps a race on the apt-lists lock.
+        install_body = (
+            f"apt-get install -y -qq openssh-server tmux rsync git jq xxd curl ca-certificates && "
+            f"mkdir -p /run/sshd && mkdir -p {host_dir_str}"
+        )
+        combined_cmd = prelude + install_body
+        returncode, stdout, stderr = self._exec_in_sandbox(sandbox_name, combined_cmd, timeout=420.0)
         if returncode != 0:
             raise MngrError(
                 f"Failed to install required packages in sandbox {sandbox_name} "
@@ -447,7 +496,20 @@ kill -TERM 1
             self._save_failed_host_record(host_id, name, tags, failure_reason)
             raise SbxHostCreationError(failure_reason) from e
 
-        # Step 2: install sshd inside the sandbox and publish its port.
+        # Step 2: spawn the keeper so the sandbox stays alive for the install + publish + sshd steps.
+        try:
+            spawn_keeper(self._provider_dir, host_id, sandbox_name)
+        except SbxCommandError as e:
+            failure_reason = str(e)
+            logger.error("Failed to spawn sbx keeper: {}", failure_reason)
+            try:
+                sbx_rm(self.mngr_ctx.concurrency_group, self.name, sandbox_name, force=True)
+            except (SbxCommandError, OSError) as cleanup_err:
+                logger.debug("Failed to clean up sandbox {} after keeper failure: {}", sandbox_name, cleanup_err)
+            self._save_failed_host_record(host_id, name, tags, failure_reason)
+            raise SbxHostCreationError(failure_reason) from e
+
+        # Step 3: install sshd inside the sandbox and publish its port.
         try:
             private_key_path, client_public_key = self._get_client_keypair()
             host_key_path, host_public_key = self._get_host_keypair()
@@ -485,6 +547,7 @@ kill -TERM 1
         except (SbxCommandError, SbxNotAuthorizedError, MngrError, OSError) as e:
             failure_reason = str(e)
             logger.error("sbx sshd bridge setup failed: {}", failure_reason)
+            stop_keeper(self._provider_dir, host_id)
             try:
                 sbx_rm(self.mngr_ctx.concurrency_group, self.name, sandbox_name, force=True)
             except (SbxCommandError, OSError) as cleanup_err:
@@ -570,6 +633,10 @@ kill -TERM 1
             logger.debug("No host record found for {}; nothing to stop", host_id)
             return
 
+        # Tear down the keeper so the sandbox actually stops (sbx will auto-stop ~3s after
+        # the foreground keeper exits, but explicitly calling sbx stop afterward is more deterministic).
+        stop_keeper(self._provider_dir, host_id)
+
         try:
             sbx_stop(
                 self.mngr_ctx.concurrency_group,
@@ -609,6 +676,7 @@ kill -TERM 1
         if isinstance(host, Host):
             host.disconnect()
         self._evict_cached_host(host_id)
+        stop_keeper(self._provider_dir, host_id)
 
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is not None and host_record.config is not None:
@@ -667,7 +735,10 @@ kill -TERM 1
         ):
             return self._create_offline_host(host_record)
 
-        # Verify the sandbox is still listed and running before producing an online Host.
+        # If the keeper died, the sandbox auto-stops within a few seconds. Try to revive it before
+        # falling back to offline, so transient mngr CLI exits don't permanently break the host.
+        ensure_keeper_alive(self._provider_dir, host_id, host_record.config.sandbox_name)
+
         try:
             sandboxes = sbx_list(self.mngr_ctx.concurrency_group, self.name)
         except (SbxCommandError, SbxNotAuthorizedError, SbxNotInstalledError) as e:
@@ -728,7 +799,8 @@ kill -TERM 1
         for record in self._host_store.list_all_host_records():
             host_id = HostId(record.certified_host_data.host_id)
             host_name = HostName(record.certified_host_data.host_name)
-            host_state = _derive_host_state(record, live_status_by_name)
+            keeper_pid = read_keeper_pid(self._provider_dir, host_id)
+            host_state = _derive_host_state(record, live_status_by_name, keeper_pid)
             if host_state == HostState.DESTROYED and not include_destroyed:
                 continue
             discovered.append(
@@ -863,14 +935,24 @@ def _host_state_from_sbx_status(status: str) -> HostState:
 def _derive_host_state(
     record: HostRecord,
     live_status_by_name: Mapping[str, str],
+    keeper_pid: int | None,
 ) -> HostState:
-    """Combine the local host record with the live sbx-reported status to derive HostState."""
+    """Combine the local host record with the live sbx-reported status to derive HostState.
+
+    A keeper PID with no live process implies the sandbox is racing toward auto-stop; we
+    report STOPPED so mngr does not try to use a stale SSH endpoint.
+    """
     if record.config is None:
         return HostState.FAILED
 
     live_status = live_status_by_name.get(record.config.sandbox_name)
     if live_status is not None:
-        return _host_state_from_sbx_status(live_status)
+        derived = _host_state_from_sbx_status(live_status)
+        # Even if sbx still reports 'running', a dead keeper means the sandbox is about to
+        # auto-stop -- demote to STOPPED so callers don't queue work against a doomed host.
+        if derived == HostState.RUNNING and keeper_pid is not None and not is_keeper_alive(keeper_pid):
+            return HostState.STOPPED
+        return derived
 
     if record.certified_host_data.failure_reason is not None:
         return HostState.FAILED

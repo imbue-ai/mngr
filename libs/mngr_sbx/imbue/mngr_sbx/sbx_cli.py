@@ -89,7 +89,10 @@ class SbxSandboxInfo(FrozenModel):
     name: str = Field(description="Sandbox name")
     agent: str = Field(description="Agent type the sandbox was created for")
     status: str = Field(description="sbx-reported status (e.g. 'running', 'stopped')")
-    workspace: str | None = Field(default=None, description="Primary workspace path mounted into the sandbox")
+    workspaces: tuple[str, ...] = Field(
+        default=(),
+        description="Workspace paths mounted into the sandbox (sbx returns these as a list)",
+    )
     raw: dict[str, Any] = Field(default_factory=dict, description="Original JSON record from sbx")
 
 
@@ -98,7 +101,12 @@ def sbx_list(
     provider_name: ProviderInstanceName,
     timeout: float = 30.0,
 ) -> list[SbxSandboxInfo]:
-    """Run ``sbx ls --json`` and parse the result into typed records."""
+    """Run ``sbx ls --json`` and parse the result into typed records.
+
+    sbx 0.28.x emits ``{"sandboxes": [...]}``. Older builds emit a top-level
+    list, and some output mode produces JSONL; handle all three for forward/
+    backward compatibility.
+    """
     with log_span("Running sbx ls --json"):
         result = cg.run_process_to_completion(
             ["sbx", "ls", "--json"],
@@ -120,23 +128,7 @@ def sbx_list(
         logger.warning("Failed to parse 'sbx ls --json' output: {}", e)
         return []
 
-    # sbx may emit either a top-level list or one JSON object per line. Handle both.
-    records: list[dict[str, Any]]
-    if isinstance(parsed, list):
-        records = [item for item in parsed if isinstance(item, dict)]
-    else:
-        records = []
-        for line in output.splitlines():
-            stripped_line = line.strip()
-            if not stripped_line:
-                continue
-            try:
-                obj = json.loads(stripped_line)
-            except json.JSONDecodeError as e:
-                logger.warning("Skipping invalid JSONL line from 'sbx ls --json': {}", e)
-                continue
-            if isinstance(obj, dict):
-                records.append(obj)
+    records = _extract_sandbox_records(parsed, output)
 
     sandboxes: list[SbxSandboxInfo] = []
     for record in records:
@@ -145,17 +137,49 @@ def sbx_list(
             continue
         agent_value = record.get("agent") or record.get("Agent") or ""
         status_value = record.get("status") or record.get("Status") or ""
-        workspace_value = record.get("workspace") or record.get("Workspace")
+        workspaces_value = record.get("workspaces") or record.get("Workspaces") or ()
+        workspaces: tuple[str, ...]
+        if isinstance(workspaces_value, list):
+            workspaces = tuple(w for w in workspaces_value if isinstance(w, str))
+        elif isinstance(workspaces_value, str):
+            workspaces = (workspaces_value,)
+        else:
+            workspaces = ()
         sandboxes.append(
             SbxSandboxInfo(
                 name=name_value,
                 agent=str(agent_value),
                 status=str(status_value),
-                workspace=workspace_value if isinstance(workspace_value, str) else None,
+                workspaces=workspaces,
                 raw=record,
             )
         )
     return sandboxes
+
+
+def _extract_sandbox_records(parsed: Any, raw_output: str) -> list[dict[str, Any]]:
+    """Normalize the various shapes ``sbx ls --json`` may produce into a flat list of dicts."""
+    if isinstance(parsed, dict):
+        nested = parsed.get("sandboxes")
+        if isinstance(nested, list):
+            return [item for item in nested if isinstance(item, dict)]
+        return []
+    if isinstance(parsed, list):
+        return [item for item in parsed if isinstance(item, dict)]
+    # Fall back: try line-delimited JSON.
+    records: list[dict[str, Any]] = []
+    for line in raw_output.splitlines():
+        stripped_line = line.strip()
+        if not stripped_line:
+            continue
+        try:
+            obj = json.loads(stripped_line)
+        except json.JSONDecodeError as e:
+            logger.warning("Skipping invalid JSONL line from 'sbx ls --json': {}", e)
+            continue
+        if isinstance(obj, dict):
+            records.append(obj)
+    return records
 
 
 def sbx_create(
@@ -322,15 +346,27 @@ def sbx_list_ports(
 def _parse_port_listing(stdout: str) -> list[SbxPortBinding]:
     """Parse ``sbx ports`` output.
 
-    ``sbx ports`` does not advertise a JSON form today, so this parser accepts
-    a few common shapes: lines like ``8080/tcp -> 127.0.0.1:32769`` or the
-    Docker-port form ``127.0.0.1:32769->8080/tcp``. Lines we don't recognize
-    are skipped with a warning so the rest of the output is still usable.
+    sbx 0.28.x emits two distinct shapes:
+
+    - ``sbx ports <name> --publish <port>`` returns a single line:
+      ``Published 127.0.0.1:49153 -> 22/tcp``
+    - ``sbx ports <name>`` (no flag) returns a table with a header row
+      and columns ``HOST IP``, ``HOST PORT``, ``SANDBOX PORT``, ``PROTOCOL``.
+
+    Older arrow-only forms (``22/tcp -> 127.0.0.1:32769`` and
+    ``127.0.0.1:32769->22/tcp``) are also accepted so a future sbx revision
+    that swaps formats doesn't silently break us. Lines we don't recognize
+    are skipped with a debug log so the rest of the output is still usable.
     """
     bindings: list[SbxPortBinding] = []
     for raw_line in stdout.splitlines():
         line = raw_line.strip()
-        if not line or line.lower().startswith(("port", "no ports", "name")):
+        if not line:
+            continue
+        # Skip the table header from ``sbx ports <name>``.
+        if line.upper().startswith("HOST IP"):
+            continue
+        if line.lower().startswith(("no ports", "name", "port")):
             continue
         parsed = _parse_port_line(line)
         if parsed is None:
@@ -342,34 +378,63 @@ def _parse_port_listing(stdout: str) -> list[SbxPortBinding]:
 
 def _parse_port_line(line: str) -> SbxPortBinding | None:
     """Parse a single sbx ports listing line into an SbxPortBinding."""
-    # Form A: "<sandbox_port>/<proto> -> <host_ip>:<host_port>"
+    # ``Published 127.0.0.1:49153 -> 22/tcp`` (from sbx ports --publish)
+    publish_prefix = "Published "
+    if line.startswith(publish_prefix):
+        return _parse_port_line(line[len(publish_prefix) :].strip())
+
+    # Form: "<sandbox_port>/<proto> -> <host_ip>:<host_port>"
     if " -> " in line:
         left_side, right_side = line.split(" -> ", 1)
-        sandbox_value, proto = _split_port_and_protocol(left_side.strip())
-        host_ip, host_port_value = _split_host_address(right_side.strip())
-        if sandbox_value is None or host_ip is None or host_port_value is None:
-            return None
-        return SbxPortBinding(
-            sandbox_port=sandbox_value,
-            host_ip=host_ip,
-            host_port=host_port_value,
-            protocol=proto or "tcp",
-        )
+        return _build_binding_from_arrow_sides(left_side.strip(), right_side.strip())
 
-    # Form B: "<host_ip>:<host_port>-><sandbox_port>/<proto>"
+    # Form: "<host_ip>:<host_port>-><sandbox_port>/<proto>" (no spaces, Docker default)
     if "->" in line:
         left_side, right_side = line.split("->", 1)
-        host_ip, host_port_value = _split_host_address(left_side.strip())
-        sandbox_value, proto = _split_port_and_protocol(right_side.strip())
-        if sandbox_value is None or host_ip is None or host_port_value is None:
+        return _build_binding_from_arrow_sides(left_side.strip(), right_side.strip())
+
+    # Whitespace-separated table row: "HOST_IP  HOST_PORT  SANDBOX_PORT  PROTOCOL"
+    columns = line.split()
+    if len(columns) >= 4:
+        host_ip = columns[0]
+        try:
+            host_port = int(columns[1])
+            sandbox_port = int(columns[2])
+        except ValueError:
             return None
+        protocol = columns[3] or "tcp"
+        return SbxPortBinding(
+            sandbox_port=sandbox_port,
+            host_ip=host_ip,
+            host_port=host_port,
+            protocol=protocol,
+        )
+
+    return None
+
+
+def _build_binding_from_arrow_sides(left: str, right: str) -> SbxPortBinding | None:
+    """Build an SbxPortBinding from the two sides of an arrow, in either orientation."""
+    # Try (sandbox -> host) orientation first.
+    sandbox_value, proto = _split_port_and_protocol(left)
+    host_ip, host_port_value = _split_host_address(right)
+    if sandbox_value is not None and host_ip is not None and host_port_value is not None:
         return SbxPortBinding(
             sandbox_port=sandbox_value,
             host_ip=host_ip,
             host_port=host_port_value,
             protocol=proto or "tcp",
         )
-
+    # Try (host -> sandbox) orientation.
+    host_ip, host_port_value = _split_host_address(left)
+    sandbox_value, proto = _split_port_and_protocol(right)
+    if sandbox_value is not None and host_ip is not None and host_port_value is not None:
+        return SbxPortBinding(
+            sandbox_port=sandbox_value,
+            host_ip=host_ip,
+            host_port=host_port_value,
+            protocol=proto or "tcp",
+        )
     return None
 
 
