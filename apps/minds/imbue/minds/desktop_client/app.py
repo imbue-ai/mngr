@@ -32,6 +32,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
@@ -1478,16 +1479,21 @@ async def _handle_restart_workspace_server_api(
 
     def _probe_until_ready() -> bool:
         end = time.monotonic() + _RESTART_BLOCK_TIMEOUT_SECONDS
-        while time.monotonic() < end:
-            status = probe_workspace_through_plugin(
-                mngr_forward_port=mngr_forward_port,
-                preauth_cookie=preauth_cookie,
-                agent_id=aid,
-                probe_timeout_seconds=_RESTART_PROBE_TIMEOUT_SECONDS,
-            )
-            if status == 200:
-                return True
-            threading.Event().wait(timeout=0.5)
+        with make_workspace_probe_client(
+            preauth_cookie=preauth_cookie,
+            probe_timeout_seconds=_RESTART_PROBE_TIMEOUT_SECONDS,
+        ) as probe_client:
+            while time.monotonic() < end:
+                status = probe_workspace_through_plugin(
+                    mngr_forward_port=mngr_forward_port,
+                    preauth_cookie=preauth_cookie,
+                    agent_id=aid,
+                    probe_timeout_seconds=_RESTART_PROBE_TIMEOUT_SECONDS,
+                    client=probe_client,
+                )
+                if status == 200:
+                    return True
+                threading.Event().wait(timeout=0.5)
         return False
 
     ready = await loop.run_in_executor(None, _probe_until_ready)
@@ -2447,14 +2453,19 @@ def _run_workspace_health_probe_loop(
             type(backend_resolver).__name__,
         )
         return
-    while not root_concurrency_group.is_shutting_down():
-        for aid in tracker.snapshot_all():
-            probe_status = probe_workspace_through_plugin(
-                mngr_forward_port=mngr_forward_port,
-                preauth_cookie=mngr_forward_preauth_cookie,
-                agent_id=aid,
-                probe_timeout_seconds=_RESTART_PROBE_TIMEOUT_SECONDS,
-            )
-            if probe_status == 200:
-                tracker.record_success(aid)
-        threading.Event().wait(timeout=_HEALTH_PROBE_INTERVAL_SECONDS)
+    with make_workspace_probe_client(
+        preauth_cookie=mngr_forward_preauth_cookie,
+        probe_timeout_seconds=_RESTART_PROBE_TIMEOUT_SECONDS,
+    ) as probe_client:
+        while not root_concurrency_group.is_shutting_down():
+            for aid in tracker.snapshot_all():
+                probe_status = probe_workspace_through_plugin(
+                    mngr_forward_port=mngr_forward_port,
+                    preauth_cookie=mngr_forward_preauth_cookie,
+                    agent_id=aid,
+                    probe_timeout_seconds=_RESTART_PROBE_TIMEOUT_SECONDS,
+                    client=probe_client,
+                )
+                if probe_status == 200:
+                    tracker.record_success(aid)
+            threading.Event().wait(timeout=_HEALTH_PROBE_INTERVAL_SECONDS)
