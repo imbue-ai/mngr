@@ -128,13 +128,13 @@ def test_initialize_tolerates_leading_v_prefix(tmp_path: Path) -> None:
 
 
 def test_initialize_rejects_older_version(tmp_path: Path) -> None:
-    binary = _make_version_binary(tmp_path, version_output="2.8.5")
+    binary = _make_version_binary(tmp_path, version_output="2.7.5")
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
     with pytest.raises(LatchkeyVersionError) as exc_info:
         manager.initialize()
     # The error message must surface both versions so the user knows what
     # they have and what they need.
-    assert "2.8.5" in str(exc_info.value)
+    assert "2.7.5" in str(exc_info.value)
     assert LATCHKEY_MIN_VERSION in str(exc_info.value)
 
 
