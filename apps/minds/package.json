@@ -14,10 +14,10 @@
   },
   "dependencies": {
     "@todesktop/runtime": "^1.6.0",
-    "latchkey": "^2.8.0"
+    "latchkey": "file:/Users/gabeguralnick/utilities/latchkey"
   },
   "devDependencies": {
-    "electron": "35.7.5",
-    "@todesktop/cli": "^1.8.0"
+    "@todesktop/cli": "^1.8.0",
+    "electron": "35.7.5"
   }
 }
