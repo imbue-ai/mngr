@@ -260,7 +260,9 @@ def _collapse_by_source(snapshots: list[UsageSnapshot]) -> list[UsageSnapshot]:
     by_source: dict[str, UsageSnapshot] = {}
     for snap in snapshots:
         existing = by_source.get(snap.source_name)
-        if existing is None or (snap.updated_at, snap.source_name) > (existing.updated_at, existing.source_name):
+        # ``existing`` was looked up under ``snap.source_name``, so the keys
+        # match by construction -- compare on ``updated_at`` alone.
+        if existing is None or snap.updated_at > existing.updated_at:
             by_source[snap.source_name] = snap
     return list(by_source.values())
 
