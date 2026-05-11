@@ -167,11 +167,11 @@ def _discover_hosts_for_gc(
                 cg=mngr_ctx.concurrency_group,
             )
         except ProviderUnavailableError as e:
-            # Skip at DEBUG to keep stderr clean for the common "Lima not
-            # installed" / "Docker daemon down" cases. The provider is
-            # excluded from `result`, so downstream gc_* helpers never
+            # Surface unavailability as a warning so the user notices when
+            # an enabled provider isn't installed/reachable. The provider
+            # is excluded from `result`, so downstream gc_* helpers never
             # see it (otherwise they'd treat its volumes as orphaned).
-            logger.debug("Skipping provider {} during GC (unavailable): {}", provider.name, e)
+            logger.warning("Skipping provider {} during GC (unavailable): {}", provider.name, e)
             continue
         except MngrError as e:
             logger.warning("Failed to discover hosts for provider {}: {}", provider.name, e)

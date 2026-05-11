@@ -105,11 +105,6 @@ def _find_host_across_providers(
             continue
         if host_name is None:
             continue
-        # Try the identifier as a HostId first, then as a HostName. For
-        # each shape, three outcomes flow through the same control: the
-        # provider has it (return), the provider says no (HostNotFoundError),
-        # or the provider can't tell us right now (ProviderUnavailableError).
-        # All three "no answer" cases fall through to the next attempt.
         try:
             host = provider.get_host(HostId(str(host_name)))
             return host.id, provider.name
