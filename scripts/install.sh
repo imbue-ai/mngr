@@ -98,8 +98,21 @@ else
             info "Install one and then set the default with: mngr config set commands.create.type <name> --scope user"
             ;;
         1)
-            info "Setting default agent type to '${agent_types[0]}'..."
-            mngr config set commands.create.type "${agent_types[0]}" --scope user || warn "Failed to set default agent type."
+            only_type="${agent_types[0]}"
+            info "Found one agent-type plugin: '$only_type'."
+            answer=""
+            if [ -e /dev/tty ]; then
+                read -r -p "Set this as the default for 'mngr create'? [Y/n]: " answer </dev/tty || answer=""
+            fi
+            case "${answer:-y}" in
+                [Yy]|[Yy][Ee][Ss]|"")
+                    mngr config set commands.create.type "$only_type" --scope user \
+                        || warn "Failed to set default agent type."
+                    ;;
+                *)
+                    info "Skipped. Set it later with: mngr config set commands.create.type <name> --scope user"
+                    ;;
+            esac
             ;;
         *)
             echo "Choose a default agent type for 'mngr create':"
