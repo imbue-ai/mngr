@@ -31,6 +31,7 @@ from enum import Enum
 from typing import Final
 
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -60,7 +61,7 @@ class _AgentRecord(MutableModel):
         description="time.monotonic() of the first failure in the current failing run, or None.",
     )
 
-    model_config = {"frozen": False, "extra": "forbid", "arbitrary_types_allowed": True}
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class WorkspaceServerHealthTracker(MutableModel):
@@ -82,7 +83,7 @@ class WorkspaceServerHealthTracker(MutableModel):
     _stuck_timers: dict[str, threading.Timer] = PrivateAttr(default_factory=dict)
     _on_change_callbacks: list[OnChangeCallback] = PrivateAttr(default_factory=list)
 
-    model_config = {"frozen": False, "extra": "forbid", "arbitrary_types_allowed": True}
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     # -- Public callback registration -------------------------------------
 
