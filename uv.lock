@@ -15,6 +15,7 @@ members = [
     "imbue-common",
     "imbue-mngr",
     "imbue-mngr-claude",
+    "imbue-mngr-claude-subagent-proxy",
     "imbue-mngr-file",
     "imbue-mngr-forward",
     "imbue-mngr-imbue-cloud",
@@ -428,18 +429,18 @@ wheels = [
 
 [[package]]
 name = "cel-python"
-version = "0.4.0"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "google-re2", marker = "python_full_version != '3.13.*' or platform_machine != 'arm64' or sys_platform != 'darwin'" },
+    { name = "google-re2" },
     { name = "jmespath" },
     { name = "lark" },
     { name = "pendulum" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ac/1a/17fd1d0faecd898f68db010951015c311780b6ceb13b4214a7be30fa9708/cel_python-0.4.0.tar.gz", hash = "sha256:9d0da22ed083cb5d57f2127ec7af7bba60bcb8d0a4a23543fc6838e739839c68", size = 13435161, upload-time = "2025-07-25T13:34:58.15Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/61/4e/f821948a5bbd7a98a218720f831a62216f79a98e43b13d9ab2f98e37c5f8/cel_python-0.5.0.tar.gz", hash = "sha256:3eb0a619e8df0f338d0430cda01427a742e77e3c433a1c7c3ebd409cd804c45a", size = 13364027, upload-time = "2026-01-31T19:07:13.436Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f8/cb/3bbb935dbaac473ee2de44f41f07efb6c696fff6e6241e9ac45c94ac6558/cel_python-0.4.0-py3-none-any.whl", hash = "sha256:9ddfad8ca4f5d54006dfb45fa46c5a937265173697c1a51fc8cdc645c6a4f4a7", size = 85069, upload-time = "2025-07-25T13:34:53.348Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/f8/38812adc3f787c2c2e8ba56f524185ed379656c10b40347a32796ba61c08/cel_python-0.5.0-py3-none-any.whl", hash = "sha256:d0f85008b89655c2bb18d797d2fa3f96f2ed80f4a3b43b0e8138c6646581e5f6", size = 84950, upload-time = "2026-01-31T19:07:11.821Z" },
 ]
 
 [[package]]
@@ -609,7 +610,7 @@ wheels = [
 
 [[package]]
 name = "concurrency-group"
-version = "0.1.15"
+version = "0.1.16"
 source = { editable = "libs/concurrency_group" }
 dependencies = [
     { name = "imbue-common" },
@@ -1644,7 +1645,7 @@ dev = [
 
 [[package]]
 name = "imbue-common"
-version = "0.1.15"
+version = "0.1.16"
 source = { editable = "libs/imbue_common" }
 dependencies = [
     { name = "click" },
@@ -1674,7 +1675,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "imbue-mngr"
-version = "0.2.6"
+version = "0.2.7"
 source = { editable = "libs/mngr" }
 dependencies = [
     { name = "cel-python" },
@@ -1703,7 +1704,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cel-python", specifier = ">=0.1.5" },
+    { name = "cel-python", specifier = ">=0.5.0" },
     { name = "click", specifier = ">=8.0" },
     { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "concurrency-group", editable = "libs/concurrency_group" },
@@ -1729,7 +1730,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-claude"
-version = "0.2.6"
+version = "0.2.7"
 source = { editable = "libs/mngr_claude" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -1747,8 +1748,31 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 dev = [{ name = "imbue-mngr-modal", editable = "libs/mngr_modal" }]
 
 [[package]]
+name = "imbue-mngr-claude-subagent-proxy"
+version = "0.1.0"
+source = { editable = "libs/mngr_claude_subagent_proxy" }
+dependencies = [
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-claude" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "imbue-mngr-modal" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-claude", editable = "libs/mngr_claude" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "imbue-mngr-modal", editable = "libs/mngr_modal" }]
+
+[[package]]
 name = "imbue-mngr-file"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_file" }
 dependencies = [
     { name = "click-option-group" },
@@ -1837,7 +1861,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-kanpan"
-version = "0.2.6"
+version = "0.2.7"
 source = { editable = "libs/mngr_kanpan" }
 dependencies = [
     { name = "click" },
@@ -1869,7 +1893,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-modal"
-version = "0.2.6"
+version = "0.2.7"
 source = { editable = "libs/mngr_modal" }
 dependencies = [
     { name = "dockerfile-parse" },
@@ -1888,7 +1912,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-notifications"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_notifications" }
 dependencies = [
     { name = "click-option-group" },
@@ -1903,7 +1927,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-opencode"
-version = "0.2.6"
+version = "0.2.7"
 source = { editable = "libs/mngr_opencode" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -1914,7 +1938,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-pair"
-version = "0.2.6"
+version = "0.2.7"
 source = { editable = "libs/mngr_pair" }
 dependencies = [
     { name = "click-option-group" },
@@ -1929,7 +1953,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-pi-coding"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_pi_coding" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -1940,7 +1964,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-recursive"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_recursive" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -1995,7 +2019,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-ttyd"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_ttyd" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2006,7 +2030,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-tutor"
-version = "0.2.6"
+version = "0.2.7"
 source = { editable = "libs/mngr_tutor" }
 dependencies = [
     { name = "click" },
@@ -2051,7 +2075,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-wait"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_wait" }
 dependencies = [
     { name = "click-option-group" },
@@ -2573,7 +2597,7 @@ requires-dist = [
 
 [[package]]
 name = "modal-proxy"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "libs/modal_proxy" }
 dependencies = [
     { name = "concurrency-group" },
@@ -3775,7 +3799,7 @@ wheels = [
 
 [[package]]
 name = "resource-guards"
-version = "0.1.5"
+version = "0.1.6"
 source = { editable = "libs/resource_guards" }
 dependencies = [
     { name = "pluggy" },

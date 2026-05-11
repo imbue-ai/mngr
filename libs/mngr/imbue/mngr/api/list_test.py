@@ -23,6 +23,7 @@ from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import HostErrorInfo
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.api.list import ProviderErrorInfo
+from imbue.mngr.api.list import _AGENT_SCHEMALESS_PATHS
 from imbue.mngr.api.list import _ListAgentsParams
 from imbue.mngr.api.list import _apply_cel_filters
 from imbue.mngr.api.list import _collect_and_emit_details_for_host
@@ -31,6 +32,7 @@ from imbue.mngr.api.list import _handle_listing_error
 from imbue.mngr.api.list import _maybe_write_full_discovery_snapshot
 from imbue.mngr.api.list import _process_host_with_error_handling
 from imbue.mngr.api.list import agent_details_to_cel_context
+from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -63,6 +65,7 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
 from imbue.mngr.providers.registry import _backend_registry
+from imbue.mngr.utils.cel_utils import TolerantMapType
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.testing import capture_loguru
 
@@ -511,6 +514,108 @@ def test_agent_details_to_cel_context_idle_uses_most_recent_activity() -> None:
     # SSH activity (10 min ago) is the most recent, so idle should be ~600s.
     assert "idle" in context
     assert 580 < context["idle"] < 620
+
+
+@pytest.mark.parametrize(
+    "exclude_expr",
+    [
+        'labels.mngr_subagent_proxy == "child"',
+        'plugin.some_plugin_field == "x"',
+        'host.tags.foo == "x"',
+        'host.plugin.some_plugin_field == "x"',
+    ],
+)
+def test_apply_cel_filters_no_warning_for_missing_key_on_schemaless_field(exclude_expr: str) -> None:
+    """Filtering on a missing key under any schemaless field must not warn.
+
+    `labels`, `plugin`, `host.tags`, `host.plugin` are all schemaless dicts,
+    and `_apply_cel_filters` must apply tolerance uniformly across all of
+    them so that an `--exclude 'labels.X == "Y"'`-style filter quietly
+    evaluates to false on agents without that key, rather than logging a
+    per-agent warning.
+    """
+    agent = _make_agent_details("test-agent", _make_host_details())
+    # All four schemaless fields default to empty dict, so the missing key
+    # in the filter is genuinely missing.
+    assert agent.labels == {}
+    assert agent.plugin == {}
+    assert agent.host.tags == {}
+    assert agent.host.plugin == {}
+
+    include_filters, exclude_filters = compile_cel_filters(
+        include_filters=(),
+        exclude_filters=(exclude_expr,),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result = _apply_cel_filters(agent, include_filters, exclude_filters)
+    assert result is True
+    assert "Error evaluating" not in log_output.getvalue()
+
+
+@pytest.mark.parametrize("path", list(_AGENT_SCHEMALESS_PATHS))
+def test_apply_cel_filters_wraps_each_schemaless_path_with_tolerant_map(path: tuple[str, ...]) -> None:
+    """The agent CEL context built by `build_agent_cel_context` has TolerantMapType
+    at each schemaless path; siblings stay strict.
+    """
+    agent = _make_agent_details("test-agent", _make_host_details())
+    cel_context = build_agent_cel_context(agent)
+
+    target: Any = cel_context
+    for step in path:
+        target = target[step]
+    assert isinstance(target, TolerantMapType)
+
+
+@pytest.mark.parametrize(
+    "exclude_expr",
+    [
+        'host.providr == "local"',
+        'host.providr.contains("local")',
+        "host.providr > 5",
+    ],
+)
+def test_apply_cel_filters_warns_on_typoed_strict_field(exclude_expr: str) -> None:
+    """A typoed strict-field path surfaces a warning so users can see the typo.
+
+    Counterpart to test_apply_cel_filters_no_warning_for_missing_key_on_schemaless_field:
+    schemaless fields stay quiet on missing keys, but a missing-strict-field
+    access -- whether via equality, method call, or ordered comparison -- raises
+    out of the filter loop's evaluate() call and is logged.
+    """
+    agent = _make_agent_details("test-agent", _make_host_details())
+    include_filters, exclude_filters = compile_cel_filters(
+        include_filters=(),
+        exclude_filters=(exclude_expr,),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result = _apply_cel_filters(agent, include_filters, exclude_filters)
+    # Exclude filter errored, so the agent is still included.
+    assert result is True
+    assert "Error evaluating" in log_output.getvalue()
+
+
+def test_apply_cel_filters_has_macro_correctly_reports_label_presence() -> None:
+    """`has(labels.X)` must return True only when X is actually set on the agent.
+
+    Without this, `--include 'has(labels.foo)'` would silently match every agent.
+    """
+    host_details = _make_host_details()
+    base_with = _make_agent_details("with-label", host_details)
+    agent_with_label = base_with.model_copy_update(
+        to_update(base_with.field_ref().labels, {"project": "mngr"}),
+    )
+    agent_without_label = _make_agent_details("without-label", host_details)
+
+    include_filters, exclude_filters = compile_cel_filters(
+        include_filters=("has(labels.project)",),
+        exclude_filters=(),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result_with = _apply_cel_filters(agent_with_label, include_filters, exclude_filters)
+        result_without = _apply_cel_filters(agent_without_label, include_filters, exclude_filters)
+    assert result_with is True
+    assert result_without is False
+    assert "Error evaluating" not in log_output.getvalue()
 
 
 def test_agent_details_to_cel_context_exposes_host_provider_under_both_names() -> None:

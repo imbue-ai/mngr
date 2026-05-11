@@ -272,6 +272,7 @@ def test_prevent_code_in_init_files() -> None:
     rc.check_code_in_init_files(_DIR, snapshot(0))
 
 
+@pytest.mark.timeout(15)
 def test_no_type_errors() -> None:
     """Ensure the codebase has zero type errors."""
     check_no_type_errors(_DIR)
