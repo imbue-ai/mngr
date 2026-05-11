@@ -102,27 +102,39 @@ class AgentErrorInfo(ErrorInfo):
 
 
 class WarningInfo(FrozenModel):
-    """Non-fatal warning surfaced from a provider during listing.
+    """Information about a non-fatal warning encountered during listing.
+
+    Surfaced via ``ListResult.warnings`` for programmatic consumers and via
+    the CLI's warning summary for human consumers. Independent of
+    ``--on-error``: warnings never gate exit code.
+    """
+
+    type: str = Field(description="The class name of the warning (e.g., 'ProviderBinaryMissingError')")
+    message: str = Field(description="The warning message")
+
+    @classmethod
+    def build(cls, exception: BaseException) -> "WarningInfo":
+        """Build a WarningInfo from an exception."""
+        return cls(type=type(exception).__name__, message=str(exception))
+
+
+class ProviderWarningInfo(WarningInfo):
+    """Warning information with provider context.
 
     Populated when a provider raises ``ProviderUnavailableError`` (binary
     missing, daemon down, credentials never configured, transient network
-    failure). Independent of ``--on-error``: warnings never gate exit code.
-    Surfaced via ``ListResult.warnings`` for programmatic consumers and
-    via the CLI's one-line warning summary for human consumers.
+    failure) during discovery.
     """
 
-    type: str = Field(description="The class name of the unavailability, e.g. 'ProviderBinaryMissingError'")
-    message: str = Field(description="Human-readable warning message")
-    provider_name: ProviderInstanceName | None = Field(
-        default=None, description="Provider instance that emitted the warning"
-    )
+    provider_name: ProviderInstanceName = Field(description="Name of the provider that emitted the warning")
 
     @classmethod
     def build_for_provider(
         cls,
         exception: ProviderUnavailableError,
         provider_name: ProviderInstanceName,
-    ) -> "WarningInfo":
+    ) -> "ProviderWarningInfo":
+        """Build a ProviderWarningInfo from an exception and provider name."""
         return cls(
             type=type(exception).__name__,
             message=str(exception),
@@ -298,7 +310,7 @@ def _construct_and_discover_for_provider(
     except ProviderUnavailableError as e:
         # Record as a WarningInfo (not an error) so other providers continue
         # producing hosts and the listing's exit code is unaffected.
-        warning_info = WarningInfo.build_for_provider(e, provider_name)
+        warning_info = ProviderWarningInfo.build_for_provider(e, provider_name)
         with results_lock:
             result.warnings.append(warning_info)
         if params.on_warning:
@@ -523,7 +535,7 @@ def _construct_discover_and_emit_for_provider(
 
     except ProviderUnavailableError as e:
         # See _construct_and_discover_for_provider.
-        warning_info = WarningInfo.build_for_provider(e, provider_name)
+        warning_info = ProviderWarningInfo.build_for_provider(e, provider_name)
         with results_lock:
             result.warnings.append(warning_info)
         if params.on_warning:

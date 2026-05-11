@@ -21,6 +21,7 @@ from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.api.list import ProviderErrorInfo
+from imbue.mngr.api.list import ProviderWarningInfo
 from imbue.mngr.api.list import WarningInfo
 from imbue.mngr.api.list import agent_details_to_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
@@ -795,10 +796,10 @@ def _render_warnings_to_stderr(warnings: list[WarningInfo], ctx: click.Context) 
     is_verbose = console_level in (LogLevel.DEBUG, LogLevel.TRACE)
     if is_verbose:
         for w in warnings:
-            label = str(w.provider_name) if w.provider_name else w.type
+            label = str(w.provider_name) if isinstance(w, ProviderWarningInfo) else w.type
             logger.warning("{}: {}: {}", label, w.type, w.message)
         return
-    names = sorted({str(w.provider_name) for w in warnings if w.provider_name})
+    names = sorted({str(w.provider_name) for w in warnings if isinstance(w, ProviderWarningInfo)})
     if not names:
         return
     plural = "providers" if len(names) > 1 else "provider"
