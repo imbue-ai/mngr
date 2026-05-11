@@ -169,9 +169,11 @@ def build_subagent_proxy_deny_hooks_config() -> dict[str, Any]:
     No PostToolUse, no SessionStart reaper -- the deny hook never spawns
     a subagent, so there is nothing to clean up after a Task call and
     nothing to reap on session start. The hook just denies the Task
-    tool with a copy-pasteable ``mngr create`` invocation in the deny
-    reason; Claude (the calling agent) is expected to run those
-    commands itself via Bash.
+    tool with a short skill-pointer ``permissionDecisionReason`` that
+    directs Claude at the ``mngr-subagents`` skill (installed under
+    ``.claude/skills/`` by ``_write_mngr_subagents_skill``); the
+    copy-pasteable ``mngr create`` / ``subagent_wait`` protocol lives in
+    that skill, not in the deny reason itself.
     """
     deny_cmd = _python_hook_command(_DENY_MODULE)
     return {
