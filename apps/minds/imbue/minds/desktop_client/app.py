@@ -2423,12 +2423,18 @@ def _run_workspace_health_probe_loop(
     root_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Loop body for the background workspace-server health probe thread."""
+    if not isinstance(backend_resolver, MngrCliBackendResolver):
+        # Static resolvers used by tests don't expose the same subdomain
+        # routing, so probing them by ID is meaningless. Resolver type is
+        # fixed for the process lifetime, so exit the thread immediately
+        # rather than spinning forever doing nothing.
+        logger.debug(
+            "Workspace-server health probe thread exiting: backend_resolver is {}, not MngrCliBackendResolver",
+            type(backend_resolver).__name__,
+        )
+        return
     while not root_concurrency_group.is_shutting_down():
         for aid in tracker.snapshot_all():
-            if not isinstance(backend_resolver, MngrCliBackendResolver):
-                # Static resolvers used by tests don't expose the same
-                # subdomain routing, so probing them by ID is meaningless.
-                continue
             probe_status = probe_workspace_through_plugin(
                 mngr_forward_port=mngr_forward_port,
                 preauth_cookie=mngr_forward_preauth_cookie,
