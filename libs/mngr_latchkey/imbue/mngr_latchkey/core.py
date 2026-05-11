@@ -446,9 +446,9 @@ class Latchkey(MutableModel):
 
         Always ``<latchkey_directory>/mngr_latchkey/``. The plugin writes
         all of its own files (gateway record, default permissions,
-        per-agent permissions, opaque handles, log files) here so they
-        cannot collide with anything the upstream ``latchkey`` CLI
-        chooses to put in :attr:`latchkey_directory`.
+        per-host permissions, log files) here so they cannot collide
+        with anything the upstream ``latchkey`` CLI chooses to put in
+        :attr:`latchkey_directory`.
         """
         return _plugin_data_dir(self.latchkey_directory)
 
