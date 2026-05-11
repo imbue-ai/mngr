@@ -369,12 +369,7 @@ class _CreateCommand(click.Command):
 @optgroup.option(
     "--type",
     default=None,
-    help=(
-        "Which type of agent to run. If not given, falls back to "
-        "[commands.create] type in your user settings. Set with: "
-        "mngr config set commands.create.type <name> --scope user "
-        "(or re-run scripts/install.sh)."
-    ),
+    help="Which type of agent to run [default: commands.create.type from user settings]",
 )
 # FOLLOWUP: hmm... I wonder if the name of this should be changed to something more like "window" to be more closely aligned with the tmux primitive it actually creates...
 #  more generally, we probably need to do a pass at refining *all* of these option names...
