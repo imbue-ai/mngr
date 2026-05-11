@@ -881,7 +881,7 @@ def _write_generated_files(
     files to a local temp dir and rsyncs them in a single call.
     """
     file_summary = sorted((str(rel), len(content)) for rel, content in generated_files.items())
-    logger.info(
+    logger.debug(
         "_write_generated_files: host.is_local={}, config_dir={}, files={}",
         host.is_local,
         config_dir,
@@ -1798,7 +1798,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig], InterruptibleAgentMixin):
         config = self.agent_config
         config_dir = self.get_claude_config_dir()
         source_claude_dir = get_user_claude_config_dir()
-        logger.info(
+        logger.debug(
             "_setup_per_agent_config_dir: agent={} host.is_local={} config_dir={} "
             "sync_home_settings={} sync_claude_json={} sync_claude_credentials={}",
             self.id,
