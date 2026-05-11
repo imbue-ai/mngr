@@ -737,6 +737,15 @@ kill -TERM 1
         ):
             return self._create_offline_host(host_record)
 
+        # Once a host has been marked stopped or destroyed in its record, never bring the keeper
+        # back -- that would resurrect a sandbox the user (or GC) just asked us to tear down.
+        is_terminal_state = host_record.certified_host_data.stop_reason in (
+            HostState.STOPPED.value,
+            HostState.DESTROYED.value,
+        )
+        if is_terminal_state:
+            return self._create_offline_host(host_record)
+
         # If the keeper died, the sandbox auto-stops within a few seconds. Try to revive it before
         # falling back to offline, so transient mngr CLI exits don't permanently break the host.
         ensure_keeper_alive(self._provider_dir, host_id, host_record.config.sandbox_name)
