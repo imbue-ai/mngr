@@ -90,9 +90,9 @@ def test_render_create_form_contains_all_launch_modes() -> None:
         assert mode.value.lower() in html
 
 
-def test_render_create_form_selects_lima_by_default() -> None:
+def test_render_create_form_selects_local_by_default() -> None:
     html = render_create_form()
-    assert 'value="LIMA" selected' in html
+    assert 'value="LOCAL" selected' in html
 
 
 def test_render_create_form_selects_specified_launch_mode() -> None:

@@ -21,24 +21,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
-# Switching to only-include (explicit whitelist) instead of the standard
-# `exclude = [..., "**/testing.py"]`. modal_proxy/testing.py is a runtime
-# module (TestingModalInterface) that mngr_modal/backend.py imports at
-# module top -- the standard `**/testing.py` exclude breaks the packaged
-# minds.app at launch with `ModuleNotFoundError: No module named
-# 'imbue.modal_proxy.testing'`. Using only-include lets us ship testing.py
-# while still keeping *_test.py / conftest.py / testing_provider_test.py
-# out of the wheel (none match the whitelist).
-only-include = [
-  "imbue/modal_proxy/__init__.py",
-  "imbue/modal_proxy/data_types.py",
-  "imbue/modal_proxy/direct.py",
-  "imbue/modal_proxy/errors.py",
-  "imbue/modal_proxy/interface.py",
-  "imbue/modal_proxy/log_utils.py",
-  "imbue/modal_proxy/register_guards.py",
-  "imbue/modal_proxy/testing.py",
-]
+exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
 
 [tool.uv.sources]
 concurrency-group = { workspace = true }
