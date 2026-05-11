@@ -1482,16 +1482,18 @@ async def _handle_restart_workspace_server_api(
     aid = AgentId(agent_id)
 
     tracker: WorkspaceServerHealthTracker | None = request.app.state.workspace_health_tracker
-    if tracker is not None:
-        tracker.mark_restarting(aid)
-
     mngr_binary: str = request.app.state.mngr_binary
     mngr_host_dir: Path = request.app.state.mngr_host_dir
     concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
     if concurrency_group is None:
-        if tracker is not None:
-            tracker.mark_stuck(aid)
+        # Validate preconditions before transitioning the tracker -- otherwise
+        # we would fire RESTARTING then immediately STUCK, producing a brief
+        # "Restarting..." flicker on the chrome banner even though no
+        # dispatch was ever attempted.
         return _json_error("Cannot dispatch restart: no concurrency group available", status_code=503)
+
+    if tracker is not None:
+        tracker.mark_restarting(aid)
     shell_command = _build_restart_shell_command()
     argv = _build_mngr_exec_argv(
         mngr_binary=mngr_binary,
