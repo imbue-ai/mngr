@@ -1,0 +1,114 @@
+"""Private helpers: spawn detached ``latchkey`` / ``mngr latchkey forward`` subprocesses.
+
+Why this file uses raw ``subprocess.Popen`` (triggering a narrow exclusion
+from ``check_direct_subprocess``): we need the spawned processes to *outlive*
+the caller. ``latchkey ensure-browser`` may download Chromium via
+Playwright, which can take a while; detaching means we do not block
+desktop-client shutdown on it and the next minds session will simply
+re-check. ``mngr latchkey forward`` is the long-running supervisor that
+owns the shared gateway and per-agent reverse tunnels; detaching means a
+minds restart adopts the existing instance rather than tearing down and
+re-establishing every tunnel.
+
+Confining the remaining ``Popen`` calls to this tiny helper keeps the
+ratchet exception obvious and well-scoped. The rest of the latchkey
+package still goes through ``ConcurrencyGroup`` for any managed
+subprocess work.
+"""
+
+import os
+import subprocess
+from pathlib import Path
+
+
+def spawn_detached_latchkey_ensure_browser(
+    latchkey_binary: str,
+    log_path: Path,
+    latchkey_directory: Path | None = None,
+) -> int:
+    """Start a detached ``latchkey ensure-browser`` and return its PID.
+
+    The command discovers and configures a browser for Latchkey to use,
+    downloading Chromium via Playwright if no system browser is found.
+    This can take a while on first run, so we fire it off detached and let
+    it complete (or not) in the background; if minds exits first, the next
+    session will re-check.
+
+    Child is placed in its own session via ``start_new_session=True`` so it
+    survives the caller's death. Stdout/stderr are appended to ``log_path``
+    (the parent directory is created if needed). When ``latchkey_directory``
+    is supplied, ``LATCHKEY_DIRECTORY`` is set in the child's environment so
+    the browser configuration lands in the shared minds-managed directory
+    instead of falling back to ``~/.latchkey``.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    if latchkey_directory is not None:
+        latchkey_directory.mkdir(parents=True, exist_ok=True)
+        env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+
+    log_file = log_path.open("ab")
+    try:
+        process = subprocess.Popen(
+            [latchkey_binary, "ensure-browser"],
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
+            env=env,
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        log_file.close()
+    return process.pid
+
+
+def spawn_detached_mngr_latchkey_forward(
+    mngr_binary: str,
+    latchkey_binary: str,
+    latchkey_directory: Path,
+    log_path: Path,
+) -> int:
+    """Start a detached ``mngr latchkey forward`` and return its PID.
+
+    The child is placed in its own session (``setsid`` via
+    ``start_new_session=True``) so it survives the caller's death. Its
+    stdout/stderr are appended to ``log_path`` (the parent directory is
+    created if needed). ``--latchkey-directory`` and ``--latchkey-binary``
+    are passed explicitly so the subprocess uses the exact same latchkey
+    state the caller knows about, regardless of any env / settings.toml
+    state the inherited environment carries.
+
+    The returned ``Popen`` object is intentionally allowed to go out of
+    scope. Python's ``subprocess`` module parks finished children on an
+    internal ``_active`` list for zombie reaping, but never kills a
+    still-running child during garbage collection, so the forward
+    supervisor keeps running until something explicitly terminates it.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    latchkey_directory.mkdir(parents=True, exist_ok=True)
+
+    log_file = log_path.open("ab")
+    try:
+        process = subprocess.Popen(
+            [
+                mngr_binary,
+                "latchkey",
+                "forward",
+                "--latchkey-directory",
+                str(latchkey_directory),
+                "--latchkey-binary",
+                latchkey_binary,
+                "--mngr-binary",
+                mngr_binary,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
+            env=dict(os.environ),
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        log_file.close()
+    return process.pid
