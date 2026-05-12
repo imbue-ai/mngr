@@ -518,7 +518,6 @@ def test_rewrite_ignores_unmapped_tool_use_id(
 
 
 def test_reap_skips_when_state_dir_unset(
-    tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
 ) -> None:
     """SessionStart with MNGR_AGENT_STATE_DIR unset is a no-op (no dispatch).
@@ -526,7 +525,6 @@ def test_reap_skips_when_state_dir_unset(
     Hooks on plain Claude sessions without mngr context (e.g. user
     running ``claude`` directly) should not crash or attempt to reap.
     """
-    del tmp_path  # state dir is intentionally never set
     spawn_calls: list[None] = []
     clean_env.delenv("MNGR_AGENT_STATE_DIR", raising=False)
 
