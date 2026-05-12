@@ -12,6 +12,8 @@ from imbue.mngr_sbx.keeper import is_keeper_alive
 from imbue.mngr_sbx.keeper import keeper_log_path
 from imbue.mngr_sbx.keeper import keeper_pid_path
 from imbue.mngr_sbx.keeper import read_keeper_pid
+from imbue.mngr_sbx.keeper import setup_keeper_command
+from imbue.mngr_sbx.keeper import sshd_keeper_command
 from imbue.mngr_sbx.keeper import stop_keeper
 
 
@@ -78,3 +80,19 @@ def test_stop_keeper_is_noop_when_pidfile_missing(tmp_path: Path) -> None:
     # Should not raise. Just confirm no file appears as a side effect.
     stop_keeper(tmp_path, HostId.generate(), timeout_seconds=1.0)
     assert not (tmp_path / "keepers").exists() or list((tmp_path / "keepers").iterdir()) == []
+
+
+def test_setup_keeper_command_is_a_long_sleep() -> None:
+    # The setup keeper must hold the sandbox alive for at least one day so it outlives any
+    # reasonable mngr session that might be left running unattended during host creation.
+    cmd = setup_keeper_command()
+    assert cmd[0] == "sleep"
+    assert int(cmd[1]) >= 86_400
+
+
+def test_sshd_keeper_command_runs_foreground_sshd() -> None:
+    cmd = sshd_keeper_command()
+    # The wrapper script must launch /usr/sbin/sshd -D so the foreground process IS sshd.
+    joined = " ".join(cmd)
+    assert "/usr/sbin/sshd" in joined
+    assert "-D" in joined

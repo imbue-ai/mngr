@@ -74,15 +74,19 @@ from imbue.mngr_sbx.host_store import HostRecord
 from imbue.mngr_sbx.host_store import SbxHostConfig
 from imbue.mngr_sbx.host_store import SbxHostStore
 from imbue.mngr_sbx.host_store import sandbox_name_for_host
-from imbue.mngr_sbx.keeper import ensure_keeper_alive
+from imbue.mngr_sbx.keeper import ensure_sshd_keeper_alive
 from imbue.mngr_sbx.keeper import is_keeper_alive
+from imbue.mngr_sbx.keeper import kill_keeper_pid
 from imbue.mngr_sbx.keeper import read_keeper_pid
+from imbue.mngr_sbx.keeper import setup_keeper_command
 from imbue.mngr_sbx.keeper import spawn_keeper
+from imbue.mngr_sbx.keeper import sshd_keeper_command
 from imbue.mngr_sbx.keeper import stop_keeper
 from imbue.mngr_sbx.sbx_cli import check_sbx_authenticated
 from imbue.mngr_sbx.sbx_cli import sbx_create
 from imbue.mngr_sbx.sbx_cli import sbx_exec
 from imbue.mngr_sbx.sbx_cli import sbx_list
+from imbue.mngr_sbx.sbx_cli import sbx_list_ports
 from imbue.mngr_sbx.sbx_cli import sbx_publish_port
 from imbue.mngr_sbx.sbx_cli import sbx_rm
 from imbue.mngr_sbx.sbx_cli import sbx_stop
@@ -275,7 +279,7 @@ class SbxProviderInstance(BaseProviderInstance):
         for warning in parse_warnings_from_output(stdout):
             logger.warning(warning)
 
-    def _start_sshd_in_sandbox(
+    def _provision_ssh_in_sandbox(
         self,
         sandbox_name: str,
         client_public_key: str,
@@ -284,7 +288,12 @@ class SbxProviderInstance(BaseProviderInstance):
         known_hosts: Sequence[str] | None,
         authorized_keys: Sequence[str] | None,
     ) -> None:
-        """Provision sshd inside the sandbox and start it in the background."""
+        """Install required packages and write SSH key material into the sandbox filesystem.
+
+        sshd itself is *not* started here -- it is started by the keeper (see
+        ``sshd_keeper_command``). This split ensures sshd is alive iff the keeper is, so
+        revivals after sandbox auto-stop bring sshd back along with the sandbox.
+        """
         self._check_and_install_packages(sandbox_name)
 
         with log_span("Configuring SSH keys in sandbox {}", sandbox_name):
@@ -311,9 +320,6 @@ class SbxProviderInstance(BaseProviderInstance):
             if add_authorized_keys_cmd is not None:
                 with log_span("Adding {} authorized_keys entries to sandbox", len(authorized_keys)):
                     self._exec_in_sandbox(sandbox_name, add_authorized_keys_cmd)
-
-        with log_span("Starting sshd in sandbox {}", sandbox_name):
-            self._exec_in_sandbox(sandbox_name, "/usr/sbin/sshd -D -o MaxSessions=100", detach=True)
 
     # =========================================================================
     # Host object helpers
@@ -498,12 +504,19 @@ kill -TERM 1
             self._save_failed_host_record(host_id, name, tags, failure_reason)
             raise SbxHostCreationError(failure_reason) from e
 
-        # Step 2: spawn the keeper so the sandbox stays alive for the install + publish + sshd steps.
+        # Step 2: spawn the *setup* keeper (sleep) so the sandbox stays alive while we install
+        # sshd. We hand over to the long-lived sshd-keeper below; the setup keeper's lifetime
+        # ends only AFTER sshd is verified listening so the sandbox never auto-stops mid-handover.
         try:
-            spawn_keeper(self._provider_dir, host_id, sandbox_name)
+            setup_handle = spawn_keeper(
+                self._provider_dir,
+                host_id,
+                sandbox_name,
+                inner_command=setup_keeper_command(),
+            )
         except SbxCommandError as e:
             failure_reason = str(e)
-            logger.error("Failed to spawn sbx keeper: {}", failure_reason)
+            logger.error("Failed to spawn sbx setup keeper: {}", failure_reason)
             try:
                 sbx_rm(self.mngr_ctx.concurrency_group, self.name, sandbox_name, force=True)
             except (SbxCommandError, OSError) as cleanup_err:
@@ -511,19 +524,31 @@ kill -TERM 1
             self._save_failed_host_record(host_id, name, tags, failure_reason)
             raise SbxHostCreationError(failure_reason) from e
 
-        # Step 3: install sshd inside the sandbox and publish its port.
+        # Step 3: install sshd and write SSH key material into the sandbox, then publish a port.
         try:
             private_key_path, client_public_key = self._get_client_keypair()
             host_key_path, host_public_key = self._get_host_keypair()
             host_private_key = host_key_path.read_text()
 
-            self._start_sshd_in_sandbox(
+            self._provision_ssh_in_sandbox(
                 sandbox_name,
                 client_public_key=client_public_key,
                 host_private_key=host_private_key,
                 host_public_key=host_public_key,
                 known_hosts=known_hosts,
                 authorized_keys=authorized_keys,
+            )
+
+            # Spawn the long-lived sshd-keeper while the setup keeper is still holding the
+            # sandbox open. Once we verify sshd is healthy via wait_for_sshd, we tear down the
+            # setup keeper. Both keepers run in parallel briefly -- sbx allows multiple
+            # concurrent `sbx exec` sessions on the same sandbox.
+            spawn_keeper(
+                self._provider_dir,
+                host_id,
+                sandbox_name,
+                inner_command=sshd_keeper_command(),
+                as_user="root",
             )
 
             with log_span("Publishing port 22 on sandbox {}", sandbox_name):
@@ -545,10 +570,15 @@ kill -TERM 1
             with log_span("Waiting for sshd to be ready..."):
                 wait_for_sshd(ssh_hostname, ssh_port, self.config.ssh_connect_timeout)
 
+            # sshd is confirmed listening through the published port -- safe to drop the setup
+            # keeper now. The sshd-keeper alone holds the sandbox open from here on out.
+            kill_keeper_pid(setup_handle.pid)
+
             host = self._create_host_object(host_id, ssh_hostname, ssh_port, private_key_path)
         except (SbxCommandError, SbxNotAuthorizedError, MngrError, OSError) as e:
             failure_reason = str(e)
             logger.error("sbx sshd bridge setup failed: {}", failure_reason)
+            kill_keeper_pid(setup_handle.pid)
             stop_keeper(self._provider_dir, host_id)
             try:
                 sbx_rm(self.mngr_ctx.concurrency_group, self.name, sandbox_name, force=True)
@@ -746,14 +776,18 @@ kill -TERM 1
         if is_terminal_state:
             return self._create_offline_host(host_record)
 
-        # If the keeper died, the sandbox auto-stops within a few seconds. Try to revive it before
-        # falling back to offline, so transient mngr CLI exits don't permanently break the host. If
-        # the revival itself fails (e.g. sbx GC'd the sandbox after a long mngr-less stretch), fall
-        # through to offline rather than propagating the error.
+        sandbox_name = host_record.config.sandbox_name
+        ssh_identity_file = host_record.ssh_identity_file
+
+        # If the keeper died, the sandbox auto-stops within a few seconds. The sshd-keeper revives
+        # both the sandbox AND sshd inside it, but sbx loses port mappings on stop -- so we also
+        # need to re-publish port 22 below and update the host record's ssh_port.
+        keeper_pid_before = read_keeper_pid(self._provider_dir, host_id)
+        keeper_was_alive = keeper_pid_before is not None and is_keeper_alive(keeper_pid_before)
         try:
-            ensure_keeper_alive(self._provider_dir, host_id, host_record.config.sandbox_name)
+            ensure_sshd_keeper_alive(self._provider_dir, host_id, sandbox_name)
         except SbxCommandError as e:
-            logger.debug("Could not revive keeper for sandbox {}: {}", host_record.config.sandbox_name, e)
+            logger.debug("Could not revive sshd keeper for sandbox {}: {}", sandbox_name, e)
             return self._create_offline_host(host_record)
 
         try:
@@ -762,18 +796,99 @@ kill -TERM 1
             logger.debug("sbx ls failed during get_host: {}", e)
             return self._create_offline_host(host_record)
 
-        matching = next((s for s in sandboxes if s.name == host_record.config.sandbox_name), None)
+        matching = next((s for s in sandboxes if s.name == sandbox_name), None)
         if matching is None or _host_state_from_sbx_status(matching.status) != HostState.RUNNING:
             return self._create_offline_host(host_record)
 
+        # If we just revived the keeper, the sandbox lost its port mapping during auto-stop --
+        # re-publish 22 and update the record + known_hosts so subsequent SSH attempts hit the
+        # right port.
+        effective_ssh_hostname = host_record.ssh_hostname
+        effective_ssh_port = host_record.ssh_port
+        if not keeper_was_alive:
+            try:
+                host_record = self._refresh_published_ssh_port(host_record)
+            except (SbxCommandError, MngrError) as e:
+                logger.debug("Could not re-publish ssh port for {}: {}", sandbox_name, e)
+                return self._create_offline_host(host_record)
+            if host_record.ssh_hostname is None or host_record.ssh_port is None:
+                return self._create_offline_host(host_record)
+            effective_ssh_hostname = host_record.ssh_hostname
+            effective_ssh_port = host_record.ssh_port
+            try:
+                wait_for_sshd(effective_ssh_hostname, effective_ssh_port, self.config.ssh_connect_timeout)
+            except MngrError as e:
+                logger.warning("sshd not ready after keeper revival for {}: {}", sandbox_name, e)
+                return self._create_offline_host(host_record)
+
         host_obj = self._create_host_object(
             host_id,
-            hostname=host_record.ssh_hostname,
-            host_port=host_record.ssh_port,
-            private_key_path=Path(host_record.ssh_identity_file),
+            hostname=effective_ssh_hostname,
+            host_port=effective_ssh_port,
+            private_key_path=Path(ssh_identity_file),
         )
         self._evict_cached_host(host_id, replacement=host_obj)
         return host_obj
+
+    def _refresh_published_ssh_port(self, host_record: HostRecord) -> HostRecord:
+        """Re-discover or re-publish the host-side mapping for the sandbox's port 22.
+
+        Called after a keeper revival, when sbx has freshly restarted the sandbox and dropped any
+        prior port bindings. Returns the updated HostRecord with the (possibly new) ssh_port
+        applied, and persists it. Also rewrites known_hosts so the saved host key is associated
+        with the new port.
+        """
+        if host_record.config is None:
+            raise MngrError("Cannot refresh ssh port without a host config")
+        sandbox_name = host_record.config.sandbox_name
+
+        bindings = sbx_list_ports(self.mngr_ctx.concurrency_group, self.name, sandbox_name)
+        existing = next(
+            (b for b in bindings if b.sandbox_port == _SANDBOX_SSH_PORT and b.protocol.startswith("tcp")),
+            None,
+        )
+        if existing is not None:
+            binding = existing
+        else:
+            with log_span("Re-publishing port 22 on sandbox {}", sandbox_name):
+                binding = sbx_publish_port(
+                    cg=self.mngr_ctx.concurrency_group,
+                    provider_name=self.name,
+                    name=sandbox_name,
+                    sandbox_port=_SANDBOX_SSH_PORT,
+                )
+
+        if host_record.ssh_hostname == binding.host_ip and host_record.ssh_port == binding.host_port:
+            return host_record
+
+        logger.debug(
+            "sbx port mapping for {} changed: {}:{} -> {}:{}",
+            sandbox_name,
+            host_record.ssh_hostname,
+            host_record.ssh_port,
+            binding.host_ip,
+            binding.host_port,
+        )
+
+        # Refresh known_hosts: remove any stale entries for the old port, add the new one.
+        if host_record.ssh_host_public_key is not None:
+            self._keys_dir.mkdir(parents=True, exist_ok=True)
+            if host_record.ssh_hostname is not None and host_record.ssh_port is not None:
+                clear_host_from_known_hosts(self._known_hosts_path, host_record.ssh_hostname, host_record.ssh_port)
+            clear_host_from_known_hosts(self._known_hosts_path, binding.host_ip, binding.host_port)
+            add_host_to_known_hosts(
+                self._known_hosts_path,
+                binding.host_ip,
+                binding.host_port,
+                host_record.ssh_host_public_key,
+            )
+
+        updated_record = host_record.model_copy_update(
+            to_update(host_record.field_ref().ssh_hostname, binding.host_ip),
+            to_update(host_record.field_ref().ssh_port, binding.host_port),
+        )
+        self._host_store.write_host_record(updated_record)
+        return updated_record
 
     def _get_host_by_name(self, name: HostName) -> HostInterface:
         for record in self._host_store.list_all_host_records():
