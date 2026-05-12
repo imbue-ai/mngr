@@ -8,14 +8,14 @@ import pytest
 from pydantic import PrivateAttr
 from pydantic import ValidationError
 
-from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
-from imbue.minds.desktop_client.ssh_tunnel import ReverseTunnelInfo
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
-from imbue.minds.desktop_client.ssh_tunnel import _ForwardedTunnelHandler
-from imbue.minds.desktop_client.ssh_tunnel import _ssh_connection_is_active
-from imbue.minds.desktop_client.ssh_tunnel import _ssh_connection_transport
 from imbue.mngr_forward.relay import relay_data
+from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr_latchkey.ssh_tunnel import ReverseTunnelInfo
+from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelError
+from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_latchkey.ssh_tunnel import _ForwardedTunnelHandler
+from imbue.mngr_latchkey.ssh_tunnel import _ssh_connection_is_active
+from imbue.mngr_latchkey.ssh_tunnel import _ssh_connection_transport
 
 
 class FakeChannelFromSocket:
