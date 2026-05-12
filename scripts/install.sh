@@ -10,10 +10,12 @@
 #   2. Installs mngr via: uv tool install imbue-mngr
 #   3. Runs: mngr dependencies -i  (interactively install system deps)
 #   4. Runs: mngr extras -i        (optional: plugins, shell completion, etc.)
-#   5. Prompts for a default agent type for `mngr create` (saved to user settings)
+#   5. Suggests a `mngr config set commands.create.type ...` command to set
+#      the default agent type for `mngr create` (does NOT write it for you)
 #
-# Steps 1-2 run automatically. Steps 3-5 prompt before changing anything.
-# Safe to re-run: skips anything already installed or already configured.
+# Steps 1-2 run automatically. Steps 3-4 prompt before installing anything.
+# Step 5 only prints a suggested command -- nothing is written without your
+# action. Safe to re-run: skips anything already installed or configured.
 # Source: https://github.com/imbue-ai/mngr
 #
 set -euo pipefail
@@ -81,9 +83,9 @@ mngr extras -i || warn "Some extras could not be installed. Run 'mngr extras' to
 
 # `mngr create` requires an agent type (via positional, --type, or
 # [commands.create] type in user settings). If the user has not set one
-# yet, ask them now -- discovering installed agent-type plugins via
-# `mngr plugin list --kind agent-type --active` so we never have to
-# hard-code or grep package names.
+# yet, suggest the right `mngr config set` command -- discovering
+# installed agent-type plugins via `mngr plugin list --kind agent-type
+# --active` so we never have to hard-code or grep package names.
 if mngr config get commands.create.type --scope user >/dev/null 2>&1; then
     info "Default agent type is already set in user settings."
 else
@@ -113,52 +115,19 @@ else
         case ${#agent_types[@]} in
             0)
                 warn "No agent-type plugins installed yet."
-                info "Install one and then set the default with: mngr config set commands.create.type <name> --scope user"
+                info "Install one and then set the default with:"
+                info "    mngr config set commands.create.type <name> --scope user"
                 ;;
             1)
                 only_type="${agent_types[0]}"
                 info "Found one agent-type plugin: '$only_type'."
-                answer=""
-                if [ -e /dev/tty ]; then
-                    read -r -p "Set this as the default for 'mngr create'? [Y/n]: " answer </dev/tty || answer=""
-                fi
-                case "${answer:-y}" in
-                    [Yy]|[Yy][Ee][Ss]|"")
-                        mngr config set commands.create.type "$only_type" --scope user \
-                            || warn "Failed to set default agent type."
-                        ;;
-                    *)
-                        info "Skipped. Set it later with: mngr config set commands.create.type <name> --scope user"
-                        ;;
-                esac
+                info "To use it as your default for 'mngr create', run:"
+                info "    mngr config set commands.create.type $only_type --scope user"
                 ;;
             *)
-                echo "Choose a default agent type for 'mngr create':"
-                for i in "${!agent_types[@]}"; do
-                    printf "  %d) %s\n" $((i + 1)) "${agent_types[$i]}"
-                done
-                choice=""
-                if [ -e /dev/tty ]; then
-                    read -r -p "[1]: " choice </dev/tty || choice=""
-                fi
-                choice="${choice:-1}"
-                # Validate `choice` is a non-negative integer BEFORE using it
-                # in arithmetic. Under `set -euo pipefail`, a non-numeric
-                # value (e.g. the user typing the agent type name instead of
-                # a number) would be evaluated as a variable name in
-                # `$((...))` and crash the installer with an unbound-variable
-                # error.
-                if [[ ! "$choice" =~ ^[0-9]+$ ]]; then
-                    warn "Invalid choice '$choice' (expected a number). Set it later with: mngr config set commands.create.type <name> --scope user"
-                else
-                    idx=$((choice - 1))
-                    if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#agent_types[@]}" ]; then
-                        mngr config set commands.create.type "${agent_types[$idx]}" --scope user \
-                            || warn "Failed to set default agent type."
-                    else
-                        warn "Invalid choice. Set it later with: mngr config set commands.create.type <name> --scope user"
-                    fi
-                fi
+                info "Found ${#agent_types[@]} agent-type plugins: ${agent_types[*]}"
+                info "To pick one as your default for 'mngr create', run:"
+                info "    mngr config set commands.create.type <name> --scope user"
                 ;;
         esac
     fi
