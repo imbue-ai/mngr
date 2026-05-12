@@ -337,9 +337,17 @@ async def _forward_workspace_http(
         backend_request = http_client.build_request(method=request.method, url=url, headers=headers, content=body)
         try:
             backend_response = await http_client.send(backend_request, stream=True)
-        except httpx.ConnectError:
+        except (httpx.ConnectError, httpx.RemoteProtocolError):
+            # ``RemoteProtocolError`` here means the backend disconnected
+            # before sending headers -- typical when the workspace server
+            # died between the SSH tunnel accepting the unix-socket
+            # connection and the channel-open completing. Same recovery
+            # signal as a connect-time failure.
             _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
             return _service_unavailable_response(request)
+        except httpx.ReadError:
+            _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.SSE_EOF, None)
+            return Response(status_code=502, content="Backend connection lost")
         except httpx.TimeoutException:
             return Response(status_code=504, content="Backend stream timed out")
 

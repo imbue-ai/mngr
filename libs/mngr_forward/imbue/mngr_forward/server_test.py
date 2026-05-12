@@ -610,6 +610,50 @@ def test_subdomain_forward_does_not_emit_failure_on_2xx(tmp_path: Path) -> None:
     assert _envelope_lines(env_out) == []
 
 
+def test_subdomain_forward_emits_workspace_backend_failure_on_sse_startup_disconnect(tmp_path: Path) -> None:
+    """``RemoteProtocolError`` on an SSE-startup ``send()`` must emit ``CONNECT_ERROR``.
+
+    Regression test: previously, an SSE-style request (``Accept: text/event-stream``)
+    whose backend died between SSH-tunnel accept and channel-open would surface
+    ``httpx.RemoteProtocolError`` from ``http_client.send(..., stream=True)``.
+    That exception was not caught by the SSE branch (only ``ConnectError``
+    and ``TimeoutException`` were), so it bubbled up through starlette as a
+    500 and no failure envelope was emitted -- meaning the minds-side health
+    tracker never transitioned to STUCK and the recovery banner never
+    appeared.
+    """
+    agent_id = AgentId()
+    preauth = "preauth-cookie-sse-startup"
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        raise_error=httpx.RemoteProtocolError,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/events",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "text/event-stream",
+            },
+        )
+
+    assert response.status_code == 503
+    lines = _envelope_lines(env_out)
+    assert len(lines) == 1
+    envelope = json.loads(lines[0])
+    assert envelope["stream"] == "forward"
+    assert envelope["agent_id"] == str(agent_id)
+    payload = envelope["payload"]
+    assert payload["type"] == "workspace_backend_failure"
+    assert payload["reason"] == "CONNECT_ERROR"
+
+
 def test_subdomain_forward_returns_plain_503_for_non_html_on_connect_failure(tmp_path: Path) -> None:
     """Non-HTML callers (API clients) get the plain 503 with no location header."""
     agent_id = AgentId()
