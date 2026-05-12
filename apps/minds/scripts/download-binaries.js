@@ -310,6 +310,42 @@ async function downloadGit(resourcesDir, { platform }) {
   }
 }
 
+// Pin pnpm to a version that works on both ToDesktop CI runners.
+// ToDesktop's CI command is `npx pnpm@latest install --prod=false
+// --no-frozen-lockfile`. `@latest` currently resolves to pnpm 11.1.0
+// (released 2026-05-11), which (a) requires Node >=22.13 and `require`s
+// `node:sqlite` (built-in only in Node >=22.5) -- ToDesktop's Azure
+// Linux runner has Node 20.20.0, so 11.1.0 crashes there with
+// ERR_UNKNOWN_BUILTIN_MODULE; and (b) made the strict-builds policy a
+// hard exit even when an `allowBuilds` entry exists for the dep. Pinning
+// to pnpm 10.33.4 (the version that was `@latest` during our last green
+// builds on 2026-05-06) avoids both: 10.x has no Node-22 requirement,
+// doesn't use node:sqlite, and only warns (not errors) on unapproved
+// build scripts. ToDesktop's CI does a `pnpm --version` check before
+// running `npx pnpm@latest`, so if pnpm is on PATH from this hook it
+// uses that version directly.
+const PNPM_VERSION = '10.33.4';
+
+function installPnpm() {
+  // Skip if a compatible pnpm is already on PATH (covers local re-runs
+  // where the user already has pnpm via corepack / brew / etc.).
+  let existing = null;
+  try {
+    existing = execSync('pnpm --version', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+  } catch {}
+  if (existing && existing.startsWith('10.')) {
+    console.log(`[download-binaries] pnpm ${existing} already on PATH; skipping reinstall.`);
+    return;
+  }
+  console.log(`[download-binaries] Installing pnpm@${PNPM_VERSION} globally so ToDesktop CI's "pnpm --version" check uses it (avoids npx pnpm@latest -> 11.1.0 which breaks both runners).`);
+  // `--no-audit --no-fund` keeps the output quiet. We let the exception
+  // propagate on failure so the build fails loudly (better than a green
+  // build that secretly uses 11.1.0).
+  execSync(`npm install -g pnpm@${PNPM_VERSION} --no-audit --no-fund`, { stdio: 'inherit' });
+  const installed = execSync('pnpm --version', { encoding: 'utf-8' }).trim();
+  console.log(`[download-binaries] pnpm now on PATH at version ${installed}`);
+}
+
 /**
  * Download platform-specific binaries into the given resources directory.
  * Can be called directly or from a ToDesktop hook.
@@ -317,6 +353,8 @@ async function downloadGit(resourcesDir, { platform }) {
 async function downloadBinaries(resourcesDir) {
   const { platform, arch } = getPlatformArch();
   console.log(`[download-binaries] Platform: ${platform}, Architecture: ${arch}`);
+
+  installPnpm();
 
   await Promise.all([
     downloadUv(resourcesDir, { platform, arch }),
