@@ -41,19 +41,9 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.latchkey.core import CredentialStatus
-from imbue.minds.desktop_client.latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
-from imbue.minds.desktop_client.latchkey.core import Latchkey
 from imbue.minds.desktop_client.latchkey.services_catalog import IMPLICIT_DEFAULT_PERMISSIONS
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import get_service_info
-from imbue.minds.desktop_client.latchkey.store import LatchkeyPermissionsConfig
-from imbue.minds.desktop_client.latchkey.store import LatchkeyStoreError
-from imbue.minds.desktop_client.latchkey.store import granted_permissions_for_scope
-from imbue.minds.desktop_client.latchkey.store import load_permissions
-from imbue.minds.desktop_client.latchkey.store import permissions_path_for_agent
-from imbue.minds.desktop_client.latchkey.store import save_permissions
-from imbue.minds.desktop_client.latchkey.store import set_permissions_for_scope
 from imbue.minds.desktop_client.latchkey.templates import render_latchkey_permission_dialog
 from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
@@ -65,6 +55,16 @@ from imbue.minds.desktop_client.request_events import append_response_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_latchkey.core import CredentialStatus
+from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
+from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import granted_permissions_for_scope
+from imbue.mngr_latchkey.store import load_permissions
+from imbue.mngr_latchkey.store import permissions_path_for_agent
+from imbue.mngr_latchkey.store import save_permissions
+from imbue.mngr_latchkey.store import set_permissions_for_scope
 
 _MNGR_MESSAGE_TIMEOUT_SECONDS: Final[float] = 30.0
 
@@ -167,16 +167,16 @@ def _fallback_set_credentials_example(service_name: str) -> str:
     return f'latchkey auth set {service_name} -H "Authorization: Bearer <token>"'
 
 
-def _prepend_latchkey_directory(command: str, latchkey_directory: Path | None) -> str:
+def _prepend_latchkey_directory(command: str, latchkey_directory: Path) -> str:
     """Prefix ``command`` with ``LATCHKEY_DIRECTORY=<dir>`` so the credential
-    written by the user lands in the same store the desktop client uses.
+    the user writes from their terminal lands in the same store the
+    desktop client uses.
 
-    No-op when the desktop client doesn't pin a custom directory (then the
-    user's terminal will inherit latchkey's own default, matching what the
-    desktop client also does).
+    Without the prefix the user's terminal-run ``latchkey`` would write
+    credentials to its own default (``~/.latchkey``) and the desktop
+    client (which runs latchkey with ``LATCHKEY_DIRECTORY`` set) would
+    never see them.
     """
-    if latchkey_directory is None:
-        return command
     return f"LATCHKEY_DIRECTORY={shlex.quote(str(latchkey_directory))} {command}"
 
 
@@ -556,7 +556,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         are used so the dialog doubles as a revoke UI; otherwise the
         implicit catch-all default (``any``) is pre-checked.
         """
-        path = permissions_path_for_agent(self.data_dir, agent_id)
+        path = permissions_path_for_agent(self.latchkey.plugin_data_dir, agent_id)
         try:
             config = load_permissions(path)
         except LatchkeyStoreError as e:
@@ -581,7 +581,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         scope_schemas: Sequence[str],
         granted_permissions: Sequence[str],
     ) -> None:
-        path = permissions_path_for_agent(self.data_dir, agent_id)
+        path = permissions_path_for_agent(self.latchkey.plugin_data_dir, agent_id)
         try:
             existing = load_permissions(path)
         except LatchkeyStoreError as e:

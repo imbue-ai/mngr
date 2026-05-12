@@ -119,6 +119,10 @@ class TmrLaunchConfig(FrozenModel):
         default=(),
         description="Create template names to apply when creating agents",
     )
+    additional_authorized_keys: tuple[str, ...] = Field(
+        default=(),
+        description="SSH public key lines to install in authorized_keys on each agent host (allows inbound SSH)",
+    )
 
 
 class IntegratorResult(FrozenModel):

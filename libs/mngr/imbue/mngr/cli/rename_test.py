@@ -8,6 +8,8 @@ from imbue.mngr.cli.rename import _output
 from imbue.mngr.cli.rename import _output_result
 from imbue.mngr.cli.rename import rename
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
 
 
@@ -21,13 +23,13 @@ def test_rename_cli_options_parsing_creates_valid_options() -> None:
         log_commands=None,
         plugin=(),
         disable_plugin=(),
-        current="my-agent",
-        new_name="new-agent",
+        current=AgentAddress(agent=AgentName("my-agent")),
+        new_name=AgentName("new-agent"),
         dry_run=False,
         host=False,
     )
-    assert opts.current == "my-agent"
-    assert opts.new_name == "new-agent"
+    assert opts.current == AgentAddress(agent=AgentName("my-agent"))
+    assert opts.new_name == AgentName("new-agent")
     assert opts.dry_run is False
 
 
@@ -41,13 +43,13 @@ def test_rename_cli_options_with_dry_run() -> None:
         log_commands=None,
         plugin=(),
         disable_plugin=(),
-        current="agent-123",
-        new_name="renamed-agent",
+        current=AgentAddress(agent=AgentName("agent-123")),
+        new_name=AgentName("renamed-agent"),
         dry_run=True,
         host=False,
     )
-    assert opts.current == "agent-123"
-    assert opts.new_name == "renamed-agent"
+    assert opts.current == AgentAddress(agent=AgentName("agent-123"))
+    assert opts.new_name == AgentName("renamed-agent")
     assert opts.dry_run is True
     assert opts.output_format == "json"
     assert opts.quiet is True
