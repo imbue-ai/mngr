@@ -48,6 +48,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr_claude_subagent_proxy.hooks.mngr_api import PARENT_ID_LABEL
 
 _CLAUDE_BINARY: Final[str] = "claude"
 _DEFAULT_SPAWN_TIMEOUT_SECONDS: Final[float] = 300.0
@@ -900,27 +901,31 @@ def test_plan_mode_propagates_to_subagent(
 # live in the skill, not in the deny reason.
 #
 # These tests verify the OBSERVABLE plugin behavior end-to-end:
-#   1. Provisioning installs only the deny hook (no spawn/cleanup/reap).
+#   1. Provisioning installs the deny hook + shared reaper (no PROXY-only
+#      spawn/cleanup/guard hooks).
 #   2. A real Claude agent invoking Task sees a deny tool_result, not a
 #      successful Task tool_result.
-#   3. No mngr child is spawned automatically by the plugin.
-#   4. No proxy machinery sidefiles (subagent_map, proxy_commands) appear.
-#
-# We do NOT test whether Claude actually follows the deny instructions
-# and runs the mngr create commands itself -- that depends on Claude's
-# instruction-following behavior on a given turn and is too brittle for a
-# regression test. The unit tests cover the deny-message content; here we
-# verify the plugin's structural behavior with real Claude.
+#   3. Claude follows the skill's protocol and successfully spawns an
+#      mngr child with the `mngr_claude_subagent_proxy_parent_id` label
+#      pointing at the parent. (DENY mode's user-visible promise is that
+#      Claude can still delegate via mngr; if that doesn't happen the
+#      feature is broken even if the hook plumbing is fine.)
+#   4. No proxy machinery sidefiles (subagent_map, proxy_commands) appear
+#      on the parent -- the deny hook never stages anything itself.
 
 
-# A short, unambiguous prompt that asks for a Task call. In deny mode the
-# call will be denied; we look for the deny reason in the parent's
-# transcript. We do NOT instruct Claude to do (or not do) anything after
-# seeing the deny -- whether Claude follows the deny instructions and
-# spawns a child via Bash is Claude's choice (and arguably the desired
-# UX), so the test must not over-specify.
+# A short, explicit prompt that asks for a Task call and tells Claude
+# what to do after the deny. We instruct the follow-through because we
+# want to verify the end-to-end skill protocol works, not just that
+# the hook fires; an under-specified prompt would let Claude give up
+# after the deny and the test would silently pass while shipping a
+# broken feature.
 _DENY_MODE_PROMPT: Final[str] = (
-    "Use the Task tool exactly once. Set subagent_type to 'general-purpose'. Set the prompt to: Say BANANA."
+    "Use the Task tool exactly once. Set subagent_type to 'general-purpose'. "
+    "Set the prompt to: Say exactly the word BANANA and nothing else, then end your turn. "
+    "If Task is denied, read the deny reason carefully and follow whatever protocol it points you at "
+    "to delegate the same prompt to a subagent. After you have the subagent's reply, echo it back to me "
+    "in exactly this form: SUBAGENT_SAID=<their-reply>. Do not retry Task after the deny."
 )
 
 
@@ -934,7 +939,7 @@ def test_deny_mode_intercepts_task_with_deny_reason(
     _source_repo: Path,
     temp_host_dir: Path,
 ) -> None:
-    """Golden path: deny mode intercepts Task and surfaces a deny reason to Claude.
+    """Golden path: deny mode intercepts Task AND Claude successfully delegates via the skill.
 
     End-to-end verification that:
     1. With ``[plugins.claude_subagent_proxy] mode = "DENY"`` in the user's
@@ -950,17 +955,19 @@ def test_deny_mode_intercepts_task_with_deny_reason(
        ``mngr-subagents``) -- proving both that the model attempted
        Task (else the PreToolUse hook would not have fired) and that
        our deny hook returned the expected short skill-pointer reason.
-    4. The deny hook does NOT write any sidefiles (no subagent_map,
-       subagent_prompts, subagent_results, or proxy_commands). The
-       skill teaches Claude to write its own prompt file before
-       running ``mngr create --message-file``; the plugin's deny hook
-       has no business pre-staging anything.
-
-    We deliberately do NOT assert on whether Claude followed the deny
-    instructions and spawned a mngr subagent itself via Bash. That is
-    the *desired* UX of deny mode -- whether it actually happens on a
-    given turn depends on the model's instruction-following, not on
-    plugin behavior, so it doesn't belong in a plugin regression test.
+    4. **Claude follows the skill protocol and successfully spawns a
+       child mngr agent** carrying the
+       ``mngr_claude_subagent_proxy_parent_id`` label pointing at the
+       parent. This is the user-visible promise of DENY mode -- if
+       Claude can't delegate via mngr after the deny, the feature is
+       broken even when the hook plumbing is fine, so the regression
+       test asserts the full skill round-trip. Side-effect on a real
+       mngr resource, not Claude's prose, so it's not brittle.
+    5. The deny hook does NOT write any sidefiles (no subagent_map,
+       subagent_prompts, subagent_results, or proxy_commands) on the
+       parent. The skill teaches Claude to write its own prompt file
+       before running ``mngr create --message-file``; the plugin's deny
+       hook has no business pre-staging anything.
     """
     mngr = _mngr_subprocess_env_deny_mode
     parent_name = _make_parent_agent_name()
@@ -1061,14 +1068,39 @@ def test_deny_mode_intercepts_task_with_deny_reason(
                     f"the skill teaches Claude to stage anything it needs itself."
                 )
 
-        # Best-effort cleanup of any children Claude may have spawned by
-        # following the deny instructions itself in Bash. Not asserting on
-        # presence/absence -- just making sure they don't leak into other
-        # tests or the developer's mngr state.
-        for agent in mngr.list_agents():
-            name = agent.get("name", "")
-            if isinstance(name, str) and name.startswith(f"{parent_name}--subagent-"):
-                created_agents.append(name)
+        # Claude must have followed the skill protocol and spawned at
+        # least one child mngr agent carrying the parent-id label. This
+        # is the load-bearing user-visible promise of DENY mode -- the
+        # deny hook firing means nothing if Claude can't actually
+        # delegate after seeing the deny reason. We assert on the
+        # *label* rather than the child's name because the skill lets
+        # Claude pick its own slug, so a name-prefix check would be
+        # brittle.
+        all_agents = mngr.list_agents()
+        children_by_label = [
+            agent
+            for agent in all_agents
+            if isinstance(agent, dict)
+            and isinstance(agent.get("labels"), dict)
+            and agent["labels"].get(PARENT_ID_LABEL) == agent_id
+        ]
+        for child in children_by_label:
+            child_name = child.get("name")
+            if isinstance(child_name, str):
+                created_agents.append(child_name)
+        assert children_by_label, (
+            f"Parent {parent_name!r} (id={agent_id!r}) did not spawn any child mngr "
+            f"agent carrying labels.{PARENT_ID_LABEL}=<parent_id>. Either Claude did "
+            f"not follow the mngr-subagents skill after the Task deny, or it spawned "
+            f"a child without the parent-id label (skill bug). DENY mode's user-visible "
+            f"promise is that Claude can delegate via mngr after the deny -- failing "
+            f"this assertion means the feature is broken end-to-end even though the "
+            f"hook plumbing is fine.\n"
+            f"All agents at end of test:\n"
+            + "\n".join(
+                f"  - {a.get('name')!r} state={a.get('state')!r} labels={a.get('labels')!r}" for a in all_agents
+            )
+        )
     finally:
         _destroy_agents_quietly(mngr, iter(created_agents))
 
