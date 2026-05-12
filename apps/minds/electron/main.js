@@ -329,6 +329,11 @@ function createBundle() {
     sendCurrentWorkspaceToBundleViews(bundle);
     primeViewWithCachedChromeState(chromeView.webContents);
   });
+  chromeView.webContents.on('console-message', (_e, _level, message) => {
+    if (message && message.indexOf('[debug]') === 0) {
+      console.log('[chromeView console]', message);
+    }
+  });
 
   wireContentViewEvents(bundle, contentView);
   registerShortcutsFor(bundle, chromeView.webContents);
@@ -886,6 +891,9 @@ function handleChromeSSEEvent(evt) {
 }
 
 function broadcastChromeEvent(evt) {
+  if (evt && evt.type === 'workspace_server_status') {
+    console.log('[debug] broadcastChromeEvent workspace_server_status:', JSON.stringify(evt), 'to', bundles.length, 'bundle(s)');
+  }
   for (const b of bundles) {
     if (b.window.isDestroyed()) continue;
     for (const view of [b.chromeView, b.sidebarView]) {
@@ -893,6 +901,9 @@ function broadcastChromeEvent(evt) {
       if (view.webContents.isDestroyed()) continue;
       try {
         view.webContents.send('chrome-event', evt);
+        if (evt && evt.type === 'workspace_server_status') {
+          console.log('[debug] sent workspace_server_status chrome-event to view id', view.webContents.id, 'currentWorkspaceId=', b.currentWorkspaceId);
+        }
       } catch { /* noop */ }
     }
   }

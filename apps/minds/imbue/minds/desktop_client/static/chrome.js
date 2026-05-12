@@ -57,6 +57,7 @@
   // -- Titlebar per-project swatch ------------------------------------------
   var currentTitleAgentId = null;
   function applyTitleSwatch(agentId) {
+    console.log('[debug] applyTitleSwatch called with agentId=', agentId);
     var swatch = document.getElementById('title-swatch');
     if (!agentId) {
       swatch.classList.add('hidden');
@@ -87,6 +88,7 @@
     if (!healthBannerEl) return;
     var aid = currentTitleAgentId;
     var status = aid ? healthStatusByAgent[aid] : null;
+    console.log('[debug] refreshHealthBanner: currentTitleAgentId=', aid, 'status=', status, 'all=', JSON.stringify(healthStatusByAgent));
     if (status === 'stuck') {
       healthBannerTextEl.textContent = 'Workspace server unresponsive. Click to restart.';
       healthBannerEl.classList.remove('hidden');
@@ -113,6 +115,7 @@
   }
 
   function handleWorkspaceServerStatus(agentId, status) {
+    console.log('[debug] handleWorkspaceServerStatus called: agentId=', agentId, 'status=', status);
     if (!agentId) return;
     if (status === 'healthy') {
       delete healthStatusByAgent[agentId];
