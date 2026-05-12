@@ -459,7 +459,7 @@ sudo poweroff
             # Create the Host object
             host = self._create_host_object(host_id, ssh_config)
 
-        except (LimaCommandError, MngrError, HostConnectionError, OSError) as e:
+        except (MngrError, HostConnectionError, OSError) as e:
             failure_reason = str(e)
             logger.error("Lima host creation failed: {}", failure_reason)
             # Clean up the Lima instance
