@@ -229,9 +229,6 @@
 # Agent definitions deployed by mngr_subagent_proxy at session start
 **/.claude/agents/
 
-# Skill deployed by mngr_claude_subagent_proxy DENY mode at session start
-**/.claude/skills/mngr-subagents/
-
 # Local mngr settings (not committed)
 **/.mngr/settings.local.toml
 
