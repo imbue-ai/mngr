@@ -69,7 +69,7 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `-t`, `--template` | text | Use a named template from create_templates config [repeatable, stacks in order] | None |
-| `-n`, `--name` | text | Agent address (alternative to positional argument, mutually exclusive) [default: auto-generated] | None |
+| `-n`, `--name` | new_agent_location | Agent address (alternative to positional argument, mutually exclusive) [default: auto-generated] | None |
 | `--id` | text | Explicit agent ID [default: auto-generated] | None |
 | `--name-style` | choice (`coolname` &#x7C; `english` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `animals` &#x7C; `scientists` &#x7C; `demons`) | Auto-generated name style | `coolname` |
 | `--type` | text | Which type of agent to run [default: claude] | None |
@@ -205,6 +205,10 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 Provider: docker
   Build args are passed directly to 'docker build'. Run 'docker build --help' for details.
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
+
+Provider: imbue_cloud
+  Build args constrain which pool host the connector leases for this `mngr create`. Recognized keys (see LeaseAttributes): repo_url, repo_branch_or_tag, cpus, memory_gb, gpu_count. Unknown keys are rejected. Example: `mngr create my-agent@my-host.imbue_cloud_alice --new-host -b cpus=4 -b repo_branch_or_tag=v1.2.3`.
+  Start args are not used by the imbue_cloud provider.
 
 Provider: lima
   Supported build arguments for the lima provider:

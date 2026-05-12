@@ -12,8 +12,10 @@ from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifie
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ProviderDiscoveryError
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -188,3 +190,40 @@ def discover_hosts_and_agents(
         # does not leak resources even though get_all_provider_instances is called again.
         logger.debug("Event stream was stale (not all identifiers found), falling back to full scan")
         return _run_discovery(mngr_ctx, None, include_destroyed, reset_caches)
+
+
+def discover_by_address(
+    address: AgentAddress,
+    mngr_ctx: MngrContext,
+    include_destroyed: bool = False,
+    reset_caches: bool = False,
+) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[BaseProviderInstance]]:
+    """Discover hosts and agents scoped by a single :class:`AgentAddress`.
+
+    The address's provider (if any) narrows discovery so we skip irrelevant
+    providers; the agent name/ID feeds the discovery event-stream
+    optimization. After discovery, results are filtered by the address's full
+    host/provider constraint.
+    """
+    provider_names: tuple[str, ...] | None = None
+    if address.host is not None and address.host.provider is not None:
+        provider_names = (str(address.host.provider),)
+
+    agents_by_host, providers = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=provider_names,
+        agent_identifiers=(str(address.agent),),
+        include_destroyed=include_destroyed,
+        reset_caches=reset_caches,
+    )
+
+    if address.host is None:
+        return dict(agents_by_host), providers
+
+    constraint: HostAddress = address.host
+    filtered = {
+        host_ref: agent_refs
+        for host_ref, agent_refs in agents_by_host.items()
+        if constraint.matches(HostAddress(host=host_ref.host_name, provider=host_ref.provider_name))
+    }
+    return filtered, providers

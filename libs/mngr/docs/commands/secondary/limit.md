@@ -43,8 +43,8 @@ mngr limit [OPTIONS] [AGENTS]...
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--agent` | text | Agent name or ID to configure (can be specified multiple times) | None |
-| `--host` | text | Host name or ID to configure (can be specified multiple times) | None |
+| `--agent` | agent_address | Agent address (NAME[@HOST[.PROVIDER]]) to configure (can be specified multiple times) | None |
+| `--host` | host_address | Host address (HOST[.PROVIDER]) to configure (can be specified multiple times) | None |
 
 ## Lifecycle
 

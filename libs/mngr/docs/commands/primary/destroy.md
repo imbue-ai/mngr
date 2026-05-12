@@ -41,7 +41,7 @@ mngr destroy [OPTIONS] [AGENTS]...
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--agent` | text | Agent name or ID to destroy (can be specified multiple times) | None |
+| `--agent` | agent_address | Agent address (NAME[@HOST[.PROVIDER]]) to destroy (can be specified multiple times) | None |
 | `--session` | text | Tmux session name to destroy (can be specified multiple times). The agent name is extracted by stripping the configured prefix from the session name. | None |
 
 ## Behavior
