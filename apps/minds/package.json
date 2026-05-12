@@ -20,6 +20,5 @@
   "devDependencies": {
     "@todesktop/cli": "^1.24.0",
     "electron": "35.7.5"
-  },
-  "packageManager": "pnpm@10.33.0"
+  }
 }
