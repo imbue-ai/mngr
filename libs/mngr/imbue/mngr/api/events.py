@@ -25,8 +25,6 @@ from imbue.imbue_common.logging import ROTATED_JSONL_PATTERN
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.address_parsers import parse_agent_address
-from imbue.mngr.api.address_parsers import parse_host_address
 from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import find_one_matching_host
@@ -35,13 +33,12 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentAddress
-from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import AgentOrHostAddress
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
@@ -134,138 +131,95 @@ class _AllEventsStreamState(MutableModel):
 
 
 def resolve_events_target(
-    identifier: str,
+    address: AgentOrHostAddress,
     mngr_ctx: MngrContext,
 ) -> EventsTarget:
-    """Resolve a target identifier (agent or host name/ID) to an EventsTarget.
+    """Resolve an :class:`AgentOrHostAddress` to an :class:`EventsTarget`.
 
-    Supports agent address syntax: ``NAME[@[HOST][.PROVIDER]]``.
-
-    Tries to interpret the identifier as an agent first, then falls back to
-    interpreting it as a host. Uses :func:`resolve_agent_reference` and
-    :func:`find_one_matching_host` from :mod:`imbue.mngr.api.find`.
-
+    Agent vs host is decided by the address type (no state-based fallback).
     When the target host is online, the returned :class:`EventsTarget`
     includes the online host and events path for direct command execution
     (e.g. ``tail -f``).
     """
-    # Parse the identifier as an agent address. If the agent component itself
-    # parses cleanly (i.e., the user typed something that could be an agent
-    # name or ID), we run the agent-first search. If it does not, the input
-    # must be a host identifier and we go directly to the host search.
-    address: AgentAddress | None
-    try:
-        address = parse_agent_address(identifier)
-    except UserInputError:
-        address = None
+    if isinstance(address, AgentAddress):
+        return _resolve_agent_events_target(address, mngr_ctx)
+    return _resolve_host_events_target(address, mngr_ctx)
 
-    filtered_agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
-    agent_result: tuple[DiscoveredHost, DiscoveredAgent] | None = None
-    if address is not None:
-        with log_span("Loading agents and hosts"):
-            filtered_agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
-        # Try finding as an agent first; suppress "not found" but re-raise ambiguity
-        try:
-            agent_result = resolve_agent_reference(address.agent, None, filtered_agents_by_host)
-        except UserInputError as e:
-            if "Multiple" in str(e):
-                raise
-            logger.trace("Agent lookup did not find {}: {}", identifier, e)
-            agent_result = None
 
-    all_hosts = list(filtered_agents_by_host.keys())
+def _resolve_agent_events_target(address: AgentAddress, mngr_ctx: MngrContext) -> EventsTarget:
+    with log_span("Loading agents and hosts"):
+        filtered_agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
+    # resolve_agent_reference only returns None when its agent argument is None,
+    # which AgentAddress disallows; it raises UserInputError on not-found.
+    agent_result = resolve_agent_reference(address.agent, None, filtered_agents_by_host)
+    assert agent_result is not None
+    host_ref, agent_ref = agent_result
+    with log_span("Getting events access for agent {}", agent_ref.agent_name):
+        provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
 
-    if agent_result is not None:
-        host_ref, agent_ref = agent_result
-        with log_span("Getting events access for agent {}", agent_ref.agent_name):
-            provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
+        host_volume = provider.get_volume_for_host(host_ref.host_id)
+        events_volume: Volume | None = None
+        if host_volume is not None:
+            agent_volume = host_volume.get_agent_volume(agent_ref.agent_id)
+            events_volume = agent_volume.scoped("events")
 
-            # Try to get the volume
-            host_volume = provider.get_volume_for_host(host_ref.host_id)
-            events_volume: Volume | None = None
-            if host_volume is not None:
-                agent_volume = host_volume.get_agent_volume(agent_ref.agent_id)
-                events_volume = agent_volume.scoped("events")
+        agent_events_subpath = Path("agents") / str(agent_ref.agent_id) / "events"
+        online_host, events_path = _try_get_online_host_for_events(provider, host_ref.host_id, agent_events_subpath)
 
-            # Try to get the online host for direct access
-            agent_events_subpath = Path("agents") / str(agent_ref.agent_id) / "events"
-            online_host, events_path = _try_get_online_host_for_events(
-                provider, host_ref.host_id, agent_events_subpath
+        if events_volume is None and online_host is None:
+            raise MngrError(
+                f"Provider '{host_ref.provider_name}' does not support volumes and the host is not online. "
+                "Cannot read events for this agent."
             )
 
-            if events_volume is None and online_host is None:
-                raise MngrError(
-                    f"Provider '{host_ref.provider_name}' does not support volumes and the host is not online. "
-                    "Cannot read events for this agent."
-                )
+    return EventsTarget(
+        volume=events_volume,
+        online_host=online_host,
+        events_path=events_path,
+        display_name=f"agent '{agent_ref.agent_name}'",
+        provider=provider,
+        host_id=host_ref.host_id,
+        events_subpath=agent_events_subpath,
+    )
 
-        return EventsTarget(
-            volume=events_volume,
-            online_host=online_host,
-            events_path=events_path,
-            display_name=f"agent '{agent_ref.agent_name}'",
-            provider=provider,
-            host_id=host_ref.host_id,
-            events_subpath=agent_events_subpath,
-        )
 
-    # Try finding as a host. Discover hosts if the agent-shaped path didn't.
-    if not all_hosts:
-        host_agents_by_host, _ = discover_hosts_and_agents(
-            mngr_ctx,
-            provider_names=None,
-            agent_identifiers=None,
-            include_destroyed=False,
-            reset_caches=False,
-        )
-        all_hosts = list(host_agents_by_host.keys())
+def _resolve_host_events_target(address: HostAddress, mngr_ctx: MngrContext) -> EventsTarget:
+    host_agents_by_host, _ = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=None,
+        agent_identifiers=None,
+        include_destroyed=False,
+        reset_caches=False,
+    )
+    all_hosts = list(host_agents_by_host.keys())
+    host_ref = find_one_matching_host(address, all_hosts)
 
-    try:
-        host_address = parse_host_address(identifier)
-    except UserInputError:
-        host_address = None
+    with log_span("Getting events access for host {}", host_ref.host_name):
+        provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
 
-    host_ref: DiscoveredHost | None = None
-    if host_address is not None:
-        try:
-            host_ref = find_one_matching_host(host_address, all_hosts)
-        except UserInputError as e:
-            if "Multiple" in str(e):
-                raise
-            logger.trace("Host lookup did not find {}: {}", identifier, e)
-            host_ref = None
+        host_volume = provider.get_volume_for_host(host_ref.host_id)
+        events_volume: Volume | None = None
+        if host_volume is not None:
+            events_volume = host_volume.volume.scoped("events")
 
-    if host_ref is not None:
-        with log_span("Getting events access for host {}", host_ref.host_name):
-            provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
+        host_events_subpath = Path("events")
+        online_host, events_path = _try_get_online_host_for_events(provider, host_ref.host_id, host_events_subpath)
 
-            # Try to get the volume
-            host_volume = provider.get_volume_for_host(host_ref.host_id)
-            events_volume = None
-            if host_volume is not None:
-                events_volume = host_volume.volume.scoped("events")
+        if events_volume is None and online_host is None:
+            raise MngrError(
+                f"Provider '{host_ref.provider_name}' does not support volumes and the host is not online. "
+                "Cannot read events for this host."
+            )
 
-            # Try to get the online host for direct access
-            host_events_subpath = Path("events")
-            online_host, events_path = _try_get_online_host_for_events(provider, host_ref.host_id, host_events_subpath)
-
-            if events_volume is None and online_host is None:
-                raise MngrError(
-                    f"Provider '{host_ref.provider_name}' does not support volumes and the host is not online. "
-                    "Cannot read events for this host."
-                )
-
-        return EventsTarget(
-            volume=events_volume,
-            online_host=online_host,
-            events_path=events_path,
-            display_name=f"host '{host_ref.host_name}'",
-            provider=provider,
-            host_id=host_ref.host_id,
-            events_subpath=host_events_subpath,
-        )
-
-    raise UserInputError(f"No agent or host found with name or ID: {identifier}")
+    return EventsTarget(
+        volume=events_volume,
+        online_host=online_host,
+        events_path=events_path,
+        display_name=f"host '{host_ref.host_name}'",
+        provider=provider,
+        host_id=host_ref.host_id,
+        events_subpath=host_events_subpath,
+    )
 
 
 def _try_get_online_host_for_events(

@@ -5,7 +5,7 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.address_parsers import parse_host_address
+from imbue.mngr.api.address_parsers import parse_agent_or_host_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import find_agents_by_addresses
 from imbue.mngr.api.find import find_all_matching_hosts
@@ -95,25 +95,32 @@ class SnapshotDestroyCliOptions(CommonCliOptions):
 # =============================================================================
 
 
-def _classify_mixed_identifiers(
+def _bucketize_mixed_identifiers(
     identifiers: list[str],
-    mngr_ctx: MngrContext,
-) -> tuple[list[AgentAddress], list[HostAddress], list[DiscoveredHost]]:
-    """Classify mixed identifiers into agent and host identifiers.
+) -> tuple[list[AgentAddress], list[HostAddress]]:
+    """Parse a mixed positional list into agent and host addresses by text alone.
 
-    Each identifier is checked against known agent names and IDs.
-    If it matches an agent, it's treated as an agent identifier.
-    Otherwise, it's treated as a host identifier.
-
-    Returns ``(agent_addresses, host_addresses, all_hosts)``. The discovered
-    host list is returned alongside so callers can resolve host addresses
-    against the same set without re-running discovery.
+    Each token is parsed via :func:`parse_agent_or_host_address`. The leading
+    ``@`` and the ``host-`` ID prefix are the disambiguators; no state is
+    consulted. Users must write ``@HOST`` (or ``HOST.PROVIDER``) to target a
+    host by bare name.
     """
-    if not identifiers:
-        return [], [], []
+    agent_addresses: list[AgentAddress] = []
+    host_addresses: list[HostAddress] = []
+    for identifier in identifiers:
+        try:
+            addr = parse_agent_or_host_address(identifier)
+        except UserInputError as e:
+            raise click.BadParameter(str(e)) from e
+        if isinstance(addr, AgentAddress):
+            agent_addresses.append(addr)
+        else:
+            host_addresses.append(addr)
+    return agent_addresses, host_addresses
 
-    # Use try/except to gracefully handle provider errors (e.g. unreachable providers).
-    # Partial results are acceptable here since we're only classifying identifiers.
+
+def _discover_all_hosts(mngr_ctx: MngrContext) -> list[DiscoveredHost]:
+    """Discover all hosts; on provider errors, log and return an empty list."""
     try:
         agents_by_host, _ = discover_hosts_and_agents(
             mngr_ctx,
@@ -123,26 +130,9 @@ def _classify_mixed_identifiers(
             reset_caches=False,
         )
     except BaseMngrError as e:
-        logger.warning("Failed to load agents for identifier classification: {}", e)
-        # Treat all identifiers as host identifiers when agents cannot be loaded;
-        # host resolution downstream will then surface a clean "not found" error.
-        return [], [parse_host_address(s) for s in identifiers], []
-
-    known_names_and_ids: set[str] = set()
-    for agent_refs in agents_by_host.values():
-        for agent_ref in agent_refs:
-            known_names_and_ids.add(str(agent_ref.agent_name))
-            known_names_and_ids.add(str(agent_ref.agent_id))
-
-    agent_addresses: list[AgentAddress] = []
-    host_addresses: list[HostAddress] = []
-    for identifier in identifiers:
-        if identifier in known_names_and_ids:
-            agent_addresses.extend(parse_agent_addresses_or_raise([identifier]))
-        else:
-            host_addresses.append(parse_host_address(identifier))
-
-    return agent_addresses, host_addresses, list(agents_by_host.keys())
+        logger.warning("Failed to discover hosts: {}", e)
+        return []
+    return list(agents_by_host.keys())
 
 
 def _resolve_snapshot_hosts(
@@ -457,9 +447,9 @@ def _snapshot_create_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     _check_create_future_options(opts)
 
-    # Classify mixed positional identifiers as agents or hosts
+    # Parse mixed positional identifiers into agent and host addresses by text alone
     expanded_identifiers = expand_stdin_placeholder(opts.identifiers)
-    mixed_agents, mixed_hosts, all_hosts = _classify_mixed_identifiers(expanded_identifiers, mngr_ctx)
+    mixed_agents, mixed_hosts = _bucketize_mixed_identifiers(expanded_identifiers)
 
     # Combine with explicit --agent and --host options
     agent_addresses: list[AgentAddress] = mixed_agents + list(opts.agent_list)
@@ -472,7 +462,8 @@ def _snapshot_create_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
-    # Resolve targets to unique hosts
+    # Resolve targets to unique hosts (discovery only needed for host-address resolution)
+    all_hosts = _discover_all_hosts(mngr_ctx) if host_addresses else []
     targets = _resolve_snapshot_hosts(
         agent_addresses=agent_addresses,
         host_addresses=host_addresses,
@@ -574,9 +565,9 @@ def snapshot_list(ctx: click.Context, **kwargs: Any) -> None:
 
     _check_list_future_options(opts)
 
-    # Classify mixed positional identifiers as agents or hosts
+    # Parse mixed positional identifiers into agent and host addresses by text alone
     expanded_identifiers = expand_stdin_placeholder(opts.identifiers)
-    mixed_agents, mixed_hosts, all_hosts = _classify_mixed_identifiers(expanded_identifiers, mngr_ctx)
+    mixed_agents, mixed_hosts = _bucketize_mixed_identifiers(expanded_identifiers)
 
     # Combine with explicit --agent and --host options
     agent_addresses: list[AgentAddress] = mixed_agents + list(opts.agent_list)
@@ -587,7 +578,8 @@ def snapshot_list(ctx: click.Context, **kwargs: Any) -> None:
             raise click.UsageError("Must specify at least one agent or host (use '-' to read from stdin)")
         return
 
-    # Resolve to hosts
+    # Resolve to hosts (discovery only needed for host-address resolution)
+    all_hosts = _discover_all_hosts(mngr_ctx) if host_addresses else []
     targets = _resolve_snapshot_hosts(
         agent_addresses=agent_addresses,
         host_addresses=host_addresses,

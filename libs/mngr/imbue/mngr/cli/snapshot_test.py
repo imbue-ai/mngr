@@ -9,20 +9,21 @@ from click.testing import CliRunner
 from imbue.mngr.cli.snapshot import SnapshotCreateCliOptions
 from imbue.mngr.cli.snapshot import SnapshotDestroyCliOptions
 from imbue.mngr.cli.snapshot import SnapshotListCliOptions
-from imbue.mngr.cli.snapshot import _classify_mixed_identifiers
+from imbue.mngr.cli.snapshot import _bucketize_mixed_identifiers
 from imbue.mngr.cli.snapshot import _emit_create_result
 from imbue.mngr.cli.snapshot import _emit_destroy_result
 from imbue.mngr.cli.snapshot import _emit_list_snapshots
 from imbue.mngr.cli.snapshot import snapshot
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.main import cli
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostAddress
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 
@@ -166,27 +167,53 @@ def test_snapshot_destroy_subcommand_not_forwarded(
 
 
 # =============================================================================
-# _classify_mixed_identifiers tests
+# _bucketize_mixed_identifiers tests
 # =============================================================================
 
 
-def test_classify_mixed_identifiers_empty_input_returns_empty_lists(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """Empty identifier list returns three empty lists."""
-    agent_ids, host_ids, all_hosts = _classify_mixed_identifiers([], temp_mngr_ctx)
-    assert agent_ids == []
-    assert host_ids == []
-    assert all_hosts == []
+def test_bucketize_mixed_identifiers_empty_input_returns_empty_lists() -> None:
+    """Empty identifier list returns two empty lists."""
+    agent_addrs, host_addrs = _bucketize_mixed_identifiers([])
+    assert agent_addrs == []
+    assert host_addrs == []
 
 
-def test_classify_mixed_identifiers_no_agents_treats_all_as_hosts(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """When no agents exist, all identifiers are classified as host identifiers."""
-    agent_ids, host_ids, _ = _classify_mixed_identifiers(["foo", "bar"], temp_mngr_ctx)
-    assert agent_ids == []
-    assert host_ids == [HostAddress(host=HostName("foo")), HostAddress(host=HostName("bar"))]
+def test_bucketize_mixed_identifiers_bare_names_are_agents() -> None:
+    """Bare names parse as agents under text-only disambiguation."""
+    agent_addrs, host_addrs = _bucketize_mixed_identifiers(["foo", "bar"])
+    assert agent_addrs == [
+        AgentAddress(agent=AgentName("foo")),
+        AgentAddress(agent=AgentName("bar")),
+    ]
+    assert host_addrs == []
+
+
+def test_bucketize_mixed_identifiers_at_prefix_is_host() -> None:
+    """A leading ``@`` forces host parsing."""
+    agent_addrs, host_addrs = _bucketize_mixed_identifiers(["@my-host", "@my-host.modal"])
+    assert agent_addrs == []
+    assert host_addrs == [
+        HostAddress(host=HostName("my-host")),
+        HostAddress(host=HostName("my-host"), provider=ProviderInstanceName("modal")),
+    ]
+
+
+def test_bucketize_mixed_identifiers_host_id_is_host() -> None:
+    """A bare HostId is recognized as a host without the ``@`` prefix."""
+    host_id = HostId.generate()
+    agent_addrs, host_addrs = _bucketize_mixed_identifiers([str(host_id)])
+    assert agent_addrs == []
+    assert host_addrs == [HostAddress(host=host_id)]
+
+
+def test_bucketize_mixed_identifiers_mix_of_agents_and_hosts() -> None:
+    """Agent tokens and host tokens go to their respective buckets."""
+    agent_addrs, host_addrs = _bucketize_mixed_identifiers(["my-agent", "@my-host", "other-agent"])
+    assert agent_addrs == [
+        AgentAddress(agent=AgentName("my-agent")),
+        AgentAddress(agent=AgentName("other-agent")),
+    ]
+    assert host_addrs == [HostAddress(host=HostName("my-host"))]
 
 
 # =============================================================================
@@ -278,33 +305,6 @@ def test_snapshot_list_cli_options_can_be_instantiated() -> None:
     assert opts.identifiers == ("a1", "a2")
     assert opts.limit == 5
     assert opts.verbose == 2
-
-
-# =============================================================================
-# _classify_mixed_identifiers edge cases
-# =============================================================================
-
-
-def test_classify_mixed_identifiers_single_unknown_identifier(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """A single unknown identifier is classified as a host identifier."""
-    agent_ids, host_ids, _ = _classify_mixed_identifiers(["some-host-id"], temp_mngr_ctx)
-    assert agent_ids == []
-    assert host_ids == [HostAddress(host=HostName("some-host-id"))]
-
-
-def test_classify_mixed_identifiers_multiple_unknown_identifiers(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """Multiple unknown identifiers are all classified as host identifiers."""
-    agent_ids, host_ids, _ = _classify_mixed_identifiers(["host-a", "host-b", "host-c"], temp_mngr_ctx)
-    assert agent_ids == []
-    assert host_ids == [
-        HostAddress(host=HostName("host-a")),
-        HostAddress(host=HostName("host-b")),
-        HostAddress(host=HostName("host-c")),
-    ]
 
 
 # =============================================================================

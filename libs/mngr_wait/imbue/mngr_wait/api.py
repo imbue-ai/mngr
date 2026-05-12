@@ -1,28 +1,24 @@
 import time
 from collections.abc import Callable
-from collections.abc import Mapping
-from collections.abc import Sequence
 
 from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
-from imbue.mngr.api.address_parsers import parse_agent_address
-from imbue.mngr.api.address_parsers import parse_agent_name_or_id
-from imbue.mngr.api.address_parsers import parse_host_address
 from imbue.mngr.api.discover import discover_by_address
+from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import find_one_matching_host
 from imbue.mngr.api.find import resolve_agent_reference
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostConnectionError
-from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
-from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import AgentOrHostAddress
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr_wait.data_types import CombinedState
@@ -45,142 +41,53 @@ class ResolvedTarget(FrozenModel):
 
 
 def resolve_wait_target(
-    identifier: str,
+    address: AgentOrHostAddress,
     mngr_ctx: MngrContext,
 ) -> ResolvedTarget:
-    """Resolve a target identifier to provider, host, and optional agent references.
+    """Resolve an :class:`AgentOrHostAddress` to a :class:`ResolvedTarget`.
 
-    Supports agent address syntax: NAME[@[HOST][.PROVIDER]].
-
-    Uses the existing find.py resolution functions for agent/host lookup.
+    Agent vs host is decided by the address type (no state-based fallback).
+    Raises :class:`UserInputError` if the target cannot be found.
     """
-    address = parse_agent_address(identifier)
-    plain_id = str(address.agent)
+    if isinstance(address, AgentAddress):
+        return _build_agent_resolved_target(address, mngr_ctx)
+    return _build_host_resolved_target(address, mngr_ctx)
 
+
+def _build_agent_resolved_target(address: AgentAddress, mngr_ctx: MngrContext) -> ResolvedTarget:
     with log_span("Discovering hosts and agents"):
-        filtered_agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
-
-    all_hosts = list(filtered_agents_by_host.keys())
-
-    # Determine target type from identifier format
-    if plain_id.startswith("agent-"):
-        return _build_agent_resolved_target(plain_id, filtered_agents_by_host, mngr_ctx)
-    elif plain_id.startswith("host-"):
-        return _build_host_resolved_target(plain_id, all_hosts, mngr_ctx)
-    else:
-        # Ambiguous name -- try agent first, then host, error on ambiguity
-        return _resolve_by_name(plain_id, filtered_agents_by_host, all_hosts, mngr_ctx)
-
-
-def _build_agent_resolved_target(
-    identifier: str,
-    agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
-    mngr_ctx: MngrContext,
-) -> ResolvedTarget:
-    """Build a ResolvedTarget for an agent identifier using find.py's resolve_agent_reference.
-
-    resolve_agent_reference raises UserInputError if not found; it only returns None
-    when identifier is None, which cannot happen here.
-    """
-    result = resolve_agent_reference(
-        parse_agent_name_or_id(identifier), resolved_host=None, agents_by_host=agents_by_host
-    )
+        agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
+    # resolve_agent_reference only returns None when its agent argument is None,
+    # which AgentAddress disallows; it raises UserInputError on not-found.
+    result = resolve_agent_reference(address.agent, resolved_host=None, agents_by_host=agents_by_host)
     assert result is not None
     host_ref, agent_ref = result
     provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
     return ResolvedTarget(
-        target=WaitTarget(identifier=identifier, target_type=WaitTargetType.AGENT),
+        target=WaitTarget(identifier=str(address), target_type=WaitTargetType.AGENT),
         provider=provider,
         host_id=host_ref.host_id,
         agent_id=agent_ref.agent_id,
     )
 
 
-def _build_host_resolved_target(
-    identifier: str,
-    all_hosts: list[DiscoveredHost],
-    mngr_ctx: MngrContext,
-) -> ResolvedTarget:
-    """Build a ResolvedTarget for a host identifier using find.py's find_one_matching_host.
-
-    find_one_matching_host raises UserInputError if the host cannot be found.
-    """
-    host_ref = find_one_matching_host(parse_host_address(identifier), all_hosts)
+def _build_host_resolved_target(address: HostAddress, mngr_ctx: MngrContext) -> ResolvedTarget:
+    with log_span("Discovering hosts and agents"):
+        agents_by_host, _ = discover_hosts_and_agents(
+            mngr_ctx,
+            provider_names=None,
+            agent_identifiers=None,
+            include_destroyed=False,
+            reset_caches=False,
+        )
+    all_hosts = list(agents_by_host.keys())
+    host_ref = find_one_matching_host(address, all_hosts)
     provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
     return ResolvedTarget(
-        target=WaitTarget(identifier=identifier, target_type=WaitTargetType.HOST),
+        target=WaitTarget(identifier=str(address), target_type=WaitTargetType.HOST),
         provider=provider,
         host_id=host_ref.host_id,
         agent_id=None,
-    )
-
-
-def _resolve_by_name(
-    identifier: str,
-    agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
-    all_hosts: list[DiscoveredHost],
-    mngr_ctx: MngrContext,
-) -> ResolvedTarget:
-    """Resolve a name by trying agent names first, then host names.
-
-    Raises UserInputError if the name matches both an agent and a host.
-    """
-    # Try agent resolution (suppressing errors to try host next)
-    agent_result: tuple[DiscoveredHost, DiscoveredAgent] | None = None
-    agent_error: UserInputError | None = None
-    try:
-        agent_result = resolve_agent_reference(
-            parse_agent_name_or_id(identifier), resolved_host=None, agents_by_host=agents_by_host
-        )
-    except UserInputError as exc:
-        agent_error = exc
-
-    # Try host resolution
-    host_ref: DiscoveredHost | None = None
-    host_error: UserInputError | None = None
-    try:
-        host_ref = find_one_matching_host(parse_host_address(identifier), all_hosts)
-    except UserInputError as exc:
-        host_error = exc
-
-    # If both match, it's ambiguous
-    if agent_result is not None and host_ref is not None:
-        raise UserInputError(
-            f"Name '{identifier}' matches both an agent and a host. "
-            "Use the full ID (agent-* or host-*) to disambiguate."
-        )
-
-    # If agent matched (possibly with error for multiple matches)
-    if agent_result is not None:
-        matched_host_ref, agent_ref = agent_result
-        provider = get_provider_instance(matched_host_ref.provider_name, mngr_ctx)
-        return ResolvedTarget(
-            target=WaitTarget(identifier=identifier, target_type=WaitTargetType.AGENT),
-            provider=provider,
-            host_id=matched_host_ref.host_id,
-            agent_id=agent_ref.agent_id,
-        )
-
-    # If agent had a "multiple matches" error, re-raise it
-    if agent_error is not None and "Multiple" in str(agent_error):
-        raise agent_error
-
-    # If host matched
-    if host_ref is not None:
-        provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
-        return ResolvedTarget(
-            target=WaitTarget(identifier=identifier, target_type=WaitTargetType.HOST),
-            provider=provider,
-            host_id=host_ref.host_id,
-            agent_id=None,
-        )
-
-    # If host had a "multiple matches" error, re-raise it
-    if host_error is not None and "Multiple" in str(host_error):
-        raise host_error
-
-    raise UserInputError(
-        f"No agent or host found with name or ID: '{identifier}'. Use 'mngr list' to see available agents and hosts."
     )
 
 
