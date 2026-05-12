@@ -148,7 +148,7 @@ async def _managed_lifespan(
     inner_app: FastAPI,
     is_externally_managed_client: bool,
 ) -> AsyncGenerator[None, None]:
-    """Manage the httpx client lifecycle and capture the running event loop.
+    """Manage the httpx client lifecycle and root concurrency group teardown.
 
     Subprocess lifecycles (``mngr forward``, ``mngr observe`` / ``mngr event``
     grandchildren) live in ``EnvelopeStreamConsumer`` and are torn down by
@@ -162,17 +162,9 @@ async def _managed_lifespan(
             follow_redirects=False,
             timeout=_PROXY_TIMEOUT_SECONDS,
         )
-    # Captured here so background callbacks (e.g. the mngr event refresh
-    # dispatch) can schedule async work on the server's running loop via
-    # asyncio.run_coroutine_threadsafe.
-    inner_app.state.event_loop = asyncio.get_running_loop()
     try:
         yield
     finally:
-        # Clear the captured loop reference first so background callbacks that
-        # race with shutdown see None and drop their events instead of trying
-        # to schedule on a loop that is about to close.
-        inner_app.state.event_loop = None
         if not is_externally_managed_client:
             await inner_app.state.http_client.aclose()
         # Exit the root ConcurrencyGroup. ``__exit__`` waits up to
@@ -1953,11 +1945,6 @@ def create_desktop_client(
     app.state.mngr_forward_preauth_cookie = mngr_forward_preauth_cookie
     app.state.auth_output_format = output_format or OutputFormat.JSONL
     app.state.root_concurrency_group = root_concurrency_group
-    # Populated with the running loop by _managed_lifespan on startup. Defined
-    # up-front as None so background callbacks fired before startup (e.g. mngr
-    # events produced between consumer.start() and uvicorn.run()) see a
-    # valid attribute and can choose to drop the event instead of crashing.
-    app.state.event_loop = None
     # Always-set (possibly None) so consumers can read directly via
     # ``app.state.api_v1_paths`` instead of using a defaulting attribute
     # lookup -- the latter is flagged by the project ratchet.
