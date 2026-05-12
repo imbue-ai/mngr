@@ -198,8 +198,7 @@ def _resolve_agent_type_name(
         )
         raise UserInputError(
             "No agent type provided. Pass --type <name>, give a positional AGENT_TYPE, "
-            "or set a default with: mngr config set commands.create.type <name> --scope user "
-            "(or re-run scripts/install.sh)." + available_hint
+            "or set a default with: mngr config set commands.create.type <name> --scope user." + available_hint
         )
     return type_flag
 
@@ -369,7 +368,7 @@ class _CreateCommand(click.Command):
 @optgroup.option(
     "--type",
     default=None,
-    help="Which type of agent to run [default: commands.create.type from user settings]",
+    help="Which type of agent to run",
 )
 # FOLLOWUP: hmm... I wonder if the name of this should be changed to something more like "window" to be more closely aligned with the tmux primitive it actually creates...
 #  more generally, we probably need to do a pass at refining *all* of these option names...
@@ -1829,7 +1828,7 @@ _CREATE_HELP_METADATA = CommandHelpMetadata(
   - `NAME@HOST.PROVIDER --new-host` -- agent on a new host with the given name
   - `NAME:PATH` -- agent with a target path for the working directory
   - `:PATH` -- auto-named agent with a target path (equivalent to omitting the name)
-- `AGENT_TYPE`: Which type of agent to run. Can also be specified via `--type`. If neither is given, falls back to `[commands.create] type` in your user settings (set during installation by `scripts/install.sh`).
+- `AGENT_TYPE`: Which type of agent to run. Can also be specified via `--type`.
 - `AGENT_ARGS`: Additional arguments passed to the agent""",
     description="""This command sets up an agent's working directory, optionally provisions a
 new host (or uses an existing one), runs the specified agent process, and
@@ -1839,12 +1838,6 @@ By default, agents run locally in a new git worktree (for git repositories)
 or an rsync copy (for non-git projects). Specify a host in the agent address
 (e.g. NAME@HOST.PROVIDER) to target a remote host, or use NAME@.PROVIDER
 to create a new one.
-
-If --type is not given and no positional agent type is supplied, mngr
-falls back to `[commands.create] type` in your user settings.
-`scripts/install.sh` prompts for this default during installation; you
-can also set it later with
-`mngr config set commands.create.type <name> --scope user`.
 
 Arguments after -- are passed directly to the agent command. To run an
 arbitrary shell command, use the built-in 'command' agent type:

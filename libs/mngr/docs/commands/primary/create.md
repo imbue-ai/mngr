@@ -27,12 +27,6 @@ or an rsync copy (for non-git projects). Specify a host in the agent address
 (e.g. NAME@HOST.PROVIDER) to target a remote host, or use NAME@.PROVIDER
 to create a new one.
 
-If --type is not given and no positional agent type is supplied, mngr
-falls back to `[commands.create] type` in your user settings.
-`scripts/install.sh` prompts for this default during installation; you
-can also set it later with
-`mngr config set commands.create.type <name> --scope user`.
-
 Arguments after -- are passed directly to the agent command. To run an
 arbitrary shell command, use the built-in 'command' agent type:
 `mngr create my-task --type command -- sleep 3600`.
@@ -64,7 +58,7 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
   - `NAME@HOST.PROVIDER --new-host` -- agent on a new host with the given name
   - `NAME:PATH` -- agent with a target path for the working directory
   - `:PATH` -- auto-named agent with a target path (equivalent to omitting the name)
-- `AGENT_TYPE`: Which type of agent to run. Can also be specified via `--type`. If neither is given, falls back to `[commands.create] type` in your user settings (set during installation by `scripts/install.sh`).
+- `AGENT_TYPE`: Which type of agent to run. Can also be specified via `--type`.
 - `AGENT_ARGS`: Additional arguments passed to the agent
 
 **Options:**
@@ -77,7 +71,7 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | `-n`, `--name` | text | Agent address (alternative to positional argument, mutually exclusive) [default: auto-generated] | None |
 | `--id` | text | Explicit agent ID [default: auto-generated] | None |
 | `--name-style` | choice (`coolname` &#x7C; `english` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `animals` &#x7C; `scientists` &#x7C; `demons`) | Auto-generated name style | `coolname` |
-| `--type` | text | Which type of agent to run [default: commands.create.type from user settings] | None |
+| `--type` | text | Which type of agent to run | None |
 | `-w`, `--extra-window` | text | Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names | None |
 | `--label` | text | Agent label KEY=VALUE [repeatable] [experimental] | None |
 | `--project` | text | Project name for the agent (sets the 'project' label; '.' inherits from source agent's project label when --from references an agent, else uses the source's git remote origin, else the source's folder name) [default: .] | `.` |
