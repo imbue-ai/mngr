@@ -131,21 +131,18 @@ def find_all_matching_agents(
 
 
 @pure
-def resolve_agent_reference(
-    agent: AgentNameOrId | None,
+def find_one_matching_agent(
+    agent: AgentNameOrId,
     resolved_host: DiscoveredHost | None,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
-) -> tuple[DiscoveredHost, DiscoveredAgent] | None:
-    """Resolve an agent identifier (ID or name) to host and agent references.
+) -> tuple[DiscoveredHost, DiscoveredAgent]:
+    """Find the single agent matching the given identifier (by ID or name).
 
-    Returns ``None`` if ``agent`` is ``None``. Raises :class:`UserInputError`
-    if the agent cannot be found or multiple agents match.
+    Raises :class:`UserInputError` when no agent matches or when more than one
+    matches. If ``resolved_host`` is given, only agents on that host are
+    considered.
     """
-    if agent is None:
-        return None
-
     matches = find_all_matching_agents(agent, agents_by_host, resolved_host)
-
     if len(matches) == 0:
         raise UserInputError(f"Could not find agent with ID or name: {agent}")
     if len(matches) > 1:
@@ -190,12 +187,11 @@ def resolve_hosted_location(
     else:
         with log_span("Resolving host reference"):
             resolved_host = find_one_matching_host(parsed.host, all_hosts)
-    with log_span("Resolving agent reference"):
-        agent_result = resolve_agent_reference(parsed.agent, resolved_host, agents_by_host)
 
     resolved_agent: DiscoveredAgent | None = None
-    if agent_result is not None:
-        resolved_host, resolved_agent = agent_result
+    if parsed.agent is not None:
+        with log_span("Resolving agent reference"):
+            resolved_host, resolved_agent = find_one_matching_agent(parsed.agent, resolved_host, agents_by_host)
 
     with log_span("Getting host interface from provider"):
         if resolved_host is None:

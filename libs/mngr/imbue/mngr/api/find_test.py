@@ -12,11 +12,11 @@ from imbue.mngr.api.find import determine_resolved_path
 from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import find_all_matching_agents
 from imbue.mngr.api.find import find_all_matching_hosts
+from imbue.mngr.api.find import find_one_matching_agent
 from imbue.mngr.api.find import find_one_matching_host
 from imbue.mngr.api.find import get_host_from_list_by_id
 from imbue.mngr.api.find import get_unique_host_from_list_by_name
 from imbue.mngr.api.find import group_agents_by_host
-from imbue.mngr.api.find import resolve_agent_reference
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -199,17 +199,7 @@ def test_find_one_matching_host_raises_when_multiple_hosts_with_same_name() -> N
         )
 
 
-def test_resolve_agent_reference_with_none() -> None:
-    result = resolve_agent_reference(
-        agent=None,
-        resolved_host=None,
-        agents_by_host={},
-    )
-
-    assert result is None
-
-
-def test_resolve_agent_reference_by_id() -> None:
+def test_find_one_matching_agent_by_id() -> None:
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     host_ref = DiscoveredHost(
@@ -224,7 +214,7 @@ def test_resolve_agent_reference_by_id() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = resolve_agent_reference(
+    result = find_one_matching_agent(
         agent=agent_id,
         resolved_host=None,
         agents_by_host={host_ref: [agent_ref]},
@@ -233,7 +223,7 @@ def test_resolve_agent_reference_by_id() -> None:
     assert result == (host_ref, agent_ref)
 
 
-def test_resolve_agent_reference_by_name() -> None:
+def test_find_one_matching_agent_by_name() -> None:
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     host_ref = DiscoveredHost(
@@ -248,7 +238,7 @@ def test_resolve_agent_reference_by_name() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = resolve_agent_reference(
+    result = find_one_matching_agent(
         agent=AgentName("test-agent"),
         resolved_host=None,
         agents_by_host={host_ref: [agent_ref]},
@@ -257,7 +247,7 @@ def test_resolve_agent_reference_by_name() -> None:
     assert result == (host_ref, agent_ref)
 
 
-def test_resolve_agent_reference_with_resolved_host_filters_by_host() -> None:
+def test_find_one_matching_agent_with_resolved_host_filters_by_host() -> None:
     host_id1 = HostId.generate()
     host_id2 = HostId.generate()
     agent_id1 = AgentId.generate()
@@ -287,7 +277,7 @@ def test_resolve_agent_reference_with_resolved_host_filters_by_host() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = resolve_agent_reference(
+    result = find_one_matching_agent(
         agent=AgentName("test-agent"),
         resolved_host=host_ref1,
         agents_by_host={
@@ -299,16 +289,16 @@ def test_resolve_agent_reference_with_resolved_host_filters_by_host() -> None:
     assert result == (host_ref1, agent_ref1)
 
 
-def test_resolve_agent_reference_raises_when_not_found() -> None:
+def test_find_one_matching_agent_raises_when_not_found() -> None:
     with pytest.raises(UserInputError, match="Could not find agent with ID or name: nonexistent"):
-        resolve_agent_reference(
+        find_one_matching_agent(
             agent=AgentName("nonexistent"),
             resolved_host=None,
             agents_by_host={},
         )
 
 
-def test_resolve_agent_reference_raises_when_multiple_agents_match() -> None:
+def test_find_one_matching_agent_raises_when_multiple_agents_match() -> None:
     host_id1 = HostId.generate()
     host_id2 = HostId.generate()
     agent_id1 = AgentId.generate()
@@ -339,7 +329,7 @@ def test_resolve_agent_reference_raises_when_multiple_agents_match() -> None:
     )
 
     with pytest.raises(UserInputError, match="Multiple agents found with ID or name: test-agent"):
-        resolve_agent_reference(
+        find_one_matching_agent(
             agent=AgentName("test-agent"),
             resolved_host=None,
             agents_by_host={

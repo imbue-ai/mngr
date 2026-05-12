@@ -70,9 +70,11 @@ replacements:
 - The api-level `find_agent_by_address`, `find_agents_by_addresses`,
   `discover_by_address`, `find_one_matching_host` (formerly
   `resolve_host_reference`, now tightened to require a non-None
-  `HostAddress`), `resolve_agent_reference`, `find_all_matching_hosts`,
-  `find_all_matching_agents`, `exec_command_on_agent(s)`, etc., all take typed
-  addresses now instead of raw strings.
+  `HostAddress`), `find_one_matching_agent` (formerly
+  `resolve_agent_reference`, now tightened to require a non-None
+  `AgentNameOrId`), `find_all_matching_hosts`, `find_all_matching_agents`,
+  `exec_command_on_agent(s)`, etc., all take typed addresses now instead of
+  raw strings.
 - `AgentDetails.address` and `HostDetails.address` expose the corresponding
   typed addresses as cached properties, so callers can pass them directly to
   api functions instead of reconstructing addresses from individual fields.

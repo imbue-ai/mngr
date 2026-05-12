@@ -27,8 +27,8 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.find import find_one_matching_agent
 from imbue.mngr.api.find import find_one_matching_host
-from imbue.mngr.api.find import resolve_agent_reference
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MalformedJsonlLineError
@@ -149,11 +149,7 @@ def resolve_events_target(
 def _resolve_agent_events_target(address: AgentAddress, mngr_ctx: MngrContext) -> EventsTarget:
     with log_span("Loading agents and hosts"):
         filtered_agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
-    # resolve_agent_reference only returns None when its agent argument is None,
-    # which AgentAddress disallows; it raises UserInputError on not-found.
-    agent_result = resolve_agent_reference(address.agent, None, filtered_agents_by_host)
-    assert agent_result is not None
-    host_ref, agent_ref = agent_result
+    host_ref, agent_ref = find_one_matching_agent(address.agent, None, filtered_agents_by_host)
     with log_span("Getting events access for agent {}", agent_ref.agent_name):
         provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
 
