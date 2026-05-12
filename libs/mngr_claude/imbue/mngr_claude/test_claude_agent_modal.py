@@ -303,7 +303,7 @@ def test_destroy_stopped_modal_agent_preserves_sessions_from_volume(
 @pytest.mark.release
 @pytest.mark.rsync
 @pytest.mark.tmux
-@pytest.mark.timeout(1200)
+@pytest.mark.timeout(600)
 def test_clone_local_claude_agent_to_modal(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
