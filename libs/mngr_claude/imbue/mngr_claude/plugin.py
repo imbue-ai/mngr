@@ -2046,18 +2046,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         host: OnlineHostInterface,
         source_agent_state_location: HostLocation,
     ) -> None:
-        """Transfer plugin data from a source agent's state directory during clone.
-
-        Copies the source agent's plugin/ directory into this agent's state
-        directory. This runs before _setup_per_agent_config_dir, which will
-        overwrite identity-specific config files with fresh values for the
-        new agent.
-
-        ``source_agent_state_location.host`` is the host where the source agent
-        lives -- it may be the local laptop, the same remote as ``host``, or a
-        different remote. Passing ``host`` to ``copy_directory`` as the source
-        would make rsync look for the source path on the destination machine
-        and fail (or, when source == dest, succeed only by coincidence).
+        """Copy the source agent's plugin/ directory into this agent's state
+        directory. Runs before _setup_per_agent_config_dir, which overwrites
+        identity-specific config files with fresh values for the new agent.
         """
         source_host = source_agent_state_location.host
         source_plugin_dir = source_agent_state_location.path / "plugin"
