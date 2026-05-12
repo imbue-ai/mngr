@@ -414,13 +414,14 @@ _LEAK_POLL_INTERVAL_S = 2.0
 def _get_leaked_modal_environments() -> list[str]:
     if not worker_modal_environment_names:
         return []
-    # Holder for the most recent poll's candidate set; populated by the
-    # closure below so we can return the final state after `poll_until`
-    # exits (whether by convergence or timeout).
-    last_candidates: list[str] = []
-    list_failed: list[bool] = [False]
+    # Tracks the most recent successful poll's candidate set so we can
+    # return the final state after `poll_until` exits (whether by
+    # convergence or by timeout). Stays `None` while every poll has
+    # failed transiently; treated as "no leaks observed" in that case.
+    last_candidates: list[str] | None = None
 
     def env_list_clean() -> bool:
+        nonlocal last_candidates
         try:
             result = subprocess.run(
                 ["uv", "run", "modal", "environment", "list", "--json"],
@@ -429,22 +430,19 @@ def _get_leaked_modal_environments() -> list[str]:
                 timeout=30,
             )
             if result.returncode != 0:
-                list_failed[0] = True
-                return True
+                # Transient failure -- keep polling. Don't overwrite a
+                # previously successful `last_candidates`.
+                return False
             envs = json.loads(result.stdout)
-            last_candidates[:] = [
-                e.get("name", "") for e in envs if e.get("name", "") in worker_modal_environment_names
-            ]
+            last_candidates = [e.get("name", "") for e in envs if e.get("name", "") in worker_modal_environment_names]
         except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
             logger.warning("Failed to list leaked modal environments: {}", e)
-            list_failed[0] = True
-            return True
+            # Transient failure -- keep polling.
+            return False
         return not last_candidates
 
     poll_until(env_list_clean, timeout=_LEAK_POLL_TIMEOUT_S, poll_interval=_LEAK_POLL_INTERVAL_S)
-    if list_failed[0]:
-        return []
-    return last_candidates
+    return last_candidates if last_candidates else []
 
 
 def _delete_modal_environments(environment_names: list[str]) -> None:
