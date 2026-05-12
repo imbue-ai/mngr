@@ -1,27 +1,30 @@
+import typing
 from collections.abc import Callable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from concurrent.futures import Future
 from datetime import datetime
 from datetime import timezone
 from threading import Lock
 from typing import Any
+from typing import Final
 
 from loguru import logger
+from pydantic import BaseModel
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
-from imbue.mngr.api.discovery_events import emit_discovery_error_to_stdout
+from imbue.mngr.api.discovery_events import emit_discovery_error_event
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
 from imbue.mngr.api.discovery_events import extract_agents_and_hosts_from_full_listing
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
-from imbue.mngr.api.providers import get_all_provider_instances
+from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
@@ -36,10 +39,57 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.providers.base_provider import BaseProviderInstance
-from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
+from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
+from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr.utils.cel_utils import with_tolerant_paths
+from imbue.mngr.utils.pydantic_utils import unwrap_optional
 from imbue.mngr.utils.thread_cleanup import mngr_executor
+
+
+def _walk_dict_paths(model: type[BaseModel], prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    """Yield every path through `model`'s pydantic field tree that terminates in a dict-typed field.
+
+    Recurses into nested model fields, unwraps `Optional[T]` to T, and treats
+    a `dict[...]` / `Mapping[...]` field as a leaf. Anything else (lists,
+    primitives, datetimes, etc.) is not a path target.
+
+    Used to compute `_AGENT_SCHEMALESS_PATHS` from the AgentDetails type tree
+    at module load time -- see the rationale on that constant.
+    """
+    paths: list[tuple[str, ...]] = []
+    for name, field in model.model_fields.items():
+        annotation = unwrap_optional(field.annotation)
+        if _is_dict_like(annotation):
+            paths.append((*prefix, name))
+            continue
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            paths.extend(_walk_dict_paths(annotation, (*prefix, name)))
+            continue
+        # Anything else (primitives, lists, tuples, datetimes, enums, ...) is
+        # not a dict and not a model we can descend into, so we skip it.
+    return paths
+
+
+def _is_dict_like(annotation: Any) -> bool:
+    """True if `annotation` is `dict[...]` or `Mapping[...]` (or a subclass origin)."""
+    origin = typing.get_origin(annotation)
+    if origin is None:
+        return False
+    return origin is dict or (isinstance(origin, type) and issubclass(origin, Mapping))
+
+
+# CEL paths whose missing-key access should evaluate to a clean False (and let
+# `has()` report absence) rather than warn per agent. Derived at module load
+# time by walking the AgentDetails pydantic field tree: every `dict[...]`-typed
+# field is treated as schemaless because its contents are user- or
+# plugin-supplied, so different agents legitimately have different keys.
+#
+# Adding a new dict field to AgentDetails or HostDetails automatically opts it
+# into tolerance. If a future dict field is actually *schemaful* (typos should
+# warn), we'll need a marker to opt it out -- flag it at the time, none today.
+# See `with_tolerant_paths` in cel_utils for the tolerance semantics.
+_AGENT_SCHEMALESS_PATHS: Final[tuple[tuple[str, ...], ...]] = tuple(_walk_dict_paths(AgentDetails))
 
 
 class ErrorInfo(FrozenModel):
@@ -133,7 +183,7 @@ def list_agents(
     include_filters: tuple[str, ...] = (),
     # CEL expressions - exclude agents matching these
     exclude_filters: tuple[str, ...] = (),
-    # If specified, only list agents from these providers (NOT IMPLEMENTED YET)
+    # If specified, only list agents from these providers
     provider_names: tuple[str, ...] | None = None,
     # How to handle errors (abort or continue)
     error_behavior: ErrorBehavior = ErrorBehavior.ABORT,
@@ -238,6 +288,99 @@ def _maybe_write_full_discovery_snapshot(
         logger.warning("Failed to write full discovery snapshot: {}", e)
 
 
+def _construct_and_discover_for_provider(
+    provider_name: ProviderInstanceName,
+    mngr_ctx: MngrContext,
+    params: _ListAgentsParams,
+    result: ListResult,
+    results_lock: Lock,
+    reset_caches: bool,
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
+    providers: list[ProviderInstanceInterface],
+    providers_lock: Lock,
+) -> None:
+    """Construct one provider and discover its hosts/agents, merging into shared dicts.
+
+    On failure, honors `params.error_behavior`: ABORT re-raises (wrapped to
+    `MngrError`); CONTINUE records a `ProviderErrorInfo` on `result.errors`.
+    """
+    try:
+        provider = get_provider_instance(provider_name, mngr_ctx)
+        if reset_caches:
+            provider.reset_caches()
+        provider_results = provider.discover_hosts_and_agents(cg=mngr_ctx.concurrency_group, include_destroyed=True)
+    except Exception as e:
+        if params.error_behavior == ErrorBehavior.ABORT:
+            if isinstance(e, MngrError):
+                raise
+            raise MngrError(str(e)) from e
+        logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
+        emit_discovery_error_event(
+            mngr_ctx.config,
+            error_type=type(e).__name__,
+            error_message=str(e),
+            source_name=str(provider_name),
+            provider_name=str(provider_name),
+        )
+        error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
+        with results_lock:
+            result.errors.append(error_info)
+        if params.on_error:
+            params.on_error(error_info)
+        return
+
+    with providers_lock:
+        providers.append(provider)
+    with results_lock:
+        agents_by_host.update(provider_results)
+
+
+def _construct_and_discover_all_providers(
+    mngr_ctx: MngrContext,
+    provider_names: tuple[str, ...] | None,
+    params: _ListAgentsParams,
+    result: ListResult,
+    results_lock: Lock,
+    reset_caches: bool,
+) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[ProviderInstanceInterface]]:
+    """Run `_construct_and_discover_for_provider` for every provider in parallel.
+
+    Returns the merged host/agent map plus the providers that completed
+    successfully.
+    """
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
+    providers: list[ProviderInstanceInterface] = []
+    providers_lock = Lock()
+
+    with log_span("Loading agents from all providers"):
+        names = list_provider_names_to_load(mngr_ctx, provider_names)
+        with mngr_executor(
+            parent_cg=mngr_ctx.concurrency_group, name="list_agents_construct_and_discover", max_workers=32
+        ) as executor:
+            futures = [
+                executor.submit(
+                    _construct_and_discover_for_provider,
+                    name,
+                    mngr_ctx,
+                    params,
+                    result,
+                    results_lock,
+                    reset_caches,
+                    agents_by_host,
+                    providers,
+                    providers_lock,
+                )
+                for name in names
+            ]
+
+        # Re-raise any thread exceptions (ABORT-mode errors)
+        for future in futures:
+            future.result()
+
+    warn_on_duplicate_host_names(agents_by_host)
+    return agents_by_host, providers
+
+
 def _list_agents_batch(
     mngr_ctx: MngrContext,
     provider_names: tuple[str, ...] | None,
@@ -247,14 +390,14 @@ def _list_agents_batch(
     reset_caches: bool = False,
 ) -> None:
     """Batch mode: load all agents from all providers, then process hosts."""
-    with log_span("Loading agents from all providers"):
-        agents_by_host, providers = discover_hosts_and_agents(
-            mngr_ctx,
-            provider_names=provider_names,
-            agent_identifiers=None,
-            include_destroyed=True,
-            reset_caches=reset_caches,
-        )
+    agents_by_host, providers = _construct_and_discover_all_providers(
+        mngr_ctx=mngr_ctx,
+        provider_names=provider_names,
+        params=params,
+        result=result,
+        results_lock=results_lock,
+        reset_caches=reset_caches,
+    )
     provider_map = {provider.name: provider for provider in providers}
     logger.trace("Found {} hosts with agents", len(agents_by_host))
 
@@ -309,22 +452,23 @@ def _list_agents_streaming(
     Fast providers fire on_agent callbacks while slow providers are still loading.
     """
     with log_span("Loading agents from all providers (streaming)"):
-        providers = get_all_provider_instances(mngr_ctx, provider_names, reset_caches=reset_caches)
-        logger.trace("Found {} provider instances", len(providers))
+        names = list_provider_names_to_load(mngr_ctx, provider_names)
+        logger.trace("Found {} provider names to load", len(names))
 
         with mngr_executor(
             parent_cg=mngr_ctx.concurrency_group, name="list_agents_streaming", max_workers=32
         ) as executor:
             streaming_futures: list[Future[None]] = []
-            for provider in providers:
+            for name in names:
                 streaming_futures.append(
                     executor.submit(
-                        _discover_and_emit_details_for_provider,
-                        provider,
+                        _construct_discover_and_emit_for_provider,
+                        name,
+                        mngr_ctx,
                         params,
                         result,
                         results_lock,
-                        mngr_ctx.concurrency_group,
+                        reset_caches,
                     )
                 )
 
@@ -333,20 +477,26 @@ def _list_agents_streaming(
             future.result()
 
 
-def _discover_and_emit_details_for_provider(
-    provider: BaseProviderInstance,
+def _construct_discover_and_emit_for_provider(
+    provider_name: ProviderInstanceName,
+    mngr_ctx: MngrContext,
     params: _ListAgentsParams,
     result: ListResult,
     results_lock: Lock,
-    cg: ConcurrencyGroup,
+    reset_caches: bool,
 ) -> None:
-    """Load hosts from a single provider, get agent refs, and immediately process them.
+    """Construct a single provider, load its hosts, and process them.
 
-    This is the streaming counterpart to the batch approach. Each provider independently
-    loads hosts, fetches agent references, then processes hosts -- firing on_agent callbacks
-    without waiting for other providers.
+    Streaming counterpart to the batch approach. Each provider independently
+    constructs, loads hosts, fetches agent references, then processes hosts --
+    firing on_agent callbacks without waiting for other providers.
     """
+    cg = mngr_ctx.concurrency_group
     try:
+        provider = get_provider_instance(provider_name, mngr_ctx)
+        if reset_caches:
+            provider.reset_caches()
+
         # Phase 1: list hosts and get agent refs
         provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=True)
 
@@ -381,13 +531,15 @@ def _discover_and_emit_details_for_provider(
             if isinstance(e, MngrError):
                 raise
             raise MngrError(str(e)) from e
-        logger.opt(exception=e).error("Error discovering agents for provider {}", provider.name)
-        emit_discovery_error_to_stdout(
+        logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
+        emit_discovery_error_event(
+            mngr_ctx.config,
             error_type=type(e).__name__,
             error_message=str(e),
-            source_name=str(provider.name),
+            source_name=str(provider_name),
+            provider_name=str(provider_name),
         )
-        error_info = ProviderErrorInfo.build_for_provider(e, provider.name)
+        error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
         with results_lock:
             result.errors.append(error_info)
         if params.on_error:
@@ -468,10 +620,12 @@ def _process_host_with_error_handling(
                 raise
             raise MngrError(str(e)) from e
         logger.opt(exception=e).error("Error processing host {}", host_ref.host_id)
-        emit_discovery_error_to_stdout(
+        emit_discovery_error_event(
+            provider.mngr_ctx.config,
             error_type=type(e).__name__,
             error_message=str(e),
             source_name=str(host_ref.host_id),
+            provider_name=str(provider.name),
         )
         error_info = HostErrorInfo.build_for_host(e, host_ref.host_id)
         with results_lock:
@@ -529,6 +683,21 @@ def agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
     return result
 
 
+def build_agent_cel_context(agent: AgentDetails) -> dict[str, Any]:
+    """Build a CEL evaluation context for `agent` with schemaless fields wrapped tolerantly.
+
+    Composes the three steps (`agent_details_to_cel_context` ->
+    `build_cel_context` -> `with_tolerant_paths`) so that filter and sort
+    callers see a consistent view: missing keys under the schemaless fields
+    listed in `_AGENT_SCHEMALESS_PATHS` evaluate to a clean False instead of
+    raising at evaluation time.
+    """
+    return with_tolerant_paths(
+        build_cel_context(agent_details_to_cel_context(agent)),
+        _AGENT_SCHEMALESS_PATHS,
+    )
+
+
 def _apply_cel_filters(
     agent: AgentDetails,
     include_filters: Sequence[Any],
@@ -539,9 +708,8 @@ def _apply_cel_filters(
     Returns True if the agent should be included (matches all include filters
     and doesn't match any exclude filters).
     """
-    context = agent_details_to_cel_context(agent)
-    return apply_cel_filters_to_context(
-        context=context,
+    return apply_compiled_cel_filters(
+        cel_context=build_agent_cel_context(agent),
         include_filters=include_filters,
         exclude_filters=exclude_filters,
         error_context_description=f"agent {agent.name}",

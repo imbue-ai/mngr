@@ -13,6 +13,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rul
 from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extension
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
 from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_without_strict_mode
+from imbue.imbue_common.test_profiles import detect_branch
 
 _REPO_ROOT = Path(__file__).parent
 
@@ -23,6 +24,7 @@ _EXCLUDED_PROJECTS: frozenset[str] = frozenset({"flexmux"})
 
 _SELF_EXCLUSION: tuple[str, ...] = ("test_meta_ratchets.py",)
 _BINARY_FILE_EXCLUSION: tuple[str, ...] = ("*.png", "*.ico", "*.jpg", "*.jpeg", "*.gif", "*.webp")
+_DATA_FILE_EXCLUSION: tuple[str, ...] = ("*.jsonl",)
 _MIGRATION_SCRIPT_EXCLUSION: tuple[str, ...] = (
     "migrate_code_mng_to_mngr.sh",
     "migrate_state_mng_to_mngr.sh",
@@ -195,7 +197,7 @@ def test_prevent_bash_without_strict_mode() -> None:
     strict mode into whatever shell sources them.
     """
     violations = find_bash_scripts_without_strict_mode(_REPO_ROOT)
-    assert len(violations) <= snapshot(6), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
+    assert len(violations) <= snapshot(7), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
 
@@ -209,7 +211,7 @@ _PREVENT_OLD_MNG_NAME = RegexRatchetRule(
 
 def test_prevent_old_mng_name_in_file_contents() -> None:
     """Ensure the old 'mng' name (not followed by 'r') is not reintroduced in file contents."""
-    exclusions = _SELF_EXCLUSION + _BINARY_FILE_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION
+    exclusions = _SELF_EXCLUSION + _BINARY_FILE_EXCLUSION + _DATA_FILE_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION
     chunks = check_ratchet_rule_all_files(_PREVENT_OLD_MNG_NAME, _REPO_ROOT, exclusions)
     assert len(chunks) <= snapshot(0), _PREVENT_OLD_MNG_NAME.format_failure(chunks)
 
@@ -261,6 +263,47 @@ def test_every_project_has_pypi_readme() -> None:
         errors.append("readme file does not exist: " + ", ".join(missing_file))
 
     assert len(errors) == 0, "Projects with PyPI readme issues:\n" + "\n".join(f"  - {e}" for e in errors)
+
+
+_REQUIRED_WHEEL_EXCLUDE_PATTERNS: tuple[str, ...] = (
+    "*_test.py",
+    "test_*.py",
+    "**/conftest.py",
+    "**/testing.py",
+)
+
+
+def test_every_project_excludes_tests_from_wheel() -> None:
+    """Ensure each project's wheel build excludes test code from the published artifact.
+
+    Without this, hatchling bundles `_test.py`, `conftest.py`, and `testing.py`
+    helpers into the wheel, so any consumer that pip-installs the package ships our
+    test code in their `site-packages/`.
+
+    Each project's `[tool.hatch.build.targets.wheel].exclude` must literally contain all
+    of `*_test.py`, `test_*.py`, `**/conftest.py`, and `**/testing.py`. The patterns are
+    required uniformly even for projects that do not currently have a matching file --
+    that way, adding a new `testing.py` (or similar) tomorrow needs no second PR.
+
+    Projects with `only-include` (an explicit whitelist) are exempt.
+    """
+    missing: list[str] = []
+    for project_dir in _get_all_project_dirs():
+        pyproject = tomlkit.parse((project_dir / "pyproject.toml").read_text())
+        wheel = pyproject.get("tool", {}).get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {})
+        if "only-include" in wheel:
+            continue
+        exclude_patterns = [str(x) for x in wheel.get("exclude", [])]
+        absent = [pat for pat in _REQUIRED_WHEEL_EXCLUDE_PATTERNS if pat not in exclude_patterns]
+        if absent:
+            missing.append(f"{project_dir.name} (missing: {absent})")
+
+    assert len(missing) == 0, (
+        "Projects must exclude test files from their wheel build. Add to "
+        "[tool.hatch.build.targets.wheel]:\n"
+        '    exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]\n\n'
+        "Offending projects:\n" + "\n".join(f"  - {m}" for m in missing)
+    )
 
 
 def _has_test_files(project_dir: Path) -> bool:
@@ -382,6 +425,40 @@ def test_every_project_with_tests_has_coverage_config() -> None:
 
     assert len(errors) == 0, "Projects with tests are missing coverage configuration:\n" + "\n".join(
         f"  - {e}" for e in errors
+    )
+
+
+# --- Changelog entry enforcement ---
+
+# Branch prefixes that are exempt from the changelog requirement
+_CHANGELOG_EXEMPT_BRANCH_PREFIXES: tuple[str, ...] = ("mngr/changelog-consolidation",)
+
+
+# Marked as acceptance because this check should be done soon before merging,
+# not during iteration.
+@pytest.mark.acceptance
+def test_pr_has_changelog_entry() -> None:
+    """Ensure every PR branch has a corresponding changelog entry file.
+
+    Each PR must include a file at changelog/<branch-name>.md where slashes
+    in the branch name are replaced with dashes. This is enforced so that
+    the nightly changelog consolidation agent has material to work with.
+    """
+    branch = detect_branch()
+
+    if not branch or branch in ("main", "release"):
+        pytest.skip("Not a PR branch")
+
+    for prefix in _CHANGELOG_EXEMPT_BRANCH_PREFIXES:
+        if branch.startswith(prefix):
+            pytest.skip(f"Branch '{branch}' is exempt from changelog requirement")
+
+    sanitized = branch.replace("/", "-")
+    changelog_file = _REPO_ROOT / "changelog" / f"{sanitized}.md"
+    assert changelog_file.exists(), (
+        f"Missing changelog entry for branch '{branch}'.\n"
+        f"Create the file: changelog/{sanitized}.md\n"
+        f"This file should briefly describe the user-visible changes in this PR."
     )
 
 

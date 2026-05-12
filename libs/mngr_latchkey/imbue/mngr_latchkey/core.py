@@ -1,0 +1,896 @@
+"""Single wrapper around all interactions with the latchkey CLI.
+
+The ``Latchkey`` class consolidates four responsibilities that all
+ultimately shell out to the same upstream binary:
+
+1. Spawning, adopting, and tracking the single shared
+   ``latchkey gateway`` subprocess (one for all minds-managed agents).
+2. Deriving the gateway's shared password and minting per-agent
+   permissions-override JWTs via ``latchkey gateway create-jwt``.
+3. Probing credential status for a service via ``latchkey services info``.
+4. Launching the interactive ``latchkey auth browser`` flow when the user
+   needs to authenticate.
+
+Keeping these in one class means there is exactly one place that knows
+about the binary path, the shared ``LATCHKEY_DIRECTORY``, and the global
+locking concerns, and exactly one place to mock or replace when something
+needs to change.
+"""
+
+import hashlib
+import json
+import os
+import shutil
+import socket
+import threading
+import time
+from collections.abc import Mapping
+from enum import auto
+from pathlib import Path
+from typing import Final
+from typing import IO
+
+from loguru import logger
+from packaging.version import InvalidVersion
+from packaging.version import Version
+from pydantic import Field
+from pydantic import PrivateAttr
+
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessSetupError
+from imbue.concurrency_group.local_process import RunningProcess
+from imbue.imbue_common.enums import UpperCaseStrEnum
+from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import default_permissions_path
+from imbue.mngr_latchkey.store import ensure_browser_log_path
+from imbue.mngr_latchkey.store import gateway_log_path
+from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
+from imbue.mngr_latchkey.store import save_permissions
+
+# Default value for :attr:`Latchkey.latchkey_binary` -- the bare
+# command name, looked up on ``PATH`` by every spawn site via
+# :func:`shutil.which` / direct ``execvp``. Callers that bundle their
+# own copy of the upstream latchkey CLI (e.g. minds' Electron shell)
+# pass the absolute path explicitly via ``Latchkey(latchkey_binary=...)``.
+LATCHKEY_BINARY: Final[str] = "latchkey"
+
+_DEFAULT_LISTEN_HOST: Final[str] = "127.0.0.1"
+
+# Maximum time to wait after spawning the ``latchkey gateway`` subprocess
+# for it to bind its listen port. Without this, ``_spawn_gateway`` could
+# publish a fresh port to callers while the child was still in
+# its startup window, and a second ``ensure_gateway_started`` caller's
+# liveness probe would fail and trigger a spurious second spawn.
+_GATEWAY_BIND_TIMEOUT_SECONDS: Final[float] = 10.0
+_GATEWAY_BIND_POLL_INTERVAL_SECONDS: Final[float] = 0.05
+
+# Services-info / create-jwt are normally instant but can stall on slow keychains.
+# The auth-browser flow waits on a real human and is intentionally untimed.
+_SERVICES_INFO_TIMEOUT_SECONDS: Final[float] = 15.0
+_CREATE_JWT_TIMEOUT_SECONDS: Final[float] = 15.0
+
+# ``latchkey --version`` is a print-and-exit; 5s is generous slack for
+# Node-runtime startup on cold filesystems.
+_VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 5.0
+
+# Minimum version of the upstream ``latchkey`` CLI this package will
+# operate against.
+LATCHKEY_MIN_VERSION: Final[str] = "2.8.0"
+
+# Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
+# when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
+# this to the dynamic shared-gateway port on the desktop host, so the
+# ``LATCHKEY_GATEWAY`` env var injected at ``mngr create`` time can be the
+# same constant URL for every agent. Matches the documented default of the
+# upstream ``latchkey gateway`` CLI (``1989``).
+AGENT_SIDE_LATCHKEY_PORT: Final[int] = 1989
+
+# Sentinel path passed to ``latchkey gateway create-jwt --no-validate`` when
+# deriving the gateway's password. The path itself never exists and is
+# never consulted by the gateway; only the encryption-key-derived signing
+# key matters here. Hashing the resulting JWT yields a stable
+# password-shaped string that is ultimately a function of the user's
+# Latchkey encryption key, so it survives desktop-client restarts without
+# us having to persist it in plaintext.
+_GATEWAY_PASSWORD_SENTINEL_PATH: Final[str] = "/__minds_gateway_password__/sentinel"
+
+
+class LatchkeyError(Exception):
+    """Base exception for all latchkey wrapper failures."""
+
+
+class LatchkeyBinaryNotFoundError(LatchkeyError, FileNotFoundError):
+    """Raised when the ``latchkey`` binary is not available on PATH."""
+
+
+class LatchkeyNotInitializedError(LatchkeyError, RuntimeError):
+    """Raised when ``Latchkey`` is used before ``initialize()`` has been called."""
+
+
+class LatchkeyJwtMintError(LatchkeyError, RuntimeError):
+    """Raised when ``latchkey gateway create-jwt`` fails to produce a JWT."""
+
+
+class LatchkeyVersionError(LatchkeyError, RuntimeError):
+    """Raised when the installed ``latchkey`` CLI is older than :data:`LATCHKEY_MIN_VERSION`."""
+
+
+class CredentialStatus(UpperCaseStrEnum):
+    """Latchkey-reported credential state for a service.
+
+    Mirrors detent's ``ApiCredentialStatus`` enum (``missing``, ``valid``,
+    ``invalid``, ``unknown``) but normalized to the project's enum convention.
+    """
+
+    MISSING = auto()
+    VALID = auto()
+    INVALID = auto()
+    UNKNOWN = auto()
+
+
+_CREDENTIAL_STATUS_BY_LATCHKEY_VALUE: Final[dict[str, CredentialStatus]] = {
+    "missing": CredentialStatus.MISSING,
+    "valid": CredentialStatus.VALID,
+    "invalid": CredentialStatus.INVALID,
+    "unknown": CredentialStatus.UNKNOWN,
+}
+
+# Latchkey's ``authOptions`` field lists the auth flows a service supports.
+# The two we currently react to are ``browser`` (interactive sign-in) and
+# ``set`` (user-supplied credentials via ``latchkey auth set``). Any unknown
+# values are preserved verbatim so callers can do their own forward-compat
+# checks without losing information.
+LATCHKEY_AUTH_OPTION_BROWSER: Final[str] = "browser"
+LATCHKEY_AUTH_OPTION_SET: Final[str] = "set"
+
+
+class LatchkeyServiceInfo(FrozenModel):
+    """Parsed output of ``latchkey services info <service>``."""
+
+    credential_status: CredentialStatus = Field(
+        description="Credential state reported by latchkey.",
+    )
+    auth_options: frozenset[str] = Field(
+        description=(
+            "Authentication option keywords latchkey says the service supports "
+            "(e.g. ``browser``, ``set``). Empty when latchkey did not report "
+            "any options or its output could not be parsed."
+        ),
+    )
+    set_credentials_example: str | None = Field(
+        description=(
+            "Example ``latchkey auth set`` invocation latchkey suggests for "
+            "manual credential setup, or ``None`` if latchkey did not provide one."
+        ),
+    )
+
+
+_UNKNOWN_LATCHKEY_SERVICE_INFO: Final[LatchkeyServiceInfo] = LatchkeyServiceInfo(
+    credential_status=CredentialStatus.UNKNOWN,
+    auth_options=frozenset(),
+    set_credentials_example=None,
+)
+
+
+def _allocate_free_port(host: str) -> int:
+    """Pick a free TCP port on ``host`` by binding to port 0 and reading it back.
+
+    There is an inherent TOCTOU race: the chosen port could be claimed by
+    another process between the time this function returns and the time
+    ``latchkey gateway`` rebinds it. In practice the window is tiny and
+    the desktop client is the only interested party on 127.0.0.1.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        return sock.getsockname()[1]
+
+
+def _is_port_listening(host: str, port: int, timeout: float) -> bool:
+    """Return True if a TCP connection to ``host:port`` succeeds within ``timeout``."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        try:
+            sock.connect((host, port))
+        except OSError:
+            return False
+    return True
+
+
+def _wait_for_port_listening(host: str, port: int, timeout: float) -> bool:
+    """Poll until ``host:port`` accepts TCP connections, or ``timeout`` elapses.
+
+    Used by ``_spawn_gateway`` to make sure the freshly-spawned
+    ``latchkey gateway`` has bound its port before its
+    listen port is exposed via ``gateway_port`` / ``gateway_url``, so a
+    user's first request after spawn does not race the port bind.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _is_port_listening(host, port, timeout=_GATEWAY_BIND_POLL_INTERVAL_SECONDS):
+            return True
+        # ``threading.Event().wait`` is the canonical interruptible
+        # short sleep in this codebase (the project ratchets against
+        # ``time.sleep`` as a polling primitive).
+        threading.Event().wait(timeout=_GATEWAY_BIND_POLL_INTERVAL_SECONDS)
+    # One last probe in case the port came up between the final sleep
+    # and the deadline, so a slow CI host doesn't false-fail.
+    return _is_port_listening(host, port, timeout=_GATEWAY_BIND_POLL_INTERVAL_SECONDS)
+
+
+def _parse_credential_status(payload: Mapping[str, object], service_name: str) -> CredentialStatus:
+    """Pull ``credentialStatus`` out of ``payload``, defaulting to UNKNOWN on any oddity."""
+    raw_status = payload.get("credentialStatus")
+    if not isinstance(raw_status, str):
+        logger.warning(
+            "'latchkey services info {}' did not include a credentialStatus string",
+            service_name,
+        )
+        return CredentialStatus.UNKNOWN
+    status = _CREDENTIAL_STATUS_BY_LATCHKEY_VALUE.get(raw_status)
+    if status is None:
+        logger.warning(
+            "Unrecognized credentialStatus {!r} from 'latchkey services info {}'",
+            raw_status,
+            service_name,
+        )
+        return CredentialStatus.UNKNOWN
+    return status
+
+
+def _parse_auth_options(payload: Mapping[str, object], service_name: str) -> frozenset[str]:
+    """Pull ``authOptions`` out of ``payload``; missing or malformed yields an empty set."""
+    raw_options = payload.get("authOptions")
+    if raw_options is None:
+        return frozenset()
+    if not isinstance(raw_options, list) or not all(isinstance(option, str) for option in raw_options):
+        logger.warning(
+            "'latchkey services info {}' authOptions was not a list of strings: {!r}",
+            service_name,
+            raw_options,
+        )
+        return frozenset()
+    return frozenset(option for option in raw_options if isinstance(option, str))
+
+
+def _parse_set_credentials_example(payload: Mapping[str, object], service_name: str) -> str | None:
+    """Pull ``setCredentialsExample`` out of ``payload``; missing/non-string yields ``None``."""
+    raw_example = payload.get("setCredentialsExample")
+    if raw_example is None:
+        return None
+    if not isinstance(raw_example, str):
+        logger.warning(
+            "'latchkey services info {}' setCredentialsExample was not a string: {!r}",
+            service_name,
+            raw_example,
+        )
+        return None
+    return raw_example
+
+
+def _build_local_latchkey_env(latchkey_directory: Path | None) -> dict[str, str]:
+    """Build an env override for *local* ``latchkey`` invocations.
+
+    ``LATCHKEY_GATEWAY`` is explicitly cleared so commands that refuse to
+    run in gateway mode (e.g. ``gateway create-jwt``) work even if the
+    user has the env var set in their shell. ``LATCHKEY_DIRECTORY`` is
+    pinned to the same shared directory the rest of minds uses so the
+    derived encryption key matches the one the gateway itself will use.
+    """
+    env = dict(os.environ)
+    env.pop("LATCHKEY_GATEWAY", None)
+    if latchkey_directory is not None:
+        env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    return env
+
+
+def _build_env_with_latchkey_directory(latchkey_directory: Path | None) -> dict[str, str] | None:
+    """Build an env override that pins ``LATCHKEY_DIRECTORY`` for a child process.
+
+    Returns ``None`` when no override is requested so the child inherits
+    the parent environment unchanged.
+    """
+    if latchkey_directory is None:
+        return None
+    env = dict(os.environ)
+    env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    return env
+
+
+def _build_gateway_env(
+    listen_host: str,
+    listen_port: int,
+    latchkey_directory: Path,
+    permissions_config_path: Path,
+    listen_password: str,
+) -> dict[str, str]:
+    """Build the env dict for the ``latchkey gateway`` subprocess.
+
+    Mirrors the env shape that ``_spawn.spawn_detached_latchkey_gateway``
+    used to set up. The gateway reads its listen host/port + permissions
+    config path + listen password from these env vars (the upstream
+    ``latchkey`` CLI exposes them as the documented gateway-config
+    surface).
+    """
+    latchkey_directory.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["LATCHKEY_GATEWAY_LISTEN_HOST"] = listen_host
+    env["LATCHKEY_GATEWAY_LISTEN_PORT"] = str(listen_port)
+    env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    env["LATCHKEY_PERMISSIONS_CONFIG"] = str(permissions_config_path)
+    env["LATCHKEY_GATEWAY_LISTEN_PASSWORD"] = listen_password
+    return env
+
+
+class _GatewayLogWriter(MutableModel):
+    """Per-line callback that appends ``latchkey gateway`` output to a log file.
+
+    :class:`ConcurrencyGroup` always pipes a child's stdout/stderr through
+    a per-line callback; this writer plays that callback role and tees
+    each line into the same on-disk log file the previous detached-spawn
+    path used (``<plugin_data_dir>/latchkey_gateway.log``). The file is
+    opened lazily so a failed spawn never creates an empty log artefact.
+    """
+
+    log_path: Path = Field(frozen=True, description="On-disk log file the gateway's stdout/stderr is appended to")
+
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _log_file: IO[bytes] | None = PrivateAttr(default=None)
+
+    def __call__(self, line: str, is_stdout: bool) -> None:
+        del is_stdout
+        with self._lock:
+            if self._log_file is None:
+                self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                self._log_file = self.log_path.open("ab")
+            try:
+                self._log_file.write(line.encode("utf-8", errors="replace"))
+                if not line.endswith("\n"):
+                    self._log_file.write(b"\n")
+                self._log_file.flush()
+            except OSError as e:
+                # Best-effort log -- a write failure must not crash the
+                # gateway dispatch thread the CG calls us on.
+                logger.warning("Failed to write latchkey gateway log line to {}: {}", self.log_path, e)
+
+
+class Latchkey(MutableModel):
+    """Wraps every interaction with the upstream ``latchkey`` CLI.
+
+    Spawns, adopts, and tracks the single shared ``latchkey gateway``
+    subprocess; derives the gateway's shared password and mints
+    per-agent permissions-override JWTs via ``latchkey gateway create-jwt``;
+    exposes ``services_info`` to query credential state and supported auth
+    options; and ``auth_browser`` to launch the interactive sign-in flow.
+    The gateway is spawned detached (``start_new_session=True`` inside
+    :func:`spawn_detached_latchkey_gateway`) so it survives desktop-client
+    restarts; its lifecycle is reconciled against the persisted record on
+    ``initialize()``.
+    """
+
+    latchkey_binary: str = Field(default=LATCHKEY_BINARY, frozen=True, description="Path to Latchkey binary")
+    listen_host: str = Field(
+        default=_DEFAULT_LISTEN_HOST,
+        frozen=True,
+        description="Host to bind the shared gateway to",
+    )
+    latchkey_directory: Path = Field(
+        frozen=True,
+        description=(
+            "Root directory for everything latchkey-related. Passed through to spawned "
+            "subprocesses as ``LATCHKEY_DIRECTORY`` so the upstream ``latchkey`` CLI's "
+            "credential / config files live here, and also used as the parent of the "
+            "plugin's own metadata subdirectory (``mngr_latchkey/``, accessible via "
+            ":attr:`plugin_data_dir`). Required."
+        ),
+    )
+
+    # ``_gateway_port`` doubles as the "is the gateway running?" flag
+    # (None means not running). ``_gateway_process`` is kept around so
+    # ``stop_gateway`` can SIGTERM the child via the :class:`RunningProcess`
+    # the spawning :class:`ConcurrencyGroup` returned.
+    _gateway_port: int | None = PrivateAttr(default=None)
+    _gateway_process: RunningProcess | None = PrivateAttr(default=None)
+    _gateway_password: str | None = PrivateAttr(default=None)
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # Held *only* across the slow spawn path so two concurrent
+    # ``start_gateway`` callers cannot both decide to spawn a fresh
+    # gateway and leak the loser's subprocess. Kept separate from
+    # ``_lock`` (which is held only for short state-mutation critical
+    # sections) so the slow spawn path doesn't block fast-path readers.
+    _spawn_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _is_initialized: bool = PrivateAttr(default=False)
+    _has_ensured_browser: bool = PrivateAttr(default=False)
+
+    # -- Gateway lifecycle ---------------------------------------------------
+
+    @property
+    def plugin_data_dir(self) -> Path:
+        """Return the directory the plugin owns under :attr:`latchkey_directory`.
+
+        Always ``<latchkey_directory>/mngr_latchkey/``. The plugin writes
+        all of its own files (default permissions, per-agent permissions,
+        opaque handles, log files, forward-supervisor record) here so
+        they cannot collide with anything the upstream ``latchkey``
+        CLI chooses to put in :attr:`latchkey_directory`.
+        """
+        return _plugin_data_dir(self.latchkey_directory)
+
+    def initialize(self) -> None:
+        """Validate the latchkey binary.
+
+        Runs ``latchkey --version`` and refuses to continue if the
+        installed CLI is older than :data:`LATCHKEY_MIN_VERSION`. The
+        check happens at ``initialize`` time (rather than at the first
+        ``ensure_gateway_started`` call) so misconfiguration surfaces
+        immediately, before any agent has had a chance to be told to
+        use the gateway.
+
+        There is intentionally **no** cross-process gateway-record
+        reconciliation: the new ``mngr latchkey forward`` /
+        :class:`LatchkeyForwardSupervisor` design guarantees at most
+        one process per latchkey directory ever spawns a gateway, so
+        adopting a peer's running gateway from disk would only matter
+        in the abnormal-exit case where the previous forward crashed
+        and left an orphan. Orphans are accepted as a rare leak (no
+        reverse tunnel still points at them once the previous forward
+        died, so they sit idle until ``pkill latchkey`` runs).
+
+        Raises:
+            LatchkeyBinaryNotFoundError: when the configured binary is
+                not on ``PATH`` / does not exist.
+            LatchkeyVersionError: when the installed binary is older
+                than :data:`LATCHKEY_MIN_VERSION`.
+            LatchkeyError: for other ``latchkey --version`` failures
+                (non-zero exit, unparseable output, spawn error).
+        """
+        self._check_minimum_version()
+        with self._lock:
+            self._is_initialized = True
+
+    def start_gateway(self, concurrency_group: ConcurrencyGroup) -> None:
+        """Start the shared gateway if this :class:`Latchkey` has not spawned one yet.
+
+        ``concurrency_group`` owns the gateway subprocess: when it exits
+        (e.g. on ``mngr latchkey forward`` shutdown), the gateway is
+        terminated as part of the group's normal cleanup. There is no
+        cross-process adoption -- the only caller that ever spawns a
+        gateway is ``mngr latchkey forward``, and the supervisor wrapper
+        makes sure at most one such process runs per latchkey directory.
+
+        In-process idempotent: subsequent calls observe :attr:`is_gateway_running`
+        and return immediately. Thread-safe within a single process via
+        ``_spawn_lock``.
+
+        After a successful call, callers can read :attr:`gateway_port`
+        / :attr:`gateway_url` to learn where the gateway is listening.
+        """
+        # Fast path: already running.
+        with self._lock:
+            self._require_initialized_locked()
+            if self._gateway_port is not None:
+                return
+        plugin_dir = self.plugin_data_dir
+        # Slow path: serialize spawning. Double-check after acquiring
+        # the spawn lock so a concurrent caller that already spawned
+        # is observed before we duplicate the work.
+        with self._spawn_lock:
+            with self._lock:
+                if self._gateway_port is not None:
+                    return
+            port, process = self._spawn_gateway(concurrency_group, plugin_dir)
+            with self._lock:
+                self._gateway_port = port
+                self._gateway_process = process
+
+    def stop_gateway(self) -> None:
+        """Terminate the gateway tracked by this :class:`Latchkey` instance.
+
+        SIGTERMs the underlying subprocess via the tracked
+        :class:`RunningProcess` and clears the in-memory state. The
+        ``ConcurrencyGroup`` that owns the subprocess would also
+        terminate it on its own ``__exit__``; calling ``stop_gateway``
+        explicitly is the way ``mngr latchkey forward``'s signal
+        handler tears the gateway down *before* the CG exits, so the
+        user sees a clean log line + a deterministic order.
+
+        Per-agent ``latchkey_permissions.json`` files are intentionally
+        *not* deleted: minds does not delete other per-agent state on
+        destruction either, and keeping them around means previously
+        granted permissions survive desktop-client restarts and
+        reboots.
+        """
+        with self._lock:
+            port = self._gateway_port
+            process = self._gateway_process
+            self._gateway_port = None
+            self._gateway_process = None
+        if process is not None and port is not None:
+            logger.info("Stopping shared Latchkey gateway ({}:{})", self.listen_host, port)
+            try:
+                process.terminate()
+            except (OSError, RuntimeError) as e:
+                logger.warning("Failed to terminate Latchkey gateway cleanly: {}", e)
+
+    @property
+    def is_gateway_running(self) -> bool:
+        """Whether this :class:`Latchkey` has spawned a gateway and not yet stopped it."""
+        with self._lock:
+            return self._gateway_port is not None
+
+    @property
+    def gateway_port(self) -> int:
+        """Port the shared gateway is listening on.
+
+        Raises :class:`LatchkeyNotInitializedError` when no gateway has
+        been started. Pair with :attr:`listen_host` to build a URL, or
+        use :attr:`gateway_url` directly.
+        """
+        with self._lock:
+            port = self._gateway_port
+        if port is None:
+            raise LatchkeyNotInitializedError("Latchkey gateway has not been started")
+        return port
+
+    @property
+    def gateway_url(self) -> str:
+        """``http://<listen_host>:<gateway_port>`` for the running gateway.
+
+        Raises :class:`LatchkeyNotInitializedError` when no gateway has
+        been started.
+        """
+        return f"http://{self.listen_host}:{self.gateway_port}"
+
+    # -- Password / JWT derivation ------------------------------------------
+
+    def derive_gateway_password(self) -> str:
+        """Return a stable password for the shared gateway.
+
+        Derived by minting a permissions-override JWT for a hard-coded
+        sentinel path (which is never validated, never reached, and
+        never consulted by the gateway itself) and SHA-256-hashing the
+        result. The derivation is purely a function of the user's
+        Latchkey encryption key, so the password is stable across
+        desktop-client restarts without minds having to persist it in
+        plaintext anywhere.
+
+        The same value is set as ``LATCHKEY_GATEWAY_LISTEN_PASSWORD`` on
+        the spawned gateway and as ``LATCHKEY_GATEWAY_PASSWORD`` on every
+        agent so the gateway accepts agent traffic.
+
+        Cached after the first successful invocation. Raises
+        ``LatchkeyJwtMintError`` if ``latchkey gateway create-jwt``
+        fails (e.g. no encryption key configured).
+        """
+        with self._lock:
+            cached = self._gateway_password
+        if cached is not None:
+            return cached
+        sentinel_jwt = self._run_create_jwt(_GATEWAY_PASSWORD_SENTINEL_PATH)
+        password = hashlib.sha256(sentinel_jwt.encode("utf-8")).hexdigest()
+        with self._lock:
+            self._gateway_password = password
+        return password
+
+    def create_permissions_override_jwt(self, permissions_path: Path) -> str:
+        """Mint an HS256 JWT that points the gateway at ``permissions_path``.
+
+        Wraps ``latchkey gateway create-jwt --no-validate <path>``. The
+        ``--no-validate`` flag is used because the file may not exist on
+        the desktop-client filesystem at JWT-mint time (it lives wherever
+        the gateway can read it; for now that is the same machine, but
+        the JWT itself does not depend on existence). The returned JWT
+        is the value to send in ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE``
+        / the ``X-Latchkey-Gateway-Permissions-Override`` header.
+
+        Raises ``LatchkeyJwtMintError`` if minting fails.
+        """
+        return self._run_create_jwt(str(permissions_path))
+
+    def _run_create_jwt(self, permissions_config_path: str) -> str:
+        """Run ``latchkey gateway create-jwt --no-validate <path>`` and return the JWT.
+
+        Skips the existence check (``--no-validate``) so callers can
+        mint JWTs for paths the desktop-client process cannot see (and
+        so we can use the password-derivation sentinel path which is
+        intentionally bogus). ``LATCHKEY_GATEWAY`` is explicitly
+        cleared from the child env: the upstream CLI refuses to run
+        ``gateway create-jwt`` in gateway-client mode, and the user
+        might have it set in their shell.
+        """
+        env = _build_local_latchkey_env(self.latchkey_directory)
+        cg = ConcurrencyGroup(name="latchkey-create-jwt")
+        try:
+            with cg:
+                result = cg.run_process_to_completion(
+                    command=[
+                        self.latchkey_binary,
+                        "gateway",
+                        "create-jwt",
+                        "--no-validate",
+                        permissions_config_path,
+                    ],
+                    timeout=_CREATE_JWT_TIMEOUT_SECONDS,
+                    is_checked_after=False,
+                    env=env,
+                )
+        except ConcurrencyExceptionGroup as group:
+            if not group.only_exception_is_instance_of(ProcessSetupError):
+                raise
+            raise LatchkeyJwtMintError(f"Failed to launch 'latchkey gateway create-jwt': {group}") from group
+        if result.returncode != 0:
+            raise LatchkeyJwtMintError(
+                "'latchkey gateway create-jwt' exited {} for {!r}: {}".format(
+                    result.returncode,
+                    permissions_config_path,
+                    result.stderr.strip() or result.stdout.strip(),
+                )
+            )
+        jwt = result.stdout.strip()
+        if not jwt:
+            raise LatchkeyJwtMintError(
+                f"'latchkey gateway create-jwt' produced empty output for {permissions_config_path!r}"
+            )
+        return jwt
+
+    # -- Service introspection -----------------------------------------------
+
+    def services_info(self, service_name: str) -> LatchkeyServiceInfo:
+        """Run ``latchkey services info <service>`` and return the parsed output.
+
+        Latchkey emits pretty-printed JSON to stdout; we parse it and pull
+        out ``credentialStatus``, ``authOptions``, and ``setCredentialsExample``.
+        Any failure (process error, malformed output, unrecognized status
+        string) yields a service info with ``CredentialStatus.UNKNOWN`` and
+        empty ``auth_options``, so the caller can fall back to its legacy
+        behaviour rather than wrongly assuming credentials are valid.
+        """
+        env = _build_env_with_latchkey_directory(self.latchkey_directory)
+        cg = ConcurrencyGroup(name="latchkey-services-info")
+        try:
+            with cg:
+                result = cg.run_process_to_completion(
+                    command=[self.latchkey_binary, "services", "info", service_name],
+                    timeout=_SERVICES_INFO_TIMEOUT_SECONDS,
+                    is_checked_after=False,
+                    env=env,
+                )
+        except ConcurrencyExceptionGroup as group:
+            # ``ConcurrencyGroup`` wraps the underlying error (e.g. a
+            # ``ProcessSetupError`` when the latchkey binary is missing /
+            # unexecutable) in an exception group on context-manager exit.
+            # The docstring promises any process error degrades to UNKNOWN
+            # rather than raising, so callers (e.g. the request dialog
+            # renderer) can fall back to legacy behaviour instead of
+            # crashing. Anything that isn't a process-setup failure is
+            # re-raised so genuinely unexpected bugs still surface.
+            if not group.only_exception_is_instance_of(ProcessSetupError):
+                raise
+            logger.warning("latchkey services info {} failed to start: {}", service_name, group)
+            return _UNKNOWN_LATCHKEY_SERVICE_INFO
+        if result.returncode != 0:
+            logger.warning(
+                "latchkey services info {} exited {}: {}",
+                service_name,
+                result.returncode,
+                result.stderr.strip(),
+            )
+            return _UNKNOWN_LATCHKEY_SERVICE_INFO
+
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            logger.warning("Could not parse 'latchkey services info {}' output as JSON: {}", service_name, e)
+            return _UNKNOWN_LATCHKEY_SERVICE_INFO
+
+        if not isinstance(payload, dict):
+            logger.warning("'latchkey services info {}' returned non-object JSON", service_name)
+            return _UNKNOWN_LATCHKEY_SERVICE_INFO
+
+        return LatchkeyServiceInfo(
+            credential_status=_parse_credential_status(payload, service_name),
+            auth_options=_parse_auth_options(payload, service_name),
+            set_credentials_example=_parse_set_credentials_example(payload, service_name),
+        )
+
+    # -- Interactive auth ----------------------------------------------------
+
+    def auth_browser(self, service_name: str) -> tuple[bool, str]:
+        """Run ``latchkey auth browser <service>`` and report success or failure.
+
+        Returns ``(True, "")`` on a clean exit. Any non-zero exit -- whether
+        from a cancelled browser flow, network failure, or something else --
+        returns ``(False, message)`` where ``message`` carries the latchkey
+        stderr (or stdout, or a generic fallback).
+        """
+        env = _build_env_with_latchkey_directory(self.latchkey_directory)
+        cg = ConcurrencyGroup(name="latchkey-auth-browser")
+        with cg:
+            # No timeout: this command waits on a real human completing
+            # the browser sign-in flow, which can take arbitrarily long.
+            result = cg.run_process_to_completion(
+                command=[self.latchkey_binary, "auth", "browser", service_name],
+                timeout=None,
+                is_checked_after=False,
+                env=env,
+            )
+        if result.returncode == 0:
+            logger.info("latchkey auth browser {} succeeded", service_name)
+            return True, ""
+        message = result.stderr.strip() or result.stdout.strip() or "latchkey auth browser failed"
+        logger.warning(
+            "latchkey auth browser {} exited {}: {}",
+            service_name,
+            result.returncode,
+            message,
+        )
+        return False, message
+
+    # -- Internals -----------------------------------------------------------
+
+    def _require_initialized_locked(self) -> None:
+        if not self._is_initialized:
+            raise LatchkeyNotInitializedError(
+                "Latchkey.initialize() must be called before use",
+            )
+
+    def _check_minimum_version(self) -> None:
+        """Refuse to initialize if the installed latchkey CLI is too old.
+
+        Runs ``latchkey --version`` and parses the (single-line, possibly
+        ``v``-prefixed) version string with :class:`packaging.version.Version`.
+        See :data:`LATCHKEY_MIN_VERSION` for the required version.
+        """
+        if shutil.which(self.latchkey_binary) is None and not Path(self.latchkey_binary).is_file():
+            raise LatchkeyBinaryNotFoundError(f"Latchkey binary not found: {self.latchkey_binary}")
+
+        env = _build_local_latchkey_env(self.latchkey_directory)
+        cg = ConcurrencyGroup(name="latchkey-version")
+        try:
+            with cg:
+                result = cg.run_process_to_completion(
+                    command=[self.latchkey_binary, "--version"],
+                    timeout=_VERSION_CHECK_TIMEOUT_SECONDS,
+                    is_checked_after=False,
+                    env=env,
+                )
+        except ConcurrencyExceptionGroup as group:
+            if not group.only_exception_is_instance_of(ProcessSetupError):
+                raise
+            raise LatchkeyError(f"Failed to launch 'latchkey --version': {group}") from group
+        if result.returncode != 0:
+            raise LatchkeyError(
+                "'latchkey --version' exited {} : {}".format(
+                    result.returncode,
+                    result.stderr.strip() or result.stdout.strip(),
+                )
+            )
+        raw = result.stdout.strip()
+        # Tolerate an optional leading ``v`` (some CLIs print ``v2.9.0``);
+        # otherwise the string must be a valid PEP 440 version.
+        cleaned = raw.removeprefix("v")
+        try:
+            installed = Version(cleaned)
+        except InvalidVersion as e:
+            raise LatchkeyError(f"Could not parse 'latchkey --version' output {raw!r}: {e}") from e
+        minimum = Version(LATCHKEY_MIN_VERSION)
+        if installed < minimum:
+            raise LatchkeyVersionError(
+                f"Installed latchkey version {installed} is older than the required minimum {minimum}; "
+                f"upgrade the binary at {self.latchkey_binary}."
+            )
+
+    def _spawn_gateway(
+        self,
+        concurrency_group: ConcurrencyGroup,
+        plugin_dir: Path,
+    ) -> tuple[int, RunningProcess]:
+        """Spawn a fresh ``latchkey gateway`` and return its listen port + :class:`RunningProcess`.
+
+        Materializes the deny-all default permissions file, derives the
+        gateway password (so the agent-side password matches), and only
+        then spawns. Does not mutate ``_info`` or persist the info -- the
+        caller is responsible for committing both under the lock.
+        """
+        if shutil.which(self.latchkey_binary) is None and not Path(self.latchkey_binary).is_file():
+            raise LatchkeyBinaryNotFoundError(f"Latchkey binary not found: {self.latchkey_binary}")
+
+        # Fire off ``latchkey ensure-browser`` in parallel the first time we
+        # actually spawn the gateway in this minds session. It runs
+        # detached alongside the gateway spawn below and we don't wait for
+        # it.
+        self._ensure_browser_once(plugin_dir)
+
+        # Latchkey treats a missing permissions file as ``allow all``, so
+        # we always materialize an empty-rules default file before
+        # spawning the gateway. This guarantees that any request that
+        # fails to attach a valid permissions-override JWT is denied for
+        # every service rather than implicitly granted. Pre-existing
+        # files are left untouched; minds always rewrites them with
+        # empty rules anyway, but on adoption we leave the existing one
+        # alone in case the user inspected it.
+        default_perms = default_permissions_path(plugin_dir)
+        if not default_perms.is_file():
+            save_permissions(default_perms, LatchkeyPermissionsConfig())
+
+        # Derive the password before spawning so the gateway and the
+        # eventual agent-side env var agree on a value. ``derive_gateway_password``
+        # is cached, so subsequent calls are free.
+        try:
+            password = self.derive_gateway_password()
+        except LatchkeyJwtMintError as e:
+            raise LatchkeyError(f"Failed to derive gateway password: {e}") from e
+
+        port = _allocate_free_port(self.listen_host)
+        log_path = gateway_log_path(plugin_dir)
+        env = _build_gateway_env(
+            listen_host=self.listen_host,
+            listen_port=port,
+            latchkey_directory=self.latchkey_directory,
+            permissions_config_path=default_perms,
+            listen_password=password,
+        )
+
+        with log_span(
+            "Starting shared Latchkey gateway on {}:{}",
+            self.listen_host,
+            port,
+        ):
+            log_writer = _GatewayLogWriter(log_path=log_path)
+            try:
+                process = concurrency_group.run_process_in_background(
+                    command=[self.latchkey_binary, "gateway"],
+                    env=env,
+                    on_output=log_writer,
+                )
+            except (ConcurrencyExceptionGroup, OSError) as e:
+                raise LatchkeyError(f"Failed to spawn shared Latchkey gateway: {e}") from e
+
+            # Block until the freshly-spawned subprocess actually binds
+            # its port. Returning earlier would let a caller use the
+            # gateway's URL before the gateway is actually accepting
+            # connections. If the gateway never comes up we terminate
+            # it so the caller doesn't end up with a half-started
+            # subprocess they don't know about.
+            if not _wait_for_port_listening(self.listen_host, port, timeout=_GATEWAY_BIND_TIMEOUT_SECONDS):
+                try:
+                    process.terminate()
+                except (OSError, RuntimeError) as e:
+                    logger.warning("Failed to terminate half-started latchkey gateway: {}", e)
+                raise LatchkeyError(
+                    "Spawned latchkey gateway did not bind {}:{} within {:.1f}s; see {} for details".format(
+                        self.listen_host, port, _GATEWAY_BIND_TIMEOUT_SECONDS, log_path
+                    )
+                )
+
+        return port, process
+
+    def _ensure_browser_once(self, plugin_dir: Path) -> None:
+        """Spawn ``latchkey ensure-browser`` the first time we're asked to, per Latchkey lifetime.
+
+        ``ensure-browser`` discovers or downloads a Playwright-compatible
+        browser into the shared latchkey directory. It only needs to succeed
+        once per machine, but re-running it is a cheap no-op. We call it
+        once per minds session at the point we know latchkey is actually
+        being used (i.e. right before spawning the gateway), fire and
+        forget. Failures here are logged but must not prevent gateway spawn.
+        """
+        with self._lock:
+            if self._has_ensured_browser:
+                return
+            self._has_ensured_browser = True
+        log_path = ensure_browser_log_path(plugin_dir)
+        try:
+            pid = spawn_detached_latchkey_ensure_browser(
+                latchkey_binary=self.latchkey_binary,
+                log_path=log_path,
+                latchkey_directory=self.latchkey_directory,
+            )
+        except OSError as e:
+            logger.warning("Failed to spawn ``latchkey ensure-browser``: {}", e)
+            return
+        logger.info("Spawned ``latchkey ensure-browser`` (pid={}, log={})", pid, log_path)

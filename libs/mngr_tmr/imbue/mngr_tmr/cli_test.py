@@ -7,10 +7,13 @@ import click
 from click.testing import CliRunner
 from click.testing import Result
 
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr_tmr.cli import _TmrCommand
+from imbue.mngr_tmr.cli import _disable_modal_initial_snapshot
 from imbue.mngr_tmr.cli import _emit_agents_launched
+from imbue.mngr_tmr.cli import _emit_integrator_branch
 from imbue.mngr_tmr.cli import _emit_report_path
 from imbue.mngr_tmr.cli import _emit_test_count
 from imbue.mngr_tmr.cli import tmr
@@ -86,6 +89,27 @@ def test_emit_agents_launched_json() -> None:
     _emit_agents_launched(5, OutputOptions(output_format=OutputFormat.JSON))
 
 
+def test_emit_integrator_branch_human() -> None:
+    _emit_integrator_branch("mngr-tmr/integrated-abc123", _human_output_opts())
+
+
+def test_emit_integrator_branch_json() -> None:
+    _emit_integrator_branch("mngr-tmr/integrated-abc123", OutputOptions(output_format=OutputFormat.JSON))
+
+
+def test_emit_integrator_branch_jsonl(capsys: Any) -> None:
+    _emit_integrator_branch("mngr-tmr/integrated-abc123", OutputOptions(output_format=OutputFormat.JSONL))
+    captured = capsys.readouterr()
+    assert '"event": "integrator_branch"' in captured.out
+    assert '"branch_name": "mngr-tmr/integrated-abc123"' in captured.out
+
+
+def test_emit_integrator_branch_none_emits_nothing(capsys: Any) -> None:
+    _emit_integrator_branch(None, OutputOptions(output_format=OutputFormat.JSONL))
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+
 def _invoke_tmr_command(
     args: list[str],
 ) -> tuple[Result, dict[str, Any]]:
@@ -143,3 +167,22 @@ def test_tmr_command_options_before_separator() -> None:
     assert captured["pytest_args"] == ("tests/",)
     assert captured["testing_flags"] == ("-m", "release")
     assert captured["provider"] == "docker"
+
+
+def test_disable_modal_initial_snapshot_skips_non_modal_providers(temp_mngr_ctx: MngrContext) -> None:
+    """Non-modal provider names leave config.providers untouched."""
+    before = dict(temp_mngr_ctx.config.providers)
+    _disable_modal_initial_snapshot(temp_mngr_ctx, ("local", "docker"))
+    assert dict(temp_mngr_ctx.config.providers) == before
+
+
+def test_disable_modal_initial_snapshot_silent_when_modal_backend_unregistered(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """With --provider modal but no modal backend registered (the tmr test
+    fixture only registers local + ssh), the helper silently no-ops; the
+    caller will surface the UnknownBackendError later when it tries to
+    actually use modal."""
+    before = dict(temp_mngr_ctx.config.providers)
+    _disable_modal_initial_snapshot(temp_mngr_ctx, ("modal", "modal"))
+    assert dict(temp_mngr_ctx.config.providers) == before

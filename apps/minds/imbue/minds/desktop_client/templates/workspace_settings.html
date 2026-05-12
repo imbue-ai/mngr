@@ -46,7 +46,7 @@
       <h2 class="text-sm font-medium text-zinc-600 mt-8 mb-3 pt-5 border-t border-zinc-200">Danger zone</h2>
       <p class="text-sm text-zinc-500 mb-3">Permanently destroy this project and release any associated resources.</p>
       {{ ui.btn_button('Destroy project', variant='danger', id='destroy-btn') }}
-      <span id="destroy-spinner" class="hidden text-zinc-500 ml-2">Destroying...</span>
+      <p id="destroy-error" class="hidden text-sm text-red-600 mt-2"></p>
 
       <div id="destroy-dialog" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/30">
         <div class="bg-white rounded-xl shadow-lg border border-zinc-200 max-w-sm w-full mx-4 p-6">
@@ -73,7 +73,7 @@
       var destroyDialog = document.getElementById('destroy-dialog');
       var destroyCancelBtn = document.getElementById('destroy-cancel-btn');
       var destroyConfirmBtn = document.getElementById('destroy-confirm-btn');
-      var destroySpinner = document.getElementById('destroy-spinner');
+      var destroyErrorEl = document.getElementById('destroy-error');
       var agentId = document.getElementById('workspace-settings').dataset.agentId;
 
       destroyBtn.addEventListener('click', function() {
@@ -85,44 +85,29 @@
       destroyDialog.addEventListener('click', function(e) {
         if (e.target === destroyDialog) destroyDialog.classList.add('hidden');
       });
-      function pollDestroyStatus() {
-        fetch('/api/destroy-agent/' + agentId + '/status')
-          .then(function(resp) { return resp.json(); })
-          .then(function(data) {
-            if (data.status === 'done') {
-              window.location.href = '/';
-            } else if (data.status === 'failed') {
-              destroySpinner.classList.add('hidden');
-              destroyBtn.disabled = false;
-              alert('Failed to destroy: ' + (data.error || 'unknown error'));
-            } else {
-              setTimeout(pollDestroyStatus, 1000);
-            }
-          })
-          .catch(function() { setTimeout(pollDestroyStatus, 1000); });
-      }
 
       destroyConfirmBtn.addEventListener('click', function() {
-        destroyDialog.classList.add('hidden');
-        destroyBtn.disabled = true;
-        destroySpinner.classList.remove('hidden');
+        destroyConfirmBtn.disabled = true;
+        // Fire-and-redirect: the detached destroy subprocess survives a
+        // settings-page navigation, and the landing page renders a
+        // "Destroying..." marker on the row from on-disk state. No more
+        // polling here.
         fetch('/api/destroy-agent/' + agentId, { method: 'POST' })
-          .then(function(resp) { return resp.json(); })
-          .then(function(data) {
-            if (data.status === 'destroying') {
-              pollDestroyStatus();
-            } else if (data.status === 'done') {
+          .then(function(resp) {
+            if (resp.ok) {
               window.location.href = '/';
-            } else {
-              destroySpinner.classList.add('hidden');
-              destroyBtn.disabled = false;
-              alert('Failed to destroy: ' + (data.error || 'unknown error'));
+              return;
             }
+            destroyConfirmBtn.disabled = false;
+            destroyErrorEl.textContent = 'Could not start destroy (HTTP ' + resp.status + ')';
+            destroyErrorEl.classList.remove('hidden');
+            destroyDialog.classList.add('hidden');
           })
           .catch(function() {
-            destroySpinner.classList.add('hidden');
-            destroyBtn.disabled = false;
-            alert('Failed to destroy project');
+            destroyConfirmBtn.disabled = false;
+            destroyErrorEl.textContent = 'Could not start destroy (network error)';
+            destroyErrorEl.classList.remove('hidden');
+            destroyDialog.classList.add('hidden');
           });
       });
     })();

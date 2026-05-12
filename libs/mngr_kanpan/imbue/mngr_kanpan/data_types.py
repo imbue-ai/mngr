@@ -149,6 +149,12 @@ class MarkableBuiltinCommand(FrozenModel):
 
 KanpanCommand = Annotated[CustomCommand | ActionBuiltinCommand | MarkableBuiltinCommand, Field(discriminator="kind")]
 
+# When `staleness_threshold_seconds` is unset, use this fraction of
+# `refresh_interval_seconds` so values that weren't updated in the last cycle
+# show as stale, but values that were just refreshed within their cycle don't
+# briefly grey out near the cycle boundary.
+STALENESS_FRACTION_OF_REFRESH_INTERVAL = 0.9
+
 
 class KanpanPluginConfig(PluginConfig):
     """Configuration for the kanpan plugin."""
@@ -179,6 +185,13 @@ class KanpanPluginConfig(PluginConfig):
         default=60.0,
         description="Minimum seconds before retrying after a failed full refresh",
     )
+    staleness_threshold_seconds: float | None = Field(
+        default=None,
+        description="Field values whose `created` timestamp is older than this many seconds "
+        "are rendered greyed-out to indicate they may be out of date. "
+        "When unset (default), resolves to 90% of `refresh_interval_seconds` so that anything "
+        "that wasn't updated in the last refresh cycle shows as stale. Set explicitly to override.",
+    )
     data_sources: dict[str, dict[str, Any]] = Field(
         default_factory=dict,
         description="Data source configurations keyed by source name (e.g. 'github', 'repo_paths'). "
@@ -204,6 +217,14 @@ class KanpanPluginConfig(PluginConfig):
         description="[deprecated] After-refresh hooks - use data sources instead",
     )
 
+    def effective_staleness_threshold_seconds(self) -> float:
+        """Resolved staleness threshold: explicit value, or
+        ``STALENESS_FRACTION_OF_REFRESH_INTERVAL * refresh_interval_seconds``.
+        """
+        if self.staleness_threshold_seconds is not None:
+            return self.staleness_threshold_seconds
+        return STALENESS_FRACTION_OF_REFRESH_INTERVAL * self.refresh_interval_seconds
+
     def merge_with(self, override: "PluginConfig") -> "KanpanPluginConfig":
         """Merge this config with an override config."""
         if not isinstance(override, KanpanPluginConfig):
@@ -222,6 +243,11 @@ class KanpanPluginConfig(PluginConfig):
             if override.retry_cooldown_seconds is not None
             else self.retry_cooldown_seconds
         )
+        merged_staleness_threshold = (
+            override.staleness_threshold_seconds
+            if override.staleness_threshold_seconds is not None
+            else self.staleness_threshold_seconds
+        )
         merged_data_sources = {**self.data_sources, **override.data_sources}
         merged_shell_commands = {**self.shell_commands, **override.shell_commands}
         merged_columns = {**self.columns, **override.columns}
@@ -234,6 +260,7 @@ class KanpanPluginConfig(PluginConfig):
             section_order=merged_section_order,
             refresh_interval_seconds=merged_refresh_interval,
             retry_cooldown_seconds=merged_auto_cooldown,
+            staleness_threshold_seconds=merged_staleness_threshold,
             data_sources=merged_data_sources,
             shell_commands=merged_shell_commands,
             columns=merged_columns,

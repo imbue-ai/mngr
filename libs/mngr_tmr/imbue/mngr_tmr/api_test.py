@@ -30,6 +30,7 @@ from imbue.mngr_tmr.data_types import ChangeKind
 from imbue.mngr_tmr.data_types import ChangeStatus
 from imbue.mngr_tmr.data_types import ReportSection
 from imbue.mngr_tmr.data_types import TestAgentInfo
+from imbue.mngr_tmr.data_types import TestMapReduceResult
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
 from imbue.mngr_tmr.launching import build_agent_options as _build_agent_options
 from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
@@ -165,6 +166,18 @@ def test_build_agent_options_passes_env_and_labels() -> None:
 def test_build_agent_options_sets_agent_name() -> None:
     opts = _build_agent_options(AgentName("tmr-my-test-abc123"), "mngr-tmr/my-test", _make_config())
     assert opts.name == AgentName("tmr-my-test-abc123")
+
+
+def test_build_agent_options_target_path_pins_work_dir() -> None:
+    opts = _build_agent_options(AgentName("test"), "branch", _make_config("modal"), target_path=Path("/code"))
+    assert opts.target_path == Path("/code")
+
+
+def test_build_agent_options_transfer_mode_override_wins() -> None:
+    opts = _build_agent_options(
+        AgentName("test"), "branch", _make_config("modal"), transfer_mode=TransferMode.GIT_WORKTREE
+    )
+    assert opts.transfer_mode == TransferMode.GIT_WORKTREE
 
 
 def test_build_agent_prompt_contains_test_id() -> None:
@@ -307,7 +320,56 @@ def test_build_current_results_timed_out_agents() -> None:
     results = build_current_results(agents=agents, final_details={}, timed_out_ids={str(agent_id)}, hosts={})
     assert len(results) == 1
     assert results[0].errored is True
-    assert report_section_of(results[0]) == ReportSection.BLOCKED
+    assert report_section_of(results[0]) == ReportSection.FAILED
+
+
+def test_build_current_results_includes_launch_failures() -> None:
+    """Agents that failed to launch should appear in the results as ERRORED."""
+    failure = TestMapReduceResult(
+        test_node_id="tests/test_a.py::test_one",
+        agent_name=AgentName("tmr-test-one-launch-failed"),
+        errored=True,
+        summary_markdown="Failed to launch agent: boom",
+    )
+    results = build_current_results(
+        agents=[],
+        final_details={},
+        timed_out_ids=set(),
+        hosts={},
+        launch_failures=[failure],
+    )
+    assert len(results) == 1
+    assert results[0].test_node_id == "tests/test_a.py::test_one"
+    assert results[0].errored is True
+    assert "Failed to launch agent: boom" in results[0].summary_markdown
+    assert report_section_of(results[0]) == ReportSection.FAILED
+
+
+def test_build_current_results_launch_failures_come_before_running_agents() -> None:
+    """Launch failures should be ordered before live-agent results in the report."""
+    failure = TestMapReduceResult(
+        test_node_id="tests/test_failed.py::test_one",
+        agent_name=AgentName("tmr-test-one-launch-failed"),
+        errored=True,
+        summary_markdown="Failed to launch agent: boom",
+    )
+    agent = TestAgentInfo(
+        test_node_id="tests/test_running.py::test_two",
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("tmr-test-two-abc123"),
+        work_dir=Path("/tmp/work"),
+        created_at=0.0,
+    )
+    results = build_current_results(
+        agents=[agent],
+        final_details={},
+        timed_out_ids=set(),
+        hosts={},
+        launch_failures=[failure],
+    )
+    assert len(results) == 2
+    assert results[0].test_node_id == "tests/test_failed.py::test_one"
+    assert results[1].test_node_id == "tests/test_running.py::test_two"
 
 
 # --- _read_local_result / read_integrator_result tests ---

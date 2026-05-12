@@ -24,8 +24,10 @@ from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import UnknownBackendError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
@@ -34,9 +36,11 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.providers.registry import get_config_class
 from imbue.mngr_tmr.api import collect_tests
 from imbue.mngr_tmr.api import gather_results
 from imbue.mngr_tmr.api import get_base_commit
@@ -58,6 +62,48 @@ from imbue.mngr_tmr.report import generate_html_report
 
 _DEFAULT_TIMEOUT_SECONDS = 3600.0
 _DEFAULT_INTEGRATOR_TIMEOUT_SECONDS = 3600.0
+
+_MODAL_BACKEND_NAME = "modal"
+
+
+def _disable_modal_initial_snapshot(mngr_ctx: MngrContext, provider_names: tuple[str, ...]) -> None:
+    """Override modal-backed provider configs to skip the per-agent initial snapshot.
+
+    Modal's on_agent_created hook normally creates a 60-90s filesystem
+    snapshot after each agent is created so the host can be restarted
+    after a hard kill. TMR creates the snapshot it actually needs
+    explicitly via ``provider.create_snapshot`` on the dedicated
+    snapshotter, and every other host TMR creates is ephemeral, so the
+    safety-net snapshot is dead weight that runs once *per agent*
+    (multiplying the cost on pooled hosts). Disable it for any modal
+    provider TMR is about to use, preserving the rest of the user's
+    config.
+
+    Must be called before any ``get_provider_instance`` call for these
+    names, since provider instances cache their config at construction.
+    """
+    seen: set[ProviderInstanceName] = set()
+    for raw_name in provider_names:
+        instance_name = ProviderInstanceName(raw_name)
+        if instance_name in seen:
+            continue
+        seen.add(instance_name)
+        existing = mngr_ctx.config.providers.get(instance_name)
+        if existing is None:
+            # Default-resolved provider: the instance name doubles as the
+            # backend name. Only patch when that backend is modal.
+            if raw_name != _MODAL_BACKEND_NAME:
+                continue
+            try:
+                config_class = get_config_class(ProviderBackendName(raw_name))
+            except UnknownBackendError:
+                continue
+            existing = config_class(backend=ProviderBackendName(raw_name))
+        if str(existing.backend) != _MODAL_BACKEND_NAME:
+            continue
+        mngr_ctx.config.providers[instance_name] = existing.model_copy_update(
+            ("is_snapshotted_after_create", False),
+        )
 
 
 class TmrCliOptions(CommonCliOptions):
@@ -87,6 +133,7 @@ class TmrCliOptions(CommonCliOptions):
     output_html: str | None
     source: str | None
     reintegrate: str | None
+    additional_authorized_keys: tuple[str, ...]
 
 
 _MIN_FD_LIMIT = 4096
@@ -158,6 +205,19 @@ def _emit_report_path(path: Path, output_opts: OutputOptions) -> None:
             assert_never(unreachable)
 
 
+def _emit_integrator_branch(branch_name: str | None, output_opts: OutputOptions) -> None:
+    """Emit the name of the integrator branch, if one was produced."""
+    if branch_name is None:
+        return
+    match output_opts.output_format:
+        case OutputFormat.JSON | OutputFormat.JSONL:
+            emit_event("integrator_branch", {"branch_name": branch_name}, output_opts.output_format)
+        case OutputFormat.HUMAN:
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _run_reintegrate(
     opts: TmrCliOptions,
     mngr_ctx: MngrContext,
@@ -171,22 +231,27 @@ def _run_reintegrate(
     """
     assert opts.reintegrate is not None
     run_name = opts.reintegrate
-    write_human_line("Reintegrating run: {}", run_name)
+    is_human = output_opts.output_format == OutputFormat.HUMAN
+    if is_human:
+        write_human_line("Reintegrating run: {}", run_name)
 
     # Discover agents from the previous run by label
     list_result = try_list_agents(mngr_ctx)
     if list_result is None:
-        write_human_line("Failed to list agents. Nothing to reintegrate.")
+        if is_human:
+            write_human_line("Failed to list agents. Nothing to reintegrate.")
         return
     matching_agents = [
         detail
         for detail in list_result.agents
         if detail.labels.get("tmr_run_name") == run_name and not str(detail.name).startswith("tmr-integrator-")
     ]
-    write_human_line("Found {} agent(s) from run {}", len(matching_agents), run_name)
+    if is_human:
+        write_human_line("Found {} agent(s) from run {}", len(matching_agents), run_name)
 
     if not matching_agents:
-        write_human_line("No agents found for run name '{}'. Nothing to reintegrate.", run_name)
+        if is_human:
+            write_human_line("No agents found for run name '{}'. Nothing to reintegrate.", run_name)
         return
 
     # Get local host (needed for local agent host mapping and integrator config)
@@ -280,6 +345,7 @@ def _run_reintegrate(
         env_options=env_options,
         label_options=label_options,
         templates=integrator_templates,
+        additional_authorized_keys=opts.additional_authorized_keys,
     )
     integrator_result = _run_integrator_phase(
         results, integrator_config, mngr_ctx, opts, output_dir, base_commit=base_commit
@@ -293,7 +359,8 @@ def _run_reintegrate(
         run_commands=_build_run_commands(run_name, integrated_branch),
     )
     _emit_report_path(html_path, output_opts)
-    _print_run_commands(run_name, integrated_branch)
+    _emit_integrator_branch(integrated_branch, output_opts)
+    _print_run_commands(run_name, output_opts, integrated_branch)
 
 
 def _run_integrator_phase(
@@ -319,7 +386,7 @@ def _run_integrator_phase(
             config=config,
             mngr_ctx=mngr_ctx,
         )
-    except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
+    except (MngrError, HostError, AgentError, OSError, BaseExceptionGroup) as exc:
         logger.warning("Failed to launch integrator agent: {}", exc)
         return None
 
@@ -501,6 +568,13 @@ def _run_integrator_phase(
     help="Re-read outcomes from a previous TMR run (by run name), re-run integrator, and regenerate report. "
     "Skips test collection and agent launching.",
 )
+@click.option(
+    "--additional-authorized-host",
+    "additional_authorized_keys",
+    multiple=True,
+    help="SSH public key line to install in authorized_keys on each agent host "
+    "(test agents, integrator, host pool, and snapshotter), allowing inbound SSH [repeatable]",
+)
 @add_common_options
 @click.pass_context
 def tmr(ctx: click.Context, **kwargs: object) -> None:
@@ -514,6 +588,8 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     # Each agent process (tmux + claude) opens many files, and list_agents
     # enumerates all hosts which can push the system near the FD limit.
     _raise_fd_limit()
+
+    _disable_modal_initial_snapshot(mngr_ctx, (opts.provider, opts.integrator_provider))
 
     source_dir = Path(opts.source) if opts.source is not None else Path.cwd()
 
@@ -564,6 +640,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         label_options=label_options,
         snapshot=provided_snapshot,
         templates=opts.agent_template,
+        additional_authorized_keys=opts.additional_authorized_keys,
     )
 
     try:
@@ -585,7 +662,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         )
     except KeyboardInterrupt:
         traceback.print_exc()
-        _print_run_commands(e2e_run_prefix, None)
+        _print_run_commands(e2e_run_prefix, output_opts, None)
         raise
 
 
@@ -620,8 +697,10 @@ def _run_tmr_pipeline(
     # Otherwise, all agents are launched up front and then polled via the same function.
     use_batched = opts.max_agents > 0 and opts.max_agents < len(test_node_ids)
 
+    launch_failures: list[TestMapReduceResult] = []
+
     if use_batched:
-        if opts.use_snapshot:
+        if opts.use_snapshot and output_opts.output_format == OutputFormat.HUMAN:
             write_human_line("WARNING: --use-snapshot is not supported with --max-agents and will be ignored")
         agent_infos: list[TestAgentInfo] = []
         agent_hosts: dict[str, OnlineHostInterface] = {}
@@ -633,6 +712,7 @@ def _run_tmr_pipeline(
             config=config,
             mngr_ctx=mngr_ctx,
             pytest_flags=testing_flags,
+            launch_failures=launch_failures,
             prompt_suffix=opts.prompt_suffix or "",
             use_snapshot=opts.use_snapshot and provided_snapshot is None,
             max_parallel=opts.max_parallel,
@@ -657,6 +737,7 @@ def _run_tmr_pipeline(
         report_path=html_path,
         all_agents=agent_infos,
         all_hosts=agent_hosts,
+        launch_failures=launch_failures,
         artifact_output_dir=output_dir,
         source_dir=source_dir,
         base_commit=base_commit if is_remote_provider else None,
@@ -676,6 +757,7 @@ def _run_tmr_pipeline(
         cg=mngr_ctx.concurrency_group,
         base_commit=base_commit if is_remote_provider else None,
         cached_results=cached_results,
+        launch_failures=launch_failures,
     )
 
     # Step 9: Write report with final results (artifacts already pulled during polling)
@@ -692,6 +774,7 @@ def _run_tmr_pipeline(
         env_options=env_options,
         label_options=label_options,
         templates=integrator_templates,
+        additional_authorized_keys=opts.additional_authorized_keys,
     )
     integrator_result = _run_integrator_phase(
         results, integrator_config, mngr_ctx, opts, output_dir, base_commit=base_commit
@@ -705,8 +788,9 @@ def _run_tmr_pipeline(
         run_commands=_build_run_commands(e2e_run_prefix, integrated_branch),
     )
     _emit_report_path(html_path, output_opts)
+    _emit_integrator_branch(integrated_branch, output_opts)
 
-    _print_run_commands(e2e_run_prefix, integrated_branch)
+    _print_run_commands(e2e_run_prefix, output_opts, integrated_branch)
 
 
 def _build_run_commands(run_name: str, integrated_branch: str | None = None) -> list[tuple[str, str]]:
@@ -720,8 +804,15 @@ def _build_run_commands(run_name: str, integrated_branch: str | None = None) -> 
     return commands
 
 
-def _print_run_commands(run_name: str, integrated_branch: str | None = None) -> None:
-    """Print useful commands for managing a TMR run's agents."""
+def _print_run_commands(run_name: str, output_opts: OutputOptions, integrated_branch: str | None = None) -> None:
+    """Print useful commands for managing a TMR run's agents.
+
+    Only emits in HUMAN output mode; in JSON/JSONL the run name and integrator
+    branch are already exposed via structured events, and unguarded
+    `write_human_line` calls would pollute the structured stream.
+    """
+    if output_opts.output_format != OutputFormat.HUMAN:
+        return
     write_human_line("")
     for label, cmd in _build_run_commands(run_name, integrated_branch):
         write_human_line("{}:", label)

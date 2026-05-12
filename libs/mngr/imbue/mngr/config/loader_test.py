@@ -216,6 +216,7 @@ def test_parse_providers_raises_on_unknown_fields() -> None:
         _parse_providers(raw, disabled_plugins=frozenset())
 
 
+@pytest.mark.allow_warnings(match=r"Unknown fields in providers\.my-local.*typo_field")
 def test_parse_providers_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
     """_parse_providers with strict=False should warn about unknown fields and not apply them to the model."""
     raw = {"my-local": {"backend": "local", "typo_field": "value"}}
@@ -319,6 +320,7 @@ def test_parse_agent_types_raises_on_unknown_fields() -> None:
         _parse_agent_types(raw, disabled_plugins=frozenset())
 
 
+@pytest.mark.allow_warnings(match=r"Unknown fields in agent_types\.claude.*bogus_option")
 def test_parse_agent_types_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
     """_parse_agent_types with strict=False should warn about unknown fields and not apply them to the model."""
     raw = {"claude": {"cli_args": "--verbose", "bogus_option": True}}
@@ -446,6 +448,7 @@ def test_parse_plugins_raises_on_unknown_fields() -> None:
         _parse_plugins(raw)
 
 
+@pytest.mark.allow_warnings(match=r"Unknown fields in plugins\.my-plugin.*nonexistent_setting")
 def test_parse_plugins_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
     """_parse_plugins with strict=False should warn about unknown fields and not apply them to the model."""
     raw = {"my-plugin": {"enabled": True, "nonexistent_setting": "abc"}}
@@ -541,6 +544,7 @@ def test_parse_logging_config_raises_on_unknown_fields() -> None:
         _parse_logging_config(raw)
 
 
+@pytest.mark.allow_warnings(match=r"Unknown fields in logging.*unknown_log_option")
 def test_parse_logging_config_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
     """_parse_logging_config with strict=False should warn about unknown fields and not apply them to the model."""
     raw = {"file_level": "DEBUG", "unknown_log_option": 42}
@@ -663,6 +667,7 @@ def test_parse_config_raises_on_unknown_top_level_field() -> None:
         parse_config(raw, disabled_plugins=frozenset())
 
 
+@pytest.mark.allow_warnings(match=r"^Unknown configuration fields: \['nonexistent_top_level'\]")
 def test_parse_config_warns_on_unknown_top_level_field_when_not_strict(log_warnings: list[str]) -> None:
     """parse_config with strict=False should warn about unknown top-level fields."""
     raw = {"prefix": "test-", "nonexistent_top_level": "value"}
@@ -680,6 +685,7 @@ def test_parse_config_raises_on_unknown_nested_field() -> None:
         parse_config(raw, disabled_plugins=frozenset())
 
 
+@pytest.mark.allow_warnings(match=r"Unknown fields in logging.*bad_field")
 def test_parse_config_warns_on_unknown_nested_field_when_not_strict(log_warnings: list[str]) -> None:
     """parse_config with strict=False should warn about unknown nested fields."""
     raw = {
@@ -1165,6 +1171,7 @@ def test_load_config_rejects_unknown_fields_by_default(
         load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
 
 
+@pytest.mark.allow_warnings(match=r"^Unknown configuration fields: \['future_field'\]")
 def test_load_config_allows_unknown_fields_with_env_var(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1637,3 +1644,56 @@ def test_parse_plugins_normalizes_hyphens() -> None:
         assert parsed.custom_field == "value"
     finally:
         _plugin_config_registry.pop(PluginName("hyphen-test-plugin"), None)
+
+
+# =============================================================================
+# Tests for silent=True warning suppression (used by `mngr plugin add`)
+# =============================================================================
+
+
+def test_parse_providers_silent_does_not_warn_on_unknown_backend(log_warnings: list[str]) -> None:
+    """_parse_providers with strict=False, silent=True must not warn about an unknown backend.
+
+    Regression guard for the issue where `mngr plugin add` was emitting
+    `Provider X references unknown backend Y` warnings during installation,
+    since the user is *about to install* the missing backend.
+    """
+    raw = {"modal": {"backend": "modal"}}
+    result = _parse_providers(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    # Provider with unknown backend was skipped (same as non-silent strict=False path).
+    assert ProviderInstanceName("modal") not in result
+    # No warning was emitted.
+    assert not any("references unknown backend" in msg for msg in log_warnings), log_warnings
+
+
+def test_parse_providers_silent_does_not_warn_on_unknown_field(log_warnings: list[str]) -> None:
+    """_parse_providers with silent=True must not warn about unknown fields on a known backend."""
+    raw = {"my-local": {"backend": "local", "typo_field": "value"}}
+    result = _parse_providers(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    assert ProviderInstanceName("my-local") in result
+    # Unknown field still stripped from the parsed model -- silent affects only the warning.
+    assert "typo_field" not in result[ProviderInstanceName("my-local")].model_dump()
+    assert not any("typo_field" in msg for msg in log_warnings), log_warnings
+
+
+def test_parse_agent_types_silent_does_not_warn_on_unknown_field(log_warnings: list[str]) -> None:
+    """_parse_agent_types with silent=True must not warn about unknown fields."""
+    raw = {"claude": {"bogus_option": "value"}}
+    result = _parse_agent_types(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    # Unknown field still stripped -- silent affects only the warning.
+    assert AgentTypeName("claude") in result
+    assert not any("bogus_option" in msg for msg in log_warnings), log_warnings
+
+
+def test_parse_plugins_silent_does_not_warn_on_unknown_field(log_warnings: list[str]) -> None:
+    """_parse_plugins with silent=True must not warn about unknown fields."""
+    raw = {"some-plugin": {"unknown_setting": "x"}}
+    _parse_plugins(raw, strict=False, silent=True)
+    assert not any("unknown_setting" in msg for msg in log_warnings), log_warnings
+
+
+def test_parse_config_silent_does_not_warn_on_unknown_top_level_field(log_warnings: list[str]) -> None:
+    """parse_config with silent=True must not warn about unknown top-level fields."""
+    raw = {"future_top_level_field": "x"}
+    parse_config(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    assert not any("future_top_level_field" in msg for msg in log_warnings), log_warnings

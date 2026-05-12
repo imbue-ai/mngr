@@ -12,6 +12,7 @@ from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
@@ -19,8 +20,6 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr_vps_docker.errors import ContainerSetupError
-from imbue.mngr_vps_docker.errors import VpsConnectionError
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vultr import hookimpl
@@ -79,13 +78,13 @@ class VultrProvider(VpsDockerProvider):
         empty results.
         """
         try:
-            docker_ssh = self._make_docker_ssh(vps_ip)
-            host_store = self._get_existing_host_store(docker_ssh)
-            if host_store is None:
-                logger.debug("State container not ready on VPS {}, skipping", vps_ip)
-                return [], {}
-            return host_store.list_all_host_records_with_agents()
-        except (VpsConnectionError, ContainerSetupError) as e:
+            with self._make_outer_for_vps_ip(vps_ip) as outer:
+                host_store = self._get_existing_host_store(outer)
+                if host_store is None:
+                    logger.debug("State container not ready on VPS {}, skipping", vps_ip)
+                    return [], {}
+                return host_store.list_all_host_records_with_agents()
+        except (HostConnectionError, MngrError) as e:
             logger.warning("Failed to read records from VPS {}: {}", vps_ip, e)
             return [], {}
 

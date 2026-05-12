@@ -15,6 +15,7 @@ from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import check_effort_callout_dismissed
 from imbue.mngr_claude.claude_config import check_source_directory_trusted
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
+from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import find_project_config
 from imbue.mngr_claude.claude_config import find_user_claude_config
 from imbue.mngr_claude.claude_config import get_claude_config_dir
@@ -670,9 +671,11 @@ def test_get_user_claude_config_dir_defaults_to_config_dir() -> None:
 
 
 def test_get_user_claude_config_dir_respects_original_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """With ORIGINAL_CLAUDE_CONFIG_DIR set, returns that path even if CLAUDE_CONFIG_DIR differs."""
+    """With ORIGINAL_CLAUDE_CONFIG_DIR set and existing on disk, returns that path even if CLAUDE_CONFIG_DIR differs."""
     user_dir = tmp_path / "user-claude"
+    user_dir.mkdir()
     agent_dir = tmp_path / "agent-claude"
+    agent_dir.mkdir()
     monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(user_dir))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(agent_dir))
     result = get_user_claude_config_dir()
@@ -687,6 +690,68 @@ def test_get_user_claude_config_dir_falls_back_to_claude_config_dir(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom_dir))
     result = get_user_claude_config_dir()
     assert result == custom_dir
+
+
+def test_get_user_claude_config_dir_falls_back_when_original_does_not_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If ORIGINAL_CLAUDE_CONFIG_DIR points at a non-existent directory, fall back to CLAUDE_CONFIG_DIR.
+
+    This is the nested-sandbox case: ORIGINAL_CLAUDE_CONFIG_DIR was inherited
+    from the host (e.g. /Users/<user>/.claude on macOS) but we are now running
+    inside a Linux VM where that path does not exist. The per-agent
+    CLAUDE_CONFIG_DIR is where the live config (and credentials) actually
+    live, so we treat ORIGINAL as if it were unset.
+    """
+    bogus_user_dir = tmp_path / "does-not-exist-on-disk"
+    agent_dir = tmp_path / "agent-claude"
+    agent_dir.mkdir()
+    monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(bogus_user_dir))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(agent_dir))
+
+    result = get_user_claude_config_dir()
+
+    assert result == agent_dir
+
+
+def test_get_user_claude_config_dir_falls_back_when_original_is_a_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If ORIGINAL_CLAUDE_CONFIG_DIR points at a non-directory, fall back to CLAUDE_CONFIG_DIR."""
+    not_a_dir = tmp_path / "regular-file"
+    not_a_dir.write_text("not a directory")
+    agent_dir = tmp_path / "agent-claude"
+    agent_dir.mkdir()
+    monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(not_a_dir))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(agent_dir))
+
+    result = get_user_claude_config_dir()
+
+    assert result == agent_dir
+
+
+def test_get_user_claude_config_dir_credentials_fallback_resolves_to_per_agent_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: nested-sandbox scenario resolves .credentials.json from the per-agent dir.
+
+    Reproduces the bug fixed by this change: ORIGINAL_CLAUDE_CONFIG_DIR points
+    at a host path that doesn't exist inside the VM, the per-agent
+    CLAUDE_CONFIG_DIR holds the live .credentials.json, and callers that
+    resolve credentials via get_user_claude_config_dir() / ".credentials.json"
+    must end up pointing at the per-agent file.
+    """
+    bogus_host_dir = tmp_path / "Users" / "someone" / ".claude"
+    agent_dir = tmp_path / "agent-claude"
+    agent_dir.mkdir()
+    (agent_dir / ".credentials.json").write_text('{"token": "abc"}')
+    monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(bogus_host_dir))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(agent_dir))
+
+    resolved = get_user_claude_config_dir() / ".credentials.json"
+
+    assert resolved.exists()
+    assert resolved.read_text() == '{"token": "abc"}'
 
 
 # Tests for find_user_claude_config
@@ -783,6 +848,45 @@ def test_find_user_claude_config_ignores_claude_config_dir(tmp_path: Path, monke
     # Should return the default user path, not the per-agent path
     result = find_user_claude_config()
     assert result == Path.home() / ".claude.json"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # Slashes and leading slash become '-' (the original behavior, preserved).
+        ("/Users/foo/bar", "-Users-foo-bar"),
+        # Dots become '-' (the original behavior, preserved).
+        ("/a.b.c", "-a-b-c"),
+        # Underscores become '-' (newly added by this branch).
+        ("/foo_bar/baz_qux", "-foo-bar-baz-qux"),
+        # Spaces and tabs become '-' (newly added).
+        ("/with space/and\ttab", "-with-space-and-tab"),
+        # '@' and '+' become '-' (newly added).
+        ("/user@host/foo+bar", "-user-host-foo-bar"),
+        # Non-ASCII letters become '-' (newly added). Each non-ASCII char is one
+        # codepoint in str(path), so each maps to exactly one '-'. The leading
+        # slash and the slash between segments each contribute one '-' as well.
+        ("/café/naïve", "-caf--na-ve"),
+        ("/中文/path", "----path"),
+        # Hyphens and ASCII alphanumerics are preserved.
+        ("/already-dashed/Mixed123", "-already-dashed-Mixed123"),
+        # Consecutive special chars are NOT collapsed (we mirror Claude Code's
+        # 1:1 mapping; collapsing would create dir-name collisions).
+        ("/a..b", "-a--b"),
+        ("/a__b", "-a--b"),
+    ],
+)
+def test_encode_claude_project_dir_name(raw: str, expected: str) -> None:
+    """encode_claude_project_dir_name maps every non-[A-Za-z0-9-] char to '-'.
+
+    Pins the behavior introduced when the encoder was broadened to match
+    Claude Code's actual algorithm (anthropics/claude-code#19972). If this
+    encoder ever regresses to ``replace("/", "-").replace(".", "-")`` or to a
+    pattern that treats ``_`` as a word char (e.g. ``\\W``), several of these
+    cases will fail -- which is the point: a divergence here silently breaks
+    ``mngr create --adopt-session``.
+    """
+    assert encode_claude_project_dir_name(Path(raw)) == expected
 
 
 def test_build_permission_auto_allow_hooks_config_has_permission_request_hook() -> None:

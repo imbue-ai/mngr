@@ -2,6 +2,7 @@ import copy
 import fcntl
 import json
 import os
+import re
 import shutil
 from collections.abc import Generator
 from collections.abc import Mapping
@@ -92,11 +93,21 @@ def get_user_claude_config_dir() -> Path:
     credentials or settings) should call this function instead.
 
     Resolution order:
-    1. $ORIGINAL_CLAUDE_CONFIG_DIR (set by mngr when creating agents)
+    1. $ORIGINAL_CLAUDE_CONFIG_DIR (set by mngr when creating agents), but
+       only if that path actually exists as a directory on disk.
     2. Falls back to get_claude_config_dir() ($CLAUDE_CONFIG_DIR or ~/.claude/)
+
+    The directory-existence check on $ORIGINAL_CLAUDE_CONFIG_DIR handles
+    nested-sandbox scenarios (e.g. a Linux lima VM running on a macOS host):
+    the env var is inherited from when the agent was first created on the
+    host, so it points at a host path like /Users/<user>/.claude that does
+    not exist inside the VM. Treating that as if the var were unset lets
+    callers (most importantly the credentials provisioner) fall through to
+    the per-agent CLAUDE_CONFIG_DIR, which is where the live credentials
+    actually live in that scenario.
     """
     original = os.environ.get("ORIGINAL_CLAUDE_CONFIG_DIR")
-    if original:
+    if original and Path(original).is_dir():
         return Path(original)
     return get_claude_config_dir()
 
@@ -452,15 +463,26 @@ def find_project_config(projects: Mapping[str, Any], path: Path) -> dict[str, An
 # Project Directory Encoding
 # =============================================================================
 
+# Matches every character that Claude Code's project-dir encoder maps to '-'
+# (i.e. everything that is not an ASCII alphanumeric or literal '-').
+_NON_DASH_ALNUM_ASCII: Final = re.compile(r"[^A-Za-z0-9-]")
+
 
 @pure
 def encode_claude_project_dir_name(path: Path) -> str:
     """Encode a filesystem path into Claude Code's project directory name.
 
     Claude Code stores per-project data in ~/.claude/projects/<encoded-path>/.
-    The encoding replaces '/' and '.' with '-'.
+    The encoding keeps only ASCII alphanumerics and ``-``, mapping every
+    other character (``/``, ``.``, ``_``, space, ``@``, ``+``, accented
+    letters, CJK, etc.) to ``-`` -- per the algorithm documented in
+    anthropics/claude-code#19972. If this encoder diverges from Claude
+    Code's, ``on_after_provisioning`` writes the adopted JSONL to a
+    project subdir Claude Code never reads on resume, the find guard in
+    ``assemble_command`` returns no match, and ``--adopt-session``
+    silently spawns a fresh session via the ``||`` fallback.
     """
-    return str(path).replace("/", "-").replace(".", "-")
+    return _NON_DASH_ALNUM_ASCII.sub("-", str(path))
 
 
 # =============================================================================
@@ -469,7 +491,7 @@ def encode_claude_project_dir_name(path: Path) -> str:
 
 # Guard prefix for readiness hook commands: exit gracefully if this is not the
 # main Claude session (e.g. a reviewer sub-agent that resumed a session).
-_SESSION_GUARD: Final[str] = '[ -z "$MAIN_CLAUDE_SESSION_ID" ] && exit 0; '
+SESSION_GUARD: Final[str] = '[ -z "$MAIN_CLAUDE_SESSION_ID" ] && exit 0; '
 
 
 @pure
@@ -480,7 +502,13 @@ def build_readiness_hooks_config() -> dict[str, Any]:
     files that signal agent state.
 
     - SessionStart: creates 'session_started' file AND tracks the current session ID
-      (writes to claude_session_id and appends to claude_session_id_history)
+      (writes to claude_session_id and appends to claude_session_id_history). Also
+      signals the tmux wait-for channel that ``mngr message`` waits on, but ONLY
+      when the session start was triggered by ``/clear`` or ``/compact``. These
+      are TUI-local slash commands that do NOT trigger UserPromptSubmit, so
+      without this signal ``mngr message agent -m /clear`` would time out at
+      ``enter_submission_timeout_seconds`` even though /clear actually executed.
+      Filtering on source ensures normal startup/resume don't fire stale signals.
     - UserPromptSubmit: creates 'active' file, removes 'permissions_waiting', signals tmux wait-for
     - PermissionRequest: creates 'permissions_waiting' file (Claude is waiting for permission approval)
     - PostToolUse: removes 'permissions_waiting' file (tool completed, permission resolved)
@@ -511,17 +539,17 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD + 'touch "$MNGR_AGENT_STATE_DIR/session_started"',
+                            "command": SESSION_GUARD + 'touch "$MNGR_AGENT_STATE_DIR/session_started"',
                         },
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD
+                            "command": SESSION_GUARD
                             + 'echo "The base branch for this work is: ${MNGR_GIT_BASE_BRANCH:-main}"',
                         },
                         {
                             "type": "command",
                             "command": (
-                                _SESSION_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
+                                SESSION_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
                                 ' _MNGR_NEW_SID=$(echo "$_MNGR_HOOK_INPUT" | jq -r ".session_id // empty");'
                                 ' if [ -z "$_MNGR_NEW_SID" ]; then'
                                 ' echo "mngr: SessionStart hook failed to extract session_id from hook input: $_MNGR_HOOK_INPUT" >&2;'
@@ -533,6 +561,23 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                                 ' echo "$_MNGR_NEW_SID${_MNGR_SOURCE:+ $_MNGR_SOURCE}" >> "$MNGR_AGENT_STATE_DIR/claude_session_id_history"'
                             ),
                         },
+                        {
+                            # /clear and /compact do not trigger UserPromptSubmit
+                            # (they are TUI-local commands), so without this hook
+                            # `mngr message agent -m /clear` would time out at
+                            # `enter_submission_timeout_seconds` even though /clear
+                            # ran successfully. Mirror the UserPromptSubmit signal
+                            # here, gated on source so that normal startup/resume
+                            # don't fire stale signals.
+                            "type": "command",
+                            "command": (
+                                SESSION_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
+                                ' _MNGR_SOURCE=$(echo "$_MNGR_HOOK_INPUT" | jq -r ".source // empty");'
+                                ' case "$_MNGR_SOURCE" in clear|compact)'
+                                " tmux wait-for -S \"mngr-submit-$(tmux display-message -p '#S')\" 2>/dev/null || true ;;"
+                                " esac"
+                            ),
+                        },
                     ]
                 }
             ],
@@ -541,12 +586,12 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD
+                            "command": SESSION_GUARD
                             + """touch "$MNGR_AGENT_STATE_DIR/active" && rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting" && mkdir -p $MNGR_HOST_DIR/events/mngr/activity && echo '{"source": "mngr/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNGR_HOST_DIR/events/mngr/activity/events.jsonl""",
                         },
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD
+                            "command": SESSION_GUARD
                             + "tmux wait-for -S \"mngr-submit-$(tmux display-message -p '#S')\" 2>/dev/null || true",
                         },
                     ]
@@ -557,7 +602,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD + 'touch "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
+                            "command": SESSION_GUARD + 'touch "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
                         },
                     ],
                 }
@@ -567,7 +612,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD + 'rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
+                            "command": SESSION_GUARD + 'rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
                         },
                     ],
                 }
@@ -577,7 +622,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD + 'rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
+                            "command": SESSION_GUARD + 'rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
                         },
                     ],
                 }
@@ -588,7 +633,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD
+                            "command": SESSION_GUARD
                             + """rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting" && mkdir -p $MNGR_HOST_DIR/events/mngr/activity && echo '{"source": "mngr/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNGR_HOST_DIR/events/mngr/activity/events.jsonl""",
                         },
                     ],
@@ -599,7 +644,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD + 'bash "$MNGR_AGENT_STATE_DIR/commands/wait_for_stop_hook.sh"',
+                            "command": SESSION_GUARD + 'bash "$MNGR_AGENT_STATE_DIR/commands/wait_for_stop_hook.sh"',
                         },
                     ],
                 }
