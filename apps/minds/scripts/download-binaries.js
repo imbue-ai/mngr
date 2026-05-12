@@ -326,24 +326,72 @@ async function downloadGit(resourcesDir, { platform }) {
 // uses that version directly.
 const PNPM_VERSION = '10.33.4';
 
+function _logErr(label, err) {
+  console.log(`[download-binaries] ${label} FAILED:`);
+  if (err && err.stderr) console.log(String(err.stderr).slice(0, 2000));
+  if (err && err.stdout) console.log(String(err.stdout).slice(0, 2000));
+  if (err && err.status != null) console.log(`exit=${err.status}`);
+}
+
+function _verifyPnpm() {
+  try {
+    return execSync('pnpm --version', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function _try(label, cmd) {
+  try {
+    console.log(`[download-binaries] ${label}: ${cmd}`);
+    execSync(cmd, { stdio: 'pipe', encoding: 'utf-8' });
+    return true;
+  } catch (err) {
+    _logErr(label, err);
+    return false;
+  }
+}
+
 function installPnpm() {
   // Skip if a compatible pnpm is already on PATH (covers local re-runs
   // where the user already has pnpm via corepack / brew / etc.).
-  let existing = null;
-  try {
-    existing = execSync('pnpm --version', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
-  } catch {}
+  const existing = _verifyPnpm();
   if (existing && existing.startsWith('10.')) {
     console.log(`[download-binaries] pnpm ${existing} already on PATH; skipping reinstall.`);
     return;
   }
-  console.log(`[download-binaries] Installing pnpm@${PNPM_VERSION} globally so ToDesktop CI's "pnpm --version" check uses it (avoids npx pnpm@latest -> 11.1.0 which breaks both runners).`);
-  // `--no-audit --no-fund` keeps the output quiet. We let the exception
-  // propagate on failure so the build fails loudly (better than a green
-  // build that secretly uses 11.1.0).
-  execSync(`npm install -g pnpm@${PNPM_VERSION} --no-audit --no-fund`, { stdio: 'inherit' });
-  const installed = execSync('pnpm --version', { encoding: 'utf-8' }).trim();
-  console.log(`[download-binaries] pnpm now on PATH at version ${installed}`);
+  console.log(`[download-binaries] Need pnpm@${PNPM_VERSION} on PATH so ToDesktop's "pnpm --version" check picks it up (avoids npx pnpm@latest -> 11.1.0 which breaks both CI runners).`);
+
+  // Strategy 1: plain `npm install -g`. Works on Mac (admin user) and on
+  // Linux when npm's prefix is user-writable.
+  if (_try('npm install -g', `npm install -g pnpm@${PNPM_VERSION} --no-audit --no-fund`)) {
+    const v = _verifyPnpm();
+    if (v) { console.log(`[download-binaries] pnpm ${v} on PATH (npm -g)`); return; }
+  }
+
+  // Strategy 2: sudo npm install -g. Azure DevOps hosted Linux runners
+  // give the CI user passwordless sudo, so this works there even when
+  // the user can't write to /usr/lib/node_modules.
+  if (_try('sudo -n npm install -g', `sudo -n npm install -g pnpm@${PNPM_VERSION} --no-audit --no-fund`)) {
+    const v = _verifyPnpm();
+    if (v) { console.log(`[download-binaries] pnpm ${v} on PATH (sudo npm -g)`); return; }
+  }
+
+  // Strategy 3: direct binary download from pnpm's GitHub releases into
+  // /usr/local/bin via sudo. pnpm publishes static single-binary builds
+  // for linux-x64 / macos-arm64 / macos-x64 with no Node.js dependency.
+  const dlPlat = process.platform === 'darwin'
+    ? (process.arch === 'arm64' ? 'macos-arm64' : 'macos-x64')
+    : 'linux-x64';
+  const url = `https://github.com/pnpm/pnpm/releases/download/v${PNPM_VERSION}/pnpm-${dlPlat}`;
+  if (_try('sudo -n direct binary install', `sudo -n bash -c 'curl -fL -o /usr/local/bin/pnpm "${url}" && chmod 755 /usr/local/bin/pnpm'`)) {
+    const v = _verifyPnpm();
+    if (v) { console.log(`[download-binaries] pnpm ${v} on PATH (direct binary)`); return; }
+  }
+
+  // If nothing put pnpm on PATH, fail loudly. Better than a silent fallback
+  // to `npx pnpm@latest` which is what got us into this mess.
+  throw new Error(`Could not install pnpm@${PNPM_VERSION} via any strategy. ToDesktop's install will fall back to pnpm@latest (currently 11.1.0) which breaks both runners.`);
 }
 
 /**
