@@ -261,6 +261,23 @@ class ModalInterface(MutableModel, ABC):
         """Load an image by ID, e.g. from a snapshot (mirrors modal.Image.from_id)."""
         ...
 
+    @abstractmethod
+    def image_from_dockerfile(
+        self,
+        path: Path,
+        *,
+        context_dir: Path | None = None,
+        secrets: Sequence[SecretInterface] = (),
+    ) -> ImageInterface:
+        """Build an image from a Dockerfile path (mirrors modal.Image.from_dockerfile).
+
+        Supports multistage Dockerfiles. Builds the whole Dockerfile as a single
+        Modal image without per-layer caching, in contrast to chained
+        ``dockerfile_commands`` which caches per instruction but does not
+        support multistage builds.
+        """
+        ...
+
     # =====================================================================
     # Sandbox (modal.Sandbox class methods)
     # =====================================================================

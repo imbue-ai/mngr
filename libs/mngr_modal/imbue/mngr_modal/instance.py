@@ -3254,6 +3254,36 @@ def _substitute_dockerfile_build_args(dockerfile_contents: str, build_args: Sequ
     return result
 
 
+def _is_multistage_dockerfile(dockerfile_contents: str) -> bool:
+    """Return True if the Dockerfile contains more than one FROM instruction.
+
+    Uses DockerfileParser to mirror the same multistage detection that Modal's
+    image builder uses.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpfile = Path(tmpdir) / "Dockerfile"
+        dfp = DockerfileParser(str(tmpfile))
+        dfp.content = dockerfile_contents
+        return bool(dfp.is_multistage)
+
+
+# Persisted Dockerfile temp dirs for multistage builds. modal.Image.from_dockerfile
+# reads the file lazily inside .build(), so the on-disk Dockerfile must outlive
+# the helper that creates it. We pin TemporaryDirectory handles here for the
+# lifetime of the process; the OS reclaims /tmp on reboot if Python exits
+# uncleanly.
+_MULTISTAGE_DOCKERFILE_TMPDIRS: list[tempfile.TemporaryDirectory[str]] = []
+
+
+def _persist_dockerfile_for_modal(dockerfile_contents: str) -> Path:
+    """Write *dockerfile_contents* to a temp file that lives for the process lifetime."""
+    tmpdir = tempfile.TemporaryDirectory()
+    _MULTISTAGE_DOCKERFILE_TMPDIRS.append(tmpdir)
+    dockerfile_path = Path(tmpdir.name) / "Dockerfile"
+    dockerfile_path.write_text(dockerfile_contents)
+    return dockerfile_path
+
+
 # FIXME: this code that breaks dockefiles up into layers really only needs to chunk the layer when we run into a COPY or RUN command (or when we're finished parsing the commands from the file).
 #  Doing that should make things quite a bit faster, but without really sacrificing any debuggability (since commands like ENV and ARG don't really do much)
 #  Specifically, we should execute the dockerfile commands together in modal, where each batch ends with a RUN or COPY command (or the end of the file), rather than doing *EVERY* command separately
@@ -3275,18 +3305,36 @@ def _build_image_from_dockerfile_contents(
 
     When is_each_layer_cached=True (the default), each instruction is applied separately,
     allowing Modal to cache intermediate layers. This means if a build fails at step N,
-    steps 1 through N-1 don't need to be re-run. Multistage dockerfiles are not supported.
+    steps 1 through N-1 don't need to be re-run.
+
+    Multistage Dockerfiles cannot be applied via Modal's incremental
+    ``dockerfile_commands`` (each call produces a single image layered on the
+    previous one, with no way to reference an earlier stage in ``COPY --from``).
+    For those, the whole Dockerfile is handed to Modal's ``Image.from_dockerfile``
+    builder in one shot; this loses per-layer caching but supports multistage.
+    ``initial_image`` cannot be combined with a multistage Dockerfile because
+    the Dockerfile's own ``FROM`` instructions define every stage.
 
     Secrets are passed to dockerfile_commands and are available during RUN commands
     via --mount=type=secret,id=<env_var_name>.
     """
-    # DockerfileParser writes to a file, so use a temp directory to avoid conflicts
+    # DockerfileParser writes to a file, so use a temp directory to avoid conflicts.
+    # For the multistage path, Modal's from_dockerfile reads the file lazily at
+    # .build() time, so the temp dir must outlive this function: keep a registry
+    # of multistage temp dirs alive for the lifetime of the process.
+    if _is_multistage_dockerfile(dockerfile_contents):
+        assert initial_image is None, "Multistage Dockerfiles cannot be combined with initial_image"
+        dockerfile_path = _persist_dockerfile_for_modal(dockerfile_contents)
+        return modal_interface.image_from_dockerfile(
+            dockerfile_path,
+            context_dir=context_dir.expanduser() if context_dir is not None else None,
+            secrets=list(secrets),
+        )
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpfile = Path(tmpdir) / "Dockerfile"
         dfp = DockerfileParser(str(tmpfile))
         dfp.content = dockerfile_contents
-
-        assert not dfp.is_multistage, "Multistage Dockerfiles are not supported yet"
 
         last_from_index = None
         for i, instr in enumerate(dfp.structure):

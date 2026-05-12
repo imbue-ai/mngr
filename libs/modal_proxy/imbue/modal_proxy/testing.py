@@ -372,6 +372,15 @@ class TestingModalInterface(ModalInterface):
     def image_from_id(self, image_id: str) -> ImageInterface:
         return TestingImage(image_id=image_id)
 
+    def image_from_dockerfile(
+        self,
+        path: Path,
+        *,
+        context_dir: Path | None = None,
+        secrets: Sequence[SecretInterface] = (),
+    ) -> ImageInterface:
+        return TestingImage(image_id=f"img-dockerfile-{uuid.uuid4().hex}")
+
     # =====================================================================
     # Sandbox
     # =====================================================================

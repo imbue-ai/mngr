@@ -2177,6 +2177,33 @@ def test_build_image_from_dockerfile_no_layer_caching(
     assert image.get_object_id() is not None
 
 
+def test_build_image_from_multistage_dockerfile(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    """A multistage Dockerfile must build via image_from_dockerfile rather than tripping
+    the legacy assert in _build_image_from_dockerfile_contents.
+
+    The mngr default Dockerfile bundled at libs/mngr/imbue/mngr/resources/Dockerfile
+    has a builder stage that compiles the offload binary; before this branch, `mngr
+    create -t modal` (and `mngr clone ... -t modal`) hit
+    ``AssertionError: Multistage Dockerfiles are not supported yet`` against that file.
+    """
+    dockerfile_contents = (
+        "FROM rust:1-bookworm AS builder\n"
+        "RUN echo build-stage\n"
+        "\n"
+        "FROM python:3.12-slim\n"
+        "RUN echo final-stage\n"
+        "COPY --from=builder /etc/hostname /tmp/host-from-builder\n"
+    )
+    image = _build_image_from_dockerfile_contents(
+        dockerfile_contents,
+        modal_interface=testing_provider._modal_interface,
+        is_each_layer_cached=True,
+    )
+    assert image.get_object_id() is not None
+
+
 # ---------------------------------------------------------------------------
 # SandboxConfig Tests
 # ---------------------------------------------------------------------------

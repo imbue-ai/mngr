@@ -465,6 +465,24 @@ class DirectModalInterface(ModalInterface):
     def image_from_id(self, image_id: str) -> ImageInterface:
         return DirectImage.model_construct(image=modal.Image.from_id(image_id))
 
+    @_translate_exceptions
+    def image_from_dockerfile(
+        self,
+        path: Path,
+        *,
+        context_dir: Path | None = None,
+        secrets: Sequence[SecretInterface] = (),
+    ) -> ImageInterface:
+        modal_secrets = [_unwrap_secret(s) for s in secrets]
+        expanded_context_dir = context_dir.expanduser() if context_dir is not None else None
+        return DirectImage.model_construct(
+            image=modal.Image.from_dockerfile(
+                path,
+                context_dir=expanded_context_dir,
+                secrets=modal_secrets,
+            )
+        )
+
     # =====================================================================
     # Sandbox
     # =====================================================================
