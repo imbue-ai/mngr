@@ -814,9 +814,16 @@ class AgentCreator(MutableModel):
         ),
     )
     workspace_ready_timeout_seconds: float = Field(
-        default=60.0,
+        default=300.0,
         frozen=True,
-        description="Maximum time to wait for the new agent's workspace_server to return HTTP 200.",
+        description=(
+            "Maximum time to wait for the new agent's workspace_server to return HTTP 200. "
+            "First-boot Lima provisioning (uv sync, npm ci + run build for the system_interface "
+            "frontend) regularly takes 90-180s on a fresh VM, so the previous 60s default left "
+            "users staring at 'Backend not yet available, Retrying...' even when the agent was "
+            "fine and just still finishing provisioning. The probe is cheap so a generous cap is "
+            "harmless; we still publish the redirect anyway if it expires."
+        ),
     )
     workspace_ready_poll_interval_seconds: float = Field(
         default=0.5,
