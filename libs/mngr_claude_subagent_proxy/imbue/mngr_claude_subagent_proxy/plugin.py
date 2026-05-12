@@ -41,12 +41,13 @@ SUBAGENT_PROXY_CHILD_AGENT_TYPE: Final[str] = "mngr-proxy-child"
 
 # Plugin-config registry key used to look up our config from MngrContext.
 # This is the key users put in their settings.toml under
-# `[plugins.subagent_proxy]`, and must match what register_plugin_config()
-# below registers. (Distinct from the pyproject.toml entry-point key
-# `claude_subagent_proxy`, which mngr uses to import this module.)
-SUBAGENT_PROXY_PLUGIN_NAME: Final[str] = "subagent_proxy"
+# `[plugins.claude_subagent_proxy]`, and must match what
+# register_plugin_config() below registers. Aligned with the pyproject.toml
+# entry-point key and the package directory name so the three names stay
+# in sync.
+CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME: Final[str] = "claude_subagent_proxy"
 
-register_plugin_config(SUBAGENT_PROXY_PLUGIN_NAME, SubagentProxyPluginConfig)
+register_plugin_config(CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME, SubagentProxyPluginConfig)
 
 
 class SubagentProxyChildConfig(ClaudeAgentConfig):
@@ -497,7 +498,7 @@ def _resolve_plugin_mode(mngr_ctx: MngrContext | None) -> SubagentProxyMode:
     """
     if mngr_ctx is None:
         return SubagentProxyPluginConfig().mode
-    config = mngr_ctx.get_plugin_config(SUBAGENT_PROXY_PLUGIN_NAME, SubagentProxyPluginConfig)
+    config = mngr_ctx.get_plugin_config(CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME, SubagentProxyPluginConfig)
     return config.mode
 
 

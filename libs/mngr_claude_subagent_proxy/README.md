@@ -22,7 +22,7 @@ the parent still receives a normally-shaped `tool_result`.
 The plugin has two modes, selected via mngr config:
 
 ```toml
-[plugins.subagent_proxy]
+[plugins.claude_subagent_proxy]
 mode = "PROXY"   # default: route Task calls through a mngr-managed subagent
                  # via a Haiku dispatcher (the original behavior).
 # mode = "DENY"  # alternative: deny Task calls with a short skill-pointer
@@ -218,7 +218,7 @@ Useful queries (`mngr list` accepts CEL `--include` / `--exclude`):
 
 ## DENY mode
 
-Setting `mode = "DENY"` in `[plugins.subagent_proxy]` swaps the proxy
+Setting `mode = "DENY"` in `[plugins.claude_subagent_proxy]` swaps the proxy
 machinery for a single `PreToolUse:Agent` hook plus a Claude skill.
 The hook denies every Task call with a short, uniform
 `permissionDecisionReason`:
@@ -280,6 +280,22 @@ protocol) carry the same `mngr_claude_subagent_proxy_parent_*` labels
 as PROXY-mode children, so they hide from
 `mngr list --exclude 'has(labels.mngr_claude_subagent_proxy_parent_name)'`
 and can be listed with the inverse filter.
+
+### Known limitation: no automatic reaping of orphaned DENY children
+
+DENY mode installs no `SessionStart` reaper, so if a parent agent
+crashes or is destroyed before its skill-spawned children finish,
+those children become orphans -- they stay running until they
+naturally end their turn or until the user destroys them. PROXY
+mode's reaper does not apply because it keys off the parent's
+`subagent_map/` sidefiles, which DENY mode never writes.
+
+Workaround: list and clean up manually via
+`mngr list --include 'has(labels.mngr_claude_subagent_proxy_parent_name)'`
+(filter to children whose parent is no longer running, then
+`mngr destroy`). A future improvement could add a DENY-mode-aware
+reaper that uses the `mngr_claude_subagent_proxy_parent_id` label
+rather than the subagent_map.
 
 ## Depth limit
 

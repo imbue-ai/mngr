@@ -247,7 +247,7 @@ def _build_mngr_subprocess_env(
 
     ``extra_settings_toml`` is appended to the per-test profile's
     ``settings.toml`` so callers can opt in to additional plugin
-    configuration (e.g. ``[plugins.subagent_proxy]\\nmode = "DENY"``).
+    configuration (e.g. ``[plugins.claude_subagent_proxy]\\nmode = "DENY"``).
     """
     home_dir = Path(os.environ["HOME"])
     # Safety belt: the autouse setup_test_mngr_env fixture must have set
@@ -320,7 +320,7 @@ def _mngr_subprocess_env_deny_mode(
 ) -> _MngrSubprocess:
     """Like ``_mngr_subprocess_env`` but with subagent_proxy plugin in DENY mode.
 
-    Adds ``[plugins.subagent_proxy]\\nmode = "DENY"`` to the per-test
+    Adds ``[plugins.claude_subagent_proxy]\\nmode = "DENY"`` to the per-test
     profile's settings.toml. With this setting, on_after_provisioning
     installs only the PreToolUse:Agent deny hook; no PostToolUse,
     SessionStart reaper, mngr-proxy.md, or stop-hook guarding.
@@ -331,7 +331,7 @@ def _mngr_subprocess_env_deny_mode(
         mngr_test_prefix,
         mngr_test_root_name,
         _source_repo,
-        extra_settings_toml='[plugins.subagent_proxy]\nmode = "DENY"\n',
+        extra_settings_toml='[plugins.claude_subagent_proxy]\nmode = "DENY"\n',
     )
 
 
@@ -937,7 +937,7 @@ def test_deny_mode_intercepts_task_with_deny_reason(
     """Golden path: deny mode intercepts Task and surfaces a deny reason to Claude.
 
     End-to-end verification that:
-    1. With ``[plugins.subagent_proxy] mode = "DENY"`` in the user's
+    1. With ``[plugins.claude_subagent_proxy] mode = "DENY"`` in the user's
        settings.toml, the provisioned parent agent's
        ``.claude/settings.local.json`` has only the PreToolUse:Agent
        deny hook -- not spawn/cleanup/reap.

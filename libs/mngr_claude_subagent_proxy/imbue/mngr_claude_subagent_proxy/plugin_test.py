@@ -16,7 +16,7 @@ from imbue.mngr.primitives import PluginName
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyMode
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyPluginConfig
-from imbue.mngr_claude_subagent_proxy.plugin import SUBAGENT_PROXY_PLUGIN_NAME
+from imbue.mngr_claude_subagent_proxy.plugin import CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME
 from imbue.mngr_claude_subagent_proxy.plugin import SubagentProxyChildConfig
 from imbue.mngr_claude_subagent_proxy.plugin import UnguardedProjectStopHookError
 from imbue.mngr_claude_subagent_proxy.plugin import UnsupportedSubagentHookError
@@ -391,7 +391,7 @@ def test_cascade_destroy_recorded_children_no_op_without_map_dir(tmp_path: Path)
 def _ctx_with_plugin_config(base_ctx: MngrContext, config: SubagentProxyPluginConfig) -> MngrContext:
     """Return a copy of ``base_ctx`` with the given subagent_proxy config injected."""
     updated_config = base_ctx.config.model_copy_update(
-        to_update(base_ctx.config.field_ref().plugins, {PluginName(SUBAGENT_PROXY_PLUGIN_NAME): config}),
+        to_update(base_ctx.config.field_ref().plugins, {PluginName(CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME): config}),
     )
     return base_ctx.model_copy_update(to_update(base_ctx.field_ref().config, updated_config))
 
