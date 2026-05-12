@@ -19,8 +19,10 @@ def test_create_default(e2e: E2eSession) -> None:
     # (if you use the alias `mngr c`, it's no more letters to type :-D)
     # running this command launches your default agent immediately *in a new worktree*
     mngr create
-    # the defaults are the following: agent=your configured default (set during `scripts/install.sh`,
-    # stored under `[commands.create] type` in user settings), provider=local, project=current dir
+    # the defaults are the following: agent=your configured default (stored under `[commands.create] type`
+    # in user settings; `scripts/install.sh` suggests a `mngr config set commands.create.type ...` command
+    # at the end and lists installed agent-type plugins, but does NOT write the setting for you),
+    # provider=local, project=current dir
     """)
     result = e2e.run(
         "mngr create my-task --type command --no-ensure-clean -- sleep 100070",
