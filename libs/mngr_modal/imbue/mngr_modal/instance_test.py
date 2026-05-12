@@ -35,6 +35,8 @@ from imbue.mngr_modal.instance import TAG_HOST_ID
 from imbue.mngr_modal.instance import TAG_HOST_NAME
 from imbue.mngr_modal.instance import TAG_USER_PREFIX
 from imbue.mngr_modal.instance import _build_modal_secrets_from_env
+from imbue.mngr_modal.instance import _is_multistage_dockerfile
+from imbue.mngr_modal.instance import _parse_docker_build_args
 from imbue.mngr_modal.instance import _parse_volume_spec
 from imbue.mngr_modal.instance import _substitute_dockerfile_build_args
 from imbue.mngr_modal.instance import build_sandbox_tags
@@ -1770,6 +1772,43 @@ def test_substitute_dockerfile_build_args_raises_for_bad_format() -> None:
     dockerfile = 'FROM python:3.11-slim\nARG FOO=""\n'
     with pytest.raises(MngrError, match="KEY=VALUE format"):
         _substitute_dockerfile_build_args(dockerfile, ("no-equals-sign",))
+
+
+def test_is_multistage_dockerfile_true_for_multiple_from() -> None:
+    """_is_multistage_dockerfile detects two FROM lines without touching disk."""
+    dockerfile = "FROM rust:1-bookworm AS builder\nFROM python:3.12-slim\n"
+    assert _is_multistage_dockerfile(dockerfile) is True
+
+
+def test_is_multistage_dockerfile_false_for_single_from() -> None:
+    dockerfile = "FROM python:3.12-slim\nRUN echo hi\n"
+    assert _is_multistage_dockerfile(dockerfile) is False
+
+
+def test_parse_docker_build_args_returns_dict() -> None:
+    dockerfile = 'FROM python:3.11\nARG VERSION=""\nARG OTHER="x"\n'
+    result = _parse_docker_build_args(dockerfile, ("VERSION=2.0", "OTHER=y"))
+    assert result == {"VERSION": "2.0", "OTHER": "y"}
+
+
+def test_parse_docker_build_args_raises_for_missing_arg() -> None:
+    dockerfile = "FROM python:3.11-slim\nRUN echo hello\n"
+    with pytest.raises(MngrError, match="not found as an ARG instruction"):
+        _parse_docker_build_args(dockerfile, ("NONEXISTENT_ARG=value",))
+
+
+def test_parse_docker_build_args_raises_for_bad_format() -> None:
+    dockerfile = 'FROM python:3.11\nARG FOO=""\n'
+    with pytest.raises(MngrError, match="KEY=VALUE format"):
+        _parse_docker_build_args(dockerfile, ("no-equals-sign",))
+
+
+def test_parse_docker_build_args_does_not_substitute() -> None:
+    """Unlike _substitute_dockerfile_build_args, the parse helper must NOT mutate
+    the Dockerfile content -- Modal applies build_args natively."""
+    dockerfile = 'FROM python:3.11\nARG VERSION="1.0.0"\n'
+    _parse_docker_build_args(dockerfile, ("VERSION=2.0.0",))
+    assert 'ARG VERSION="1.0.0"' in dockerfile  # unchanged
 
 
 # =============================================================================

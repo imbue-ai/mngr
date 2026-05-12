@@ -472,6 +472,7 @@ class DirectModalInterface(ModalInterface):
         *,
         context_dir: Path | None = None,
         secrets: Sequence[SecretInterface] = (),
+        build_args: Mapping[str, str] = {},
     ) -> ImageInterface:
         modal_secrets = [_unwrap_secret(s) for s in secrets]
         expanded_context_dir = context_dir.expanduser() if context_dir is not None else None
@@ -480,6 +481,7 @@ class DirectModalInterface(ModalInterface):
                 path,
                 context_dir=expanded_context_dir,
                 secrets=modal_secrets,
+                build_args=dict(build_args),
             )
         )
 

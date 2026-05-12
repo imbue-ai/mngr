@@ -1,4 +1,5 @@
 import argparse
+import io
 import json
 import os
 import re
@@ -848,17 +849,31 @@ class ModalProviderInstance(BaseProviderInstance):
 
         if dockerfile is not None:
             dockerfile_contents = dockerfile.read_text()
-            # Substitute docker build args into ARG defaults
-            if docker_build_args:
-                dockerfile_contents = _substitute_dockerfile_build_args(dockerfile_contents, docker_build_args)
             effective_context_dir = context_dir if context_dir is not None else dockerfile.parent
-            image = _build_image_from_dockerfile_contents(
-                dockerfile_contents,
-                modal_interface=modal_interface,
-                context_dir=effective_context_dir,
-                is_each_layer_cached=True,
-                secrets=modal_secrets,
-            )
+            if _is_multistage_dockerfile(dockerfile_contents):
+                # Modal's incremental dockerfile_commands cannot honor `COPY --from=<stage>`,
+                # so multistage Dockerfiles go through modal.Image.from_dockerfile directly.
+                # Build args are applied natively by Modal rather than via regex pre-substitution,
+                # which means the user's on-disk Dockerfile already outlives the eager .build()
+                # call below and we don't need a temp file.
+                build_args_dict = _parse_docker_build_args(dockerfile_contents, docker_build_args)
+                image = modal_interface.image_from_dockerfile(
+                    dockerfile,
+                    context_dir=effective_context_dir,
+                    secrets=modal_secrets,
+                    build_args=build_args_dict,
+                )
+            else:
+                # Substitute docker build args into ARG defaults
+                if docker_build_args:
+                    dockerfile_contents = _substitute_dockerfile_build_args(dockerfile_contents, docker_build_args)
+                image = _build_image_from_dockerfile_contents(
+                    dockerfile_contents,
+                    modal_interface=modal_interface,
+                    context_dir=effective_context_dir,
+                    is_each_layer_cached=True,
+                    secrets=modal_secrets,
+                )
         elif base_image:
             image = modal_interface.image_from_registry(base_image)
         else:
@@ -3254,34 +3269,43 @@ def _substitute_dockerfile_build_args(dockerfile_contents: str, build_args: Sequ
     return result
 
 
+@pure
 def _is_multistage_dockerfile(dockerfile_contents: str) -> bool:
     """Return True if the Dockerfile contains more than one FROM instruction.
 
     Uses DockerfileParser to mirror the same multistage detection that Modal's
-    image builder uses.
+    image builder uses. ``cache_content=True`` keeps the parser in-memory --
+    no temp file is created.
     """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpfile = Path(tmpdir) / "Dockerfile"
-        dfp = DockerfileParser(str(tmpfile))
-        dfp.content = dockerfile_contents
-        return bool(dfp.is_multistage)
+    dfp = DockerfileParser(fileobj=io.BytesIO())
+    dfp.content = dockerfile_contents
+    return bool(dfp.is_multistage)
 
 
-# Persisted Dockerfile temp dirs for multistage builds. modal.Image.from_dockerfile
-# reads the file lazily inside .build(), so the on-disk Dockerfile must outlive
-# the helper that creates it. We pin TemporaryDirectory handles here for the
-# lifetime of the process; the OS reclaims /tmp on reboot if Python exits
-# uncleanly.
-_MULTISTAGE_DOCKERFILE_TMPDIRS: list[tempfile.TemporaryDirectory[str]] = []
+@pure
+def _parse_docker_build_args(
+    dockerfile_contents: str,
+    build_args: Sequence[str],
+) -> dict[str, str]:
+    """Parse and validate KEY=VALUE docker build args against a Dockerfile.
 
-
-def _persist_dockerfile_for_modal(dockerfile_contents: str) -> Path:
-    """Write *dockerfile_contents* to a temp file that lives for the process lifetime."""
-    tmpdir = tempfile.TemporaryDirectory()
-    _MULTISTAGE_DOCKERFILE_TMPDIRS.append(tmpdir)
-    dockerfile_path = Path(tmpdir.name) / "Dockerfile"
-    dockerfile_path.write_text(dockerfile_contents)
-    return dockerfile_path
+    Returns the parsed dict. Raises ``MngrError`` if any spec is not
+    ``KEY=VALUE`` form, or if a key has no matching ``ARG`` instruction in the
+    Dockerfile (mirrors the validation that ``_substitute_dockerfile_build_args``
+    performs as a side effect of substitution).
+    """
+    parsed: dict[str, str] = {}
+    for arg_spec in build_args:
+        if "=" not in arg_spec:
+            raise MngrError(f"Docker build arg must be in KEY=VALUE format, got: {arg_spec}")
+        key, value = arg_spec.split("=", 1)
+        if not re.search(rf"^ARG\s+{re.escape(key)}\b", dockerfile_contents, flags=re.MULTILINE):
+            raise MngrError(
+                f"Docker build arg {key!r} not found as an ARG instruction in the Dockerfile. "
+                "Ensure the Dockerfile contains a matching ARG instruction."
+            )
+        parsed[key] = value
+    return parsed
 
 
 # FIXME: this code that breaks dockefiles up into layers really only needs to chunk the layer when we run into a COPY or RUN command (or when we're finished parsing the commands from the file).
@@ -3301,36 +3325,25 @@ def _build_image_from_dockerfile_contents(
     # Secrets to make available during Dockerfile RUN commands
     secrets: Sequence[SecretInterface] = (),
 ) -> ImageInterface:
-    """Build a Modal image from Dockerfile contents with optional per-layer caching.
+    """Build a Modal image from single-stage Dockerfile contents with optional per-layer caching.
 
     When is_each_layer_cached=True (the default), each instruction is applied separately,
     allowing Modal to cache intermediate layers. This means if a build fails at step N,
     steps 1 through N-1 don't need to be re-run.
 
-    Multistage Dockerfiles cannot be applied via Modal's incremental
-    ``dockerfile_commands`` (each call produces a single image layered on the
-    previous one, with no way to reference an earlier stage in ``COPY --from``).
-    For those, the whole Dockerfile is handed to Modal's ``Image.from_dockerfile``
-    builder in one shot; this loses per-layer caching but supports multistage.
-    ``initial_image`` cannot be combined with a multistage Dockerfile because
-    the Dockerfile's own ``FROM`` instructions define every stage.
+    Only single-stage Dockerfiles are supported. Modal's incremental
+    ``dockerfile_commands`` produces one image layered on the previous one, with
+    no way to reference an earlier stage in ``COPY --from``; callers that need
+    multistage support must route through ``ModalInterface.image_from_dockerfile``
+    directly (see ``_get_modal_image_definition``).
 
     Secrets are passed to dockerfile_commands and are available during RUN commands
     via --mount=type=secret,id=<env_var_name>.
     """
-    # DockerfileParser writes to a file, so use a temp directory to avoid conflicts.
-    # For the multistage path, Modal's from_dockerfile reads the file lazily at
-    # .build() time, so the temp dir must outlive this function: keep a registry
-    # of multistage temp dirs alive for the lifetime of the process.
-    if _is_multistage_dockerfile(dockerfile_contents):
-        assert initial_image is None, "Multistage Dockerfiles cannot be combined with initial_image"
-        dockerfile_path = _persist_dockerfile_for_modal(dockerfile_contents)
-        return modal_interface.image_from_dockerfile(
-            dockerfile_path,
-            context_dir=context_dir.expanduser() if context_dir is not None else None,
-            secrets=list(secrets),
-        )
-
+    assert not _is_multistage_dockerfile(dockerfile_contents), (
+        "Multistage Dockerfiles must be built via ModalInterface.image_from_dockerfile, not this helper"
+    )
+    # DockerfileParser writes to a file, so use a temp directory to avoid conflicts
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpfile = Path(tmpdir) / "Dockerfile"
         dfp = DockerfileParser(str(tmpfile))

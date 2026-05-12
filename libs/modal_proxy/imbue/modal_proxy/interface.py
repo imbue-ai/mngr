@@ -268,6 +268,7 @@ class ModalInterface(MutableModel, ABC):
         *,
         context_dir: Path | None = None,
         secrets: Sequence[SecretInterface] = (),
+        build_args: Mapping[str, str] = {},
     ) -> ImageInterface:
         """Build an image from a Dockerfile path (mirrors modal.Image.from_dockerfile).
 
@@ -275,6 +276,9 @@ class ModalInterface(MutableModel, ABC):
         Modal image without per-layer caching, in contrast to chained
         ``dockerfile_commands`` which caches per instruction but does not
         support multistage builds.
+
+        ``build_args`` override matching ``ARG`` defaults in the Dockerfile,
+        equivalent to ``docker build --build-arg KEY=VALUE``.
         """
         ...
 

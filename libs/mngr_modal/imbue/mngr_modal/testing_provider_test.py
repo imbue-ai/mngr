@@ -2177,18 +2177,19 @@ def test_build_image_from_dockerfile_no_layer_caching(
     assert image.get_object_id() is not None
 
 
-def test_build_image_from_multistage_dockerfile(
+def test_get_modal_image_definition_from_multistage_dockerfile(
     testing_provider: ModalProviderInstance,
+    tmp_path: Path,
 ) -> None:
-    """A multistage Dockerfile must build via image_from_dockerfile rather than tripping
-    the legacy assert in _build_image_from_dockerfile_contents.
+    """A multistage Dockerfile must build end-to-end through _get_modal_image_definition.
 
     The mngr default Dockerfile bundled at libs/mngr/imbue/mngr/resources/Dockerfile
     has a builder stage that compiles the offload binary; before this branch, `mngr
     create -t modal` (and `mngr clone ... -t modal`) hit
     ``AssertionError: Multistage Dockerfiles are not supported yet`` against that file.
     """
-    dockerfile_contents = (
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
         "FROM rust:1-bookworm AS builder\n"
         "RUN echo build-stage\n"
         "\n"
@@ -2196,12 +2197,51 @@ def test_build_image_from_multistage_dockerfile(
         "RUN echo final-stage\n"
         "COPY --from=builder /etc/hostname /tmp/host-from-builder\n"
     )
-    image = _build_image_from_dockerfile_contents(
-        dockerfile_contents,
-        modal_interface=testing_provider._modal_interface,
-        is_each_layer_cached=True,
+    image = testing_provider._get_modal_image_definition(dockerfile=dockerfile)
+    assert image.get_object_id() is not None
+
+
+def test_get_modal_image_definition_multistage_dockerfile_with_build_args(
+    testing_provider: ModalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """For multistage Dockerfiles, docker_build_args are validated against the file
+    and then handed to Modal natively rather than regex-substituted into the contents."""
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
+        "FROM rust:1-bookworm AS builder\n"
+        'ARG TOOL_VERSION="1.0.0"\n'
+        "RUN echo $TOOL_VERSION\n"
+        "\n"
+        "FROM python:3.12-slim\n"
+        "COPY --from=builder /etc/hostname /tmp/host-from-builder\n"
+    )
+    image = testing_provider._get_modal_image_definition(
+        dockerfile=dockerfile,
+        docker_build_args=["TOOL_VERSION=2.0.0"],
     )
     assert image.get_object_id() is not None
+
+
+def test_get_modal_image_definition_multistage_rejects_unknown_build_arg(
+    testing_provider: ModalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """Validation parity with the single-stage path: a build arg whose ARG is not in
+    the Dockerfile must raise, not be silently ignored by Modal."""
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
+        "FROM rust:1-bookworm AS builder\n"
+        "RUN echo build-stage\n"
+        "\n"
+        "FROM python:3.12-slim\n"
+        "COPY --from=builder /etc/hostname /tmp/host-from-builder\n"
+    )
+    with pytest.raises(MngrError, match="not found as an ARG"):
+        testing_provider._get_modal_image_definition(
+            dockerfile=dockerfile,
+            docker_build_args=["MISSING_ARG=value"],
+        )
 
 
 # ---------------------------------------------------------------------------

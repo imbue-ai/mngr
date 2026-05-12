@@ -378,6 +378,7 @@ class TestingModalInterface(ModalInterface):
         *,
         context_dir: Path | None = None,
         secrets: Sequence[SecretInterface] = (),
+        build_args: Mapping[str, str] = {},
     ) -> ImageInterface:
         return TestingImage(image_id=f"img-dockerfile-{uuid.uuid4().hex}")
 
