@@ -32,9 +32,9 @@ from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameOrId
+from imbue.mngr.primitives import HostedLocation
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SourceLocation
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 
@@ -197,13 +197,13 @@ class ResolvedSource(FrozenModel):
 
 @log_call
 def resolve_source_location(
-    parsed: SourceLocation,
+    parsed: HostedLocation,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
     mngr_ctx: MngrContext,
     *,
     is_start_desired: bool = True,
 ) -> ResolvedSource:
-    """Resolve a :class:`SourceLocation` to a concrete host, path, and optional agent.
+    """Resolve a :class:`HostedLocation` (interpreted as a source) to a concrete host, path, and optional agent.
 
     Resolves agent/host references against the discovered hosts and agents.
     If the resolved host is offline, it will be started if ``is_start_desired``

@@ -7,8 +7,8 @@ from loguru import logger
 from imbue.mngr.api.pull import pull_files
 from imbue.mngr.api.pull import pull_git
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import HOSTED_LOCATION
 from imbue.mngr.cli.address_params import HOST_ADDRESS
-from imbue.mngr.cli.address_params import SOURCE_LOCATION
 from imbue.mngr.cli.agent_utils import find_agent_for_command
 from imbue.mngr.cli.agent_utils import stop_agent_after_sync
 from imbue.mngr.cli.common_opts import add_common_options
@@ -22,7 +22,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import HostAddress
-from imbue.mngr.primitives import SourceLocation
+from imbue.mngr.primitives import HostedLocation
 from imbue.mngr.primitives import UncommittedChangesMode
 
 
@@ -32,9 +32,9 @@ class PullCliOptions(CommonCliOptions):
     Inherits common options (output_format, quiet, verbose, etc.) from CommonCliOptions.
     """
 
-    source_pos: SourceLocation | None
+    source_pos: HostedLocation | None
     destination_pos: str | None
-    source: SourceLocation | None
+    source: HostedLocation | None
     source_agent: AgentAddress | None
     source_host: HostAddress | None
     source_path: str | None
@@ -47,7 +47,7 @@ class PullCliOptions(CommonCliOptions):
     uncommitted_changes: str
     target_branch: str | None
     # Planned features (not yet implemented)
-    target: SourceLocation | None
+    target: HostedLocation | None
     target_agent: AgentAddress | None
     target_host: HostAddress | None
     target_path: str | None
@@ -68,13 +68,13 @@ class PullCliOptions(CommonCliOptions):
 
 
 @click.command()
-@click.argument("source_pos", type=SOURCE_LOCATION, default=None, required=False, metavar="SOURCE")
+@click.argument("source_pos", type=HOSTED_LOCATION, default=None, required=False, metavar="SOURCE")
 @click.argument("destination_pos", default=None, required=False, metavar="DESTINATION")
 @optgroup.group("Source Selection")
 @optgroup.option(
     "--source",
     "source",
-    type=SOURCE_LOCATION,
+    type=HOSTED_LOCATION,
     help="Source specification: AGENT[@HOST[.PROVIDER]][:PATH]",
 )
 @optgroup.option("--source-agent", type=AGENT_ADDRESS, help="Source agent address (NAME[@HOST[.PROVIDER]])")
@@ -120,7 +120,7 @@ class PullCliOptions(CommonCliOptions):
 @optgroup.group("Target (for agent-to-agent sync)")
 @optgroup.option(
     "--target",
-    type=SOURCE_LOCATION,
+    type=HOSTED_LOCATION,
     help="Target specification: AGENT[@HOST[.PROVIDER]][:PATH] [future]",
 )
 @optgroup.option("--target-agent", type=AGENT_ADDRESS, help="Target agent address [future]")
@@ -189,7 +189,7 @@ def pull(ctx: click.Context, **kwargs) -> None:
     )
 
     # Merge positional and named arguments (named option takes precedence)
-    effective_source_loc: SourceLocation | None = opts.source if opts.source is not None else opts.source_pos
+    effective_source_loc: HostedLocation | None = opts.source if opts.source is not None else opts.source_pos
     effective_destination = opts.destination if opts.destination is not None else opts.destination_pos
 
     # Check for unsupported options

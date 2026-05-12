@@ -22,7 +22,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.address_parsers import parse_source_location
+from imbue.mngr.api.address_parsers import parse_hosted_location
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
@@ -1224,7 +1224,7 @@ def _resolve_source_location(
         return ResolvedSource(location=HostLocation(host=online_host, path=cloned_path))
 
     # Parse the --from string once
-    parsed = parse_source_location(opts.source)
+    parsed = parse_hosted_location(opts.source)
 
     # When --from is just a local path (no agent or host component),
     # resolve it locally without loading all providers. Loading all

@@ -18,9 +18,9 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostedLocation
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SourceLocation
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
@@ -81,7 +81,7 @@ def test_resolve_source_location_resolves_host_and_path(
 
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {host_ref: []}
 
-    parsed = SourceLocation(
+    parsed = HostedLocation(
         host=HostAddress(host=host_id),
         path=temp_work_dir,
     )

@@ -373,7 +373,7 @@ class AgentAddress(FrozenModel):
 
     The agent component is required; without it, this is not an agent address.
     Use :class:`HostAddress` for ``@HOST.PROVIDER`` (no agent) or
-    :class:`SourceLocation` for ``--from`` syntax.
+    :class:`HostedLocation` for ``[NAME[@HOST[.PROVIDER]]][:PATH]`` syntax.
     """
 
     agent: AgentNameOrId = Field(description="Agent name or ID (required)")
@@ -411,8 +411,13 @@ class NewAgentLocation(FrozenModel):
     path: Path | None = Field(default=None, description="Optional explicit work-directory path inside the host")
 
 
-class SourceLocation(FrozenModel):
-    """A parsed ``--from`` argument: ``[NAME[@HOST[.PROVIDER]]][:PATH]`` or a bare path.
+class HostedLocation(FrozenModel):
+    """A location that lives on some host: ``[NAME[@HOST[.PROVIDER]]][:PATH]`` or a bare path.
+
+    Used wherever a CLI command needs to designate "a place on any host" -- the
+    source for ``mngr create --from``/``mngr pair``, or the target for
+    ``mngr push``/``mngr pull``. The host may be local or remote; "hosted"
+    captures both.
 
     Every component is optional. The four meaningful shapes (in addition to a
     bare path string) are:
@@ -426,9 +431,9 @@ class SourceLocation(FrozenModel):
     parsed directly into ``path`` as a convenience.
     """
 
-    agent: AgentNameOrId | None = Field(default=None, description="Optional source agent name or ID")
-    host: HostAddress | None = Field(default=None, description="Optional source host")
-    path: Path | None = Field(default=None, description="Optional source path")
+    agent: AgentNameOrId | None = Field(default=None, description="Optional agent name or ID")
+    host: HostAddress | None = Field(default=None, description="Optional host")
+    path: Path | None = Field(default=None, description="Optional path")
 
 
 class AgentTypeName(SafeName):

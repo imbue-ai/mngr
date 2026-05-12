@@ -6,8 +6,8 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import HOSTED_LOCATION
 from imbue.mngr.cli.address_params import HOST_ADDRESS
-from imbue.mngr.cli.address_params import SOURCE_LOCATION
 from imbue.mngr.cli.agent_utils import find_agent_for_command
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -23,8 +23,8 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import ConflictMode
 from imbue.mngr.primitives import HostAddress
+from imbue.mngr.primitives import HostedLocation
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import SourceLocation
 from imbue.mngr.primitives import SyncDirection
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.git_utils import find_git_worktree_root
@@ -34,8 +34,8 @@ from imbue.mngr_pair.api import pair_files
 class PairCliOptions(CommonCliOptions):
     """Options passed from the CLI to the pair command."""
 
-    source_pos: SourceLocation | None
-    source: SourceLocation | None
+    source_pos: HostedLocation | None
+    source: HostedLocation | None
     source_agent: AgentAddress | None
     source_host: HostAddress | None
     source_path: str | None
@@ -80,12 +80,12 @@ def _emit_pair_stopped(output_opts: OutputOptions) -> None:
 
 
 @click.command()
-@click.argument("source_pos", type=SOURCE_LOCATION, default=None, required=False, metavar="SOURCE")
+@click.argument("source_pos", type=HOSTED_LOCATION, default=None, required=False, metavar="SOURCE")
 @optgroup.group("Source Selection")
 @optgroup.option(
     "--source",
     "source",
-    type=SOURCE_LOCATION,
+    type=HOSTED_LOCATION,
     help="Source specification: AGENT[@HOST[.PROVIDER]][:PATH]",
 )
 @optgroup.option("--source-agent", type=AGENT_ADDRESS, help="Source agent address (NAME[@HOST[.PROVIDER]])")
@@ -147,7 +147,7 @@ def pair(ctx: click.Context, **kwargs) -> None:
     )
 
     # Merge positional and named arguments (named option takes precedence)
-    effective_source_loc: SourceLocation | None = opts.source if opts.source is not None else opts.source_pos
+    effective_source_loc: HostedLocation | None = opts.source if opts.source is not None else opts.source_pos
 
     # Build source agent address and sub-path
     source_address: AgentAddress | None = None

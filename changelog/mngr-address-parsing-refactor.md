@@ -15,8 +15,10 @@ In `imbue.mngr.primitives` (with parsers in `imbue.mngr.api.address_parsers`):
 - `NewAgentLocation` — `[NAME][@HOST[.PROVIDER]][:PATH]`. The positional
   argument of `mngr create`. The name is optional (auto-generated if omitted)
   and is parsed strictly as `AgentName` (not an agent ID).
-- `SourceLocation` — `[NAME[@HOST[.PROVIDER]]][:PATH]` or a bare path. The
-  argument of `mngr create --from`.
+- `HostedLocation` — `[NAME[@HOST[.PROVIDER]]][:PATH]` or a bare path.
+  Designates "a location on any host", local or remote. Used as the source
+  argument of `mngr create --from`/`mngr pair` and as the target argument of
+  `mngr push`/`mngr pull`.
 
 Two new type aliases (in `imbue.mngr.primitives`) capture the
 "name-or-id" notion at the type level:
@@ -27,7 +29,7 @@ Two new type aliases (in `imbue.mngr.primitives`) capture the
 ## CLI parses at the Click level
 
 The Click `ParamType` adapters in `imbue.mngr.cli.address_params` (`AGENT_ADDRESS`,
-`HOST_ADDRESS`, `NEW_AGENT_LOCATION`, `SOURCE_LOCATION`, `AGENT_NAME_OR_ID`,
+`HOST_ADDRESS`, `NEW_AGENT_LOCATION`, `HOSTED_LOCATION`, `AGENT_NAME_OR_ID`,
 `HOST_NAME_OR_ID`, `AGENT_NAME`) attach to `@click.argument` and
 `@click.option`, so command bodies receive typed addresses directly. The
 api/ layer takes the typed objects; the cli/ layer no longer holds parsing
@@ -39,7 +41,7 @@ logic that the api/ layer also needs.
   `TARGET`/`SOURCE` argument. Previously these commands had a bespoke parser
   that only understood `AGENT[:PATH]`, so a fully-qualified address like
   `mngr push my-agent@m1.modal:/path` failed with a "host filter not supported"
-  error. The shared `SourceLocation` parser unifies this with the rest of the
+  error. The shared `HostedLocation` parser unifies this with the rest of the
   CLI.
 - **`HostName` no longer permits dots.** Host names are validated as
   `SafeName` (alphanumeric + dashes/underscores). The `HOST.PROVIDER`
@@ -60,7 +62,7 @@ replacements:
 - `find_and_maybe_start_agent_by_name_or_id` -> `find_and_maybe_start_agent`
   (takes `AgentNameOrId` instead of `str`).
 - `parse_agent_spec` (cli helper for `mngr push`/`pull`) -> deleted; use
-  `parse_source_location` / the `SOURCE_LOCATION` ParamType.
+  `parse_hosted_location` / the `HOSTED_LOCATION` ParamType.
 - `_host_matches_filter` -> replaced by the `HostAddress.matches` method.
 - `api/agent_addr.py` was folded into `api/find.py` and `api/discover.py`; with
   typed addresses as the norm, there is no longer a reason to segregate

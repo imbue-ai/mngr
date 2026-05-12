@@ -3,7 +3,7 @@
 Each ParamType wraps one of the parsers in :mod:`imbue.mngr.api.address_parsers`.
 Click invokes these during argument parsing, so command bodies receive typed
 addresses (``AgentAddress``, ``HostAddress``, ``NewAgentLocation``,
-``SourceLocation``) rather than raw strings.
+``HostedLocation``) rather than raw strings.
 
 Use the module-level singletons (``AGENT_ADDRESS``, ``HOST_ADDRESS``, ...) as
 the ``type=`` value on a ``@click.option`` or ``@click.argument`` decorator.
@@ -17,17 +17,17 @@ from imbue.mngr.api.address_parsers import parse_agent_address
 from imbue.mngr.api.address_parsers import parse_agent_name_or_id
 from imbue.mngr.api.address_parsers import parse_host_address
 from imbue.mngr.api.address_parsers import parse_host_name_or_id
+from imbue.mngr.api.address_parsers import parse_hosted_location
 from imbue.mngr.api.address_parsers import parse_new_agent_location
-from imbue.mngr.api.address_parsers import parse_source_location
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameOrId
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostNameOrId
+from imbue.mngr.primitives import HostedLocation
 from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import NewAgentLocation
-from imbue.mngr.primitives import SourceLocation
 
 
 def _convert_with_user_input_error(
@@ -76,15 +76,20 @@ class NewAgentLocationParamType(click.ParamType):
         return _convert_with_user_input_error(parse_new_agent_location, value, param, ctx)
 
 
-class SourceLocationParamType(click.ParamType):
-    """Click param type for ``mngr create --from``'s ``[NAME[@HOST[.PROVIDER]]][:PATH]`` argument."""
+class HostedLocationParamType(click.ParamType):
+    """Click param type for ``[NAME[@HOST[.PROVIDER]]][:PATH]`` source/target arguments.
 
-    name = "source_location"
+    Used by commands that designate "a location on any host" -- e.g. the
+    ``--from`` argument of ``mngr create``, the ``TARGET``/``SOURCE`` argument
+    of ``mngr push``/``mngr pull``, and the source argument of ``mngr pair``.
+    """
 
-    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> SourceLocation:
-        if isinstance(value, SourceLocation):
+    name = "hosted_location"
+
+    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> HostedLocation:
+        if isinstance(value, HostedLocation):
             return value
-        return _convert_with_user_input_error(parse_source_location, value, param, ctx)
+        return _convert_with_user_input_error(parse_hosted_location, value, param, ctx)
 
 
 class AgentNameOrIdParamType(click.ParamType):
@@ -124,7 +129,7 @@ class AgentNameParamType(click.ParamType):
 AGENT_ADDRESS = AgentAddressParamType()
 HOST_ADDRESS = HostAddressParamType()
 NEW_AGENT_LOCATION = NewAgentLocationParamType()
-SOURCE_LOCATION = SourceLocationParamType()
+HOSTED_LOCATION = HostedLocationParamType()
 AGENT_NAME_OR_ID = AgentNameOrIdParamType()
 HOST_NAME_OR_ID = HostNameOrIdParamType()
 AGENT_NAME = AgentNameParamType()

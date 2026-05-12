@@ -1,7 +1,7 @@
 """Parsers that produce the typed address shapes shared across mngr.
 
 The four typed shapes -- :class:`HostAddress`, :class:`AgentAddress`,
-:class:`NewAgentLocation`, :class:`SourceLocation` -- live in
+:class:`NewAgentLocation`, :class:`HostedLocation` -- live in
 :mod:`imbue.mngr.primitives` so the lower-layer ``config`` package can reference
 them in CLI option dataclasses. The parsers are kept here in the api layer
 because they raise :class:`UserInputError` (in the ``errors`` module, which
@@ -33,10 +33,10 @@ from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameOrId
+from imbue.mngr.primitives import HostedLocation
 from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SourceLocation
 
 # === Atomic parsers ===
 
@@ -154,24 +154,28 @@ def parse_new_agent_location(s: str) -> NewAgentLocation:
 
 
 @pure
-def parse_source_location(s: str) -> SourceLocation:
-    """Parse a ``--from``/``--source`` string into a :class:`SourceLocation`.
+def parse_hosted_location(s: str) -> HostedLocation:
+    """Parse a ``[NAME[@HOST[.PROVIDER]]][:PATH]`` string into a :class:`HostedLocation`.
+
+    Used for any CLI argument that designates "a location on some host" --
+    sources (``mngr create --from``, ``mngr pair``) and targets
+    (``mngr push``, ``mngr pull``).
 
     Bare paths (starting with ``/``, ``./``, ``~/``, or ``../``) are recognized
     as a convenience. A bare name like ``foo`` always refers to an agent named
     ``foo``, not a directory; use ``:foo`` to mean a relative directory.
     """
     if s.startswith(("/", "./", "~/", "../")):
-        return SourceLocation(path=Path(s))
+        return HostedLocation(path=Path(s))
 
     address_part, path = _split_path_suffix(s)
     if not address_part and path is None:
-        return SourceLocation()
+        return HostedLocation()
 
     agent_str, host_part = _split_at_part(address_part)
     agent = parse_agent_name_or_id(agent_str) if agent_str else None
     host = parse_host_address(host_part) if host_part else None
-    return SourceLocation(agent=agent, host=host, path=path)
+    return HostedLocation(agent=agent, host=host, path=path)
 
 
 # === Internal split helpers ===
