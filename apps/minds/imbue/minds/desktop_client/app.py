@@ -1886,7 +1886,6 @@ def create_desktop_client(
     request_event_handlers: tuple[RequestEventHandler, ...] = (),
     server_port: int = 0,
     mngr_forward_port: int = 0,
-    mngr_forward_preauth_cookie: str | None = None,
     output_format: OutputFormat | None = None,
     root_concurrency_group: ConcurrencyGroup | None = None,
 ) -> FastAPI:
@@ -1942,7 +1941,6 @@ def create_desktop_client(
     app.state.request_event_handlers = request_event_handlers
     app.state.auth_server_port = server_port
     app.state.mngr_forward_port = mngr_forward_port
-    app.state.mngr_forward_preauth_cookie = mngr_forward_preauth_cookie
     app.state.auth_output_format = output_format or OutputFormat.JSONL
     app.state.root_concurrency_group = root_concurrency_group
     # Always-set (possibly None) so consumers can read directly via

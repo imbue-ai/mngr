@@ -264,7 +264,6 @@ def run(
         request_event_handlers=(latchkey_permission_handler,),
         server_port=port,
         mngr_forward_port=mngr_forward_port,
-        mngr_forward_preauth_cookie=preauth_cookie,
         output_format=output_format,
         root_concurrency_group=root_concurrency_group,
     )
