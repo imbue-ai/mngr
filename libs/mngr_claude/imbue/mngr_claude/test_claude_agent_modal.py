@@ -76,7 +76,13 @@ def _create_local_agent(
     source_dir: Path,
     env: ModalSubprocessTestEnv,
 ) -> subprocess.CompletedProcess[str]:
-    """Create a Claude agent on the local (test sandbox) host."""
+    """Create a Claude agent on the local (test sandbox) host.
+
+    ``--yes`` flips ``mngr_ctx.is_auto_approve`` so the Claude trust dialog
+    check is skipped for the fresh test work_dir (it would otherwise fail in
+    a non-interactive environment because the work_dir isn't in the user's
+    Claude trust list).
+    """
     return subprocess.run(
         [
             "uv",
@@ -85,6 +91,7 @@ def _create_local_agent(
             "create",
             agent_name,
             "claude",
+            "--yes",
             "--no-connect",
             "--no-ensure-clean",
             "--source",
@@ -108,7 +115,7 @@ def _clone_agent_to_modal(
     target_agent_name: str,
     env: ModalSubprocessTestEnv,
 ) -> subprocess.CompletedProcess[str]:
-    """Clone an existing agent to a fresh Modal host."""
+    """Clone an existing agent to a fresh Modal host (different host id from source)."""
     return subprocess.run(
         [
             "uv",
@@ -117,6 +124,7 @@ def _clone_agent_to_modal(
             "clone",
             source_agent_name,
             f"{target_agent_name}@.modal",
+            "--yes",
             "--no-connect",
             "--no-ensure-clean",
             "--pass-env",
@@ -294,7 +302,8 @@ def test_destroy_stopped_modal_agent_preserves_sessions_from_volume(
 
 @pytest.mark.release
 @pytest.mark.rsync
-@pytest.mark.timeout(900)
+@pytest.mark.tmux
+@pytest.mark.timeout(1200)
 def test_clone_local_claude_agent_to_modal(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
@@ -310,10 +319,11 @@ def test_clone_local_claude_agent_to_modal(
     Modal sandbox looking for the source plugin dir there (where it doesn't
     exist) instead of pushing it from the source host. The fix threads the
     source agent's host through ``CreateAgentOptions.source_agent_state_host``
-    and passes that as the rsync source.
+    and passes that as the rsync source, so the cross-host transfer
+    (local->Modal in this test) actually runs from the right machine.
 
     Cleanup destroys both agents regardless of test outcome so the Modal
-    sandbox is reclaimed.
+    sandbox and the local agent state are reclaimed.
     """
     source_name = f"test-clone-src-{get_short_random_string()}"
     target_name = f"test-clone-dst-{get_short_random_string()}"
