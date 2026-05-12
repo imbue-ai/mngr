@@ -907,7 +907,14 @@ class CreateAgentOptions(FrozenModel):
     source_agent_state_dir: Path | None = Field(
         default=None,
         description="Agent state directory of the source agent, used to transfer "
-        "per-agent data during clone operations (set when cloning via --from with an agent source)",
+        "per-agent data during clone operations (set when cloning via --from with an agent source). "
+        "The path is on the host identified by ``source_agent_state_host``.",
+    )
+    source_agent_state_host: OnlineHostInterface | None = Field(
+        default=None,
+        description="Host on which ``source_agent_state_dir`` lives. Needed so plugin code "
+        "can rsync from the right machine when the source agent is on a remote host "
+        "(e.g. cloning a modal agent). Always set together with ``source_agent_state_dir``.",
     )
     is_update: bool = Field(
         default=False,

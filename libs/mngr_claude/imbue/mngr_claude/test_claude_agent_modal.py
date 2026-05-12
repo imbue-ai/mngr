@@ -71,6 +71,64 @@ def _create_modal_agent(
     )
 
 
+def _create_local_agent(
+    agent_name: str,
+    source_dir: Path,
+    env: ModalSubprocessTestEnv,
+) -> subprocess.CompletedProcess[str]:
+    """Create a Claude agent on the local (test sandbox) host."""
+    return subprocess.run(
+        [
+            "uv",
+            "run",
+            "mngr",
+            "create",
+            agent_name,
+            "claude",
+            "--no-connect",
+            "--no-ensure-clean",
+            "--source",
+            str(source_dir),
+            "--pass-env",
+            "ANTHROPIC_API_KEY",
+            "--",
+            "--dangerously-skip-permissions",
+            "-p",
+            "just say 'hello'",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        env=env.env,
+    )
+
+
+def _clone_agent_to_modal(
+    source_agent_name: str,
+    target_agent_name: str,
+    env: ModalSubprocessTestEnv,
+) -> subprocess.CompletedProcess[str]:
+    """Clone an existing agent to a fresh Modal host."""
+    return subprocess.run(
+        [
+            "uv",
+            "run",
+            "mngr",
+            "clone",
+            source_agent_name,
+            f"{target_agent_name}@.modal",
+            "--no-connect",
+            "--no-ensure-clean",
+            "--pass-env",
+            "ANTHROPIC_API_KEY",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        env=env.env,
+    )
+
+
 def _destroy_modal_agent(agent_name: str, env: ModalSubprocessTestEnv) -> subprocess.CompletedProcess[str]:
     """Force-destroy a Modal agent and return the completed process."""
     return subprocess.run(
@@ -232,3 +290,56 @@ def test_destroy_stopped_modal_agent_preserves_sessions_from_volume(
     )
 
     _assert_sessions_preserved(modal_subprocess_env.host_dir, agent_name)
+
+
+@pytest.mark.release
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_clone_local_claude_agent_to_modal(
+    temp_source_dir: Path,
+    modal_subprocess_env: ModalSubprocessTestEnv,
+) -> None:
+    """Regression: ``mngr clone <local-agent> <new>@.modal`` must succeed.
+
+    Previously this failed during plugin-data transfer with::
+
+        rsync: change_dir ".../<source-agent>/plugin" failed: No such file or directory
+
+    because ``_transfer_source_plugin_data`` passed the destination Modal host
+    as both source and target of ``copy_directory``. Rsync then ran on the
+    Modal sandbox looking for the source plugin dir there (where it doesn't
+    exist) instead of pushing it from the source host. The fix threads the
+    source agent's host through ``CreateAgentOptions.source_agent_state_host``
+    and passes that as the rsync source.
+
+    Cleanup destroys both agents regardless of test outcome so the Modal
+    sandbox is reclaimed.
+    """
+    source_name = f"test-clone-src-{get_short_random_string()}"
+    target_name = f"test-clone-dst-{get_short_random_string()}"
+    _setup_claude_gitignore(temp_source_dir)
+
+    try:
+        create_result = _create_local_agent(source_name, temp_source_dir, modal_subprocess_env)
+        assert create_result.returncode == 0, (
+            f"Local create failed (rc={create_result.returncode}):\n"
+            f"stdout: {create_result.stdout}\nstderr: {create_result.stderr}"
+        )
+
+        clone_result = _clone_agent_to_modal(source_name, target_name, modal_subprocess_env)
+        assert clone_result.returncode == 0, (
+            f"Clone to modal failed (rc={clone_result.returncode}):\n"
+            f"stdout: {clone_result.stdout}\nstderr: {clone_result.stderr}"
+        )
+
+        # The original regression printed this specific rsync failure; assert
+        # it is absent so a future regression that exits 0 but skips the
+        # transfer still trips the test.
+        combined_output = clone_result.stdout + clone_result.stderr
+        assert "rsync failed" not in combined_output, (
+            f"Clone reported an rsync failure:\nstdout: {clone_result.stdout}\nstderr: {clone_result.stderr}"
+        )
+    finally:
+        # Best-effort cleanup -- destroy both agents even if assertions failed.
+        _destroy_modal_agent(target_name, modal_subprocess_env)
+        _destroy_modal_agent(source_name, modal_subprocess_env)
