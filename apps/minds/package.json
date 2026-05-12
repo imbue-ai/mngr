@@ -1,6 +1,6 @@
 {
   "name": "minds",
-  "version": "0.2.16",
+  "version": "0.2.17",
   "description": "Minds - Self-improving, persistent AI agents",
   "homepage": "https://github.com/imbue-ai/mngr",
   "author": "Imbue <dev@imbue.com>",
@@ -19,13 +19,5 @@
   "devDependencies": {
     "@todesktop/cli": "1.25.0-0",
     "electron": "35.7.5"
-  },
-  "pnpm": {
-    "ignoredBuiltDependencies": [
-      "@firebase/util",
-      "dtrace-provider",
-      "electron",
-      "protobufjs"
-    ]
   }
 }
