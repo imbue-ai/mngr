@@ -83,54 +83,17 @@ mngr extras -i || warn "Some extras could not be installed. Run 'mngr extras' to
 
 # `mngr create` requires an agent type (via positional, --type, or
 # [commands.create] type in user settings). If the user has not set one
-# yet, suggest the right `mngr config set` command -- discovering
-# installed agent-type plugins via `mngr plugin list --kind agent-type
-# --active` so we never have to hard-code or grep package names.
+# yet, suggest the right `mngr config set` command and list the
+# installed agent-type plugins they can pick from.
 if mngr config get commands.create.type --scope user >/dev/null 2>&1; then
     info "Default agent type is already set in user settings."
 else
-    # Capture stdout and stderr separately so we can distinguish
-    # "no plugins" from "list command failed" (e.g. broken config or
-    # install). Silently swallowing failures here would mask real bugs
-    # as a misleading "no agent-type plugins installed yet" warning.
-    agent_types_stderr="$(mktemp)"
-    skip_default_menu=0
-    if agent_types_output="$(mngr plugin list --kind agent-type --active --format '{name}' 2>"$agent_types_stderr")"; then
-        agent_types=()
-        while IFS= read -r line; do
-            [ -n "$line" ] && agent_types+=("$line")
-        done <<<"$agent_types_output"
-    else
-        warn "Could not list agent-type plugins ('mngr plugin list' failed):"
-        if [ -s "$agent_types_stderr" ]; then
-            sed 's/^/    /' "$agent_types_stderr" >&2
-        fi
-        info "Set the default later with: mngr config set commands.create.type <name> --scope user"
-        agent_types=()
-        skip_default_menu=1
-    fi
-    rm -f "$agent_types_stderr"
-
-    if [ "$skip_default_menu" = "0" ]; then
-        case ${#agent_types[@]} in
-            0)
-                warn "No agent-type plugins installed yet."
-                info "Install one and then set the default with:"
-                info "    mngr config set commands.create.type <name> --scope user"
-                ;;
-            1)
-                only_type="${agent_types[0]}"
-                info "Found one agent-type plugin: '$only_type'."
-                info "To use it as your default for 'mngr create', run:"
-                info "    mngr config set commands.create.type $only_type --scope user"
-                ;;
-            *)
-                info "Found ${#agent_types[@]} agent-type plugins: ${agent_types[*]}"
-                info "To pick one as your default for 'mngr create', run:"
-                info "    mngr config set commands.create.type <name> --scope user"
-                ;;
-        esac
-    fi
+    info "To set a default agent type for 'mngr create', run:"
+    info "    mngr config set commands.create.type <name> --scope user"
+    info "Available agent types:"
+    mngr plugin list --kind agent-type --active --format '{name}' 2>/dev/null \
+        | sed 's/^/    /' \
+        || warn "Could not list agent-type plugins. Run 'mngr plugin list --kind agent-type' to investigate."
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
