@@ -30,8 +30,8 @@ from typing import cast
 import httpx
 import semver
 import tomlkit
-from changelog_release import finalize_changelog_unreleased
-from changelog_release import today_pacific
+from changelog_release_utils import finalize_changelog_unreleased
+from changelog_release_utils import today_pacific
 from utils import PACKAGES
 from utils import PACKAGE_BY_PYPI_NAME
 from utils import REPO_ROOT

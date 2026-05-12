@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.changelog_release import finalize_changelog_unreleased
+from scripts.changelog_release_utils import finalize_changelog_unreleased
 
 
 def test_finalize_renames_unreleased_and_inserts_fresh_one(tmp_path: Path) -> None:
