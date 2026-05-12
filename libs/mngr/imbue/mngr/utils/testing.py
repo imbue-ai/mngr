@@ -132,47 +132,27 @@ class ModalCleanupOutcome(UpperCaseStrEnum):
     FAILED = auto()
 
 
-def deregister_modal_test_app(app_name: str) -> None:
-    """Stop tracking a Modal app for leak detection.
+def deregister_modal_test_volume(volume_name: str) -> None:
+    """Stop tracking a Modal volume for leak detection.
 
-    Call this only when the caller has positively confirmed the app was
-    stopped (or was already gone). The session-end leak detector polls
-    `modal app list --json` to find tracked apps that are still alive, but
-    Modal's listing endpoints are eventually consistent w.r.t. deletion --
-    they can still return entries for seconds after the synchronous delete
-    call returned "not found". Trusting the cleanup hook's response and
-    deregistering immediately avoids paying that listing-convergence tail.
-    On a real cleanup failure (anything other than DELETED/NOT_FOUND),
+    Call this only when the caller has positively confirmed the volume was
+    deleted (or was already gone). The session-end leak detector polls
+    `modal volume list --json` to find tracked volumes that are still alive,
+    but Modal's listing endpoints are eventually consistent w.r.t. deletion
+    -- they can still return entries for seconds after the synchronous
+    delete call returned "not found". Trusting the cleanup hook's response
+    and deregistering immediately avoids paying that listing-convergence
+    tail. On a real cleanup failure (anything other than DELETED/NOT_FOUND),
     callers must NOT deregister: leaving the name tracked lets the leak
     detector surface it, with the CI hourly cleanup script
     (cleanup_old_modal_test_environments.py) as the ultimate safety net.
-
-    Note: there are currently NO callsites for this function. It is kept
-    for parallelism with `deregister_modal_test_volume` /
-    `deregister_modal_test_environment` (which do have per-test callers)
-    and for future use if/when we have a reliable per-test signal that the
-    Modal-side app actually stopped. Today we do not: closing the local
-    app context (`ModalProviderBackend.close_app`) does not stop persistent
-    apps server-side, and even ephemeral apps stop asynchronously, so we
-    cannot synchronously distinguish DELETED/NOT_FOUND from FAILED for
-    apps. We therefore deliberately leave every registered app tracked and
-    let `_get_leaked_modal_apps` (in `mngr_modal/conftest.py`) be the
-    authoritative source for app liveness at session end. Do not add a
-    callsite here just for symmetry with the volume/env helpers -- that
-    would hide real app leaks.
     """
-    if app_name in worker_modal_app_names:
-        worker_modal_app_names.remove(app_name)
-
-
-def deregister_modal_test_volume(volume_name: str) -> None:
-    """Stop tracking a Modal volume for leak detection. See `deregister_modal_test_app`."""
     if volume_name in worker_modal_volume_names:
         worker_modal_volume_names.remove(volume_name)
 
 
 def deregister_modal_test_environment(environment_name: str) -> None:
-    """Stop tracking a Modal environment for leak detection. See `deregister_modal_test_app`."""
+    """Stop tracking a Modal environment for leak detection. See `deregister_modal_test_volume`."""
     if environment_name in worker_modal_environment_names:
         worker_modal_environment_names.remove(environment_name)
 
