@@ -94,18 +94,18 @@ def test_snapshot_create_on_error_abort_reports_failure(
     assert "Aborted" in result.output or "does not support" in result.output
 
 
-def test_snapshot_create_mixed_identifier_classified_as_host(
+def test_snapshot_create_at_prefix_targets_host(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that a positional arg not matching any agent is treated as a host identifier.
+    """A positional arg with the @-prefix is classified as a host identifier.
 
-    The identifier is classified as a host (no agent match), and since the local
-    provider only accepts "localhost" as a host name, it fails with "not found".
+    The local provider only accepts "localhost", so a bogus name fails with
+    "host not found".
     """
     result = cli_runner.invoke(
         snapshot,
-        ["create", "not-an-agent-or-host-99999"],
+        ["create", "@not-a-host-99999"],
         obj=plugin_manager,
         catch_exceptions=True,
     )

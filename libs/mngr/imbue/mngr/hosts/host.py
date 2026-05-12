@@ -243,18 +243,21 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     provider_instance: ProviderInstanceInterface = Field(
         frozen=True, description="The provider instance managing this host"
     )
-
-    # is_local, _ensure_connected, _close_paramiko_client, disconnect, and __del__
-    # are inherited unchanged from OuterHost.
+    host_name: HostName = Field(
+        frozen=True,
+        description=(
+            "User-facing name of the host. Stored explicitly because the SSH "
+            "connector's name may be a connection target (e.g. an IP for "
+            "local-docker hosts) rather than a HostName-shaped value."
+        ),
+    )
 
     def get_name(self) -> HostName:
-        """Return the mngr-assigned host name from certified data.
+        """Return the user-facing host name (overrides ``OuterHost.get_name``)."""
+        return self.host_name
 
-        Overrides OuterHost.get_name (which returns the connector hostname),
-        so callers get the friendly name set when the host was created
-        rather than the SSH endpoint.
-        """
-        return HostName(self.get_certified_data().host_name)
+    # is_local, _ensure_connected, _close_paramiko_client, disconnect, and
+    # __del__ are inherited unchanged from OuterHost.
 
     def model_copy_update(self, *updates: Any) -> "Host":
         """Create a copy of this Host with updated fields.
@@ -638,10 +641,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             #  It just means that the host is not yet properly initialized
             #  For hosts that are currently being created, that's fine, but otherwise this should count as a busted host
             #  Annoyingly we'll need to understand the difference (by checking to see if, eg, this host is locked)
-            # NB: must not call get_name() here -- Host.get_name() reads certified data, which would recurse.
             return CertifiedHostData(
                 host_id=str(self.id),
-                host_name="unknown-host-at-" + str(self.get_connector_host_name()),
+                host_name=str(self.host_name),
                 created_at=now,
                 updated_at=now,
             )

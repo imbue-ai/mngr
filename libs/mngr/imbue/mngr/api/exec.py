@@ -11,10 +11,10 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.mngr.api.agent_addr import find_agent_by_address
-from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import ensure_host_started
+from imbue.mngr.api.find import find_all_agents
+from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
@@ -23,6 +23,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ErrorBehavior
@@ -109,7 +110,7 @@ class MultiExecResult(MutableModel):
 @log_call
 def exec_command_on_agent(
     mngr_ctx: MngrContext,
-    agent_str: str,
+    address: AgentAddress,
     command: str,
     cwd: str | None = None,
     timeout_seconds: float | None = None,
@@ -117,12 +118,11 @@ def exec_command_on_agent(
 ) -> ExecResult:
     """Execute a shell command on the host where an agent runs.
 
-    Supports agent address syntax: NAME[@[HOST][.PROVIDER]].
-
-    Resolves the agent by name, ID, or address, optionally starts it if stopped,
-    then executes the command on its host (defaulting to the agent's work_dir).
+    Resolves the agent by :class:`AgentAddress`, optionally starts it if
+    stopped, then executes the command on its host (defaulting to the agent's
+    work_dir).
     """
-    agent, host = find_agent_by_address(agent_str, mngr_ctx, "exec", is_start_desired=is_start_desired)
+    agent, host = find_one_agent(address, mngr_ctx, is_start_desired=is_start_desired)
 
     # Determine working directory: explicit --cwd, or agent's work_dir
     effective_cwd = Path(cwd) if cwd is not None else agent.work_dir
@@ -307,7 +307,7 @@ def group_matches_by_outer_host(
 @log_call
 def exec_command_on_outer_hosts(
     mngr_ctx: MngrContext,
-    agent_identifiers: Sequence[str],
+    addresses: Sequence[AgentAddress],
     command: str,
     is_all: bool,
     cwd: str | None = None,
@@ -337,8 +337,8 @@ def exec_command_on_outer_hosts(
     """
     result = MultiExecResult()
 
-    matches = find_agents_by_addresses(
-        raw_identifiers=list(agent_identifiers),
+    matches = find_all_agents(
+        addresses=addresses,
         filter_all=is_all,
         target_state=None,
         mngr_ctx=mngr_ctx,
@@ -419,7 +419,7 @@ def exec_command_on_outer_hosts(
 @log_call
 def exec_command_on_agents(
     mngr_ctx: MngrContext,
-    agent_identifiers: Sequence[str],
+    addresses: Sequence[AgentAddress],
     command: str,
     is_all: bool,
     cwd: str | None = None,
@@ -433,16 +433,15 @@ def exec_command_on_agents(
 ) -> MultiExecResult:
     """Execute a shell command on the hosts where multiple agents run.
 
-    Supports agent address syntax: NAME[@[HOST][.PROVIDER]].
-
-    Resolves each agent by name, ID, or address, optionally starts them if stopped,
-    then executes the command on each host (defaulting to the agent's work_dir).
+    Resolves each agent by :class:`AgentAddress`, optionally starts them if
+    stopped, then executes the command on each host (defaulting to the
+    agent's work_dir).
     """
     result = MultiExecResult()
 
     # Find all matching agents (with address support for host/provider filtering)
-    matches = find_agents_by_addresses(
-        raw_identifiers=list(agent_identifiers),
+    matches = find_all_agents(
+        addresses=addresses,
         filter_all=is_all,
         target_state=None,
         mngr_ctx=mngr_ctx,
