@@ -1,9 +1,8 @@
 """Click entry points for ``mngr latchkey``.
 
-Three subcommands wire the standalone-CLI workflow described in
-``specs/mngr-latchkey-cli/spec.md``:
+Three subcommands wire the standalone-CLI workflow:
 
-* ``create-agent-env`` -- one-shot. Wraps
+* ``create-agent-env`` -- Wraps
   :func:`prepare_agent_latchkey` and emits the resulting env vars +
   opaque permissions handle path as a single JSON object on stdout.
 * ``link-permissions`` -- one-shot. Wraps
