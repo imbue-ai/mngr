@@ -7,6 +7,8 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.api.address_parsers import parse_agent_address
+from imbue.mngr.api.address_parsers import parse_agent_or_host_address
+from imbue.mngr.api.address_parsers import parse_host_address
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import _address_matches_agent_match
 from imbue.mngr.api.find import _post_filter_matches_by_addresses
@@ -81,6 +83,83 @@ def test_parse_agent_address_rejects_at_only() -> None:
     """A bare ``@HOST`` form lacks an agent name and is rejected."""
     with pytest.raises(UserInputError):
         parse_agent_address("@myhost")
+
+
+# =============================================================================
+# parse_host_address: leading-@ tolerance
+# =============================================================================
+
+
+def test_parse_host_address_accepts_leading_at() -> None:
+    """``@HOST`` parses the same as ``HOST`` for host-only contexts."""
+    assert parse_host_address("@myhost") == HostAddress(host=HostName("myhost"))
+    assert parse_host_address("@myhost.modal") == HostAddress(
+        host=HostName("myhost"), provider=ProviderInstanceName("modal")
+    )
+
+
+def test_parse_host_address_rejects_at_only() -> None:
+    """``@`` alone has no host component."""
+    with pytest.raises(UserInputError):
+        parse_host_address("@")
+
+
+# =============================================================================
+# parse_agent_or_host_address tests
+# =============================================================================
+
+
+def test_parse_agent_or_host_address_bare_name_is_agent() -> None:
+    """A bare name parses as agent first."""
+    addr = parse_agent_or_host_address("my-agent")
+    assert addr == AgentAddress(agent=AgentName("my-agent"))
+
+
+def test_parse_agent_or_host_address_at_prefix_is_host() -> None:
+    """A leading ``@`` forces host parsing."""
+    addr = parse_agent_or_host_address("@my-host")
+    assert addr == HostAddress(host=HostName("my-host"))
+
+
+def test_parse_agent_or_host_address_at_prefix_with_provider_is_host() -> None:
+    """``@HOST.PROVIDER`` parses as host with provider."""
+    addr = parse_agent_or_host_address("@my-host.modal")
+    assert addr == HostAddress(host=HostName("my-host"), provider=ProviderInstanceName("modal"))
+
+
+def test_parse_agent_or_host_address_host_id_is_host() -> None:
+    """A bare HostId is treated as a host even without the ``@`` prefix."""
+    host_id = HostId.generate()
+    addr = parse_agent_or_host_address(str(host_id))
+    assert addr == HostAddress(host=host_id)
+
+
+def test_parse_agent_or_host_address_agent_id_is_agent() -> None:
+    """A bare AgentId is treated as an agent."""
+    agent_id = AgentId.generate()
+    addr = parse_agent_or_host_address(str(agent_id))
+    assert addr == AgentAddress(agent=agent_id)
+
+
+def test_parse_agent_or_host_address_host_dot_provider_is_host() -> None:
+    """``HOST.PROVIDER`` (no @, contains dot) falls through to host parsing."""
+    addr = parse_agent_or_host_address("myhost.modal")
+    assert addr == HostAddress(host=HostName("myhost"), provider=ProviderInstanceName("modal"))
+
+
+def test_parse_agent_or_host_address_agent_at_host_is_agent() -> None:
+    """``AGENT@HOST`` parses as agent with host qualifier."""
+    addr = parse_agent_or_host_address("my-agent@my-host")
+    assert addr == AgentAddress(agent=AgentName("my-agent"), host=HostAddress(host=HostName("my-host")))
+
+
+def test_parse_agent_or_host_address_agent_at_host_dot_provider_is_agent() -> None:
+    """``AGENT@HOST.PROVIDER`` parses as agent with full host."""
+    addr = parse_agent_or_host_address("my-agent@my-host.modal")
+    assert addr == AgentAddress(
+        agent=AgentName("my-agent"),
+        host=HostAddress(host=HostName("my-host"), provider=ProviderInstanceName("modal")),
+    )
 
 
 # =============================================================================

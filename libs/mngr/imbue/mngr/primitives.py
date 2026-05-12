@@ -385,6 +385,17 @@ class AgentAddress(FrozenModel):
         return f"{self.agent}@{self.host}"
 
 
+# A text-disambiguated agent-or-host argument. The textual rules are:
+# - A leading "@" forces host parsing.
+# - An identifier with HostId shape (``host-...``) is treated as a host.
+# - Otherwise the input is tried as an agent first, then as a host.
+# Used by commands whose top-level positional may refer to either kind of
+# entity: ``mngr event``, ``mngr transcript``, ``mngr snapshot create``,
+# ``mngr snapshot list``, ``mngr wait``. See
+# :func:`imbue.mngr.api.address_parsers.parse_agent_or_host_address`.
+AgentOrHostAddress = AgentAddress | HostAddress
+
+
 class NewAgentLocation(FrozenModel):
     """A parsed ``[NAME][@[HOST][.PROVIDER]][:PATH]`` string.
 

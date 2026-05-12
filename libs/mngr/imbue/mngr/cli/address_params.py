@@ -15,6 +15,7 @@ import click
 
 from imbue.mngr.api.address_parsers import parse_agent_address
 from imbue.mngr.api.address_parsers import parse_agent_name_or_id
+from imbue.mngr.api.address_parsers import parse_agent_or_host_address
 from imbue.mngr.api.address_parsers import parse_host_address
 from imbue.mngr.api.address_parsers import parse_host_name_or_id
 from imbue.mngr.api.address_parsers import parse_hosted_location
@@ -23,6 +24,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameOrId
+from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostNameOrId
 from imbue.mngr.primitives import HostedLocation
@@ -63,6 +65,22 @@ class HostAddressParamType(click.ParamType):
         if isinstance(value, HostAddress):
             return value
         return _convert_with_user_input_error(parse_host_address, value, param, ctx)
+
+
+class AgentOrHostAddressParamType(click.ParamType):
+    """Click param type for an :class:`AgentOrHostAddress`.
+
+    Accepts ``AGENT[@HOST[.PROVIDER]]`` for agents and ``@HOST[.PROVIDER]`` or
+    ``HOST.PROVIDER`` (or a bare :class:`HostId`) for hosts. See
+    :func:`parse_agent_or_host_address` for the full disambiguation rules.
+    """
+
+    name = "agent_or_host_address"
+
+    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> AgentOrHostAddress:
+        if isinstance(value, (AgentAddress, HostAddress)):
+            return value
+        return _convert_with_user_input_error(parse_agent_or_host_address, value, param, ctx)
 
 
 class NewAgentLocationParamType(click.ParamType):
@@ -128,6 +146,7 @@ class AgentNameParamType(click.ParamType):
 
 AGENT_ADDRESS = AgentAddressParamType()
 HOST_ADDRESS = HostAddressParamType()
+AGENT_OR_HOST_ADDRESS = AgentOrHostAddressParamType()
 NEW_AGENT_LOCATION = NewAgentLocationParamType()
 HOSTED_LOCATION = HostedLocationParamType()
 AGENT_NAME_OR_ID = AgentNameOrIdParamType()

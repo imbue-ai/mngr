@@ -29,6 +29,7 @@ from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameOrId
+from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -89,12 +90,19 @@ def _parse_provider_name(s: str) -> ProviderInstanceName:
 
 @pure
 def parse_host_address(s: str) -> HostAddress:
-    """Parse a ``HOST[.PROVIDER]`` string into a :class:`HostAddress`.
+    """Parse a ``[@]HOST[.PROVIDER]`` string into a :class:`HostAddress`.
 
     The host component is required. Empty input or input that starts with a
     dot raises :class:`UserInputError`. The dot is a deterministic separator:
     real host names do not contain dots in the mngr DSL.
+
+    A leading ``@`` is tolerated for convenience: it is significant only when
+    parsing :class:`AgentOrHostAddress` (where it disambiguates host from
+    agent), but harmless to allow everywhere else so users can type the same
+    string in either context.
     """
+    if s.startswith("@"):
+        s = s[1:]
     if not s:
         raise UserInputError("Host address cannot be empty")
     host_part, provider_part = _split_host_part(s)
@@ -120,6 +128,37 @@ def parse_agent_address(s: str) -> AgentAddress:
     agent = parse_agent_name_or_id(name_part)
     host = parse_host_address(host_part) if host_part is not None else None
     return AgentAddress(agent=agent, host=host)
+
+
+@pure
+def parse_agent_or_host_address(s: str) -> AgentOrHostAddress:
+    """Parse a string as either an :class:`AgentAddress` or :class:`HostAddress`.
+
+    Text-only disambiguation rules (no state lookup):
+
+    - A leading ``@`` forces host parsing (``@HOST``, ``@HOST.PROVIDER``).
+    - An input that parses as a :class:`HostId` is treated as a host. Without
+      this sniff a bare ``host-abc123`` would parse as :class:`AgentName`
+      (which permits any :class:`SafeName`) and be misread as an agent.
+    - Otherwise the input is tried as an :class:`AgentAddress` first, and
+      falls back to :class:`HostAddress` on failure. The fallback path is
+      reached for inputs like ``HOST.PROVIDER`` because :class:`AgentName`
+      rejects dots.
+
+    Note: a host name shaped like a :class:`SafeName` (no ``host-`` prefix,
+    no dots) cannot be targeted by bare text alone -- users must write
+    ``@HOST``. This is the deliberate price of state-free parsing.
+    """
+    if s.startswith("@"):
+        return parse_host_address(s)
+    try:
+        return HostAddress(host=HostId(s))
+    except ValueError:
+        pass
+    try:
+        return parse_agent_address(s)
+    except UserInputError:
+        return parse_host_address(s)
 
 
 @pure
