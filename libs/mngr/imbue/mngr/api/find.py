@@ -153,31 +153,31 @@ def resolve_agent_reference(
     return matches[0]
 
 
-class ResolvedSource(FrozenModel):
-    """Result of resolving a source location, including the discovered agent when available."""
+class ResolvedHostedLocation(FrozenModel):
+    """Result of resolving a :class:`HostedLocation`, including the discovered agent when available."""
 
     model_config = {"arbitrary_types_allowed": True}
 
     location: HostLocation = Field(description="The resolved host and path")
-    agent: DiscoveredAgent | None = Field(default=None, description="The source agent, if resolved from one")
+    agent: DiscoveredAgent | None = Field(default=None, description="The resolved agent, if the location named one")
 
 
 @log_call
-def resolve_source_location(
+def resolve_hosted_location(
     parsed: HostedLocation,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
     mngr_ctx: MngrContext,
     *,
     is_start_desired: bool = True,
-) -> ResolvedSource:
-    """Resolve a :class:`HostedLocation` (interpreted as a source) to a concrete host, path, and optional agent.
+) -> ResolvedHostedLocation:
+    """Resolve a :class:`HostedLocation` to a concrete host, path, and optional agent.
 
     Resolves agent/host references against the discovered hosts and agents.
     If the resolved host is offline, it will be started if ``is_start_desired``
     is True (the default); otherwise raises :class:`UserInputError`.
     """
     logger.trace(
-        "Resolving source: agent={} host={} path={}",
+        "Resolving hosted location: agent={} host={} path={}",
         parsed.agent,
         parsed.host,
         parsed.path,
@@ -225,7 +225,7 @@ def resolve_source_location(
         agent_work_dir_if_available=agent_work_dir,
     )
 
-    return ResolvedSource(
+    return ResolvedHostedLocation(
         location=HostLocation(host=online_host, path=resolved_path),
         agent=resolved_agent,
     )

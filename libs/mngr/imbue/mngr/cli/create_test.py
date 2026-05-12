@@ -13,7 +13,7 @@ from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.api.address_parsers import parse_new_agent_location
-from imbue.mngr.api.find import ResolvedSource
+from imbue.mngr.api.find import ResolvedHostedLocation
 from imbue.mngr.cli.create import _AutoLabels
 from imbue.mngr.cli.create import _CreateCommand
 from imbue.mngr.cli.create import _RECOVERED_MESSAGE_FILENAME
@@ -568,7 +568,7 @@ def test_parse_project_name_returns_explicit_project(
 ) -> None:
     """When --project is specified, return it directly."""
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-    resolved = ResolvedSource(location=HostLocation(host=local_host, path=temp_work_dir))
+    resolved = ResolvedHostedLocation(location=HostLocation(host=local_host, path=temp_work_dir))
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().project, "explicit-project"),
     )
@@ -587,7 +587,7 @@ def test_parse_project_name_treats_dot_as_default_derivation(
     some_dir = tmp_path / "some-source"
     some_dir.mkdir()
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-    resolved = ResolvedSource(location=HostLocation(host=local_host, path=some_dir))
+    resolved = ResolvedHostedLocation(location=HostLocation(host=local_host, path=some_dir))
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().project, "."),
     )
@@ -606,7 +606,7 @@ def test_parse_project_name_inherits_from_source_agent(
     some_dir = tmp_path / "local-folder"
     some_dir.mkdir()
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-    resolved = ResolvedSource(
+    resolved = ResolvedHostedLocation(
         location=HostLocation(host=local_host, path=some_dir),
         agent=DiscoveredAgent(
             host_id=local_host.id,
@@ -631,7 +631,7 @@ def test_parse_project_name_derives_from_remote_url(
     some_dir = tmp_path / "local-folder"
     some_dir.mkdir()
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-    resolved = ResolvedSource(location=HostLocation(host=local_host, path=some_dir))
+    resolved = ResolvedHostedLocation(location=HostLocation(host=local_host, path=some_dir))
 
     result = _parse_project_name(resolved, default_create_cli_opts, remote_url="https://github.com/owner/my-repo.git")
 
@@ -647,7 +647,7 @@ def test_parse_project_name_falls_back_to_folder_name(
     some_dir = tmp_path / "some-project"
     some_dir.mkdir()
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-    resolved = ResolvedSource(location=HostLocation(host=local_host, path=some_dir))
+    resolved = ResolvedHostedLocation(location=HostLocation(host=local_host, path=some_dir))
 
     result = _parse_project_name(resolved, default_create_cli_opts, remote_url=None)
 
