@@ -1187,8 +1187,7 @@ done
 # The CEL context per source matches `mngr usage --format json` sources[i]; see
 # the `mngr usage wait --help` page for the full field list.
 mngr usage wait --until 'five_hour.elapsed_percentage > 75 && five_hour.used_percentage < 50' \
-  && mngr create chore@.modal --no-connect \
-       --message "Find and fix one bug in the codebase. Pick a TODO/FIXME or a small clear issue you can resolve in under 30 minutes, write a test if applicable, open a PR. No scope creep."
+  && mngr create chore@.modal --no-connect --message "Find and fix an issue in the codebase."
 
 # TODO: make examples of using "mngr wait" (lifecycle-state wait, distinct from `mngr usage wait` above)
 
