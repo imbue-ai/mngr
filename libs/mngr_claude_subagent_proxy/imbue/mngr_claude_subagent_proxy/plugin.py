@@ -534,14 +534,16 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
     Behavior depends on ``SubagentProxyPluginConfig.mode``:
     - ``PROXY`` (default): install spawn / cleanup / SessionStart hooks,
       write the mngr-proxy agent definition, guard project Stop hooks.
-    - ``DENY``: install only the deny hook and write the
-      ``mngr-subagents`` skill under ``.claude/skills/``. None of the
-      other plumbing runs (no PostToolUse, no SessionStart reaper, no
-      Stop-hook guard, no project settings.json check). The deny hook
-      never invokes ``mngr create`` and does not generate per-Task
-      wait-scripts; Claude reads the skill and runs the two-command
-      spawn-and-wait protocol itself via Bash, so the cascade-destroy
-      / reaper machinery has nothing to track.
+    - ``DENY``: install the PreToolUse:Agent deny hook plus the shared
+      label-driven SessionStart reaper (same ``hooks/reap.py`` PROXY
+      uses), and write the ``mngr-subagents`` skill under
+      ``.claude/skills/``. The other PROXY-only plumbing does NOT run
+      (no PostToolUse cleanup, no Stop-hook guard, no project
+      settings.json check). The deny hook never invokes ``mngr create``
+      and does not generate per-Task wait-scripts; Claude reads the
+      skill and runs the two-command spawn-and-wait protocol itself
+      via Bash. The reaper still picks up terminal children spawned
+      that way via the shared parent-id label.
     """
     if not isinstance(agent.agent_config, ClaudeAgentConfig):
         return
