@@ -4,11 +4,12 @@ Single responsibility: install a per-agent statusline shim into Claude
 agents so each render appends a rate-limit event to
 ``$MNGR_AGENT_STATE_DIR/events/claude/rate_limits/events.jsonl``.
 
-Discovery is by convention -- ``mngr usage`` walks all
-``events/<source>/rate_limits/events.jsonl`` files itself, mirroring how
-``mngr transcript`` finds ``common_transcript`` events. We don't implement a
-reader hookspec; we just write to the conventional path and let the generic
-CLI find the data.
+Discovery is by convention -- ``mngr usage`` enumerates agents via
+``list_agents`` and reads each agent's ``events/<source>/rate_limits/
+events.jsonl`` via the events API (``discover_event_sources`` +
+``read_event_content``), the same mechanism ``mngr event`` uses. We don't
+implement a reader hookspec; we just write to the conventional path and let
+the generic CLI find the data uniformly for local and remote agents.
 
 Provisioning runs from a single ``on_before_provisioning`` hookimpl on
 mngr core, so this plugin doesn't depend on any Claude-specific hookspec.
