@@ -399,11 +399,13 @@ def test_usage_command_json_surfaces_elapsed_when_window_seconds_present(
     payload = json.loads(result.output.strip())
     five_hour = payload["sources"][0]["five_hour"]
     assert five_hour["window_seconds"] == 18000
-    # Approximately 18000 - 5400 = 12600 seconds elapsed = ~70% of the window.
-    # The CLI invocation uses its own wall-clock for `now`, which may have advanced
-    # a few seconds since the event timestamp; allow that drift in the assertion.
-    assert 12595 <= five_hour["elapsed_seconds"] <= 12605
-    assert abs(five_hour["elapsed_percentage"] - 70.0) < 0.1
+    # Compute the expected elapsed off the CLI's own ``now`` (echoed in the JSON
+    # payload) rather than a clock the test captured before invoking, so any
+    # wall-clock drift between test setup and CLI invocation is cancelled out.
+    cli_now = payload["now"]
+    expected_elapsed = 18000 - (now_s + 5400 - cli_now)
+    assert five_hour["elapsed_seconds"] == expected_elapsed
+    assert five_hour["elapsed_percentage"] == expected_elapsed / 18000 * 100
 
 
 @pytest.mark.tmux
