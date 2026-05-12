@@ -200,6 +200,35 @@ def test_marketplace_namespaced_does_not_fall_back_to_user_flat_agent(fake_home:
     assert resolve_agent_definition("imbue-code-guardian:verify-and-fix", work_dir) is None
 
 
+def test_malformed_yaml_frontmatter_returns_none_without_raising(fake_home: Path, tmp_path: Path) -> None:
+    """A .md file with malformed YAML frontmatter must not crash the resolver --
+    ``frontmatter.loads`` raises ``yaml.YAMLError`` on bad YAML, which would
+    otherwise propagate out of ``run()`` in the PreToolUse hook and prevent
+    any JSON response from being emitted.
+
+    The resolver logs a warning and returns ``None`` for the candidate (same
+    handling as an unreadable file), so the caller falls back to the
+    prompt-only / unresolved-type path instead of breaking the hook.
+
+    Regression for: a typo in an installed marketplace agent's frontmatter
+    would otherwise wedge the entire mngr-proxy plugin for that agent.
+    """
+    user_agents = fake_home / ".claude" / "agents"
+    user_agents.mkdir(parents=True)
+    # Malformed YAML: unclosed bracket / missing value. Triggers yaml.YAMLError
+    # inside frontmatter.loads.
+    (user_agents / "broken.md").write_text(
+        "---\nname: [unclosed\ndescription: still bad\n---\n\nbody after broken fm\n"
+    )
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    # Must not raise.
+    result = resolve_agent_definition("broken", work_dir)
+    assert result is None
+
+
 def test_first_marketplace_wins_when_multiple_have_same_plugin_agent(fake_home: Path, tmp_path: Path) -> None:
     """If two marketplaces both ship ``<plugin>/agents/<agent>.md``, the
     first (sorted by name) wins. Stable precedence is required so the

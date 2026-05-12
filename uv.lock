@@ -1756,6 +1756,7 @@ dependencies = [
     { name = "imbue-mngr" },
     { name = "imbue-mngr-claude" },
     { name = "python-frontmatter" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -1768,6 +1769,7 @@ requires-dist = [
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "imbue-mngr-claude", editable = "libs/mngr_claude" },
     { name = "python-frontmatter", specifier = ">=1.1.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [package.metadata.requires-dev]

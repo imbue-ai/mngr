@@ -64,6 +64,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import frontmatter
+import yaml
 from loguru import logger
 from pydantic import Field
 
@@ -156,6 +157,18 @@ def resolve_agent_definition(subagent_type: str, work_dir: Path) -> AgentDefinit
         except OSError as e:
             logger.warning("agent_definitions: failed to read {}: {}", candidate, e)
             continue
-        body = frontmatter.loads(content).content.lstrip("\n")
+        # python-frontmatter's YAML handler raises yaml.YAMLError on
+        # malformed frontmatter (e.g. typo in an installed marketplace
+        # agent's --- block). Without this guard the exception would
+        # propagate out of the PreToolUse hook's run(), crashing the
+        # hook process before any JSON is emitted -- which would either
+        # default-allow the Task (PROXY mode) or skip the deny (DENY
+        # mode), defeating the plugin's purpose.
+        try:
+            parsed = frontmatter.loads(content)
+        except yaml.YAMLError as e:
+            logger.warning("agent_definitions: failed to parse frontmatter in {}: {}", candidate, e)
+            continue
+        body = parsed.content.lstrip("\n")
         return AgentDefinition(path=candidate, body=body)
     return None
