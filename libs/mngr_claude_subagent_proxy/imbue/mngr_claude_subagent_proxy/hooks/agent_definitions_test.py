@@ -155,9 +155,9 @@ def test_project_local_overrides_user_level_same_name(fake_home: Path, tmp_path:
     assert "USER-LEVEL" not in result.body
 
 
-def test_returns_none_when_definition_has_no_frontmatter(fake_home: Path, tmp_path: Path) -> None:
-    """A .md file with no YAML frontmatter is still readable -- the body
-    is the entire file content. The resolver doesn't reject the file; it
+def test_resolves_definition_without_frontmatter(fake_home: Path, tmp_path: Path) -> None:
+    """A .md file with no YAML frontmatter still resolves -- the body is
+    the entire file content. The resolver doesn't reject the file; it
     just doesn't try to strip a non-existent frontmatter block.
     """
     user_agents = fake_home / ".claude" / "agents"
