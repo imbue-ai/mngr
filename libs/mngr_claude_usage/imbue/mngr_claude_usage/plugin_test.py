@@ -27,7 +27,6 @@ class _StubHost(BaseModel):
     """Stub host for tests."""
 
     host_dir: Path
-    is_local: bool
 
 
 # =============================================================================
@@ -181,7 +180,7 @@ def test_hookimpl_skips_non_claude_stub(temp_mngr_ctx: MngrContext, tmp_path: Pa
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     agent = _StubAgent(id="agent-test", agent_type="opencode", work_dir=work_dir)
-    host = _StubHost(host_dir=tmp_path / "host", is_local=True)
+    host = _StubHost(host_dir=tmp_path / "host")
     on_before_provisioning(agent=agent, host=host, mngr_ctx=temp_mngr_ctx)  # ty: ignore[invalid-argument-type]
     assert not (tmp_path / "host" / "agents" / "agent-test").exists()
     assert not (work_dir / ".claude" / "settings.local.json").exists()
