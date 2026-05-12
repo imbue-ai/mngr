@@ -14,15 +14,21 @@ from click.testing import CliRunner
 
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import CommandString
 from imbue.mngr_usage.cli import _build_render_model
 from imbue.mngr_usage.cli import _collapse_by_source
 from imbue.mngr_usage.cli import _flatten_primary_for_template
 from imbue.mngr_usage.cli import _format_duration
 from imbue.mngr_usage.cli import _format_human_line
 from imbue.mngr_usage.cli import _format_reset_phrase
-from imbue.mngr_usage.cli import _gather_snapshots
+from imbue.mngr_usage.cli import _last_valid_event_from_content
 from imbue.mngr_usage.cli import _parse_max_age
-from imbue.mngr_usage.cli import _read_last_event
 from imbue.mngr_usage.cli import _snapshot_from_event
 from imbue.mngr_usage.cli import usage
 from imbue.mngr_usage.data_types import UsageSnapshot
@@ -107,29 +113,27 @@ def test_format_human_line_no_data_drops_reset_suffix() -> None:
 # =============================================================================
 
 
-def test_read_last_event_picks_last_valid_line(tmp_path: Path) -> None:
+def test_last_valid_event_picks_last_valid_line() -> None:
     """A truncated/garbage trailing line is skipped; the previous valid line wins."""
-    events_file = tmp_path / "events.jsonl"
-    events_file.write_text(
+    content = (
         json.dumps(_make_event("2026-05-08T10:00:00.000000000Z"))
         + "\n"
         + json.dumps(_make_event("2026-05-08T11:00:00.000000000Z"))
         + "\n"
         + "{not valid json"
     )
-    event = _read_last_event(events_file)
+    event = _last_valid_event_from_content(content, "test")
     assert event is not None
     assert event["timestamp"] == "2026-05-08T11:00:00.000000000Z"
 
 
-def test_read_last_event_returns_none_when_no_valid_lines(tmp_path: Path) -> None:
-    events_file = tmp_path / "events.jsonl"
-    events_file.write_text("garbage\nstill garbage\n")
-    assert _read_last_event(events_file) is None
+def test_last_valid_event_returns_none_when_no_valid_lines() -> None:
+    assert _last_valid_event_from_content("garbage\nstill garbage\n", "test") is None
 
 
-def test_read_last_event_returns_none_when_missing(tmp_path: Path) -> None:
-    assert _read_last_event(tmp_path / "missing.jsonl") is None
+def test_last_valid_event_returns_none_for_empty_content() -> None:
+    assert _last_valid_event_from_content("", "test") is None
+    assert _last_valid_event_from_content("\n\n", "test") is None
 
 
 def test_snapshot_from_event_drops_events_without_rate_limits() -> None:
@@ -157,70 +161,10 @@ def test_snapshot_from_event_round_trips_window_data() -> None:
     assert snap.windows["five_hour"].resets_at == 1778280000
 
 
-def test_gather_snapshots_walks_per_agent_event_files(tmp_path: Path) -> None:
-    """Should find rate_limits events under agents/<id>/events/<source>/rate_limits/events.jsonl."""
-    host_dir = tmp_path / "host"
-    # Two agents, each with a rate_limits events file at the conventional path.
-    _write_event(
-        host_dir / "agents" / "agent-aaa" / "events" / "claude" / "rate_limits" / "events.jsonl",
-        _make_event("2026-05-08T10:00:00.000000000Z", used_percentage=10.0),
-    )
-    _write_event(
-        host_dir / "agents" / "agent-bbb" / "events" / "claude" / "rate_limits" / "events.jsonl",
-        _make_event("2026-05-08T11:00:00.000000000Z", used_percentage=99.0),
-    )
-    snapshots = _gather_snapshots(host_dir)
-    assert len(snapshots) == 2
-    # Both have source_name="claude" since both events files live under events/claude/
-    assert {s.source_name for s in snapshots} == {"claude"}
-
-
-def test_gather_snapshots_handles_missing_dirs(tmp_path: Path) -> None:
-    """Missing agents dir, missing events dir, missing rate_limits subdir: all yield nothing."""
-    assert _gather_snapshots(tmp_path / "no_such_dir") == []
-
-    host_dir = tmp_path / "host"
-    (host_dir / "agents").mkdir(parents=True)
-    # No agents
-    assert _gather_snapshots(host_dir) == []
-
-    # Agent has no events dir
-    (host_dir / "agents" / "agent-aaa").mkdir()
-    assert _gather_snapshots(host_dir) == []
-
-    # Events dir is empty
-    (host_dir / "agents" / "agent-aaa" / "events").mkdir()
-    assert _gather_snapshots(host_dir) == []
-
-
-def test_gather_snapshots_picks_up_alternate_source_segments(tmp_path: Path) -> None:
-    """The segment after events/ is the source name -- non-claude sources work too."""
-    host_dir = tmp_path / "host"
-    _write_event(
-        host_dir / "agents" / "agent-x" / "events" / "opencode" / "rate_limits" / "events.jsonl",
-        _make_event("2026-05-08T10:00:00.000000000Z"),
-    )
-    snapshots = _gather_snapshots(host_dir)
-    assert len(snapshots) == 1
-    assert snapshots[0].source_name == "opencode"
-
-
-def test_gather_snapshots_expands_tilde_in_host_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A ``~``-prefixed host_dir must be expanded before walking the filesystem.
-
-    Regression: mngr's pydantic default for ``default_host_dir`` is the literal
-    ``Path("~/.mngr")`` (unexpanded). Without ``expanduser()``, a clean shell
-    with no ``MNGR_HOST_DIR`` env override would walk a non-existent
-    ``~/.mngr/agents`` and silently report no usage data.
-    """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    _write_event(
-        tmp_path / ".mngr" / "agents" / "agent-aaa" / "events" / "claude" / "rate_limits" / "events.jsonl",
-        _make_event("2026-05-08T10:00:00.000000000Z", used_percentage=42.0),
-    )
-    snapshots = _gather_snapshots(Path("~/.mngr"))
-    assert len(snapshots) == 1
-    assert snapshots[0].source_name == "claude"
+# NOTE: the old filesystem-walking _gather_snapshots(host_dir) tests have been
+# removed. The walker now uses list_agents + the events API; per-agent reads
+# are exercised end-to-end via the test_usage_command_* tests below, which
+# plant events files into a real local agent's state dir.
 
 
 # =============================================================================
@@ -324,20 +268,45 @@ def cli_profile_dir(temp_host_dir: Path, temp_profile_dir: Path) -> Path:
     return temp_profile_dir
 
 
-def _plant_event(host_dir: Path, agent_id: str, event: dict[str, Any], source: str = "claude") -> None:
-    events_file = host_dir / "agents" / agent_id / "events" / source / "rate_limits" / "events.jsonl"
+@pytest.fixture
+def cli_test_agent(local_host: Host, tmp_path: Path) -> AgentInterface:
+    """Register a real local agent (not started) so ``list_agents`` finds it.
+
+    Returns the registered agent; tests can plant events into its state dir
+    at ``get_agent_state_dir_path(local_host.host_dir, agent.id) / "events" / ...``.
+    """
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    return local_host.create_agent_state(
+        work_dir_path=work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("usage-test"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 9999"),
+        ),
+    )
+
+
+def _plant_event_for_agent(
+    local_host: Host, agent: AgentInterface, event: dict[str, Any], source: str = "claude"
+) -> None:
+    """Plant an event into the agent's events file at the conventional path."""
+    state_dir = get_agent_state_dir_path(local_host.host_dir, agent.id)
+    events_file = state_dir / "events" / source / "rate_limits" / "events.jsonl"
     _write_event(events_file, event)
 
 
+@pytest.mark.tmux
 def test_usage_command_human_format(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
     cli_profile_dir: Path,
 ) -> None:
-    _plant_event(
-        temp_host_dir,
-        "agent-aaa",
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
         {
             "source": "claude/rate_limits",
             "type": "rate_limit_snapshot",
@@ -356,15 +325,17 @@ def test_usage_command_human_format(
     assert "73% used" in result.output
 
 
+@pytest.mark.tmux
 def test_usage_command_json_format(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
     cli_profile_dir: Path,
 ) -> None:
-    _plant_event(
-        temp_host_dir,
-        "agent-aaa",
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
         {
             "source": "claude/rate_limits",
             "type": "rate_limit_snapshot",
@@ -385,15 +356,17 @@ def test_usage_command_json_format(
     assert "seven_day" not in payload["sources"][0]
 
 
+@pytest.mark.tmux
 def test_usage_command_format_template(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
     cli_profile_dir: Path,
 ) -> None:
-    _plant_event(
-        temp_host_dir,
-        "agent-aaa",
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
         {
             "source": "claude/rate_limits",
             "type": "rate_limit_snapshot",
@@ -418,7 +391,6 @@ def test_usage_command_format_template(
 def test_usage_command_no_data_when_no_events(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
     cli_profile_dir: Path,
 ) -> None:
     """No agents on the host means no events files; render the no-data hint."""
@@ -427,16 +399,38 @@ def test_usage_command_no_data_when_no_events(
     assert "No usage data yet" in result.output
 
 
+@pytest.mark.tmux
 def test_usage_command_picks_freshest_across_agents(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
+    local_host: Host,
+    tmp_path: Path,
     cli_profile_dir: Path,
 ) -> None:
     """Two agents, two events, the most-recent timestamp wins."""
-    _plant_event(
-        temp_host_dir,
-        "agent-old",
+    work_dir_old = tmp_path / "work-old"
+    work_dir_old.mkdir()
+    agent_old = local_host.create_agent_state(
+        work_dir_path=work_dir_old,
+        options=CreateAgentOptions(
+            name=AgentName("usage-test-old"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 9999"),
+        ),
+    )
+    work_dir_new = tmp_path / "work-new"
+    work_dir_new.mkdir()
+    agent_new = local_host.create_agent_state(
+        work_dir_path=work_dir_new,
+        options=CreateAgentOptions(
+            name=AgentName("usage-test-new"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 9999"),
+        ),
+    )
+    _plant_event_for_agent(
+        local_host,
+        agent_old,
         {
             "source": "claude/rate_limits",
             "type": "rate_limit_snapshot",
@@ -445,9 +439,9 @@ def test_usage_command_picks_freshest_across_agents(
             "rate_limits": {"five_hour": {"used_percentage": 10.0, "resets_at": 9_999_999_999_999}},
         },
     )
-    _plant_event(
-        temp_host_dir,
-        "agent-new",
+    _plant_event_for_agent(
+        local_host,
+        agent_new,
         {
             "source": "claude/rate_limits",
             "type": "rate_limit_snapshot",
@@ -469,10 +463,12 @@ def test_usage_command_picks_freshest_across_agents(
     assert payload["sources"][0]["five_hour"]["used_percentage"] == 99.0
 
 
+@pytest.mark.tmux
 def test_usage_command_uses_reset_specific_warning_when_window_just_reset(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
     cli_profile_dir: Path,
 ) -> None:
     """Regression: when a snapshot is fresh but a window already reset, the
@@ -480,9 +476,9 @@ def test_usage_command_uses_reset_specific_warning_when_window_just_reset(
     updated now ago"). The age-based warning fires only when the snapshot
     itself is stale by age."""
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
-    _plant_event(
-        temp_host_dir,
-        "agent-aaa",
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
         {
             "source": "claude/rate_limits",
             "type": "rate_limit_snapshot",
@@ -502,16 +498,38 @@ def test_usage_command_uses_reset_specific_warning_when_window_just_reset(
     assert "a window already reset" in result.output
 
 
+@pytest.mark.tmux
 def test_usage_command_human_format_multi_source(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
+    local_host: Host,
+    tmp_path: Path,
     cli_profile_dir: Path,
 ) -> None:
     """When two distinct sources contribute, render each as its own [source] section."""
-    _plant_event(
-        temp_host_dir,
-        "agent-aaa",
+    work_dir_a = tmp_path / "work-a"
+    work_dir_a.mkdir()
+    agent_a = local_host.create_agent_state(
+        work_dir_path=work_dir_a,
+        options=CreateAgentOptions(
+            name=AgentName("usage-test-claude"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 9999"),
+        ),
+    )
+    work_dir_b = tmp_path / "work-b"
+    work_dir_b.mkdir()
+    agent_b = local_host.create_agent_state(
+        work_dir_path=work_dir_b,
+        options=CreateAgentOptions(
+            name=AgentName("usage-test-opencode"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 9999"),
+        ),
+    )
+    _plant_event_for_agent(
+        local_host,
+        agent_a,
         {
             "source": "claude/rate_limits",
             "type": "rate_limit_snapshot",
@@ -521,9 +539,9 @@ def test_usage_command_human_format_multi_source(
         },
         source="claude",
     )
-    _plant_event(
-        temp_host_dir,
-        "agent-bbb",
+    _plant_event_for_agent(
+        local_host,
+        agent_b,
         {
             "source": "opencode/rate_limits",
             "type": "rate_limit_snapshot",

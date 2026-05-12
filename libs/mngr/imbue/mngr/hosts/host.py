@@ -194,6 +194,30 @@ def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
     return host_dir / "agents" / str(agent_id)
 
 
+def read_json_dict_via_host(host: OnlineHostInterface, path: Path) -> dict[str, Any]:
+    """Host-aware variant of ``mngr.utils.file_utils.read_json_dict``.
+
+    Reads ``path`` via the host (works for local or remote hosts). Missing
+    file, unparseable JSON, or non-object JSON each yield ``{}`` -- the same
+    tolerance ``read_json_dict`` provides for plugin provisioning that
+    reads optional user-managed config like ``.claude/settings.json``.
+
+    Lives here rather than in ``file_utils`` because it needs
+    ``OnlineHostInterface``, which would create a circular import via
+    ``config.data_types``.
+    """
+    try:
+        content = host.read_text_file(path)
+    except FileNotFoundError:
+        return {}
+    try:
+        loaded = json.loads(content)
+    except json.JSONDecodeError as e:
+        logger.warning("Could not parse {} as JSON ({}); treating as empty.", path, e)
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def _git_command_stdout(host: OnlineHostInterface, command: str, cwd: Path) -> str | None:
     """Run a git command on a host and return its stripped stdout, or None if it failed or was empty.
 

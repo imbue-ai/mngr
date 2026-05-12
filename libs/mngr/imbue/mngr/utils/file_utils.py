@@ -11,11 +11,14 @@ from loguru import logger
 def read_json_dict(path: Path) -> dict[str, Any]:
     """Read ``path`` as a JSON object dict, returning ``{}`` if missing/malformed/non-dict.
 
-    The "safe read" pattern several plugins (mngr_claude, mngr_claude_usage,
-    etc.) want when consulting an optional user-managed config file like
-    ``.claude/settings.json``: a typo in the file shouldn't break agent
-    provisioning. Missing file -> ``{}``. Unparseable JSON -> log a warning
-    and ``{}``. Non-object JSON (top-level list, string, etc.) -> ``{}``.
+    The "safe read" pattern several plugins want when consulting an optional
+    user-managed config file like ``.claude/settings.json``: a typo in the
+    file shouldn't break agent provisioning. Missing file -> ``{}``.
+    Unparseable JSON -> log a warning and ``{}``. Non-object JSON (top-level
+    list, string, etc.) -> ``{}``.
+
+    For a host-aware variant that reads via ``OnlineHostInterface``, see
+    ``mngr.hosts.host.read_json_dict_via_host``.
     """
     if not path.is_file():
         return {}

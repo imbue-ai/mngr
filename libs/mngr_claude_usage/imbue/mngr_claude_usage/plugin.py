@@ -12,23 +12,22 @@ CLI find the data.
 
 Provisioning runs from a single ``on_before_provisioning`` hookimpl on
 mngr core, so this plugin doesn't depend on any Claude-specific hookspec.
+All file I/O goes through ``host.read_text_file`` / ``host.write_file``
+so the provisioner works for local and remote agents uniformly.
 """
 
 from __future__ import annotations
 
 import importlib.resources
 import json
-import os
-import shutil
-import stat
 from pathlib import Path
 
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.hosts.host import read_json_dict_via_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.utils.file_utils import read_json_dict
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude_usage import resources as _resources
 
@@ -37,7 +36,7 @@ _STATUSLINE_SHIM_SCRIPT = "claude_statusline.sh"
 _USER_STATUSLINE_CMD_FILE = "user_statusline_cmd"
 
 
-def _capture_existing_statusline_command(work_dir: Path, our_shim_path: str) -> str:
+def _capture_existing_statusline_command(host: OnlineHostInterface, work_dir: Path, our_shim_path: str) -> str:
     """Capture the user's pre-existing ``statusLine.command`` so the shim can chain to it.
 
     Reads ``<work_dir>/.claude/settings.local.json`` first (local tier wins in
@@ -50,7 +49,7 @@ def _capture_existing_statusline_command(work_dir: Path, our_shim_path: str) -> 
     """
     claude_dir = work_dir / ".claude"
     for filename in ("settings.local.json", "settings.json"):
-        settings = read_json_dict(claude_dir / filename)
+        settings = read_json_dict_via_host(host, claude_dir / filename)
         statusline = settings.get("statusLine")
         if not isinstance(statusline, dict):
             continue
@@ -63,100 +62,88 @@ def _capture_existing_statusline_command(work_dir: Path, our_shim_path: str) -> 
     return ""
 
 
-def _write_user_statusline_cmd(commands_dir: Path, command: str) -> None:
+def _write_user_statusline_cmd(host: OnlineHostInterface, commands_dir: Path, command: str) -> None:
     """Write the captured user command to the sidecar file the shim reads.
 
-    If the sidecar already exists with the same contents, skip the write (avoid
-    needless mtime churn on re-provisioning).
-
-    An empty ``command`` means "no user command was found in settings this
-    run". On re-provisioning that's the expected state for users whose
-    original statusline lived in ``settings.local.json``: our first provision
+    Empty ``command`` means the most recent capture pass found nothing; on
+    re-provisioning that's the expected state for users whose original
+    statusline lived in ``settings.local.json`` (our first provision
     captured it into the sidecar and overwrote settings.local.json with our
-    shim, so subsequent runs find only our shim there and nothing in
-    settings.json. To avoid silently dropping a previously-captured user
-    command, we preserve any existing non-empty sidecar when called with an
-    empty ``command``. (A user who genuinely wants to clear their wrapped
-    statusline can delete the sidecar manually -- it's still a strictly
-    better failure mode than silent loss.)
+    shim, so subsequent runs find only our shim there). To avoid silently
+    dropping the previously-captured user command, we preserve any existing
+    non-empty sidecar when called with an empty ``command``. (A user who
+    genuinely wants to clear their wrapped statusline can delete the
+    sidecar manually -- it's still a strictly better failure mode than
+    silent loss.)
     """
     sidecar = commands_dir / _USER_STATUSLINE_CMD_FILE
-    if not command and sidecar.is_file() and sidecar.read_text():
-        return
-    if sidecar.is_file() and sidecar.read_text() == command:
-        return
-    sidecar.write_text(command)
+    if not command:
+        try:
+            existing = host.read_text_file(sidecar)
+        except FileNotFoundError:
+            existing = ""
+        if existing:
+            return
+    host.write_file(sidecar, command.encode())
 
 
-def _copy_resource_script(commands_dir: Path, filename: str) -> None:
-    """Copy a packaged resource script into ``commands_dir`` and chmod +x.
-
-    Uses ``importlib.resources.as_file`` so it works whether the package is
-    installed as source files or zipped (we only ever ship as source today,
-    but the pattern is correct).
-    """
+def _install_resource_script(host: OnlineHostInterface, commands_dir: Path, filename: str) -> None:
+    """Install a packaged resource script onto the host with mode 0755."""
     dst = commands_dir / filename
-    src_traversable = importlib.resources.files(_resources).joinpath(filename)
-    with importlib.resources.as_file(src_traversable) as src_path:
-        shutil.copyfile(src_path, dst)
-    dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    content = importlib.resources.files(_resources).joinpath(filename).read_text().encode()
+    host.write_file(dst, content, mode="0755")
 
 
-def _install_settings_local_statusline(work_dir: Path, statusline_command: str) -> None:
-    """Set the agent's ``statusLine.command`` in ``<work_dir>/.claude/settings.local.json``.
+def _install_settings_local_statusline(host: OnlineHostInterface, work_dir: Path, statusline_command: str) -> None:
+    """Set ``statusLine.command`` in ``<work_dir>/.claude/settings.local.json`` on the host.
 
     Merges with whatever else is in that file (other plugins or the user may
-    have written hooks, MCP servers, etc.). Atomic via temp + os.replace so a
-    partial write can't corrupt the file.
+    have written hooks, MCP servers, etc.). Atomic via ``host.write_file``'s
+    ``is_atomic=True`` so a partial write can't corrupt the file.
     """
-    claude_dir = work_dir / ".claude"
-    claude_dir.mkdir(parents=True, exist_ok=True)
-    settings_path = claude_dir / "settings.local.json"
-    settings = read_json_dict(settings_path)
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    settings = read_json_dict_via_host(host, settings_path)
     settings["statusLine"] = {"type": "command", "command": statusline_command}
-    tmp = settings_path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(settings, indent=2))
-    os.replace(tmp, settings_path)
+    host.write_file(settings_path, (json.dumps(settings, indent=2) + "\n").encode(), is_atomic=True)
 
 
-def _provision_statusline_shim(state_dir: Path, work_dir: Path) -> None:
-    """Install shim, writer, sidecar, and settings.local.json statusLine."""
+def _provision_statusline_shim(host: OnlineHostInterface, state_dir: Path, work_dir: Path) -> None:
+    """Install shim, writer, sidecar, and settings.local.json statusLine.
+
+    All file writes go through the ``host`` so this works uniformly for local
+    and remote agents.
+    """
     commands_dir = state_dir / "commands"
-    commands_dir.mkdir(parents=True, exist_ok=True)
-
     shim_path = str(commands_dir / _STATUSLINE_SHIM_SCRIPT)
-    user_cmd = _capture_existing_statusline_command(work_dir, our_shim_path=shim_path)
-    _write_user_statusline_cmd(commands_dir, user_cmd)
-
-    _copy_resource_script(commands_dir, _STATUSLINE_SHIM_SCRIPT)
-    _copy_resource_script(commands_dir, _RATE_LIMITS_WRITER_SCRIPT)
-
-    _install_settings_local_statusline(work_dir, shim_path)
+    user_cmd = _capture_existing_statusline_command(host, work_dir, our_shim_path=shim_path)
+    _write_user_statusline_cmd(host, commands_dir, user_cmd)
+    _install_resource_script(host, commands_dir, _STATUSLINE_SHIM_SCRIPT)
+    _install_resource_script(host, commands_dir, _RATE_LIMITS_WRITER_SCRIPT)
+    _install_settings_local_statusline(host, work_dir, shim_path)
 
 
 @hookimpl
 def on_before_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
-    """Provision the rate-limit statusline shim for Claude agents on the local host.
+    """Provision the rate-limit statusline shim for Claude agents on any host.
 
     Steps:
     1. Capture the user's pre-existing ``statusLine.command`` (if any) into
        ``<state_dir>/commands/user_statusline_cmd`` so the shim can chain.
-    2. Copy the shim and the writer into ``<state_dir>/commands/``.
+    2. Install the shim and the writer into ``<state_dir>/commands/``.
     3. Set ``<work_dir>/.claude/settings.local.json``'s ``statusLine.command``
-       to point at our shim (local-tier wins over project-tier in Claude Code's
-       precedence stack).
+       to point at our shim (local-tier wins over project-tier in Claude
+       Code's precedence stack).
 
-    Skips non-Claude agents and remote hosts. The remote-host skip is a
-    current limitation of ``mngr usage``'s walker (it inspects the local
-    filesystem only); a future enhancement could use ``list_agents`` +
-    ``read_event_content`` from ``mngr.api`` to read events from remote
-    agents the same way ``mngr transcript`` does. The ``isinstance`` check
-    covers ``claude``, ``headless_claude``, and user-defined agent types
-    whose ``parent_type`` chain reaches ``claude`` (e.g. config-defined
-    templates like ``write-plus``).
+    All writes go through ``host.write_file`` so the provisioner works for
+    local and remote agents the same way. Skips non-Claude agents only; the
+    ``isinstance`` check covers ``claude``, ``headless_claude``, and
+    user-defined agent types whose ``parent_type`` chain reaches ``claude``
+    (e.g. config-defined templates like ``write-plus``).
     """
     if not isinstance(agent, ClaudeAgent):
         return
-    if not host.is_local:
-        return
-    _provision_statusline_shim(get_agent_state_dir_path(host.host_dir, agent.id), agent.work_dir)
+    _provision_statusline_shim(
+        host,
+        get_agent_state_dir_path(host.host_dir, agent.id),
+        agent.work_dir,
+    )

@@ -2,25 +2,38 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterable
 from datetime import datetime
-from pathlib import Path
+from threading import Lock
 from typing import Any
 from typing import assert_never
 
 import click
+from click_option_group import optgroup
 from loguru import logger
+from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.events import discover_event_sources
+from imbue.mngr.api.events import read_event_content
+from imbue.mngr.api.events import try_build_events_target_for_agent
+from imbue.mngr.api.list import ErrorBehavior
+from imbue.mngr.api.list import list_agents
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.filter_opts import AgentFilterCliOptions
+from imbue.mngr.cli.filter_opts import add_agent_filter_options
+from imbue.mngr.cli.filter_opts import build_agent_filter_cel
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr_usage.data_types import UsagePluginConfig
@@ -32,8 +45,13 @@ from imbue.mngr_usage.data_types import WindowSnapshot
 # This mirrors the common_transcript pattern (events/<source>/common_transcript/
 # events.jsonl) used by `mngr transcript`. The <source> segment names the
 # writer (a free-form identifier chosen by the writer plugin) and becomes the
-# UsageSnapshot.source_name for the event.
-_RATE_LIMITS_EVENTS_LEAF: tuple[str, str] = ("rate_limits", "events.jsonl")
+# UsageSnapshot.source_name for the event. ``mngr usage`` finds events by
+# enumerating agents via ``list_agents`` and reading per-agent events via the
+# events API -- this works uniformly for local and remote agents, and inherits
+# ``mngr list``'s CEL filter machinery (``--include``, ``--exclude``,
+# ``--provider``, ``--local``, ...).
+_RATE_LIMITS_SOURCE_SUFFIX = "/rate_limits"
+_EVENTS_JSONL_FILENAME = "events.jsonl"
 
 _NO_DATA_HINT = (
     "No usage data yet -- check that a usage writer plugin is installed in the env "
@@ -42,13 +60,18 @@ _NO_DATA_HINT = (
 )
 
 
-class UsageCliOptions(CommonCliOptions):
+class UsageCliOptions(CommonCliOptions, AgentFilterCliOptions):
     """Options for the `mngr usage` command.
 
-    Inherits common options (output_format, quiet, verbose, etc.) from CommonCliOptions.
+    Inherits common output options (output_format, quiet, verbose, etc.) from
+    ``CommonCliOptions`` and the agent-filter flags (``--include``,
+    ``--exclude``, ``--local``, ``--running``, ``--project``, ``--label``,
+    ...) from ``AgentFilterCliOptions`` so the same filtering vocabulary
+    ``mngr list`` and ``mngr kanpan`` use applies here too.
     """
 
     max_age: str | None
+    provider: tuple[str, ...]
 
 
 @pure
@@ -69,50 +92,16 @@ def _parse_max_age(value: str | None) -> int | None:
 # =============================================================================
 
 
-def _iter_rate_limit_event_files(host_dir: Path) -> Iterable[tuple[Path, str]]:
-    """Yield ``(events_file, source_name)`` pairs across all agents on this host.
-
-    Pattern: ``<host_dir>/agents/agent-*/events/<source>/rate_limits/events.jsonl``
-    -- the same shape ``mngr transcript`` uses for ``events/<source>/common_transcript/...``.
-    The ``<source>`` segment is what we use as the snapshot source name.
-    Missing path components yield nothing rather than raising.
-
-    ``host_dir`` is ``expanduser()``'d defensively because mngr's pydantic
-    default for ``default_host_dir`` is the literal unexpanded ``Path("~/.mngr")``
-    when neither ``MNGR_HOST_DIR`` env var nor a config file overrides it
-    (see ``libs/mngr/imbue/mngr/config/loader.py``). Without the expansion,
-    a clean shell with no ``MNGR_HOST_DIR`` would walk a non-existent
-    ``~/.mngr/agents`` and silently report no usage data.
-    """
-    agents_dir = host_dir.expanduser() / "agents"
-    if not agents_dir.is_dir():
-        return
-    for agent_state_dir in agents_dir.iterdir():
-        if not agent_state_dir.is_dir():
-            continue
-        events_dir = agent_state_dir / "events"
-        if not events_dir.is_dir():
-            continue
-        for source_dir in events_dir.iterdir():
-            if not source_dir.is_dir():
-                continue
-            candidate = source_dir / _RATE_LIMITS_EVENTS_LEAF[0] / _RATE_LIMITS_EVENTS_LEAF[1]
-            if candidate.is_file():
-                yield candidate, source_dir.name
-
-
-def _read_last_event(events_file: Path) -> dict[str, Any] | None:
-    """Read the last well-formed JSON object from a JSONL events file.
+@pure
+def _last_valid_event_from_content(content: str, source_for_warnings: str) -> dict[str, Any] | None:
+    """Return the last well-formed JSON object from a JSONL events file's content.
 
     Walks lines from the end; tolerates a truncated trailing line by skipping
     it and trying the previous one. Returns None if no valid line exists.
+    ``source_for_warnings`` is included in any malformed-line warning so the
+    user can locate the offending events file.
     """
-    try:
-        text = events_file.read_text()
-    except OSError as e:
-        logger.debug("Could not read {}: {}", events_file, e)
-        return None
-    for line in reversed([raw for raw in text.splitlines() if raw.strip()]):
+    for line in reversed([raw for raw in content.splitlines() if raw.strip()]):
         try:
             event = json.loads(line)
         except json.JSONDecodeError as e:
@@ -121,7 +110,7 @@ def _read_last_event(events_file: Path) -> dict[str, Any] | None:
             # level for visibility because corrupt earlier lines indicate something
             # worse and the user should know about it; expected truncation will
             # resolve on the next render.
-            logger.warning("Skipping malformed event line in {}: {}", events_file, e)
+            logger.warning("Skipping malformed event line in {}: {}", source_for_warnings, e)
             continue
         if isinstance(event, dict):
             return event
@@ -216,25 +205,97 @@ def _snapshot_from_event(event: dict[str, Any], source_name: str) -> UsageSnapsh
     return UsageSnapshot(source_name=source_name, windows=windows, updated_at=timestamp)
 
 
-def _gather_snapshots(host_dir: Path) -> list[UsageSnapshot]:
-    """Walk events files across all agents, return one UsageSnapshot per source.
+def _snapshots_for_agent(mngr_ctx: MngrContext, agent: AgentDetails) -> list[UsageSnapshot]:
+    """Read all rate-limit snapshots from one agent's events directory.
 
-    Multiple agents may share the same source name -- the writer plugin
-    chooses the segment, so all agents that share a writer write to the
-    same ``events/<source>/rate_limits/events.jsonl`` under their own state
-    dirs. For each (events_file, source_name) we extract the last event;
-    if several events files exist for the same source_name,
-    ``_collapse_by_source`` later keeps the freshest per source_name.
+    Builds an ``EventsTarget`` for the agent (works for local + remote +
+    volume-backed hosts), discovers source dirs under ``events/``, and for
+    each source matching ``<source>/rate_limits`` reads the last event and
+    converts to a ``UsageSnapshot``. Returns ``[]`` if the host has no
+    events access, has no rate_limits source, or all events fail to parse.
     """
+    target = try_build_events_target_for_agent(
+        mngr_ctx=mngr_ctx,
+        agent_id=agent.id,
+        agent_name=str(agent.name),
+        host_id=agent.host.id,
+        provider_name=agent.host.provider_name,
+    )
+    if target is None:
+        return []
+    try:
+        sources = discover_event_sources(target)
+    except MngrError as e:
+        logger.debug("Could not discover events for agent {}: {}", agent.name, e)
+        return []
     snapshots: list[UsageSnapshot] = []
-    for events_file, source_name in _iter_rate_limit_event_files(host_dir):
-        event = _read_last_event(events_file)
+    for source in sources:
+        if not source.source_path.endswith(_RATE_LIMITS_SOURCE_SUFFIX) or not source.is_current_file_present:
+            continue
+        try:
+            content = read_event_content(target, f"{source.source_path}/{_EVENTS_JSONL_FILENAME}")
+        except (MngrError, FileNotFoundError) as e:
+            logger.debug("Could not read {} for agent {}: {}", source.source_path, agent.name, e)
+            continue
+        event = _last_valid_event_from_content(content, f"agent {agent.name} {source.source_path}")
         if event is None:
             continue
+        source_name = source.source_path.removesuffix(_RATE_LIMITS_SOURCE_SUFFIX)
         snapshot = _snapshot_from_event(event, source_name)
         if snapshot is not None:
             snapshots.append(snapshot)
     return snapshots
+
+
+class _SnapshotCollector(MutableModel):
+    """``list_agents`` on_agent callback that collects per-agent rate-limit snapshots.
+
+    Class-based rather than a closure so it can hold its own lock without
+    triggering the "no inline functions" ratchet (the callback runs from a
+    streaming provider thread).
+    """
+
+    mngr_ctx: MngrContext
+    snapshots: list[UsageSnapshot] = []
+    _lock: Lock = PrivateAttr(default_factory=Lock)
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    def __call__(self, agent: AgentDetails) -> None:
+        agent_snapshots = _snapshots_for_agent(self.mngr_ctx, agent)
+        if not agent_snapshots:
+            return
+        with self._lock:
+            self.snapshots.extend(agent_snapshots)
+
+
+def _gather_snapshots(
+    mngr_ctx: MngrContext,
+    *,
+    include_filters: tuple[str, ...],
+    exclude_filters: tuple[str, ...],
+    provider_names: tuple[str, ...] | None,
+) -> list[UsageSnapshot]:
+    """Enumerate matching agents via ``list_agents`` and collect their rate-limit snapshots.
+
+    Inherits ``mngr list``'s CEL filtering, so e.g. ``mngr usage --local`` /
+    ``--provider local`` / ``--project foo`` work without per-command glue.
+    Errors from individual hosts are tolerated so a flaky remote provider
+    doesn't crash the whole pass; this matches ``mngr list``'s
+    ``CONTINUE`` behavior under stress (and is what users expect from a
+    glanceable status command).
+    """
+    collector = _SnapshotCollector(mngr_ctx=mngr_ctx)
+    list_agents(
+        mngr_ctx=mngr_ctx,
+        is_streaming=True,
+        include_filters=include_filters,
+        exclude_filters=exclude_filters,
+        provider_names=provider_names,
+        error_behavior=ErrorBehavior.CONTINUE,
+        on_agent=collector,
+    )
+    return collector.snapshots
 
 
 @pure
@@ -514,15 +575,21 @@ def _emit_output(
     default=None,
     help="Stale-warning threshold (e.g. '300', '5m', '2h'). Default: from plugin config.",
 )
+@add_agent_filter_options
+@optgroup.option(
+    "--provider",
+    multiple=True,
+    help="Show only agents from the given provider(s) (repeatable, e.g. --provider local)",
+)
 @add_common_options
 @click.pass_context
 def usage(ctx: click.Context, **kwargs: Any) -> None:
     """Show rolling-window usage / quota data captured by an agent's statusline.
 
-    Walks ``<host_dir>/agents/*/events/<source>/rate_limits/events.jsonl``
-    (matching the same convention ``mngr transcript`` uses for
-    ``common_transcript``), parses the freshest event per source, picks the
-    most recent across sources, and renders.
+    Enumerates agents via ``list_agents`` (same machinery, filters, and speed
+    profile as ``mngr list``), reads each agent's ``events/<source>/
+    rate_limits/events.jsonl`` via the events API (so remote agents work the
+    same as local), and renders the freshest snapshot per source.
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -535,7 +602,16 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
     max_age_override = _parse_max_age(opts.max_age)
     effective_max_age = max_age_override if max_age_override is not None else plugin_config.max_age_seconds
 
-    snapshots = _collapse_by_source(_gather_snapshots(mngr_ctx.config.default_host_dir))
+    include_filters, exclude_filters = build_agent_filter_cel(opts, mngr_ctx.concurrency_group)
+    provider_names = opts.provider if opts.provider else None
+    snapshots = _collapse_by_source(
+        _gather_snapshots(
+            mngr_ctx,
+            include_filters=include_filters,
+            exclude_filters=exclude_filters,
+            provider_names=provider_names,
+        )
+    )
     now = int(time.time())
 
     # One render model per source (freshest snapshot for that source), sorted
@@ -556,13 +632,15 @@ CommandHelpMetadata(
     description="""Reports rolling-window usage / quota data captured by an agent's
 statusline.
 
-This command is agent-agnostic: it walks ``<host_dir>/agents/*/events/<source>/
-rate_limits/events.jsonl`` and renders the most recent event. The pattern
-mirrors how ``mngr transcript`` discovers ``common_transcript`` events --
-writer plugins emit events to the conventional path; ``mngr usage`` discovers
-them automatically without any agent-specific knowledge.""",
+Agent-agnostic and host-agnostic: enumerates matching agents via
+``list_agents`` (same machinery and filter vocabulary as ``mngr list``) and
+reads each agent's ``events/<source>/rate_limits/events.jsonl`` via the
+events API. Local and remote agents are read uniformly; the writer plugin
+chooses the ``<source>`` segment.""",
     examples=(
         ("Show current usage", "mngr usage"),
+        ("Local agents only", "mngr usage --local"),
+        ("Specific providers", "mngr usage --provider local --provider modal"),
         ("Treat the snapshot as stale after 60s (warning only)", "mngr usage --max-age 60"),
         ("Machine-readable output", "mngr usage --format json"),
         ("Custom format template", "mngr usage --format '{five_hour.used_percentage}/{seven_day.used_percentage}'"),

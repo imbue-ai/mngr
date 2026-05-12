@@ -8,6 +8,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.hosts.host import Host
 from imbue.mngr_claude_usage.plugin import _capture_existing_statusline_command
 from imbue.mngr_claude_usage.plugin import _install_settings_local_statusline
 from imbue.mngr_claude_usage.plugin import _provision_statusline_shim
@@ -34,28 +35,28 @@ class _StubHost(BaseModel):
 # =============================================================================
 
 
-def test_capture_picks_up_command_from_settings_json(tmp_path: Path) -> None:
+def test_capture_picks_up_command_from_settings_json(local_host: Host, tmp_path: Path) -> None:
     claude_dir = tmp_path / ".claude"
     claude_dir.mkdir()
     (claude_dir / "settings.json").write_text(
         json.dumps({"statusLine": {"type": "command", "command": "/path/to/user-statusline.sh"}})
     )
     assert (
-        _capture_existing_statusline_command(tmp_path, our_shim_path="/different/shim.sh")
+        _capture_existing_statusline_command(local_host, tmp_path, our_shim_path="/different/shim.sh")
         == "/path/to/user-statusline.sh"
     )
 
 
-def test_capture_prefers_settings_local_over_settings_json(tmp_path: Path) -> None:
+def test_capture_prefers_settings_local_over_settings_json(local_host: Host, tmp_path: Path) -> None:
     """Local tier wins over project tier in Claude Code's precedence stack."""
     claude_dir = tmp_path / ".claude"
     claude_dir.mkdir()
     (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/project.sh"}}))
     (claude_dir / "settings.local.json").write_text(json.dumps({"statusLine": {"command": "/local.sh"}}))
-    assert _capture_existing_statusline_command(tmp_path, our_shim_path="/different.sh") == "/local.sh"
+    assert _capture_existing_statusline_command(local_host, tmp_path, our_shim_path="/different.sh") == "/local.sh"
 
 
-def test_capture_skips_self_recursion(tmp_path: Path) -> None:
+def test_capture_skips_self_recursion(local_host: Host, tmp_path: Path) -> None:
     """On re-provisioning, our own shim is in settings.local.json -- skip it and
     fall through to settings.json so we don't form a recursive wrap."""
     claude_dir = tmp_path / ".claude"
@@ -63,18 +64,18 @@ def test_capture_skips_self_recursion(tmp_path: Path) -> None:
     own_shim = "/state/commands/claude_statusline.sh"
     (claude_dir / "settings.local.json").write_text(json.dumps({"statusLine": {"command": own_shim}}))
     (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/user-statusline.sh"}}))
-    assert _capture_existing_statusline_command(tmp_path, our_shim_path=own_shim) == "/user-statusline.sh"
+    assert _capture_existing_statusline_command(local_host, tmp_path, our_shim_path=own_shim) == "/user-statusline.sh"
 
 
-def test_capture_returns_empty_when_no_settings(tmp_path: Path) -> None:
-    assert _capture_existing_statusline_command(tmp_path, our_shim_path="/x") == ""
+def test_capture_returns_empty_when_no_settings(local_host: Host, tmp_path: Path) -> None:
+    assert _capture_existing_statusline_command(local_host, tmp_path, our_shim_path="/x") == ""
 
 
-def test_capture_tolerates_malformed_json(tmp_path: Path) -> None:
+def test_capture_tolerates_malformed_json(local_host: Host, tmp_path: Path) -> None:
     claude_dir = tmp_path / ".claude"
     claude_dir.mkdir()
     (claude_dir / "settings.json").write_text("{not valid json")
-    assert _capture_existing_statusline_command(tmp_path, our_shim_path="/x") == ""
+    assert _capture_existing_statusline_command(local_host, tmp_path, our_shim_path="/x") == ""
 
 
 # =============================================================================
@@ -82,42 +83,42 @@ def test_capture_tolerates_malformed_json(tmp_path: Path) -> None:
 # =============================================================================
 
 
-def test_install_creates_settings_local_when_absent(tmp_path: Path) -> None:
-    _install_settings_local_statusline(tmp_path, "/path/to/shim.sh")
+def test_install_creates_settings_local_when_absent(local_host: Host, tmp_path: Path) -> None:
+    _install_settings_local_statusline(local_host, tmp_path, "/path/to/shim.sh")
     settings = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
     assert settings == {"statusLine": {"type": "command", "command": "/path/to/shim.sh"}}
 
 
-def test_install_merges_into_existing_settings_local(tmp_path: Path) -> None:
+def test_install_merges_into_existing_settings_local(local_host: Host, tmp_path: Path) -> None:
     """Existing keys (hooks, MCP servers, etc.) must be preserved."""
     claude_dir = tmp_path / ".claude"
     claude_dir.mkdir()
     (claude_dir / "settings.local.json").write_text(json.dumps({"hooks": {"SessionStart": "..."}}))
-    _install_settings_local_statusline(tmp_path, "/shim.sh")
+    _install_settings_local_statusline(local_host, tmp_path, "/shim.sh")
     settings = json.loads((claude_dir / "settings.local.json").read_text())
     assert settings["hooks"] == {"SessionStart": "..."}
     assert settings["statusLine"]["command"] == "/shim.sh"
 
 
-def test_install_overwrites_previous_statusline(tmp_path: Path) -> None:
+def test_install_overwrites_previous_statusline(local_host: Host, tmp_path: Path) -> None:
     claude_dir = tmp_path / ".claude"
     claude_dir.mkdir()
     (claude_dir / "settings.local.json").write_text(json.dumps({"statusLine": {"command": "/old.sh"}}))
-    _install_settings_local_statusline(tmp_path, "/new.sh")
+    _install_settings_local_statusline(local_host, tmp_path, "/new.sh")
     settings = json.loads((claude_dir / "settings.local.json").read_text())
     assert settings["statusLine"]["command"] == "/new.sh"
 
 
 # =============================================================================
-# on_before_provisioning (end-to-end)
+# _provision_statusline_shim (end-to-end via local_host)
 # =============================================================================
 
 
-def test_provision_creates_shim_writer_and_settings_local(tmp_path: Path) -> None:
+def test_provision_creates_shim_writer_and_settings_local(local_host: Host, tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    _provision_statusline_shim(state_dir, work_dir)
+    _provision_statusline_shim(local_host, state_dir, work_dir)
     commands = state_dir / "commands"
     assert (commands / "claude_statusline.sh").is_file()
     assert (commands / "claude_rate_limits_writer.sh").is_file()
@@ -130,20 +131,20 @@ def test_provision_creates_shim_writer_and_settings_local(tmp_path: Path) -> Non
     assert sidecar.read_text() == ""
 
 
-def test_provision_captures_existing_user_statusline(tmp_path: Path) -> None:
+def test_provision_captures_existing_user_statusline(local_host: Host, tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     work_dir = tmp_path / "work"
     claude_dir = work_dir / ".claude"
     claude_dir.mkdir(parents=True)
     (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/path/to/user-statusline.sh"}}))
-    _provision_statusline_shim(state_dir, work_dir)
+    _provision_statusline_shim(local_host, state_dir, work_dir)
     sidecar = state_dir / "commands" / "user_statusline_cmd"
     assert sidecar.read_text() == "/path/to/user-statusline.sh"
     project_settings = json.loads((claude_dir / "settings.json").read_text())
     assert project_settings["statusLine"]["command"] == "/path/to/user-statusline.sh"
 
 
-def test_provision_is_idempotent_on_reprovision(tmp_path: Path) -> None:
+def test_provision_is_idempotent_on_reprovision(local_host: Host, tmp_path: Path) -> None:
     """Re-running must not capture our own shim as the user command, and must
     preserve the originally captured user command across runs."""
     state_dir = tmp_path / "state"
@@ -151,12 +152,12 @@ def test_provision_is_idempotent_on_reprovision(tmp_path: Path) -> None:
     claude_dir = work_dir / ".claude"
     claude_dir.mkdir(parents=True)
     (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/user-statusline.sh"}}))
-    _provision_statusline_shim(state_dir, work_dir)
-    _provision_statusline_shim(state_dir, work_dir)
+    _provision_statusline_shim(local_host, state_dir, work_dir)
+    _provision_statusline_shim(local_host, state_dir, work_dir)
     assert (state_dir / "commands" / "user_statusline_cmd").read_text() == "/user-statusline.sh"
 
 
-def test_provision_preserves_user_cmd_when_only_in_settings_local(tmp_path: Path) -> None:
+def test_provision_preserves_user_cmd_when_only_in_settings_local(local_host: Host, tmp_path: Path) -> None:
     """User's original statusline lives only in settings.local.json (gitignored
     local tier). First provision captures it, then overwrites settings.local.json
     with our shim. On re-provisioning, the sidecar must still hold the original
@@ -167,8 +168,8 @@ def test_provision_preserves_user_cmd_when_only_in_settings_local(tmp_path: Path
     claude_dir = work_dir / ".claude"
     claude_dir.mkdir(parents=True)
     (claude_dir / "settings.local.json").write_text(json.dumps({"statusLine": {"command": "/user-statusline.sh"}}))
-    _provision_statusline_shim(state_dir, work_dir)
-    _provision_statusline_shim(state_dir, work_dir)
+    _provision_statusline_shim(local_host, state_dir, work_dir)
+    _provision_statusline_shim(local_host, state_dir, work_dir)
     assert (state_dir / "commands" / "user_statusline_cmd").read_text() == "/user-statusline.sh"
 
 
