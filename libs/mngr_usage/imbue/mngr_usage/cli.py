@@ -35,6 +35,7 @@ from imbue.mngr_usage.api import WaitForUsageResult
 from imbue.mngr_usage.api import derive_elapsed
 from imbue.mngr_usage.api import gather_usage_snapshots
 from imbue.mngr_usage.api import wait_for_usage
+from imbue.mngr_usage.api import window_has_data
 from imbue.mngr_usage.api import window_render_dict
 from imbue.mngr_usage.data_types import UsagePluginConfig
 from imbue.mngr_usage.data_types import UsageSnapshot
@@ -144,7 +145,7 @@ def _window_to_template_values(window: WindowSnapshot, now: int) -> dict[str, st
         "window_seconds": "" if window.window_seconds is None else str(window.window_seconds),
         "elapsed_seconds": "" if elapsed_seconds is None else str(elapsed_seconds),
         "elapsed_percentage": "" if elapsed_percentage is None else f"{elapsed_percentage:.2f}",
-        "is_present": "true" if window.used_percentage is not None or window.resets_at is not None else "false",
+        "is_present": "true" if window_has_data(window) else "false",
     }
 
 

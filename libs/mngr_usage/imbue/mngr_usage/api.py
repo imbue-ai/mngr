@@ -136,6 +136,19 @@ def snapshot_from_event(event: dict[str, Any], source_name: str) -> UsageSnapsho
 
 
 @pure
+def window_has_data(window: WindowSnapshot) -> bool:
+    """Return True if the window has any writer-supplied content worth rendering.
+
+    A window is considered "present" once the writer has populated either a
+    usage percentage or a reset timestamp; both being None means the writer
+    emitted a window key without content yet. Centralized here so the JSON
+    surface (``window_render_dict``) and the format-template surface
+    (``_window_to_template_values``) stay in lockstep.
+    """
+    return window.used_percentage is not None or window.resets_at is not None
+
+
+@pure
 def derive_elapsed(window: WindowSnapshot, now: int) -> tuple[int | None, float | None]:
     """Compute ``(elapsed_seconds, elapsed_percentage)`` for a window, when derivable.
 
@@ -171,7 +184,7 @@ def window_render_dict(snap: WindowSnapshot, now: int) -> dict[str, Any]:
         "seconds_until_reset": seconds_until_reset,
         "elapsed_seconds": elapsed_seconds,
         "elapsed_percentage": elapsed_percentage,
-        "is_present": snap.used_percentage is not None or snap.resets_at is not None,
+        "is_present": window_has_data(snap),
     }
 
 
