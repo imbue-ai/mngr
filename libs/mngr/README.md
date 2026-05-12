@@ -106,9 +106,9 @@ It's built on primitives you already know (SSH, git, tmux, docker), and
 **mngr is *very* simple to use:**
 
 ```bash
-mngr create           # launch your default agent locally (default agent type is set during install; provider=local, project=current dir)
-mngr create @.modal          # launch your default agent on Modal (new host with auto-generated name)
-mngr create my-task          # launch your default agent with a name
+mngr create           # launch an agent locally (provider=local, project=current dir)
+mngr create @.modal          # launch an agent on Modal (new host with auto-generated name)
+mngr create my-task          # launch an agent with a name
 mngr create my-task codex    # launch codex instead of the default
 mngr create -- --model opus  # pass any arguments through to the underlying agent
 

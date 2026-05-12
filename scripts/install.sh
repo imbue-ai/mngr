@@ -85,9 +85,7 @@ mngr extras -i || warn "Some extras could not be installed. Run 'mngr extras' to
 # [commands.create] type in user settings). If the user has not set one
 # yet, suggest the right `mngr config set` command and list the
 # installed agent-type plugins they can pick from.
-if mngr config get commands.create.type --scope user >/dev/null 2>&1; then
-    info "Default agent type is already set in user settings."
-else
+if ! mngr config get commands.create.type --scope user >/dev/null 2>&1; then
     info "To set a default agent type for 'mngr create', run:"
     info "    mngr config set commands.create.type <name> --scope user"
     info "Available agent types:"
