@@ -5,6 +5,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Generator
+from typing import assert_never
 from uuid import uuid4
 
 import modal
@@ -139,25 +140,31 @@ def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_n
 
     # Delete the volume using Modal SDK (must be done before environment deletion).
     volume_result = _delete_modal_volume_via_sdk(volume_name, environment_name)
-    if volume_result is ModalCleanupOutcome.FAILED:
-        logger.error(
-            "Cleanup of Modal volume {} in environment {} failed; leaving registered "
-            "so session-end leak detector surfaces it.",
-            volume_name,
-            environment_name,
-        )
-    else:
-        deregister_modal_test_volume(volume_name)
+    match volume_result:
+        case ModalCleanupOutcome.DELETED | ModalCleanupOutcome.NOT_FOUND:
+            deregister_modal_test_volume(volume_name)
+        case ModalCleanupOutcome.FAILED:
+            logger.error(
+                "Cleanup of Modal volume {} in environment {} failed; leaving registered "
+                "so session-end leak detector surfaces it.",
+                volume_name,
+                environment_name,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
     # Delete the environment using Modal SDK.
     env_result = _delete_modal_environment_via_sdk(environment_name)
-    if env_result is ModalCleanupOutcome.FAILED:
-        logger.error(
-            "Cleanup of Modal environment {} failed; leaving registered so session-end leak detector surfaces it.",
-            environment_name,
-        )
-    else:
-        deregister_modal_test_environment(environment_name)
+    match env_result:
+        case ModalCleanupOutcome.DELETED | ModalCleanupOutcome.NOT_FOUND:
+            deregister_modal_test_environment(environment_name)
+        case ModalCleanupOutcome.FAILED:
+            logger.error(
+                "Cleanup of Modal environment {} failed; leaving registered so session-end leak detector surfaces it.",
+                environment_name,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _delete_modal_volume_via_sdk(volume_name: str, environment_name: str) -> ModalCleanupOutcome:
@@ -349,14 +356,17 @@ def modal_test_session_cleanup(
     # endpoint is eventually consistent and can lag past any defensible
     # polling budget, but the synchronous delete call's response is
     # authoritative.
-    if env_result is ModalCleanupOutcome.FAILED:
-        logger.error(
-            "Cleanup of Modal session environment {} failed; leaving registered "
-            "so session-end leak detector surfaces it.",
-            environment_name,
-        )
-    else:
-        deregister_modal_test_environment(environment_name)
+    match env_result:
+        case ModalCleanupOutcome.DELETED | ModalCleanupOutcome.NOT_FOUND:
+            deregister_modal_test_environment(environment_name)
+        case ModalCleanupOutcome.FAILED:
+            logger.error(
+                "Cleanup of Modal session environment {} failed; leaving registered "
+                "so session-end leak detector surfaces it.",
+                environment_name,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 @pytest.fixture
