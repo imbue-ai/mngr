@@ -82,15 +82,6 @@ _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
     "Unknown": HostState.CRASHED,
 }
 
-# ssh-keyscan tuning. sshd finishes loading host keys slightly after the
-# TCP port becomes reachable, so wait_for_sshd can succeed while keyscan
-# still sees an empty banner. We poll until at least one key parses, with
-# a per-attempt subprocess timeout, a poll interval between attempts, and
-# a total budget that covers a worst-case slow first boot.
-_HOST_KEY_SCAN_TIMEOUT_SECONDS = 10.0
-_HOST_KEY_SCAN_POLL_INTERVAL_SECONDS = 2.0
-_HOST_KEY_SCAN_TOTAL_BUDGET_SECONDS = 60.0
-
 
 class LimaProviderInstance(BaseProviderInstance):
     """Provider instance for managing Lima VMs as hosts.
@@ -278,20 +269,19 @@ class LimaProviderInstance(BaseProviderInstance):
         # It's possible A is open while B isn't ready. Thus polling until success.
         if not poll_until(
             lambda: self._try_scan_and_record_host_key(hostname, port),
-            timeout=_HOST_KEY_SCAN_TOTAL_BUDGET_SECONDS,
-            poll_interval=_HOST_KEY_SCAN_POLL_INTERVAL_SECONDS,
+            timeout=60.0,
+            poll_interval=2.0,
         ):
             raise MngrError(
-                f"ssh-keyscan could not read a host key for {hostname}:{port} after "
-                f"{_HOST_KEY_SCAN_TOTAL_BUDGET_SECONDS}s; the Lima VM may not have "
-                f"finished starting sshd"
+                f"ssh-keyscan could not read a host key for {hostname}:{port} after 60s; "
+                f"the Lima VM may not have finished starting sshd"
             )
 
     def _try_scan_and_record_host_key(self, hostname: str, port: int) -> bool:
         """Run ssh-keyscan once. Returns True iff at least one host key was added."""
         result = self.mngr_ctx.concurrency_group.run_process_to_completion(
             ["ssh-keyscan", "-t", "rsa,ecdsa,ed25519", "-p", str(port), hostname],
-            timeout=_HOST_KEY_SCAN_TIMEOUT_SECONDS,
+            timeout=10.0,
         )
         if result.returncode != 0 or not result.stdout.strip():
             return False
