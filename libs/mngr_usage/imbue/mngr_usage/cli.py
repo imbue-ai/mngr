@@ -26,6 +26,7 @@ from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.duration import parse_duration_to_seconds
@@ -324,6 +325,30 @@ def _emit_output(
             assert_never(unreachable)
 
 
+def _reject_group_options_when_subcommand_invoked(ctx: click.Context) -> None:
+    """Raise ``UserInputError`` if any group-level option was explicitly passed.
+
+    Click parses ``mngr usage --local wait --until X`` as: ``--local`` on the
+    group, ``--until`` on the subcommand. Our group early-returns on subcommand
+    so ``--local`` would silently disappear, which is a UX trap (the user
+    clearly meant for ``--local`` to scope the wait). Detect explicit
+    command-line params via ``ctx.get_parameter_source`` and tell the user to
+    move them after the subcommand.
+    """
+    explicit_param_names = [
+        name for name in ctx.params if ctx.get_parameter_source(name) == click.core.ParameterSource.COMMANDLINE
+    ]
+    if not explicit_param_names:
+        return
+    flag_form = sorted(f"--{name.replace('_', '-')}" for name in explicit_param_names)
+    subcommand = ctx.invoked_subcommand
+    raise UserInputError(
+        f"Options {', '.join(flag_form)} are not supported on `mngr usage` when a "
+        f"subcommand is invoked (they would be silently ignored). Pass them after "
+        f"`{subcommand}` instead: `mngr usage {subcommand} <options>`."
+    )
+
+
 @click.group(name="usage", invoke_without_command=True)
 @click.option(
     "--max-age",
@@ -352,7 +377,14 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
     # Group-with-default-action: when a subcommand is invoked we hand off
     # entirely (no group-level reading or rendering). Without a subcommand
     # we render the snapshot, the existing ``mngr usage`` behavior.
+    #
+    # Reject group-level options when a subcommand is invoked, instead of
+    # silently ignoring them. ``mngr usage --local wait --until X`` looks
+    # like ``--local`` should scope the wait, but Click parses it as a
+    # group option and our early-return drops it. The explicit error
+    # tells the user to put flags after the subcommand.
     if ctx.invoked_subcommand is not None:
+        _reject_group_options_when_subcommand_invoked(ctx)
         return
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,

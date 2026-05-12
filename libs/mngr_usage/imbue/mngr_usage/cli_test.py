@@ -399,8 +399,10 @@ def test_usage_command_json_surfaces_elapsed_when_window_seconds_present(
     payload = json.loads(result.output.strip())
     five_hour = payload["sources"][0]["five_hour"]
     assert five_hour["window_seconds"] == 18000
-    # 18000 - 5400 = 12600 seconds elapsed = 70% of the window
-    assert five_hour["elapsed_seconds"] == 12600
+    # Approximately 18000 - 5400 = 12600 seconds elapsed = ~70% of the window.
+    # The CLI invocation uses its own wall-clock for `now`, which may have advanced
+    # a few seconds since the event timestamp; allow that drift in the assertion.
+    assert 12595 <= five_hour["elapsed_seconds"] <= 12605
     assert abs(five_hour["elapsed_percentage"] - 70.0) < 0.1
 
 
@@ -609,6 +611,44 @@ def test_usage_wait_times_out_when_predicate_never_satisfied(
     # Exit code 2 == EXIT_CODE_TIMEOUT from mngr.cli.exit_codes; matches `mngr wait`.
     assert result.exit_code == 2, result.output
     assert "Timed out" in result.output
+
+
+def test_usage_wait_rejects_group_level_options_when_subcommand_invoked(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    cli_profile_dir: Path,
+) -> None:
+    """Group-level options like `--local` placed before the subcommand are silently
+    ignored by Click's early-return. We surface a UserInputError instead so the user
+    sees their flag is in the wrong position."""
+    result = cli_runner.invoke(
+        usage,
+        ["--local", "wait", "--until", "true", "--timeout", "1s"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    # The error names the offending flag and the corrective placement.
+    assert "--local" in result.output
+    assert "wait" in result.output
+
+
+def test_usage_wait_accepts_subcommand_level_options(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    cli_profile_dir: Path,
+) -> None:
+    """Sanity: putting the same flag after the subcommand is the supported form
+    and reaches the wait body (here it times out since no matching agent exists)."""
+    result = cli_runner.invoke(
+        usage,
+        ["wait", "--until", "true", "--local", "--interval", "1s", "--timeout", "1s"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    # `--until 'true'` would normally match instantly, but with no agents present
+    # there are no snapshots to evaluate against, so the wait times out (exit 2).
+    assert result.exit_code in (0, 2), result.output
 
 
 def test_usage_wait_rejects_invalid_cel(
