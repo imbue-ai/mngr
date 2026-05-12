@@ -71,8 +71,7 @@ with the failing step number and error detail in `notes`.
    wrote it. Tighten any wordy bullets (cut filler words; keep names
    of changed APIs/files); merge bullets that describe the same
    user-visible change; confirm every bullet has a category prefix in
-   the exact `- <Category>: <description>` format. Make at most one
-   targeted edit per bullet — don't rewrite for the sake of rewriting.
+   the exact `- <Category>: <description>` format.
 
 6. Configure git: `git config user.email "bot@imbue.com"`,
    `git config user.name "Changelog Bot"`, `gh auth setup-git`.
