@@ -63,6 +63,7 @@ SECONDARY_COMMANDS = {
     "help",
     "imbue_cloud",
     "kanpan",
+    "latchkey",
     "label",
     "limit",
     "message",
