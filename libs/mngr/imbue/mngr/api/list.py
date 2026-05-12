@@ -1,12 +1,16 @@
+import typing
 from collections.abc import Callable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from concurrent.futures import Future
 from datetime import datetime
 from datetime import timezone
 from threading import Lock
 from typing import Any
+from typing import Final
 
 from loguru import logger
+from pydantic import BaseModel
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -35,9 +39,57 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
+from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
+from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr.utils.cel_utils import with_tolerant_paths
+from imbue.mngr.utils.pydantic_utils import unwrap_optional
 from imbue.mngr.utils.thread_cleanup import mngr_executor
+
+
+def _walk_dict_paths(model: type[BaseModel], prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    """Yield every path through `model`'s pydantic field tree that terminates in a dict-typed field.
+
+    Recurses into nested model fields, unwraps `Optional[T]` to T, and treats
+    a `dict[...]` / `Mapping[...]` field as a leaf. Anything else (lists,
+    primitives, datetimes, etc.) is not a path target.
+
+    Used to compute `_AGENT_SCHEMALESS_PATHS` from the AgentDetails type tree
+    at module load time -- see the rationale on that constant.
+    """
+    paths: list[tuple[str, ...]] = []
+    for name, field in model.model_fields.items():
+        annotation = unwrap_optional(field.annotation)
+        if _is_dict_like(annotation):
+            paths.append((*prefix, name))
+            continue
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            paths.extend(_walk_dict_paths(annotation, (*prefix, name)))
+            continue
+        # Anything else (primitives, lists, tuples, datetimes, enums, ...) is
+        # not a dict and not a model we can descend into, so we skip it.
+    return paths
+
+
+def _is_dict_like(annotation: Any) -> bool:
+    """True if `annotation` is `dict[...]` or `Mapping[...]` (or a subclass origin)."""
+    origin = typing.get_origin(annotation)
+    if origin is None:
+        return False
+    return origin is dict or (isinstance(origin, type) and issubclass(origin, Mapping))
+
+
+# CEL paths whose missing-key access should evaluate to a clean False (and let
+# `has()` report absence) rather than warn per agent. Derived at module load
+# time by walking the AgentDetails pydantic field tree: every `dict[...]`-typed
+# field is treated as schemaless because its contents are user- or
+# plugin-supplied, so different agents legitimately have different keys.
+#
+# Adding a new dict field to AgentDetails or HostDetails automatically opts it
+# into tolerance. If a future dict field is actually *schemaful* (typos should
+# warn), we'll need a marker to opt it out -- flag it at the time, none today.
+# See `with_tolerant_paths` in cel_utils for the tolerance semantics.
+_AGENT_SCHEMALESS_PATHS: Final[tuple[tuple[str, ...], ...]] = tuple(_walk_dict_paths(AgentDetails))
 
 
 class ErrorInfo(FrozenModel):
@@ -631,6 +683,21 @@ def agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
     return result
 
 
+def build_agent_cel_context(agent: AgentDetails) -> dict[str, Any]:
+    """Build a CEL evaluation context for `agent` with schemaless fields wrapped tolerantly.
+
+    Composes the three steps (`agent_details_to_cel_context` ->
+    `build_cel_context` -> `with_tolerant_paths`) so that filter and sort
+    callers see a consistent view: missing keys under the schemaless fields
+    listed in `_AGENT_SCHEMALESS_PATHS` evaluate to a clean False instead of
+    raising at evaluation time.
+    """
+    return with_tolerant_paths(
+        build_cel_context(agent_details_to_cel_context(agent)),
+        _AGENT_SCHEMALESS_PATHS,
+    )
+
+
 def _apply_cel_filters(
     agent: AgentDetails,
     include_filters: Sequence[Any],
@@ -641,9 +708,8 @@ def _apply_cel_filters(
     Returns True if the agent should be included (matches all include filters
     and doesn't match any exclude filters).
     """
-    context = agent_details_to_cel_context(agent)
-    return apply_cel_filters_to_context(
-        context=context,
+    return apply_compiled_cel_filters(
+        cel_context=build_agent_cel_context(agent),
         include_filters=include_filters,
         exclude_filters=exclude_filters,
         error_context_description=f"agent {agent.name}",
