@@ -390,8 +390,10 @@ def wait_for_usage(
             last_snapshots = poll_fn()
         except (MngrError, OSError) as e:
             # A flaky host shouldn't kill the wait. Polling errors get logged
-            # and we try again on the next interval; we keep last_snapshots
-            # from the previous successful poll so on_tick still gets context.
+            # and we try again on the next interval; last_snapshots keeps its
+            # prior value -- the most recent successful poll's snapshots, or
+            # the empty initial value if no poll has ever succeeded -- so
+            # on_tick always receives a well-formed (possibly empty) list.
             logger.warning("Usage poll failed (will retry): {}", e)
         matched = _match_first_source(last_snapshots, until_filters, source_filter, now_fn())
         if on_tick is not None:
