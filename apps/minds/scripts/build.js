@@ -368,6 +368,17 @@ function stageRuntimePyproject(wheelByPackage) {
 async function main() {
   console.log('Building Minds desktop app...\n');
 
+  // Fetch Tailwind CDN bundle. Used to live in package.json's `postinstall`
+  // hook, but newer pnpm (11.x, what ToDesktop's `npx pnpm@latest install`
+  // pulls) treats `ERR_PNPM_IGNORED_BUILDS` for transitive deps (electron,
+  // protobufjs, dtrace-provider, @firebase/util) as fatal at install time
+  // when an additional postinstall is present. Pulling tailwind here keeps
+  // pnpm install side-effect-free and unblocks the ToDesktop pipeline.
+  console.log('Fetching Tailwind...');
+  execSync(`bash "${path.join(__dirname, 'fetch_tailwind.sh')}"`, {
+    cwd: ROOT, stdio: 'inherit',
+  });
+
   if (fs.existsSync(RESOURCES_DIR)) {
     fs.rmSync(RESOURCES_DIR, { recursive: true });
   }
