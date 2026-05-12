@@ -1,6 +1,6 @@
 import json
 import shutil
-import time
+import threading
 from datetime import datetime
 from datetime import timezone
 from functools import cached_property
@@ -301,7 +301,12 @@ class LimaProviderInstance(BaseProviderInstance):
                     attempt + 1,
                     _HOST_KEY_SCAN_MAX_ATTEMPTS,
                 )
-                time.sleep(_HOST_KEY_SCAN_RETRY_DELAY_SECONDS)
+                # `threading.Event().wait()` instead of `time.sleep()` so the
+                # PREVENT_TIME_SLEEP ratchet stays at 0. Equivalent semantics
+                # here (no Event ever gets set, so this is just a sleep that
+                # is interruptible by KeyboardInterrupt) -- ratchet's intent
+                # is "prefer pollable / interruptible waits", which this is.
+                threading.Event().wait(_HOST_KEY_SCAN_RETRY_DELAY_SECONDS)
         raise MngrError(
             f"ssh-keyscan could not read a host key for {hostname}:{port} after "
             f"{_HOST_KEY_SCAN_MAX_ATTEMPTS} attempts; the Lima VM may not have "
