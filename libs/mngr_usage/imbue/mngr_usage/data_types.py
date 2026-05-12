@@ -40,6 +40,13 @@ class WindowSnapshot(FrozenModel):
     window's key as the label. Writers can use this to give compact display
     names while keeping keys identifier-safe so format templates work.
 
+    ``window_seconds``, when present, declares the window's fixed duration
+    in seconds. ``mngr usage`` uses it to derive ``elapsed_seconds`` /
+    ``elapsed_percentage`` without baking per-window-class knowledge into
+    the reader. Writers should emit it for fixed-duration windows and omit
+    it for variable-duration ones (e.g. Claude's overage); when omitted the
+    derived elapsed fields are reported as ``None``.
+
     ``status`` and ``is_using_overage`` are declared as optional fields
     defaulting to None; reserved for forward-compat without a schema bump.
     """
