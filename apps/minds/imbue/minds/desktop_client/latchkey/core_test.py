@@ -19,6 +19,7 @@ from imbue.minds.desktop_client.latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.minds.desktop_client.latchkey.core import CredentialStatus
 from imbue.minds.desktop_client.latchkey.core import Latchkey
 from imbue.minds.desktop_client.latchkey.core import LatchkeyBinaryNotFoundError
+from imbue.minds.desktop_client.latchkey.core import LatchkeyDestructionHandler
 from imbue.minds.desktop_client.latchkey.core import LatchkeyDiscoveryHandler
 from imbue.minds.desktop_client.latchkey.core import LatchkeyJwtMintError
 from imbue.minds.desktop_client.latchkey.core import LatchkeyNotInitializedError
@@ -521,18 +522,24 @@ def test_discovery_handler_spawns_shared_gateway_for_every_provider(tmp_path: Pa
 
 
 class _RecordingTunnelManager(SSHTunnelManager):
-    """SSHTunnelManager that records setup_reverse_tunnel calls instead of doing SSH."""
+    """SSHTunnelManager that records setup/remove calls instead of doing SSH."""
 
-    _calls: list[tuple[RemoteSSHInfo, int, int]] = PrivateAttr(default_factory=list)
+    _calls: list[tuple[RemoteSSHInfo, int, int, str | None]] = PrivateAttr(default_factory=list)
+    _removed_agent_ids: list[str] = PrivateAttr(default_factory=list)
 
     def setup_reverse_tunnel(
         self,
         ssh_info: RemoteSSHInfo,
         local_port: int,
         remote_port: int = 0,
+        agent_id: str | None = None,
     ) -> int:
-        self._calls.append((ssh_info, local_port, remote_port))
+        self._calls.append((ssh_info, local_port, remote_port, agent_id))
         return remote_port
+
+    def remove_reverse_tunnels_for_agent(self, agent_id: str) -> int:
+        self._removed_agent_ids.append(agent_id)
+        return 0
 
 
 def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: Path) -> None:
@@ -559,14 +566,21 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: 
         assert info is not None
 
         # Exactly one reverse tunnel, bridging the dynamic host-side gateway port
-        # to the fixed agent-side port on the container's loopback.
-        assert tunnel_manager._calls == [(ssh_info, info.port, AGENT_SIDE_LATCHKEY_PORT)]
+        # to the fixed agent-side port on the container's loopback. The tunnel
+        # must also be tagged with the owning agent's id, so the destruction
+        # handler can find and tear it down via remove_reverse_tunnels_for_agent;
+        # without that tag the original CPU leak would re-surface.
+        assert tunnel_manager._calls == [(ssh_info, info.port, AGENT_SIDE_LATCHKEY_PORT, str(agent_id))]
     finally:
         manager.stop_gateway()
 
 
-def test_discovery_handler_skips_reverse_tunnel_for_dev_agents(tmp_path: Path) -> None:
-    """DEV agents (ssh_info is None) run on the bare host and need no tunnel."""
+def test_discovery_handler_skips_reverse_tunnel_when_ssh_info_missing(tmp_path: Path) -> None:
+    """Agents discovered without SSH info skip reverse-tunnel setup.
+
+    Without an SSH route the handler cannot forward the host-side gateway
+    into the agent, so it just ensures the gateway is up and returns.
+    """
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_binary=str(fake_binary))
     manager.initialize(data_dir=tmp_path)
@@ -675,6 +689,21 @@ def test_ensure_browser_not_called_when_binary_missing(tmp_path: Path) -> None:
     with pytest.raises(LatchkeyBinaryNotFoundError):
         manager.ensure_gateway_started()
     assert not ensure_browser_log_path(tmp_path).exists()
+
+
+# -- Destruction handler --
+
+
+def test_destruction_handler_removes_reverse_tunnels_for_destroyed_agent() -> None:
+    """The handler must ask the tunnel manager to drop the destroyed agent's
+    reverse tunnels. The shared gateway must NOT be touched -- it serves
+    other agents.
+    """
+    tunnel_manager = _RecordingTunnelManager()
+    handler = LatchkeyDestructionHandler(tunnel_manager=tunnel_manager)
+    agent_id = AgentId()
+    handler(agent_id)
+    assert tunnel_manager._removed_agent_ids == [str(agent_id)]
 
 
 # -- services_info / auth_browser --
