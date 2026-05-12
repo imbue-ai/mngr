@@ -1,12 +1,8 @@
 import hashlib
 import json
-import os
-import signal
 import socket
 import threading
 import time
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -25,7 +21,6 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.core import LatchkeyNotInitializedError
 from imbue.mngr_latchkey.core import LatchkeyVersionError
-from imbue.mngr_latchkey.core import _cmdline_looks_like_latchkey_gateway
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo
@@ -33,20 +28,13 @@ from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_browser_log_path
-from imbue.mngr_latchkey.store import load_gateway_info
-from imbue.mngr_latchkey.store import save_gateway_info
 
 _POLL_INTERVAL_SECONDS = 0.05
 
-
-def test_cmdline_matcher_accepts_plausible_latchkey_gateway() -> None:
-    assert _cmdline_looks_like_latchkey_gateway(["/usr/local/bin/latchkey", "gateway"])
-    assert _cmdline_looks_like_latchkey_gateway(["latchkey", "gateway", "--verbose"])
-    # Shebang rewriting: kernel injects the interpreter ahead of the script path.
-    assert _cmdline_looks_like_latchkey_gateway(["/usr/bin/env", "node", "/opt/latchkey/cli", "gateway"])
-    assert _cmdline_looks_like_latchkey_gateway(["node", "gateway"]) is False
-    assert _cmdline_looks_like_latchkey_gateway(["latchkey", "auth", "set"]) is False
-    assert _cmdline_looks_like_latchkey_gateway([]) is False
+# The previous on-disk gateway-record tests went away when the record
+# itself did -- gateway lifetime is now scoped to a single ``mngr
+# latchkey forward`` subprocess. The cmdline-matcher / cross-process
+# adoption / stale-record tests below are dropped for the same reason.
 
 
 def test_ensure_gateway_started_requires_initialize(tmp_path: Path) -> None:
@@ -247,7 +235,7 @@ def _wait_for_process_exit(pid: int, timeout: float = 5.0) -> bool:
         return False
 
 
-def test_ensure_gateway_started_spawns_subprocess_and_persists_record(tmp_path: Path) -> None:
+def test_ensure_gateway_started_spawns_subprocess(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
@@ -258,14 +246,9 @@ def test_ensure_gateway_started_spawns_subprocess_and_persists_record(tmp_path: 
         assert info.pid > 0
         assert _wait_for_listening(info.host, info.port), "gateway did not start listening"
 
-        # The record was persisted and matches the returned info.
-        record = load_gateway_info(manager.plugin_data_dir)
-        assert record is not None
-        assert record.host == info.host
-        assert record.port == info.port
-        assert record.pid == info.pid
-
-        # Idempotent: a second call returns the same info without spawning again.
+        # In-process idempotent: a second call returns the same info
+        # without spawning again. Cross-process adoption was removed
+        # along with the on-disk gateway record.
         second = manager.ensure_gateway_started()
         assert second == info
         assert manager.get_gateway_info() == info
@@ -310,57 +293,6 @@ def test_ensure_gateway_started_preserves_existing_default_permissions_file(tmp_
         assert perms_path.read_text() == existing
     finally:
         manager.stop_gateway()
-
-
-def test_restart_adopts_live_gateway_and_discards_stale_info(tmp_path: Path) -> None:
-    fake_binary = _make_fake_latchkey_binary(tmp_path)
-    # First "session": start a gateway. We don't tear down ``manager_a``
-    # -- in production the desktop client just exits and the detached
-    # gateway keeps running. The second-session manager below must adopt
-    # the surviving subprocess from the on-disk record alone.
-    manager_a = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
-    manager_a.initialize()
-    info = manager_a.ensure_gateway_started()
-    assert _wait_for_listening(info.host, info.port)
-
-    try:
-        # Second "session": manager should adopt the live record.
-        manager_b = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
-        manager_b.initialize()
-        try:
-            adopted = manager_b.get_gateway_info()
-            assert adopted is not None
-            assert adopted.pid == info.pid
-            assert adopted.port == info.port
-
-            # A second ensure_gateway_started should reuse the adopted
-            # process -- no new PID allocated.
-            ensured = manager_b.ensure_gateway_started()
-            assert ensured.pid == info.pid
-        finally:
-            manager_b.stop_gateway()
-    finally:
-        if psutil.pid_exists(info.pid):
-            try:
-                os.kill(info.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-
-
-def test_initialize_discards_stale_record(tmp_path: Path) -> None:
-    """A persisted record whose PID is gone is discarded on initialize."""
-    stale_info = LatchkeyGatewayInfo(
-        host="127.0.0.1",
-        port=1,
-        pid=2**31 - 1,
-        started_at=datetime.now(timezone.utc),
-    )
-    fake_binary = _make_fake_latchkey_binary(tmp_path)
-    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
-    save_gateway_info(manager.plugin_data_dir, stale_info)
-    manager.initialize()
-    assert manager.get_gateway_info() is None
-    assert load_gateway_info(manager.plugin_data_dir) is None
 
 
 def test_concurrent_ensure_gateway_started_spawns_at_most_one_subprocess(tmp_path: Path) -> None:
@@ -442,7 +374,7 @@ def test_concurrent_ensure_gateway_started_spawns_at_most_one_subprocess(tmp_pat
         manager.stop_gateway()
 
 
-def test_stop_gateway_terminates_subprocess_and_removes_record(tmp_path: Path) -> None:
+def test_stop_gateway_terminates_subprocess(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
@@ -451,7 +383,6 @@ def test_stop_gateway_terminates_subprocess_and_removes_record(tmp_path: Path) -
 
     manager.stop_gateway()
     assert manager.get_gateway_info() is None
-    assert load_gateway_info(manager.plugin_data_dir) is None
     assert _wait_for_process_exit(info.pid)
 
 

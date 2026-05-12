@@ -203,3 +203,41 @@ Latchkey gateway" / "Discarding stale ..." at INFO level. Both lines
 are now DEBUG, so one-shot invocations of `mngr latchkey create-agent-env`
 and `mngr latchkey link-permissions` (which `initialize()` but never
 touch the gateway) no longer emit a misleading line on stderr.
+
+## mngr-latchkey: drop the on-disk gateway record
+
+With `LatchkeyForwardSupervisor` guaranteeing at most one `mngr
+latchkey forward` process per latchkey directory, the only thing that
+ever spawns a `latchkey gateway` is that single supervised forward
+subprocess. Cross-process gateway adoption -- the original reason for
+persisting a `LatchkeyGatewayInfo` record at `<plugin_data_dir>/latchkey_gateway.json`
+-- is no longer needed.
+
+Changes:
+
+- `Latchkey.initialize()` no longer reads or reconciles a persisted
+  gateway record. It still runs `latchkey --version` so misconfiguration
+  surfaces eagerly.
+- `Latchkey.ensure_gateway_started()` no longer persists / restores
+  state across processes; it stays in-process-idempotent (subsequent
+  calls return the cached `self._info`).
+- `Latchkey.stop_gateway()` no longer deletes a record; just terminates
+  the in-memory tracked subprocess.
+- `imbue.mngr_latchkey.store`: removed `save_gateway_info`,
+  `load_gateway_info`, `delete_gateway_info`, `gateway_info_path`, and
+  the `_GATEWAY_RECORD_FILENAME` constant. `LatchkeyGatewayInfo`
+  itself stays as the in-memory return-type for the spawn path.
+- `imbue.mngr_latchkey.core`: removed `_is_info_alive`,
+  `_cmdline_looks_like_latchkey_gateway`, and the
+  `_LIVENESS_CONNECT_TIMEOUT_SECONDS` constant. The `_is_port_listening`
+  helper now takes a `timeout` argument from its (one remaining)
+  caller, `_wait_for_port_listening`, which is still used after spawn
+  to wait for the gateway to bind its port.
+
+Trade-off: if `mngr latchkey forward` crashes (SIGKILL, OOM, segfault)
+without running its SIGTERM cleanup path, the gateway becomes an
+orphan. The orphan keeps its port bound but no reverse tunnel still
+points at it (those died with the previous forward's paramiko
+clients), so the orphan is just an idle process. The next supervisor
+call spawns a fresh forward + fresh gateway on a fresh port; the
+orphan can be cleaned up with `pkill latchkey`.

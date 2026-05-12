@@ -50,12 +50,9 @@ from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_gateway
 from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import default_permissions_path
-from imbue.mngr_latchkey.store import delete_gateway_info
 from imbue.mngr_latchkey.store import ensure_browser_log_path
 from imbue.mngr_latchkey.store import gateway_log_path
-from imbue.mngr_latchkey.store import load_gateway_info
 from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
-from imbue.mngr_latchkey.store import save_gateway_info
 from imbue.mngr_latchkey.store import save_permissions
 
 # Default value for :attr:`Latchkey.latchkey_binary` -- the bare
@@ -66,8 +63,6 @@ from imbue.mngr_latchkey.store import save_permissions
 LATCHKEY_BINARY: Final[str] = "latchkey"
 
 _DEFAULT_LISTEN_HOST: Final[str] = "127.0.0.1"
-
-_LIVENESS_CONNECT_TIMEOUT_SECONDS: Final[float] = 1.0
 
 _TERMINATE_GRACE_SECONDS: Final[float] = 5.0
 
@@ -200,36 +195,10 @@ def _allocate_free_port(host: str) -> int:
         return sock.getsockname()[1]
 
 
-def _cmdline_looks_like_latchkey_gateway(cmdline: list[str]) -> bool:
-    """Check whether a process's ``cmdline`` looks like our ``latchkey gateway``.
-
-    We require ``latchkey`` to appear as a path component anywhere in the
-    argv (to tolerate shebang rewriting that injects ``env`` / ``python`` as
-    argv[0]) and the literal ``gateway`` subcommand anywhere after it. This
-    guards against PID reuse: an unrelated process that happens to grab the
-    same PID almost certainly won't match.
-    """
-    if not cmdline:
-        return False
-    latchkey_idx: int | None = None
-    for idx, arg in enumerate(cmdline):
-        # Match ``latchkey`` anywhere in the arg. This handles direct
-        # execution (``/usr/local/bin/latchkey``), shebang rewrites that
-        # push the interpreter ahead of the script path
-        # (``/usr/bin/env node /opt/latchkey/cli``), and wrappers whose
-        # script path includes the word "latchkey" somewhere.
-        if "latchkey" in arg:
-            latchkey_idx = idx
-            break
-    if latchkey_idx is None:
-        return False
-    return "gateway" in cmdline[latchkey_idx + 1 :]
-
-
-def _is_port_listening(host: str, port: int) -> bool:
-    """Return True if a TCP connection to ``host:port`` succeeds within the timeout."""
+def _is_port_listening(host: str, port: int, timeout: float) -> bool:
+    """Return True if a TCP connection to ``host:port`` succeeds within ``timeout``."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(_LIVENESS_CONNECT_TIMEOUT_SECONDS)
+        sock.settimeout(timeout)
         try:
             sock.connect((host, port))
         except OSError:
@@ -242,14 +211,12 @@ def _wait_for_port_listening(host: str, port: int, timeout: float) -> bool:
 
     Used by ``_spawn_gateway`` to make sure the freshly-spawned
     ``latchkey gateway`` has bound its port before its
-    ``LatchkeyGatewayInfo`` is published. Without this, a second
-    ``ensure_gateway_started`` caller would probe the still-binding
-    port, see it as dead, and spuriously spawn a duplicate gateway
-    even though the spawn lock was held correctly.
+    ``LatchkeyGatewayInfo`` is published / returned to callers, so a
+    user's first request after spawn does not race the port bind.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if _is_port_listening(host, port):
+        if _is_port_listening(host, port, timeout=_GATEWAY_BIND_POLL_INTERVAL_SECONDS):
             return True
         # ``threading.Event().wait`` is the canonical interruptible
         # short sleep in this codebase (the project ratchets against
@@ -257,39 +224,7 @@ def _wait_for_port_listening(host: str, port: int, timeout: float) -> bool:
         threading.Event().wait(timeout=_GATEWAY_BIND_POLL_INTERVAL_SECONDS)
     # One last probe in case the port came up between the final sleep
     # and the deadline, so a slow CI host doesn't false-fail.
-    return _is_port_listening(host, port)
-
-
-def _is_info_alive(info: LatchkeyGatewayInfo) -> bool:
-    """Verify that an info still corresponds to our running gateway.
-
-    Three checks, all must pass:
-    1. A process with the recorded PID exists.
-    2. That process's cmdline looks like ``latchkey gateway`` (not PID reuse).
-    3. Something accepts TCP connections on the recorded host:port.
-    """
-    try:
-        process = psutil.Process(info.pid)
-        cmdline = process.cmdline()
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as e:
-        logger.debug("Latchkey gateway record is stale (pid={}): {}", info.pid, e)
-        return False
-    if not _cmdline_looks_like_latchkey_gateway(cmdline):
-        logger.debug(
-            "Latchkey gateway record points at pid {} whose cmdline is not ours: {!r}",
-            info.pid,
-            cmdline,
-        )
-        return False
-    if not _is_port_listening(info.host, info.port):
-        logger.debug(
-            "Latchkey gateway record points at pid {} but {}:{} is not accepting connections",
-            info.pid,
-            info.host,
-            info.port,
-        )
-        return False
-    return True
+    return _is_port_listening(host, port, timeout=_GATEWAY_BIND_POLL_INTERVAL_SECONDS)
 
 
 def _terminate_pid(pid: int) -> None:
@@ -445,32 +380,32 @@ class Latchkey(MutableModel):
         """Return the directory the plugin owns under :attr:`latchkey_directory`.
 
         Always ``<latchkey_directory>/mngr_latchkey/``. The plugin writes
-        all of its own files (gateway record, default permissions,
-        per-agent permissions, opaque handles, log files) here so they
-        cannot collide with anything the upstream ``latchkey`` CLI
-        chooses to put in :attr:`latchkey_directory`.
+        all of its own files (default permissions, per-agent permissions,
+        opaque handles, log files, forward-supervisor record) here so
+        they cannot collide with anything the upstream ``latchkey``
+        CLI chooses to put in :attr:`latchkey_directory`.
         """
         return _plugin_data_dir(self.latchkey_directory)
 
     def initialize(self) -> None:
-        """Validate the latchkey binary, then adopt or discard the persisted gateway info.
+        """Validate the latchkey binary.
 
-        Performs the following steps:
+        Runs ``latchkey --version`` and refuses to continue if the
+        installed CLI is older than :data:`LATCHKEY_MIN_VERSION`. The
+        check happens at ``initialize`` time (rather than at the first
+        ``ensure_gateway_started`` call) so misconfiguration surfaces
+        immediately, before any agent has had a chance to be told to
+        use the gateway.
 
-        1. Runs ``latchkey --version`` and refuses to continue if the
-           installed CLI is older than :data:`LATCHKEY_MIN_VERSION`.
-           This is checked at ``initialize`` time (rather than at the
-           first ``ensure_gateway_started`` call) so misconfiguration
-           surfaces immediately, before any agent has had a chance to
-           be told to use the gateway.
-        2. Loads any persisted gateway record. A live, still-ours
-           gateway is adopted so subsequent ``ensure_gateway_started``
-           calls are no-ops; a dead record is removed from disk.
-
-        Liveness probes include a TCP connect (up to
-        ``_LIVENESS_CONNECT_TIMEOUT_SECONDS``), which is why they run
-        outside the lock. ``initialize()`` is only expected to be called
-        once before any concurrent use, so there is no real contention here.
+        There is intentionally **no** cross-process gateway-record
+        reconciliation: the new ``mngr latchkey forward`` /
+        :class:`LatchkeyForwardSupervisor` design guarantees at most
+        one process per latchkey directory ever spawns a gateway, so
+        adopting a peer's running gateway from disk would only matter
+        in the abnormal-exit case where the previous forward crashed
+        and left an orphan. Orphans are accepted as a rare leak (no
+        reverse tunnel still points at them once the previous forward
+        died, so they sit idle until ``pkill latchkey`` runs).
 
         Raises:
             LatchkeyBinaryNotFoundError: when the configured binary is
@@ -481,87 +416,53 @@ class Latchkey(MutableModel):
                 (non-zero exit, unparseable output, spawn error).
         """
         self._check_minimum_version()
-        plugin_dir = self.plugin_data_dir
-        existing = load_gateway_info(plugin_dir)
-        is_alive = existing is not None and _is_info_alive(existing)
-
         with self._lock:
-            if self._is_initialized:
-                return
-            if is_alive and existing is not None:
-                # Debug-level so one-shot CLI commands that only need
-                # ``initialize()`` (``mngr latchkey create-agent-env``,
-                # ``mngr latchkey link-permissions``) do not emit a noisy
-                # info line about a gateway they never touch. The same
-                # line still shows up under ``--verbose`` for users who
-                # actually want to see the reconciliation outcome.
-                logger.debug(
-                    "Adopted existing shared Latchkey gateway (pid={}, {}:{})",
-                    existing.pid,
-                    existing.host,
-                    existing.port,
-                )
-                self._info = existing
-            elif existing is not None:
-                logger.debug(
-                    "Discarding stale Latchkey gateway record (pid={})",
-                    existing.pid,
-                )
-                delete_gateway_info(plugin_dir)
-                self._info = None
-            else:
-                self._info = None
             self._is_initialized = True
 
     def ensure_gateway_started(self) -> LatchkeyGatewayInfo:
-        """Start the shared gateway if it is not already running.
+        """Start the shared gateway if this :class:`Latchkey` has not spawned one yet.
 
-        Idempotent and thread-safe: concurrent callers either all see
-        the existing gateway (fast path) or serialize on ``_spawn_lock``
-        so exactly one of them spawns a fresh subprocess and the others
-        adopt its result (slow path). Without that serialization, two
-        threads racing past the initial ``_info`` check would each spawn
-        a real ``latchkey gateway`` subprocess and the second write to
-        ``_info`` would leak the loser's process.
+        In-process idempotent: subsequent calls return the cached
+        :attr:`_info` set by the first call. There is no cross-process
+        adoption -- the only caller that ever spawns a gateway is
+        ``mngr latchkey forward``, and the supervisor wrapper makes
+        sure at most one such process runs per latchkey directory.
 
-        The TCP liveness probe and subprocess spawn run outside
-        ``_lock`` so unrelated fast-path callers (``get_gateway_info``,
-        ``stop_gateway``, ``_ensure_browser_once``) are not blocked
-        for the up-to-1s probe / subprocess fork window.
+        Thread-safe within a single process: ``_spawn_lock`` guards the
+        slow path so two concurrent callers do not both decide to
+        spawn a real subprocess. Without that serialization, the
+        loser's process would leak. The eager startup path in
+        ``mngr latchkey forward`` runs this before any discovery
+        callback registers, so in normal operation only one caller
+        ever hits the slow path.
         """
-        # Fast path: read current state under the short lock, then
-        # liveness-probe the existing gateway (if any) without
-        # blocking other state accesses.
+        # Fast path: existing in-memory info wins.
         with self._lock:
             self._require_initialized_locked()
             existing = self._info
-        if existing is not None and _is_info_alive(existing):
+        if existing is not None:
             return existing
         plugin_dir = self.plugin_data_dir
-        # Slow path: serialize spawning. The double-check after
-        # acquiring ``_spawn_lock`` matters: while we waited for the
-        # spawn lock another caller may have already spawned and
-        # published a fresh gateway, in which case we adopt it and
-        # do not spawn a second one.
+        # Slow path: serialize spawning. Double-check after acquiring
+        # the spawn lock so a concurrent caller that already spawned
+        # is observed before we duplicate the work.
         with self._spawn_lock:
             with self._lock:
                 existing = self._info
-            if existing is not None and _is_info_alive(existing):
+            if existing is not None:
                 return existing
             info = self._spawn_gateway(plugin_dir)
             with self._lock:
                 self._info = info
-                save_gateway_info(plugin_dir, info)
             return info
 
     def stop_gateway(self) -> None:
-        """Terminate the shared gateway and delete its record.
+        """Terminate the gateway tracked by this :class:`Latchkey` instance.
 
-        The in-memory entry and the on-disk gateway record are removed
-        atomically under the lock so no other caller can observe a
-        half-torn-down state. ``_terminate_pid`` is deliberately called
-        outside the lock because it can wait up to
-        ``_TERMINATE_GRACE_SECONDS`` for the child to exit. Per-agent
+        Clears the in-memory record and SIGTERMs the underlying
+        subprocess. ``_terminate_pid`` is deliberately called outside
+        the lock because it can wait up to ``_TERMINATE_GRACE_SECONDS``
+        for the child to exit. Per-agent
         ``latchkey_permissions.json`` files are intentionally *not*
         deleted: minds does not delete other per-agent state on
         destruction either, and keeping them around means previously
@@ -570,8 +471,6 @@ class Latchkey(MutableModel):
         with self._lock:
             info = self._info
             self._info = None
-            if self._is_initialized:
-                delete_gateway_info(self.plugin_data_dir)
         if info is not None:
             logger.info("Stopping shared Latchkey gateway (pid={})", info.pid)
             _terminate_pid(info.pid)

@@ -1,77 +1,32 @@
 import json
 import os
 import stat
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 
 import pytest
 
 from imbue.mngr.primitives import AgentId
-from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import MalformedPermissionsConfigError
 from imbue.mngr_latchkey.store import default_permissions_path
-from imbue.mngr_latchkey.store import delete_gateway_info
-from imbue.mngr_latchkey.store import gateway_info_path
 from imbue.mngr_latchkey.store import gateway_log_path
 from imbue.mngr_latchkey.store import granted_permissions_for_scope
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_agent
-from imbue.mngr_latchkey.store import load_gateway_info
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
 from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_agent
-from imbue.mngr_latchkey.store import save_gateway_info
 from imbue.mngr_latchkey.store import save_permissions
 from imbue.mngr_latchkey.store import set_permissions_for_scope
 
-
-def _make_record() -> LatchkeyGatewayInfo:
-    return LatchkeyGatewayInfo(
-        host="127.0.0.1",
-        port=19999,
-        pid=12345,
-        started_at=datetime.now(timezone.utc),
-    )
-
-
-def test_save_and_load_roundtrip(tmp_path: Path) -> None:
-    record = _make_record()
-    save_gateway_info(tmp_path, record)
-    loaded = load_gateway_info(tmp_path)
-    assert loaded == record
-
-
-def test_load_returns_none_when_missing(tmp_path: Path) -> None:
-    assert load_gateway_info(tmp_path) is None
-
-
-def test_load_returns_none_when_malformed(tmp_path: Path) -> None:
-    path = gateway_info_path(tmp_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{not valid json")
-    assert load_gateway_info(tmp_path) is None
-
-
-def test_delete_is_idempotent(tmp_path: Path) -> None:
-    delete_gateway_info(tmp_path)
-    record = _make_record()
-    save_gateway_info(tmp_path, record)
-    delete_gateway_info(tmp_path)
-    delete_gateway_info(tmp_path)
-    assert load_gateway_info(tmp_path) is None
-
-
-def test_save_overwrites_existing_record(tmp_path: Path) -> None:
-    save_gateway_info(
-        tmp_path, LatchkeyGatewayInfo(host="127.0.0.1", port=1, pid=1, started_at=datetime.now(timezone.utc))
-    )
-    fresh = LatchkeyGatewayInfo(host="127.0.0.1", port=2, pid=2, started_at=datetime.now(timezone.utc))
-    save_gateway_info(tmp_path, fresh)
-    loaded = load_gateway_info(tmp_path)
-    assert loaded == fresh
+# Gateway info save/load/delete tests went away when the on-disk
+# gateway record did -- gateway lifetime is now fully owned by the
+# single ``mngr latchkey forward`` subprocess the supervisor
+# guarantees, and cross-process adoption is no longer attempted.
+# ``LatchkeyGatewayInfo`` itself remains as an in-memory return-type
+# for the spawn path. Forward-supervisor record helpers are tested in
+# ``forward_supervisor_test.py`` instead.
 
 
 def test_gateway_log_path_is_top_level(tmp_path: Path) -> None:

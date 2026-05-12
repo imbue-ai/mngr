@@ -5,12 +5,13 @@ Everything the plugin writes lives under ``<latchkey_directory>/mngr_latchkey/``
 segregated from upstream latchkey's own ``LATCHKEY_DIRECTORY`` files
 while sharing a single root path the user has to remember.
 
-Two kinds of files live there:
+Two kinds of state live there:
 
-* ``LatchkeyGatewayInfo`` -- metadata identifying the single shared
-  ``latchkey gateway`` subprocess (host, port, pid, started_at). Used
-  so the next launch can adopt or drop the existing gateway. Stored
-  at ``{plugin_data_dir}/latchkey_gateway.json``.
+* ``LatchkeyForwardInfo`` -- metadata identifying the detached
+  ``mngr latchkey forward`` supervisor (pid, started_at). Used by
+  :class:`LatchkeyForwardSupervisor` so the next caller can adopt or
+  drop the existing supervisor. Stored at
+  ``{plugin_data_dir}/latchkey_forward.json``.
 * ``LatchkeyPermissionsConfig`` -- the contents of latchkey's permissions
   config for an agent, in detent's rule format. Stored on disk per-agent
   as ``{plugin_data_dir}/agents/{agent_id}/latchkey_permissions.json``.
@@ -19,6 +20,12 @@ Two kinds of files live there:
   the JWT minted at agent-creation time. Rewritten whenever the user
   grants or revokes permissions. Only the subset of detent's file
   schema that we actually produce is modeled.
+
+``LatchkeyGatewayInfo`` is defined here too (it's a return-type for
+the gateway-spawn path) but is no longer persisted to disk: gateway
+lifetime is fully owned by the single ``mngr latchkey forward``
+process that the supervisor guarantees, so cross-process adoption is
+unnecessary.
 
 The gateway never reads the per-agent file directly via its agent-id
 path. Instead, an opaque ``{plugin_data_dir}/permissions/<uuid>.json``
@@ -60,7 +67,6 @@ from imbue.mngr.primitives import AgentId
 # upstream ``latchkey`` CLI writes under ``LATCHKEY_DIRECTORY``.
 PLUGIN_DATA_SUBDIR_NAME: Final[str] = "mngr_latchkey"
 
-_GATEWAY_RECORD_FILENAME: Final[str] = "latchkey_gateway.json"
 _GATEWAY_LOG_FILENAME: Final[str] = "latchkey_gateway.log"
 _FORWARD_RECORD_FILENAME: Final[str] = "latchkey_forward.json"
 _FORWARD_LOG_FILENAME: Final[str] = "latchkey_forward.log"
@@ -83,53 +89,18 @@ def plugin_data_dir(latchkey_directory: Path) -> Path:
 
 
 class LatchkeyGatewayInfo(FrozenModel):
-    """Metadata identifying the running shared Latchkey gateway subprocess."""
+    """Metadata identifying the running shared Latchkey gateway subprocess.
+
+    Pure in-memory data type now -- not persisted to disk. Lives here
+    rather than in ``core.py`` only because other modules import it as
+    a return-type / Field type and a layered import contract would
+    otherwise put ``core`` below them.
+    """
 
     host: str = Field(description="Host the gateway is listening on (typically 127.0.0.1)")
     port: int = Field(description="Port the gateway is listening on")
     pid: int = Field(description="PID of the ``latchkey gateway`` process")
     started_at: datetime = Field(description="UTC timestamp when the gateway was started")
-
-
-def gateway_info_path(data_dir: Path) -> Path:
-    """Return the path to the shared gateway info record."""
-    return data_dir / _GATEWAY_RECORD_FILENAME
-
-
-def save_gateway_info(data_dir: Path, info: LatchkeyGatewayInfo) -> None:
-    """Write the gateway info record, overwriting any existing one."""
-    path = gateway_info_path(data_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(info.model_dump_json(indent=2))
-    logger.debug("Saved latchkey gateway info at {}", path)
-
-
-def load_gateway_info(data_dir: Path) -> LatchkeyGatewayInfo | None:
-    """Read the gateway info, or None if missing or malformed."""
-    path = gateway_info_path(data_dir)
-    if not path.is_file():
-        return None
-    try:
-        raw = path.read_text()
-    except OSError as e:
-        logger.warning("Failed to read latchkey gateway info at {}: {}", path, e)
-        return None
-    try:
-        return LatchkeyGatewayInfo.model_validate_json(raw)
-    except ValueError as e:
-        logger.warning("Malformed latchkey gateway info at {}: {}", path, e)
-        return None
-
-
-def delete_gateway_info(data_dir: Path) -> None:
-    """Remove the stored gateway info (no-op if absent)."""
-    path = gateway_info_path(data_dir)
-    if path.is_file():
-        try:
-            path.unlink()
-            logger.debug("Deleted latchkey gateway info at {}", path)
-        except OSError as e:
-            logger.warning("Failed to delete latchkey gateway info at {}: {}", path, e)
 
 
 def gateway_log_path(data_dir: Path) -> Path:
