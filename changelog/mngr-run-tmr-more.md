@@ -1,3 +1,1 @@
-Analysis-only branch (no code changes).
-
-Diagnosed the "Connection lost while pulling branch from agent" errors at the end of `mngr tmr` runs. Root cause is ordering in `libs/mngr_tmr/imbue/mngr_tmr/api.py`: `finalize_agent` stops the agent before `pull_agent_branch` runs, so the git fetch hits a torn-down Modal sandbox. Fix (not applied here) is to call `stop_agent_on_host` after `pull_agent_branch` at both call sites.
+Fix "Connection lost while pulling branch from agent" warnings during `mngr tmr` runs against remote (Modal) providers. Previously `finalize_agent` stopped the agent before `pull_agent_branch` ran, so the git fetch was issued against a torn-down sandbox and failed. The polling loop now pulls both artifacts and the git branch before stopping the agent, and the post-poll `gather_results` fallback skips branches that were already pulled successfully (since their sandboxes have since been stopped).
