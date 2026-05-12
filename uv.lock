@@ -21,6 +21,7 @@ members = [
     "imbue-mngr-forward",
     "imbue-mngr-imbue-cloud",
     "imbue-mngr-kanpan",
+    "imbue-mngr-latchkey",
     "imbue-mngr-lima",
     "imbue-mngr-modal",
     "imbue-mngr-notifications",
@@ -1896,6 +1897,37 @@ requires-dist = [
 ]
 
 [[package]]
+name = "imbue-mngr-latchkey"
+version = "0.1.0"
+source = { editable = "libs/mngr_latchkey" }
+dependencies = [
+    { name = "click" },
+    { name = "concurrency-group" },
+    { name = "imbue-common" },
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-forward" },
+    { name = "loguru" },
+    { name = "paramiko" },
+    { name = "pluggy" },
+    { name = "psutil" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.0" },
+    { name = "concurrency-group", editable = "libs/concurrency_group" },
+    { name = "imbue-common", editable = "libs/imbue_common" },
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-forward", editable = "libs/mngr_forward" },
+    { name = "loguru", specifier = ">=0.7" },
+    { name = "paramiko", specifier = ">=3.0" },
+    { name = "pluggy", specifier = ">=1.0" },
+    { name = "psutil", specifier = ">=5.9" },
+    { name = "pydantic", specifier = ">=2.0" },
+]
+
+[[package]]
 name = "imbue-mngr-lima"
 version = "0.1.0"
 source = { editable = "libs/mngr_lima" }
@@ -2551,6 +2583,7 @@ dependencies = [
     { name = "imbue-common" },
     { name = "imbue-mngr" },
     { name = "imbue-mngr-forward" },
+    { name = "imbue-mngr-latchkey" },
     { name = "itsdangerous" },
     { name = "jinja2" },
     { name = "loguru" },
@@ -2575,6 +2608,7 @@ requires-dist = [
     { name = "imbue-common", editable = "libs/imbue_common" },
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "imbue-mngr-forward", editable = "libs/mngr_forward" },
+    { name = "imbue-mngr-latchkey", editable = "libs/mngr_latchkey" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "loguru" },
