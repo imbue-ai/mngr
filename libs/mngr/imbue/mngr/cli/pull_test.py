@@ -7,17 +7,14 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.mngr.api.address_parsers import parse_agent_name_or_id
-from imbue.mngr.api.find import find_and_maybe_start_agent
+from imbue.mngr.api.find import materialize_agent
 from imbue.mngr.cli.pull import PullCliOptions
 from imbue.mngr.cli.pull import pull
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.main import cli
-from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
@@ -128,89 +125,13 @@ def test_pull_command_sync_mode_choices() -> None:
     assert "full" in result.output
 
 
-def test_find_agent_by_name_or_id_raises_for_empty_agents(temp_mngr_ctx: MngrContext) -> None:
-    """Test that find_agent_by_name_or_id raises UserInputError for unknown agent."""
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
-
-    with pytest.raises(UserInputError, match="No agent found with name or ID"):
-        find_and_maybe_start_agent(parse_agent_name_or_id("nonexistent-agent"), agents_by_host, temp_mngr_ctx, "test")
-
-
-def test_find_agent_by_name_or_id_raises_agent_not_found_for_valid_id(temp_mngr_ctx: MngrContext) -> None:
-    """Test that find_agent_by_name_or_id raises AgentNotFoundError for valid but nonexistent ID."""
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
-
-    # Generate a valid agent ID that doesn't exist in the empty agents_by_host
-    nonexistent_id = AgentId.generate()
-
-    with pytest.raises(AgentNotFoundError):
-        find_and_maybe_start_agent(parse_agent_name_or_id(str(nonexistent_id)), agents_by_host, temp_mngr_ctx, "test")
-
-
-@pytest.mark.tmux
-def test_find_agent_by_name_or_id_raises_for_multiple_matches(
-    local_provider: LocalProviderInstance,
-    temp_mngr_ctx: MngrContext,
-    temp_work_dir: Path,
-) -> None:
-    """Test that find_agent_by_name_or_id raises for multiple agents with same name."""
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-
-    agent_name = AgentName("duplicate-pull-test-agent")
-
-    # Create two real agents with the same name on the local host
-    agent1 = local_host.create_agent_state(
-        work_dir_path=temp_work_dir,
-        options=CreateAgentOptions(
-            agent_type=AgentTypeName("generic"),
-            name=agent_name,
-            command=CommandString("sleep 47291"),
-        ),
-    )
-    agent2 = local_host.create_agent_state(
-        work_dir_path=temp_work_dir,
-        options=CreateAgentOptions(
-            agent_type=AgentTypeName("generic"),
-            name=agent_name,
-            command=CommandString("sleep 47292"),
-        ),
-    )
-
-    # Build references matching the real host and agents
-    host_ref = DiscoveredHost(
-        provider_name=ProviderInstanceName("local"),
-        host_id=local_host.id,
-        host_name=local_host.get_name(),
-    )
-    agent_ref1 = DiscoveredAgent(
-        agent_id=agent1.id,
-        agent_name=agent1.name,
-        host_id=local_host.id,
-        provider_name=ProviderInstanceName("local"),
-    )
-    agent_ref2 = DiscoveredAgent(
-        agent_id=agent2.id,
-        agent_name=agent2.name,
-        host_id=local_host.id,
-        provider_name=ProviderInstanceName("local"),
-    )
-
-    agents_by_host = {host_ref: [agent_ref1, agent_ref2]}
-
-    try:
-        with pytest.raises(UserInputError, match="Multiple agents found"):
-            find_and_maybe_start_agent(parse_agent_name_or_id(str(agent_name)), agents_by_host, temp_mngr_ctx, "test")
-    finally:
-        local_host.stop_agents([agent1.id, agent2.id])
-
-
-def _create_stopped_agent_with_references(
+def _create_stopped_agent_with_ref(
     local_provider: LocalProviderInstance,
     temp_work_dir: Path,
     agent_name: AgentName,
     command: CommandString,
-) -> tuple[OnlineHostInterface, DiscoveredAgent, dict[DiscoveredHost, list[DiscoveredAgent]]]:
-    """Create an agent, stop it, and return the host, agent ref, and agents_by_host mapping."""
+) -> tuple[OnlineHostInterface, DiscoveredHost, DiscoveredAgent]:
+    """Create an agent, stop it, and return the host plus discovered refs."""
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
 
     agent = local_host.create_agent_state(
@@ -236,29 +157,25 @@ def _create_stopped_agent_with_references(
         host_id=local_host.id,
         provider_name=ProviderInstanceName("local"),
     )
-    agents_by_host = {host_ref: [agent_ref]}
-
-    return local_host, agent_ref, agents_by_host
+    return local_host, host_ref, agent_ref
 
 
 @pytest.mark.tmux
-def test_find_agent_with_skip_agent_state_check_succeeds_for_stopped_agent(
+def test_materialize_agent_with_skip_agent_state_check_succeeds_for_stopped_agent(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
 ) -> None:
-    """Test that skip_agent_state_check=True allows finding a stopped agent without error."""
+    """skip_agent_state_check=True materializes a stopped agent without error."""
     agent_name = AgentName("stopped-find-test-agent")
-    local_host, agent_ref, agents_by_host = _create_stopped_agent_with_references(
+    local_host, host_ref, agent_ref = _create_stopped_agent_with_ref(
         local_provider, temp_work_dir, agent_name, CommandString("sleep 47293")
     )
 
-    # With skip_agent_state_check=True, should succeed even though agent is stopped
-    found_agent, found_host = find_and_maybe_start_agent(
-        parse_agent_name_or_id(str(agent_name)),
-        agents_by_host,
+    found_agent, found_host = materialize_agent(
+        host_ref,
+        agent_ref,
         temp_mngr_ctx,
-        "test",
         skip_agent_state_check=True,
     )
     assert found_agent.id == agent_ref.agent_id
@@ -266,20 +183,19 @@ def test_find_agent_with_skip_agent_state_check_succeeds_for_stopped_agent(
 
 
 @pytest.mark.tmux
-def test_find_agent_without_skip_raises_for_stopped_agent(
+def test_materialize_agent_without_skip_raises_for_stopped_agent(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
 ) -> None:
-    """Test that without skip_agent_state_check, a stopped agent raises UserInputError."""
+    """Without skip_agent_state_check, materializing a stopped agent raises UserInputError."""
     agent_name = AgentName("stopped-find-test-agent-2")
-    _local_host, _agent_ref, agents_by_host = _create_stopped_agent_with_references(
+    _local_host, host_ref, agent_ref = _create_stopped_agent_with_ref(
         local_provider, temp_work_dir, agent_name, CommandString("sleep 47294")
     )
 
-    # Without skip_agent_state_check, should raise for stopped agent
     with pytest.raises(UserInputError, match="stopped and automatic starting is disabled"):
-        find_and_maybe_start_agent(parse_agent_name_or_id(str(agent_name)), agents_by_host, temp_mngr_ctx, "test")
+        materialize_agent(host_ref, agent_ref, temp_mngr_ctx)
 
 
 def test_pull_target_branch_requires_git_mode(

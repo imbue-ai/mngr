@@ -391,7 +391,6 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         agent, host = find_agent_by_address(
             opts.agent,
             mngr_ctx,
-            "connect",
             is_start_desired=opts.start,
         )
     elif not mngr_ctx.is_interactive:
@@ -415,7 +414,6 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         agent, host = find_agent_by_address(
             most_recent.address,
             mngr_ctx,
-            "connect",
             is_start_desired=opts.start,
         )
     else:
@@ -439,7 +437,6 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         agent, host = find_agent_by_address(
             selected.address,
             mngr_ctx,
-            "connect",
             is_start_desired=opts.start,
         )
 

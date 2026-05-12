@@ -14,10 +14,11 @@ from pydantic import TypeAdapter
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import find_and_maybe_start_agent
+from imbue.mngr.api.find import find_agent_by_address
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
@@ -222,18 +223,9 @@ def compute_section(fields: dict[str, FieldValue]) -> BoardSection:
 
 def toggle_agent_mute(mngr_ctx: MngrContext, agent_name: AgentName) -> bool:
     """Toggle the mute state of an agent. Returns the new mute state."""
-    agents_by_host, _ = discover_hosts_and_agents(
+    agent, _host = find_agent_by_address(
+        AgentAddress(agent=agent_name),
         mngr_ctx,
-        provider_names=None,
-        agent_identifiers=(str(agent_name),),
-        include_destroyed=False,
-        reset_caches=False,
-    )
-    agent, _host = find_and_maybe_start_agent(
-        agent_name,
-        agents_by_host,
-        mngr_ctx,
-        command_name="kanpan",
         skip_agent_state_check=True,
     )
     plugin_data = agent.get_plugin_data(PLUGIN_NAME)

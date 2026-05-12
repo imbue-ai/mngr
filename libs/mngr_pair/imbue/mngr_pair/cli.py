@@ -178,7 +178,6 @@ def pair(ctx: click.Context, **kwargs) -> None:
     result = find_agent_for_command(
         mngr_ctx=mngr_ctx,
         address=source_address,
-        command_usage="pair <agent-id>",
         host_filter=opts.source_host,
     )
     if result is None:

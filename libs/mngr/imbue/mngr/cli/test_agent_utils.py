@@ -4,7 +4,7 @@ These tests create a real agent via the CLI, then exercise
 select_agent_interactively_with_host and find_agent_for_command end-to-end.
 The only thing monkeypatched is the urwid TUI (select_agent_interactively),
 since it requires an interactive terminal. Everything else -- list_agents,
-discover_hosts_and_agents, find_and_maybe_start_agent --
+discover_hosts_and_agents, find_agent_by_address, materialize_agent --
 runs against real data on disk.
 """
 
@@ -94,7 +94,6 @@ def test_find_agent_for_command_with_stopped_agent_and_skip_agent_state_check(
     result = find_agent_for_command(
         mngr_ctx=temp_mngr_ctx,
         address=AgentAddress(agent=AgentName(agent_name)),
-        command_usage="test",
         host_filter=None,
         is_start_desired=True,
         skip_agent_state_check=True,
@@ -131,6 +130,5 @@ def test_find_agent_for_command_raises_for_stopped_agent_without_skip(
         find_agent_for_command(
             mngr_ctx=temp_mngr_ctx,
             address=AgentAddress(agent=AgentName(agent_name)),
-            command_usage="test",
             host_filter=None,
         )

@@ -188,7 +188,6 @@ def push(ctx: click.Context, **kwargs) -> None:
     result = find_agent_for_command(
         mngr_ctx=mngr_ctx,
         address=target_address,
-        command_usage="push <agent-id> <path>",
         host_filter=None,
     )
     if result is None:

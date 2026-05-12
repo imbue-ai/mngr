@@ -138,15 +138,29 @@ def find_one_matching_agent(
 ) -> tuple[DiscoveredHost, DiscoveredAgent]:
     """Find the single agent matching the given identifier (by ID or name).
 
-    Raises :class:`UserInputError` when no agent matches or when more than one
-    matches. If ``resolved_host`` is given, only agents on that host are
-    considered.
+    Raises :class:`AgentNotFoundError` when ``agent`` is an :class:`AgentId`
+    and no agent has that ID (the ID was supposed to identify a specific
+    agent uniquely). Raises :class:`UserInputError` when an :class:`AgentName`
+    has no match, or when more than one agent matches. If ``resolved_host``
+    is given, only agents on that host are considered.
+
+    The multi-match error lists each matching agent in ``NAME@HOST.PROVIDER``
+    form so the user can disambiguate.
     """
     matches = find_all_matching_agents(agent, agents_by_host, resolved_host)
     if len(matches) == 0:
+        if isinstance(agent, AgentId):
+            raise AgentNotFoundError(str(agent))
         raise UserInputError(f"Could not find agent with ID or name: {agent}")
     if len(matches) > 1:
-        raise UserInputError(f"Multiple agents found with ID or name: {agent}")
+        match_lines = "\n".join(
+            f"  - {agent_ref.agent_name}@{host_ref.host_name}.{host_ref.provider_name} (ID: {agent_ref.agent_id})"
+            for host_ref, agent_ref in matches
+        )
+        raise UserInputError(
+            f"Multiple agents found with name '{agent}':\n{match_lines}\n\n"
+            "Disambiguate using NAME@HOST.PROVIDER or use the agent ID directly."
+        )
     return matches[0]
 
 
@@ -303,110 +317,38 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
             )
 
 
-@log_call
-def find_and_maybe_start_agent(
-    agent: AgentNameOrId,
-    agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
+def materialize_agent(
+    host_ref: DiscoveredHost,
+    agent_ref: DiscoveredAgent,
     mngr_ctx: MngrContext,
-    command_name: str,
     is_start_desired: bool = False,
     skip_agent_state_check: bool = False,
 ) -> tuple[AgentInterface, OnlineHostInterface]:
-    """Find an agent by name or ID and return the agent and host interfaces.
+    """Materialize discovered refs into live :class:`AgentInterface` and :class:`OnlineHostInterface`.
 
-    Resolves a typed :class:`AgentNameOrId` to the live agent and host
-    objects that CLI commands need to interact with.
+    Brings the host online (starting it if ``is_start_desired`` and offline),
+    then looks the agent up on the live host. If ``skip_agent_state_check`` is
+    False (the default) and the agent is stopped, raises unless
+    ``is_start_desired`` is also True.
 
-    is_start_desired: if True, start both the host and the agent when stopped.
-    skip_agent_state_check: if True, skip the agent lifecycle state check
-        (useful for commands like provision that need the host online but don't
-        care whether the agent process is running).
-
-    Raises :class:`AgentNotFoundError` if the agent cannot be found by ID.
-    Raises :class:`UserInputError` if the agent cannot be found by name or if
-    multiple agents match.
+    Raises :class:`UserInputError` if the host is offline and
+    ``is_start_desired`` is False. Raises :class:`RuntimeError` if the agent
+    was present at discovery time but is no longer on the live host
+    (a stale-cache / inconsistency case).
     """
-    if isinstance(agent, AgentId):
-        for host_ref, agent_refs in agents_by_host.items():
-            for agent_ref in agent_refs:
-                if agent_ref.agent_id == agent:
-                    provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
-                    host = provider.get_host(host_ref.host_id)
-                    online_host, _was_started = ensure_host_started(
-                        host, is_start_desired=is_start_desired, provider=provider
-                    )
-                    for live_agent in online_host.get_agents():
-                        if live_agent.id == agent:
-                            if not skip_agent_state_check:
-                                ensure_agent_started(live_agent, online_host, is_start_desired=is_start_desired)
-                            return live_agent, online_host
-        raise AgentNotFoundError(agent)
-
-    matching: list[tuple[AgentInterface, OnlineHostInterface]] = []
-    match_display_info: list[tuple[AgentId, HostName, ProviderInstanceName]] = []
-    missing_from_host: list[tuple[AgentId, HostName, ProviderInstanceName]] = []
-
-    for host_ref, agent_refs in agents_by_host.items():
-        for agent_ref in agent_refs:
-            if agent_ref.agent_name == agent:
-                provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
-                host = provider.get_host(host_ref.host_id)
-                online_host, _was_started = ensure_host_started(
-                    host, is_start_desired=is_start_desired, provider=provider
-                )
-                # Find the specific agent by ID (not name, to avoid duplicates)
-                found_on_host = False
-                for live_agent in online_host.get_agents():
-                    if live_agent.id == agent_ref.agent_id:
-                        matching.append((live_agent, online_host))
-                        match_display_info.append((agent_ref.agent_id, host_ref.host_name, host_ref.provider_name))
-                        found_on_host = True
-                        break
-                if not found_on_host:
-                    missing_from_host.append((agent_ref.agent_id, host_ref.host_name, host_ref.provider_name))
-
-    if missing_from_host:
-        missing_details = ", ".join(
-            f"{agent_id}@{host_name}.{provider_name}" for agent_id, host_name, provider_name in missing_from_host
-        )
-        if not matching:
-            # This is an internal consistency error: discovery found agents but
-            # they weren't on their hosts. Raise as RuntimeError so the
-            # unexpected-error handler suggests reporting to GitHub.
-            raise RuntimeError(
-                f"Agent '{agent}' was found during discovery but not on host(s). "
-                f"Missing: {missing_details}. "
-                f"This indicates a stale discovery cache or host state inconsistency."
-            )
-        logger.warning(
-            "Some agents named '{}' were discovered but not found on their host(s): {}",
-            agent,
-            missing_details,
-        )
-
-    if not matching:
-        raise UserInputError(f"No agent found with name or ID: {agent}")
-
-    if len(matching) > 1:
-        agent_list = "\n".join(
-            [
-                f"  - {agent}@{host_name}.{provider_name} (ID: {agent_id})"
-                for agent_id, host_name, provider_name in match_display_info
-            ]
-        )
-        raise UserInputError(
-            f"Multiple agents found with name '{agent}':\n{agent_list}\n\n"
-            f"Disambiguate using the address format:\n"
-            f"  mngr {command_name} {agent}@<host>.<provider>\n\n"
-            f"Or use the agent ID directly:\n"
-            f"  mngr {command_name} <agent-id>"
-        )
-
-    found_agent, found_host = matching[0]
-    if not skip_agent_state_check:
-        ensure_agent_started(found_agent, found_host, is_start_desired=is_start_desired)
-
-    return found_agent, found_host
+    provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
+    host = provider.get_host(host_ref.host_id)
+    online_host, _was_started = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
+    for live_agent in online_host.get_agents():
+        if live_agent.id == agent_ref.agent_id:
+            if not skip_agent_state_check:
+                ensure_agent_started(live_agent, online_host, is_start_desired=is_start_desired)
+            return live_agent, online_host
+    raise RuntimeError(
+        f"Agent '{agent_ref.agent_name}' (ID: {agent_ref.agent_id}) was found during discovery but is "
+        f"no longer present on host {host_ref.host_name}.{host_ref.provider_name}. "
+        "This indicates a stale discovery cache or host state inconsistency."
+    )
 
 
 class AgentMatch(FrozenModel):
@@ -632,27 +574,28 @@ def _post_filter_matches_by_addresses(
 def find_agent_by_address(
     address: AgentAddress,
     mngr_ctx: MngrContext,
-    command_name: str,
     is_start_desired: bool = False,
     skip_agent_state_check: bool = False,
 ) -> tuple[AgentInterface, OnlineHostInterface]:
-    """Find an agent by :class:`AgentAddress`, supporting host/provider disambiguation.
+    """Find an agent by :class:`AgentAddress` and return live interfaces.
 
-    Handles the full flow: runs discovery (skipping irrelevant providers),
-    filters by the address's host constraint, and resolves to an agent+host
-    pair. Raises :class:`UserInputError` if the host constraint matches no
-    hosts.
+    Runs discovery (skipping irrelevant providers), matches the address's
+    agent identifier against discovered agents (filtered by the address's
+    host constraint if any), then materializes live interfaces.
+
+    Raises :class:`UserInputError` if the host constraint matches no hosts.
+    Raises :class:`AgentNotFoundError` / :class:`UserInputError` if the
+    agent cannot be resolved (see :func:`find_one_matching_agent`).
     """
     agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
-
     if not agents_by_host and address.host is not None:
         raise UserInputError(f"No hosts found matching {address.host}")
 
-    return find_and_maybe_start_agent(
-        address.agent,
-        agents_by_host,
+    host_ref, agent_ref = find_one_matching_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
+    return materialize_agent(
+        host_ref,
+        agent_ref,
         mngr_ctx,
-        command_name,
         is_start_desired=is_start_desired,
         skip_agent_state_check=skip_agent_state_check,
     )

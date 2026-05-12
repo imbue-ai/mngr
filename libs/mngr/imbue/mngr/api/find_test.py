@@ -298,6 +298,20 @@ def test_find_one_matching_agent_raises_when_not_found() -> None:
         )
 
 
+def test_find_one_matching_agent_raises_agent_not_found_for_unknown_id() -> None:
+    """An unknown AgentId raises AgentNotFoundError (not UserInputError).
+
+    The distinction lets callers detect "the specific agent you named no
+    longer exists" separately from "your search term didn't match anything".
+    """
+    with pytest.raises(AgentNotFoundError):
+        find_one_matching_agent(
+            agent=AgentId.generate(),
+            resolved_host=None,
+            agents_by_host={},
+        )
+
+
 def test_find_one_matching_agent_raises_when_multiple_agents_match() -> None:
     host_id1 = HostId.generate()
     host_id2 = HostId.generate()
@@ -328,7 +342,7 @@ def test_find_one_matching_agent_raises_when_multiple_agents_match() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    with pytest.raises(UserInputError, match="Multiple agents found with ID or name: test-agent"):
+    with pytest.raises(UserInputError, match="Multiple agents found with name 'test-agent'"):
         find_one_matching_agent(
             agent=AgentName("test-agent"),
             resolved_host=None,

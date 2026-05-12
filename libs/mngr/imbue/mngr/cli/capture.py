@@ -50,7 +50,6 @@ def capture(ctx: click.Context, **kwargs: Any) -> None:
     result = find_agent_for_command(
         mngr_ctx=mngr_ctx,
         address=opts.agent,
-        command_usage="capture",
         host_filter=None,
         is_start_desired=opts.start,
     )

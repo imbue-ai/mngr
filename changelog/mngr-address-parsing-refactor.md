@@ -59,8 +59,18 @@ replacements:
   `parse_identifier_as_address`, `ParsedSourceLocation` -> replaced by the
   composite parsers in `api/address_parsers.py` and FrozenModel types in
   `primitives.py`.
-- `find_and_maybe_start_agent_by_name_or_id` -> `find_and_maybe_start_agent`
-  (takes `AgentNameOrId` instead of `str`).
+- `find_and_maybe_start_agent` -> deleted; was redundant with
+  `find_agent_by_address` (callers all did `discover_*` + the call). Its
+  matching logic now lives in `find_one_matching_agent` (now also raises a
+  helpful "Multiple agents found ... disambiguate using NAME@HOST.PROVIDER"
+  message listing each colliding agent). Its materialization logic now lives
+  in a small `materialize_agent(host_ref, agent_ref, mngr_ctx)` helper that
+  callers can reuse when they already have discovered refs.
+- `find_agent_by_address` no longer takes a `command_name`; the disambiguation
+  hint in the multi-match error no longer embeds the CLI command name.
+- `find_agent_for_command` no longer takes a `command_usage` argument and
+  now merges its optional `host_filter` into the agent address upfront
+  (raising if address and filter pin different hosts).
 - `parse_agent_spec` (cli helper for `mngr push`/`pull`) -> deleted; use
   `parse_hosted_location` / the `HOSTED_LOCATION` ParamType.
 - `_host_matches_filter` -> replaced by the `HostAddress.matches` method.
