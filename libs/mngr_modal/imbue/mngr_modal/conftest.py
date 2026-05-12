@@ -486,17 +486,23 @@ def _delete_modal_volumes(volume_names: list[str]) -> None:
             pass
 
 
-# `modal environment list --json` is eventually consistent w.r.t. deletion:
-# after `modal environment delete X` (or its CLI siblings) returns "Environment
-# 'X' not found", the env can linger in the global list for several seconds
-# (and the same `modal app list --env=X` query has been observed to flip from
-# "not found" to returncode 0 across a ~5 s window during this asynchronous
-# tear-down). Because no Modal endpoint is stable across that window, a
-# single-shot cross-check can't reliably tell a zombie from a real leak.
-# Instead, poll the global list until it converges (env disappears) or we hit
-# the budget; anything that still appears after the budget is treated as a
-# real leak. Budget is generous compared to the observed window (~5 s) but
-# bounded so a genuinely-leaked env doesn't stall teardown indefinitely.
+# `modal environment list --json` is observably inconsistent with other
+# Modal endpoints in a short window after the test session creates an env:
+# this branch's earlier CI runs had cleanup chains where `modal env delete X`
+# and `modal app list --env=X` both returned "Environment 'X' not found" at
+# session-teardown time, yet `modal environment list --json` a few seconds
+# later returned X. We don't know whether the right framing is "env-delete
+# is eventually consistent and the global list lags", "env-create is
+# eventually consistent across replicas and one replica hadn't caught up yet
+# when cleanup ran", or some mix. Either way, no single Modal endpoint
+# query is reliable across a few-second window, so a single-shot leak check
+# can't tell a stale-listing entry from a real leak.
+#
+# Mitigation: poll the global list until it converges (candidate disappears)
+# or until a budget elapses; anything still listed after the budget gets
+# flagged. The budget is generous compared to the observed window (~5 s in
+# the runs that motivated this) but bounded so a genuinely-leaked env
+# doesn't stall teardown indefinitely.
 _LEAK_POLL_TIMEOUT_S = 30.0
 _LEAK_POLL_INTERVAL_S = 2.0
 
