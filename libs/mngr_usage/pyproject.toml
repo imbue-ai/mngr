@@ -1,6 +1,6 @@
 [project]
 name = "imbue-mngr-usage"
-version = "0.2.6"
+version = "0.1.0"
 description = "mngr usage subcommand: agent-agnostic rolling-window quota / usage CLI (provider plugins implement the data side via the current_usage_snapshot hook)"
 readme = "README.md"
 requires-python = ">=3.12"

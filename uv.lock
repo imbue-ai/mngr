@@ -1774,7 +1774,7 @@ dev = [{ name = "imbue-mngr-modal", editable = "libs/mngr_modal" }]
 
 [[package]]
 name = "imbue-mngr-claude-usage"
-version = "0.2.6"
+version = "0.1.0"
 source = { editable = "libs/mngr_claude_usage" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2066,7 +2066,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-usage"
-version = "0.2.6"
+version = "0.1.0"
 source = { editable = "libs/mngr_usage" }
 dependencies = [
     { name = "click" },

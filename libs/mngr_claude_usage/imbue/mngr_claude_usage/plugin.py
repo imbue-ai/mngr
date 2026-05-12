@@ -22,42 +22,19 @@ import os
 import shutil
 import stat
 from pathlib import Path
-from typing import Any
-
-from loguru import logger
 
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.utils.file_utils import read_json_dict
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude_usage import resources as _resources
 
 _RATE_LIMITS_WRITER_SCRIPT = "claude_rate_limits_writer.sh"
 _STATUSLINE_SHIM_SCRIPT = "claude_statusline.sh"
 _USER_STATUSLINE_CMD_FILE = "user_statusline_cmd"
-
-
-def _agent_state_dir(agent: AgentInterface, host: OnlineHostInterface) -> Path:
-    """Mirror BaseAgent._get_agent_dir(): the per-agent state directory on this host."""
-    return host.host_dir / "agents" / str(agent.id)
-
-
-def _read_existing_settings(path: Path) -> dict[str, Any]:
-    """Return the JSON contents of ``path`` as a dict, or empty if missing/malformed.
-
-    A malformed settings.local.json is logged at warning level and treated as
-    empty rather than raising -- we don't want a typo in the user's settings to
-    break agent provisioning.
-    """
-    if not path.is_file():
-        return {}
-    try:
-        loaded = json.loads(path.read_text())
-    except json.JSONDecodeError as e:
-        logger.warning("Could not parse {} as JSON ({}); treating as empty.", path, e)
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
 
 
 def _capture_existing_statusline_command(work_dir: Path, our_shim_path: str) -> str:
@@ -73,7 +50,7 @@ def _capture_existing_statusline_command(work_dir: Path, our_shim_path: str) -> 
     """
     claude_dir = work_dir / ".claude"
     for filename in ("settings.local.json", "settings.json"):
-        settings = _read_existing_settings(claude_dir / filename)
+        settings = read_json_dict(claude_dir / filename)
         statusline = settings.get("statusLine")
         if not isinstance(statusline, dict):
             continue
@@ -135,7 +112,7 @@ def _install_settings_local_statusline(work_dir: Path, statusline_command: str) 
     claude_dir = work_dir / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
     settings_path = claude_dir / "settings.local.json"
-    settings = _read_existing_settings(settings_path)
+    settings = read_json_dict(settings_path)
     settings["statusLine"] = {"type": "command", "command": statusline_command}
     tmp = settings_path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(settings, indent=2))
@@ -143,11 +120,7 @@ def _install_settings_local_statusline(work_dir: Path, statusline_command: str) 
 
 
 def _provision_statusline_shim(state_dir: Path, work_dir: Path) -> None:
-    """Install shim, writer, sidecar, and settings.local.json statusLine.
-
-    Factored out of the hookimpl so tests can exercise the full file-side
-    behavior without needing a fully-constructed ``ClaudeAgent``.
-    """
+    """Install shim, writer, sidecar, and settings.local.json statusLine."""
     commands_dir = state_dir / "commands"
     commands_dir.mkdir(parents=True, exist_ok=True)
 
@@ -183,4 +156,4 @@ def on_before_provisioning(agent: AgentInterface, host: OnlineHostInterface, mng
         return
     if not host.is_local:
         return
-    _provision_statusline_shim(_agent_state_dir(agent, host), agent.work_dir)
+    _provision_statusline_shim(get_agent_state_dir_path(host.host_dir, agent.id), agent.work_dir)

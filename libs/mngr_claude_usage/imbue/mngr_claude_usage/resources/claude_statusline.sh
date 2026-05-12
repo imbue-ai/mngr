@@ -11,8 +11,8 @@
 #      $MNGR_AGENT_STATE_DIR/events/claude/rate_limits/events.jsonl.
 #   3. Replay the payload to the user's pre-existing statusLine.command (if
 #      any) captured at provision time into the sibling user_statusline_cmd
-#      sidecar file, so any pre-existing user statusline (caveman, starship,
-#      etc.) keeps working unchanged.
+#      sidecar file, so any pre-existing user statusline keeps working
+#      unchanged.
 set -euo pipefail
 
 : "${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR must be set}"

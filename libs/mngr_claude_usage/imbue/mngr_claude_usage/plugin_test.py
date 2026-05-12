@@ -38,9 +38,12 @@ def test_capture_picks_up_command_from_settings_json(tmp_path: Path) -> None:
     claude_dir = tmp_path / ".claude"
     claude_dir.mkdir()
     (claude_dir / "settings.json").write_text(
-        json.dumps({"statusLine": {"type": "command", "command": "/path/to/caveman.sh"}})
+        json.dumps({"statusLine": {"type": "command", "command": "/path/to/user-statusline.sh"}})
     )
-    assert _capture_existing_statusline_command(tmp_path, our_shim_path="/different/shim.sh") == "/path/to/caveman.sh"
+    assert (
+        _capture_existing_statusline_command(tmp_path, our_shim_path="/different/shim.sh")
+        == "/path/to/user-statusline.sh"
+    )
 
 
 def test_capture_prefers_settings_local_over_settings_json(tmp_path: Path) -> None:
@@ -59,8 +62,8 @@ def test_capture_skips_self_recursion(tmp_path: Path) -> None:
     claude_dir.mkdir()
     own_shim = "/state/commands/claude_statusline.sh"
     (claude_dir / "settings.local.json").write_text(json.dumps({"statusLine": {"command": own_shim}}))
-    (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/caveman.sh"}}))
-    assert _capture_existing_statusline_command(tmp_path, our_shim_path=own_shim) == "/caveman.sh"
+    (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/user-statusline.sh"}}))
+    assert _capture_existing_statusline_command(tmp_path, our_shim_path=own_shim) == "/user-statusline.sh"
 
 
 def test_capture_returns_empty_when_no_settings(tmp_path: Path) -> None:
@@ -132,12 +135,12 @@ def test_provision_captures_existing_user_statusline(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     claude_dir = work_dir / ".claude"
     claude_dir.mkdir(parents=True)
-    (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/path/to/caveman.sh"}}))
+    (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/path/to/user-statusline.sh"}}))
     _provision_statusline_shim(state_dir, work_dir)
     sidecar = state_dir / "commands" / "user_statusline_cmd"
-    assert sidecar.read_text() == "/path/to/caveman.sh"
+    assert sidecar.read_text() == "/path/to/user-statusline.sh"
     project_settings = json.loads((claude_dir / "settings.json").read_text())
-    assert project_settings["statusLine"]["command"] == "/path/to/caveman.sh"
+    assert project_settings["statusLine"]["command"] == "/path/to/user-statusline.sh"
 
 
 def test_provision_is_idempotent_on_reprovision(tmp_path: Path) -> None:
@@ -147,10 +150,10 @@ def test_provision_is_idempotent_on_reprovision(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     claude_dir = work_dir / ".claude"
     claude_dir.mkdir(parents=True)
-    (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/caveman.sh"}}))
+    (claude_dir / "settings.json").write_text(json.dumps({"statusLine": {"command": "/user-statusline.sh"}}))
     _provision_statusline_shim(state_dir, work_dir)
     _provision_statusline_shim(state_dir, work_dir)
-    assert (state_dir / "commands" / "user_statusline_cmd").read_text() == "/caveman.sh"
+    assert (state_dir / "commands" / "user_statusline_cmd").read_text() == "/user-statusline.sh"
 
 
 def test_provision_preserves_user_cmd_when_only_in_settings_local(tmp_path: Path) -> None:
@@ -163,10 +166,10 @@ def test_provision_preserves_user_cmd_when_only_in_settings_local(tmp_path: Path
     work_dir = tmp_path / "work"
     claude_dir = work_dir / ".claude"
     claude_dir.mkdir(parents=True)
-    (claude_dir / "settings.local.json").write_text(json.dumps({"statusLine": {"command": "/caveman.sh"}}))
+    (claude_dir / "settings.local.json").write_text(json.dumps({"statusLine": {"command": "/user-statusline.sh"}}))
     _provision_statusline_shim(state_dir, work_dir)
     _provision_statusline_shim(state_dir, work_dir)
-    assert (state_dir / "commands" / "user_statusline_cmd").read_text() == "/caveman.sh"
+    assert (state_dir / "commands" / "user_statusline_cmd").read_text() == "/user-statusline.sh"
 
 
 def test_hookimpl_skips_non_claude_stub(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
