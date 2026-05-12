@@ -20,6 +20,8 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr_claude_usage.plugin import _provision_statusline_shim
 from imbue.mngr_modal.instance import ModalProviderInstance
 
+pytestmark = [pytest.mark.modal]
+
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
