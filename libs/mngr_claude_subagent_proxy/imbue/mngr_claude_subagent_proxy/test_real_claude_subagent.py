@@ -894,8 +894,7 @@ def test_plan_mode_propagates_to_subagent(
 # In deny mode the plugin replaces its proxy machinery with a single
 # PreToolUse:Agent hook that DENIES the Task tool with a short
 # skill-pointer reason directing Claude at the `mngr-subagents` skill.
-# The skill (installed under the per-agent CLAUDE_CONFIG_DIR at
-# `$MNGR_AGENT_STATE_DIR/plugin/claude/anthropic/skills/mngr-subagents/SKILL.md`)
+# The skill (installed at `.claude/skills/mngr-subagents/SKILL.md`)
 # teaches the two-command `mngr create` + `subagent_wait` protocol
 # Claude is expected to run itself via Bash; the copy-pasteable commands
 # live in the skill, not in the deny reason.

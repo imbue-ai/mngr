@@ -267,12 +267,8 @@ What deny mode installs:
 - `PreToolUse:Agent` hook (the skill-pointer deny).
 - `SessionStart` hook -- the same `hooks/reap.py` PROXY uses
   (see "Reaping orphan children" below).
-- `mngr-subagents` SKILL.md installed under the per-agent
-  CLAUDE_CONFIG_DIR
-  (`$MNGR_AGENT_STATE_DIR/plugin/claude/anthropic/skills/mngr-subagents/SKILL.md`)
-  -- the explicit spawn-and-wait protocol Claude is expected to use.
-  Installed outside the worktree so git-tracked projects don't see it
-  as an untracked file (avoids tripping clean-tree stop hooks).
+- `.claude/skills/mngr-subagents/SKILL.md` -- the explicit
+  spawn-and-wait protocol Claude is expected to use.
 
 What deny mode does NOT install or run (vs. PROXY):
 - No `PostToolUse:Agent` cleanup -- the deny hook never runs

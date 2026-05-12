@@ -20,9 +20,7 @@ class SubagentProxyMode(UpperCaseStrEnum):
     end-turn body.
 
     DENY: deny every Task call with a short permissionDecisionReason
-    that points Claude at the ``mngr-subagents`` skill (provisioned
-    under the per-agent CLAUDE_CONFIG_DIR rather than the worktree,
-    to keep git-tracked projects clean). The skill
+    that points Claude at the ``mngr-subagents`` skill. The skill
     teaches an explicit two-command spawn-and-wait protocol Claude
     runs itself via the Bash tool (``mngr create`` then
     ``python -m imbue.mngr_claude_subagent_proxy.subagent_wait``) and
