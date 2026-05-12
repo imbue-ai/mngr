@@ -268,7 +268,7 @@ class LimaProviderInstance(BaseProviderInstance):
         # Connections: host machine ssh-keyscan <-A-> hostagent <-B-> lima vm sshd
         # It's possible A is open while B isn't ready. Thus polling until success.
         if not poll_until(
-            lambda: self._try_record_host_keys(hostname, port),
+            lambda: self._try_scan_and_add_host_key(hostname, port),
             timeout=60.0,
             poll_interval=2.0,
         ):
@@ -277,8 +277,8 @@ class LimaProviderInstance(BaseProviderInstance):
                 f"the Lima VM may not have finished starting sshd"
             )
 
-    def _try_record_host_keys(self, hostname: str, port: int) -> bool:
-        """Run ssh-keyscan once. Returns True iff at least one host key was recorded."""
+    def _try_scan_and_add_host_key(self, hostname: str, port: int) -> bool:
+        """Run ssh-keyscan once and add any keys returned. Returns True iff at least one was added."""
         result = self.mngr_ctx.concurrency_group.run_process_to_completion(
             ["ssh-keyscan", "-t", "rsa,ecdsa,ed25519", "-p", str(port), hostname],
             timeout=10.0,
