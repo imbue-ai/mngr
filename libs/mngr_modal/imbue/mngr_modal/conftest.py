@@ -423,8 +423,9 @@ def _get_leaked_modal_environments() -> list[str]:
     # Cross-check each candidate against an env-scoped operation -- if the env
     # is genuinely gone, `modal app list --env=<name>` returns non-zero with
     # "Environment '<name>' not found", and we can safely drop it from the
-    # leak list. If we can't verify (timeout, etc.), err conservatively and
-    # treat it as a real leak.
+    # leak list. Any other failure (auth error, transient API error,
+    # timeout, etc.) is treated conservatively as a real leak so we don't
+    # silently mask leaks behind unrelated CLI failures.
     real_leaks: list[str] = []
     for name in candidates:
         try:
@@ -436,12 +437,19 @@ def _get_leaked_modal_environments() -> list[str]:
             )
             if verify.returncode == 0:
                 real_leaks.append(name)
-            else:
+            elif "not found" in verify.stderr.lower():
                 logger.debug(
-                    "Dropping zombie env {} (in global list but `app list --env` fails: {})",
+                    "Dropping zombie env {} (in global list but `app list --env` reports not found: {})",
                     name,
                     verify.stderr.strip(),
                 )
+            else:
+                logger.warning(
+                    "Cross-check for env {} returned non-zero without 'not found'; treating as leak: {}",
+                    name,
+                    verify.stderr.strip(),
+                )
+                real_leaks.append(name)
         except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
             logger.warning("Cross-check for env {} failed; treating as leak: {}", name, e)
             real_leaks.append(name)
