@@ -34,6 +34,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.git_utils import parse_worktree_git_file
@@ -657,7 +658,7 @@ def _is_rotated_log_file(path: Path) -> bool:
 
 def gc_orphaned_resources(
     hosts_by_provider: ProviderHosts,
-    deleted_host_ids: set,
+    deleted_host_ids: set[HostId],
     dry_run: bool,
     error_behavior: ErrorBehavior,
     result: GcResult,
