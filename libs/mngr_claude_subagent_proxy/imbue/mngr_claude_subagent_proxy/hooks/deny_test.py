@@ -159,30 +159,6 @@ def test_deny_does_not_require_state_dir_or_parent_name(clean_env: pytest.Monkey
     assert "mngr-subagents" in response["hookSpecificOutput"]["permissionDecisionReason"]
 
 
-@pytest.mark.parametrize(
-    "raw_stdin",
-    ["", "{not json", "[1, 2, 3]", "{}"],
-    ids=["empty", "malformed_json", "non_object_json", "empty_object"],
-)
-def test_deny_emits_skill_pointer_for_any_stdin(raw_stdin: str, hook_env: pytest.MonkeyPatch) -> None:
-    """The deny reason is uniform for any stdin shape.
-
-    The hook deliberately ignores stdin content -- the deny is the
-    same regardless of what Claude was trying to delegate. Empty,
-    malformed, non-dict JSON, and well-formed-but-empty all get the
-    same skill-pointer reason.
-    """
-    del hook_env
-    stdin_buffer = io.StringIO(raw_stdin)
-    stdout_buffer = io.StringIO()
-    deny_hook.run(stdin_buffer, stdout_buffer)
-
-    response = json.loads(stdout_buffer.getvalue())
-    hook_out = response["hookSpecificOutput"]
-    assert hook_out["permissionDecision"] == "deny"
-    assert "mngr-subagents" in hook_out["permissionDecisionReason"]
-
-
 def test_deny_at_max_depth_emits_depth_limit_deny(hook_env: pytest.MonkeyPatch) -> None:
     """At/above ``MNGR_MAX_SUBAGENT_DEPTH``, deny mode emits a depth-limit reason.
 
@@ -225,19 +201,30 @@ def test_deny_below_max_depth_emits_skill_pointer_reason(hook_env: pytest.Monkey
         pytest.param("", id="empty_stdin"),
         pytest.param("{not json", id="malformed_json"),
         pytest.param("[1, 2, 3]", id="non_dict_json"),
+        pytest.param("{}", id="empty_object"),
         pytest.param(json.dumps({"tool_input": {"prompt": "hi"}}), id="missing_tool_use_id"),
         pytest.param(json.dumps({"tool_use_id": "toolu_x"}), id="missing_prompt"),
     ],
 )
-def test_deny_never_allows_passthrough(raw_stdin: str, hook_env: pytest.MonkeyPatch) -> None:
-    """No code path in the deny hook may emit permissionDecision=allow.
+def test_deny_is_uniform_across_stdin_shapes(raw_stdin: str, hook_env: pytest.MonkeyPatch) -> None:
+    """The deny reason is uniform for any stdin shape -- no passthrough, skill pointer always present.
 
-    A pass-through would let the native Task tool run, defeating the
-    point of deny mode.
+    Two invariants in one parametrized table:
+    (1) ``permissionDecision == "deny"`` for every stdin shape -- a
+        passthrough would let the native Task tool run, defeating the
+        point of deny mode.
+    (2) ``"mngr-subagents" in permissionDecisionReason`` -- the deny
+        reason consistently points at the skill, regardless of what
+        Claude was trying to delegate (or whether the hook input even
+        parsed).
+
+    Covers valid, empty, malformed, non-dict, well-formed-but-empty,
+    and partially-populated stdin shapes.
     """
     del hook_env
     stdin_buffer = io.StringIO(raw_stdin)
     stdout_buffer = io.StringIO()
     deny_hook.run(stdin_buffer, stdout_buffer)
-    decision = json.loads(stdout_buffer.getvalue())["hookSpecificOutput"]["permissionDecision"]
-    assert decision == "deny"
+    hook_out = json.loads(stdout_buffer.getvalue())["hookSpecificOutput"]
+    assert hook_out["permissionDecision"] == "deny"
+    assert "mngr-subagents" in hook_out["permissionDecisionReason"]
