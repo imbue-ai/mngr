@@ -63,8 +63,12 @@ mode = "PROXY"   # default: route Task calls through a mngr-managed subagent
   proxy children before the parent's state dir is wiped.
 
 The plugin also contributes a `mngr-proxy` Claude subagent definition
-at `.claude/agents/mngr-proxy.md` and writes per-tool-use wait-scripts
-into `$MNGR_AGENT_STATE_DIR/proxy_commands/`.
+under the per-agent CLAUDE_CONFIG_DIR
+(`$MNGR_AGENT_STATE_DIR/plugin/claude/anthropic/agents/mngr-proxy.md`)
+and writes per-tool-use wait-scripts into
+`$MNGR_AGENT_STATE_DIR/proxy_commands/`. The definition lives outside
+the worktree so git-tracked projects don't see it as an untracked file
+(avoids tripping clean-tree stop hooks).
 
 ## Wait-script protocol
 
@@ -373,6 +377,36 @@ already-considered-and-deferred Option B (see plan): a wrapper that
 intercepts the dialog at the parent level and round-trips the
 decision back to the child. Defers all the way back to the original
 plan; not picked up here for simplicity.
+
+#### Honor agent-definition tool restrictions and system-prompt semantics
+
+**Not implemented.** When a parent calls
+`Task(subagent_type="imbue-code-guardian:verify-and-fix", prompt=Y)`
+with a specialized agent type, Claude Code's native behavior is to
+spawn the subagent with the `.md` definition's body as its **system
+prompt** (separate channel from the user message) AND honor the
+frontmatter's `tools:` / `model:` declarations (e.g. `tools: [Read,
+Grep]` to limit the child to read-only tools).
+
+Today the plugin's typed-`subagent_type` support resolves the agent
+definition and inlines the body into the proxy prompt file (PROXY) or
+points Claude at the resolved path so it can prepend the body itself
+(DENY). Both modes treat the body as **user-message text**, not a
+system prompt, and **ignore tool restrictions entirely** -- the
+spawned mngr subagent inherits the user's full Claude config. The
+v1 docstring on `SubagentProxyMode.DENY` and the `mngr-subagents`
+skill both flag this as a known limitation.
+
+Fix path: extend `mngr create` (and the `mngr_claude` Claude
+launcher) to accept a `--append-system-prompt-file` sidefile that
+threads through to Claude Code's actual `--append-system-prompt` flag
+for proper system-prompt semantics. The `.mngr-system-prompt`
+convention already exists for the headless agent
+(`libs/mngr_claude/imbue/mngr_claude/headless_claude_agent.py`); it
+needs to be plumbed through to the interactive `--type claude` path
+the proxy uses. For tool restrictions, register
+`mngr-proxy-child`-style agent types per frontmatter-declared
+permission profile and select the right one at `mngr create` time.
 
 #### Tighter mngr_recursive integration
 

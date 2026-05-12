@@ -58,11 +58,12 @@ def fake_host(host_dir: Path) -> FakeHost:
     return FakeHost(host_dir)
 
 
-def test_plugin_hooks_register_on_claude_agent(work_dir: Path, fake_host: FakeHost) -> None:
+def test_plugin_hooks_register_on_claude_agent(work_dir: Path, host_dir: Path, fake_host: FakeHost) -> None:
     """The plugin's provisioning hook wires up hooks and the proxy agent.
 
     This is the golden-path CI check: verify that invoking on_after_provisioning
-    for a Claude agent writes the mngr-proxy agent definition and merges the
+    for a Claude agent writes the mngr-proxy agent definition under the
+    per-agent CLAUDE_CONFIG_DIR (NOT the worktree) and merges the
     python-module hooks into .claude/settings.local.json.
     """
     agent_id = AgentId.generate()
@@ -78,10 +79,13 @@ def test_plugin_hooks_register_on_claude_agent(work_dir: Path, fake_host: FakeHo
     assert any(entry.get("matcher") == "Agent" for entry in hooks["PostToolUse"])
     assert "SessionStart" in hooks
 
-    proxy_md = work_dir / ".claude" / "agents" / "mngr-proxy.md"
+    proxy_md = host_dir / "agents" / str(agent_id) / "plugin" / "claude" / "anthropic" / "agents" / "mngr-proxy.md"
     assert proxy_md.exists()
     proxy_content = proxy_md.read_text()
     assert "model: haiku" in proxy_content
+    # Worktree must stay clean -- the worktree-side path is what the
+    # previous implementation polluted, so pin its absence too.
+    assert not (work_dir / ".claude" / "agents" / "mngr-proxy.md").exists()
 
     python_prefix = "uv run python -m imbue.mngr_claude_subagent_proxy.hooks."
     pre_cmd = hooks["PreToolUse"][0]["hooks"][0]["command"]
@@ -436,20 +440,27 @@ def test_deny_mode_installs_pretooluse_deny_and_sessionstart_reaper(
 
 
 def test_deny_mode_does_not_write_proxy_agent_definition(
-    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+    work_dir: Path, host_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
 ) -> None:
     """In DENY mode, the mngr-proxy.md agent definition is NOT written.
 
-    The Haiku dispatcher is part of PROXY mode only. Writing it in deny
-    mode would dirty the worktree with a file the user never invokes.
+    The Haiku dispatcher is part of PROXY mode only. Pin the absence at
+    BOTH the legacy worktree path and the per-agent state-dir path that
+    PROXY mode now uses, so a future refactor can't accidentally
+    reintroduce the definition under DENY.
     """
     ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
-    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+    agent_id = AgentId.generate()
+    agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
 
     _provision(agent, fake_host, ctx)
 
-    proxy_md = work_dir / ".claude" / "agents" / "mngr-proxy.md"
-    assert not proxy_md.exists()
+    worktree_proxy_md = work_dir / ".claude" / "agents" / "mngr-proxy.md"
+    state_dir_proxy_md = (
+        host_dir / "agents" / str(agent_id) / "plugin" / "claude" / "anthropic" / "agents" / "mngr-proxy.md"
+    )
+    assert not worktree_proxy_md.exists()
+    assert not state_dir_proxy_md.exists()
 
 
 def test_deny_mode_writes_mngr_subagents_skill(

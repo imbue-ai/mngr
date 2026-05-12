@@ -215,9 +215,24 @@ def build_subagent_proxy_deny_hooks_config() -> dict[str, Any]:
     }
 
 
-def _write_proxy_agent_definition(host: OnlineHostInterface, work_dir: Path) -> None:
-    """Write the mngr-proxy subagent definition under the agent's .claude/agents/."""
-    agents_dir = work_dir / ".claude" / "agents"
+def _write_proxy_agent_definition(host: OnlineHostInterface, agent: AgentInterface) -> None:
+    """Write the mngr-proxy Haiku-dispatcher agent definition under the
+    per-agent CLAUDE_CONFIG_DIR rather than the worktree.
+
+    Destination: ``<state_dir>/plugin/claude/anthropic/agents/mngr-proxy.md``,
+    where ``<state_dir>`` is ``host.host_dir / "agents" / agent.id``. This
+    is the per-agent CLAUDE_CONFIG_DIR mngr_claude points the spawned
+    Claude session at (see ``ClaudeAgent.get_claude_config_dir``). Claude
+    Code resolves typed-subagent definitions from ``$CLAUDE_CONFIG_DIR/agents/``
+    (alongside the user's flat ``~/.claude/agents/``), which is the same
+    mechanism by which ``_CLAUDE_HOME_SYNC_DIRS`` syncs the user's
+    ``~/.claude/agents/`` into the per-agent config dir. Symmetric with
+    the DENY-mode skill placement -- both PROXY's agent definition and
+    DENY's skill are plugin-generated runtime artifacts that have no
+    business polluting git-tracked worktrees with untracked files.
+    """
+    state_dir = get_agent_state_dir_path(host.host_dir, agent.id)
+    agents_dir = state_dir / "plugin" / "claude" / "anthropic" / "agents"
     host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(agents_dir))}", timeout_seconds=5.0)
     content = _load_resource(_AGENT_DEFINITION)
     host.write_text_file(agents_dir / "mngr-proxy.md", content)
@@ -579,7 +594,7 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
         return
 
     _check_project_settings_stop_hooks_guarded(host, agent.work_dir)
-    _write_proxy_agent_definition(host, agent.work_dir)
+    _write_proxy_agent_definition(host, agent)
     _merge_subagent_proxy_hooks(host, agent.work_dir)
 
     if _is_subagent_proxy_child(agent):
