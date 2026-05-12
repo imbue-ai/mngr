@@ -40,6 +40,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
 
 _DEFAULT_STUCK_THRESHOLD_SECONDS: Final[float] = 5.0
+_DEFAULT_POST_RECOVERY_GRACE_SECONDS: Final[float] = 5.0
 
 
 class AgentHealth(str, Enum):
@@ -78,10 +79,18 @@ class WorkspaceServerHealthTracker(MutableModel):
         default=_DEFAULT_STUCK_THRESHOLD_SECONDS,
         description="Seconds of continuous failures before HEALTHY -> STUCK fires.",
     )
+    post_recovery_grace_seconds: float = Field(
+        default=_DEFAULT_POST_RECOVERY_GRACE_SECONDS,
+        description=(
+            "Seconds after a non-HEALTHY -> HEALTHY transition during which record_failure is ignored. "
+            "Drains stale failures from in-flight requests that started while the workspace was still bad."
+        ),
+    )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _records: dict[str, _AgentRecord] = PrivateAttr(default_factory=dict)
     _stuck_timers: dict[str, threading.Timer] = PrivateAttr(default_factory=dict)
+    _last_recovery_at: dict[str, float] = PrivateAttr(default_factory=dict)
     _on_change_callbacks: list[OnChangeCallback] = PrivateAttr(default_factory=list)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -119,11 +128,19 @@ class WorkspaceServerHealthTracker(MutableModel):
         timer that fires the HEALTHY -> STUCK transition once
         ``stuck_threshold_seconds`` elapse without a success. Subsequent
         failures while still in the window are no-ops.
+
+        Failures arriving within ``post_recovery_grace_seconds`` of the
+        most recent non-HEALTHY -> HEALTHY transition are ignored, so
+        stale envelopes from in-flight requests that overlap a restart do
+        not immediately re-arm the stuck timer.
         """
         aid_str = str(agent_id)
         with self._lock:
             record = self._records.setdefault(aid_str, _AgentRecord())
             if record.health != AgentHealth.HEALTHY:
+                return
+            last_recovery = self._last_recovery_at.get(aid_str)
+            if last_recovery is not None and time.monotonic() - last_recovery < self.post_recovery_grace_seconds:
                 return
             if record.first_failure_at is not None:
                 return
@@ -150,6 +167,7 @@ class WorkspaceServerHealthTracker(MutableModel):
             record.first_failure_at = None
             if record.health != AgentHealth.HEALTHY:
                 record.health = AgentHealth.HEALTHY
+                self._last_recovery_at[aid_str] = time.monotonic()
                 fire_health = AgentHealth.HEALTHY
         if fire_health is not None:
             self._fire_on_change(agent_id, fire_health)

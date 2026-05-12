@@ -177,6 +177,49 @@ def test_concurrent_failures_only_one_stuck_event() -> None:
         assert seen == [AgentHealth.STUCK]
 
 
+def test_failure_within_post_recovery_grace_is_ignored() -> None:
+    """A failure shortly after a non-HEALTHY -> HEALTHY transition does not re-arm STUCK."""
+    tracker = WorkspaceServerHealthTracker(
+        stuck_threshold_seconds=_FAST_THRESHOLD,
+        post_recovery_grace_seconds=10.0,
+    )
+    aid = AgentId.generate()
+    seen: list[AgentHealth] = []
+    tracker.add_on_change_callback(lambda _a, h: seen.append(h))
+
+    tracker.record_failure(aid)
+    assert _wait_for(lambda: tracker.get_health(aid) == AgentHealth.STUCK)
+    tracker.record_success(aid)
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+
+    tracker.record_failure(aid)
+    threading.Event().wait(timeout=_FAST_THRESHOLD * 4)
+
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+    assert seen == [AgentHealth.STUCK, AgentHealth.HEALTHY]
+
+
+def test_failure_after_post_recovery_grace_expires_fires_stuck() -> None:
+    """Once the grace window elapses, a new failure arms STUCK normally."""
+    grace = 0.05
+    tracker = WorkspaceServerHealthTracker(
+        stuck_threshold_seconds=_FAST_THRESHOLD,
+        post_recovery_grace_seconds=grace,
+    )
+    aid = AgentId.generate()
+    seen: list[AgentHealth] = []
+    tracker.add_on_change_callback(lambda _a, h: seen.append(h))
+
+    tracker.record_failure(aid)
+    assert _wait_for(lambda: tracker.get_health(aid) == AgentHealth.STUCK)
+    tracker.record_success(aid)
+
+    threading.Event().wait(timeout=grace * 4)
+    tracker.record_failure(aid)
+    assert _wait_for(lambda: tracker.get_health(aid) == AgentHealth.STUCK)
+    assert seen == [AgentHealth.STUCK, AgentHealth.HEALTHY, AgentHealth.STUCK]
+
+
 def test_callback_exception_does_not_break_subsequent_callbacks() -> None:
     tracker = WorkspaceServerHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
