@@ -295,3 +295,20 @@ Callers updated:
   inside this helper).
 - `FakeLatchkey` in `testing.py` mirrors the new `start_gateway`
   signature.
+
+## mngr-latchkey: do not let `mngr latchkey forward` die with its parent
+
+`_forward_command` was calling `start_parent_death_watcher`, which polls
+`os.getppid()` every ~3 seconds and SIGTERMs the process when the
+original parent dies and the process gets reparented to PID 1. That
+actively defeats the detached-supervisor pattern: when minds spawns
+`mngr latchkey forward` with `start_new_session=True` and then exits,
+the watcher saw the reparent and shut the gateway down within ~3
+seconds.
+
+Removed the watcher call. To still handle the *interactive* case (user
+runs `mngr latchkey forward` in a terminal and closes the terminal),
+SIGHUP is now wired into the same signal handler as SIGINT/SIGTERM,
+so a terminal close triggers the clean coupled-lifetime shutdown path
+rather than killing the python interpreter under the default handler
+(which would leave the gateway orphaned).

@@ -43,7 +43,6 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import PluginName
-from imbue.mngr.utils.parent_process import start_parent_death_watcher
 from imbue.mngr_latchkey.agent_setup import finalize_agent_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.config import LatchkeyPluginConfig
@@ -368,10 +367,13 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
         is_format_template_supported=False,
     )
 
-    # Bail early if the parent (e.g. the launching shell) dies before we
-    # finish shutting down; otherwise we can leak the gateway subprocess.
-    start_parent_death_watcher(mngr_ctx.concurrency_group)
-
+    # No parent-death watcher: ``LatchkeyForwardSupervisor`` spawns us
+    # detached via ``start_new_session=True`` so we survive embedder
+    # restarts (the whole point of the supervisor pattern). Polling
+    # ``getppid()`` and SIGTERM'ing ourselves on reparent-to-init would
+    # actively defeat that. SIGHUP is wired into the signal handlers
+    # below for the interactive case (user runs ``mngr latchkey forward``
+    # in a terminal and closes it).
     latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
 
     # Eagerly ensure the gateway is up so users see startup failures
@@ -445,16 +447,20 @@ class _ShutdownSignalHandler(FrozenModel):
 
 
 def _install_signal_handlers(shutdown_event: threading.Event) -> None:
-    """Wire SIGINT / SIGTERM to set ``shutdown_event``.
+    """Wire SIGINT / SIGTERM / SIGHUP to set ``shutdown_event``.
 
-    Both signals trigger the same coupled-lifetime shutdown path
-    (terminate the gateway). We do not install a SIGHUP handler --
-    ``mngr latchkey forward`` intentionally has no bounce/reload story;
-    if the user wants to pick up settings.toml changes, they restart
-    the process.
+    All three signals trigger the same coupled-lifetime shutdown path
+    (terminate the gateway and reverse tunnels, exit cleanly). SIGHUP
+    in particular matters for the interactive use case: when the user
+    runs ``mngr latchkey forward`` in a terminal and closes the
+    terminal, the kernel SIGHUP's the foreground process group, and
+    without this handler the python interpreter would die under the
+    default handler before our cleanup ran -- leaving the gateway as
+    an orphan. ``mngr latchkey forward`` is intentionally *not* a
+    reload story: SIGHUP triggers full shutdown, not a config bounce.
     """
     handler = _ShutdownSignalHandler(shutdown_event=shutdown_event)
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         try:
             signal.signal(sig, handler)
         except (ValueError, OSError) as e:
