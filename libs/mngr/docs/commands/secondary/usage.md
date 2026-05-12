@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr usage [OPTIONS]
+mngr usage [OPTIONS] [COMMAND]
 ```
 
 Show rolling-window usage / quota data from agent statusline events.
