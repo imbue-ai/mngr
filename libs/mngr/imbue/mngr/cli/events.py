@@ -8,12 +8,14 @@ from imbue.mngr.api.events import EventRecord
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import resolve_events_target
 from imbue.mngr.api.events import stream_all_events
+from imbue.mngr.cli.address_params import AGENT_OR_HOST_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.parent_process import start_parent_death_watcher
 
@@ -24,7 +26,7 @@ class EventsCliOptions(CommonCliOptions):
     Inherits common options (output_format, quiet, verbose, etc.) from CommonCliOptions.
     """
 
-    target: str
+    target: AgentOrHostAddress
     sources: tuple[str, ...]
     source: tuple[str, ...]
     include: tuple[str, ...]
@@ -42,7 +44,7 @@ def _write_and_flush_stdout(content: str) -> None:
 
 
 @click.command(name="event")
-@click.argument("target")
+@click.argument("target", type=AGENT_OR_HOST_ADDRESS)
 @click.argument("sources", nargs=-1)
 @optgroup.group("Display")
 @optgroup.option(
@@ -109,7 +111,7 @@ def events(ctx: click.Context, **kwargs: Any) -> None:
 
     # Resolve the target (agent or host)
     target = resolve_events_target(
-        identifier=opts.target,
+        address=opts.target,
         mngr_ctx=mngr_ctx,
     )
 
@@ -165,12 +167,17 @@ CommandHelpMetadata(
     one_line_description="View events from an agent or host",
     synopsis="mngr event TARGET [SOURCES...] [--source SOURCE] [--include CEL] [--exclude CEL] [--follow] [--tail N] [--head N]",
     arguments_description=(
-        "- `TARGET`: Agent or host name/ID whose events to view\n"
+        "- `TARGET`: Agent or host whose events to view. Agents are `NAME` or "
+        "`NAME@HOST[.PROVIDER]`. Hosts are `@HOST[.PROVIDER]` (the `@` prefix "
+        "is required to disambiguate from agent names) or a `host-...` ID.\n"
         "- `SOURCES`: Event sources to include (optional; includes all sources if omitted). "
         "These are paths relative to the target's events/ directory (e.g. 'messages', 'logs/mngr')."
     ),
-    description="""TARGET identifies an agent (by name or ID) or a host (by name or ID).
-The command first tries to match TARGET as an agent, then as a host.
+    description="""TARGET identifies an agent or a host by text:
+- Agents: `NAME`, `NAME@HOST`, or `NAME@HOST.PROVIDER`.
+- Hosts: `@HOST`, `@HOST.PROVIDER`, or a bare `host-...` ID.
+
+Bare names without `@` are always interpreted as agent names.
 
 Streams all events from all sources in date-sorted order. Use --source
 or positional SOURCES arguments to restrict which event sources to include.

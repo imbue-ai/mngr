@@ -1,11 +1,11 @@
 """Public reader API for ``mngr usage``.
 
-Pulled out of ``cli.py`` so the snapshot pipeline (``gather_usage_snapshots``)
-and the polling primitive (``wait_for_usage``) can be reused without going
-through Click. The CLI command and the ``mngr usage wait`` subcommand both
-import from here.
+Houses the snapshot pipeline (``gather_usage_snapshots``) and the polling
+primitive (``wait_for_usage``) so they can be reused without going through
+Click. The CLI command and the ``mngr usage wait`` subcommand both import
+from here.
 
-Architectural contract: ``mngr_usage`` stays writer-agnostic. The reader
+Architectural contract: ``mngr_usage`` is writer-agnostic. The reader
 walks events files by path convention and treats window keys
 (``five_hour``, ``seven_day``, ...) and source names (``claude``, ...) as
 opaque strings supplied by whichever writer plugin produced them. The
@@ -28,6 +28,7 @@ from typing import Any
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
@@ -91,43 +92,18 @@ def _parse_iso_timestamp(value: Any) -> int | None:
         return None
 
 
-@pure
-def _coerce_optional_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-@pure
-def _coerce_optional_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-@pure
-def _coerce_optional_str(value: Any) -> str | None:
-    return value if isinstance(value, str) else None
-
-
-@pure
-def _coerce_optional_bool(value: Any) -> bool | None:
-    return value if isinstance(value, bool) else None
-
-
 def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
     """Reshape an event's ``rate_limits`` payload into UsageSnapshot windows.
 
     Window keys and their order are entirely up to the writer; we preserve
     JSONL insertion order. Per-window ``label`` (optional) is what the
     human renderer uses; missing labels fall back to the window key.
-    Missing fields are coerced to None.
+
+    Writer/reader versions are assumed to be lockstep (both live in the
+    same monorepo). If a window dict has an unexpected field or a value
+    that won't coerce to the typed field, pydantic raises and we drop the
+    window with a debug log -- surfaces writer/reader drift rather than
+    masking it.
     """
     rate_limits = event.get("rate_limits")
     if not isinstance(rate_limits, dict):
@@ -136,14 +112,10 @@ def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
     for window_key, window_value in rate_limits.items():
         if not isinstance(window_value, dict):
             continue
-        windows[str(window_key)] = WindowSnapshot(
-            used_percentage=_coerce_optional_float(window_value.get("used_percentage")),
-            resets_at=_coerce_optional_int(window_value.get("resets_at")),
-            window_seconds=_coerce_optional_int(window_value.get("window_seconds")),
-            label=_coerce_optional_str(window_value.get("label")),
-            status=_coerce_optional_str(window_value.get("status")),
-            is_using_overage=_coerce_optional_bool(window_value.get("is_using_overage")),
-        )
+        try:
+            windows[str(window_key)] = WindowSnapshot.model_validate(window_value)
+        except ValidationError as e:
+            logger.debug("Skipping window {}: {}", window_key, e)
     return windows
 
 
