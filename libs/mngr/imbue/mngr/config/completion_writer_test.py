@@ -6,6 +6,7 @@ from pathlib import Path
 import click
 import pytest
 
+from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import get_completion_cache_dir
 from imbue.mngr.config.completion_writer import _EXCLUDED_CONFIG_KEY_PREFIXES
@@ -228,7 +229,9 @@ def test_write_cli_completions_cache_with_mngr_ctx(
         },
     )
 
-    write_cli_completions_cache(cli_group=group, mngr_ctx=temp_mngr_ctx)
+    write_cli_completions_cache(
+        cli_group=group, mngr_ctx=temp_mngr_ctx, registered_agent_types=list_registered_agent_types()
+    )
     data = _read_cache(completion_cache_dir)
 
     # Agent types include at least the built-in registered types

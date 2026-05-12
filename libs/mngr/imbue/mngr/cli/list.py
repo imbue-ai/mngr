@@ -17,6 +17,7 @@ from tabulate import tabulate
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
@@ -197,18 +198,15 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     # Write the tab completion cache in the background so it doesn't block
     # the list output. The cache includes both static CLI structure and
     # dynamic values from the runtime context (agent types, templates, etc.).
-    # Agent types are resolved inside ``write_cli_completions_cache`` via
-    # ``list_available_agent_types``, which reads from the in-memory registry
-    # populated at process start; the registry is not mutated after
-    # ``load_agents_from_plugins`` so reading it from the background thread is
-    # safe.
     if ctx.parent is not None and isinstance(ctx.parent.command, click.Group):
         cli_group = ctx.parent.command
+        registered_agent_types = list_registered_agent_types()
         mngr_ctx.concurrency_group.start_new_thread(
             target=write_cli_completions_cache,
             kwargs={
                 "cli_group": cli_group,
                 "mngr_ctx": mngr_ctx,
+                "registered_agent_types": registered_agent_types,
             },
             name="completion-cache-writer",
             is_checked=False,

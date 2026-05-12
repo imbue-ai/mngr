@@ -8,7 +8,6 @@ import click
 from loguru import logger
 from pydantic import BaseModel
 
-from imbue.mngr.agents.agent_registry import list_available_agent_types
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import CompletionCacheData
 from imbue.mngr.config.completion_cache import get_completion_cache_dir
@@ -279,6 +278,7 @@ def _is_excluded_config_key(key: str) -> bool:
 
 def _build_dynamic_completions(
     mngr_ctx: MngrContext,
+    registered_agent_types: list[str],
 ) -> _DynamicCompletions:
     """Build dynamic completion data from the runtime context.
 
@@ -287,11 +287,8 @@ def _build_dynamic_completions(
     """
     config = mngr_ctx.config
 
-    # `list_available_agent_types` is the canonical union of plugin-registered
-    # types and user-config-defined ones. Reuse it here so the completion
-    # cache cannot drift from the picker / error-message list surfaced by
-    # `mngr create` and `mngr plugin list --kind agent-type`.
-    agent_type_names = list_available_agent_types(config)
+    custom = [str(k) for k in config.agent_types.keys()]
+    agent_type_names = sorted(set(registered_agent_types + custom))
 
     provider_backend_names = list_registered_provider_backend_names()
 
@@ -324,6 +321,7 @@ def write_cli_completions_cache(
     *,
     cli_group: click.Group,
     mngr_ctx: MngrContext | None = None,
+    registered_agent_types: list[str] | None = None,
 ) -> None:
     """Write all CLI commands, options, and choices to the completions cache (best-effort).
 
@@ -337,9 +335,7 @@ def write_cli_completions_cache(
 
     When mngr_ctx is provided, runtime-derived completion values (agent types,
     templates, providers, plugin names, config keys) are extracted and injected
-    into the cache. Agent types are resolved via ``list_available_agent_types``
-    so the cache stays in sync with the picker / error-message list used by
-    ``mngr create`` and ``mngr plugin list --kind agent-type``.
+    into the cache.
 
     Catches OSError from cache writes so filesystem failures do not break
     CLI commands. Other exceptions are allowed to propagate.
@@ -416,7 +412,7 @@ def write_cli_completions_cache(
                 positional_completions[dotted_key] = entries
 
         # Inject dynamic choice values from runtime context (config, registries)
-        dynamic = _build_dynamic_completions(mngr_ctx) if mngr_ctx is not None else None
+        dynamic = _build_dynamic_completions(mngr_ctx, registered_agent_types or []) if mngr_ctx is not None else None
         if dynamic is not None:
             dynamic_as_dict = dynamic._asdict()
             for opt_key, data_key in _DYNAMIC_CHOICE_OPTIONS.items():
