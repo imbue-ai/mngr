@@ -1371,6 +1371,12 @@ _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
 # the inner command is non-blocking, so anything beyond a few seconds means
 # the mngr CLI got stuck talking to its provider).
 _RESTART_DISPATCH_TIMEOUT_SECONDS: Final[float] = 10.0
+# Timeout for the ``mngr restart-host`` dispatch. Container/VM lifecycle
+# bounces can be slow (stop + start + ssh handshake), so the cap is much
+# higher than the surgical restart's. If the CLI hasn't returned by then,
+# something is wedged and we want the tracker to flip RESTART_FAILED so
+# the modal surfaces it rather than the dispatcher hanging forever.
+_RESTART_HOST_DISPATCH_TIMEOUT_SECONDS: Final[float] = 120.0
 
 
 def _build_restart_shell_command() -> str:
@@ -1591,6 +1597,73 @@ async def _handle_restart_workspace_server_api(
     if tracker is not None:
         tracker.record_success(aid)
     return Response(status_code=200, content="{}", media_type="application/json")
+
+
+async def _handle_restart_container_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Restart the container/VM backing the agent (layer-2 recovery).
+
+    Returns 202 immediately and runs ``mngr restart-host`` asynchronously
+    in a background executor task. The tracker is marked RESTARTING up
+    front so the modal can render the in-flight state before this returns.
+    Dispatch failures (non-zero exit, exec failure, timeout) mark the
+    tracker RESTART_FAILED with the error string so the modal can surface
+    it. On successful dispatch we leave the tracker in RESTARTING and let
+    the background workspace-health probe loop flip it to HEALTHY when
+    the workspace responds 200 again.
+
+    For local agents, ``mngr restart-host`` falls back internally to
+    bouncing the agent's tmux session; for docker / imbue_cloud agents
+    it performs a real container/VM stop+start.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return _json_error("Not authenticated", status_code=403)
+    aid = AgentId(agent_id)
+
+    tracker: WorkspaceServerHealthTracker | None = request.app.state.workspace_health_tracker
+    mngr_binary: str = request.app.state.mngr_binary
+    mngr_host_dir: Path = request.app.state.mngr_host_dir
+    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    if concurrency_group is None:
+        # Validate preconditions before transitioning the tracker -- mirrors
+        # the surgical restart endpoint.
+        return _json_error("Cannot dispatch restart: no concurrency group available", status_code=503)
+
+    if tracker is not None:
+        tracker.mark_restarting(aid)
+    argv = [mngr_binary, "restart-host", str(aid), "--quiet"]
+    env = dict(os.environ)
+    env["MNGR_HOST_DIR"] = str(mngr_host_dir)
+
+    def _dispatch() -> None:
+        try:
+            finished = concurrency_group.run_process_to_completion(
+                argv,
+                timeout=_RESTART_HOST_DISPATCH_TIMEOUT_SECONDS,
+                is_checked_after=False,
+                env=env,
+            )
+        except (OSError, RuntimeError, subprocess.TimeoutExpired, ConcurrencyGroupError) as exc:
+            logger.warning("restart-host dispatch for {} failed: {}", aid, exc)
+            if tracker is not None:
+                tracker.mark_restart_failed(aid, f"Restart command failed: {exc}")
+            return
+        if finished.returncode != 0:
+            logger.warning(
+                "restart-host for {} exited {}: {}", aid, finished.returncode, finished.stderr
+            )
+            if tracker is not None:
+                tracker.mark_restart_failed(
+                    aid,
+                    f"Restart command exited {finished.returncode}: {finished.stderr}",
+                )
+
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(None, _dispatch)
+    return Response(status_code=202, content="{}", media_type="application/json")
 
 
 # -- Account management routes --
@@ -2484,6 +2557,7 @@ def create_desktop_client(
     # Workspace-server recovery routes
     app.get("/agents/{agent_id}/recovery")(_handle_recovery_page)
     app.post("/api/agents/{agent_id}/restart-workspace-server")(_handle_restart_workspace_server_api)
+    app.post("/api/agents/{agent_id}/restart-container")(_handle_restart_container_api)
 
     return app
 

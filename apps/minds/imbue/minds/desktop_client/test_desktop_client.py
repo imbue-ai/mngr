@@ -1476,6 +1476,12 @@ def test_restart_api_requires_authentication(tmp_path: Path) -> None:
     assert response.status_code == 403
 
 
+def test_restart_container_api_requires_authentication(tmp_path: Path) -> None:
+    client, _, agent_id = _setup_test_server(tmp_path)
+    response = client.post(f"/api/agents/{agent_id}/restart-container")
+    assert response.status_code == 403
+
+
 def test_create_desktop_client_stashes_workspace_health_tracker(tmp_path: Path) -> None:
     """create_desktop_client should expose the tracker on app.state for handlers."""
     auth_dir = tmp_path / "auth"
