@@ -1,5 +1,7 @@
 # Service Tabs and Agent Creation -- Spec
 
+> Note: minds_workspace_server has since been moved out of mngr to `forever-claude-template/apps/system_interface/`. Path references to `apps/minds_workspace_server/...` describe state at the time this spec was written.
+
 ## Overview
 
 - The minds workspace server currently has hard-coded "Chat", "Terminal", and "Custom URL" options in the dockview "+" tab menu. We want to replace these with dynamic options: per-agent chat entries, applications from `runtime/applications.toml`, and "Custom URL."
