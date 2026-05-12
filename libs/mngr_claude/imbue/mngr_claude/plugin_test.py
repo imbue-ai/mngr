@@ -65,6 +65,7 @@ from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
 from imbue.mngr_claude.plugin import _generate_installed_plugins_content
 from imbue.mngr_claude.plugin import _generate_known_marketplaces_content
 from imbue.mngr_claude.plugin import _get_claude_version
+from imbue.mngr_claude.plugin import _get_local_host
 from imbue.mngr_claude.plugin import _get_preserved_sessions_dir
 from imbue.mngr_claude.plugin import _get_preserved_sessions_dir_for
 from imbue.mngr_claude.plugin import _has_api_credentials_available
@@ -3171,7 +3172,7 @@ def test_transfer_source_plugin_data_copies_plugin_dir(
     projects_dir.mkdir(parents=True)
     (projects_dir / "session.jsonl").write_text('{"type":"message"}\n')
 
-    agent._transfer_source_plugin_data(host, source_dir)
+    agent._transfer_source_plugin_data(host, source_dir, temp_mngr_ctx)
 
     # data.json should be untouched (only plugin/ is copied)
     assert json.loads((dest_dir / "data.json").read_text())["id"] == "new-agent"
@@ -3194,7 +3195,51 @@ def test_transfer_source_plugin_data_skips_when_no_plugin_dir(
     source_dir.mkdir()
 
     # Should not raise
-    agent._transfer_source_plugin_data(host, source_dir)
+    agent._transfer_source_plugin_data(host, source_dir, temp_mngr_ctx)
+
+
+def test_transfer_source_plugin_data_uses_local_host_as_rsync_source(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Regression: source_host passed to copy_directory must be the LOCAL host, not
+    the destination ``host``. Otherwise cloning a local agent to a remote host
+    (e.g. ``mngr clone foo bar --provider modal``) makes rsync look for the
+    source plugin dir on the remote machine, where it does not exist.
+    """
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    # Real source plugin dir on the local filesystem.
+    source_dir = tmp_path / "source_agent_state"
+    (source_dir / "plugin").mkdir(parents=True)
+
+    # Stand-in destination host that is distinguishable from the local host.
+    # We only need to capture the args passed to copy_directory; no real rsync
+    # should run, so a simple recorder suffices.
+    captured_args: list[tuple[OnlineHostInterface, Path, Path]] = []
+
+    class _RecordingHost:
+        id = HostId.generate()
+
+        def copy_directory(
+            self,
+            source_host: OnlineHostInterface,
+            source_path: Path,
+            target_path: Path,
+            extra_args: str | None = None,
+            exclude_git: bool = False,
+        ) -> None:
+            captured_args.append((source_host, source_path, target_path))
+
+    dest_host = cast(OnlineHostInterface, _RecordingHost())
+
+    agent._transfer_source_plugin_data(dest_host, source_dir, temp_mngr_ctx)
+
+    assert len(captured_args) == 1, "copy_directory should be invoked exactly once"
+    source_host_arg, _, _ = captured_args[0]
+    local_host = _get_local_host(temp_mngr_ctx)
+    assert source_host_arg.id == local_host.id, (
+        f"Expected local host (id={local_host.id}) as rsync source, got {source_host_arg.id} (the destination host)"
+    )
 
 
 # =============================================================================

@@ -1982,7 +1982,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             # This copies sessions, memory, transcript offsets, etc. The subsequent config setup
             # will overwrite identity-specific files (.claude.json, credentials) with fresh values.
             if options.source_agent_state_dir is not None:
-                self._transfer_source_plugin_data(host, options.source_agent_state_dir)
+                self._transfer_source_plugin_data(host, options.source_agent_state_dir, mngr_ctx)
 
             # Set up per-agent config directory (for both local and remote hosts)
             self._setup_per_agent_config_dir(host, options, mngr_ctx)
@@ -2044,6 +2044,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         self,
         host: OnlineHostInterface,
         source_agent_state_dir: Path,
+        mngr_ctx: MngrContext,
     ) -> None:
         """Transfer plugin data from a source agent's state directory during clone.
 
@@ -2059,8 +2060,13 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             logger.debug("No plugin directory in source agent, skipping clone transfer")
             return
 
+        # The source agent state dir lives on the local machine (where mngr runs).
+        # When ``host`` is a remote host (e.g. cloning local -> modal), we must
+        # rsync FROM local TO ``host``; passing ``host`` as the source would
+        # make rsync look for the path on the wrong machine.
+        source_host = _get_local_host(mngr_ctx)
         with log_span("Transferring source plugin data"):
-            host.copy_directory(host, source_plugin_dir, dest_plugin_dir)
+            host.copy_directory(source_host, source_plugin_dir, dest_plugin_dir)
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve session files and clean up per-agent credentials and trust entries.
