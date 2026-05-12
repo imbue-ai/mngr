@@ -33,10 +33,12 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # The one remaining match is in ``destroying_test.py`` (a real test
-    # poll loop). The fake-binary string literal that previously
-    # contributed a second match lived in the now-relocated latchkey
-    # core_test.py, which moved to the ``mngr_latchkey`` package.
+    # Count is 1 because of a regex misfire: ``core_test.py`` embeds a
+    # fake ``latchkey`` binary as a Python source string. That source
+    # string contains a literal ``time.sleep(0.5)`` call inside the
+    # *spawned subprocess* -- not in test framework code -- to widen
+    # the spawn-race window so the regression test for the
+    # ``ensure_gateway_started`` double-spawn bug reliably triggers.
     rc.check_time_sleep(_DIR, snapshot(1))
 
 
@@ -45,7 +47,7 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(12))
+    rc.check_bare_print(_DIR, snapshot(0))
 
 
 # --- Exception handling ---
@@ -68,7 +70,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(10))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(0))
 
 
 # --- Import style ---
@@ -102,10 +104,7 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    # Two: app.py uses ``asyncio.get_running_loop()`` and ``asyncio.run_coroutine_threadsafe``
-    # for HTTP route handlers; latchkey/permissions.py uses ``run_in_executor`` to run the
-    # blocking grant/deny path off the event loop. Both are intrinsic to FastAPI integration.
-    rc.check_asyncio_import(_DIR, snapshot(2))
+    rc.check_asyncio_import(_DIR, snapshot(0))
 
 
 def test_prevent_pandas_import() -> None:
@@ -154,12 +153,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    # ``forward_cli.py`` carries one ``# noqa: S603`` next to the
-    # ``subprocess.Popen`` call that spawns ``mngr forward``. The S603
-    # suppression must be on the same line as the call for ruff to
-    # recognize it; ``# noqa`` is intentionally not in the trailing-
-    # comment exempt list.
-    rc.check_trailing_comments(_DIR, snapshot(1))
+    rc.check_trailing_comments(_DIR, snapshot(0))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -248,28 +242,14 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    # ``latchkey/_spawn.py`` intentionally uses ``subprocess.Popen`` with
-    # ``start_new_session=True`` so that the spawned ``latchkey gateway``
-    # outlives the minds desktop client. That is the opposite of what the
-    # ratchet is designed to enforce (managed cleanup via ConcurrencyGroup),
-    # so we exclude that tiny helper specifically; see its module docstring
-    # for the full justification.
-    #
-    # ``forward_cli.py`` similarly uses ``subprocess.Popen`` directly so it
-    # can hold a reference to the ``mngr forward`` plugin's ``Popen.pid``
-    # for the ``SIGHUP``-bounce path. ``ConcurrencyGroup.RunningProcess``
-    # does not expose the PID today; once it does (a separate cleanup spec
-    # in the concurrency_group lib), this exclusion can be dropped.
-    excluded = TEST_FILE_PATTERNS + (
-        "testing.py",
-        "scripts/*.py",
-        "*/latchkey/_spawn.py",
-        "*/desktop_client/forward_cli.py",
-        # ``destroying.py`` spawns a detached ``bash -c '<mngr destroy ...>'``
-        # so the destroy survives a minds-backend exit; same justification as
-        # ``latchkey/_spawn.py``. See specs/detached-destroy-flow/spec.md.
-        "*/desktop_client/destroying.py",
-    )
+    # ``_spawn.py`` intentionally uses ``subprocess.Popen`` with
+    # ``start_new_session=True`` for the two subprocesses that must
+    # outlive their caller: ``latchkey ensure-browser`` (which may be
+    # downloading Chromium) and ``mngr latchkey forward`` (which the
+    # supervisor adopts across embedder restarts). The shared
+    # ``latchkey gateway`` no longer needs this -- it's spawned via
+    # ``ConcurrencyGroup`` from ``core.py``.
+    excluded = TEST_FILE_PATTERNS + ("*/_spawn.py",)
     rc.check_direct_subprocess(_DIR, snapshot(0), excluded_patterns=excluded)
 
 
@@ -304,10 +284,14 @@ def test_prevent_assert_isinstance() -> None:
 
 
 def test_prevent_code_in_init_files() -> None:
-    rc.check_code_in_init_files(_DIR, snapshot(0))
+    # The package's root ``__init__.py`` is the conventional home for the
+    # plugin-system marker ``hookimpl = pluggy.HookimplMarker("mngr")``
+    # (the one exception called out in the repo CLAUDE.md). That single
+    # line plus its ``import pluggy`` are tracked here as one violation
+    # of the otherwise-strict no-code-in-init rule.
+    rc.check_code_in_init_files(_DIR, snapshot(1))
 
 
-@pytest.mark.flaky
 def test_no_type_errors() -> None:
     """Ensure the codebase has zero type errors."""
     check_no_type_errors(_DIR)

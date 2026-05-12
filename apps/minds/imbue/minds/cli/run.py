@@ -53,10 +53,6 @@ from imbue.minds.desktop_client.forward_cli import LocalAgentDiscoveryHandler
 from imbue.minds.desktop_client.forward_cli import MindsApiUrlWriter
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
-from imbue.minds.desktop_client.latchkey.core import LATCHKEY_BINARY
-from imbue.minds.desktop_client.latchkey.core import Latchkey
-from imbue.minds.desktop_client.latchkey.core import LatchkeyDestructionHandler
-from imbue.minds.desktop_client.latchkey.core import LatchkeyDiscoveryHandler
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import LatchkeyServicesCatalogError
@@ -67,13 +63,16 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.output import emit_event
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
+from imbue.mngr_latchkey.core import LATCHKEY_BINARY
+from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 _DEFAULT_MNGR_FORWARD_PORT: Final[int] = 8421
 _AUTH_ERROR_TYPE: Final[str] = "ImbueCloudAuthError"
@@ -131,9 +130,19 @@ def run(
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
     backend_resolver = MngrCliBackendResolver()
-    tunnel_manager = SSHTunnelManager()
     latchkey = _build_latchkey(data_directory=data_directory)
-    latchkey.initialize(data_dir=data_directory)
+    latchkey.initialize()
+
+    # Spawn (or adopt) a detached ``mngr latchkey forward`` supervisor.
+    # The supervisor owns the shared latchkey gateway + per-agent reverse
+    # tunnels; running it as a detached subprocess (rather than the inline
+    # ``LatchkeyDiscoveryHandler``/``SSHTunnelManager`` wiring that used to
+    # live here) means a minds restart adopts the existing instance instead
+    # of tearing every tunnel down and re-establishing it. We do *not*
+    # terminate it on minds shutdown -- mirroring how minds already leaves
+    # the gateway running detached so agents in containers/VMs keep working
+    # across desktop-client restarts.
+    _ensure_mngr_latchkey_forward_supervisor(latchkey)
 
     root_concurrency_group = ConcurrencyGroup(name="minds-run")
     root_concurrency_group.__enter__()
@@ -203,25 +212,9 @@ def run(
     # Remote-agent ``minds_api_url`` writes happen via the plugin's
     # reverse_tunnel_established envelope.
     consumer.add_on_reverse_tunnel_established_callback(MindsApiUrlWriter(resolver=backend_resolver))
-    # Latchkey gateway lifecycle: a single shared ``latchkey gateway``
-    # subprocess serves every agent (lifetime is independent of any one
-    # agent), so the discovery callback's job is just to ensure the
-    # shared gateway is up and to (for remote agents) reverse-tunnel it
-    # into the container. Per-agent permission overrides ride on the JWT
-    # injected at ``mngr create`` time. The destruction callback exists
-    # solely to drop the per-agent reverse SSH tunnel when an agent goes
-    # away -- otherwise ``SSHTunnelManager`` keeps the entry in its
-    # registry and the 30s health-check loop spins paramiko transports
-    # against an SSH host that no longer exists, pegging a CPU.
-    latchkey_discovery_handler = LatchkeyDiscoveryHandler(
-        latchkey=latchkey,
-        tunnel_manager=tunnel_manager,
-        concurrency_group=root_concurrency_group,
-    )
-    latchkey_destruction_handler = LatchkeyDestructionHandler(tunnel_manager=tunnel_manager)
-    consumer.add_on_agent_discovered_callback(latchkey_discovery_handler)
-    consumer.add_on_agent_destroyed_callback(latchkey_destruction_handler)
-    tunnel_manager.start_reverse_tunnel_health_check()
+    # Latchkey discovery / destruction wiring now lives in the detached
+    # ``mngr latchkey forward`` subprocess started above; no callbacks to
+    # register here.
 
     # Auto-disable an ``imbue_cloud_<slug>`` provider if its session is
     # revoked server-side, so the rest of the user's accounts keep working
@@ -310,7 +303,6 @@ def run(
         uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
     finally:
         consumer.terminate()
-        tunnel_manager.cleanup()
 
 
 def _try_load_latchkey_services_catalog() -> dict[str, ServicePermissionInfo]:
@@ -322,10 +314,20 @@ def _try_load_latchkey_services_catalog() -> dict[str, ServicePermissionInfo]:
 
 
 def _build_latchkey(data_directory: Path) -> Latchkey:
+    # The latchkey-binary path is supplied by the Electron shell (which
+    # bundles its own copy of latchkey under the app resources) via
+    # ``MINDS_LATCHKEY_BINARY``. We fall back to ``"latchkey"`` on PATH
+    # when the env var is not set, e.g. when minds is invoked outside
+    # the Electron shell.
     binary_override = os.environ.get("MINDS_LATCHKEY_BINARY")
     latchkey_binary = binary_override if binary_override else LATCHKEY_BINARY
+    # Single rooted directory for both upstream latchkey's credential
+    # store (passed as ``LATCHKEY_DIRECTORY``) and the plugin's own
+    # ``mngr_latchkey/`` metadata subdir. ``MINDS_LATCHKEY_DIRECTORY``
+    # is honored as an override for users who want to share credentials
+    # across multiple ``MINDS_ROOT_NAME``s.
     directory_override = os.environ.get("MINDS_LATCHKEY_DIRECTORY")
-    latchkey_directory: Path | None
+    latchkey_directory: Path
     if directory_override:
         latchkey_directory = Path(directory_override).expanduser()
     else:
@@ -341,6 +343,34 @@ def _sleep_then_open(url: str, delay: float = 1.0) -> None:
     """
     threading.Event().wait(timeout=delay)
     webbrowser.open(url)
+
+
+def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
+    """Spawn (or adopt) the detached ``mngr latchkey forward`` supervisor.
+
+    Reuses ``latchkey``'s already-resolved binary + directory paths so
+    the supervisor sees exactly the same latchkey state minds itself
+    works against. Bare-name ``mngr`` is used; bundled minds builds
+    rely on the Electron shell having put ``mngr`` on the child's
+    PATH alongside the bundled ``latchkey`` (the
+    :class:`MngrMessageSender` and ``mngr forward`` subprocess paths
+    already make the same assumption).
+
+    Failures are logged as warnings rather than raised: a broken
+    supervisor degrades latchkey to "unreachable from inside agents"
+    but should not prevent minds itself from starting.
+    """
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=MNGR_BINARY,
+        latchkey_binary=latchkey.latchkey_binary,
+        latchkey_directory=latchkey.latchkey_directory,
+    )
+    try:
+        info = supervisor.ensure_running()
+    except LatchkeyError as e:
+        logger.warning("Could not start detached mngr latchkey forward supervisor: {}", e)
+        return
+    logger.info("mngr latchkey forward supervisor running (pid={})", info.pid)
 
 
 class _ImbueCloudAuthErrorDisabler(FrozenModel):
