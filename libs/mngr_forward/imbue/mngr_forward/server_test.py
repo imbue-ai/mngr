@@ -619,8 +619,8 @@ def test_subdomain_forward_emits_workspace_backend_failure_on_sse_startup_discon
     That exception was not caught by the SSE branch (only ``ConnectError``
     and ``TimeoutException`` were), so it bubbled up through starlette as a
     500 and no failure envelope was emitted -- meaning the minds-side health
-    tracker never transitioned to STUCK and the recovery banner never
-    appeared.
+    tracker never transitioned to STUCK and the chrome never navigated to
+    the recovery page.
     """
     agent_id = AgentId()
     preauth = "preauth-cookie-sse-startup"

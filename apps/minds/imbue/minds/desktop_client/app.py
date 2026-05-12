@@ -1497,7 +1497,7 @@ async def _handle_restart_workspace_server_api(
     if concurrency_group is None:
         # Validate preconditions before transitioning the tracker -- otherwise
         # we would fire RESTARTING then immediately STUCK, producing a brief
-        # "Restarting..." flicker on the chrome banner even though no
+        # "Restarting..." flicker on the recovery page even though no
         # dispatch was ever attempted.
         return _json_error("Cannot dispatch restart: no concurrency group available", status_code=503)
 
@@ -1545,10 +1545,10 @@ async def _handle_restart_workspace_server_api(
     preauth_cookie: str | None = request.app.state.mngr_forward_preauth_cookie
     if mngr_forward_port == 0 or not preauth_cookie:
         # Plugin probing is disabled, so we cannot verify recovery. Treat the
-        # successful dispatch as success optimistically so the chrome banner
-        # clears -- otherwise the tracker would stay in RESTARTING forever
-        # (the background probe loop is also a no-op when the plugin is
-        # disabled, so nothing else will ever clear it).
+        # successful dispatch as success optimistically so the recovery page
+        # auto-returns -- otherwise the tracker would stay in RESTARTING
+        # forever (the background probe loop is also a no-op when the plugin
+        # is disabled, so nothing else will ever clear it).
         if tracker is not None:
             tracker.record_success(aid)
         return Response(status_code=200, content="{}", media_type="application/json")

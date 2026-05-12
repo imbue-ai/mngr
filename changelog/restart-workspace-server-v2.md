@@ -1,7 +1,7 @@
 Workspace-server restart and health-recovery UI on the `mngr_forward` plugin architecture.
 
 User-visible changes:
-- A persistent banner now appears at the top of the workspace iframe when the agent's workspace server stops responding. Clicking it opens the recovery page so the user can restart the server.
+- When an agent's workspace server stops responding, the chrome auto-navigates the workspace view to a recovery page where the user can restart the server.
 - The landing page now annotates each project row with a status badge when its workspace server is unresponsive or restarting; clicking such a row goes to the recovery page instead of the workspace.
 - The sidebar context menu gained a "Restart workspace server" entry that opens the recovery page for the selected workspace.
 - A dedicated recovery page (`/agents/<id>/recovery`) renders the restart button, streams server-status updates via SSE, and auto-reloads back to the workspace once the server is healthy again.
