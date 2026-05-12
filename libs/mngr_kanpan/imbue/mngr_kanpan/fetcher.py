@@ -28,6 +28,7 @@ from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_source import KanpanFieldTypeError
 from imbue.mngr_kanpan.data_source import deserialize_fields
+from imbue.mngr_kanpan.data_source import now_utc
 from imbue.mngr_kanpan.data_sources.github import CreatePrUrlField
 from imbue.mngr_kanpan.data_sources.github import PrFetchFailedField
 from imbue.mngr_kanpan.data_sources.github import PrField
@@ -90,12 +91,14 @@ def fetch_board_snapshot(
                 all_fields[agent_name] = {}
             all_fields[agent_name].update(agent_fields)
 
-    # Build board entries
+    # Build board entries. The muted bit is sourced from local certified data
+    # (always live), so its `created` is now.
+    now = now_utc()
     entries: list[AgentBoardEntry] = []
     for agent in agents:
         agent_fields = dict(all_fields.get(agent.name, {}))
         is_muted = agent.name in muted_agents
-        agent_fields[FIELD_MUTED] = BoolField(value=is_muted)
+        agent_fields[FIELD_MUTED] = BoolField(value=is_muted, created=now)
 
         cells = {key: field.display() for key, field in agent_fields.items()}
         section = compute_section(agent_fields)
@@ -288,8 +291,11 @@ def save_field_cache(
         for agent_name, agent_fields in cached_fields.items():
             agent_data: dict[str, Any] = {}
             for key, field in agent_fields.items():
-                # mode="json" so non-string keys / enums / etc. survive json.dump.
-                # The dump includes the kind discriminator -- no separate envelope needed.
+                # mode="json" emits JSON-native primitives (datetime -> ISO
+                # string, enums -> str). The dump includes the FieldValue
+                # subclass's `kind` discriminator, so no separate type
+                # envelope is needed -- load_field_cache rehydrates via the
+                # discriminated-union TypeAdapter.
                 agent_data[key] = field.model_dump(mode="json")
             serialized[str(agent_name)] = agent_data
 
@@ -331,11 +337,18 @@ def load_field_cache(
         raw = json.loads(cache_path.read_text())
         result: dict[AgentName, dict[str, FieldValue]] = {}
         for agent_name_str, agent_data in raw.items():
+            # deserialize_fields drops per-key ValidationErrors with a debug
+            # log (covers the legacy-entries-missing-`created` migration case).
             agent_fields = deserialize_fields(agent_data, adapters)
             if agent_fields:
                 result[AgentName(agent_name_str)] = agent_fields
         return result
     except Exception as e:
+        # Tolerate any read/parse/decode failure and behave as the docstring
+        # promises ("returns empty dict if the cache file doesn't exist or
+        # is corrupt"). The broad catch is intentional and covers
+        # UnicodeDecodeError from partial-write corruption alongside the
+        # narrower OSError / json.JSONDecodeError cases.
         logger.debug("Failed to load field cache: {}", e)
         return {}
 

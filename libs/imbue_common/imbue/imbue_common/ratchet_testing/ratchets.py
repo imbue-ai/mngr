@@ -692,9 +692,13 @@ def find_code_in_init_files(
     The root __init__.py (directly under source_dir) may optionally contain
     specific allowed lines (e.g., pluggy hookimpl marker). All other __init__.py
     files must be empty.
+
+    Walks only gitignore-respecting files so that virtualenvs (e.g. .venv/) and
+    other ignored dirs under source_dir are not scanned.
     """
     root_init = source_dir / "__init__.py"
-    init_files = list(source_dir.rglob("__init__.py"))
+    py_files = _get_non_ignored_files_with_extension(source_dir, FileExtension(".py"))
+    init_files = [f for f in py_files if f.name == "__init__.py"]
 
     violations: list[str] = []
     for init_file in init_files:

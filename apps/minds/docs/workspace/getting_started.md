@@ -15,7 +15,7 @@ This starts the local desktop client (default: `http://127.0.0.1:8420`). A one-t
 3. Fill in:
    - **Name**: a short identifier for the agent (e.g. "selene")
    - **Git repository**: URL or local path to a template repo (e.g. `https://github.com/imbue-ai/forever-claude-template`)
-   - **Launch mode**: LOCAL (Docker container) or DEV (runs in-place)
+   - **Launch mode**: LOCAL (Docker container on this machine), LIMA (Lima VM), CLOUD (Docker on a Vultr VPS), or IMBUE_CLOUD (leased pool host via the imbue_cloud provider)
 4. Click "Create" and wait for the Docker build + agent setup
 5. You'll be redirected to the agent's web server when creation completes
 
@@ -29,7 +29,7 @@ This starts the local desktop client (default: `http://127.0.0.1:8420`). A one-t
 ## Accessing your agent
 
 After creation, the agent is accessible at:
-- **Local**: `http://{agent_id}.localhost:8420/` (the desktop client byte-forwards the subdomain to the workspace's `minds_workspace_server`, which serves the dockview UI)
+- **Local**: `http://{agent_id}.localhost:8420/` (the desktop client byte-forwards the subdomain to the workspace's workspace server, which serves the dockview UI)
 - **Individual service**: `http://{agent_id}.localhost:8420/service/{service_name}/` (e.g. `.../service/web/`, `.../service/terminal/`)
 - **Global** (if Cloudflare configured): `https://{service}--{agent_id}--{username}.{domain}`
 

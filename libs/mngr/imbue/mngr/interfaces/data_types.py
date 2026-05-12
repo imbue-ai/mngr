@@ -283,9 +283,12 @@ class CertifiedHostData(FrozenModel):
 
         Strips deprecated idle_mode field, provides defaults for
         created_at/updated_at when missing from old data, and normalizes
-        the local host name to 'localhost'.  Older data stored the raw
-        pyinfra name '@local', and Host.get_name() produces 'local'
-        (after stripping the '@' prefix); both are normalized here.
+        any spelling of the local host's name to 'localhost'.  Older data
+        stored the raw pyinfra connector name '@local'; OuterHost's
+        get_connector_host_name() strips the '@' to produce 'local'; and
+        Host.get_certified_data()'s missing-data.json fallback prefixes
+        that connector name to produce 'unknown-host-at-local'. All three
+        forms are normalized here.
         """
         if isinstance(data, dict):
             data.pop("idle_mode", None)
@@ -294,11 +297,9 @@ class CertifiedHostData(FrozenModel):
                 data["created_at"] = now - timedelta(weeks=1)
             if "updated_at" not in data:
                 data["updated_at"] = now - timedelta(days=1)
-            # Normalize local host names.  pyinfra uses '@local' internally
-            # and Host.get_name() strips that to 'local'; the canonical
-            # name is 'localhost'.
+            # Normalize the local host's many internal spellings to the canonical 'localhost'.
             host_name = data.get("host_name")
-            if isinstance(host_name, str) and host_name in ("@local", "local"):
+            if isinstance(host_name, str) and host_name in ("@local", "local", "unknown-host-at-local"):
                 data["host_name"] = "localhost"
         return data
 
@@ -431,7 +432,15 @@ class BuildCacheInfo(FrozenModel):
 
 
 class HostDetails(FrozenModel):
-    """Full host information collected by connecting to the host."""
+    """Full host information collected by connecting to the host.
+
+    Note for anyone adding fields: `dict[...]`-typed fields here are treated
+    as *schemaless* by the CEL filter / sort code path (missing keys evaluate
+    to a clean False rather than warning per agent), via the auto-derived
+    `_AGENT_SCHEMALESS_PATHS` in `imbue.mngr.api.list`. If you add a dict
+    field whose keys are actually schemaful and typos should still warn,
+    that's a new case that needs an explicit opt-out -- flag it.
+    """
 
     id: HostId = Field(description="Host ID")
     name: str = Field(description="Host name")
@@ -471,6 +480,15 @@ class AgentDetails(FrozenModel):
     """Full agent information collected by connecting to the host.
 
     This combines certified and reported data from the agent with host information.
+
+    Note for anyone adding fields: `dict[...]`-typed fields here (and on the
+    nested `HostDetails`) are treated as *schemaless* by the CEL filter / sort
+    code path -- missing keys evaluate to a clean False rather than warning
+    per agent. The set is auto-derived from this type via
+    `_AGENT_SCHEMALESS_PATHS` in `imbue.mngr.api.list`, so adding a new dict
+    field opts it into tolerance automatically. If you add a dict field whose
+    keys are actually schemaful and typos should still warn, that's a new
+    case that needs an explicit opt-out -- flag it.
     """
 
     resource_type: Literal["agent"] = "agent"

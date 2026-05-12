@@ -19,7 +19,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.api.list import ErrorInfo
-from imbue.mngr.api.list import agent_details_to_cel_context
+from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -39,7 +39,6 @@ from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_sort_keys
 from imbue.mngr.utils.cel_utils import evaluate_cel_sort_key
 from imbue.mngr.utils.terminal import ANSI_DIM_GRAY
@@ -892,7 +891,7 @@ def _sort_agents_by_cel(
         return agents
 
     # Precompute CEL contexts once for all agents
-    cel_contexts = [build_cel_context(agent_details_to_cel_context(agent)) for agent in agents]
+    cel_contexts = [build_agent_cel_context(agent) for agent in agents]
 
     # Pair agents with their precomputed contexts for sorting
     paired: list[tuple[AgentDetails, dict[str, Any]]] = list(zip(agents, cel_contexts, strict=True))
@@ -1034,6 +1033,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 **Existence checks:**
 - `has(url)` - Agents that have a URL set
 - `has(host.ssh)` - Agents on remote hosts with SSH access
+- `has(labels.foo)` - Agents that have a `foo` label set
 """,
         ),
         (

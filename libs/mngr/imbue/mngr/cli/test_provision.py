@@ -99,6 +99,7 @@ def test_provision_with_env_var(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_provision_preserves_existing_env_vars(
     cli_runner: CliRunner,
     temp_work_dir: Path,

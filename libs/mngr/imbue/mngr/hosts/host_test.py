@@ -1941,6 +1941,13 @@ def test_host_get_reported_activity_content_returns_none_for_non_boot_type(
 # =========================================================================
 
 
+def test_host_get_connector_host_name_strips_at_prefix_for_local_host(
+    local_host: Host,
+) -> None:
+    """get_connector_host_name() should strip pyinfra's internal '@' prefix from local host names."""
+    assert local_host.get_connector_host_name() == HostName("local")
+
+
 def test_host_get_name_returns_host_name(
     local_host: Host,
 ) -> None:

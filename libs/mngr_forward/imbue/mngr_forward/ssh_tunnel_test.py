@@ -57,7 +57,7 @@ def test_remote_ssh_info_round_trip() -> None:
 def test_remote_ssh_info_is_frozen() -> None:
     info = RemoteSSHInfo(user="root", host="1.2.3.4", port=22, key_path=Path("/tmp/k"))
     with pytest.raises((ValueError, TypeError)):
-        info.user = "other"  # type: ignore[misc]
+        info.user = "other"
 
 
 # -- ReverseTunnelInfo / ReverseTunnelSpec ---------------------------------
