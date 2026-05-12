@@ -87,11 +87,12 @@ def _is_forward_info_alive(info: LatchkeyForwardInfo) -> bool:
         process = psutil.Process(info.pid)
         cmdline = process.cmdline()
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as e:
-        logger.debug("mngr latchkey forward record is stale (pid={}): {}", info.pid, e)
+        logger.info("mngr latchkey forward record is stale (pid={}): {}", info.pid, e)
         return False
     if not _cmdline_looks_like_mngr_latchkey_forward(cmdline):
-        logger.debug(
-            "mngr latchkey forward record points at pid {} whose cmdline is not ours: {!r}",
+        logger.warning(
+            "mngr latchkey forward record points at pid {} whose cmdline does not match "
+            "our pattern (expected ``mngr ... latchkey ... forward``): {!r}",
             info.pid,
             cmdline,
         )
@@ -191,18 +192,26 @@ class LatchkeyForwardSupervisor(MutableModel):
         the ``mngr`` binary is missing).
         """
         plugin_dir = self.plugin_data_dir
+        record_path = plugin_dir / "latchkey_forward.json"
         with self._lock:
             existing = load_forward_info(plugin_dir)
-            if existing is not None and _is_forward_info_alive(existing):
-                logger.debug(
-                    "Adopted existing mngr latchkey forward supervisor (pid={})",
+            if existing is None:
+                logger.info(
+                    "No existing mngr latchkey forward record at {}; spawning a fresh supervisor",
+                    record_path,
+                )
+            elif _is_forward_info_alive(existing):
+                logger.info(
+                    "Adopted existing mngr latchkey forward supervisor (pid={}, record={})",
                     existing.pid,
+                    record_path,
                 )
                 return existing
-            if existing is not None:
-                logger.debug(
-                    "Discarding stale mngr latchkey forward record (pid={})",
+            else:
+                logger.info(
+                    "Discarding stale mngr latchkey forward record (pid={}, record={}); spawning fresh",
                     existing.pid,
+                    record_path,
                 )
                 delete_forward_info(plugin_dir)
 
