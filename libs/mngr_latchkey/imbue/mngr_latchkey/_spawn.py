@@ -10,12 +10,6 @@ owns the shared gateway and per-agent reverse tunnels; detaching means a
 minds restart adopts the existing instance rather than tearing down and
 re-establishing every tunnel.
 
-The shared ``latchkey gateway`` subprocess used to live here too but is
-now spawned through :class:`ConcurrencyGroup` from ``core.py``: its
-lifetime is fully owned by the single ``mngr latchkey forward`` process
-that the supervisor guarantees, so the detached-from-CG escape hatch
-has no remaining use.
-
 Confining the remaining ``Popen`` calls to this tiny helper keeps the
 ratchet exception obvious and well-scoped. The rest of the latchkey
 package still goes through ``ConcurrencyGroup`` for any managed

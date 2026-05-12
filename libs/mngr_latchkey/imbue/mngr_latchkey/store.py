@@ -21,11 +21,6 @@ Two kinds of state live there:
   grants or revokes permissions. Only the subset of detent's file
   schema that we actually produce is modeled.
 
-The shared ``latchkey gateway`` does not have a state record here:
-its lifetime is fully owned by the single ``mngr latchkey forward``
-process that the supervisor guarantees, and within that process the
-listen port is tracked in memory on the :class:`Latchkey` instance.
-
 The gateway never reads the per-agent file directly via its agent-id
 path. Instead, an opaque ``{plugin_data_dir}/permissions/<uuid>.json``
 file is created at agent-creation time (with empty rules), the JWT is
