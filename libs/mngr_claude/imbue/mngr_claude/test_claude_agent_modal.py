@@ -308,7 +308,8 @@ def test_clone_local_claude_agent_to_modal(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
 ) -> None:
-    """Regression: ``mngr clone <local-agent> <new>@.modal`` must succeed.
+    """Regression: ``mngr clone <local-agent> <new>@.modal`` must succeed
+    and actually transfer the source agent's plugin/ session data.
 
     Previously this failed during plugin-data transfer with::
 
@@ -322,6 +323,12 @@ def test_clone_local_claude_agent_to_modal(
     ``CreateAgentOptions.source_agent_state_location`` and passes that host as
     the rsync source, so the cross-host transfer (local->Modal in this test)
     actually runs from the right machine.
+
+    The test then destroys the target so the preserved-sessions mechanism
+    pulls the modal agent's plugin/ data back locally, and asserts the
+    source's session data made it across. A silent regression (e.g. the
+    transfer is skipped because ``path_exists`` returns False against the
+    wrong host) would leave that preserved dir empty.
 
     Cleanup destroys both agents regardless of test outcome so the Modal
     sandbox and the local agent state are reclaimed.
@@ -343,14 +350,24 @@ def test_clone_local_claude_agent_to_modal(
             f"stdout: {clone_result.stdout}\nstderr: {clone_result.stderr}"
         )
 
-        # The original regression printed this specific rsync failure; assert
-        # it is absent so a future regression that exits 0 but skips the
-        # transfer still trips the test.
-        combined_output = clone_result.stdout + clone_result.stderr
-        assert "rsync failed" not in combined_output, (
-            f"Clone reported an rsync failure:\nstdout: {clone_result.stdout}\nstderr: {clone_result.stderr}"
+        # Destroying the target Modal agent preserves its plugin/ session
+        # files back to the local host_dir (the same mechanism exercised by
+        # ``test_destroy_modal_agent_preserves_sessions_locally``). Finding
+        # session files under the target's preserved_sessions dir proves the
+        # cross-host clone actually transferred the source agent's session
+        # data to the destination -- a silent no-op in
+        # ``_transfer_source_plugin_data`` would leave preserved_sessions
+        # empty and trip this assertion, which the looser "rsync failed"
+        # output check could not catch.
+        destroy_target_result = _destroy_modal_agent(target_name, modal_subprocess_env)
+        assert destroy_target_result.returncode == 0, (
+            f"Destroy of target failed (rc={destroy_target_result.returncode}):\n"
+            f"stdout: {destroy_target_result.stdout}\nstderr: {destroy_target_result.stderr}"
         )
+        _assert_sessions_preserved(modal_subprocess_env.host_dir, target_name)
     finally:
-        # Best-effort cleanup -- destroy both agents even if assertions failed.
+        # Best-effort cleanup. The target is normally destroyed above; this
+        # re-destroy is a no-op when the agent is already gone but ensures
+        # we still clean up if the clone failed before the explicit destroy.
         _destroy_modal_agent(target_name, modal_subprocess_env)
         _destroy_modal_agent(source_name, modal_subprocess_env)
