@@ -11,6 +11,9 @@ importers:
       '@todesktop/runtime':
         specifier: ^1.6.0
         version: 1.6.4
+      electron-updater:
+        specifier: ^4.6.1
+        version: 4.6.5
       latchkey:
         specifier: ^2.8.0
         version: 2.10.0
