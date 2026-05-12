@@ -423,28 +423,78 @@ def _emit_backend_failure(
         logger.trace("Could not emit workspace_backend_failure envelope for {}: {}", agent_id, e)
 
 
+_SERVICE_UNAVAILABLE_HTML = """\
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="refresh" content="1">
+    <title>Workspace server starting</title>
+    <style>
+      html, body { height: 100%; margin: 0; }
+      body {
+        background: #fafafa;
+        color: #18181b;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+      .card {
+        background: #fff;
+        border: 1px solid #e4e4e7;
+        border-radius: 12px;
+        padding: 24px;
+        max-width: 480px;
+        width: 100%;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+      }
+      .row { display: flex; align-items: center; gap: 12px; }
+      h1 { font-size: 1.125rem; font-weight: 600; margin: 0 0 6px; color: #18181b; }
+      p { margin: 0; color: #52525b; font-size: 0.875rem; line-height: 1.5; }
+      .spinner {
+        width: 20px;
+        height: 20px;
+        border: 2px solid #e4e4e7;
+        border-top-color: #18181b;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        flex-shrink: 0;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="row">
+        <div class="spinner" aria-hidden="true"></div>
+        <div>
+          <h1>Workspace server starting</h1>
+          <p>This page will reload automatically once the workspace is ready.</p>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
+"""
+
+
 def _service_unavailable_response(request: Request) -> Response:
-    """Return a 503 (HTML auto-refresh for browsers, plain text otherwise).
+    """Return a 503 (styled loading page for browsers, plain text otherwise).
 
     The chrome shell drives recovery navigation off the per-agent health
     SSE stream emitted by minds (which is fed by the
     ``workspace_backend_failure`` envelope). That separation keeps the
     plugin origin-agnostic: it does not need to know where minds is
-    listening, and a browser hitting the plugin directly (outside of the
-    chrome shell) still gets the legacy auto-refresh fallback.
+    listening. For browsers that hit the plugin directly (including users
+    landing here mid-restart from the minds chrome), we serve a styled
+    auto-refreshing loader so the experience is not a blank flash.
     """
     accepts_html = "text/html" in request.headers.get("accept", "")
     if accepts_html:
-        return HTMLResponse(
-            content=(
-                "<!doctype html><html><head>"
-                '<meta http-equiv="refresh" content="1">'
-                "</head><body>"
-                "<p>Backend not yet available. Retrying...</p>"
-                "</body></html>"
-            ),
-            status_code=503,
-        )
+        return HTMLResponse(content=_SERVICE_UNAVAILABLE_HTML, status_code=503)
     return Response(status_code=503, content="Backend not yet available")
 
 

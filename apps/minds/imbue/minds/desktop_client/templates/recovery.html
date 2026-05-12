@@ -47,34 +47,24 @@
         setStatus('Restarting...', true);
       }
 
-      async function doRestart() {
+      function doRestart() {
         if (inFlight) return;
         inFlight = true;
         setStatus('Restarting...', true);
-        try {
-          var response = await fetch('/api/agents/' + encodeURIComponent(agentId) + '/restart-workspace-server', {
-            method: 'POST',
-            credentials: 'same-origin',
-          });
-          if (response.ok) {
-            setStatus('Workspace restarted. Reloading...', true);
-            if (returnTo) {
-              window.location.assign(returnTo);
-            } else {
-              window.location.reload();
-            }
-            return;
-          }
-          if (response.status === 504) {
-            setStatus('Still restarting; the page will reload once the workspace is ready.', true);
-            return;
-          }
-          var body = await response.text();
-          setStatus('Restart failed: ' + (body || response.status), false);
-        } catch (e) {
-          setStatus('Restart request failed: ' + e, false);
-        } finally {
-          inFlight = false;
+        // Fire the restart and immediately navigate to the workspace URL.
+        // The plugin serves a styled auto-refreshing loader on 503, so the
+        // user sees a loading page until the workspace is back instead of
+        // waiting on this recovery page. The restart fetch keeps running in
+        // the background; we ignore its outcome.
+        fetch('/api/agents/' + encodeURIComponent(agentId) + '/restart-workspace-server', {
+          method: 'POST',
+          credentials: 'same-origin',
+          keepalive: true,
+        }).catch(function () { /* navigation aborts in-flight fetch -- ignore */ });
+        if (returnTo) {
+          window.location.assign(returnTo);
+        } else {
+          window.location.reload();
         }
       }
 

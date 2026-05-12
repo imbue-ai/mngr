@@ -499,7 +499,7 @@ def test_subdomain_forward_returns_retry_page_on_backend_connect_error(tmp_path:
     # HTML navigations get the auto-refresh retry page so the user lands on
     # something useful instead of a hard 502.
     assert html_response.status_code == 503
-    assert "Retrying" in html_response.text
+    assert "Workspace server starting" in html_response.text
     assert 'http-equiv="refresh"' in html_response.text
     # Non-HTML callers get a plain 503 they can interpret programmatically.
     assert json_response.status_code == 503
