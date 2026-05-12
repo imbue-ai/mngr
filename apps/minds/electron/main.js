@@ -326,6 +326,7 @@ function createBundle() {
   // title bar otherwise has no way to learn its own window's title.
   chromeView.webContents.on('did-finish-load', () => {
     updateOsTitle(bundle);
+    sendCurrentWorkspaceToBundleViews(bundle);
     primeViewWithCachedChromeState(chromeView.webContents);
   });
 
@@ -355,7 +356,7 @@ function wireContentViewEvents(bundle, contentView) {
     const newAgentId = parseWorkspaceId(url);
     if (bundle.currentWorkspaceId !== newAgentId) {
       bundle.currentWorkspaceId = newAgentId;
-      sendCurrentWorkspaceToBundleSidebar(bundle);
+      sendCurrentWorkspaceToBundleViews(bundle);
     }
     updateOsTitle(bundle);
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
@@ -455,7 +456,7 @@ function openSidebar(bundle) {
     bundle.window.contentView.addChildView(sidebarView);
     registerShortcutsFor(bundle, sidebarView.webContents);
     sidebarView.webContents.on('did-finish-load', () => {
-      sendCurrentWorkspaceToBundleSidebar(bundle);
+      sendCurrentWorkspaceToBundleViews(bundle);
       primeViewWithCachedChromeState(sidebarView.webContents);
     });
     if (backendBaseUrl) {
@@ -554,10 +555,18 @@ function toggleRequestsPanel(bundle) {
   else openRequestsPanel(bundle);
 }
 
-function sendCurrentWorkspaceToBundleSidebar(bundle) {
-  if (!bundle || !bundle.sidebarView) return;
-  if (bundle.sidebarView.webContents.isDestroyed()) return;
-  bundle.sidebarView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+function sendCurrentWorkspaceToBundleViews(bundle) {
+  if (!bundle) return;
+  // Both the titlebar (chrome view) and the sidebar key UI off the current
+  // workspace -- the titlebar uses it to scope the workspace-health banner to
+  // the active agent (otherwise the banner cannot match incoming
+  // workspace_server_status SSE events against any agent and stays hidden).
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    bundle.chromeView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+  }
+  if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
+    bundle.sidebarView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+  }
 }
 
 // -- Window opening / focusing --
@@ -577,7 +586,7 @@ function loadUrlIntoBundleContentView(bundle, url) {
     bundle.currentContentUrl = url;
     bundle.preErrorUrl = url;
     updateOsTitle(bundle);
-    sendCurrentWorkspaceToBundleSidebar(bundle);
+    sendCurrentWorkspaceToBundleViews(bundle);
   }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed() && url) {
     bundle.contentView.webContents.loadURL(url);

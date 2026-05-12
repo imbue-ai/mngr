@@ -161,19 +161,17 @@
         document.getElementById('page-title').textContent = title || 'Minds';
       });
     }
-    window.minds.onContentURLChange(function (url) {
+    window.minds.onContentURLChange(function () {
       refreshAuthStatus();
-      try {
-        var u = new URL(url);
-        var m = u.pathname.match(/^\/goto\/([^/]+)/);
-        applyTitleSwatch(m ? m[1] : null);
-      } catch (e) {}
     });
-    if (window.minds.onCurrentWorkspaceChanged) {
-      window.minds.onCurrentWorkspaceChanged(function (agentId) {
-        applyTitleSwatch(agentId || null);
-      });
-    }
+    // In Electron mode the current workspace is authoritative via IPC: main.js
+    // tracks the active workspace per bundle (handles both /goto/<id>/ URLs and
+    // post-redirect agent-<id>.localhost subdomains) and pushes it here. Deriving
+    // it from the content URL alone would clobber it to null on every navigation
+    // that doesn't match /goto/<id>/, which would hide the workspace-health banner.
+    window.minds.onCurrentWorkspaceChanged(function (agentId) {
+      applyTitleSwatch(agentId || null);
+    });
   } else {
     setInterval(function () {
       try {

@@ -416,6 +416,7 @@ def _emit_backend_failure(
     The plugin never lets envelope-emission errors break a forwarded
     request -- if stdout is gone (parent died) we just log and continue.
     """
+    logger.warning("[debug] emitting workspace_backend_failure for {} reason={} status={}", agent_id, reason, status_code)
     try:
         payload = WorkspaceBackendFailurePayload(agent_id=agent_id, reason=reason, status_code=status_code)
         envelope_writer.emit_workspace_backend_failure(payload)
