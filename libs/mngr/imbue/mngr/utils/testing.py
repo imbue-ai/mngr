@@ -114,12 +114,16 @@ def register_modal_test_environment(environment_name: str) -> None:
         worker_modal_environment_names.append(environment_name)
 
 
-class CleanupResult(enum.Enum):
+class ModalCleanupOutcome(enum.Enum):
     """Outcome of a Modal-side delete call.
 
     Callers should treat `DELETED` and `NOT_FOUND` as success (the resource is
     conceptually gone, regardless of whether we did the deleting) and only
     `FAILED` as a reason to keep tracking the resource for leak detection.
+
+    Distinct from `imbue.mngr.api.data_types.CleanupResult`, which is the
+    pydantic model returned by the `mngr cleanup` CLI (lists of destroyed/
+    stopped agents). This enum classifies a single Modal-side delete only.
     """
 
     DELETED = "deleted"
@@ -1202,13 +1206,13 @@ def delete_modal_volumes_in_environment(environment_name: str) -> None:
         logger.warning("Failed to list/delete Modal volumes in environment {}: {}", environment_name, e)
 
 
-def delete_modal_environment(environment_name: str) -> CleanupResult:
+def delete_modal_environment(environment_name: str) -> ModalCleanupOutcome:
     """Delete a Modal environment.
 
-    Robust to concurrent deletion: returns a CleanupResult instead of raising.
-    Callers should treat DELETED and NOT_FOUND as success (the env is gone,
-    whether we did the deleting or someone else did) and only FAILED as a
-    reason to keep the env tracked for leak detection.
+    Robust to concurrent deletion: returns a ModalCleanupOutcome instead of
+    raising. Callers should treat DELETED and NOT_FOUND as success (the env
+    is gone, whether we did the deleting or someone else did) and only
+    FAILED as a reason to keep the env tracked for leak detection.
     """
     try:
         result = subprocess.run(
@@ -1219,20 +1223,20 @@ def delete_modal_environment(environment_name: str) -> CleanupResult:
         )
         if result.returncode == 0:
             logger.debug("Deleted Modal environment {}", environment_name)
-            return CleanupResult.DELETED
+            return ModalCleanupOutcome.DELETED
         stderr = result.stderr or result.stdout
         if "not found" in stderr.lower():
             logger.debug("Modal environment {} already gone: {}", environment_name, stderr.strip())
-            return CleanupResult.NOT_FOUND
+            return ModalCleanupOutcome.NOT_FOUND
         logger.warning(
             "Modal environment delete returned non-zero for {}: {}",
             environment_name,
             stderr,
         )
-        return CleanupResult.FAILED
+        return ModalCleanupOutcome.FAILED
     except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
         logger.warning("Failed to delete Modal environment {}: {}", environment_name, e)
-        return CleanupResult.FAILED
+        return ModalCleanupOutcome.FAILED
 
 
 def cleanup_old_modal_test_environments(
