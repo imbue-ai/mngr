@@ -8,13 +8,9 @@ deterministically.
 """
 
 from collections.abc import Mapping
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import pytest
-from pydantic import PrivateAttr
 
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
@@ -25,86 +21,18 @@ from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVE
 from imbue.mngr_latchkey.agent_setup import finalize_agent_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
-from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
-from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_agent
+from imbue.mngr_latchkey.testing import FakeLatchkey
+from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
 
-class _FakeLatchkey(Latchkey):
-    """Test double for :class:`Latchkey` that never spawns subprocesses.
-
-    Each method either returns the configured fake value or raises
-    the configured fake error so individual tests can assert the
-    degradation semantics of :func:`prepare_agent_latchkey`.
-    """
-
-    _gateway_url: str | None = PrivateAttr(default=None)
-    _gateway_error: BaseException | None = PrivateAttr(default=None)
-    _password: str | None = PrivateAttr(default=None)
-    _password_error: BaseException | None = PrivateAttr(default=None)
-    _jwt: str | None = PrivateAttr(default=None)
-    _jwt_error: BaseException | None = PrivateAttr(default=None)
-
-    def configure(
-        self,
-        *,
-        gateway_url: str | None = None,
-        gateway_error: BaseException | None = None,
-        password: str | None = None,
-        password_error: BaseException | None = None,
-        jwt: str | None = None,
-        jwt_error: BaseException | None = None,
-    ) -> None:
-        self._gateway_url = gateway_url
-        self._gateway_error = gateway_error
-        self._password = password
-        self._password_error = password_error
-        self._jwt = jwt
-        self._jwt_error = jwt_error
-
-    def ensure_gateway_started(self) -> LatchkeyGatewayInfo:
-        if self._gateway_error is not None:
-            raise self._gateway_error
-        if self._gateway_url is None:
-            raise LatchkeyError("test fake: configure gateway_url")
-        parts = urlsplit(self._gateway_url)
-        if parts.hostname is None or parts.port is None:
-            raise LatchkeyError(f"unparseable url: {self._gateway_url}")
-        return LatchkeyGatewayInfo(
-            host=parts.hostname,
-            port=parts.port,
-            pid=42,
-            started_at=datetime.now(timezone.utc),
-        )
-
-    def derive_gateway_password(self) -> str:
-        if self._password_error is not None:
-            raise self._password_error
-        if self._password is None:
-            raise LatchkeyJwtMintError("test fake: configure password")
-        return self._password
-
-    def create_permissions_override_jwt(self, permissions_path: Path) -> str:
-        if self._jwt_error is not None:
-            raise self._jwt_error
-        if self._jwt is None:
-            raise LatchkeyJwtMintError("test fake: configure jwt")
-        return self._jwt
-
-
-def _full_fake(tmp_path: Path) -> _FakeLatchkey:
-    fake = _FakeLatchkey(latchkey_directory=tmp_path)
-    fake.configure(
-        gateway_url="http://127.0.0.1:55555",
-        password="hunter2",
-        jwt="header.payload.signature",
-    )
-    return fake
+def _full_fake(tmp_path: Path) -> FakeLatchkey:
+    return make_full_fake_latchkey(tmp_path)
 
 
 # -- prepare_agent_latchkey ---------------------------------------------------
@@ -161,7 +89,7 @@ def test_prepare_full_wiring_on_host_uses_live_port(tmp_path: Path) -> None:
 
 def test_prepare_on_host_gateway_start_failure_propagates(tmp_path: Path) -> None:
     """Gateway-start failures bubble up to the caller; the helper does not swallow them."""
-    fake = _FakeLatchkey(latchkey_directory=tmp_path)
+    fake = FakeLatchkey(latchkey_directory=tmp_path)
     fake.configure(
         gateway_error=LatchkeyError("boom"),
         password="hunter2",
@@ -173,7 +101,7 @@ def test_prepare_on_host_gateway_start_failure_propagates(tmp_path: Path) -> Non
 
 def test_prepare_password_derivation_failure_propagates(tmp_path: Path) -> None:
     """Password-derivation failures bubble up to the caller."""
-    fake = _FakeLatchkey(latchkey_directory=tmp_path)
+    fake = FakeLatchkey(latchkey_directory=tmp_path)
     fake.configure(
         gateway_url="http://127.0.0.1:55555",
         password_error=LatchkeyJwtMintError("nope"),
@@ -193,7 +121,7 @@ def test_prepare_jwt_mint_failure_propagates(tmp_path: Path) -> None:
     files are tiny and live under the user's own latchkey directory,
     so leaking one occasionally is not a concern.
     """
-    fake = _FakeLatchkey(latchkey_directory=tmp_path)
+    fake = FakeLatchkey(latchkey_directory=tmp_path)
     fake.configure(
         gateway_url="http://127.0.0.1:55555",
         password="hunter2",

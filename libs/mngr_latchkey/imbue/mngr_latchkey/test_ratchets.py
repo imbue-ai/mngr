@@ -280,7 +280,12 @@ def test_prevent_assert_isinstance() -> None:
 
 
 def test_prevent_code_in_init_files() -> None:
-    rc.check_code_in_init_files(_DIR, snapshot(0))
+    # The package's root ``__init__.py`` is the conventional home for the
+    # plugin-system marker ``hookimpl = pluggy.HookimplMarker("mngr")``
+    # (the one exception called out in the repo CLAUDE.md). That single
+    # line plus its ``import pluggy`` are tracked here as one violation
+    # of the otherwise-strict no-code-in-init rule.
+    rc.check_code_in_init_files(_DIR, snapshot(1))
 
 
 def test_no_type_errors() -> None:

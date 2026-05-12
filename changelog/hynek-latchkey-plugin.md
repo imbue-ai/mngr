@@ -84,3 +84,63 @@ as that root directory.
   to reflect violations that went away with the deleted code.
 
 ### No user-visible behaviour change in minds itself.
+
+## mngr-latchkey: register a `mngr latchkey` CLI surface
+
+The `imbue-mngr-latchkey` package now ships as a proper `mngr` plugin:
+it declares a `[project.entry-points.mngr]` entry point and registers
+a `mngr latchkey` command group with three subcommands, plus a
+`[plugins.latchkey]` settings.toml block. Users can wire latchkey to
+agents end-to-end from the shell, without the minds desktop app.
+
+### New CLI
+
+- `mngr latchkey forward` -- long-running foreground supervisor.
+  Spawns the shared `latchkey gateway` subprocess, consumes
+  `mngr observe`'s discovery stream, and sets up / tears down a
+  reverse SSH tunnel for every agent on a remote host. Stops the
+  shared gateway on `SIGINT`/`SIGTERM` (coupled lifetime).
+- `mngr latchkey create-agent-env` -- one-shot. Wraps
+  `prepare_agent_latchkey(is_tunneled=True)` and emits
+  `{"env": {...}, "opaque_permissions_path": "..."}` on stdout as a
+  single JSON object. Always emits the constant agent-side loopback
+  URL (`http://127.0.0.1:1989`); there is no DEV / on-host mode.
+- `mngr latchkey link-permissions --agent-id ID --opaque-path PATH` --
+  one-shot. Wraps `finalize_agent_permissions` to swing the opaque
+  handle's symlink to the canonical agent-keyed permissions path.
+
+Intentionally not in scope: `ensure-gateway`/`stop-gateway` (lifecycle
+is internal to `forward`), `latchkey auth ...` wrappers, permissions
+editing, agent-include / agent-exclude filtering on `forward`. Users
+who need credential management run upstream `latchkey` directly.
+
+### New settings
+
+```toml
+[plugins.latchkey]
+directory = "~/.mngr/latchkey"   # default
+latchkey_binary = "latchkey"     # default; resolved via PATH
+```
+
+Both fields are overridable via `MNGR_LATCHKEY_DIRECTORY` and
+`MNGR_LATCHKEY_BINARY` env vars and matching `--latchkey-directory` /
+`--latchkey-binary` CLI flags. Precedence is CLI > env > settings.toml
+> built-in default.
+
+### Failure semantics
+
+Any `LatchkeyError` / `LatchkeyStoreError` raised by the underlying
+library surfaces as a non-zero exit; `create-agent-env` does not fall
+back to the empty-env degraded mode the library tolerates.
+
+### Implementation notes
+
+New modules under `libs/mngr_latchkey/imbue/mngr_latchkey/`:
+`plugin.py` (entry point), `cli.py` (the three subcommands +
+settings-precedence resolver), `config.py` (`LatchkeyPluginConfig`),
+`discovery_stream.py` (a small `mngr observe`-driven dispatcher that
+fans the relevant events out to `LatchkeyDiscoveryHandler` /
+`LatchkeyDestructionHandler`). `testing.py` lifts the existing
+`_FakeLatchkey` test double to a shared `FakeLatchkey` so the new
+`cli_test.py` and the existing `agent_setup_test.py` share one
+implementation.

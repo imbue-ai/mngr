@@ -1889,6 +1889,7 @@ dependencies = [
     { name = "imbue-mngr-forward" },
     { name = "loguru" },
     { name = "paramiko" },
+    { name = "pluggy" },
     { name = "psutil" },
     { name = "pydantic" },
 ]
@@ -1902,6 +1903,7 @@ requires-dist = [
     { name = "imbue-mngr-forward", editable = "libs/mngr_forward" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "paramiko", specifier = ">=3.0" },
+    { name = "pluggy", specifier = ">=1.0" },
     { name = "psutil", specifier = ">=5.9" },
     { name = "pydantic", specifier = ">=2.0" },
 ]

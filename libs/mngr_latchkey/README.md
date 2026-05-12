@@ -4,11 +4,68 @@ Latchkey gateway management for [mngr](https://github.com/imbue-ai/mngr).
 
 This package owns the lifecycle of a single shared `latchkey gateway`
 subprocess and the per-agent state that points the gateway at each
-agent's own permissions file. It is a plain Python library: import
-the classes and call them directly; there is no `mngr` CLI surface
-yet.
+agent's own permissions file. It ships both as a Python library
+(imported by the minds desktop client) and as a `mngr` CLI plugin
+that registers the `mngr latchkey` command group.
+
+## CLI
+
+Once `imbue-mngr-latchkey` is installed, `mngr` discovers the plugin
+via the standard entry-point mechanism and exposes three subcommands:
+
+```
+mngr latchkey forward            # long-running supervisor: gateway + reverse tunnels
+mngr latchkey create-agent-env   # emit LATCHKEY_* env vars + opaque permissions handle as JSON
+mngr latchkey link-permissions   # swing the opaque handle's symlink to the canonical agent path
+```
+
+The supervisor is intentionally the only entry point for gateway
+lifecycle: there are no `ensure-gateway` / `stop-gateway` subcommands.
+`mngr latchkey forward` spawns the shared gateway eagerly on startup
+and stops it on `SIGINT`/`SIGTERM` (coupled lifetime). Any in-flight
+agents lose their gateway endpoint until the next `mngr latchkey
+forward` is started; the per-agent permissions files survive across
+restarts.
+
+### Wiring a new agent without the minds desktop app
+
+```sh
+# In one terminal, leave the supervisor running for the lifetime of the agents.
+mngr latchkey forward
+
+# In another terminal, per agent:
+mngr latchkey create-agent-env > /tmp/lk.json
+OPAQUE_PATH=$(jq -r .opaque_permissions_path /tmp/lk.json)
+ENV_ARGS=$(jq -r '.env | to_entries[] | "--env \(.key)=\(.value)"' /tmp/lk.json)
+
+# Substitute your preferred mngr create invocation here.
+AGENT_ID=$(mngr create my-template $ENV_ARGS --format json | jq -r .agent_id)
+
+mngr latchkey link-permissions --agent-id "$AGENT_ID" --opaque-path "$OPAQUE_PATH"
+```
+
+`create-agent-env` always emits the constant agent-side loopback URL
+(`http://127.0.0.1:1989`); there is no DEV / on-host mode. The agent
+reaches the gateway via the reverse SSH tunnel that
+`mngr latchkey forward` opens on every discovery.
+
+### Settings
+
+```toml
+[plugins.latchkey]
+directory = "~/.mngr/latchkey"   # default
+latchkey_binary = "latchkey"     # default; resolved via PATH
+```
+
+Both fields are overridable via the matching env vars
+(`MNGR_LATCHKEY_DIRECTORY`, `MNGR_LATCHKEY_BINARY`) and per-invocation
+CLI flags (`--latchkey-directory`, `--latchkey-binary`). Precedence is
+CLI flag > env var > settings.toml > built-in default.
 
 ## Python API
+
+Every CLI subcommand is a thin wrapper around the library; the library
+remains importable for embedders such as the minds desktop client.
 
 ```python
 from imbue.mngr_latchkey.core import Latchkey
@@ -61,4 +118,6 @@ via `Latchkey.plugin_data_dir`).
 The package owns the `latchkey_permissions.json` schema (a subset of
 detent's rule format). UI surfaces (such as the minds permission
 dialog) read and update it via the helpers in
-`imbue.mngr_latchkey.store`.
+`imbue.mngr_latchkey.store`. The CLI deliberately does *not* expose
+permission editing or `latchkey auth ...` wrappers; run upstream
+`latchkey` directly for those flows.
