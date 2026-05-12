@@ -8,12 +8,12 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 
-import click
 import pluggy
 import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
+from imbue.mngr.errors import UserInputError
 from imbue.mngr_usage.cli import _build_render_model
 from imbue.mngr_usage.cli import _collapse_by_source
 from imbue.mngr_usage.cli import _flatten_primary_for_template
@@ -69,7 +69,7 @@ def test_parse_max_age_accepts_units() -> None:
 
 
 def test_parse_max_age_rejects_bad_input() -> None:
-    with pytest.raises(click.UsageError):
+    with pytest.raises(UserInputError):
         _parse_max_age("forever")
 
 

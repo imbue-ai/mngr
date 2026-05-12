@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 from collections.abc import Iterable
 from datetime import datetime
@@ -23,6 +22,7 @@ from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr_usage.data_types import UsagePluginConfig
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
@@ -53,22 +53,15 @@ class UsageCliOptions(CommonCliOptions):
 
 @pure
 def _parse_max_age(value: str | None) -> int | None:
-    """Parse a max-age value like "300" or "5m" into seconds.
+    """Thin wrapper around ``parse_duration_to_seconds`` for the optional CLI flag.
 
-    Accepts a bare integer (seconds), or a number followed by s/m/h/d.
+    Returns ``None`` when the user didn't supply ``--max-age``; otherwise
+    delegates to ``parse_duration_to_seconds`` so durations are accepted
+    consistently with the rest of mngr.
     """
-    if value is None:
+    if value is None or not value.strip():
         return None
-    value = value.strip().lower()
-    if not value:
-        return None
-    match = re.fullmatch(r"(\d+)\s*([smhd]?)", value)
-    if match is None:
-        raise click.UsageError(f"Invalid --max-age value: {value!r}. Expected e.g. '300', '5m', '2h'.")
-    n = int(match.group(1))
-    unit = match.group(2) or "s"
-    multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
-    return n * multiplier
+    return int(parse_duration_to_seconds(value))
 
 
 # =============================================================================
@@ -137,20 +130,17 @@ def _read_last_event(events_file: Path) -> dict[str, Any] | None:
 
 @pure
 def _parse_iso_timestamp(value: Any) -> int | None:
-    """Convert an ISO 8601 ``timestamp`` field to a Unix timestamp.
+    """Convert an ISO 8601 ``timestamp`` field to a Unix timestamp, or None on failure.
 
-    Returns None on any parse failure. The writer emits a fixed-width
-    nanosecond-precision form (``%Y-%m-%dT%H:%M:%S.000000000Z``) but we
-    accept any form ``datetime.fromisoformat`` handles.
+    Python 3.11+ ``datetime.fromisoformat`` accepts the trailing ``Z`` and
+    9-digit fractional seconds the writer emits, so no normalization needed.
     """
     if not isinstance(value, str):
         return None
-    normalized = value.rstrip("Z") + "+00:00" if value.endswith("Z") else value
     try:
-        dt = datetime.fromisoformat(normalized)
+        return int(datetime.fromisoformat(value).timestamp())
     except ValueError:
         return None
-    return int(dt.timestamp())
 
 
 @pure
