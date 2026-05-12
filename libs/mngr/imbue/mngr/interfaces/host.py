@@ -929,10 +929,8 @@ class CreateAgentOptions(FrozenModel):
     )
     source_agent_state_location: HostLocation | None = Field(
         default=None,
-        description="Location of the source agent's state directory during a clone "
-        "(set when cloning via --from with an agent source). Carries both the host "
-        "the state dir lives on and the path on that host, so plugin code can rsync "
-        "from the right machine even when the source agent is on a remote host.",
+        description="Location of the source agent's state directory "
+        "(set when cloning via --from with an agent source).",
     )
     is_update: bool = Field(
         default=False,
