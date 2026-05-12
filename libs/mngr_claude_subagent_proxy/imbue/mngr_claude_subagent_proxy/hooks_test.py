@@ -13,6 +13,7 @@ import io
 import json
 import stat
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -654,33 +655,12 @@ def test_spawn_env_vars_from_real_os_env(clean_env: pytest.MonkeyPatch) -> None:
 # by copying the user marketplace dir. The provisioning-time wrap of
 # the user marketplace never reached the cache. Fix: call this helper
 # from a SessionStart hook.
-def _write_unguarded_orchestrator_hooks(path: Path) -> None:
-    """Helper: write a hooks.json mimicking what Claude Code fetches from
-    a stop-hook plugin marketplace (un-guarded orchestrator command)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "hooks": {
-                    "Stop": [
-                        {
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "timeout": 900,
-                                    "command": "${CLAUDE_PLUGIN_ROOT}/scripts/stop_hook_orchestrator.sh",
-                                }
-                            ]
-                        }
-                    ]
-                }
-            }
-        )
-        + "\n"
-    )
 
 
-def test_guard_per_agent_plugin_cache_wraps_unguarded_stop_hooks(tmp_path: Path) -> None:
+def test_guard_per_agent_plugin_cache_wraps_unguarded_stop_hooks(
+    tmp_path: Path,
+    write_unguarded_orchestrator_hooks: Callable[[Path], None],
+) -> None:
     """Walks every hooks.json under the per-agent plugin cache and prepends
     the proxy-child guard to each Stop/SubagentStop command. Idempotent on
     second pass.
@@ -694,7 +674,7 @@ def test_guard_per_agent_plugin_cache_wraps_unguarded_stop_hooks(tmp_path: Path)
         cache_root / "marketplaces" / "beta" / "plugins" / "p2" / "hooks" / "hooks.json",
     ]
     for p in paths:
-        _write_unguarded_orchestrator_hooks(p)
+        write_unguarded_orchestrator_hooks(p)
 
     _stop_hook_guard.guard_per_agent_plugin_cache(state_dir)
 
@@ -727,8 +707,3 @@ def test_guard_per_agent_plugin_cache_noop_when_cache_missing(tmp_path: Path) ->
     state_dir.mkdir()
     # Should not raise.
     _stop_hook_guard.guard_per_agent_plugin_cache(state_dir)
-
-
-# `_write_unguarded_orchestrator_hooks` above is also used by the
-# guard_stop_hooks SessionStart hook's tests in
-# imbue/mngr_claude_subagent_proxy/hooks/guard_stop_hooks_test.py.

@@ -7,7 +7,9 @@ fixtures belong in ``conftest.py`` rather than being duplicated in each
 test file.
 """
 
+import json
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -60,3 +62,39 @@ def hook_env(clean_env: pytest.MonkeyPatch, state_dir: Path) -> pytest.MonkeyPat
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
     clean_env.setenv("MNGR_AGENT_NAME", "parent-agent")
     return clean_env
+
+
+@pytest.fixture
+def write_unguarded_orchestrator_hooks() -> Callable[[Path], None]:
+    """Return a writer that drops a hooks.json mimicking an un-guarded
+    stop-hook orchestrator plugin marketplace entry.
+
+    Shared by the Stop-hook guard tests in ``hooks_test.py`` and
+    ``hooks/guard_stop_hooks_test.py``; lives here so both files use the
+    same definition rather than maintaining byte-identical copies.
+    """
+
+    def _write(path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "Stop": [
+                            {
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "timeout": 900,
+                                        "command": "${CLAUDE_PLUGIN_ROOT}/scripts/stop_hook_orchestrator.sh",
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            )
+            + "\n"
+        )
+
+    return _write

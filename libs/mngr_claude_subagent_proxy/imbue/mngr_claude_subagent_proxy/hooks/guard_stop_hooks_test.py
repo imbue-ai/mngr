@@ -14,41 +14,17 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
 from imbue.mngr_claude_subagent_proxy.hooks import guard_stop_hooks
 
 
-def _write_unguarded_orchestrator_hooks(path: Path) -> None:
-    """Helper: write a hooks.json mimicking what Claude Code fetches from
-    a stop-hook plugin marketplace (un-guarded orchestrator command)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "hooks": {
-                    "Stop": [
-                        {
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "timeout": 900,
-                                    "command": "${CLAUDE_PLUGIN_ROOT}/scripts/stop_hook_orchestrator.sh",
-                                }
-                            ]
-                        }
-                    ]
-                }
-            }
-        )
-        + "\n"
-    )
-
-
 def test_guard_stop_hooks_run_wraps_per_agent_plugin_cache(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    write_unguarded_orchestrator_hooks: Callable[[Path], None],
 ) -> None:
     """Reading MNGR_AGENT_STATE_DIR from env, run() wraps every Stop hook
     in that agent's plugin cache with the proxy-child env guard.
@@ -67,7 +43,7 @@ def test_guard_stop_hooks_run_wraps_per_agent_plugin_cache(
         / "hooks"
         / "hooks.json"
     )
-    _write_unguarded_orchestrator_hooks(cache_hooks)
+    write_unguarded_orchestrator_hooks(cache_hooks)
     monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
 
     guard_stop_hooks.run(io.StringIO(""))
