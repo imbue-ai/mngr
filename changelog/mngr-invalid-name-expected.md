@@ -1,1 +1,1 @@
-- Invalid agent identifiers (e.g. `mngr connect mngr/foo`) now produce a normal "Invalid agent name or ID" error instead of an uncaught `InvalidName` that triggers the "launch an agent to diagnose this problem" flow.
+- Invalid agent identifiers (e.g. `mngr connect mngr/foo`) now produce a normal "Not a valid agent name or ID" error instead of an uncaught `InvalidName` that triggers the "launch an agent to diagnose this problem" flow.
