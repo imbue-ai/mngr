@@ -26,6 +26,7 @@ from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.cel_utils import compile_cel_filters
@@ -627,6 +628,10 @@ def _output_wait_result(result: WaitForUsageResult, output_format: OutputFormat)
         case OutputFormat.JSONL:
             emit_event("result", payload, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
+            # ``wait_for_usage`` returns from exactly two paths: match (is_matched=True,
+            # is_timed_out=False) or timeout (is_matched=False, is_timed_out=True). The
+            # is_matched/timed_out booleans are therefore exhaustive; treat anything
+            # else as a programming error and raise so it doesn't silently disappear.
             if result.is_matched:
                 write_human_line(
                     "Matched on source '{}' after {:.1f}s",
@@ -636,7 +641,10 @@ def _output_wait_result(result: WaitForUsageResult, output_format: OutputFormat)
             elif result.is_timed_out:
                 write_human_line("Timed out after {:.1f}s without match", result.elapsed_seconds)
             else:
-                write_human_line("Wait ended after {:.1f}s without match", result.elapsed_seconds)
+                raise MngrError(
+                    f"wait_for_usage returned both is_matched=False and is_timed_out=False "
+                    f"(elapsed={result.elapsed_seconds:.2f}s)"
+                )
         case _ as unreachable:
             assert_never(unreachable)
 
