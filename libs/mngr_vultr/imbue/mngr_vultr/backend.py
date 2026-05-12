@@ -75,7 +75,10 @@ class VultrProvider(VpsDockerProvider):
         Uses the read-only host store so that discovery never creates the
         state container. If the container does not exist yet (e.g., the VPS
         is still being set up by a concurrent ``mngr create``), returns
-        empty results.
+        empty results. If outer SSH to the VPS fails, fall back to any
+        in-process cached records for that VPS so the hosts still appear
+        in the listing (with an offline state) instead of disappearing
+        entirely; one bad VPS must not silently drop its hosts.
         """
         try:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
@@ -85,8 +88,17 @@ class VultrProvider(VpsDockerProvider):
                     return [], {}
                 return host_store.list_all_host_records_with_agents()
         except (HostConnectionError, MngrError) as e:
-            logger.warning("Failed to read records from VPS {}: {}", vps_ip, e)
-            return [], {}
+            cached_records = [r for r in self._host_record_cache.values() if r.vps_ip == vps_ip]
+            if cached_records:
+                logger.warning(
+                    "Failed to read records from VPS {} ({}); surfacing {} cached host record(s) as offline",
+                    vps_ip,
+                    e,
+                    len(cached_records),
+                )
+            else:
+                logger.warning("Failed to read records from VPS {}: {}", vps_ip, e)
+            return cached_records, {}
 
     def _discover_host_records_with_agents(
         self,
