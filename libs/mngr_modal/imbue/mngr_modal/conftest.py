@@ -1,7 +1,6 @@
 import json
 import os
 import subprocess
-import time
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -24,6 +23,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import delete_modal_apps_in_environment
 from imbue.mngr.utils.testing import delete_modal_environment
@@ -407,15 +407,20 @@ def _delete_modal_volumes(volume_names: list[str]) -> None:
 # the budget; anything that still appears after the budget is treated as a
 # real leak. Budget is generous compared to the observed window (~5 s) but
 # bounded so a genuinely-leaked env doesn't stall teardown indefinitely.
+_LEAK_POLL_TIMEOUT_S = 30.0
 _LEAK_POLL_INTERVAL_S = 2.0
-_LEAK_POLL_MAX_TRIES = 15  # ~30 s total budget
 
 
 def _get_leaked_modal_environments() -> list[str]:
     if not worker_modal_environment_names:
         return []
-    candidates: list[str] = []
-    for try_idx in range(_LEAK_POLL_MAX_TRIES):
+    # Holder for the most recent poll's candidate set; populated by the
+    # closure below so we can return the final state after `poll_until`
+    # exits (whether by convergence or timeout).
+    last_candidates: list[str] = []
+    list_failed: list[bool] = [False]
+
+    def env_list_clean() -> bool:
         try:
             result = subprocess.run(
                 ["uv", "run", "modal", "environment", "list", "--json"],
@@ -424,17 +429,22 @@ def _get_leaked_modal_environments() -> list[str]:
                 timeout=30,
             )
             if result.returncode != 0:
-                return []
+                list_failed[0] = True
+                return True
             envs = json.loads(result.stdout)
-            candidates = [e.get("name", "") for e in envs if e.get("name", "") in worker_modal_environment_names]
+            last_candidates[:] = [
+                e.get("name", "") for e in envs if e.get("name", "") in worker_modal_environment_names
+            ]
         except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
-            logger.warning("Failed to list leaked modal environments (poll {}): {}", try_idx, e)
-            return []
-        if not candidates:
-            return []
-        if try_idx < _LEAK_POLL_MAX_TRIES - 1:
-            time.sleep(_LEAK_POLL_INTERVAL_S)
-    return candidates
+            logger.warning("Failed to list leaked modal environments: {}", e)
+            list_failed[0] = True
+            return True
+        return not last_candidates
+
+    poll_until(env_list_clean, timeout=_LEAK_POLL_TIMEOUT_S, poll_interval=_LEAK_POLL_INTERVAL_S)
+    if list_failed[0]:
+        return []
+    return last_candidates
 
 
 def _delete_modal_environments(environment_names: list[str]) -> None:
