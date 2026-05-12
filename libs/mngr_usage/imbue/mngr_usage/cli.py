@@ -11,6 +11,7 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 from pydantic import PrivateAttr
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
@@ -132,34 +133,7 @@ def _parse_iso_timestamp(value: Any) -> int | None:
         return None
 
 
-@pure
-def _coerce_optional_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-@pure
-def _coerce_optional_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-@pure
-def _coerce_optional_str(value: Any) -> str | None:
-    return value if isinstance(value, str) else None
-
-
-@pure
-def _coerce_optional_bool(value: Any) -> bool | None:
-    return value if isinstance(value, bool) else None
+_WINDOW_FIELDS: frozenset[str] = frozenset(WindowSnapshot.model_fields)
 
 
 def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
@@ -175,7 +149,13 @@ def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
     Window keys and their order are entirely up to the writer; we preserve
     JSONL insertion order. Per-window ``label`` (optional) is what the
     human renderer uses; missing labels fall back to the window key.
-    Missing fields are coerced to None.
+
+    Pydantic does the field-level type coercion (and rejects unparseable
+    values). Unknown keys in the writer's window dict are filtered out
+    rather than failing pydantic's ``extra="forbid"``: a writer that adds
+    a new field shouldn't force a reader update. If the remaining fields
+    don't validate, the window is dropped (with a debug log) -- partial
+    windows would be harder to reason about than absent ones.
     """
     rate_limits = event.get("rate_limits")
     if not isinstance(rate_limits, dict):
@@ -184,13 +164,11 @@ def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
     for window_key, window_value in rate_limits.items():
         if not isinstance(window_value, dict):
             continue
-        windows[str(window_key)] = WindowSnapshot(
-            used_percentage=_coerce_optional_float(window_value.get("used_percentage")),
-            resets_at=_coerce_optional_int(window_value.get("resets_at")),
-            label=_coerce_optional_str(window_value.get("label")),
-            status=_coerce_optional_str(window_value.get("status")),
-            is_using_overage=_coerce_optional_bool(window_value.get("is_using_overage")),
-        )
+        filtered = {k: v for k, v in window_value.items() if k in _WINDOW_FIELDS}
+        try:
+            windows[str(window_key)] = WindowSnapshot.model_validate(filtered)
+        except ValidationError as e:
+            logger.debug("Skipping window {}: {}", window_key, e)
     return windows
 
 
