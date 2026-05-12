@@ -635,6 +635,26 @@ def test_usage_wait_rejects_group_level_options_when_subcommand_invoked(
     assert "wait" in result.output
 
 
+def test_usage_wait_rejection_uses_visible_flag_name_for_renamed_params(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    cli_profile_dir: Path,
+) -> None:
+    """The error message must use the user-visible CLI flag (e.g. ``--format``),
+    not the underlying click param name (``output_format``). Otherwise the
+    suggestion sends the user looking for a flag that doesn't exist."""
+    result = cli_runner.invoke(
+        usage,
+        ["--format", "json", "wait", "--until", "true", "--timeout", "1s"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    assert "--format" in result.output
+    # The internal param name must NOT leak into the message.
+    assert "--output-format" not in result.output
+
+
 def test_usage_wait_accepts_subcommand_level_options(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
