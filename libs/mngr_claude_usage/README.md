@@ -44,7 +44,7 @@ collapse-to-freshest rule will silently mix them.
 
 This is rare in practice (one user = one Anthropic account), but if you run
 multiple Claude Code sessions logged into different Pro/Max accounts, treat
-`mngr usage` as ambiguous: the "freshest" reading is for the last-renderered
+`mngr usage` as ambiguous: the "freshest" reading is for the last-rendered
 account, not for any specific one. There's no field in the payload that would
 let us label or warn from inside the writer; the only paths to resolution are
 (a) capture auth-source from a different surface (e.g. Claude Code hooks
