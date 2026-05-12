@@ -136,7 +136,7 @@ def test_last_valid_event_returns_none_for_empty_content() -> None:
     assert last_valid_event_from_content("\n\n", "test") is None
 
 
-def testsnapshot_from_event_drops_events_without_rate_limits() -> None:
+def test_snapshot_from_event_drops_events_without_rate_limits() -> None:
     """An event line without a rate_limits field can't make a useful snapshot."""
     event = {
         "source": "claude/rate_limits",
@@ -147,12 +147,12 @@ def testsnapshot_from_event_drops_events_without_rate_limits() -> None:
     assert snapshot_from_event(event, source_name="claude") is None
 
 
-def testsnapshot_from_event_drops_unparseable_timestamps() -> None:
+def test_snapshot_from_event_drops_unparseable_timestamps() -> None:
     event = _make_event("not-a-timestamp")
     assert snapshot_from_event(event, source_name="claude") is None
 
 
-def testsnapshot_from_event_round_trips_window_data() -> None:
+def test_snapshot_from_event_round_trips_window_data() -> None:
     event = _make_event("2026-05-08T10:00:00.000000000Z", used_percentage=42.5, resets_at=1778280000)
     snap = snapshot_from_event(event, source_name="claude")
     assert snap is not None
@@ -180,7 +180,7 @@ def _snap(name: str = "x", at: int = 1000, percentage: float | None = 50.0) -> U
     )
 
 
-def testcollapse_by_source_picks_freshest_per_source() -> None:
+def test_collapse_by_source_picks_freshest_per_source() -> None:
     """Multiple agents writing to the same source should collapse to the freshest."""
     older_claude = _snap(name="claude", at=1000, percentage=10.0)
     newer_claude = _snap(name="claude", at=2000, percentage=20.0)
@@ -192,7 +192,7 @@ def testcollapse_by_source_picks_freshest_per_source() -> None:
     assert claude_snap.windows["five_hour"].used_percentage == 20.0
 
 
-def testcollapse_by_source_returns_empty_for_empty_input() -> None:
+def test_collapse_by_source_returns_empty_for_empty_input() -> None:
     assert collapse_by_source([]) == []
 
 
