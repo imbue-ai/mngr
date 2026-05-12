@@ -122,7 +122,7 @@ def exec_command_on_agent(
     stopped, then executes the command on its host (defaulting to the agent's
     work_dir).
     """
-    agent, host = find_one_agent(address, mngr_ctx, "exec", is_start_desired=is_start_desired)
+    agent, host = find_one_agent(address, mngr_ctx, is_start_desired=is_start_desired)
 
     # Determine working directory: explicit --cwd, or agent's work_dir
     effective_cwd = Path(cwd) if cwd is not None else agent.work_dir
