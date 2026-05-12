@@ -563,6 +563,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         connector = PyinfraConnector(pyinfra_host)
         host = ImbueCloudHost(
             id=host_id,
+            host_name=HostName(lease.host_id),
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,

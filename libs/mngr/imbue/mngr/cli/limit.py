@@ -7,12 +7,15 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import AgentMatch
+from imbue.mngr.api.find import filter_one_host
+from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import group_agents_by_host
-from imbue.mngr.api.find import resolve_host_reference
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import HOST_ADDRESS
+from imbue.mngr.cli.address_params import parse_agent_addresses_or_raise
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -32,7 +35,9 @@ from imbue.mngr.interfaces.data_types import get_activity_sources_for_idle_mode
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import OutputFormat
@@ -44,8 +49,8 @@ class LimitCliOptions(CommonCliOptions):
     """Options passed from the CLI to the limit command."""
 
     agents: tuple[str, ...]
-    agent_list: tuple[str, ...]
-    hosts: tuple[str, ...]
+    agent_list: tuple[AgentAddress, ...]
+    hosts: tuple[HostAddress, ...]
     # Lifecycle
     start_on_boot: bool | None
     idle_timeout: str | None
@@ -213,21 +218,18 @@ def _build_host_references(mngr_ctx: MngrContext) -> list[DiscoveredHost]:
     return list(agents_by_host.keys())
 
 
-def _resolve_host_identifiers(
-    host_identifiers: tuple[str, ...],
+def _resolve_host_addresses(
+    host_addresses: Sequence[HostAddress],
     mngr_ctx: MngrContext,
 ) -> set[HostId]:
-    """Resolve host identifiers (names or IDs) to a set of HostIds.
+    """Resolve a sequence of :class:`HostAddress` to a set of :class:`HostId`.
 
-    Raises UserInputError if any host identifier cannot be resolved.
+    Raises :class:`UserInputError` if any host address cannot be resolved.
     """
     all_hosts = _build_host_references(mngr_ctx)
     resolved_ids: set[HostId] = set()
-    for host_identifier in host_identifiers:
-        # resolve_host_reference raises UserInputError for unresolvable identifiers;
-        # it only returns None when host_identifier is None, which cannot happen here
-        resolved_host = resolve_host_reference(host_identifier, all_hosts)
-        assert resolved_host is not None
+    for host_address in host_addresses:
+        resolved_host = filter_one_host(host_address, all_hosts)
         resolved_ids.add(resolved_host.host_id)
     return resolved_ids
 
@@ -238,14 +240,16 @@ def _resolve_host_identifiers(
 @optgroup.option(
     "--agent",
     "agent_list",
+    type=AGENT_ADDRESS,
     multiple=True,
-    help="Agent name or ID to configure (can be specified multiple times)",
+    help="Agent address (NAME[@HOST[.PROVIDER]]) to configure (can be specified multiple times)",
 )
 @optgroup.option(
     "--host",
     "hosts",
+    type=HOST_ADDRESS,
     multiple=True,
-    help="Host name or ID to configure (can be specified multiple times)",
+    help="Host address (HOST[.PROVIDER]) to configure (can be specified multiple times)",
 )
 @optgroup.group("Lifecycle")
 @optgroup.option(
@@ -342,8 +346,10 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
         )
 
     # Validate targets: must specify agents or --host
-    agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
-    has_agents = bool(agent_identifiers)
+    agent_addresses: list[AgentAddress] = parse_agent_addresses_or_raise(expand_stdin_placeholder(opts.agents)) + list(
+        opts.agent_list
+    )
+    has_agents = bool(agent_addresses)
     has_hosts = bool(opts.hosts)
 
     if not has_agents and not has_hosts:
@@ -364,9 +370,9 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
     if has_hosts and not has_agents:
         changes: list[dict[str, Any]] = []
         all_hosts = _build_host_references(mngr_ctx)
-        for host_identifier in opts.hosts:
+        for host_address in opts.hosts:
             _apply_host_only_changes(
-                host_identifier=host_identifier,
+                host_address=host_address,
                 all_hosts=all_hosts,
                 opts=opts,
                 output_opts=output_opts,
@@ -377,8 +383,8 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
         return
 
     # Find agents (match all states for limit command)
-    agents = find_agents_by_addresses(
-        raw_identifiers=agent_identifiers,
+    agents = find_all_agents(
+        addresses=agent_addresses,
         filter_all=False,
         target_state=None,
         mngr_ctx=mngr_ctx,
@@ -390,7 +396,7 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
 
     # If --host is also specified, filter agents to those on the specified hosts
     if has_hosts:
-        resolved_host_ids = _resolve_host_identifiers(opts.hosts, mngr_ctx)
+        resolved_host_ids = _resolve_host_addresses(opts.hosts, mngr_ctx)
         target_agents = [a for a in agents if a.host_id in resolved_host_ids]
         if not target_agents:
             _output("No agents found on the specified host(s)", output_opts)
@@ -447,7 +453,7 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
 
 
 def _apply_host_only_changes(
-    host_identifier: str,
+    host_address: HostAddress,
     all_hosts: list[DiscoveredHost],
     opts: LimitCliOptions,
     output_opts: OutputOptions,
@@ -456,12 +462,9 @@ def _apply_host_only_changes(
 ) -> None:
     """Apply host-level changes when targeting hosts directly (no agents).
 
-    Raises UserInputError if the host identifier cannot be resolved.
+    Raises UserInputError if the host address cannot be resolved.
     """
-    # resolve_host_reference raises UserInputError for unresolvable identifiers;
-    # it only returns None when host_identifier is None, which cannot happen here
-    resolved_host = resolve_host_reference(host_identifier, all_hosts)
-    assert resolved_host is not None
+    resolved_host = filter_one_host(host_address, all_hosts)
 
     provider = get_provider_instance(resolved_host.provider_name, mngr_ctx)
     host = provider.get_host(resolved_host.host_id)

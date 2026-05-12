@@ -38,7 +38,7 @@ mngr label [OPTIONS] [AGENTS]...
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--agent` | text | Agent name or ID to label (can be specified multiple times) | None |
+| `--agent` | agent_address | Agent address (NAME[@HOST[.PROVIDER]]) to label (can be specified multiple times) | None |
 
 ## Labels
 

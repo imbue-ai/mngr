@@ -38,7 +38,10 @@ from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.volume import LocalVolume
@@ -131,7 +134,7 @@ def test_resolve_events_target_finds_agent(
     (agent_events_dir / "output.log").write_text("agent log content\n")
 
     # Resolve should find the agent
-    target = resolve_events_target("test-resolve-agent", temp_mngr_ctx)
+    target = resolve_events_target(AgentAddress(agent=AgentName("test-resolve-agent")), temp_mngr_ctx)
     assert "test-resolve-agent" in target.display_name
 
     # Should be able to read event files via the online host
@@ -155,8 +158,8 @@ def test_resolve_events_target_finds_host(
     host_events_dir.mkdir(parents=True, exist_ok=True)
     (host_events_dir / "host-output.log").write_text("host log content\n")
 
-    # Resolve using the host ID (not name, since "local" doesn't match agent-first)
-    target = resolve_events_target(str(host.id), temp_mngr_ctx)
+    # Resolve using the host ID
+    target = resolve_events_target(HostAddress(host=host.id), temp_mngr_ctx)
     assert "host" in target.display_name
 
     # Should be able to read event files via the online host
@@ -164,11 +167,11 @@ def test_resolve_events_target_finds_host(
     assert "host log content" in content
 
 
-def test_resolve_events_target_raises_for_unknown_identifier(
+def test_resolve_events_target_raises_for_unknown_agent(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    with pytest.raises(UserInputError, match="No agent or host found"):
-        resolve_events_target("nonexistent-identifier-abc123", temp_mngr_ctx)
+    with pytest.raises(UserInputError, match="Could not find agent"):
+        resolve_events_target(AgentAddress(agent=AgentName("nonexistent-identifier-abc123")), temp_mngr_ctx)
 
 
 # =============================================================================
@@ -289,7 +292,7 @@ def test_resolve_events_target_populates_online_host_for_agent(
     agent_events_dir.mkdir(parents=True, exist_ok=True)
     (agent_events_dir / "output.log").write_text("test content\n")
 
-    target = resolve_events_target("test-online-agent-82719", temp_mngr_ctx)
+    target = resolve_events_target(AgentAddress(agent=AgentName("test-online-agent-82719")), temp_mngr_ctx)
 
     # Both volume and online_host should be populated for local provider
     assert target.volume is not None
@@ -1050,7 +1053,7 @@ def test_resolve_events_target_populates_provider_and_host_id(
         '{"timestamp":"2026-01-01T00:00:00Z","event_id":"e1","source":"messages"}\n'
     )
 
-    target = resolve_events_target("test-refresh-agent-93718", temp_mngr_ctx)
+    target = resolve_events_target(AgentAddress(agent=AgentName("test-refresh-agent-93718")), temp_mngr_ctx)
 
     assert target.provider is not None
     assert target.host_id is not None

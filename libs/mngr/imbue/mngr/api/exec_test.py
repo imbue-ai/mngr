@@ -11,6 +11,7 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.api.address_parsers import parse_agent_address
 from imbue.mngr.api.exec import ExecResult
 from imbue.mngr.api.exec import MultiExecResult
 from imbue.mngr.api.exec import OuterExecResult
@@ -141,7 +142,7 @@ def test_exec_command_on_agent_runs_command(
     """Test exec_command_on_agent runs a command on a real local agent."""
     result = exec_command_on_agent(
         mngr_ctx=temp_mngr_ctx,
-        agent_str=str(running_test_agent.agent.name),
+        address=parse_agent_address(str(running_test_agent.agent.name)),
         command="echo hello",
     )
 
@@ -163,7 +164,7 @@ def test_exec_command_on_agent_uses_custom_cwd(
 
     result = exec_command_on_agent(
         mngr_ctx=temp_mngr_ctx,
-        agent_str=str(running_test_agent.agent.name),
+        address=parse_agent_address(str(running_test_agent.agent.name)),
         command="cat marker.txt",
         cwd=str(custom_dir),
     )
@@ -180,7 +181,7 @@ def test_exec_command_on_agent_returns_failure(
     """Test that a failing command returns success=False."""
     result = exec_command_on_agent(
         mngr_ctx=temp_mngr_ctx,
-        agent_str=str(running_test_agent.agent.name),
+        address=parse_agent_address(str(running_test_agent.agent.name)),
         command="false",
     )
 
@@ -203,7 +204,7 @@ def test_exec_command_on_agent_sources_agent_env(
 
     result = exec_command_on_agent(
         mngr_ctx=temp_mngr_ctx,
-        agent_str=str(agent.name),
+        address=parse_agent_address(str(agent.name)),
         command="echo $MNGR_TEST_EXEC_VAR",
     )
 
@@ -238,7 +239,7 @@ def test_exec_command_on_agents_single_agent(
     """Test exec_command_on_agents runs a command on a single agent."""
     result = exec_command_on_agents(
         mngr_ctx=temp_mngr_ctx,
-        agent_identifiers=[str(running_test_agent.agent.name)],
+        addresses=[parse_agent_address(str(running_test_agent.agent.name))],
         command="echo multi-exec-test",
         is_all=False,
     )
@@ -257,7 +258,7 @@ def test_exec_command_on_agents_nonexistent_agent(
     with pytest.raises(AgentNotFoundError):
         exec_command_on_agents(
             mngr_ctx=temp_mngr_ctx,
-            agent_identifiers=["nonexistent-agent-82716"],
+            addresses=[parse_agent_address("nonexistent-agent-82716")],
             command="echo test",
             is_all=False,
         )
@@ -273,7 +274,7 @@ def test_exec_command_on_agents_invokes_callbacks(
 
     result = exec_command_on_agents(
         mngr_ctx=temp_mngr_ctx,
-        agent_identifiers=[str(running_test_agent.agent.name)],
+        addresses=[parse_agent_address(str(running_test_agent.agent.name))],
         command="echo callback-test",
         is_all=False,
         on_success=lambda r: callback_results.append(r),
@@ -357,7 +358,7 @@ def test_exec_command_on_agents_returns_empty_when_no_agents_match(
     """exec_command_on_agents should return empty result when no agents exist and is_all=True."""
     result = exec_command_on_agents(
         mngr_ctx=temp_mngr_ctx,
-        agent_identifiers=[],
+        addresses=[],
         command="echo test",
         is_all=True,
     )
