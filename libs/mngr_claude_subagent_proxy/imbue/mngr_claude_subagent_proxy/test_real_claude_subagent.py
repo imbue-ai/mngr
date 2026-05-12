@@ -939,8 +939,10 @@ def test_deny_mode_intercepts_task_with_deny_reason(
     End-to-end verification that:
     1. With ``[plugins.claude_subagent_proxy] mode = "DENY"`` in the user's
        settings.toml, the provisioned parent agent's
-       ``.claude/settings.local.json`` has only the PreToolUse:Agent
-       deny hook -- not spawn/cleanup/reap.
+       ``.claude/settings.local.json`` has the PreToolUse:Agent deny
+       hook plus the shared SessionStart reaper (the same label-driven
+       ``hooks/reap.py`` PROXY uses), and crucially does NOT have the
+       PROXY-only spawn / cleanup hooks.
     2. ``.claude/agents/mngr-proxy.md`` is NOT written (no Haiku
        dispatcher needed in deny mode).
     3. When the parent Claude agent calls Task, the parent's transcript
@@ -971,14 +973,21 @@ def test_deny_mode_intercepts_task_with_deny_reason(
             f"stderr:\n{create_result.stderr}\nstdout:\n{create_result.stdout}"
         )
 
-        # Provisioning checks: settings.local.json must have ONLY the deny
-        # hook installed. We check immediately after create so the state is
-        # not racing with anything Claude does.
+        # Provisioning checks: settings.local.json must have the deny hook
+        # plus the shared SessionStart reaper, and crucially must NOT have
+        # the PROXY-only spawn / cleanup hooks. We check immediately after
+        # create so the state is not racing with anything Claude does.
         settings_text = _agent_settings_local_json(parent_name, _source_repo)
         assert "imbue.mngr_claude_subagent_proxy.hooks.deny" in settings_text, (
             f"Parent's settings.local.json does NOT contain the deny hook command. "
             f"This means deny mode did not take effect at provisioning time. "
             f"settings.local.json:\n{settings_text}"
+        )
+        assert "imbue.mngr_claude_subagent_proxy.hooks.reap" in settings_text, (
+            f"Parent's settings.local.json does NOT contain the shared SessionStart "
+            f"reaper command. DENY mode installs the same label-driven hooks/reap.py "
+            f"PROXY uses (commit 97d04090a); its absence means deny-mode provisioning "
+            f"is not picking up the shared reaper. settings.local.json:\n{settings_text}"
         )
         assert "imbue.mngr_claude_subagent_proxy.hooks.spawn" not in settings_text, (
             f"Parent's settings.local.json STILL contains the spawn hook -- "
@@ -986,9 +995,6 @@ def test_deny_mode_intercepts_task_with_deny_reason(
         )
         assert "imbue.mngr_claude_subagent_proxy.hooks.cleanup" not in settings_text, (
             "Parent's settings.local.json STILL contains the cleanup hook in deny mode."
-        )
-        assert "imbue.mngr_claude_subagent_proxy.hooks.reap" not in settings_text, (
-            "Parent's settings.local.json STILL contains the SessionStart reaper in deny mode."
         )
 
         # mngr-proxy.md is the Haiku dispatcher; deny mode does not need it.
