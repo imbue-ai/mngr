@@ -17,11 +17,11 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentGitOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostBuildOptions
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface

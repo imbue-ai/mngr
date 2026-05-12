@@ -57,7 +57,6 @@ from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
@@ -71,6 +70,7 @@ from imbue.mngr.interfaces.host import AgentPermissionsOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import NewHostBuildOptions
 from imbue.mngr.interfaces.host import NewHostOptions
@@ -760,15 +760,16 @@ def _create_agent(
             "Use a remote provider (e.g. --provider modal) for idle detection."
         )
 
-    # Compute source agent state dir from the resolved agent ID. The path is on
-    # the resolved source's host, which may be remote (e.g. cloning a modal agent).
-    source_agent_state_dir: Path | None = None
-    source_agent_state_host: OnlineHostInterface | None = None
+    # Compute source agent state location from the resolved agent. The host
+    # carried alongside the path may be remote (e.g. cloning a modal agent).
+    source_agent_state_location: HostLocation | None = None
     if setup.resolved_source.agent is not None:
-        source_agent_state_dir = get_agent_state_dir_path(
-            setup.resolved_source.location.host.host_dir, setup.resolved_source.agent.agent_id
+        source_agent_state_location = HostLocation(
+            host=setup.resolved_source.location.host,
+            path=get_agent_state_dir_path(
+                setup.resolved_source.location.host.host_dir, setup.resolved_source.agent.agent_id
+            ),
         )
-        source_agent_state_host = setup.resolved_source.location.host
 
     # Parse agent options
     agent_opts, has_explicit_base = _parse_agent_opts(
@@ -777,8 +778,7 @@ def _create_agent(
         target_host=target_host,
         initial_message=setup.initial_message,
         source_location=setup.resolved_source.location,
-        source_agent_state_dir=source_agent_state_dir,
-        source_agent_state_host=source_agent_state_host,
+        source_agent_state_location=source_agent_state_location,
         mngr_ctx=mngr_ctx,
         target_path=setup.target_path,
     )
@@ -1410,8 +1410,7 @@ def _parse_agent_opts(
     initial_message: str | None,
     source_location: HostLocation,
     mngr_ctx: MngrContext,
-    source_agent_state_dir: Path | None = None,
-    source_agent_state_host: OnlineHostInterface | None = None,
+    source_agent_state_location: HostLocation | None = None,
     target_path: Path | None = None,
 ) -> tuple[CreateAgentOptions, bool]:
     # Get agent name from address (which incorporates both positional and --name),
@@ -1493,8 +1492,6 @@ def _parse_agent_opts(
     resolved_agent_args = opts.agent_args
     resolved_agent_type = _resolve_agent_type_name(opts.type, opts.positional_agent_type)
 
-    is_clone = source_agent_state_dir is not None
-
     # Parse worktree base folder
     parsed_worktree_base_folder = Path(opts.worktree_base_folder).expanduser() if opts.worktree_base_folder else None
 
@@ -1515,8 +1512,7 @@ def _parse_agent_opts(
         permissions=permissions,
         label_options=label_options,
         provisioning=provisioning,
-        source_agent_state_dir=source_agent_state_dir if is_clone else None,
-        source_agent_state_host=source_agent_state_host if is_clone else None,
+        source_agent_state_location=source_agent_state_location,
     )
     return agent_opts, has_explicit_base
 

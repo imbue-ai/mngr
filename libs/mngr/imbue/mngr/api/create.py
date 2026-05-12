@@ -15,11 +15,11 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface

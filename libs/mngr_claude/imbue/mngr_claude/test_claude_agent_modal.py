@@ -318,9 +318,10 @@ def test_clone_local_claude_agent_to_modal(
     as both source and target of ``copy_directory``. Rsync then ran on the
     Modal sandbox looking for the source plugin dir there (where it doesn't
     exist) instead of pushing it from the source host. The fix threads the
-    source agent's host through ``CreateAgentOptions.source_agent_state_host``
-    and passes that as the rsync source, so the cross-host transfer
-    (local->Modal in this test) actually runs from the right machine.
+    source agent's location (host + state dir) through
+    ``CreateAgentOptions.source_agent_state_location`` and passes that host as
+    the rsync source, so the cross-host transfer (local->Modal in this test)
+    actually runs from the right machine.
 
     Cleanup destroys both agents regardless of test outcome so the Modal
     sandbox and the local agent state are reclaimed.

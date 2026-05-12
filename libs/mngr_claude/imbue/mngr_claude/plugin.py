@@ -50,6 +50,7 @@ from imbue.mngr.interfaces.data_types import RelativePath
 from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
@@ -865,13 +866,6 @@ def _get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
     if not isinstance(local_host_ref, OnlineHostInterface):
         raise MngrError("Local host is not online")
     return local_host_ref
-
-
-def _path_exists_on_host(host: OnlineHostInterface, path: Path) -> bool:
-    """Whether ``path`` exists on ``host`` (local fs for local hosts, ``test -e`` over SSH otherwise)."""
-    if host.is_local:
-        return path.exists()
-    return host.execute_idempotent_command(f"test -e {shlex.quote(str(path))}", timeout_seconds=5.0).success
 
 
 def _write_generated_files(
@@ -1988,14 +1982,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             # Transfer plugin data from source agent before config setup (if cloning via --from).
             # This copies sessions, memory, transcript offsets, etc. The subsequent config setup
             # will overwrite identity-specific files (.claude.json, credentials) with fresh values.
-            if options.source_agent_state_dir is not None:
-                assert options.source_agent_state_host is not None, (
-                    "source_agent_state_host must be set whenever source_agent_state_dir is set "
-                    "(both are populated together in cli/create.py)"
-                )
-                self._transfer_source_plugin_data(
-                    host, options.source_agent_state_host, options.source_agent_state_dir
-                )
+            if options.source_agent_state_location is not None:
+                self._transfer_source_plugin_data(host, options.source_agent_state_location)
 
             # Set up per-agent config directory (for both local and remote hosts)
             self._setup_per_agent_config_dir(host, options, mngr_ctx)
@@ -2056,8 +2044,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
     def _transfer_source_plugin_data(
         self,
         host: OnlineHostInterface,
-        source_host: OnlineHostInterface,
-        source_agent_state_dir: Path,
+        source_agent_state_location: HostLocation,
     ) -> None:
         """Transfer plugin data from a source agent's state directory during clone.
 
@@ -2066,16 +2053,17 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         overwrite identity-specific config files with fresh values for the
         new agent.
 
-        ``source_host`` is the host where the source agent lives -- it may be
-        the local laptop, the same remote as ``host``, or a different remote.
-        Passing ``host`` itself here would make rsync look for the source path
-        on the destination machine and fail (or, when source == dest, succeed
-        only by coincidence).
+        ``source_agent_state_location.host`` is the host where the source agent
+        lives -- it may be the local laptop, the same remote as ``host``, or a
+        different remote. Passing ``host`` to ``copy_directory`` as the source
+        would make rsync look for the source path on the destination machine
+        and fail (or, when source == dest, succeed only by coincidence).
         """
-        source_plugin_dir = source_agent_state_dir / "plugin"
+        source_host = source_agent_state_location.host
+        source_plugin_dir = source_agent_state_location.path / "plugin"
         dest_plugin_dir = self._get_agent_dir() / "plugin"
 
-        if not _path_exists_on_host(source_host, source_plugin_dir):
+        if not source_host.path_exists(source_plugin_dir):
             logger.debug("No plugin directory in source agent, skipping clone transfer")
             return
 

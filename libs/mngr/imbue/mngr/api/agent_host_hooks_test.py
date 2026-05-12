@@ -13,9 +13,9 @@ from imbue.mngr import hookimpl
 from imbue.mngr.api.create import create
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName

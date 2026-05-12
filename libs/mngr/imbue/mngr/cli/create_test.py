@@ -39,9 +39,9 @@ from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource

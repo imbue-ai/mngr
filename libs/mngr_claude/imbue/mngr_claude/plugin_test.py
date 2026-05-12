@@ -30,6 +30,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
@@ -3171,7 +3172,7 @@ def test_transfer_source_plugin_data_copies_plugin_dir(
     projects_dir.mkdir(parents=True)
     (projects_dir / "session.jsonl").write_text('{"type":"message"}\n')
 
-    agent._transfer_source_plugin_data(host, host, source_dir)
+    agent._transfer_source_plugin_data(host, HostLocation(host=host, path=source_dir))
 
     # data.json should be untouched (only plugin/ is copied)
     assert json.loads((dest_dir / "data.json").read_text())["id"] == "new-agent"
@@ -3194,7 +3195,7 @@ def test_transfer_source_plugin_data_skips_when_no_plugin_dir(
     source_dir.mkdir()
 
     # Should not raise
-    agent._transfer_source_plugin_data(host, host, source_dir)
+    agent._transfer_source_plugin_data(host, HostLocation(host=host, path=source_dir))
 
 
 # =============================================================================

@@ -34,7 +34,6 @@ from tenacity import wait_fixed
 
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.thread_utils import ObservableThread
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import info_span
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
@@ -216,17 +215,6 @@ def _is_same_machine(a: OnlineHostInterface, b: OnlineHostInterface) -> bool:
     if a.id == b.id:
         return True
     return a.is_local and b.is_local
-
-
-class HostLocation(FrozenModel):
-    """A path on a specific host."""
-
-    host: OnlineHostInterface = Field(
-        description="The actual host where the source resides",
-    )
-    path: Path = Field(
-        description="The actual path to the source directory on the host",
-    )
 
 
 class Host(OuterHost, BaseHost, OnlineHostInterface):
@@ -432,13 +420,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     # read_file, write_file, read_text_file, write_text_file, _get_file_mtime,
     # and get_file_mtime are inherited unchanged from OuterHost.
-
-    def _path_exists(self, path: Path) -> bool:
-        """Check if a path exists on the host."""
-        if self.is_local:
-            return path.exists()
-        result = self.execute_idempotent_command(f"test -e '{str(path)}'")
-        return result.success
 
     def _is_directory(self, path: Path) -> bool:
         """Check if a path is a directory on the host."""
