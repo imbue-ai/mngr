@@ -1084,10 +1084,13 @@ def test_deny_mode_settings_file_is_minimal_compared_to_proxy_mode(
 ) -> None:
     """The settings.local.json hooks dict in deny mode is strictly smaller than in proxy mode.
 
-    Specifically: deny mode installs ONLY a PreToolUse:Agent entry for
-    the subagent_proxy plugin. We don't assert on third-party hook
-    entries (mngr_claude readiness, user-installed hooks) -- those are
-    the same in both modes.
+    Specifically: deny mode installs exactly two subagent_proxy hook
+    commands -- the PreToolUse:Agent deny hook and the shared
+    SessionStart reaper (same ``hooks/reap.py`` PROXY uses). PROXY
+    mode installs four (spawn, cleanup, reap, guard_stop_hooks), so
+    deny mode is strictly smaller. We don't assert on third-party
+    hook entries (mngr_claude readiness, user-installed hooks) --
+    those are the same in both modes.
     """
     mngr = _mngr_subprocess_env_deny_mode
     parent_name = _make_parent_agent_name()
@@ -1126,11 +1129,17 @@ def test_deny_mode_settings_file_is_minimal_compared_to_proxy_mode(
                     if "imbue.mngr_claude_subagent_proxy" in command:
                         proxy_commands.append(command)
 
-        assert len(proxy_commands) == 1, (
-            f"Deny mode should install exactly one subagent_proxy hook command, "
-            f"got {len(proxy_commands)}: {proxy_commands!r}"
+        assert len(proxy_commands) == 2, (
+            f"Deny mode should install exactly two subagent_proxy hook commands "
+            f"(PreToolUse:Agent deny + SessionStart reap), got {len(proxy_commands)}: "
+            f"{proxy_commands!r}"
         )
-        assert "imbue.mngr_claude_subagent_proxy.hooks.deny" in proxy_commands[0]
+        assert any("imbue.mngr_claude_subagent_proxy.hooks.deny" in cmd for cmd in proxy_commands), (
+            f"Deny mode should install hooks.deny command. Got: {proxy_commands!r}"
+        )
+        assert any("imbue.mngr_claude_subagent_proxy.hooks.reap" in cmd for cmd in proxy_commands), (
+            f"Deny mode should install the shared hooks.reap SessionStart command. Got: {proxy_commands!r}"
+        )
     finally:
         _destroy_agents_quietly(mngr, iter(created_agents))
 
