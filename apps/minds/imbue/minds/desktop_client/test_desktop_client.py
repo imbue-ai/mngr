@@ -1375,7 +1375,14 @@ def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path
 
 def test_build_restart_shell_command_kicks_tmux_and_touches_services_toml() -> None:
     cmd = _build_restart_shell_command()
-    assert "tmux kill-window -t imbue-agent:workspace_server" in cmd
+    # The session name is host-specific (e.g. `devminds-mindtest`), so the
+    # command must discover it at run time. The window name comes from the
+    # forever-claude-template bootstrap manager, which always prefixes
+    # services.toml entries with `svc-`; `system_interface` is the entry
+    # that runs `minds-workspace-server`.
+    assert "tmux list-sessions" in cmd
+    assert "svc-system_interface" in cmd
+    assert "tmux kill-window" in cmd
     # mngr exec already runs in the agent's work_dir, so services.toml is relative.
     assert "touch services.toml" in cmd
 

@@ -1341,8 +1341,14 @@ def _build_workspace_list(
 
 # -- Workspace-server recovery / restart --
 
-_RESTART_TMUX_SESSION: Final[str] = "imbue-agent"
-_RESTART_TMUX_WINDOW: Final[str] = "workspace_server"
+# The forever-claude-template bootstrap service manager prefixes every
+# services.toml-managed tmux window with ``svc-`` and runs the workspace
+# server under the ``system_interface`` service entry, so the window we
+# need to kick is always ``svc-system_interface``. The session name is
+# host-specific (``${MNGR_PREFIX}-${MNGR_AGENT_NAME}`` -- e.g.
+# ``devminds-mindtest``), so it is discovered at run time rather than
+# hardcoded.
+_RESTART_TMUX_WINDOW: Final[str] = "svc-system_interface"
 # How long the restart endpoint blocks after kicking the tmux window before
 # returning 504. The background probe loop continues polling beyond this so
 # the recovery page eventually navigates regardless.
@@ -1362,16 +1368,20 @@ def _build_restart_shell_command() -> str:
     """Compose the shell command that ``mngr exec`` runs on the agent host.
 
     The agent container's ``forever-claude-template`` runtime watches
-    ``services.toml`` mtime. ``tmux kill-window`` kills the current
-    workspace_server window; ``touch services.toml`` then re-triggers the
-    watch loop which respawns it. Both run regardless of each other's
-    success so a stale tmux state still produces a touch and vice versa.
+    ``services.toml`` mtime. We iterate every tmux session on the host
+    and kill the ``svc-system_interface`` window in each; the bootstrap
+    manager only acts on a session-window pair when reconcile sees the
+    window missing, so the loop is safe and idempotent. ``touch
+    services.toml`` then re-triggers the watch loop which respawns the
+    service. Both run regardless of each other's success so a stale
+    tmux state still produces a touch and vice versa.
 
     ``mngr exec`` runs commands in the agent's work_dir by default, so
     ``services.toml`` is referenced as a relative path.
     """
     return (
-        f"tmux kill-window -t {_RESTART_TMUX_SESSION}:{_RESTART_TMUX_WINDOW} 2>/dev/null; "
+        f"tmux list-sessions -F '#S' 2>/dev/null | "
+        f'while read s; do tmux kill-window -t "$s:{_RESTART_TMUX_WINDOW}" 2>/dev/null; done; '
         f"touch services.toml"
     )
 
