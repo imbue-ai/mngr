@@ -707,14 +707,32 @@ def _claude_json_has_primary_api_key() -> bool:
 
 
 def _read_macos_keychain_credential(label: str, concurrency_group: ConcurrencyGroup) -> str | None:
-    """Read a credential from the macOS keychain by label."""
+    """Read a credential from the macOS keychain by label.
+
+    Bounded by a short timeout: `security find-generic-password` will block
+    indefinitely when macOS pops a keychain ACL prompt that the user does
+    not see / answer (e.g. when a different signed binary first reads an
+    entry owned by another app). A hung keychain read used to block all of
+    `mngr create` -- agent provisioning would stop at "_setup_per_agent_config_dir"
+    with no further log lines.
+    """
     try:
         result = concurrency_group.run_process_to_completion(
             ["security", "find-generic-password", "-l", label, "-w"],
             is_checked_after=False,
+            timeout=10.0,
         )
     except ProcessSetupError:
         logger.debug("macOS security binary not found")
+        return None
+    if result.is_timed_out:
+        logger.warning(
+            "macOS keychain read for label {!r} timed out (likely a hidden ACL prompt); "
+            "skipping. If you need this credential merged into the agent's config, "
+            "grant the running app access in Keychain Access.app or set "
+            "convert_macos_credentials=false in the agent config.",
+            label,
+        )
         return None
     if result.returncode != 0:
         logger.debug("No keychain credential found for label {!r}", label)
@@ -879,7 +897,7 @@ def _write_generated_files(
     files to a local temp dir and rsyncs them in a single call.
     """
     file_summary = sorted((str(rel), len(content)) for rel, content in generated_files.items())
-    logger.debug(
+    logger.info(
         "_write_generated_files: host.is_local={}, config_dir={}, files={}",
         host.is_local,
         config_dir,
@@ -1779,7 +1797,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         config = self.agent_config
         config_dir = self.get_claude_config_dir()
         source_claude_dir = get_user_claude_config_dir()
-        logger.debug(
+        logger.info(
             "_setup_per_agent_config_dir: agent={} host.is_local={} config_dir={} "
             "sync_home_settings={} sync_claude_json={} sync_claude_credentials={}",
             self.id,
@@ -2214,16 +2232,6 @@ def _copy_single_file_to_local(
         logger.warning("Failed to preserve session history for agent {}: {}", agent_name, e)
 
 
-def get_preserved_sessions_dir_for_host(host_dir: Path, agent_name: AgentName, agent_id: AgentId) -> Path:
-    """Return the preserved-sessions directory for an agent under the given host dir.
-
-    This is the single source of truth for the on-disk layout of preserved
-    Claude session data, so other plugins that need to read those files can
-    call this helper instead of duplicating the path structure.
-    """
-    return host_dir / "plugin" / "mngr_claude" / "preserved_sessions" / f"{agent_name}--{agent_id}"
-
-
 def _get_preserved_sessions_dir_for(agent_name: AgentName, agent_id: AgentId, mngr_ctx: MngrContext) -> Path:
     """Return the local directory path for an agent's preserved session files.
 
@@ -2231,7 +2239,7 @@ def _get_preserved_sessions_dir_for(agent_name: AgentName, agent_id: AgentId, mn
     the online (agent-based) and offline (volume-based) preservation paths.
     """
     local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
-    return get_preserved_sessions_dir_for_host(local_host_dir, agent_name, agent_id)
+    return local_host_dir / "plugin" / "mngr_claude" / "preserved_sessions" / f"{agent_name}--{agent_id}"
 
 
 def _should_preserve_sessions(ref: DiscoveredAgent) -> bool:
