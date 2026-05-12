@@ -238,17 +238,22 @@ def _write_mngr_subagents_skill(host: OnlineHostInterface, work_dir: Path) -> No
 
 
 def _merge_subagent_proxy_deny_hooks(host: OnlineHostInterface, work_dir: Path) -> None:
-    """Merge the deny-mode hook into the agent's .claude/settings.local.json.
+    """Merge the deny-mode hooks into the agent's .claude/settings.local.json.
 
-    Deny mode installs a single PreToolUse:Agent hook that denies Task
-    calls with a short skill-pointer reason pointing at the
+    Deny mode installs two hooks: a PreToolUse:Agent hook that denies
+    Task calls with a short skill-pointer reason pointing at the
     ``mngr-subagents`` skill (installed alongside, under
-    ``.claude/skills/``). It does NOT install PostToolUse / SessionStart
-    hooks (no spawned children to clean up), does NOT walk the user's
-    plugin hooks dirs to install Stop-hook guards (no proxy children to
-    guard against), and does NOT check the project ``settings.json`` for
-    un-guarded Stop hooks (same reason). The surface is deliberately
-    much smaller than PROXY mode.
+    ``.claude/skills/``), plus the shared label-driven SessionStart
+    reaper (same ``hooks/reap.py`` PROXY uses; both spawn paths attach
+    the ``mngr_claude_subagent_proxy_parent_id`` label so the same
+    query identifies orphans regardless of mode). It does NOT install
+    a PostToolUse hook (the deny hook never runs ``mngr create``, so
+    there is no per-Task-call state to clean up), does NOT walk the
+    user's plugin hooks dirs to install Stop-hook guards (DENY
+    children are plain claude agents without the proxy-child env var,
+    so the guard predicate would never fire), and does NOT check the
+    project ``settings.json`` for un-guarded Stop hooks (same reason).
+    The surface is deliberately much smaller than PROXY mode.
     """
     settings_path = work_dir / ".claude" / "settings.local.json"
     existing_settings: dict[str, Any] = {}
