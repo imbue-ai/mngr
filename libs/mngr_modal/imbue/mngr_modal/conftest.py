@@ -115,10 +115,19 @@ def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_n
     """Clean up Modal test resources after a test completes.
 
     This helper performs cleanup in the correct order:
-    1. Close the Modal app context (note: does not stop the Modal-side app --
-       ephemeral apps stop on context close, persistent apps keep running
-       until the session-end leak detector or the CI hourly cleanup catches
-       them; the app stays tracked in `worker_modal_app_names` either way)
+    1. Close the Modal app context. For ephemeral apps this advances the
+       `app.run()` generator, which Modal treats as the calling program
+       exit and triggers the app (plus its sandboxes) to stop server-side.
+       For persistent apps (`App.lookup` with `create_if_missing=True`,
+       `run_context is None`) this is a no-op for app lifecycle: the
+       Modal-side app keeps running until something explicitly stops it
+       (typically the session-end leak detector's `_stop_modal_apps` step,
+       or the CI hourly cleanup script). Either way the app stays
+       registered in `worker_modal_app_names` so the leak detector runs
+       against the global `modal app list` -- we don't deregister apps
+       here because we can't tell from close_app alone whether the
+       Modal-side stop actually took effect (and there's a brief
+       eventually-consistent window for ephemeral apps too).
     2. Delete the volume (must be done before environment deletion)
     3. Delete the environment (cleans up any remaining resources)
     4. Deregister volume + env from leak tracking *only* if their delete
@@ -126,9 +135,6 @@ def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_n
        cleanup failure leaves the resource tracked so the session-end leak
        detector surfaces it.
     """
-    # Close the Modal app context first. close_app does not stop the
-    # Modal-side app, so we deliberately do NOT deregister the app here;
-    # leak detection should still see it.
     ModalProviderBackend.close_app(app_name)
 
     # Delete the volume using Modal SDK (must be done before environment deletion).
