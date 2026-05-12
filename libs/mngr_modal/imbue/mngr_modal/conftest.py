@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import time
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -27,9 +28,6 @@ from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import delete_modal_apps_in_environment
 from imbue.mngr.utils.testing import delete_modal_environment
 from imbue.mngr.utils.testing import delete_modal_volumes_in_environment
-from imbue.mngr.utils.testing import deregister_modal_test_app
-from imbue.mngr.utils.testing import deregister_modal_test_environment
-from imbue.mngr.utils.testing import deregister_modal_test_volume
 from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import make_mngr_ctx
@@ -117,9 +115,6 @@ def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_n
     1. Close the Modal app context
     2. Delete the volume (must be done before environment deletion)
     3. Delete the environment (cleans up any remaining resources)
-    4. Deregister the resources from leak tracking so the session-end leak
-       detector doesn't re-flag them (Modal's listing endpoints are
-       eventually consistent w.r.t. deletion)
     """
     # Close the Modal app context first
     ModalProviderBackend.close_app(app_name)
@@ -135,13 +130,6 @@ def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_n
         delete_environment(environment_name)
     except (modal.exception.Error, OSError):
         pass
-
-    # Deregister now that cleanup was attempted. See `deregister_modal_test_app`
-    # for the rationale; the 1-hour CI cleanup script is the safety net for
-    # cleanups that silently fail to actually delete.
-    deregister_modal_test_app(app_name)
-    deregister_modal_test_volume(volume_name)
-    deregister_modal_test_environment(environment_name)
 
 
 @pytest.fixture
@@ -345,8 +333,8 @@ def _reset_modal_app_registry() -> Generator[None, None, None]:
 # If this ever starts firing on apps that have actually been deleted, the
 # same eventually-consistent-listing pattern as
 # `_get_leaked_modal_environments` is likely the cause -- adopt the same
-# cross-check approach (verify with a different Modal endpoint that the
-# resource is really alive before flagging) here.
+# polling approach (re-list until the candidate set converges or the budget
+# is exhausted) here.
 def _get_leaked_modal_apps() -> list[tuple[str, str]]:
     if not worker_modal_app_names:
         return []
@@ -380,7 +368,7 @@ def _stop_modal_apps(apps: list[tuple[str, str]]) -> None:
 
 # Same caveat as `_get_leaked_modal_apps`: if false positives appear on
 # volumes due to Modal's eventually-consistent global listing, apply the
-# `_get_leaked_modal_environments` cross-check pattern here.
+# `_get_leaked_modal_environments` polling pattern here.
 def _get_leaked_modal_volumes() -> list[str]:
     if not worker_modal_volume_names:
         return []
@@ -408,65 +396,45 @@ def _delete_modal_volumes(volume_names: list[str]) -> None:
             pass
 
 
+# `modal environment list --json` is eventually consistent w.r.t. deletion:
+# after `modal environment delete X` (or its CLI siblings) returns "Environment
+# 'X' not found", the env can linger in the global list for several seconds
+# (and the same `modal app list --env=X` query has been observed to flip from
+# "not found" to returncode 0 across a ~5 s window during this asynchronous
+# tear-down). Because no Modal endpoint is stable across that window, a
+# single-shot cross-check can't reliably tell a zombie from a real leak.
+# Instead, poll the global list until it converges (env disappears) or we hit
+# the budget; anything that still appears after the budget is treated as a
+# real leak. Budget is generous compared to the observed window (~5 s) but
+# bounded so a genuinely-leaked env doesn't stall teardown indefinitely.
+_LEAK_POLL_INTERVAL_S = 2.0
+_LEAK_POLL_MAX_TRIES = 15  # ~30 s total budget
+
+
 def _get_leaked_modal_environments() -> list[str]:
     if not worker_modal_environment_names:
         return []
-    try:
-        result = subprocess.run(
-            ["uv", "run", "modal", "environment", "list", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            return []
-        envs = json.loads(result.stdout)
-        candidates = [e.get("name", "") for e in envs if e.get("name", "") in worker_modal_environment_names]
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
-        logger.warning("Failed to list leaked modal environments: {}", e)
-        return []
-
-    # `modal environment list --json` is eventually consistent with respect to
-    # deletion: it can return entries for envs that no other Modal endpoint
-    # still sees. We hit this consistently when batching multiple tests per
-    # pytest session (lower `max_parallel`): cleanup calls `modal environment
-    # delete X` and gets "Environment 'X' not found" (along with the same
-    # response from `modal app list --env=X` and `modal volume list --env=X`),
-    # yet the global env list still returns X for some seconds afterward.
-    # Cross-check each candidate against an env-scoped operation -- if the env
-    # is genuinely gone, `modal app list --env=<name>` returns non-zero with
-    # "Environment '<name>' not found", and we can safely drop it from the
-    # leak list. Any other failure (auth error, transient API error,
-    # timeout, etc.) is treated conservatively as a real leak so we don't
-    # silently mask leaks behind unrelated CLI failures.
-    real_leaks: list[str] = []
-    for name in candidates:
+    candidates: list[str] = []
+    for try_idx in range(_LEAK_POLL_MAX_TRIES):
         try:
-            verify = subprocess.run(
-                ["uv", "run", "modal", "app", "list", "--env", name, "--json"],
+            result = subprocess.run(
+                ["uv", "run", "modal", "environment", "list", "--json"],
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
-            if verify.returncode == 0:
-                real_leaks.append(name)
-            elif "not found" in verify.stderr.lower():
-                logger.debug(
-                    "Dropping zombie env {} (in global list but `app list --env` reports not found: {})",
-                    name,
-                    verify.stderr.strip(),
-                )
-            else:
-                logger.warning(
-                    "Cross-check for env {} returned non-zero without 'not found'; treating as leak: {}",
-                    name,
-                    verify.stderr.strip(),
-                )
-                real_leaks.append(name)
-        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
-            logger.warning("Cross-check for env {} failed; treating as leak: {}", name, e)
-            real_leaks.append(name)
-    return real_leaks
+            if result.returncode != 0:
+                return []
+            envs = json.loads(result.stdout)
+            candidates = [e.get("name", "") for e in envs if e.get("name", "") in worker_modal_environment_names]
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
+            logger.warning("Failed to list leaked modal environments (poll {}): {}", try_idx, e)
+            return []
+        if not candidates:
+            return []
+        if try_idx < _LEAK_POLL_MAX_TRIES - 1:
+            time.sleep(_LEAK_POLL_INTERVAL_S)
+    return candidates
 
 
 def _delete_modal_environments(environment_names: list[str]) -> None:
