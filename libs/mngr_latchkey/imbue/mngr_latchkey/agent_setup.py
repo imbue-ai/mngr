@@ -37,10 +37,12 @@ from typing import Final
 
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_agent
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
@@ -99,6 +101,7 @@ def prepare_agent_latchkey(
     latchkey: Latchkey | None,
     *,
     is_tunneled: bool,
+    concurrency_group: ConcurrencyGroup | None = None,
 ) -> AgentLatchkeySetup:
     """Pre-create env vars + opaque permissions handle for a new agent.
 
@@ -112,10 +115,13 @@ def prepare_agent_latchkey(
       the discovery handler does that on its own when the agent shows
       up. (Starting the gateway eagerly would force every ``mngr create``
       to spawn a gateway even for tests that never exercise latchkey.)
+      ``concurrency_group`` is ignored in this mode.
     * ``False`` (DEV / on-bare-host agents): the agent runs on the same
       host as the gateway and reaches it directly. We have to start the
       gateway *now* to learn its dynamic port and bake it into
-      ``LATCHKEY_GATEWAY``.
+      ``LATCHKEY_GATEWAY``. ``concurrency_group`` becomes the owner of
+      the spawned gateway subprocess; it must be supplied whenever
+      ``latchkey is not None``.
 
     ``latchkey=None`` is a degraded mode for tests / no-password-gateway
     setups: we still inject the constant agent-side gateway URL when
@@ -133,6 +139,9 @@ def prepare_agent_latchkey(
             not make that policy call.
         LatchkeyStoreError: when materializing the opaque permissions
             file fails.
+        LatchkeyError: when ``is_tunneled=False`` with a real ``Latchkey``
+            but no ``concurrency_group`` is supplied (we need one to
+            own the spawned gateway subprocess).
     """
     if is_tunneled:
         gateway_url = f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
@@ -140,9 +149,13 @@ def prepare_agent_latchkey(
         # No live port to inject and no Latchkey to ask -- caller asked
         # for the empty case.
         return AgentLatchkeySetup(env={}, opaque_permissions_path=None)
+    elif concurrency_group is None:
+        raise LatchkeyError(
+            "prepare_agent_latchkey(is_tunneled=False) needs a concurrency_group to own the spawned gateway subprocess"
+        )
     else:
-        info = latchkey.ensure_gateway_started()
-        gateway_url = f"http://{info.host}:{info.port}"
+        latchkey.start_gateway(concurrency_group)
+        gateway_url = latchkey.gateway_url
 
     env: dict[str, str] = {ENV_LATCHKEY_GATEWAY: gateway_url}
     opaque_path: Path | None = None

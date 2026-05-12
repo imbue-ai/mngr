@@ -1,7 +1,7 @@
 """Unit tests for :mod:`imbue.mngr_latchkey.agent_setup`.
 
 These cover the per-agent latchkey setup helpers without spawning a real
-``latchkey gateway`` subprocess. ``Latchkey.ensure_gateway_started`` and
+``latchkey gateway`` subprocess. ``Latchkey.start_gateway`` and
 the JWT-mint / password-derivation methods are stubbed via a fake
 subclass so we can drive the various success / failure permutations
 deterministically.
@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_DISABLE_COUNTING
@@ -81,10 +82,18 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
 def test_prepare_full_wiring_on_host_uses_live_port(tmp_path: Path) -> None:
     """On-host (DEV) agents get the gateway's live host:port pair."""
     fake = _full_fake(tmp_path)
-    setup = prepare_agent_latchkey(fake, is_tunneled=False)
+    with ConcurrencyGroup(name="test-on-host-prepare") as cg:
+        setup = prepare_agent_latchkey(fake, is_tunneled=False, concurrency_group=cg)
     assert setup.env[ENV_LATCHKEY_GATEWAY] == "http://127.0.0.1:55555"
     assert setup.env[ENV_LATCHKEY_GATEWAY_PASSWORD] == "hunter2"
     assert setup.env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] == "header.payload.signature"
+
+
+def test_prepare_on_host_without_concurrency_group_raises(tmp_path: Path) -> None:
+    """is_tunneled=False with a real Latchkey requires a concurrency_group to own the gateway."""
+    fake = _full_fake(tmp_path)
+    with pytest.raises(LatchkeyError):
+        prepare_agent_latchkey(fake, is_tunneled=False)
 
 
 def test_prepare_on_host_gateway_start_failure_propagates(tmp_path: Path) -> None:
@@ -95,8 +104,9 @@ def test_prepare_on_host_gateway_start_failure_propagates(tmp_path: Path) -> Non
         password="hunter2",
         jwt="header.payload.signature",
     )
-    with pytest.raises(LatchkeyError):
-        prepare_agent_latchkey(fake, is_tunneled=False)
+    with ConcurrencyGroup(name="test-prepare-failure") as cg:
+        with pytest.raises(LatchkeyError):
+            prepare_agent_latchkey(fake, is_tunneled=False, concurrency_group=cg)
 
 
 def test_prepare_password_derivation_failure_propagates(tmp_path: Path) -> None:

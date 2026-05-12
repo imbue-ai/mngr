@@ -376,17 +376,14 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
 
     # Eagerly ensure the gateway is up so users see startup failures
     # immediately, not on the first agent discovery. The discovery
-    # handler will idempotently re-ensure on every fire.
+    # handler will idempotently re-ensure on every fire. The gateway
+    # subprocess is owned by ``mngr_ctx.concurrency_group`` and gets
+    # terminated when this command's click context exits.
     try:
-        info = latchkey.ensure_gateway_started()
+        latchkey.start_gateway(mngr_ctx.concurrency_group)
     except LatchkeyError as e:
         raise click.ClickException(f"Failed to start shared Latchkey gateway: {e}") from e
-    logger.info(
-        "Started shared Latchkey gateway (pid={}, host={}, port={})",
-        info.pid,
-        info.host,
-        info.port,
-    )
+    logger.info("Started shared Latchkey gateway at {}", latchkey.gateway_url)
 
     tunnel_manager = SSHTunnelManager()
     tunnel_manager.start_reverse_tunnel_health_check()

@@ -4,17 +4,15 @@ Per CLAUDE.md, do not create tests for this module itself; the helpers
 are exercised through the tests that import them.
 """
 
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from pydantic import PrivateAttr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
-from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
 
 
 class FakeLatchkey(Latchkey):
@@ -58,20 +56,28 @@ class FakeLatchkey(Latchkey):
         # invariant check.
         self._is_initialized = True
 
-    def ensure_gateway_started(self) -> LatchkeyGatewayInfo:
+    def start_gateway(self, concurrency_group: ConcurrencyGroup) -> None:
+        # The fake never actually spawns; the CG argument is accepted
+        # only to mirror the production signature.
+        del concurrency_group
         if self._gateway_error is not None:
             raise self._gateway_error
         if self._gateway_url is None:
-            raise LatchkeyError("FakeLatchkey: configure gateway_url before calling ensure_gateway_started")
+            raise LatchkeyError("FakeLatchkey: configure gateway_url before calling start_gateway")
         parts = urlsplit(self._gateway_url)
         if parts.hostname is None or parts.port is None:
             raise LatchkeyError(f"FakeLatchkey: unparseable url: {self._gateway_url}")
-        return LatchkeyGatewayInfo(
-            host=parts.hostname,
-            port=parts.port,
-            pid=42,
-            started_at=datetime.now(timezone.utc),
-        )
+        # ``Latchkey`` exposes a ``gateway_port`` property; we shadow the
+        # private slot it reads so callers see the configured URL.
+        self._gateway_port = parts.port
+
+    @property
+    def gateway_url(self) -> str:
+        # Mirror Latchkey.gateway_url but use the configured URL verbatim
+        # (so test assertions can compare to whatever URL the fixture set).
+        if self._gateway_url is None:
+            raise LatchkeyError("FakeLatchkey: configure gateway_url before reading gateway_url")
+        return self._gateway_url
 
     def derive_gateway_password(self) -> str:
         if self._password_error is not None:

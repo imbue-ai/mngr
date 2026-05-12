@@ -25,7 +25,6 @@ from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
-from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_browser_log_path
 
@@ -37,10 +36,11 @@ _POLL_INTERVAL_SECONDS = 0.05
 # adoption / stale-record tests below are dropped for the same reason.
 
 
-def test_ensure_gateway_started_requires_initialize(tmp_path: Path) -> None:
+def test_start_gateway_requires_initialize(tmp_path: Path) -> None:
     manager = Latchkey(latchkey_directory=tmp_path)
-    with pytest.raises(LatchkeyNotInitializedError):
-        manager.ensure_gateway_started()
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        with pytest.raises(LatchkeyNotInitializedError):
+            manager.start_gateway(cg)
 
 
 def test_plugin_data_dir_is_subdir_of_latchkey_directory(tmp_path: Path) -> None:
@@ -60,19 +60,20 @@ def test_initialize_raises_when_binary_missing(tmp_path: Path) -> None:
         manager.initialize()
 
 
-def test_ensure_gateway_started_raises_when_binary_disappears_after_initialize(tmp_path: Path) -> None:
+def test_start_gateway_raises_when_binary_disappears_after_initialize(tmp_path: Path) -> None:
     """``initialize`` succeeded but the binary was removed before spawn.
 
-    The spawn-time binary-missing check inside ``ensure_gateway_started``
-    still fires; the version check at ``initialize`` is just an earlier
-    line of defence.
+    The spawn-time binary-missing check inside ``start_gateway`` still
+    fires; the version check at ``initialize`` is just an earlier line
+    of defence.
     """
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
     fake_binary.unlink()
-    with pytest.raises(LatchkeyBinaryNotFoundError):
-        manager.ensure_gateway_started()
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        with pytest.raises(LatchkeyBinaryNotFoundError):
+            manager.start_gateway(cg)
 
 
 # -- initialize() version check ----------------------------------------------
@@ -235,28 +236,31 @@ def _wait_for_process_exit(pid: int, timeout: float = 5.0) -> bool:
         return False
 
 
-def test_ensure_gateway_started_spawns_subprocess(tmp_path: Path) -> None:
+def test_start_gateway_spawns_subprocess(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
-    try:
-        info = manager.ensure_gateway_started()
-        assert info.host == "127.0.0.1"
-        assert info.port > 0
-        assert info.pid > 0
-        assert _wait_for_listening(info.host, info.port), "gateway did not start listening"
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        manager.start_gateway(cg)
+        assert manager.is_gateway_running
+        port = manager.gateway_port
+        assert port > 0
+        assert manager.gateway_url == f"http://127.0.0.1:{port}"
+        assert _wait_for_listening("127.0.0.1", port), "gateway did not start listening"
 
-        # In-process idempotent: a second call returns the same info
-        # without spawning again. Cross-process adoption was removed
-        # along with the on-disk gateway record.
-        second = manager.ensure_gateway_started()
-        assert second == info
-        assert manager.get_gateway_info() == info
-    finally:
+        # In-process idempotent: a second call is a no-op; the port
+        # stays the same. Cross-process adoption was removed along
+        # with the on-disk gateway record.
+        manager.start_gateway(cg)
+        assert manager.gateway_port == port
+
+        # ``stop_gateway`` must run inside the CG so the long-running
+        # gateway subprocess is gone before the CG waits for strands
+        # to finish at ``__exit__``.
         manager.stop_gateway()
 
 
-def test_ensure_gateway_started_materializes_deny_all_default_permissions(tmp_path: Path) -> None:
+def test_start_gateway_materializes_deny_all_default_permissions(tmp_path: Path) -> None:
     """The default permissions file must exist with empty rules before the gateway starts.
 
     Latchkey treats a missing permissions file as ``allow all``, so we
@@ -269,16 +273,15 @@ def test_ensure_gateway_started_materializes_deny_all_default_permissions(tmp_pa
     manager.initialize()
     perms_path = default_permissions_path(manager.plugin_data_dir)
     assert not perms_path.exists()
-    try:
-        info = manager.ensure_gateway_started()
-        assert _wait_for_listening(info.host, info.port)
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        manager.start_gateway(cg)
+        assert _wait_for_listening("127.0.0.1", manager.gateway_port)
         assert perms_path.is_file()
         assert json.loads(perms_path.read_text()) == {"rules": []}
-    finally:
         manager.stop_gateway()
 
 
-def test_ensure_gateway_started_preserves_existing_default_permissions_file(tmp_path: Path) -> None:
+def test_start_gateway_preserves_existing_default_permissions_file(tmp_path: Path) -> None:
     """An existing default permissions file must not be overwritten on spawn."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
@@ -287,23 +290,21 @@ def test_ensure_gateway_started_preserves_existing_default_permissions_file(tmp_
     perms_path.parent.mkdir(parents=True, exist_ok=True)
     existing = '{"rules": [{"some-scope": ["any"]}]}'
     perms_path.write_text(existing)
-    try:
-        info = manager.ensure_gateway_started()
-        assert _wait_for_listening(info.host, info.port)
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        manager.start_gateway(cg)
+        assert _wait_for_listening("127.0.0.1", manager.gateway_port)
         assert perms_path.read_text() == existing
-    finally:
         manager.stop_gateway()
 
 
-def test_concurrent_ensure_gateway_started_spawns_at_most_one_subprocess(tmp_path: Path) -> None:
-    """Two threads racing through ``ensure_gateway_started`` must not both spawn.
+def test_concurrent_start_gateway_spawns_at_most_one_subprocess(tmp_path: Path) -> None:
+    """Two threads racing through ``start_gateway`` must not both spawn.
 
-    Without the spawn lock, both callers would observe ``_info`` as
-    ``None``, both would proceed to spawn a real subprocess, and the
-    second write to ``_info`` would leak the loser's process. We
-    detect that by counting how many distinct PIDs the manager hands
-    back across many concurrent callers and how many ``latchkey``
-    invocations reached the binary.
+    Without the spawn lock, both callers would observe the in-memory
+    "not running" flag, both would proceed to spawn a real
+    subprocess, and the second write would leak the loser's process.
+    We detect that by counting how many ``latchkey`` invocations
+    reached the binary across many concurrent callers.
     """
     invocation_counter = tmp_path / "gateway_invocations"
     script = tmp_path / "latchkey"
@@ -343,26 +344,27 @@ def test_concurrent_ensure_gateway_started_spawns_at_most_one_subprocess(tmp_pat
     manager.initialize()
 
     barrier = threading.Barrier(8)
-    results: list[LatchkeyGatewayInfo] = []
-    results_lock = threading.Lock()
+    observed_ports: list[int] = []
+    observed_lock = threading.Lock()
 
-    def worker() -> None:
-        # Sync all workers so they all attempt the spawn at roughly
-        # the same instant. This maximises the chance of catching a
-        # regression to the no-lock behaviour.
-        barrier.wait()
-        info = manager.ensure_gateway_started()
-        with results_lock:
-            results.append(info)
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
 
-    threads = [threading.Thread(target=worker, name=f"spawn-race-{i}") for i in range(8)]
-    try:
+        def worker() -> None:
+            # Sync all workers so they all attempt the spawn at roughly
+            # the same instant. This maximises the chance of catching a
+            # regression to the no-lock behaviour.
+            barrier.wait()
+            manager.start_gateway(cg)
+            with observed_lock:
+                observed_ports.append(manager.gateway_port)
+
+        threads = [threading.Thread(target=worker, name=f"spawn-race-{i}") for i in range(8)]
         for t in threads:
             t.start()
         for t in threads:
             t.join(timeout=10.0)
-        # All callers must agree on a single gateway info.
-        assert len({(info.pid, info.port) for info in results}) == 1, results
+        # All callers must agree on a single gateway port.
+        assert len(set(observed_ports)) == 1, observed_ports
         # And the fake binary must have been invoked exactly once for
         # the ``gateway`` subcommand. (``ensure-browser`` and
         # ``create-jwt`` invocations are short-circuited above and do
@@ -370,20 +372,25 @@ def test_concurrent_ensure_gateway_started_spawns_at_most_one_subprocess(tmp_pat
         assert invocation_counter.is_file()
         invocations = invocation_counter.read_text().splitlines()
         assert len(invocations) == 1, f"expected one gateway spawn, got {invocations}"
-    finally:
         manager.stop_gateway()
 
 
-def test_stop_gateway_terminates_subprocess(tmp_path: Path) -> None:
+def test_stop_gateway_clears_in_memory_state(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
-    info = manager.ensure_gateway_started()
-    assert _wait_for_listening(info.host, info.port)
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        manager.start_gateway(cg)
+        assert manager.is_gateway_running
+        port = manager.gateway_port
+        assert _wait_for_listening("127.0.0.1", port)
 
-    manager.stop_gateway()
-    assert manager.get_gateway_info() is None
-    assert _wait_for_process_exit(info.pid)
+        manager.stop_gateway()
+        assert not manager.is_gateway_running
+        with pytest.raises(LatchkeyNotInitializedError):
+            _ = manager.gateway_port
+        # Idempotent no-op so the CG has nothing left to wait for when it exits.
+        manager.stop_gateway()
 
 
 def test_stop_gateway_is_no_op_when_not_running(tmp_path: Path) -> None:
@@ -489,7 +496,7 @@ def test_create_permissions_override_jwt_clears_latchkey_gateway_env(
     assert report_path.read_text() == "<unset>"
 
 
-def test_ensure_gateway_started_passes_password_to_subprocess(tmp_path: Path) -> None:
+def test_start_gateway_passes_password_to_subprocess(tmp_path: Path) -> None:
     """The spawned gateway must receive the derived password as ``LATCHKEY_GATEWAY_LISTEN_PASSWORD``."""
     report_path = tmp_path / "password_report"
     script = tmp_path / "latchkey"
@@ -521,16 +528,15 @@ def test_ensure_gateway_started_passes_password_to_subprocess(tmp_path: Path) ->
 
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
     manager.initialize()
-    try:
-        info = manager.ensure_gateway_started()
-        assert _wait_for_listening(info.host, info.port)
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        manager.start_gateway(cg)
+        assert _wait_for_listening("127.0.0.1", manager.gateway_port)
         # Wait for the report file to be written.
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline and not report_path.is_file():
             threading.Event().wait(timeout=_POLL_INTERVAL_SECONDS)
         assert report_path.is_file()
         assert report_path.read_text() == manager.derive_gateway_password()
-    finally:
         manager.stop_gateway()
 
 
@@ -543,8 +549,13 @@ def test_discovery_handler_spawns_shared_gateway_for_every_provider(tmp_path: Pa
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
     tunnel_manager = SSHTunnelManager()
-    try:
-        with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+    # The CG owns the gateway subprocess: it must see the gateway
+    # already-stopped before its ``__exit__`` runs, otherwise the CG
+    # will time out waiting for the long-running gateway to exit
+    # naturally. We call ``stop_gateway`` + ``tunnel_manager.cleanup()``
+    # inside the ``with`` block.
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        try:
             handler = LatchkeyDiscoveryHandler(
                 latchkey=manager,
                 tunnel_manager=tunnel_manager,
@@ -553,13 +564,12 @@ def test_discovery_handler_spawns_shared_gateway_for_every_provider(tmp_path: Pa
             for provider_name in ("local", "docker", "lima", "vultr", "modal"):
                 # ssh_info=None is fine here -- it keeps the test off the SSH path.
                 handler(AgentId(), None, provider_name)
-        info = manager.get_gateway_info()
-        assert info is not None
-        # Same shared gateway across all five callbacks; ensure it actually came up.
-        assert _wait_for_listening(info.host, info.port)
-    finally:
-        manager.stop_gateway()
-        tunnel_manager.cleanup()
+            assert manager.is_gateway_running
+            # Same shared gateway across all five callbacks; ensure it actually came up.
+            assert _wait_for_listening("127.0.0.1", manager.gateway_port)
+        finally:
+            manager.stop_gateway()
+            tunnel_manager.cleanup()
 
 
 class _RecordingTunnelManager(SSHTunnelManager):
@@ -590,29 +600,29 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: 
     tunnel_manager = _RecordingTunnelManager()
     agent_id = AgentId()
     ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=22, key_path=tmp_path / "k")
-    try:
-        # The handler dispatches tunnel setup onto a CG worker thread, so
-        # exit the CG (joining its threads) before asserting on the
-        # recording tunnel manager's calls -- otherwise the assertion races
-        # the worker.
-        with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-            handler = LatchkeyDiscoveryHandler(
-                latchkey=manager,
-                tunnel_manager=tunnel_manager,
-                concurrency_group=cg,
-            )
-            handler(agent_id, ssh_info, "docker")
+    # The handler dispatches tunnel setup onto a CG worker thread, so
+    # exit the CG (joining its threads) before asserting on the
+    # recording tunnel manager's calls -- otherwise the assertion races
+    # the worker. ``stop_gateway`` must run before the CG exits so the
+    # long-running gateway subprocess isn't a strand the CG times out on.
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+        )
+        handler(agent_id, ssh_info, "docker")
 
-        info = manager.get_gateway_info()
-        assert info is not None
+        assert manager.is_gateway_running
+        host_side_port = manager.gateway_port
 
         # Exactly one reverse tunnel, bridging the dynamic host-side gateway port
         # to the fixed agent-side port on the container's loopback. The tunnel
         # must also be tagged with the owning agent's id, so the destruction
         # handler can find and tear it down via remove_reverse_tunnels_for_agent;
         # without that tag the original CPU leak would re-surface.
-        assert tunnel_manager._calls == [(ssh_info, info.port, AGENT_SIDE_LATCHKEY_PORT, str(agent_id))]
-    finally:
+        assert tunnel_manager._calls == [(ssh_info, host_side_port, AGENT_SIDE_LATCHKEY_PORT, str(agent_id))]
+
         manager.stop_gateway()
 
 
@@ -626,18 +636,16 @@ def test_discovery_handler_skips_reverse_tunnel_when_ssh_info_missing(tmp_path: 
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
     tunnel_manager = _RecordingTunnelManager()
-    try:
-        with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-            handler = LatchkeyDiscoveryHandler(
-                latchkey=manager,
-                tunnel_manager=tunnel_manager,
-                concurrency_group=cg,
-            )
-            handler(AgentId(), None, "local")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+        )
+        handler(AgentId(), None, "local")
 
-        assert manager.get_gateway_info() is not None
+        assert manager.is_gateway_running
         assert tunnel_manager._calls == []
-    finally:
         manager.stop_gateway()
 
 
@@ -647,8 +655,8 @@ def test_discovery_handler_swallows_gateway_errors(tmp_path: Path) -> None:
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
     # Remove the binary so the discovery handler's call to
-    # ``ensure_gateway_started`` fails with ``LatchkeyBinaryNotFoundError``
-    # at spawn time, exercising the handler's swallow-and-warn path.
+    # ``start_gateway`` fails with ``LatchkeyBinaryNotFoundError`` at
+    # spawn time, exercising the handler's swallow-and-warn path.
     fake_binary.unlink()
     tunnel_manager = _RecordingTunnelManager()
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
@@ -658,7 +666,7 @@ def test_discovery_handler_swallows_gateway_errors(tmp_path: Path) -> None:
             concurrency_group=cg,
         )
         handler(AgentId(), None, "local")
-    assert manager.get_gateway_info() is None
+    assert not manager.is_gateway_running
     assert tunnel_manager._calls == []
 
 
@@ -717,16 +725,15 @@ def test_ensure_browser_runs_once_on_first_spawn(tmp_path: Path, monkeypatch: py
     fake_binary = _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path, counter_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
-    try:
-        # Multiple ensure_gateway_started calls -- the gateway is shared.
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        # Multiple start_gateway calls -- the gateway is shared.
         for _ in range(3):
-            manager.ensure_gateway_started()
+            manager.start_gateway(cg)
 
         # ensure-browser must have run exactly once.
         assert _wait_for_counter(counter_path, expected=1) == 1
         # And a log file for ensure-browser got written in the minds data dir.
         assert ensure_browser_log_path(manager.plugin_data_dir).is_file()
-    finally:
         manager.stop_gateway()
 
 
@@ -741,8 +748,9 @@ def test_ensure_browser_not_called_when_binary_missing(tmp_path: Path) -> None:
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
     fake_binary.unlink()
-    with pytest.raises(LatchkeyBinaryNotFoundError):
-        manager.ensure_gateway_started()
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        with pytest.raises(LatchkeyBinaryNotFoundError):
+            manager.start_gateway(cg)
     assert not ensure_browser_log_path(manager.plugin_data_dir).exists()
 
 

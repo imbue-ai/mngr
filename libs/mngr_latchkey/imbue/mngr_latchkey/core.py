@@ -25,13 +25,11 @@ import socket
 import threading
 import time
 from collections.abc import Mapping
-from datetime import datetime
-from datetime import timezone
 from enum import auto
 from pathlib import Path
 from typing import Final
+from typing import IO
 
-import psutil
 from loguru import logger
 from packaging.version import InvalidVersion
 from packaging.version import Version
@@ -41,13 +39,12 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
+from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
-from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_gateway
-from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_browser_log_path
@@ -64,11 +61,9 @@ LATCHKEY_BINARY: Final[str] = "latchkey"
 
 _DEFAULT_LISTEN_HOST: Final[str] = "127.0.0.1"
 
-_TERMINATE_GRACE_SECONDS: Final[float] = 5.0
-
 # Maximum time to wait after spawning the ``latchkey gateway`` subprocess
 # for it to bind its listen port. Without this, ``_spawn_gateway`` could
-# publish a fresh ``LatchkeyGatewayInfo`` while the child was still in
+# publish a fresh port to callers while the child was still in
 # its startup window, and a second ``ensure_gateway_started`` caller's
 # liveness probe would fail and trigger a spurious second spawn.
 _GATEWAY_BIND_TIMEOUT_SECONDS: Final[float] = 10.0
@@ -211,7 +206,7 @@ def _wait_for_port_listening(host: str, port: int, timeout: float) -> bool:
 
     Used by ``_spawn_gateway`` to make sure the freshly-spawned
     ``latchkey gateway`` has bound its port before its
-    ``LatchkeyGatewayInfo`` is published / returned to callers, so a
+    listen port is exposed via ``gateway_port`` / ``gateway_url``, so a
     user's first request after spawn does not race the port bind.
     """
     deadline = time.monotonic() + timeout
@@ -225,28 +220,6 @@ def _wait_for_port_listening(host: str, port: int, timeout: float) -> bool:
     # One last probe in case the port came up between the final sleep
     # and the deadline, so a slow CI host doesn't false-fail.
     return _is_port_listening(host, port, timeout=_GATEWAY_BIND_POLL_INTERVAL_SECONDS)
-
-
-def _terminate_pid(pid: int) -> None:
-    """SIGTERM a PID, falling back to SIGKILL after a grace period.
-
-    Silently tolerates already-dead / inaccessible / not-ours processes.
-    """
-    try:
-        process = psutil.Process(pid)
-    except psutil.NoSuchProcess:
-        return
-    try:
-        process.terminate()
-        process.wait(timeout=_TERMINATE_GRACE_SECONDS)
-    except psutil.TimeoutExpired:
-        logger.warning("Latchkey gateway pid {} did not exit within grace period; sending SIGKILL", pid)
-        try:
-            process.kill()
-        except psutil.NoSuchProcess:
-            return
-    except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-        logger.debug("Could not terminate pid {}: {}", pid, e)
 
 
 def _parse_credential_status(payload: Mapping[str, object], service_name: str) -> CredentialStatus:
@@ -328,6 +301,63 @@ def _build_env_with_latchkey_directory(latchkey_directory: Path | None) -> dict[
     return env
 
 
+def _build_gateway_env(
+    listen_host: str,
+    listen_port: int,
+    latchkey_directory: Path,
+    permissions_config_path: Path,
+    listen_password: str,
+) -> dict[str, str]:
+    """Build the env dict for the ``latchkey gateway`` subprocess.
+
+    Mirrors the env shape that ``_spawn.spawn_detached_latchkey_gateway``
+    used to set up. The gateway reads its listen host/port + permissions
+    config path + listen password from these env vars (the upstream
+    ``latchkey`` CLI exposes them as the documented gateway-config
+    surface).
+    """
+    latchkey_directory.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["LATCHKEY_GATEWAY_LISTEN_HOST"] = listen_host
+    env["LATCHKEY_GATEWAY_LISTEN_PORT"] = str(listen_port)
+    env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    env["LATCHKEY_PERMISSIONS_CONFIG"] = str(permissions_config_path)
+    env["LATCHKEY_GATEWAY_LISTEN_PASSWORD"] = listen_password
+    return env
+
+
+class _GatewayLogWriter(MutableModel):
+    """Per-line callback that appends ``latchkey gateway`` output to a log file.
+
+    :class:`ConcurrencyGroup` always pipes a child's stdout/stderr through
+    a per-line callback; this writer plays that callback role and tees
+    each line into the same on-disk log file the previous detached-spawn
+    path used (``<plugin_data_dir>/latchkey_gateway.log``). The file is
+    opened lazily so a failed spawn never creates an empty log artefact.
+    """
+
+    log_path: Path = Field(frozen=True, description="On-disk log file the gateway's stdout/stderr is appended to")
+
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _log_file: IO[bytes] | None = PrivateAttr(default=None)
+
+    def __call__(self, line: str, is_stdout: bool) -> None:
+        del is_stdout
+        with self._lock:
+            if self._log_file is None:
+                self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                self._log_file = self.log_path.open("ab")
+            try:
+                self._log_file.write(line.encode("utf-8", errors="replace"))
+                if not line.endswith("\n"):
+                    self._log_file.write(b"\n")
+                self._log_file.flush()
+            except OSError as e:
+                # Best-effort log -- a write failure must not crash the
+                # gateway dispatch thread the CG calls us on.
+                logger.warning("Failed to write latchkey gateway log line to {}: {}", self.log_path, e)
+
+
 class Latchkey(MutableModel):
     """Wraps every interaction with the upstream ``latchkey`` CLI.
 
@@ -359,16 +389,19 @@ class Latchkey(MutableModel):
         ),
     )
 
-    _info: LatchkeyGatewayInfo | None = PrivateAttr(default=None)
+    # ``_gateway_port`` doubles as the "is the gateway running?" flag
+    # (None means not running). ``_gateway_process`` is kept around so
+    # ``stop_gateway`` can SIGTERM the child via the :class:`RunningProcess`
+    # the spawning :class:`ConcurrencyGroup` returned.
+    _gateway_port: int | None = PrivateAttr(default=None)
+    _gateway_process: RunningProcess | None = PrivateAttr(default=None)
     _gateway_password: str | None = PrivateAttr(default=None)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     # Held *only* across the slow spawn path so two concurrent
-    # ``ensure_gateway_started`` callers cannot both decide to spawn
-    # a fresh gateway and leak the loser's subprocess. Kept separate
-    # from ``_lock`` (which is held only for short state-mutation
-    # critical sections) so the TCP liveness probe inside the slow
-    # path doesn't block fast-path readers like ``get_gateway_info``
-    # or ``stop_gateway``.
+    # ``start_gateway`` callers cannot both decide to spawn a fresh
+    # gateway and leak the loser's subprocess. Kept separate from
+    # ``_lock`` (which is held only for short state-mutation critical
+    # sections) so the slow spawn path doesn't block fast-path readers.
     _spawn_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _is_initialized: bool = PrivateAttr(default=False)
     _has_ensured_browser: bool = PrivateAttr(default=False)
@@ -419,66 +452,98 @@ class Latchkey(MutableModel):
         with self._lock:
             self._is_initialized = True
 
-    def ensure_gateway_started(self) -> LatchkeyGatewayInfo:
+    def start_gateway(self, concurrency_group: ConcurrencyGroup) -> None:
         """Start the shared gateway if this :class:`Latchkey` has not spawned one yet.
 
-        In-process idempotent: subsequent calls return the cached
-        :attr:`_info` set by the first call. There is no cross-process
-        adoption -- the only caller that ever spawns a gateway is
-        ``mngr latchkey forward``, and the supervisor wrapper makes
-        sure at most one such process runs per latchkey directory.
+        ``concurrency_group`` owns the gateway subprocess: when it exits
+        (e.g. on ``mngr latchkey forward`` shutdown), the gateway is
+        terminated as part of the group's normal cleanup. There is no
+        cross-process adoption -- the only caller that ever spawns a
+        gateway is ``mngr latchkey forward``, and the supervisor wrapper
+        makes sure at most one such process runs per latchkey directory.
 
-        Thread-safe within a single process: ``_spawn_lock`` guards the
-        slow path so two concurrent callers do not both decide to
-        spawn a real subprocess. Without that serialization, the
-        loser's process would leak. The eager startup path in
-        ``mngr latchkey forward`` runs this before any discovery
-        callback registers, so in normal operation only one caller
-        ever hits the slow path.
+        In-process idempotent: subsequent calls observe :attr:`is_gateway_running`
+        and return immediately. Thread-safe within a single process via
+        ``_spawn_lock``.
+
+        After a successful call, callers can read :attr:`gateway_port`
+        / :attr:`gateway_url` to learn where the gateway is listening.
         """
-        # Fast path: existing in-memory info wins.
+        # Fast path: already running.
         with self._lock:
             self._require_initialized_locked()
-            existing = self._info
-        if existing is not None:
-            return existing
+            if self._gateway_port is not None:
+                return
         plugin_dir = self.plugin_data_dir
         # Slow path: serialize spawning. Double-check after acquiring
         # the spawn lock so a concurrent caller that already spawned
         # is observed before we duplicate the work.
         with self._spawn_lock:
             with self._lock:
-                existing = self._info
-            if existing is not None:
-                return existing
-            info = self._spawn_gateway(plugin_dir)
+                if self._gateway_port is not None:
+                    return
+            port, process = self._spawn_gateway(concurrency_group, plugin_dir)
             with self._lock:
-                self._info = info
-            return info
+                self._gateway_port = port
+                self._gateway_process = process
 
     def stop_gateway(self) -> None:
         """Terminate the gateway tracked by this :class:`Latchkey` instance.
 
-        Clears the in-memory record and SIGTERMs the underlying
-        subprocess. ``_terminate_pid`` is deliberately called outside
-        the lock because it can wait up to ``_TERMINATE_GRACE_SECONDS``
-        for the child to exit. Per-agent
-        ``latchkey_permissions.json`` files are intentionally *not*
-        deleted: minds does not delete other per-agent state on
+        SIGTERMs the underlying subprocess via the tracked
+        :class:`RunningProcess` and clears the in-memory state. The
+        ``ConcurrencyGroup`` that owns the subprocess would also
+        terminate it on its own ``__exit__``; calling ``stop_gateway``
+        explicitly is the way ``mngr latchkey forward``'s signal
+        handler tears the gateway down *before* the CG exits, so the
+        user sees a clean log line + a deterministic order.
+
+        Per-agent ``latchkey_permissions.json`` files are intentionally
+        *not* deleted: minds does not delete other per-agent state on
         destruction either, and keeping them around means previously
-        granted permissions survive desktop-client restarts and reboots.
+        granted permissions survive desktop-client restarts and
+        reboots.
         """
         with self._lock:
-            info = self._info
-            self._info = None
-        if info is not None:
-            logger.info("Stopping shared Latchkey gateway (pid={})", info.pid)
-            _terminate_pid(info.pid)
+            port = self._gateway_port
+            process = self._gateway_process
+            self._gateway_port = None
+            self._gateway_process = None
+        if process is not None and port is not None:
+            logger.info("Stopping shared Latchkey gateway ({}:{})", self.listen_host, port)
+            try:
+                process.terminate()
+            except (OSError, RuntimeError) as e:
+                logger.warning("Failed to terminate Latchkey gateway cleanly: {}", e)
 
-    def get_gateway_info(self) -> LatchkeyGatewayInfo | None:
-        """Return the shared gateway info, or ``None`` if no gateway is tracked."""
+    @property
+    def is_gateway_running(self) -> bool:
+        """Whether this :class:`Latchkey` has spawned a gateway and not yet stopped it."""
         with self._lock:
-            return self._info
+            return self._gateway_port is not None
+
+    @property
+    def gateway_port(self) -> int:
+        """Port the shared gateway is listening on.
+
+        Raises :class:`LatchkeyNotInitializedError` when no gateway has
+        been started. Pair with :attr:`listen_host` to build a URL, or
+        use :attr:`gateway_url` directly.
+        """
+        with self._lock:
+            port = self._gateway_port
+        if port is None:
+            raise LatchkeyNotInitializedError("Latchkey gateway has not been started")
+        return port
+
+    @property
+    def gateway_url(self) -> str:
+        """``http://<listen_host>:<gateway_port>`` for the running gateway.
+
+        Raises :class:`LatchkeyNotInitializedError` when no gateway has
+        been started.
+        """
+        return f"http://{self.listen_host}:{self.gateway_port}"
 
     # -- Password / JWT derivation ------------------------------------------
 
@@ -719,8 +784,12 @@ class Latchkey(MutableModel):
                 f"upgrade the binary at {self.latchkey_binary}."
             )
 
-    def _spawn_gateway(self, plugin_dir: Path) -> LatchkeyGatewayInfo:
-        """Build a fresh ``LatchkeyGatewayInfo`` by spawning a detached gateway.
+    def _spawn_gateway(
+        self,
+        concurrency_group: ConcurrencyGroup,
+        plugin_dir: Path,
+    ) -> tuple[int, RunningProcess]:
+        """Spawn a fresh ``latchkey gateway`` and return its listen port + :class:`RunningProcess`.
 
         Materializes the deny-all default permissions file, derives the
         gateway password (so the agent-side password matches), and only
@@ -758,46 +827,47 @@ class Latchkey(MutableModel):
 
         port = _allocate_free_port(self.listen_host)
         log_path = gateway_log_path(plugin_dir)
+        env = _build_gateway_env(
+            listen_host=self.listen_host,
+            listen_port=port,
+            latchkey_directory=self.latchkey_directory,
+            permissions_config_path=default_perms,
+            listen_password=password,
+        )
 
         with log_span(
             "Starting shared Latchkey gateway on {}:{}",
             self.listen_host,
             port,
         ):
+            log_writer = _GatewayLogWriter(log_path=log_path)
             try:
-                pid = spawn_detached_latchkey_gateway(
-                    latchkey_binary=self.latchkey_binary,
-                    listen_host=self.listen_host,
-                    listen_port=port,
-                    log_path=log_path,
-                    latchkey_directory=self.latchkey_directory,
-                    permissions_config_path=default_perms,
-                    listen_password=password,
+                process = concurrency_group.run_process_in_background(
+                    command=[self.latchkey_binary, "gateway"],
+                    env=env,
+                    on_output=log_writer,
                 )
-            except OSError as e:
+            except (ConcurrencyExceptionGroup, OSError) as e:
                 raise LatchkeyError(f"Failed to spawn shared Latchkey gateway: {e}") from e
 
             # Block until the freshly-spawned subprocess actually binds
-            # its port. Returning earlier would let a concurrent
-            # ``ensure_gateway_started`` caller probe the not-yet-bound
-            # port, conclude the gateway is dead, and spuriously spawn
-            # a second one. If the gateway never comes up we tear it
-            # down so the caller doesn't end up with a leaked
-            # subprocess plus a misleading published record.
+            # its port. Returning earlier would let a caller use the
+            # gateway's URL before the gateway is actually accepting
+            # connections. If the gateway never comes up we terminate
+            # it so the caller doesn't end up with a half-started
+            # subprocess they don't know about.
             if not _wait_for_port_listening(self.listen_host, port, timeout=_GATEWAY_BIND_TIMEOUT_SECONDS):
-                _terminate_pid(pid)
+                try:
+                    process.terminate()
+                except (OSError, RuntimeError) as e:
+                    logger.warning("Failed to terminate half-started latchkey gateway: {}", e)
                 raise LatchkeyError(
-                    "Spawned latchkey gateway (pid={}) did not bind {}:{} within {:.1f}s; see {} for details".format(
-                        pid, self.listen_host, port, _GATEWAY_BIND_TIMEOUT_SECONDS, log_path
+                    "Spawned latchkey gateway did not bind {}:{} within {:.1f}s; see {} for details".format(
+                        self.listen_host, port, _GATEWAY_BIND_TIMEOUT_SECONDS, log_path
                     )
                 )
 
-        return LatchkeyGatewayInfo(
-            host=self.listen_host,
-            port=port,
-            pid=pid,
-            started_at=datetime.now(timezone.utc),
-        )
+        return port, process
 
     def _ensure_browser_once(self, plugin_dir: Path) -> None:
         """Spawn ``latchkey ensure-browser`` the first time we're asked to, per Latchkey lifetime.

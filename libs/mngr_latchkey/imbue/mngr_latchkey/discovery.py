@@ -72,10 +72,11 @@ class LatchkeyDiscoveryHandler(MutableModel):
     def __call__(self, agent_id: AgentId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
         del provider_name
         try:
-            info = self.latchkey.ensure_gateway_started()
+            self.latchkey.start_gateway(self.concurrency_group)
         except LatchkeyError as e:
             logger.warning("Failed to start shared Latchkey gateway for agent {}: {}", agent_id, e)
             return
+        host_side_port = self.latchkey.gateway_port
 
         if ssh_info is None:
             # No SSH info for this agent (e.g. local-provider agent in tests,
@@ -93,7 +94,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         try:
             self.concurrency_group.start_new_thread(
                 target=self._run_remote_setup,
-                args=(agent_id, ssh_info, info.port),
+                args=(agent_id, ssh_info, host_side_port),
                 name=f"latchkey-discovery-setup-{agent_id_str}",
                 is_checked=False,
             )

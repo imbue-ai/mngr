@@ -21,11 +21,10 @@ Two kinds of state live there:
   grants or revokes permissions. Only the subset of detent's file
   schema that we actually produce is modeled.
 
-``LatchkeyGatewayInfo`` is defined here too (it's a return-type for
-the gateway-spawn path) but is no longer persisted to disk: gateway
-lifetime is fully owned by the single ``mngr latchkey forward``
-process that the supervisor guarantees, so cross-process adoption is
-unnecessary.
+The shared ``latchkey gateway`` does not have a state record here:
+its lifetime is fully owned by the single ``mngr latchkey forward``
+process that the supervisor guarantees, and within that process the
+listen port is tracked in memory on the :class:`Latchkey` instance.
 
 The gateway never reads the per-agent file directly via its agent-id
 path. Instead, an opaque ``{plugin_data_dir}/permissions/<uuid>.json``
@@ -86,21 +85,6 @@ def plugin_data_dir(latchkey_directory: Path) -> Path:
 
 
 # -- Gateway info --------------------------------------------------------------
-
-
-class LatchkeyGatewayInfo(FrozenModel):
-    """Metadata identifying the running shared Latchkey gateway subprocess.
-
-    Pure in-memory data type now -- not persisted to disk. Lives here
-    rather than in ``core.py`` only because other modules import it as
-    a return-type / Field type and a layered import contract would
-    otherwise put ``core`` below them.
-    """
-
-    host: str = Field(description="Host the gateway is listening on (typically 127.0.0.1)")
-    port: int = Field(description="Port the gateway is listening on")
-    pid: int = Field(description="PID of the ``latchkey gateway`` process")
-    started_at: datetime = Field(description="UTC timestamp when the gateway was started")
 
 
 def gateway_log_path(data_dir: Path) -> Path:

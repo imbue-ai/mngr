@@ -82,8 +82,6 @@ def _is_forward_info_alive(info: LatchkeyForwardInfo) -> bool:
     2. That process's cmdline looks like ``mngr latchkey forward``
        (defends against PID reuse).
 
-    Unlike the gateway, there is no listening port to probe -- the
-    supervisor is a foreground watcher with no TCP surface of its own.
     """
     try:
         process = psutil.Process(info.pid)

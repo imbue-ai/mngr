@@ -241,3 +241,57 @@ points at it (those died with the previous forward's paramiko
 clients), so the orphan is just an idle process. The next supervisor
 call spawns a fresh forward + fresh gateway on a fresh port; the
 orphan can be cleaned up with `pkill latchkey`.
+
+## mngr-latchkey: spawn the gateway via ConcurrencyGroup, simplify Latchkey API
+
+Now that the gateway is only ever spawned by `mngr latchkey forward`
+(a long-running supervised process), the detached-process /
+on-disk-record machinery was overkill. Switched the gateway over to
+standard `ConcurrencyGroup.run_process_in_background` and stripped the
+lifecycle surface down to what the two production callers actually
+need.
+
+API changes:
+
+- `Latchkey.ensure_gateway_started()` -> `Latchkey.start_gateway(cg)`.
+  Takes the owning `ConcurrencyGroup` as an explicit argument (the CG's
+  `__exit__` is what terminates the gateway). In-process idempotent.
+- Replaced the `LatchkeyGatewayInfo` return value with simpler
+  in-instance state and accessors:
+  - `Latchkey.is_gateway_running` -- boolean.
+  - `Latchkey.gateway_port` -- int (raises `LatchkeyNotInitializedError`
+    when no gateway is running).
+  - `Latchkey.gateway_url` -- `http://<listen_host>:<gateway_port>`.
+- `LatchkeyGatewayInfo` itself is gone (was the in-memory return shape
+  with `host`/`port`/`started_at`; replaced by the properties above).
+- `Latchkey.get_gateway_info()` removed; callers use `is_gateway_running`
+  / `gateway_port` directly.
+
+Internals:
+
+- `spawn_detached_latchkey_gateway` removed from `_spawn.py`. The
+  remaining detached helpers are `ensure-browser` (Chromium download
+  that should outlive a quick forward restart) and `mngr latchkey forward`
+  itself (the supervisor adopts across embedder restarts).
+- Gateway output is captured by a small `_GatewayLogWriter` `MutableModel`
+  that tees per-line into the same `<plugin_data_dir>/latchkey_gateway.log`
+  the detached path used. The CG's standard pipe-based output capture
+  replaces the old direct stdout/stderr-to-file redirection.
+- Cross-process adoption helpers (`_is_info_alive`,
+  `_cmdline_looks_like_latchkey_gateway`, `_terminate_pid`,
+  `_LIVENESS_CONNECT_TIMEOUT_SECONDS`) are gone -- the supervisor wrapper
+  already enforces "at most one forward per directory" and adoption
+  inside that single process is now just a boolean check.
+
+Callers updated:
+
+- `LatchkeyDiscoveryHandler.__call__` reads the host-side port via
+  `latchkey.gateway_port` after calling `start_gateway`.
+- `_forward_command` (cli.py) passes `mngr_ctx.concurrency_group` to
+  `start_gateway` and logs `latchkey.gateway_url`.
+- `prepare_agent_latchkey` accepts an optional `concurrency_group`
+  argument; raises `LatchkeyError` if `is_tunneled=False` is used
+  without one (the only path that actually spawns a gateway from
+  inside this helper).
+- `FakeLatchkey` in `testing.py` mirrors the new `start_gateway`
+  signature.

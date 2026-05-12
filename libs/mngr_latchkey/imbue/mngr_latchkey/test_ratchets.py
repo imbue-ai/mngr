@@ -243,8 +243,12 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 def test_prevent_direct_subprocess() -> None:
     # ``_spawn.py`` intentionally uses ``subprocess.Popen`` with
-    # ``start_new_session=True`` so that the spawned ``latchkey gateway``
-    # outlives the caller (e.g. the minds desktop client).
+    # ``start_new_session=True`` for the two subprocesses that must
+    # outlive their caller: ``latchkey ensure-browser`` (which may be
+    # downloading Chromium) and ``mngr latchkey forward`` (which the
+    # supervisor adopts across embedder restarts). The shared
+    # ``latchkey gateway`` no longer needs this -- it's spawned via
+    # ``ConcurrencyGroup`` from ``core.py``.
     excluded = TEST_FILE_PATTERNS + ("*/_spawn.py",)
     rc.check_direct_subprocess(_DIR, snapshot(0), excluded_patterns=excluded)
 
