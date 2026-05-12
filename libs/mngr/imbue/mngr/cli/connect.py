@@ -18,10 +18,11 @@ from urwid.widget.wimp import SelectableIcon
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.agent_addr import find_agent_by_address
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.data_types import ConnectionOptions
+from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.list import list_agents
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.filter_opts import AgentFilterCliOptions
@@ -36,6 +37,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
 
 
@@ -48,7 +50,7 @@ class ConnectCliOptions(AgentFilterCliOptions, CommonCliOptions):
     non-interactive most-recent fallback); they are ignored otherwise.
     """
 
-    agent: str | None
+    agent: AgentAddress | None
     start: bool
     reconnect: bool
     session_command: str | None
@@ -334,9 +336,11 @@ def _build_connection_options(opts: ConnectCliOptions, mngr_ctx: MngrContext) ->
 
 
 @click.command()
-@click.argument("agent", default=None, required=False)
+@click.argument("agent", type=AGENT_ADDRESS, default=None, required=False)
 @optgroup.group("General")
-@optgroup.option("--agent", "agent", help="The agent to connect to (by name or ID)")
+@optgroup.option(
+    "--agent", "agent", type=AGENT_ADDRESS, help="The agent to connect to (by name or ID, optionally @HOST[.PROVIDER])"
+)
 @optgroup.option(
     "--start/--no-start",
     default=True,
@@ -384,10 +388,9 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
     host: OnlineHostInterface
 
     if opts.agent is not None:
-        agent, host = find_agent_by_address(
+        agent, host = find_one_agent(
             opts.agent,
             mngr_ctx,
-            "connect",
             is_start_desired=opts.start,
         )
     elif not mngr_ctx.is_interactive:
@@ -408,10 +411,9 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         sorted_agents = sorted(list_result.agents, key=lambda a: a.create_time, reverse=True)
         most_recent = sorted_agents[0]
         logger.info("No agent specified, connecting to most recently created: {}", most_recent.name)
-        agent, host = find_agent_by_address(
-            str(most_recent.id),
+        agent, host = find_one_agent(
+            most_recent.address,
             mngr_ctx,
-            "connect",
             is_start_desired=opts.start,
         )
     else:
@@ -432,10 +434,9 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
             logger.info("No agent selected")
             return
 
-        agent, host = find_agent_by_address(
-            str(selected.id),
+        agent, host = find_one_agent(
+            selected.address,
             mngr_ctx,
-            "connect",
             is_start_desired=opts.start,
         )
 
