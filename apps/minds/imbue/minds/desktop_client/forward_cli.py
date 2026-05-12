@@ -562,7 +562,6 @@ class EnvelopeStreamConsumer(MutableModel):
                 except (OSError, RuntimeError, paramiko.SSHException) as e:
                     logger.warning("reverse_tunnel_established callback failed for {}: {}", info.agent_id, e)
         elif payload_type == "workspace_backend_failure":
-            logger.info("[debug] received workspace_backend_failure envelope: {}", payload)
             try:
                 agent_id = AgentId(str(payload["agent_id"]))
                 reason = WorkspaceBackendFailureReason(str(payload["reason"]))

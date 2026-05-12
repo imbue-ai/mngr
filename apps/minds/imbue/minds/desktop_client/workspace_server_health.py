@@ -7,9 +7,10 @@ hit from the background probe loop calls ``record_success``. The tracker
 applies a simple state machine:
 
 - HEALTHY -> STUCK: a continuous run of failures lasting at least
-  ``stuck_threshold_seconds`` with no intervening success.
-- STUCK -> RESTARTING: the restart endpoint marks the tracker so the chrome
-  banner can render a different label and the probe loop keeps polling.
+  ``stuck_threshold_seconds`` with no intervening success. The chrome
+  titlebar reacts by navigating the content view to the recovery page.
+- STUCK -> RESTARTING: the restart endpoint marks the tracker so the
+  recovery page can render a different label and the probe loop keeps polling.
 - {STUCK, RESTARTING} -> HEALTHY: a successful probe.
 
 State changes fire registered on-change callbacks. Callbacks are invoked
@@ -120,26 +121,18 @@ class WorkspaceServerHealthTracker(MutableModel):
         failures while still in the window are no-ops.
         """
         aid_str = str(agent_id)
-        started_timer = False
         with self._lock:
             record = self._records.setdefault(aid_str, _AgentRecord())
             if record.health != AgentHealth.HEALTHY:
-                logger.info("[debug] record_failure({}): no-op (health={})", aid_str, record.health)
                 return
             if record.first_failure_at is not None:
-                logger.info("[debug] record_failure({}): no-op (timer already running)", aid_str)
                 return
             record.first_failure_at = time.monotonic()
             timer = threading.Timer(self.stuck_threshold_seconds, self._on_stuck_timer_fired, args=(aid_str,))
             timer.daemon = True
             self._cancel_stuck_timer_locked(aid_str)
             self._stuck_timers[aid_str] = timer
-            started_timer = True
         timer.start()
-        if started_timer:
-            logger.info(
-                "[debug] record_failure({}): started {}s stuck timer", aid_str, self.stuck_threshold_seconds
-            )
 
     def record_success(self, agent_id: AgentId) -> None:
         """Record a successful probe for ``agent_id``.
@@ -148,22 +141,16 @@ class WorkspaceServerHealthTracker(MutableModel):
         RESTARTING, transitions it back to HEALTHY and fires on-change.
         """
         aid_str = str(agent_id)
-        logger.info("[debug] record_success({}) called", aid_str)
         fire_health: AgentHealth | None = None
         with self._lock:
             record = self._records.get(aid_str)
-            had_timer = aid_str in self._stuck_timers
             self._cancel_stuck_timer_locked(aid_str)
             if record is None:
-                logger.info("[debug] record_success({}): no record", aid_str)
                 return
             record.first_failure_at = None
             if record.health != AgentHealth.HEALTHY:
                 record.health = AgentHealth.HEALTHY
                 fire_health = AgentHealth.HEALTHY
-        logger.info(
-            "[debug] record_success({}): cleared first_failure_at, had_timer={}", aid_str, had_timer
-        )
         if fire_health is not None:
             self._fire_on_change(agent_id, fire_health)
 
@@ -172,7 +159,7 @@ class WorkspaceServerHealthTracker(MutableModel):
 
         Used by the restart endpoint to roll back a RESTARTING transition
         when the dispatch fails: without this, a failed dispatch would
-        leave the chrome banner permanently labelled "Restarting..." until
+        leave the recovery page permanently labelled "Restarting..." until
         an unrelated success/failure rewrote the state.
         """
         aid_str = str(agent_id)
@@ -191,7 +178,7 @@ class WorkspaceServerHealthTracker(MutableModel):
 
         Cancels any pending stuck timer (the agent is already known-bad and
         we don't need a delayed STUCK transition) and fires on-change so
-        the chrome banner can re-label.
+        the recovery page can re-label.
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
@@ -216,10 +203,10 @@ class WorkspaceServerHealthTracker(MutableModel):
     def snapshot_all(self) -> dict[AgentId, AgentHealth]:
         """Return a copy of all currently-tracked non-HEALTHY agents.
 
-        HEALTHY agents are omitted because the chrome banner and recovery
-        page only care about agents with active recovery state; including
-        every HEALTHY agent would make the SSE payload grow unboundedly
-        with workspace count.
+        HEALTHY agents are omitted because the chrome auto-redirect and
+        recovery page only care about agents with active recovery state;
+        including every HEALTHY agent would make the SSE payload grow
+        unboundedly with workspace count.
         """
         with self._lock:
             return {
@@ -236,38 +223,27 @@ class WorkspaceServerHealthTracker(MutableModel):
             timer.cancel()
 
     def _on_stuck_timer_fired(self, aid_str: str) -> None:
-        logger.info("[debug] stuck timer fired for {}", aid_str)
         fire_health: AgentHealth | None = None
         with self._lock:
             self._stuck_timers.pop(aid_str, None)
             record = self._records.get(aid_str)
             if record is None:
-                logger.info("[debug] _on_stuck_timer_fired({}): no record", aid_str)
                 return
             if record.health != AgentHealth.HEALTHY:
-                logger.info(
-                    "[debug] _on_stuck_timer_fired({}): not HEALTHY (health={})", aid_str, record.health
-                )
                 return
             if record.first_failure_at is None:
-                logger.info("[debug] _on_stuck_timer_fired({}): first_failure_at=None", aid_str)
                 return
             elapsed = time.monotonic() - record.first_failure_at
             if elapsed + 1e-6 < self.stuck_threshold_seconds:
-                logger.info(
-                    "[debug] _on_stuck_timer_fired({}): too early (elapsed={:.3f}s)", aid_str, elapsed
-                )
                 return
             record.health = AgentHealth.STUCK
             fire_health = AgentHealth.STUCK
         if fire_health is not None:
-            logger.info("[debug] _on_stuck_timer_fired({}): transitioning to STUCK, firing on_change", aid_str)
             self._fire_on_change(AgentId(aid_str), fire_health)
 
     def _fire_on_change(self, agent_id: AgentId, new_health: AgentHealth) -> None:
         with self._lock:
             callbacks = list(self._on_change_callbacks)
-        logger.info("[debug] _fire_on_change({}, {}): {} callback(s)", agent_id, new_health, len(callbacks))
         for callback in callbacks:
             try:
                 callback(agent_id, new_health)

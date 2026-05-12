@@ -57,14 +57,18 @@
   // -- Titlebar per-project swatch ------------------------------------------
   var currentTitleAgentId = null;
   function applyTitleSwatch(agentId) {
-    console.log('[debug] applyTitleSwatch called with agentId=', agentId);
     var swatch = document.getElementById('title-swatch');
     if (!agentId) {
       swatch.classList.add('hidden');
       document.documentElement.style.removeProperty('--workspace-accent');
       currentTitleAgentId = null;
-      refreshHealthBanner();
       return;
+    }
+    if (currentTitleAgentId !== agentId) {
+      // Agent identity changed -- clear the recovery-redirect lock so a
+      // user who navigates back to a still-stuck workspace gets bounced
+      // to recovery again instead of landing on the 503 page.
+      delete redirectedAgents[agentId];
     }
     currentTitleAgentId = agentId;
     getAccent(agentId, function (c) {
@@ -72,67 +76,50 @@
       document.documentElement.style.setProperty('--workspace-accent', c);
       swatch.classList.remove('hidden');
     });
-    refreshHealthBanner();
+    maybeRedirectToRecovery();
   }
 
-  // -- Workspace-server health banner ---------------------------------------
+  // -- Workspace-server recovery redirect -----------------------------------
   //
   // SSE pushes ``workspace_server_status`` events whenever an agent transitions
-  // between healthy / stuck / restarting. We mirror the latest per-agent status
-  // here and show the banner only for the currently-displayed agent.
-  var healthStatusByAgent = {};
-  var healthBannerEl = document.getElementById('workspace-health-banner');
-  var healthBannerTextEl = document.getElementById('workspace-health-banner-text');
+  // between healthy / stuck / restarting. When the currently-displayed agent
+  // goes STUCK we navigate the content view to the recovery page; the recovery
+  // page's own SSE subscription redirects back to ``return_to`` once the agent
+  // is healthy again. We redirect at most once per stuck episode (per agent),
+  // cleared by a subsequent ``healthy`` event, so the recovery page itself
+  // doesn't get clobbered on repeat STUCK transitions while the user is on it.
+  var workspaceStatusByAgent = {};
+  var redirectedAgents = {};
 
-  function refreshHealthBanner() {
-    if (!healthBannerEl) return;
-    var aid = currentTitleAgentId;
-    var status = aid ? healthStatusByAgent[aid] : null;
-    console.log('[debug] refreshHealthBanner: currentTitleAgentId=', aid, 'status=', status, 'all=', JSON.stringify(healthStatusByAgent));
-    if (status === 'stuck') {
-      healthBannerTextEl.textContent = 'Workspace server unresponsive. Click to restart.';
-      healthBannerEl.classList.remove('hidden');
-    } else if (status === 'restarting') {
-      healthBannerTextEl.textContent = 'Restarting workspace server...';
-      healthBannerEl.classList.remove('hidden');
-    } else {
-      healthBannerEl.classList.add('hidden');
-    }
-  }
-
-  function openRecoveryForCurrentAgent() {
-    var aid = currentTitleAgentId;
-    if (!aid) return;
+  function buildRecoveryUrl(agentId) {
     var returnTo = '';
     if (isElectron) {
-      returnTo = mngrForwardOrigin + '/goto/' + aid + '/';
+      returnTo = mngrForwardOrigin + '/goto/' + agentId + '/';
     } else {
       try { returnTo = document.getElementById('content-frame').contentWindow.location.href; } catch (e) {}
-      if (!returnTo) returnTo = mngrForwardOrigin + '/goto/' + aid + '/';
+      if (!returnTo) returnTo = mngrForwardOrigin + '/goto/' + agentId + '/';
     }
-    var url = '/agents/' + encodeURIComponent(aid) + '/recovery?return_to=' + encodeURIComponent(returnTo);
-    navigateContent(url);
+    return '/agents/' + encodeURIComponent(agentId) + '/recovery?return_to=' + encodeURIComponent(returnTo);
+  }
+
+  function maybeRedirectToRecovery() {
+    var aid = currentTitleAgentId;
+    if (!aid) return;
+    if (workspaceStatusByAgent[aid] !== 'stuck') return;
+    if (redirectedAgents[aid]) return;
+    redirectedAgents[aid] = true;
+    navigateContent(buildRecoveryUrl(aid));
   }
 
   function handleWorkspaceServerStatus(agentId, status) {
-    console.log('[debug] handleWorkspaceServerStatus called: agentId=', agentId, 'status=', status);
     if (!agentId) return;
     if (status === 'healthy') {
-      delete healthStatusByAgent[agentId];
-    } else {
-      healthStatusByAgent[agentId] = status;
+      delete workspaceStatusByAgent[agentId];
+      delete redirectedAgents[agentId];
+      return;
     }
-    refreshHealthBanner();
-  }
-
-  if (healthBannerEl) {
-    healthBannerEl.addEventListener('click', openRecoveryForCurrentAgent);
-    healthBannerEl.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        openRecoveryForCurrentAgent();
-      }
-    });
+    workspaceStatusByAgent[agentId] = status;
+    maybeRedirectToRecovery();
   }
 
   // -- Button wiring --------------------------------------------------------
@@ -171,7 +158,8 @@
     // tracks the active workspace per bundle (handles both /goto/<id>/ URLs and
     // post-redirect agent-<id>.localhost subdomains) and pushes it here. Deriving
     // it from the content URL alone would clobber it to null on every navigation
-    // that doesn't match /goto/<id>/, which would hide the workspace-health banner.
+    // that doesn't match /goto/<id>/, which would prevent the recovery-page
+    // redirect from firing for the current agent.
     window.minds.onCurrentWorkspaceChanged(function (agentId) {
       applyTitleSwatch(agentId || null);
     });
