@@ -370,6 +370,103 @@ intercepts the dialog at the parent level and round-trips the
 decision back to the child. Defers all the way back to the original
 plan; not picked up here for simplicity.
 
+#### Honor agent-definition tool restrictions and system-prompt semantics
+
+**Not implemented.** When a parent calls
+`Task(subagent_type="imbue-code-guardian:verify-and-fix", prompt=Y)`
+with a specialized agent type, Claude Code's native behavior is to
+spawn the subagent with the `.md` definition's body as its **system
+prompt** (separate channel from the user message) AND honor the
+frontmatter's `tools:` / `model:` declarations (e.g. `tools: [Read,
+Grep]` to limit the child to read-only tools).
+
+Today the plugin's typed-`subagent_type` support resolves the agent
+definition and inlines the body into the proxy prompt file (PROXY) or
+points Claude at the resolved path so it can prepend the body itself
+(DENY). Both modes treat the body as **user-message text**, not a
+system prompt, and **ignore tool restrictions entirely** -- the
+spawned mngr subagent inherits the user's full Claude config. The
+v1 docstring on `SubagentProxyMode.DENY` and the `mngr-subagents`
+skill both flag this as a known limitation.
+
+Fix path: extend `mngr create` (and the `mngr_claude` Claude
+launcher) to accept a `--append-system-prompt-file` sidefile that
+threads through to Claude Code's actual `--append-system-prompt` flag
+for proper system-prompt semantics. The `.mngr-system-prompt`
+convention already exists for the headless agent
+(`libs/mngr_claude/imbue/mngr_claude/headless_claude_agent.py`); it
+needs to be plumbed through to the interactive `--type claude` path
+the proxy uses. For tool restrictions, register
+`mngr-proxy-child`-style agent types per frontmatter-declared
+permission profile and select the right one at `mngr create` time.
+
+#### Move provisioning artifacts (`mngr-proxy.md`, `mngr-subagents` SKILL.md) out of the worktree
+
+**Not yet possible cleanly.** The plugin currently writes two
+provisioning-time files into the agent's worktree:
+
+- PROXY mode: `<work_dir>/.claude/agents/mngr-proxy.md` (the Haiku
+  dispatcher agent definition).
+- DENY mode: `<work_dir>/.claude/skills/mngr-subagents/SKILL.md` (the
+  spawn-and-wait protocol skill).
+
+For git-tracked projects, both show up as untracked files in `git
+status` and trip clean-tree stop hooks
+(`imbue-code-guardian`'s `stop_hook_orchestrator.sh` is the canonical
+case). A move was attempted on this branch and reverted; the
+investigation findings are below so the next attempt doesn't redo
+them:
+
+**The symlink-traversal trap.** mngr_claude's
+`_sync_user_resources` (with default `symlink_user_resources=True`)
+symlinks the per-agent CLAUDE_CONFIG_DIR's `skills/` and `agents/`
+subdirs to `~/.claude/skills/` and `~/.claude/agents/`:
+
+    <state_dir>/plugin/claude/anthropic/skills -> ~/.claude/skills
+    <state_dir>/plugin/claude/anthropic/agents -> ~/.claude/agents
+
+So a naive "write to per-agent CLAUDE_CONFIG_DIR" approach
+(`<state_dir>/plugin/claude/anthropic/skills/mngr-subagents/SKILL.md`)
+follows the symlink and writes to `~/.claude/skills/mngr-subagents/SKILL.md`
+-- polluting the user's global Claude config dir, persisting across
+all mngr agents, and visible to the user's primary `claude` session.
+Worse than worktree pollution, not better. Unit tests using
+`FakeHost` will NOT catch this because the fake doesn't replicate
+the symlink topology.
+
+**What Claude Code actually supports for non-worktree, non-user-home
+placement (as of May 2026):**
+
+- **Skills**: the only escape hatch is the CLI flag `--add-dir <path>`,
+  which loads `.claude/skills/` from `<path>` (see
+  [Skills from additional directories](https://code.claude.com/docs/en/skills)).
+  The matching `additionalDirectories` settings.json key is supposed
+  to trigger the same skill discovery but currently doesn't
+  ([anthropics/claude-code#37553](https://github.com/anthropics/claude-code/issues/37553)).
+  A dedicated `skillsDirectories` setting was proposed and closed as
+  duplicate ([#39403](https://github.com/anthropics/claude-code/issues/39403)).
+- **Agents**: no escape hatch at all. The docs are explicit -- "Other
+  `.claude/` configuration such as subagents, commands, and output
+  styles is not loaded from additional directories." Agents resolve
+  only from `~/.claude/agents/`, `<project>/.claude/agents/`, or
+  plugin-installed (`<plugin>/agents/`).
+
+**Recommended fix paths:**
+
+- For the SKILL.md: plumb `--add-dir <state_dir>` through
+  mngr_claude's Claude launcher, write SKILL.md to
+  `<state_dir>/.claude/skills/mngr-subagents/SKILL.md` (NOT through
+  the symlink). Keeps both the worktree and user home clean. Requires
+  changes outside this plugin (mngr_claude's claude invocation).
+- For mngr-proxy.md: no clean fix until Claude Code grows an
+  escape hatch for agent discovery, OR we package the proxy
+  definition as a Claude Code plugin installed in the per-agent
+  plugin cache (a bigger refactor).
+
+Either way, the SKILL.md and mngr-proxy.md fix is **not a small
+local change** to this plugin; both need work in mngr_claude or
+Claude Code itself.
+
 #### Tighter mngr_recursive integration
 
 `mngr_binary.py` was copied from `mngr_recursive.watcher_common.get_mngr_command`
