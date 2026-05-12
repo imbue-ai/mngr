@@ -146,11 +146,14 @@ def on_before_provisioning(agent: AgentInterface, host: OnlineHostInterface, mng
        to point at our shim (local-tier wins over project-tier in Claude Code's
        precedence stack).
 
-    Skips non-Claude agents and remote hosts: ``mngr usage`` walks the local
-    host_dir for events files, so a remote-only events file would never be
-    visible. The ``isinstance`` check covers ``claude``, ``headless_claude``,
-    and user-defined agent types whose ``parent_type`` chain reaches
-    ``claude`` (e.g. config-defined templates like ``write-plus``).
+    Skips non-Claude agents and remote hosts. The remote-host skip is a
+    current limitation of ``mngr usage``'s walker (it inspects the local
+    filesystem only); a future enhancement could use ``list_agents`` +
+    ``read_event_content`` from ``mngr.api`` to read events from remote
+    agents the same way ``mngr transcript`` does. The ``isinstance`` check
+    covers ``claude``, ``headless_claude``, and user-defined agent types
+    whose ``parent_type`` chain reaches ``claude`` (e.g. config-defined
+    templates like ``write-plus``).
     """
     if not isinstance(agent, ClaudeAgent):
         return
