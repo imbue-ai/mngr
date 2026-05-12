@@ -141,6 +141,20 @@ def deregister_modal_test_app(app_name: str) -> None:
     callers must NOT deregister: leaving the name tracked lets the leak
     detector surface it, with the CI hourly cleanup script
     (cleanup_old_modal_test_environments.py) as the ultimate safety net.
+
+    Note: there are currently NO callsites for this function. It is kept
+    for parallelism with `deregister_modal_test_volume` /
+    `deregister_modal_test_environment` (which do have per-test callers)
+    and for future use if/when we have a reliable per-test signal that the
+    Modal-side app actually stopped. Today we do not: closing the local
+    app context (`ModalProviderBackend.close_app`) does not stop persistent
+    apps server-side, and even ephemeral apps stop asynchronously, so we
+    cannot synchronously distinguish DELETED/NOT_FOUND from FAILED for
+    apps. We therefore deliberately leave every registered app tracked and
+    let `_get_leaked_modal_apps` (in `mngr_modal/conftest.py`) be the
+    authoritative source for app liveness at session end. Do not add a
+    callsite here just for symmetry with the volume/env helpers -- that
+    would hide real app leaks.
     """
     if app_name in worker_modal_app_names:
         worker_modal_app_names.remove(app_name)
