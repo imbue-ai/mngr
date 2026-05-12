@@ -97,6 +97,7 @@ mngr tmr [OPTIONS] [PYTEST_ARGS]...
 | `--output-html` | path | Path for the HTML report [default: tmr_<timestamp>/index.html] | None |
 | `--source` | directory | Source directory for test collection and agent work dirs [default: current directory] | None |
 | `--reintegrate` | text | Re-read outcomes from a previous TMR run (by run name), re-run integrator, and regenerate report. Skips test collection and agent launching. | None |
+| `--additional-authorized-host` | text | SSH public key line to install in authorized_keys on each agent host (test agents, integrator, host pool, and snapshotter), allowing inbound SSH [repeatable] | None |
 
 ## See Also
 
