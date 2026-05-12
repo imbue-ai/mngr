@@ -15,7 +15,7 @@ to a subagent. The protocol below replaces the entire `Task` workflow.
 Two Bash commands. First, spawn:
 
     uv run mngr create '<slug>:<parent_cwd>' \
-        --type claude --transfer=none --no-ensure-clean --no-connect --reuse \
+        --type claude --transfer=none --no-ensure-clean --no-connect \
         --label "mngr_claude_subagent_proxy_parent_name=${MNGR_AGENT_NAME:-}" \
         --label "mngr_claude_subagent_proxy_parent_id=${MNGR_AGENT_ID:-}" \
         --env MNGR_SUBAGENT_DEPTH=$((${MNGR_SUBAGENT_DEPTH:-0}+1)) \
@@ -24,7 +24,9 @@ Two Bash commands. First, spawn:
 - `<slug>` is a short, agent-name-friendly identifier for what the
   subagent is doing (e.g. `code-review`, `find-readmes`). Make it
   unique across concurrent calls -- a short suffix like the date or a
-  random hex is fine.
+  random hex is fine. The plugin does NOT pass `--reuse`, so a
+  duplicate slug is a hard error and forces you to pick a new one;
+  this is intentional (see "What NOT to do" below for why).
 - `<parent_cwd>` is the absolute path of the directory you're working
   in (use the value you'd pass to `cd`); pins the subagent's worktree
   base to where you are.
@@ -43,8 +45,6 @@ Two Bash commands. First, spawn:
   Leave the literal `$((${MNGR_SUBAGENT_DEPTH:-0}+1))` arithmetic in
   the command -- the shell evaluates it; do not pre-substitute a
   numeric value yourself.
-- `--reuse` makes the create idempotent if a previous attempt
-  partially succeeded; safe to retry the same command.
 
 Second, block until the subagent ends its turn and capture its reply:
 
@@ -73,8 +73,8 @@ stdout and exits 0 (the same exit code as the `END_TURN:` happy path).
 Detect the permission case by the `PERMISSION_REQUIRED:` prefix on the
 output, not by the exit code. Tell the user to run `mngr connect <slug>`
 in another terminal to resolve, then re-run the same `subagent_wait`
-command. The spawn step is idempotent under `--reuse`, so you do not
-need to repeat it.
+command. Do NOT re-run `mngr create` -- the existing agent is still
+there, only the wait needs to resume.
 
 ## Inspecting a running subagent
 
@@ -92,3 +92,9 @@ Independent of the wait, the user (or you, on request) can:
 - Do not skip the `mngr_claude_subagent_proxy_parent_*` labels; without
   them, the subagent will not be identifiable as a proxy child via
   `mngr list` filters.
+- If `mngr create` fails with "agent already exists", pick a NEW unique
+  slug and retry. Do NOT destroy the existing agent -- it may belong
+  to a concurrent call (or an earlier call you have not yet collected
+  the reply from), and destroying it would lose that work. The plugin
+  intentionally does not pass `--reuse` so that slug collisions fail
+  loudly rather than silently merging unrelated work.

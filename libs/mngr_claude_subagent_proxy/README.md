@@ -238,7 +238,7 @@ agent's `.claude/skills/`, which teaches the explicit two-command
 protocol:
 
     uv run mngr create '<slug>:<parent_cwd>' \
-        --type claude --transfer=none --no-ensure-clean --no-connect --reuse \
+        --type claude --transfer=none --no-ensure-clean --no-connect \
         --label "mngr_claude_subagent_proxy_parent_name=${MNGR_AGENT_NAME:-}" \
         --label "mngr_claude_subagent_proxy_parent_id=${MNGR_AGENT_ID:-}" \
         --env MNGR_SUBAGENT_DEPTH=$((${MNGR_SUBAGENT_DEPTH:-0}+1)) \
@@ -261,7 +261,11 @@ thing. If the subagent itself raises a permission dialog,
 stdout and exits 0 (same exit code as the `END_TURN:` happy path; the
 prefix is the signal, not the exit code). Resolve with
 `mngr connect <slug>` in another terminal and re-run the same
-`subagent_wait` command (`mngr create --reuse` is idempotent).
+`subagent_wait` command -- do NOT re-run `mngr create`, the existing
+agent is still there. The plugin deliberately does NOT pass `--reuse`
+on the spawn command so that slug collisions between concurrent Task
+calls surface as hard errors rather than silently merging unrelated
+work; pick a fresh unique slug per call.
 
 What deny mode installs:
 - `PreToolUse:Agent` hook (the skill-pointer deny).
@@ -369,6 +373,31 @@ already-considered-and-deferred Option B (see plan): a wrapper that
 intercepts the dialog at the parent level and round-trips the
 decision back to the child. Defers all the way back to the original
 plan; not picked up here for simplicity.
+
+#### Per-agent opt-in via a dedicated agent type
+
+**Not implemented.** Today the plugin opts in at the user/project level
+via `[plugins.claude_subagent_proxy] enabled = true` in `settings.toml`,
+and its `on_after_provisioning` then fires for *every* `claude` agent
+provisioned -- there's no way to enable it for some claude agents but
+not others without flipping the global switch. For users who want
+DENY (or PROXY) on only specific delegations, that's all-or-nothing.
+
+Better behavior: register a dedicated agent type (e.g.
+`claude-deny` / `claude-proxy`) via the `register_agent_type`
+hookimpl whose `on_after_provisioning` installs the plugin's hooks,
+while plain `claude` agents stay untouched. Users opt in per
+invocation with `--type claude-deny`. The current
+`mngr-proxy-child` registration in `plugin.py` already follows
+the registered-agent-type pattern; this would extend it to the
+*top-level* parent as well, instead of mutating every claude agent.
+
+Fix path: add a new `AgentTypeName` constant + child class of
+`ClaudeAgentConfig` (or just reuse it), register via
+`@hookimpl register_agent_type`, gate the `on_after_provisioning`
+body on `isinstance(agent.agent_config, ...)` of that new type
+rather than `ClaudeAgentConfig`. Keeps the user's existing
+`claude` agents fully unmodified.
 
 #### Tighter mngr_recursive integration
 
