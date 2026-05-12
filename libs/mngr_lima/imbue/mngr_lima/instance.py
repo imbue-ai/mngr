@@ -16,6 +16,8 @@ from pyinfra.api import Host as PyinfraHost
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import HostError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -272,7 +274,7 @@ class LimaProviderInstance(BaseProviderInstance):
             timeout=60.0,
             poll_interval=2.0,
         ):
-            raise MngrError(
+            raise HostConnectionError(
                 f"ssh-keyscan could not read a host key for {hostname}:{port} after 60s; "
                 f"the Lima VM may not have finished starting sshd"
             )
@@ -459,7 +461,7 @@ sudo poweroff
             # Create the Host object
             host = self._create_host_object(host_id, ssh_config)
 
-        except (LimaCommandError, MngrError, OSError) as e:
+        except (LimaCommandError, MngrError, HostError, OSError) as e:
             failure_reason = str(e)
             logger.error("Lima host creation failed: {}", failure_reason)
             # Clean up the Lima instance
