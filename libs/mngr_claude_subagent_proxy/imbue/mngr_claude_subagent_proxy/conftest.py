@@ -20,13 +20,15 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
 
     Covers the union of vars referenced by any subagent-proxy unit test:
     ``MNGR_AGENT_STATE_DIR`` and ``MNGR_AGENT_NAME`` (set by both
-    spawn/deny entry points), ``MNGR_SUBAGENT_DEPTH`` /
+    spawn/deny entry points), ``MNGR_AGENT_ID`` (reap hook's
+    label-driven destroy filter), ``MNGR_SUBAGENT_DEPTH`` /
     ``MNGR_MAX_SUBAGENT_DEPTH`` (depth-limit guard), and
     ``MNGR_SUBAGENT_REAP_BACKGROUND`` (reap hook background-worker switch).
     """
     for name in (
         "MNGR_AGENT_STATE_DIR",
         "MNGR_AGENT_NAME",
+        "MNGR_AGENT_ID",
         "MNGR_SUBAGENT_DEPTH",
         "MNGR_MAX_SUBAGENT_DEPTH",
         "MNGR_SUBAGENT_REAP_BACKGROUND",
