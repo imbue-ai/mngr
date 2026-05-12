@@ -258,22 +258,21 @@ prefix is the signal, not the exit code). Resolve with
 `subagent_wait` command (`mngr create --reuse` is idempotent).
 
 What deny mode installs:
-- `PreToolUse:Agent` hook only.
+- `PreToolUse:Agent` hook (the skill-pointer deny).
+- `SessionStart` hook (a label-driven reaper -- see below).
 - `.claude/skills/mngr-subagents/SKILL.md` -- the explicit
   spawn-and-wait protocol Claude is expected to use.
 
 What deny mode does NOT install or run (vs. PROXY):
 - No `PostToolUse:Agent` cleanup -- the deny hook never runs
-  `mngr create`, so there is no per-Task-call state on the parent
-  to clean up.
-- No `SessionStart` reaper -- same reason: the plugin doesn't track
-  spawned children, so there is nothing to reap.
+  `mngr create` itself, so there is no per-Task-call state on the
+  parent to clean up.
 - No `mngr-proxy.md` Haiku dispatcher.
 - No `_check_project_settings_stop_hooks_guarded` check on
   `.claude/settings.json`.
 - No env-conditional Stop-hook guarding of plugin `hooks.json` files.
 - No Stop/SubagentStop compatibility checks on spawned children.
-- No sidefiles of any kind under `$MNGR_AGENT_STATE_DIR/`.
+- No per-tool_use_id sidefiles under `$MNGR_AGENT_STATE_DIR/`.
 
 Children spawned in deny mode (by Claude following the skill's
 protocol) carry the same `mngr_claude_subagent_proxy_parent_*` labels
@@ -281,21 +280,19 @@ as PROXY-mode children, so they hide from
 `mngr list --exclude 'has(labels.mngr_claude_subagent_proxy_parent_name)'`
 and can be listed with the inverse filter.
 
-### Known limitation: no automatic reaping of orphaned DENY children
+### Reaping orphan DENY children (label-driven)
 
-DENY mode installs no `SessionStart` reaper, so if a parent agent
-crashes or is destroyed before its skill-spawned children finish,
-those children become orphans -- they stay running until they
-naturally end their turn or until the user destroys them. PROXY
-mode's reaper does not apply because it keys off the parent's
-`subagent_map/` sidefiles, which DENY mode never writes.
-
-Workaround: list and clean up manually via
-`mngr list --include 'has(labels.mngr_claude_subagent_proxy_parent_name)'`
-(filter to children whose parent is no longer running, then
-`mngr destroy`). A future improvement could add a DENY-mode-aware
-reaper that uses the `mngr_claude_subagent_proxy_parent_id` label
-rather than the subagent_map.
+PROXY mode's reaper keys off the parent's `subagent_map/` sidefiles,
+which DENY mode does not write. DENY mode installs its own
+`SessionStart` hook (`hooks/deny_reap.py`) that reaps by label
+instead: it queries `mngr list` for agents whose
+`mngr_claude_subagent_proxy_parent_id` label matches the current
+parent's `MNGR_AGENT_ID` and destroys any whose state is terminal
+(DONE / STOPPED). RUNNING / WAITING children are left alone (they
+may still be doing useful work the user wants to observe). This
+mirrors PROXY mode's conservative cleanup scope and closes the
+orphan loop end-to-end -- the skill instructs Claude to set the
+parent_id label when spawning, and this hook reaps on top of it.
 
 ## Depth limit
 

@@ -100,6 +100,7 @@ _SPAWN_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.spawn"
 _CLEANUP_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.cleanup"
 _REAP_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.reap"
 _DENY_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.deny"
+_DENY_REAP_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.deny_reap"
 
 
 def _load_resource(filename: str) -> str:
@@ -165,18 +166,25 @@ def build_subagent_proxy_hooks_config() -> dict[str, Any]:
 
 
 def build_subagent_proxy_deny_hooks_config() -> dict[str, Any]:
-    """Build the deny-mode hooks config: a single PreToolUse:Agent hook.
+    """Build the deny-mode hooks config: PreToolUse:Agent deny + SessionStart reap.
 
-    No PostToolUse, no SessionStart reaper -- the deny hook never spawns
-    a subagent, so there is nothing to clean up after a Task call and
-    nothing to reap on session start. The hook just denies the Task
-    tool with a short skill-pointer ``permissionDecisionReason`` that
-    directs Claude at the ``mngr-subagents`` skill (installed under
-    ``.claude/skills/`` by ``_write_mngr_subagents_skill``); the
-    copy-pasteable ``mngr create`` / ``subagent_wait`` protocol lives in
-    that skill, not in the deny reason itself.
+    - PreToolUse (Agent): emit a short skill-pointer ``permissionDecisionReason``
+      that directs Claude at the ``mngr-subagents`` skill (installed under
+      ``.claude/skills/`` by ``_write_mngr_subagents_skill``); the
+      ``mngr create`` / ``subagent_wait`` protocol lives in that skill,
+      not in the deny reason itself.
+    - SessionStart: a label-driven reaper that scans for terminal subagents
+      labeled with this parent's ``mngr_claude_subagent_proxy_parent_id``
+      and destroys them. Distinct from PROXY mode's subagent_map-driven
+      reaper -- DENY mode doesn't write that sidefile, so we go through
+      labels instead. The skill instructs Claude to set the parent_id
+      label when spawning, so this loop closes itself.
+
+    No PostToolUse cleanup -- the deny hook never runs ``mngr create``
+    itself, so there is no per-Task-call state on the parent to clean up.
     """
     deny_cmd = _python_hook_command(_DENY_MODULE)
+    deny_reap_cmd = _python_hook_command(_DENY_REAP_MODULE)
     return {
         "hooks": {
             "PreToolUse": [
@@ -187,6 +195,16 @@ def build_subagent_proxy_deny_hooks_config() -> dict[str, Any]:
                             "type": "command",
                             "command": deny_cmd,
                             "timeout": 15,
+                        },
+                    ],
+                }
+            ],
+            "SessionStart": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": deny_reap_cmd,
                         },
                     ],
                 }

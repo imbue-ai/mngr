@@ -396,14 +396,19 @@ def _ctx_with_plugin_config(base_ctx: MngrContext, config: SubagentProxyPluginCo
     return base_ctx.model_copy_update(to_update(base_ctx.field_ref().config, updated_config))
 
 
-def test_deny_mode_installs_only_pretooluse_deny_hook(
+def test_deny_mode_installs_pretooluse_deny_and_sessionstart_reaper(
     work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
 ) -> None:
-    """In DENY mode, on_after_provisioning installs only the deny hook -- nothing else.
+    """DENY mode installs PreToolUse:Agent (the skill-pointer deny) plus
+    SessionStart (the label-driven reaper for orphaned children).
 
-    Specifically, no PostToolUse hook (no spawned children to clean up),
-    no SessionStart reaper, no mngr-proxy.md agent definition, no plugin
-    cache hooks.json walk.
+    The reaper exists because the skill instructs Claude to label spawned
+    subagents with the parent's MNGR_AGENT_ID, so children left behind
+    by a previous session can be cleaned up by querying mngr list with
+    a label filter -- distinct from PROXY mode's subagent_map-based reaper.
+
+    No PostToolUse hook (no per-Task-call sidefiles to clean), no
+    mngr-proxy.md agent definition, no plugin cache hooks.json walk.
     """
     ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
@@ -414,15 +419,19 @@ def test_deny_mode_installs_only_pretooluse_deny_hook(
     assert settings_path.exists()
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
-    # Only PreToolUse:Agent is installed.
+    # PreToolUse:Agent is the skill-pointer deny hook.
     assert "PreToolUse" in hooks
     assert any(entry.get("matcher") == "Agent" for entry in hooks["PreToolUse"])
     pre_cmd = hooks["PreToolUse"][0]["hooks"][0]["command"]
     assert "imbue.mngr_claude_subagent_proxy.hooks.deny" in pre_cmd
-    # No PostToolUse, no SessionStart -- nothing to clean up because no
-    # subagent is ever spawned automatically.
+    # SessionStart is the label-driven reaper (deny_reap.py), distinct
+    # from PROXY mode's subagent_map-driven reaper.
+    assert "SessionStart" in hooks
+    session_cmd = hooks["SessionStart"][0]["hooks"][0]["command"]
+    assert "imbue.mngr_claude_subagent_proxy.hooks.deny_reap" in session_cmd
+    # No PostToolUse cleanup -- the deny hook never runs mngr create
+    # itself, so no per-Task-call state on the parent to clean up.
     assert "PostToolUse" not in hooks
-    assert "SessionStart" not in hooks
 
 
 def test_deny_mode_does_not_write_proxy_agent_definition(
