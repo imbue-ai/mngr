@@ -12,12 +12,23 @@ baked into Claude Code itself and have no on-disk definition. The
 resolver returns ``None`` for those (and any other unknown name); the
 caller falls back to the prompt-only spawn path.
 
-Discovery walks, in precedence (closest wins):
+Discovery branches on whether ``subagent_type`` is plugin-namespaced
+(contains ``:``):
 
-1. ``<work_dir>/.claude/agents/<name>.md`` -- project-local.
-2. ``~/.claude/agents/<name>.md`` -- user-level.
-3. For plugin-namespaced types (``plugin:agent``):
-   ``~/.claude/plugins/marketplaces/*/plugins/<plugin>/agents/<agent>.md``.
+- Non-namespaced (e.g. ``code-reviewer``): walk in precedence order,
+  closest wins, and stop at the first hit:
+
+  1. ``<work_dir>/.claude/agents/<name>.md`` -- project-local.
+  2. ``~/.claude/agents/<name>.md`` -- user-level.
+
+- Plugin-namespaced (``plugin:agent``, e.g.
+  ``imbue-code-guardian:verify-and-fix``): only the marketplaces root
+  is checked --
+  ``~/.claude/plugins/marketplaces/*/plugins/<plugin>/agents/<agent>.md``
+  (marketplaces enumerated in sorted order; first hit wins). The flat
+  ``~/.claude/agents/`` is NOT a fallback for namespaced types -- a
+  same-named flat file under a different plugin namespace would be a
+  silent collision, so we refuse to cross the boundary.
 
 Tool restrictions declared in the frontmatter (``tools: [Read, Grep]``)
 are NOT honored in v1: a plain mngr Claude subagent inherits the user's
