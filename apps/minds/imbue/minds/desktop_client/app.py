@@ -1232,9 +1232,7 @@ async def _handle_chrome_events(
             if tracker is not None:
                 for aid, status in tracker.snapshot_all().items():
                     yield "data: {}\n\n".format(
-                        json.dumps(
-                            {"type": "workspace_server_status", "agent_id": str(aid), "status": status.value}
-                        )
+                        json.dumps({"type": "workspace_server_status", "agent_id": str(aid), "status": status.value})
                     )
 
             # Wait for changes and push updates until client disconnects.
@@ -1278,9 +1276,7 @@ async def _handle_chrome_events(
                 while not health_queue.empty():
                     aid_str, status = health_queue.get_nowait()
                     yield "data: {}\n\n".format(
-                        json.dumps(
-                            {"type": "workspace_server_status", "agent_id": aid_str, "status": status.value}
-                        )
+                        json.dumps({"type": "workspace_server_status", "agent_id": aid_str, "status": status.value})
                     )
 
                 current_data = _build_workspace_list(backend_resolver, session_store)

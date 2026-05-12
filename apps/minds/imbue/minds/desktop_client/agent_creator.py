@@ -1360,8 +1360,7 @@ class AgentCreator(MutableModel):
                         return
                 threading.Event().wait(timeout=self.workspace_ready_poll_interval_seconds)
         logger.warning(
-            "Workspace readiness probe for {} timed out after {:.0f}s "
-            "(last status={}); publishing redirect anyway",
+            "Workspace readiness probe for {} timed out after {:.0f}s (last status={}); publishing redirect anyway",
             agent_id,
             self.workspace_ready_timeout_seconds,
             last_status,

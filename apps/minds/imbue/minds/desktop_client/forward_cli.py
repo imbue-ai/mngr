@@ -133,7 +133,9 @@ class EnvelopeStreamConsumer(MutableModel):
         default_factory=list
     )
     _on_provider_error_callbacks: list[OnProviderErrorCallback] = PrivateAttr(default_factory=list)
-    _on_workspace_backend_failure_callbacks: list[OnWorkspaceBackendFailureCallback] = PrivateAttr(default_factory=list)
+    _on_workspace_backend_failure_callbacks: list[OnWorkspaceBackendFailureCallback] = PrivateAttr(
+        default_factory=list
+    )
     _process: subprocess.Popen[bytes] | None = PrivateAttr(default=None)
     _has_notified_exit: bool = PrivateAttr(default=False)
     _intentional_shutdown: bool = PrivateAttr(default=False)

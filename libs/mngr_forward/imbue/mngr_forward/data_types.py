@@ -98,9 +98,7 @@ class WorkspaceBackendFailurePayload(FrozenModel):
     )
 
 
-ForwardPayload = (
-    LoginUrlPayload | ListeningPayload | ReverseTunnelEstablishedPayload | WorkspaceBackendFailurePayload
-)
+ForwardPayload = LoginUrlPayload | ListeningPayload | ReverseTunnelEstablishedPayload | WorkspaceBackendFailurePayload
 
 
 class ForwardEnvelope(FrozenModel):

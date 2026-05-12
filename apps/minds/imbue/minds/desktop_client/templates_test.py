@@ -182,7 +182,7 @@ def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
     assert "http://agent.localhost:8421/" in html
     assert "/api/agents/" in html
     assert "restart-workspace-server" in html
-    assert "data-initial-status=\"stuck\"" in html
+    assert 'data-initial-status="stuck"' in html
 
 
 def test_render_recovery_page_restarting_status() -> None:
@@ -192,4 +192,4 @@ def test_render_recovery_page_restarting_status() -> None:
         return_to="",
         initial_status="restarting",
     )
-    assert "data-initial-status=\"restarting\"" in html
+    assert 'data-initial-status="restarting"' in html
