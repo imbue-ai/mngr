@@ -182,9 +182,7 @@ async def find_content_view(timeout: float = 30.0) -> dict[str, Any]:
             return content[0]
         await asyncio.sleep(0.5)
     pages = await _cdp_list()
-    raise MindsIntegTestError(
-        f"No content view found within {timeout}s. Pages seen: {[p.get('url') for p in pages]}"
-    )
+    raise MindsIntegTestError(f"No content view found within {timeout}s. Pages seen: {[p.get('url') for p in pages]}")
 
 
 async def cdp_eval(ws_url: str, expression: str, return_by_value: bool = True) -> Any:
@@ -213,9 +211,7 @@ async def cdp_eval(ws_url: str, expression: str, return_by_value: bool = True) -
 
 async def cdp_navigate(ws_url: str, url: str) -> None:
     async with websockets.connect(ws_url) as ws:
-        await ws.send(
-            json.dumps({"id": 1, "method": "Page.navigate", "params": {"url": url}})
-        )
+        await ws.send(json.dumps({"id": 1, "method": "Page.navigate", "params": {"url": url}}))
         await ws.recv()
 
 
@@ -408,8 +404,7 @@ async def run() -> list[StepResult]:
             except _TRANSIENT as e:
                 known_state = f"EVAL_ERROR:{e}"
             if isinstance(known_state, str) and (
-                known_state.startswith(("302", "303", "307"))
-                or "opaqueredirect" in known_state
+                known_state.startswith(("302", "303", "307")) or "opaqueredirect" in known_state
             ):
                 known_ok = True
                 break
@@ -469,9 +464,7 @@ async def run() -> list[StepResult]:
                 subdomain_state = await cdp_eval(ws_url, chat_probe) or ""
             except _TRANSIENT as e:
                 subdomain_state = f"EVAL_ERROR:{e}"
-            if isinstance(subdomain_state, str) and not subdomain_state.startswith(
-                ("NOT_SUBDOMAIN", "EVAL_ERROR")
-            ):
+            if isinstance(subdomain_state, str) and not subdomain_state.startswith(("NOT_SUBDOMAIN", "EVAL_ERROR")):
                 subdomain_ok = True
                 break
             await asyncio.sleep(1.0)
