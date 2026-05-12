@@ -20,7 +20,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.data_types import ConnectionOptions
-from imbue.mngr.api.find import find_agent_by_address
+from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
@@ -388,7 +388,7 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
     host: OnlineHostInterface
 
     if opts.agent is not None:
-        agent, host = find_agent_by_address(
+        agent, host = find_one_agent(
             opts.agent,
             mngr_ctx,
             is_start_desired=opts.start,
@@ -411,7 +411,7 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         sorted_agents = sorted(list_result.agents, key=lambda a: a.create_time, reverse=True)
         most_recent = sorted_agents[0]
         logger.info("No agent specified, connecting to most recently created: {}", most_recent.name)
-        agent, host = find_agent_by_address(
+        agent, host = find_one_agent(
             most_recent.address,
             mngr_ctx,
             is_start_desired=opts.start,
@@ -434,7 +434,7 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
             logger.info("No agent selected")
             return
 
-        agent, host = find_agent_by_address(
+        agent, host = find_one_agent(
             selected.address,
             mngr_ctx,
             is_start_desired=opts.start,

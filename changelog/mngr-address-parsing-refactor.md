@@ -60,13 +60,13 @@ replacements:
   composite parsers in `api/address_parsers.py` and FrozenModel types in
   `primitives.py`.
 - `find_and_maybe_start_agent` -> deleted; was redundant with
-  `find_agent_by_address` (callers all did `discover_*` + the call). Its
-  matching logic now lives in `find_one_matching_agent` (now also raises a
+  `find_one_agent` (callers all did `discover_*` + the call). Its
+  matching logic now lives in `filter_one_agent` (now also raises a
   helpful "Multiple agents found ... disambiguate using NAME@HOST.PROVIDER"
   message listing each colliding agent). Its materialization logic now lives
   in a small `materialize_agent(host_ref, agent_ref, mngr_ctx)` helper that
   callers can reuse when they already have discovered refs.
-- `find_agent_by_address` no longer takes a `command_name`; the disambiguation
+- `find_one_agent` no longer takes a `command_name`; the disambiguation
   hint in the multi-match error no longer embeds the CLI command name.
 - `find_agent_for_command` no longer takes a `command_usage` argument and
   now merges its optional `host_filter` into the agent address upfront
@@ -77,12 +77,12 @@ replacements:
 - `api/agent_addr.py` was folded into `api/find.py` and `api/discover.py`; with
   typed addresses as the norm, there is no longer a reason to segregate
   address-accepting functions.
-- The api-level `find_agent_by_address`, `find_agents_by_addresses`,
-  `discover_by_address`, `find_one_matching_host` (formerly
+- The api-level `find_one_agent`, `find_all_agents`,
+  `discover_by_address`, `filter_one_host` (formerly
   `resolve_host_reference`, now tightened to require a non-None
-  `HostAddress`), `find_one_matching_agent` (formerly
+  `HostAddress`), `filter_one_agent` (formerly
   `resolve_agent_reference`, now tightened to require a non-None
-  `AgentNameOrId`), `find_all_matching_hosts`, `find_all_matching_agents`,
+  `AgentNameOrId`), `filter_all_hosts`, `filter_all_agents`,
   `exec_command_on_agent(s)`, etc., all take typed addresses now instead of
   raw strings.
 - `AgentDetails.address` and `HostDetails.address` expose the corresponding

@@ -9,7 +9,7 @@ from click_option_group import optgroup
 
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.find import AgentMatch
-from imbue.mngr.api.find import find_agents_by_addresses
+from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
@@ -159,7 +159,7 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
         return
 
     # Find agents to stop (RUNNING agents)
-    agents_to_stop = find_agents_by_addresses(
+    agents_to_stop = find_all_agents(
         addresses=agent_addresses,
         filter_all=False,
         target_state=AgentLifecycleState.RUNNING,

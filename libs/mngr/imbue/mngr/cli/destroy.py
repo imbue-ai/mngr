@@ -16,7 +16,7 @@ from imbue.mngr.api.discovery_events import emit_agent_destroyed
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.discovery_events import emit_host_destroyed
 from imbue.mngr.api.find import AgentMatch
-from imbue.mngr.api.find import find_agents_by_addresses
+from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.gc import gc as api_gc
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.api.providers import get_provider_instance
@@ -297,7 +297,7 @@ def _find_agents_to_destroy(
     Raises AgentNotFoundError if any specified address does not match an agent.
     """
     # include_destroyed=True so we can find and clean up agents on already-destroyed hosts.
-    matches = find_agents_by_addresses(
+    matches = find_all_agents(
         addresses=addresses,
         filter_all=False,
         target_state=None,

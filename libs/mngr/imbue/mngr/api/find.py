@@ -86,7 +86,7 @@ def _find_matching_hosts(
 
 
 @pure
-def find_all_matching_hosts(
+def filter_all_hosts(
     address: HostAddress,
     all_hosts: Sequence[DiscoveredHost],
 ) -> list[DiscoveredHost]:
@@ -95,7 +95,7 @@ def find_all_matching_hosts(
 
 
 @pure
-def find_one_matching_host(
+def filter_one_host(
     address: HostAddress,
     all_hosts: Sequence[DiscoveredHost],
 ) -> DiscoveredHost:
@@ -104,7 +104,7 @@ def find_one_matching_host(
     Raises :class:`UserInputError` when no host matches or when more than one
     matches.
     """
-    matches = find_all_matching_hosts(address, all_hosts)
+    matches = filter_all_hosts(address, all_hosts)
     if len(matches) == 0:
         raise UserInputError(f"Could not find host with ID or name: {address}")
     if len(matches) > 1:
@@ -113,7 +113,7 @@ def find_one_matching_host(
 
 
 @pure
-def find_all_matching_agents(
+def filter_all_agents(
     agent: AgentNameOrId,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
     resolved_host: DiscoveredHost | None = None,
@@ -131,7 +131,7 @@ def find_all_matching_agents(
 
 
 @pure
-def find_one_matching_agent(
+def filter_one_agent(
     agent: AgentNameOrId,
     resolved_host: DiscoveredHost | None,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
@@ -147,7 +147,7 @@ def find_one_matching_agent(
     The multi-match error lists each matching agent in ``NAME@HOST.PROVIDER``
     form so the user can disambiguate.
     """
-    matches = find_all_matching_agents(agent, agents_by_host, resolved_host)
+    matches = filter_all_agents(agent, agents_by_host, resolved_host)
     if len(matches) == 0:
         if isinstance(agent, AgentId):
             raise AgentNotFoundError(str(agent))
@@ -200,12 +200,12 @@ def resolve_hosted_location(
         resolved_host = None
     else:
         with log_span("Resolving host reference"):
-            resolved_host = find_one_matching_host(parsed.host, all_hosts)
+            resolved_host = filter_one_host(parsed.host, all_hosts)
 
     resolved_agent: DiscoveredAgent | None = None
     if parsed.agent is not None:
         with log_span("Resolving agent reference"):
-            resolved_host, resolved_agent = find_one_matching_agent(parsed.agent, resolved_host, agents_by_host)
+            resolved_host, resolved_agent = filter_one_agent(parsed.agent, resolved_host, agents_by_host)
 
     with log_span("Getting host interface from provider"):
         if resolved_host is None:
@@ -498,7 +498,7 @@ def _collect_required_provider_names(
     return tuple(sorted(providers))
 
 
-def find_agents_by_addresses(
+def find_all_agents(
     addresses: Sequence[AgentAddress],
     filter_all: bool,
     target_state: AgentLifecycleState | None,
@@ -571,7 +571,7 @@ def _post_filter_matches_by_addresses(
     return filtered
 
 
-def find_agent_by_address(
+def find_one_agent(
     address: AgentAddress,
     mngr_ctx: MngrContext,
     is_start_desired: bool = False,
@@ -585,13 +585,13 @@ def find_agent_by_address(
 
     Raises :class:`UserInputError` if the host constraint matches no hosts.
     Raises :class:`AgentNotFoundError` / :class:`UserInputError` if the
-    agent cannot be resolved (see :func:`find_one_matching_agent`).
+    agent cannot be resolved (see :func:`filter_one_agent`).
     """
     agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
     if not agents_by_host and address.host is not None:
         raise UserInputError(f"No hosts found matching {address.host}")
 
-    host_ref, agent_ref = find_one_matching_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
+    host_ref, agent_ref = filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
     return materialize_agent(
         host_ref,
         agent_ref,

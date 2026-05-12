@@ -21,7 +21,7 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.address_parsers import parse_agent_name_or_id
-from imbue.mngr.api.find import find_agent_by_address
+from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.primitives import AgentAddress
@@ -84,7 +84,7 @@ def _resolve_agent(agent_name: str, mngr_ctx: MngrContext) -> AgentInterface:
 
     Raises UserInputError if the agent cannot be found.
     """
-    agent, _host = find_agent_by_address(
+    agent, _host = find_one_agent(
         AgentAddress(agent=parse_agent_name_or_id(agent_name)),
         mngr_ctx,
         is_start_desired=True,

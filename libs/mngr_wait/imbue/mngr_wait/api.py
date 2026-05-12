@@ -8,8 +8,8 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import find_one_matching_agent
-from imbue.mngr.api.find import find_one_matching_host
+from imbue.mngr.api.find import filter_one_agent
+from imbue.mngr.api.find import filter_one_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostConnectionError
@@ -57,7 +57,7 @@ def resolve_wait_target(
 def _build_agent_resolved_target(address: AgentAddress, mngr_ctx: MngrContext) -> ResolvedTarget:
     with log_span("Discovering hosts and agents"):
         agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
-    host_ref, agent_ref = find_one_matching_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
+    host_ref, agent_ref = filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
     provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
     return ResolvedTarget(
         target=WaitTarget(identifier=str(address), target_type=WaitTargetType.AGENT),
@@ -77,7 +77,7 @@ def _build_host_resolved_target(address: HostAddress, mngr_ctx: MngrContext) -> 
             reset_caches=False,
         )
     all_hosts = list(agents_by_host.keys())
-    host_ref = find_one_matching_host(address, all_hosts)
+    host_ref = filter_one_host(address, all_hosts)
     provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
     return ResolvedTarget(
         target=WaitTarget(identifier=str(address), target_type=WaitTargetType.HOST),

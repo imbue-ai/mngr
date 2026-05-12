@@ -7,8 +7,8 @@ from loguru import logger
 
 from imbue.mngr.api.address_parsers import parse_agent_or_host_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import find_agents_by_addresses
-from imbue.mngr.api.find import find_all_matching_hosts
+from imbue.mngr.api.find import filter_all_hosts
+from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
@@ -152,7 +152,7 @@ def _resolve_snapshot_hosts(
 
     # Resolve from agent addresses
     if agent_addresses:
-        agents = find_agents_by_addresses(
+        agents = find_all_agents(
             addresses=agent_addresses,
             filter_all=False,
             target_state=AgentLifecycleState.RUNNING,
@@ -173,7 +173,7 @@ def _resolve_snapshot_hosts(
     # lookup in _classify_mixed_identifiers, so if host lookup also fails,
     # the error should mention both.
     for host_address in host_addresses:
-        matches = find_all_matching_hosts(host_address, all_hosts)
+        matches = filter_all_hosts(host_address, all_hosts)
         if not matches:
             raise UserInputError(f"Agent or host not found: {host_address}")
         for match in matches:

@@ -7,7 +7,7 @@ from loguru import logger
 
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.find import AgentMatch
-from imbue.mngr.api.find import find_agents_by_addresses
+from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
@@ -252,7 +252,7 @@ def label(ctx: click.Context, **kwargs: Any) -> None:
         return
 
     # Find matching agents using the shared infrastructure (same as limit, stop, etc.)
-    target_agents = find_agents_by_addresses(
+    target_agents = find_all_agents(
         addresses=agent_addresses,
         filter_all=False,
         target_state=None,

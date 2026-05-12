@@ -10,10 +10,10 @@ from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import _find_agents_by_identifiers_or_state
 from imbue.mngr.api.find import determine_resolved_path
 from imbue.mngr.api.find import ensure_agent_started
-from imbue.mngr.api.find import find_all_matching_agents
-from imbue.mngr.api.find import find_all_matching_hosts
-from imbue.mngr.api.find import find_one_matching_agent
-from imbue.mngr.api.find import find_one_matching_host
+from imbue.mngr.api.find import filter_all_agents
+from imbue.mngr.api.find import filter_all_hosts
+from imbue.mngr.api.find import filter_one_agent
+from imbue.mngr.api.find import filter_one_host
 from imbue.mngr.api.find import get_host_from_list_by_id
 from imbue.mngr.api.find import get_unique_host_from_list_by_name
 from imbue.mngr.api.find import group_agents_by_host
@@ -120,7 +120,7 @@ def test_parse_hosted_location_colon_prefix_is_local_path() -> None:
     assert parsed == HostedLocation(path=Path("my-dir"))
 
 
-def test_find_one_matching_host_by_id() -> None:
+def test_filter_one_host_by_id() -> None:
     host_id = HostId.generate()
     host_ref = DiscoveredHost(
         host_id=host_id,
@@ -128,7 +128,7 @@ def test_find_one_matching_host_by_id() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = find_one_matching_host(
+    result = filter_one_host(
         address=HostAddress(host=host_id),
         all_hosts=[host_ref],
     )
@@ -136,14 +136,14 @@ def test_find_one_matching_host_by_id() -> None:
     assert result == host_ref
 
 
-def test_find_one_matching_host_by_name() -> None:
+def test_filter_one_host_by_name() -> None:
     host_ref = DiscoveredHost(
         host_id=HostId.generate(),
         host_name=HostName("test-host"),
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = find_one_matching_host(
+    result = filter_one_host(
         address=HostAddress(host=HostName("test-host")),
         all_hosts=[host_ref],
     )
@@ -151,16 +151,16 @@ def test_find_one_matching_host_by_name() -> None:
     assert result == host_ref
 
 
-def test_find_one_matching_host_raises_when_not_found() -> None:
+def test_filter_one_host_raises_when_not_found() -> None:
     with pytest.raises(UserInputError, match="Could not find host with ID or name: nonexistent"):
-        find_one_matching_host(
+        filter_one_host(
             address=HostAddress(host=HostName("nonexistent")),
             all_hosts=[],
         )
 
 
-def test_find_one_matching_host_disambiguates_with_host_provider_form() -> None:
-    """find_one_matching_host should pick the right host when 'host.provider' is given."""
+def test_filter_one_host_disambiguates_with_host_provider_form() -> None:
+    """filter_one_host should pick the right host when 'host.provider' is given."""
     host_modal = DiscoveredHost(
         host_id=HostId.generate(),
         host_name=HostName("m1"),
@@ -172,7 +172,7 @@ def test_find_one_matching_host_disambiguates_with_host_provider_form() -> None:
         provider_name=ProviderInstanceName("docker"),
     )
 
-    result = find_one_matching_host(
+    result = filter_one_host(
         address=HostAddress(host=HostName("m1"), provider=ProviderInstanceName("modal")),
         all_hosts=[host_modal, host_docker],
     )
@@ -180,7 +180,7 @@ def test_find_one_matching_host_disambiguates_with_host_provider_form() -> None:
     assert result == host_modal
 
 
-def test_find_one_matching_host_raises_when_multiple_hosts_with_same_name() -> None:
+def test_filter_one_host_raises_when_multiple_hosts_with_same_name() -> None:
     host_ref1 = DiscoveredHost(
         host_id=HostId.generate(),
         host_name=HostName("test-host"),
@@ -193,13 +193,13 @@ def test_find_one_matching_host_raises_when_multiple_hosts_with_same_name() -> N
     )
 
     with pytest.raises(UserInputError, match="Multiple hosts found with name: test-host"):
-        find_one_matching_host(
+        filter_one_host(
             address=HostAddress(host=HostName("test-host")),
             all_hosts=[host_ref1, host_ref2],
         )
 
 
-def test_find_one_matching_agent_by_id() -> None:
+def test_filter_one_agent_by_id() -> None:
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     host_ref = DiscoveredHost(
@@ -214,7 +214,7 @@ def test_find_one_matching_agent_by_id() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = find_one_matching_agent(
+    result = filter_one_agent(
         agent=agent_id,
         resolved_host=None,
         agents_by_host={host_ref: [agent_ref]},
@@ -223,7 +223,7 @@ def test_find_one_matching_agent_by_id() -> None:
     assert result == (host_ref, agent_ref)
 
 
-def test_find_one_matching_agent_by_name() -> None:
+def test_filter_one_agent_by_name() -> None:
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     host_ref = DiscoveredHost(
@@ -238,7 +238,7 @@ def test_find_one_matching_agent_by_name() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = find_one_matching_agent(
+    result = filter_one_agent(
         agent=AgentName("test-agent"),
         resolved_host=None,
         agents_by_host={host_ref: [agent_ref]},
@@ -247,7 +247,7 @@ def test_find_one_matching_agent_by_name() -> None:
     assert result == (host_ref, agent_ref)
 
 
-def test_find_one_matching_agent_with_resolved_host_filters_by_host() -> None:
+def test_filter_one_agent_with_resolved_host_filters_by_host() -> None:
     host_id1 = HostId.generate()
     host_id2 = HostId.generate()
     agent_id1 = AgentId.generate()
@@ -277,7 +277,7 @@ def test_find_one_matching_agent_with_resolved_host_filters_by_host() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = find_one_matching_agent(
+    result = filter_one_agent(
         agent=AgentName("test-agent"),
         resolved_host=host_ref1,
         agents_by_host={
@@ -289,30 +289,30 @@ def test_find_one_matching_agent_with_resolved_host_filters_by_host() -> None:
     assert result == (host_ref1, agent_ref1)
 
 
-def test_find_one_matching_agent_raises_when_not_found() -> None:
+def test_filter_one_agent_raises_when_not_found() -> None:
     with pytest.raises(UserInputError, match="Could not find agent with ID or name: nonexistent"):
-        find_one_matching_agent(
+        filter_one_agent(
             agent=AgentName("nonexistent"),
             resolved_host=None,
             agents_by_host={},
         )
 
 
-def test_find_one_matching_agent_raises_agent_not_found_for_unknown_id() -> None:
+def test_filter_one_agent_raises_agent_not_found_for_unknown_id() -> None:
     """An unknown AgentId raises AgentNotFoundError (not UserInputError).
 
     The distinction lets callers detect "the specific agent you named no
     longer exists" separately from "your search term didn't match anything".
     """
     with pytest.raises(AgentNotFoundError):
-        find_one_matching_agent(
+        filter_one_agent(
             agent=AgentId.generate(),
             resolved_host=None,
             agents_by_host={},
         )
 
 
-def test_find_one_matching_agent_raises_when_multiple_agents_match() -> None:
+def test_filter_one_agent_raises_when_multiple_agents_match() -> None:
     host_id1 = HostId.generate()
     host_id2 = HostId.generate()
     agent_id1 = AgentId.generate()
@@ -343,7 +343,7 @@ def test_find_one_matching_agent_raises_when_multiple_agents_match() -> None:
     )
 
     with pytest.raises(UserInputError, match="Multiple agents found with name 'test-agent'"):
-        find_one_matching_agent(
+        filter_one_agent(
             agent=AgentName("test-agent"),
             resolved_host=None,
             agents_by_host={
@@ -816,65 +816,65 @@ def test__find_agents_by_identifiers_or_state_filter_by_stopped_state(
     assert "find-stopped-test" in found_names
 
 
-# --- find_all_matching_hosts ---
+# --- filter_all_hosts ---
 
 
-def test_find_all_matching_hosts_by_name() -> None:
+def test_filter_all_hosts_by_name() -> None:
     host = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("my-host"), provider_name=ProviderInstanceName("local")
     )
-    result = find_all_matching_hosts(HostAddress(host=HostName("my-host")), [host])
+    result = filter_all_hosts(HostAddress(host=HostName("my-host")), [host])
     assert result == [host]
 
 
-def test_find_all_matching_hosts_by_id() -> None:
+def test_filter_all_hosts_by_id() -> None:
     host = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("my-host"), provider_name=ProviderInstanceName("local")
     )
-    result = find_all_matching_hosts(HostAddress(host=host.host_id), [host])
+    result = filter_all_hosts(HostAddress(host=host.host_id), [host])
     assert result == [host]
 
 
-def test_find_all_matching_hosts_no_match() -> None:
+def test_filter_all_hosts_no_match() -> None:
     host = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("other"), provider_name=ProviderInstanceName("local")
     )
-    assert find_all_matching_hosts(HostAddress(host=HostName("nonexistent")), [host]) == []
+    assert filter_all_hosts(HostAddress(host=HostName("nonexistent")), [host]) == []
 
 
-def test_find_all_matching_hosts_multiple() -> None:
+def test_filter_all_hosts_multiple() -> None:
     host1 = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("shared"), provider_name=ProviderInstanceName("local")
     )
     host2 = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("shared"), provider_name=ProviderInstanceName("local")
     )
-    result = find_all_matching_hosts(HostAddress(host=HostName("shared")), [host1, host2])
+    result = filter_all_hosts(HostAddress(host=HostName("shared")), [host1, host2])
     assert len(result) == 2
 
 
-def test_find_all_matching_hosts_by_host_provider_form() -> None:
-    """find_all_matching_hosts should match the 'host.provider' form."""
+def test_filter_all_hosts_by_host_provider_form() -> None:
+    """filter_all_hosts should match the 'host.provider' form."""
     host_modal = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("m1"), provider_name=ProviderInstanceName("modal")
     )
     host_docker = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("m1"), provider_name=ProviderInstanceName("docker")
     )
-    result = find_all_matching_hosts(
+    result = filter_all_hosts(
         HostAddress(host=HostName("m1"), provider=ProviderInstanceName("modal")),
         [host_modal, host_docker],
     )
     assert result == [host_modal]
 
 
-def test_find_all_matching_hosts_host_provider_form_no_match() -> None:
+def test_filter_all_hosts_host_provider_form_no_match() -> None:
     """If the provider suffix does not match any host, return no matches."""
     host = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("m1"), provider_name=ProviderInstanceName("modal")
     )
     assert (
-        find_all_matching_hosts(
+        filter_all_hosts(
             HostAddress(host=HostName("m1"), provider=ProviderInstanceName("docker")),
             [host],
         )
@@ -882,10 +882,10 @@ def test_find_all_matching_hosts_host_provider_form_no_match() -> None:
     )
 
 
-# --- find_all_matching_agents ---
+# --- filter_all_agents ---
 
 
-def test_find_all_matching_agents_by_name() -> None:
+def test_filter_all_agents_by_name() -> None:
     host_id = HostId.generate()
     host = DiscoveredHost(host_id=host_id, host_name=HostName("h"), provider_name=ProviderInstanceName("local"))
     agent = DiscoveredAgent(
@@ -894,12 +894,12 @@ def test_find_all_matching_agents_by_name() -> None:
         agent_name=AgentName("my-agent"),
         provider_name=ProviderInstanceName("local"),
     )
-    result = find_all_matching_agents(AgentName("my-agent"), {host: [agent]})
+    result = filter_all_agents(AgentName("my-agent"), {host: [agent]})
     assert len(result) == 1
     assert result[0] == (host, agent)
 
 
-def test_find_all_matching_agents_by_id() -> None:
+def test_filter_all_agents_by_id() -> None:
     host_id = HostId.generate()
     host = DiscoveredHost(host_id=host_id, host_name=HostName("h"), provider_name=ProviderInstanceName("local"))
     agent = DiscoveredAgent(
@@ -908,11 +908,11 @@ def test_find_all_matching_agents_by_id() -> None:
         agent_name=AgentName("a"),
         provider_name=ProviderInstanceName("local"),
     )
-    result = find_all_matching_agents(agent.agent_id, {host: [agent]})
+    result = filter_all_agents(agent.agent_id, {host: [agent]})
     assert len(result) == 1
 
 
-def test_find_all_matching_agents_no_match() -> None:
+def test_filter_all_agents_no_match() -> None:
     host_id = HostId.generate()
     host = DiscoveredHost(host_id=host_id, host_name=HostName("h"), provider_name=ProviderInstanceName("local"))
     agent = DiscoveredAgent(
@@ -921,10 +921,10 @@ def test_find_all_matching_agents_no_match() -> None:
         agent_name=AgentName("other"),
         provider_name=ProviderInstanceName("local"),
     )
-    assert find_all_matching_agents(AgentName("nonexistent"), {host: [agent]}) == []
+    assert filter_all_agents(AgentName("nonexistent"), {host: [agent]}) == []
 
 
-def test_find_all_matching_agents_multiple() -> None:
+def test_filter_all_agents_multiple() -> None:
     host1_id = HostId.generate()
     host2_id = HostId.generate()
     host1 = DiscoveredHost(host_id=host1_id, host_name=HostName("h1"), provider_name=ProviderInstanceName("local"))
@@ -941,11 +941,11 @@ def test_find_all_matching_agents_multiple() -> None:
         agent_name=AgentName("shared"),
         provider_name=ProviderInstanceName("local"),
     )
-    result = find_all_matching_agents(AgentName("shared"), {host1: [agent1], host2: [agent2]})
+    result = filter_all_agents(AgentName("shared"), {host1: [agent1], host2: [agent2]})
     assert len(result) == 2
 
 
-def test_find_all_matching_agents_filtered_by_host() -> None:
+def test_filter_all_agents_filtered_by_host() -> None:
     host1_id = HostId.generate()
     host2_id = HostId.generate()
     host1 = DiscoveredHost(host_id=host1_id, host_name=HostName("h1"), provider_name=ProviderInstanceName("local"))
@@ -962,7 +962,7 @@ def test_find_all_matching_agents_filtered_by_host() -> None:
         agent_name=AgentName("shared"),
         provider_name=ProviderInstanceName("local"),
     )
-    result = find_all_matching_agents(AgentName("shared"), {host1: [agent1], host2: [agent2]}, resolved_host=host1)
+    result = filter_all_agents(AgentName("shared"), {host1: [agent1], host2: [agent2]}, resolved_host=host1)
     assert len(result) == 1
     assert result[0] == (host1, agent1)
 

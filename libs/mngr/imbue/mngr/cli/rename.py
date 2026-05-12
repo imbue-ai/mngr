@@ -7,7 +7,7 @@ from loguru import logger
 
 from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
-from imbue.mngr.api.find import find_one_matching_agent
+from imbue.mngr.api.find import filter_one_agent
 from imbue.mngr.api.find import materialize_agent
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import AGENT_NAME
@@ -119,7 +119,7 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
     # Discovery is run explicitly so the result can also drive the
     # name-conflict check below.
     agents_by_host, _ = discover_by_address(opts.current, mngr_ctx)
-    host_ref, agent_ref = find_one_matching_agent(opts.current.agent, None, agents_by_host)
+    host_ref, agent_ref = filter_one_agent(opts.current.agent, None, agents_by_host)
     agent, host = materialize_agent(host_ref, agent_ref, mngr_ctx, skip_agent_state_check=True)
 
     old_name = str(agent.name)

@@ -13,7 +13,7 @@ from imbue.mngr.api.connect import run_connect_command
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.find import ensure_host_started
-from imbue.mngr.api.find import find_agents_by_addresses
+from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
@@ -158,7 +158,7 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
         raise click.UsageError("--connect can only be used with a single agent")
 
     # Find agents to start (STOPPED agents)
-    agents_to_start = find_agents_by_addresses(
+    agents_to_start = find_all_agents(
         addresses=agent_addresses,
         filter_all=False,
         target_state=AgentLifecycleState.STOPPED,

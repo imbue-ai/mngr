@@ -4,7 +4,7 @@ These tests create a real agent via the CLI, then exercise
 select_agent_interactively_with_host and find_agent_for_command end-to-end.
 The only thing monkeypatched is the urwid TUI (select_agent_interactively),
 since it requires an interactive terminal. Everything else -- list_agents,
-discover_hosts_and_agents, find_agent_by_address, materialize_agent --
+discover_hosts_and_agents, find_one_agent, materialize_agent --
 runs against real data on disk.
 """
 

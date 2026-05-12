@@ -343,7 +343,7 @@ def test_stop_accepts_address_syntax(
     temp_work_dir: Path,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Commands using the shared find_agents_by_addresses accept address syntax.
+    """Commands using the shared find_all_agents accept address syntax.
 
     Using 'stop' as a representative: passing NAME@HOST should not crash with a
     parsing error. It will fail with 'agent not found' (expected) rather than a

@@ -13,8 +13,8 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import ensure_host_started
-from imbue.mngr.api.find import find_agent_by_address
-from imbue.mngr.api.find import find_agents_by_addresses
+from imbue.mngr.api.find import find_all_agents
+from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
@@ -122,7 +122,7 @@ def exec_command_on_agent(
     stopped, then executes the command on its host (defaulting to the agent's
     work_dir).
     """
-    agent, host = find_agent_by_address(address, mngr_ctx, "exec", is_start_desired=is_start_desired)
+    agent, host = find_one_agent(address, mngr_ctx, "exec", is_start_desired=is_start_desired)
 
     # Determine working directory: explicit --cwd, or agent's work_dir
     effective_cwd = Path(cwd) if cwd is not None else agent.work_dir
@@ -337,7 +337,7 @@ def exec_command_on_outer_hosts(
     """
     result = MultiExecResult()
 
-    matches = find_agents_by_addresses(
+    matches = find_all_agents(
         addresses=addresses,
         filter_all=is_all,
         target_state=None,
@@ -440,7 +440,7 @@ def exec_command_on_agents(
     result = MultiExecResult()
 
     # Find all matching agents (with address support for host/provider filtering)
-    matches = find_agents_by_addresses(
+    matches = find_all_agents(
         addresses=addresses,
         filter_all=is_all,
         target_state=None,

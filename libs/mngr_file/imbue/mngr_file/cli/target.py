@@ -11,8 +11,8 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.api.address_parsers import parse_agent_name_or_id
 from imbue.mngr.api.address_parsers import parse_host_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import find_all_matching_agents
-from imbue.mngr.api.find import find_all_matching_hosts
+from imbue.mngr.api.find import filter_all_agents
+from imbue.mngr.api.find import filter_all_hosts
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
@@ -159,12 +159,12 @@ def resolve_file_target(
         agent_target = parse_agent_name_or_id(target_identifier)
     except UserInputError:
         agent_target = None
-    matching_agents = find_all_matching_agents(agent_target, agents_by_host) if agent_target is not None else []
+    matching_agents = filter_all_agents(agent_target, agents_by_host) if agent_target is not None else []
     try:
         host_target = parse_host_address(target_identifier)
     except UserInputError:
         host_target = None
-    matching_hosts = find_all_matching_hosts(host_target, all_hosts) if host_target is not None else []
+    matching_hosts = filter_all_hosts(host_target, all_hosts) if host_target is not None else []
 
     # Check for ambiguity within each type
     if len(matching_agents) > 1:

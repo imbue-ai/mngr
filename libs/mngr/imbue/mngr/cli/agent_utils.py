@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.find import find_agent_by_address
+from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.cli.connect import select_agent_interactively
 from imbue.mngr.cli.output_helpers import emit_info
@@ -63,7 +63,7 @@ def select_agent_interactively_with_host(
     if selected is None:
         return None
 
-    return find_agent_by_address(
+    return find_one_agent(
         AgentAddress(agent=selected.id),
         mngr_ctx,
         is_start_desired=is_start_desired,
@@ -96,7 +96,7 @@ def find_agent_for_command(
             if address.host is not None and address.host != host_filter:
                 raise UserInputError(f"Address host ({address.host}) conflicts with --host filter ({host_filter}).")
             address = AgentAddress(agent=address.agent, host=host_filter)
-        return find_agent_by_address(
+        return find_one_agent(
             address,
             mngr_ctx,
             is_start_desired=is_start_desired,
