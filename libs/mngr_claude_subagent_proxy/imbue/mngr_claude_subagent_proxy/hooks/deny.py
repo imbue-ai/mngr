@@ -29,6 +29,7 @@ for the full surface comparison.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Final
 from typing import TextIO
 
@@ -39,12 +40,38 @@ from imbue.mngr_claude_subagent_proxy.hook_io import emit_depth_limit_deny
 from imbue.mngr_claude_subagent_proxy.hook_io import emit_pre_tool_deny
 from imbue.mngr_claude_subagent_proxy.hook_io import parse_int_env
 from imbue.mngr_claude_subagent_proxy.hook_io import read_hook_stdin_json
+from imbue.mngr_claude_subagent_proxy.hooks.agent_definitions import resolve_agent_definition
 
 DENY_REASON: Final[str] = (
     "mngr_claude_subagent_proxy is in deny mode: the Task tool is disabled for this agent. "
     "Use a mngr-managed subagent instead -- see the `mngr-subagents` skill for the "
     "two-command spawn-and-wait protocol."
 )
+
+
+def _build_typed_subagent_pointer(subagent_type: str, work_dir: Path) -> str | None:
+    """Build the typed-subagent pointer suffix appended to ``DENY_REASON``.
+
+    Returns ``None`` when ``subagent_type`` is empty or resolves to no
+    on-disk definition (built-in types like ``general-purpose``); the
+    deny reason stays the short uniform skill pointer in that case.
+
+    When the type resolves, the suffix names the resolved ``.md`` path
+    so Claude can prepend its body to the prompt file before spawning
+    -- preserving Claude Code's typed-subagent system-prompt contract.
+    The body itself is intentionally NOT inlined: it can be thousands
+    of characters and would dwarf the actual deny reason.
+    """
+    if not subagent_type:
+        return None
+    definition = resolve_agent_definition(subagent_type, work_dir)
+    if definition is None:
+        return None
+    return (
+        f" For subagent_type {subagent_type!r}, prepend the body of "
+        f"{definition.path} to your prompt file (it is the spawned subagent's "
+        f"system prompt) before running `mngr create`."
+    )
 
 
 def run(stdin: TextIO, stdout: TextIO) -> None:
@@ -64,14 +91,25 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         emit_depth_limit_deny(stdout, depth, max_depth)
         return
 
-    # Read stdin through the shared parser even though we discard the
-    # result. We don't use any of the content -- the deny is uniform
-    # regardless of what Claude was trying to delegate -- but using the
+    # Read stdin through the shared parser. The base deny is uniform
+    # regardless of tool_input content, but we DO read ``subagent_type``
+    # off the parsed payload to optionally append a typed-subagent
+    # pointer (path to the agent definition .md file whose body the
+    # spawned subagent should receive as its system prompt). Using the
     # same primitive as hooks/spawn.py keeps malformed-input warnings
     # uniform across the two PreToolUse hooks (single source of truth
     # for stdin validation in hook_io.read_hook_stdin_json).
-    read_hook_stdin_json(stdin, "deny")
-    emit_pre_tool_deny(stdout, DENY_REASON)
+    payload = read_hook_stdin_json(stdin, "deny")
+    subagent_type = ""
+    if payload is not None:
+        tool_input = payload.get("tool_input")
+        if isinstance(tool_input, dict):
+            raw = tool_input.get("subagent_type")
+            if isinstance(raw, str):
+                subagent_type = raw
+    typed_suffix = _build_typed_subagent_pointer(subagent_type, Path.cwd())
+    reason = DENY_REASON if typed_suffix is None else DENY_REASON + typed_suffix
+    emit_pre_tool_deny(stdout, reason)
 
 
 def main() -> None:
