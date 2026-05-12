@@ -642,7 +642,7 @@ def _output_wait_result(result: WaitForUsageResult, output_format: OutputFormat)
 
 
 CommandHelpMetadata(
-    key="usage wait",
+    key="usage.wait",
     one_line_description="Block until a usage snapshot matches a CEL predicate",
     synopsis="mngr usage wait --until CEL [--until CEL ...] [--source NAME ...] [--timeout DURATION] [--interval DURATION]",
     description="""Polls ``mngr usage`` snapshots until at least one source's CEL

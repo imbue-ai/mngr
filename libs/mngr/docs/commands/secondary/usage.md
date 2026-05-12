@@ -68,6 +68,30 @@ mngr usage [OPTIONS] COMMAND [ARGS]...
 
 ## mngr usage wait
 
+Block until a usage snapshot matches a CEL predicate.
+
+Polls ``mngr usage`` snapshots until at least one source's CEL
+context satisfies every ``--until`` expression. Composable with shell:
+
+mngr usage wait --until 'five_hour.used_percentage < 50 && five_hour.elapsed_percentage > 75' \
+      && mngr message my-agent "ok, kick off the next batch"
+
+The CEL context per source mirrors one entry of ``mngr usage --format
+json``'s ``sources`` array, with these derived fields per window:
+
+- ``used_percentage``: from the writer.
+- ``resets_at`` / ``seconds_until_reset``: when the window resets.
+- ``window_seconds``: window duration (writer-provided; absent for
+  variable-duration windows like Claude's overage).
+- ``elapsed_seconds`` / ``elapsed_percentage``: derived from
+  ``window_seconds`` and ``seconds_until_reset``; absent when
+  ``window_seconds`` isn't emitted.
+
+Exit codes:
+  0 - A source matched all --until filters.
+  1 - Error (invalid CEL, interrupt).
+  2 - Timed out.
+
 **Usage:**
 
 ```text
@@ -121,6 +145,33 @@ mngr usage wait [OPTIONS]
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
 | `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
+
+
+## Examples
+
+**Wait for 75% of the 5h window to elapse while at most 50% of the limit is used**
+
+```bash
+$ mngr usage wait --until 'five_hour.elapsed_percentage > 75 && five_hour.used_percentage < 50'
+```
+
+**Restrict to Claude usage only**
+
+```bash
+$ mngr usage wait --source claude --until 'five_hour.used_percentage < 25'
+```
+
+**Bail out after an hour**
+
+```bash
+$ mngr usage wait --until 'seven_day.used_percentage < 30' --timeout 1h
+```
+
+**Tighter poll for short-window predicates**
+
+```bash
+$ mngr usage wait --until 'overage.is_using_overage == false' --interval 10s
+```
 
 ## Examples
 
