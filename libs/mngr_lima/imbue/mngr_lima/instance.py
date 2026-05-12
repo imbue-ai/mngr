@@ -82,21 +82,11 @@ _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
     "Unknown": HostState.CRASHED,
 }
 
-# ssh-keyscan tuning. Lima's macOS-side hostagent begins accepting TCP on
-# 127.0.0.1:<port> before the guest sshd is actually listening. During that
-# window the proxied connection inside the VM has no peer, so ssh-keyscan's
-# first write to the socket fails with EPIPE ("Broken pipe") -- rc=1, empty
-# stdout. We poll until at least one key parses, with a per-attempt
-# subprocess timeout, a poll interval between attempts, and a total budget
-# that covers a worst-case slow first boot.
-#
-# Empirically (Lima 1.x, vz driver, macOS aarch64) the race window is ~7s
-# on a restart of an already-provisioned VM and tens of seconds on first
-# boot. The 60s total budget covers the slow case while still failing fast
-# on a permanently broken host. We cannot distinguish "transient race" from
-# "permanently broken" at this layer -- both look identical (rc=1 + empty
-# stdout + 'Broken pipe' on stderr) -- so the retry serves both equally
-# well.
+# ssh-keyscan tuning. sshd finishes loading host keys slightly after the
+# TCP port becomes reachable, so wait_for_sshd can succeed while keyscan
+# still sees an empty banner. We poll until at least one key parses, with
+# a per-attempt subprocess timeout, a poll interval between attempts, and
+# a total budget that covers a worst-case slow first boot.
 _HOST_KEY_SCAN_TIMEOUT_SECONDS = 10.0
 _HOST_KEY_SCAN_POLL_INTERVAL_SECONDS = 2.0
 _HOST_KEY_SCAN_TOTAL_BUDGET_SECONDS = 60.0
@@ -280,18 +270,12 @@ class LimaProviderInstance(BaseProviderInstance):
         First removes any stale keys for this host:port (from previous VMs
         that may have reused the same port), then adds all key types from
         ssh-keyscan so paramiko can negotiate any of them.
-
-        Lima's macOS-side hostagent accepts TCP on 127.0.0.1:<port> before
-        the guest sshd is listening; in that window the proxied connection
-        inside the VM has no peer, so ssh-keyscan's first ``write()`` to
-        the socket fails with EPIPE ("Broken pipe") and produces rc=1 +
-        empty stdout. We poll until at least one key parses; if we still
-        cannot read a key after the total budget, raise MngrError. The
-        loud raise prevents the otherwise-cryptic downstream paramiko
-        ``StrictPolicy: No host key for [127.0.0.1]:<port>`` that the
-        previous "warn + return silently" code led to.
         """
         clear_host_from_known_hosts(self._known_hosts_path, hostname, port)
+
+        # sshd can race with ssh-keyscan during VM bring-up.
+        # Connections: host machine ssh-keyscan <-A-> hostagent <-B-> lima vm sshd
+        # It's possible A is open while B isn't ready. Thus polling until success.
         if not poll_until(
             lambda: self._try_scan_and_record_host_key(hostname, port),
             timeout=_HOST_KEY_SCAN_TOTAL_BUDGET_SECONDS,
