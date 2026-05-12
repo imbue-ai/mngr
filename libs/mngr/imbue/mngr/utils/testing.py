@@ -1,3 +1,4 @@
+import enum
 import json
 import os
 import re
@@ -113,18 +114,33 @@ def register_modal_test_environment(environment_name: str) -> None:
         worker_modal_environment_names.append(environment_name)
 
 
+class CleanupResult(enum.Enum):
+    """Outcome of a Modal-side delete call.
+
+    Callers should treat `DELETED` and `NOT_FOUND` as success (the resource is
+    conceptually gone, regardless of whether we did the deleting) and only
+    `FAILED` as a reason to keep tracking the resource for leak detection.
+    """
+
+    DELETED = "deleted"
+    NOT_FOUND = "not_found"
+    FAILED = "failed"
+
+
 def deregister_modal_test_app(app_name: str) -> None:
     """Stop tracking a Modal app for leak detection.
 
-    Call this after a test's cleanup hook has attempted to delete the app. The
-    session-end leak detector (in libs/mngr_modal/.../conftest.py) polls
+    Call this only when the caller has positively confirmed the app was
+    stopped (or was already gone). The session-end leak detector polls
     `modal app list --json` to find tracked apps that are still alive, but
     Modal's listing endpoints are eventually consistent w.r.t. deletion --
     they can still return entries for seconds after the synchronous delete
     call returned "not found". Trusting the cleanup hook's response and
     deregistering immediately avoids paying that listing-convergence tail.
-    If the underlying delete silently failed, the CI hourly cleanup script
-    (cleanup_old_modal_test_environments.py) catches it as a safety net.
+    On a real cleanup failure (anything other than DELETED/NOT_FOUND),
+    callers must NOT deregister: leaving the name tracked lets the leak
+    detector surface it, with the CI hourly cleanup script
+    (cleanup_old_modal_test_environments.py) as the ultimate safety net.
     """
     if app_name in worker_modal_app_names:
         worker_modal_app_names.remove(app_name)
@@ -1172,10 +1188,13 @@ def delete_modal_volumes_in_environment(environment_name: str) -> None:
         logger.warning("Failed to list/delete Modal volumes in environment {}: {}", environment_name, e)
 
 
-def delete_modal_environment(environment_name: str) -> None:
+def delete_modal_environment(environment_name: str) -> CleanupResult:
     """Delete a Modal environment.
 
-    This is robust to concurrent deletion - failures result in warnings, not errors.
+    Robust to concurrent deletion: returns a CleanupResult instead of raising.
+    Callers should treat DELETED and NOT_FOUND as success (the env is gone,
+    whether we did the deleting or someone else did) and only FAILED as a
+    reason to keep the env tracked for leak detection.
     """
     try:
         result = subprocess.run(
@@ -1184,16 +1203,22 @@ def delete_modal_environment(environment_name: str) -> None:
             text=True,
             timeout=30,
         )
-        if result.returncode != 0:
-            logger.warning(
-                "Modal environment delete returned non-zero for {}: {}",
-                environment_name,
-                result.stderr or result.stdout,
-            )
-        else:
+        if result.returncode == 0:
             logger.debug("Deleted Modal environment {}", environment_name)
+            return CleanupResult.DELETED
+        stderr = result.stderr or result.stdout
+        if "not found" in stderr.lower():
+            logger.debug("Modal environment {} already gone: {}", environment_name, stderr.strip())
+            return CleanupResult.NOT_FOUND
+        logger.warning(
+            "Modal environment delete returned non-zero for {}: {}",
+            environment_name,
+            stderr,
+        )
+        return CleanupResult.FAILED
     except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
         logger.warning("Failed to delete Modal environment {}: {}", environment_name, e)
+        return CleanupResult.FAILED
 
 
 def cleanup_old_modal_test_environments(

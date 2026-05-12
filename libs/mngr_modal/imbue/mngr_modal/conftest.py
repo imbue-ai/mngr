@@ -24,11 +24,11 @@ from imbue.mngr.primitives import UserId
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.testing import CleanupResult
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import delete_modal_apps_in_environment
 from imbue.mngr.utils.testing import delete_modal_environment
 from imbue.mngr.utils.testing import delete_modal_volumes_in_environment
-from imbue.mngr.utils.testing import deregister_modal_test_app
 from imbue.mngr.utils.testing import deregister_modal_test_environment
 from imbue.mngr.utils.testing import deregister_modal_test_volume
 from imbue.mngr.utils.testing import generate_test_environment_name
@@ -115,33 +115,73 @@ def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_n
     """Clean up Modal test resources after a test completes.
 
     This helper performs cleanup in the correct order:
-    1. Close the Modal app context
+    1. Close the Modal app context (note: does not stop the Modal-side app --
+       ephemeral apps stop on context close, persistent apps keep running
+       until the session-end leak detector or the CI hourly cleanup catches
+       them; the app stays tracked in `worker_modal_app_names` either way)
     2. Delete the volume (must be done before environment deletion)
     3. Delete the environment (cleans up any remaining resources)
-    4. Deregister from leak tracking so the session-end detector doesn't pay
-       for Modal's eventually-consistent listing convergence
+    4. Deregister volume + env from leak tracking *only* if their delete
+       calls succeeded or reported the resource was already gone. A real
+       cleanup failure leaves the resource tracked so the session-end leak
+       detector surfaces it.
     """
-    # Close the Modal app context first
+    # Close the Modal app context first. close_app does not stop the
+    # Modal-side app, so we deliberately do NOT deregister the app here;
+    # leak detection should still see it.
     ModalProviderBackend.close_app(app_name)
 
-    # Delete the volume using Modal SDK (must be done before environment deletion)
+    # Delete the volume using Modal SDK (must be done before environment deletion).
+    volume_result = _delete_modal_volume_via_sdk(volume_name, environment_name)
+    if volume_result is CleanupResult.FAILED:
+        logger.error(
+            "Cleanup of Modal volume {} in environment {} failed; leaving registered "
+            "so session-end leak detector surfaces it.",
+            volume_name,
+            environment_name,
+        )
+    else:
+        deregister_modal_test_volume(volume_name)
+
+    # Delete the environment using Modal SDK.
+    env_result = _delete_modal_environment_via_sdk(environment_name)
+    if env_result is CleanupResult.FAILED:
+        logger.error(
+            "Cleanup of Modal environment {} failed; leaving registered so session-end leak detector surfaces it.",
+            environment_name,
+        )
+    else:
+        deregister_modal_test_environment(environment_name)
+
+
+def _delete_modal_volume_via_sdk(volume_name: str, environment_name: str) -> CleanupResult:
+    """Delete a Modal volume via the SDK and classify the outcome.
+
+    See `imbue.mngr.utils.testing.CleanupResult` for the contract.
+    """
     try:
         modal.Volume.objects.delete(volume_name, environment_name=environment_name)
-    except (modal.exception.Error, OSError):
-        pass
+        return CleanupResult.DELETED
+    except modal.exception.NotFoundError:
+        return CleanupResult.NOT_FOUND
+    except (modal.exception.Error, OSError) as e:
+        logger.warning("Failed to delete Modal volume {} in env {}: {}", volume_name, environment_name, e)
+        return CleanupResult.FAILED
 
-    # Delete the environment using Modal SDK (cleans up any remaining resources)
+
+def _delete_modal_environment_via_sdk(environment_name: str) -> CleanupResult:
+    """Delete a Modal environment via the SDK and classify the outcome.
+
+    See `imbue.mngr.utils.testing.CleanupResult` for the contract.
+    """
     try:
         delete_environment(environment_name)
-    except (modal.exception.Error, OSError):
-        pass
-
-    # Deregister so the session-end polling check skips these. See
-    # `deregister_modal_test_app` for the rationale; the CI hourly cleanup
-    # script remains the safety net if delete actually failed.
-    deregister_modal_test_app(app_name)
-    deregister_modal_test_volume(volume_name)
-    deregister_modal_test_environment(environment_name)
+        return CleanupResult.DELETED
+    except modal.exception.NotFoundError:
+        return CleanupResult.NOT_FOUND
+    except (modal.exception.Error, OSError) as e:
+        logger.warning("Failed to delete Modal environment {}: {}", environment_name, e)
+        return CleanupResult.FAILED
 
 
 @pytest.fixture
@@ -296,12 +336,21 @@ def modal_test_session_cleanup(
     yield
     delete_modal_apps_in_environment(environment_name)
     delete_modal_volumes_in_environment(environment_name)
-    delete_modal_environment(environment_name)
-    # Deregister so the session-end polling check skips this env. The cleanup
-    # chain above is authoritative ("Environment not found" is a successful
-    # delete-or-already-deleted signal); Modal's global list, by contrast,
-    # can take longer than any defensible polling budget to converge.
-    deregister_modal_test_environment(environment_name)
+    env_result = delete_modal_environment(environment_name)
+    # Only deregister if Modal confirmed the env is gone (deleted or already
+    # not-found). On real cleanup failure, keep it tracked so the session-end
+    # polling check still has a chance to surface it. Modal's global list
+    # endpoint is eventually consistent and can lag past any defensible
+    # polling budget, but the synchronous delete call's response is
+    # authoritative.
+    if env_result is CleanupResult.FAILED:
+        logger.error(
+            "Cleanup of Modal session environment {} failed; leaving registered "
+            "so session-end leak detector surfaces it.",
+            environment_name,
+        )
+    else:
+        deregister_modal_test_environment(environment_name)
 
 
 @pytest.fixture
