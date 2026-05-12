@@ -333,13 +333,15 @@ def _flag_form_for_param(ctx: click.Context, param_name: str) -> str:
     ``optgroup.option("--format", "output_format", ...)`` stores its value
     under ``output_format`` but the user types ``--format``). To produce
     accurate error messages we look up the actual long-form switch from
-    the command's parameter list; for params without a ``--``-form (i.e.
-    positional arguments) we fall back to the hyphenated name.
+    the command's parameter list (``param.opts`` is declared on
+    ``click.Parameter`` and present on both ``Option`` and ``Argument``);
+    for params without a ``--``-form (i.e. positional arguments) we fall
+    back to the hyphenated name.
     """
     for param in ctx.command.params:
         if param.name != param_name:
             continue
-        long_opts = [opt for opt in getattr(param, "opts", []) if opt.startswith("--")]
+        long_opts = [opt for opt in param.opts if opt.startswith("--")]
         if long_opts:
             return long_opts[0]
         break
