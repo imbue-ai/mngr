@@ -1,34 +1,55 @@
 """Resolve a Claude Code ``subagent_type`` to its agent-definition file.
 
-Claude Code's typed subagents are spawned from ``.md`` files containing
-YAML frontmatter (name, description, tools, model) and a Markdown body
-that becomes the spawned subagent's system prompt. This module surfaces
-the body so the plugin can preserve the system-prompt contract when
-proxying or denying typed Task calls (otherwise both modes effectively
-strip the system prompt and spawn a generic Claude).
+This module's job: given a parent's ``Task(subagent_type=X, prompt=Y)``
+call, locate the ``.md`` file Claude Code would have loaded as X's
+definition and return its post-frontmatter body. The plugin uses the
+body either as user-message text prepended to the proxy prompt file
+(PROXY mode) or as a path pointer in the deny reason (DENY mode),
+preserving the typed-subagent contract the parent expected.
 
 Built-in agent types -- ``general-purpose``, ``Explore``, etc. -- are
 baked into Claude Code itself and have no on-disk definition. The
 resolver returns ``None`` for those (and any other unknown name); the
 caller falls back to the prompt-only spawn path.
 
+## Claude Code on-disk layout contract
+
+This module depends on Claude Code's documented on-disk layout for
+agent definitions (verified against Claude Code as of 2026-05). If the
+layout changes, this module needs a matching update.
+
 Discovery branches on whether ``subagent_type`` is plugin-namespaced
 (contains ``:``):
 
 - Non-namespaced (e.g. ``code-reviewer``): walk in precedence order,
-  closest wins, and stop at the first hit:
+  closest wins, stop at the first hit:
 
   1. ``<work_dir>/.claude/agents/<name>.md`` -- project-local.
-  2. ``~/.claude/agents/<name>.md`` -- user-level.
+  2. ``<user-claude-config-dir>/agents/<name>.md`` -- user-level.
 
 - Plugin-namespaced (``plugin:agent``, e.g.
   ``imbue-code-guardian:verify-and-fix``): only the marketplaces root
   is checked --
-  ``~/.claude/plugins/marketplaces/*/plugins/<plugin>/agents/<agent>.md``
+  ``<user-claude-config-dir>/plugins/marketplaces/*/plugins/<plugin>/agents/<agent>.md``
   (marketplaces enumerated in sorted order; first hit wins). The flat
-  ``~/.claude/agents/`` is NOT a fallback for namespaced types -- a
-  same-named flat file under a different plugin namespace would be a
-  silent collision, so we refuse to cross the boundary.
+  ``agents/`` dir is NOT a fallback for namespaced types -- a same-named
+  flat file under a different plugin namespace would be a silent
+  collision, so we refuse to cross the boundary.
+
+Frontmatter parsing is delegated to ``python-frontmatter`` -- the
+delimiter is the standard ``---`` YAML block at the top of the file.
+A file with no frontmatter returns its full content as the body.
+
+This contract is **not** a Claude Code public API; it's the directory
+layout the Claude Code CLI uses for agent discovery as observed and
+documented at https://code.claude.com/docs/en/skills (and the
+sub-agents page). If Claude Code grows a CLI command like
+``claude --resolve-agent X`` or enriches PreToolUse:Agent hook input
+with the resolved definition, this whole module collapses into a
+subprocess call -- see "Honor agent-definition tool restrictions and
+system-prompt semantics" in the plugin README for the v2 followup.
+
+## Limitations
 
 Tool restrictions declared in the frontmatter (``tools: [Read, Grep]``)
 are NOT honored in v1: a plain mngr Claude subagent inherits the user's
@@ -39,18 +60,15 @@ restricted permissions.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Final
 
+import frontmatter
 from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
-
-_FRONTMATTER_RE: Final[re.Pattern[str]] = re.compile(r"\A---\r?\n.*?\r?\n---\r?\n", re.DOTALL)
 
 
 class AgentDefinition(FrozenModel):
@@ -58,20 +76,6 @@ class AgentDefinition(FrozenModel):
 
     path: Path = Field(description="Absolute path to the resolved .md file.")
     body: str = Field(description="The Markdown body (post-frontmatter) -- the system prompt Claude Code would use.")
-
-
-def _strip_frontmatter(content: str) -> str:
-    """Strip a leading YAML frontmatter block from ``content``.
-
-    The frontmatter delimiter is the standard ``---`` line on its own;
-    if no frontmatter is present, returns ``content`` unchanged (after
-    stripping any leading blank lines, so the body starts on the first
-    non-empty line whether or not frontmatter was present).
-    """
-    match = _FRONTMATTER_RE.match(content)
-    if match is None:
-        return content.lstrip("\n")
-    return content[match.end() :].lstrip("\n")
 
 
 def _user_claude_agents_dir() -> Path:
@@ -152,5 +156,6 @@ def resolve_agent_definition(subagent_type: str, work_dir: Path) -> AgentDefinit
         except OSError as e:
             logger.warning("agent_definitions: failed to read {}: {}", candidate, e)
             continue
-        return AgentDefinition(path=candidate, body=_strip_frontmatter(content))
+        body = frontmatter.loads(content).content.lstrip("\n")
+        return AgentDefinition(path=candidate, body=body)
     return None
