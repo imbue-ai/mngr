@@ -133,9 +133,6 @@ def _parse_iso_timestamp(value: Any) -> int | None:
         return None
 
 
-_WINDOW_FIELDS: frozenset[str] = frozenset(WindowSnapshot.model_fields)
-
-
 def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
     """Reshape an event's ``rate_limits`` payload into UsageSnapshot windows.
 
@@ -150,12 +147,11 @@ def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
     JSONL insertion order. Per-window ``label`` (optional) is what the
     human renderer uses; missing labels fall back to the window key.
 
-    Pydantic does the field-level type coercion (and rejects unparseable
-    values). Unknown keys in the writer's window dict are filtered out
-    rather than failing pydantic's ``extra="forbid"``: a writer that adds
-    a new field shouldn't force a reader update. If the remaining fields
-    don't validate, the window is dropped (with a debug log) -- partial
-    windows would be harder to reason about than absent ones.
+    Writer/reader versions are assumed to be lockstep (both live in the
+    same monorepo). If a window dict has an unexpected field or a value
+    that won't coerce to the typed field, pydantic raises and we drop the
+    window with a debug log -- surfaces writer/reader drift rather than
+    masking it.
     """
     rate_limits = event.get("rate_limits")
     if not isinstance(rate_limits, dict):
@@ -164,9 +160,8 @@ def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
     for window_key, window_value in rate_limits.items():
         if not isinstance(window_value, dict):
             continue
-        filtered = {k: v for k, v in window_value.items() if k in _WINDOW_FIELDS}
         try:
-            windows[str(window_key)] = WindowSnapshot.model_validate(filtered)
+            windows[str(window_key)] = WindowSnapshot.model_validate(window_value)
         except ValidationError as e:
             logger.debug("Skipping window {}: {}", window_key, e)
     return windows
