@@ -104,6 +104,29 @@ def _user_claude_marketplaces_dir() -> Path:
     return get_user_claude_config_dir() / "plugins" / "marketplaces"
 
 
+def _is_safe_subagent_type_segment(segment: str) -> bool:
+    """Return True if ``segment`` is safe to interpolate into a candidate path.
+
+    Rejects path-meaningful characters so a ``subagent_type`` value like
+    ``"../../etc/passwd"`` or ``"plugin:../x"`` cannot traverse out of
+    the ``.claude/agents/`` directory and read an unrelated ``.md``
+    file. The ``subagent_type`` field originates from Claude's Task
+    tool call (LLM output), so we treat it as untrusted-by-design even
+    though it is not externally attacker-controlled.
+
+    Real Claude Code agent names are restricted to a-z, 0-9, and ``-``
+    per the docs, so this conservative rejection cannot false-positive
+    on any legitimate input. Code must work on both macOS and Linux
+    per CLAUDE.md, so we disallow ``/``, ``\\``, and ``\\x00`` explicitly
+    (these cover the path-separator characters on both platforms).
+    """
+    if not segment:
+        return False
+    if segment in (".", ".."):
+        return False
+    return not any(bad in segment for bad in ("/", "\\", "\x00"))
+
+
 def _iter_candidate_paths(subagent_type: str, work_dir: Path) -> Iterator[Path]:
     """Yield candidate ``.md`` paths for ``subagent_type`` in precedence order.
 
@@ -113,9 +136,23 @@ def _iter_candidate_paths(subagent_type: str, work_dir: Path) -> Iterator[Path]:
     Mixing the two would silently let a flat user file shadow a
     marketplace-installed agent of the same agent-name, which would
     be surprising.
+
+    Each segment of ``subagent_type`` (the whole string for
+    non-namespaced, or ``plugin_name`` / ``agent_name`` for namespaced)
+    is validated by ``_is_safe_subagent_type_segment`` before being
+    interpolated into a path. Unsafe segments (path separators,
+    traversal tokens, empty strings) cause the iterator to yield
+    nothing -- the caller falls through to the prompt-only / unresolved
+    path, same as for built-in types.
     """
     if ":" in subagent_type:
         plugin_name, _, agent_name = subagent_type.partition(":")
+        if not _is_safe_subagent_type_segment(plugin_name) or not _is_safe_subagent_type_segment(agent_name):
+            logger.warning(
+                "agent_definitions: rejecting unsafe namespaced subagent_type {!r}",
+                subagent_type,
+            )
+            return
         marketplaces_root = _user_claude_marketplaces_dir()
         if not marketplaces_root.is_dir():
             return
@@ -131,6 +168,12 @@ def _iter_candidate_paths(subagent_type: str, work_dir: Path) -> Iterator[Path]:
         for marketplace_dir in marketplace_dirs:
             yield marketplace_dir / "plugins" / plugin_name / "agents" / f"{agent_name}.md"
         return
+    if not _is_safe_subagent_type_segment(subagent_type):
+        logger.warning(
+            "agent_definitions: rejecting unsafe non-namespaced subagent_type {!r}",
+            subagent_type,
+        )
+        return
     yield work_dir / ".claude" / "agents" / f"{subagent_type}.md"
     yield _user_claude_agents_dir() / f"{subagent_type}.md"
 
@@ -142,6 +185,9 @@ def resolve_agent_definition(subagent_type: str, work_dir: Path) -> AgentDefinit
     - empty ``subagent_type``,
     - built-in types (``general-purpose``, ``Explore``, ...) with no on-disk file,
     - any plugin-namespaced type whose marketplace path doesn't exist,
+    - any ``subagent_type`` with unsafe characters (path separators,
+      traversal tokens, or empty segments after splitting on ``:``);
+      logged as a warning,
     - any file the resolver can't read (logged as a warning).
 
     Returns an ``AgentDefinition`` (with the post-frontmatter body) for

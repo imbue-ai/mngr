@@ -229,6 +229,44 @@ def test_malformed_yaml_frontmatter_returns_none_without_raising(fake_home: Path
     assert result is None
 
 
+@pytest.mark.parametrize(
+    "subagent_type",
+    [
+        pytest.param("../../etc/passwd", id="non_namespaced_traversal"),
+        pytest.param("foo/bar", id="non_namespaced_slash"),
+        pytest.param("foo\\bar", id="non_namespaced_backslash"),
+        pytest.param("..", id="non_namespaced_dotdot"),
+        pytest.param(".", id="non_namespaced_dot"),
+        pytest.param("plugin:../etc/hosts", id="namespaced_agent_traversal"),
+        pytest.param("..:agent", id="namespaced_plugin_dotdot"),
+        pytest.param("plugin:foo/bar", id="namespaced_agent_slash"),
+        pytest.param("plugin\\x:agent", id="namespaced_plugin_backslash"),
+        pytest.param("foo\x00bar", id="non_namespaced_nul"),
+    ],
+)
+def test_unsafe_subagent_type_rejected(subagent_type: str, fake_home: Path, tmp_path: Path) -> None:
+    """Path-meaningful characters in ``subagent_type`` are rejected so the
+    resolver cannot traverse out of the ``.claude/agents/`` dir to read
+    an unrelated ``.md`` file. Even if a malicious ``.md`` were planted
+    at the traversal target, the resolver must refuse to open it.
+
+    Defense-in-depth: ``subagent_type`` comes from Claude's Task tool
+    call (LLM output) and is not strictly attacker-controlled, but
+    the same conservative rejection also surfaces typos that would
+    otherwise silently miss.
+    """
+    # Plant a .md file at a plausible traversal target so the test
+    # would fail (resolve to that file) if validation were missing.
+    traversal_target = fake_home.parent / "traversal_target.md"
+    traversal_target.write_text("---\nname: traversal\n---\n\nLEAKED CONTENT.\n")
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    result = resolve_agent_definition(subagent_type, work_dir)
+    assert result is None
+
+
 def test_first_marketplace_wins_when_multiple_have_same_plugin_agent(fake_home: Path, tmp_path: Path) -> None:
     """If two marketplaces both ship ``<plugin>/agents/<agent>.md``, the
     first (sorted by name) wins. Stable precedence is required so the
