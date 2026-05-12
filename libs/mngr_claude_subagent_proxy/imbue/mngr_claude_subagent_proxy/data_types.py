@@ -26,8 +26,11 @@ class SubagentProxyMode(UpperCaseStrEnum):
     ``python -m imbue.mngr_claude_subagent_proxy.subagent_wait``) and
     treats subagent_wait's stdout as the Task tool's tool_result.
     Nothing is spawned by the deny hook itself, no per-Task
-    wait-script is generated, no PostToolUse / SessionStart hooks are
-    installed, and no Stop-hook guarding or settings.json check runs.
+    wait-script is generated, no PostToolUse hook is installed, and
+    no Stop-hook guarding or settings.json check runs. A SessionStart
+    hook IS installed -- the same label-driven ``hooks/reap.py`` PROXY
+    mode uses -- so terminal children spawned via the skill's protocol
+    are reaped on the parent's next session start.
     """
 
     PROXY = auto()
