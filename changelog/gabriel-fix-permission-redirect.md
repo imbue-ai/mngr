@@ -1,0 +1,1 @@
+- Fixed: after approving or denying a permission request in the minds app, you are now redirected back to the workspace of the agent that made the request, rather than to the home page.
