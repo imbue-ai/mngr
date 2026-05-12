@@ -8,8 +8,8 @@ from loguru import logger
 from imbue.mngr.api.address_parsers import parse_host_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import find_agents_by_addresses
+from imbue.mngr.api.find import find_all_matching_hosts
 from imbue.mngr.api.find import group_agents_by_host
-from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import HOST_ADDRESS
@@ -33,12 +33,12 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import BaseMngrError
-from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
@@ -95,49 +95,22 @@ class SnapshotDestroyCliOptions(CommonCliOptions):
 # =============================================================================
 
 
-def _find_host_across_providers(
-    host_address: HostAddress,
-    mngr_ctx: MngrContext,
-) -> tuple[HostId, ProviderInstanceName] | None:
-    """Find a host by :class:`HostAddress` across all providers.
-
-    Returns ``(host_id, provider_name)`` if found, or ``None`` if no provider
-    has a matching host.
-    """
-    host_part = host_address.host
-    provider_name = host_address.provider
-    for provider in get_all_provider_instances(mngr_ctx):
-        if provider_name is not None and provider.name != provider_name:
-            continue
-        if host_part is None:
-            continue
-        try:
-            host = provider.get_host(HostId(str(host_part)))
-            return host.id, provider.name
-        except (HostNotFoundError, ValueError):
-            pass
-        try:
-            host = provider.get_host(host_part)
-            return host.id, provider.name
-        except (HostNotFoundError, ValueError):
-            pass
-    return None
-
-
 def _classify_mixed_identifiers(
     identifiers: list[str],
     mngr_ctx: MngrContext,
-) -> tuple[list[AgentAddress], list[HostAddress]]:
+) -> tuple[list[AgentAddress], list[HostAddress], list[DiscoveredHost]]:
     """Classify mixed identifiers into agent and host identifiers.
 
     Each identifier is checked against known agent names and IDs.
     If it matches an agent, it's treated as an agent identifier.
     Otherwise, it's treated as a host identifier.
 
-    Returns (agent_identifiers, host_identifiers).
+    Returns ``(agent_addresses, host_addresses, all_hosts)``. The discovered
+    host list is returned alongside so callers can resolve host addresses
+    against the same set without re-running discovery.
     """
     if not identifiers:
-        return [], []
+        return [], [], []
 
     # Use try/except to gracefully handle provider errors (e.g. unreachable providers).
     # Partial results are acceptable here since we're only classifying identifiers.
@@ -151,8 +124,9 @@ def _classify_mixed_identifiers(
         )
     except BaseMngrError as e:
         logger.warning("Failed to load agents for identifier classification: {}", e)
-        # Treat all identifiers as host identifiers when agents cannot be loaded.
-        return [], [parse_host_address(s) for s in identifiers]
+        # Treat all identifiers as host identifiers when agents cannot be loaded;
+        # host resolution downstream will then surface a clean "not found" error.
+        return [], [parse_host_address(s) for s in identifiers], []
 
     known_names_and_ids: set[str] = set()
     for agent_refs in agents_by_host.values():
@@ -168,18 +142,21 @@ def _classify_mixed_identifiers(
         else:
             host_addresses.append(parse_host_address(identifier))
 
-    return agent_addresses, host_addresses
+    return agent_addresses, host_addresses, list(agents_by_host.keys())
 
 
 def _resolve_snapshot_hosts(
     agent_addresses: list[AgentAddress],
     host_addresses: list[HostAddress],
+    all_hosts: list[DiscoveredHost],
     mngr_ctx: MngrContext,
 ) -> list[tuple[str, ProviderInstanceName, list[str]]]:
     """Resolve agent and host identifiers to unique host targets.
 
     Returns a list of (host_id_str, provider_name, agent_names) tuples,
-    deduplicated by host.
+    deduplicated by host. An ambiguous host name (matching multiple hosts)
+    snapshots every matching host, mirroring the agent path's set-based
+    behavior.
     """
     seen_hosts: dict[str, tuple[ProviderInstanceName, list[str]]] = {}
 
@@ -206,13 +183,13 @@ def _resolve_snapshot_hosts(
     # lookup in _classify_mixed_identifiers, so if host lookup also fails,
     # the error should mention both.
     for host_address in host_addresses:
-        result = _find_host_across_providers(host_address, mngr_ctx)
-        if result is None:
+        matches = find_all_matching_hosts(host_address, all_hosts)
+        if not matches:
             raise UserInputError(f"Agent or host not found: {host_address}")
-        host_id, provider_name = result
-        host_id_str = str(host_id)
-        if host_id_str not in seen_hosts:
-            seen_hosts[host_id_str] = (provider_name, [])
+        for match in matches:
+            host_id_str = str(match.host_id)
+            if host_id_str not in seen_hosts:
+                seen_hosts[host_id_str] = (match.provider_name, [])
 
     return [(host_id_str, prov, agents) for host_id_str, (prov, agents) in seen_hosts.items()]
 
@@ -482,7 +459,7 @@ def _snapshot_create_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     # Classify mixed positional identifiers as agents or hosts
     expanded_identifiers = expand_stdin_placeholder(opts.identifiers)
-    mixed_agents, mixed_hosts = _classify_mixed_identifiers(expanded_identifiers, mngr_ctx)
+    mixed_agents, mixed_hosts, all_hosts = _classify_mixed_identifiers(expanded_identifiers, mngr_ctx)
 
     # Combine with explicit --agent and --host options
     agent_addresses: list[AgentAddress] = mixed_agents + list(opts.agent_list)
@@ -499,6 +476,7 @@ def _snapshot_create_impl(ctx: click.Context, **kwargs: Any) -> None:
     targets = _resolve_snapshot_hosts(
         agent_addresses=agent_addresses,
         host_addresses=host_addresses,
+        all_hosts=all_hosts,
         mngr_ctx=mngr_ctx,
     )
 
@@ -598,7 +576,7 @@ def snapshot_list(ctx: click.Context, **kwargs: Any) -> None:
 
     # Classify mixed positional identifiers as agents or hosts
     expanded_identifiers = expand_stdin_placeholder(opts.identifiers)
-    mixed_agents, mixed_hosts = _classify_mixed_identifiers(expanded_identifiers, mngr_ctx)
+    mixed_agents, mixed_hosts, all_hosts = _classify_mixed_identifiers(expanded_identifiers, mngr_ctx)
 
     # Combine with explicit --agent and --host options
     agent_addresses: list[AgentAddress] = mixed_agents + list(opts.agent_list)
@@ -613,6 +591,7 @@ def snapshot_list(ctx: click.Context, **kwargs: Any) -> None:
     targets = _resolve_snapshot_hosts(
         agent_addresses=agent_addresses,
         host_addresses=host_addresses,
+        all_hosts=all_hosts,
         mngr_ctx=mngr_ctx,
     )
 
@@ -699,10 +678,11 @@ def snapshot_destroy(ctx: click.Context, **kwargs: Any) -> None:
     if opts.snapshots and opts.all_snapshots:
         raise click.UsageError("Cannot specify both --snapshot and --all-snapshots")
 
-    # Resolve to hosts
+    # Resolve to hosts (no host_addresses here, so all_hosts is unused)
     targets = _resolve_snapshot_hosts(
         agent_addresses=agent_addresses,
         host_addresses=[],
+        all_hosts=[],
         mngr_ctx=mngr_ctx,
     )
 

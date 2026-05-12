@@ -173,17 +173,18 @@ def test_snapshot_destroy_subcommand_not_forwarded(
 def test_classify_mixed_identifiers_empty_input_returns_empty_lists(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """Empty identifier list returns two empty lists."""
-    agent_ids, host_ids = _classify_mixed_identifiers([], temp_mngr_ctx)
+    """Empty identifier list returns three empty lists."""
+    agent_ids, host_ids, all_hosts = _classify_mixed_identifiers([], temp_mngr_ctx)
     assert agent_ids == []
     assert host_ids == []
+    assert all_hosts == []
 
 
 def test_classify_mixed_identifiers_no_agents_treats_all_as_hosts(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """When no agents exist, all identifiers are classified as host identifiers."""
-    agent_ids, host_ids = _classify_mixed_identifiers(["foo", "bar"], temp_mngr_ctx)
+    agent_ids, host_ids, _ = _classify_mixed_identifiers(["foo", "bar"], temp_mngr_ctx)
     assert agent_ids == []
     assert host_ids == [HostAddress(host=HostName("foo")), HostAddress(host=HostName("bar"))]
 
@@ -288,7 +289,7 @@ def test_classify_mixed_identifiers_single_unknown_identifier(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """A single unknown identifier is classified as a host identifier."""
-    agent_ids, host_ids = _classify_mixed_identifiers(["some-host-id"], temp_mngr_ctx)
+    agent_ids, host_ids, _ = _classify_mixed_identifiers(["some-host-id"], temp_mngr_ctx)
     assert agent_ids == []
     assert host_ids == [HostAddress(host=HostName("some-host-id"))]
 
@@ -297,7 +298,7 @@ def test_classify_mixed_identifiers_multiple_unknown_identifiers(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """Multiple unknown identifiers are all classified as host identifiers."""
-    agent_ids, host_ids = _classify_mixed_identifiers(["host-a", "host-b", "host-c"], temp_mngr_ctx)
+    agent_ids, host_ids, _ = _classify_mixed_identifiers(["host-a", "host-b", "host-c"], temp_mngr_ctx)
     assert agent_ids == []
     assert host_ids == [
         HostAddress(host=HostName("host-a")),
