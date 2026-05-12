@@ -44,6 +44,7 @@ from imbue.mngr.cli.provision import provision
 from imbue.mngr.cli.pull import pull
 from imbue.mngr.cli.push import push
 from imbue.mngr.cli.rename import rename
+from imbue.mngr.cli.restart_host import restart_host
 from imbue.mngr.cli.snapshot import snapshot
 from imbue.mngr.cli.start import start
 from imbue.mngr.cli.stop import stop
@@ -340,6 +341,7 @@ BUILTIN_COMMANDS: list[click.Command] = [
     pull,
     push,
     rename,
+    restart_host,
     start,
     stop,
     limit,
