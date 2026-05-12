@@ -1865,7 +1865,7 @@ pushing all local branches and tags via git. Use --transfer to override the defa
         ("Create an agent in a new Modal sandbox", "mngr create my-agent@.modal"),
         ("Create using a named template", "mngr create my-agent --template modal"),
         ("Stack multiple templates", "mngr create my-agent -t modal -t codex"),
-        ("Create a codex agent (overriding the configured default)", "mngr create my-agent codex"),
+        ("Create a codex agent instead of the default", "mngr create my-agent codex"),
         ("Pass arguments to the agent", "mngr create my-agent -- --model opus"),
         ("Create on an existing host", "mngr create my-agent@my-dev-box"),
         ("Create on existing host with provider", "mngr create my-agent@my-dev-box.modal"),
