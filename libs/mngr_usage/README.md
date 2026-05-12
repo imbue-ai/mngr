@@ -51,8 +51,9 @@ reader-derived `seconds_until_reset`, `elapsed_seconds`, and
 writer; absent on variable-duration windows like Claude's overage).
 
 Exit codes mirror `mngr wait`: 0 matched, 1 error, 2 timeout. Default poll
-interval is 30s; use `--interval` for tighter cadence. `--source NAME`
-restricts which writer sources count for matching.
+interval is 30s; use `--interval` for tighter cadence. To restrict matching
+to a specific writer, use the top-level `source` field in CEL (e.g.
+`--until 'source == "claude" && five_hour.used_percentage < 50'`).
 
 ## Implementing a writer plugin
 

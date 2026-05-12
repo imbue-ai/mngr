@@ -256,9 +256,16 @@ def _snapshots_for_agent(mngr_ctx: MngrContext, agent: AgentDetails) -> list[Usa
 class _SnapshotCollector(MutableModel):
     """``list_agents`` on_agent callback that collects per-agent rate-limit snapshots.
 
+    The ``_lock`` here is required, not defensive. ``list_agents(is_streaming=True)``
+    fans out across an executor with ``max_workers=32`` per provider AND a nested
+    ``max_workers=32`` executor per host within each provider (see ``mngr.api.list``'s
+    ``_list_agents_streaming`` and ``_construct_discover_and_emit_for_provider``),
+    and ``_collect_and_emit_details_for_host`` invokes ``on_agent`` *outside* the
+    results_lock. Multiple host threads can therefore enter ``__call__`` concurrently;
+    without the lock, the ``list.extend`` would race.
+
     Class-based rather than a closure so it can hold its own lock without
-    triggering the "no inline functions" ratchet (the callback runs from a
-    streaming provider thread).
+    triggering the "no inline functions" ratchet.
     """
 
     mngr_ctx: MngrContext
@@ -346,19 +353,15 @@ class WaitForUsageResult(FrozenModel):
 def _match_first_source(
     snapshots: Sequence[UsageSnapshot],
     until_filters: Sequence[Any],
-    source_filter: tuple[str, ...],
     now: int,
 ) -> str | None:
     """Return the ``source_name`` of the first snapshot whose CEL context satisfies all ``until_filters``.
 
-    ``source_filter`` is the explicit user-supplied ``--source NAME`` list;
-    when non-empty, snapshots whose ``source_name`` isn't in the set are
-    skipped (treated as "not a candidate"), so a non-matching writer can't
-    accidentally satisfy the predicate.
+    Users who want to restrict matching to a specific writer can encode that
+    directly in the CEL predicate via the top-level ``source`` field, e.g.
+    ``--until 'source == "claude" && five_hour.used_percentage < 50'``.
     """
     for snapshot in snapshots:
-        if source_filter and snapshot.source_name not in source_filter:
-            continue
         raw_ctx = build_source_cel_context(snapshot, now)
         cel_ctx = build_cel_context(raw_ctx)
         passed = apply_compiled_cel_filters(
@@ -376,10 +379,8 @@ def wait_for_usage(
     *,
     poll_fn: Callable[[], list[UsageSnapshot]],
     until_filters: Sequence[Any],
-    source_filter: tuple[str, ...],
     timeout_seconds: float | None,
     interval_seconds: float,
-    on_tick: Callable[[list[UsageSnapshot], str | None], None] | None = None,
     now_fn: Callable[[], int] = lambda: int(time.time()),
     monotonic_fn: Callable[[], float] = time.monotonic,
     sleep_fn: Callable[[float], None] = time.sleep,
@@ -387,10 +388,9 @@ def wait_for_usage(
     """Poll until any source's CEL context satisfies all ``until_filters``, or timeout.
 
     Per tick: ``poll_fn()`` returns the (already collapsed-by-source)
-    snapshot list. For each remaining source (after applying
-    ``source_filter``), build a CEL context and evaluate against
-    ``until_filters``. First passing source wins. If no match and not
-    timed out, sleep ``interval_seconds`` and try again.
+    snapshot list. For each source, build a CEL context and evaluate
+    against ``until_filters``. First passing source wins. If no match
+    and not timed out, sleep ``interval_seconds`` and try again.
 
     Clock and sleep are injected so tests can run the loop fast without
     real time elapsing. The default callable for ``now_fn`` reads
@@ -406,14 +406,11 @@ def wait_for_usage(
             last_snapshots = poll_fn()
         except (MngrError, OSError) as e:
             # A flaky host shouldn't kill the wait. Polling errors get logged
-            # and we try again on the next interval; last_snapshots keeps its
-            # prior value -- the most recent successful poll's snapshots, or
-            # the empty initial value if no poll has ever succeeded -- so
-            # on_tick always receives a well-formed (possibly empty) list.
+            # and we try again on the next interval; last_snapshots keeps
+            # whatever the previous successful poll produced (or stays
+            # empty if no poll has ever succeeded).
             logger.warning("Usage poll failed (will retry): {}", e)
-        matched = _match_first_source(last_snapshots, until_filters, source_filter, now_fn())
-        if on_tick is not None:
-            on_tick(last_snapshots, matched)
+        matched = _match_first_source(last_snapshots, until_filters, now_fn())
         if matched is not None:
             return WaitForUsageResult(
                 is_matched=True,

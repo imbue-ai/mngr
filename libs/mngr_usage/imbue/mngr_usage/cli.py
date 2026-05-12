@@ -483,16 +483,13 @@ class UsageWaitCliOptions(CommonCliOptions, AgentFilterCliOptions):
     ``until_filters`` (from ``--until``) is the predicate vocabulary --
     a list of CEL expressions, all of which must evaluate true against
     a single source's CEL context for the wait to succeed. See
-    ``api.build_source_cel_context`` for the shape that's exposed.
-
-    ``source_filters`` (from ``--source``) restricts which writer
-    sources count for matching: ``--source claude`` only matches the
-    ``claude`` source, ignoring anything else even if it would
-    otherwise satisfy the predicate.
+    ``api.build_source_cel_context`` for the shape that's exposed. Users
+    can scope matching to a specific writer via the top-level ``source``
+    field in CEL (e.g. ``source == "claude" && five_hour.used_percentage
+    < 50``).
     """
 
     until_filters: tuple[str, ...]
-    source_filters: tuple[str, ...]
     provider: tuple[str, ...]
     timeout: str | None
     interval: str
@@ -508,13 +505,6 @@ class UsageWaitCliOptions(CommonCliOptions, AgentFilterCliOptions):
     help="CEL expression that must evaluate true for some source to win the wait "
     "[repeatable, all must match]. The CEL context is the per-source dict from "
     "`mngr usage --format json` (see help description for shape).",
-)
-@optgroup.option(
-    "--source",
-    "source_filters",
-    multiple=True,
-    help="Only consider these writer sources (e.g. 'claude'). When omitted, any source "
-    "may satisfy the predicate [repeatable].",
 )
 @optgroup.group("Wait options")
 @optgroup.option(
@@ -570,12 +560,10 @@ def wait(ctx: click.Context, **kwargs: Any) -> None:
     emit_info(
         f"Waiting for usage predicate (poll {opts.interval}"
         f"{', timeout ' + opts.timeout if opts.timeout is not None else ''}"
-        f"{', sources=' + ','.join(opts.source_filters) if opts.source_filters else ''}"
         ")",
         output_opts.output_format,
     )
 
-    captured_output_format = output_opts.output_format
     try:
         result = wait_for_usage(
             poll_fn=lambda: gather_usage_snapshots(
@@ -585,16 +573,16 @@ def wait(ctx: click.Context, **kwargs: Any) -> None:
                 provider_names=provider_names,
             ),
             until_filters=until_programs,
-            source_filter=opts.source_filters,
             timeout_seconds=timeout_seconds,
             interval_seconds=interval_seconds,
-            on_tick=lambda snapshots, matched: _emit_wait_tick(snapshots, matched, captured_output_format),
         )
     except KeyboardInterrupt:
         logger.debug("Received keyboard interrupt")
         ctx.exit(EXIT_CODE_ERROR)
         return
 
+    if result.is_matched:
+        _emit_match_state_change(result, output_opts.output_format)
     _output_wait_result(result, output_opts.output_format)
     if result.is_matched:
         ctx.exit(EXIT_CODE_SUCCESS)
@@ -604,32 +592,32 @@ def wait(ctx: click.Context, **kwargs: Any) -> None:
         ctx.exit(EXIT_CODE_ERROR)
 
 
-def _emit_wait_tick(
-    snapshots: list[UsageSnapshot],
-    matched_source: str | None,
-    output_format: OutputFormat,
-) -> None:
-    """Per-tick progress emission, modeled on ``mngr wait``'s state_change events.
+def _emit_match_state_change(result: WaitForUsageResult, output_format: OutputFormat) -> None:
+    """Emit the match transition in ``mngr_wait``'s ``state_change`` JSONL shape.
 
-    JSONL: one ``tick`` event per poll with a compact summary. Human: one
-    line per tick (silent in JSON mode, which prefers a single final
-    payload over noisy progress).
+    The match is the only state change ``wait_for_usage`` produces: at most
+    once per call, ``matched_source`` flips from None to a ``source_name``.
+    Reusing ``mngr_wait``'s envelope means downstream JSONL consumers see one
+    consistent shape across both wait commands.
     """
-    source_names: list[str] = [s.source_name for s in snapshots]
-    summary = {
-        "matched_source": matched_source,
-        "sources": source_names,
-    }
     match output_format:
         case OutputFormat.JSONL:
-            emit_event("tick", summary, OutputFormat.JSONL)
+            emit_event(
+                "state_change",
+                {
+                    "field": "matched_source",
+                    "old_value": None,
+                    "new_value": result.matched_source,
+                    "elapsed_seconds": result.elapsed_seconds,
+                },
+                OutputFormat.JSONL,
+            )
         case OutputFormat.HUMAN:
-            if matched_source is not None:
-                write_human_line("[{}] matched", matched_source)
-            elif snapshots:
-                write_human_line("polled: {} (no match yet)", ", ".join(source_names))
-            else:
-                write_human_line("polled: no usage data yet")
+            write_human_line(
+                "matched_source changed: None -> {} (after {:.1f}s)",
+                result.matched_source,
+                result.elapsed_seconds,
+            )
         case OutputFormat.JSON:
             # JSON mode: silent until the final result payload.
             pass
@@ -676,7 +664,7 @@ def _output_wait_result(result: WaitForUsageResult, output_format: OutputFormat)
 CommandHelpMetadata(
     key="usage.wait",
     one_line_description="Block until a usage snapshot matches a CEL predicate",
-    synopsis="mngr usage wait --until CEL [--until CEL ...] [--source NAME ...] [--timeout DURATION] [--interval DURATION]",
+    synopsis="mngr usage wait --until CEL [--until CEL ...] [--timeout DURATION] [--interval DURATION]",
     description="""Polls ``mngr usage`` snapshots until at least one source's CEL
 context satisfies every ``--until`` expression. Composable with shell:
 
@@ -704,8 +692,8 @@ Exit codes:
             "mngr usage wait --until 'five_hour.elapsed_percentage > 75 && five_hour.used_percentage < 50'",
         ),
         (
-            "Restrict to Claude usage only",
-            "mngr usage wait --source claude --until 'five_hour.used_percentage < 25'",
+            "Restrict to Claude usage only (via CEL)",
+            "mngr usage wait --until 'source == \"claude\" && five_hour.used_percentage < 25'",
         ),
         (
             "Bail out after an hour",

@@ -169,7 +169,6 @@ def test_wait_for_usage_matches_on_first_poll_when_predicate_already_true() -> N
     result = wait_for_usage(
         poll_fn=lambda: snapshots,
         until_filters=_compile_until(["five_hour.used_percentage < 50"]),
-        source_filter=(),
         timeout_seconds=None,
         interval_seconds=30.0,
         now_fn=lambda: 1000,
@@ -196,7 +195,6 @@ def test_wait_for_usage_polls_until_predicate_flips_true() -> None:
     result = wait_for_usage(
         poll_fn=poll_fn,
         until_filters=_compile_until(["five_hour.used_percentage < 50"]),
-        source_filter=(),
         timeout_seconds=None,
         interval_seconds=30.0,
         now_fn=lambda: 1000,
@@ -214,7 +212,6 @@ def test_wait_for_usage_times_out_when_predicate_never_matches() -> None:
     result = wait_for_usage(
         poll_fn=lambda: snapshots,
         until_filters=_compile_until(["five_hour.used_percentage < 50"]),
-        source_filter=(),
         timeout_seconds=60.0,
         interval_seconds=30.0,
         now_fn=lambda: 1000,
@@ -226,14 +223,14 @@ def test_wait_for_usage_times_out_when_predicate_never_matches() -> None:
     assert result.matched_source is None
 
 
-def test_wait_for_usage_source_filter_excludes_non_matching_sources() -> None:
-    """With --source claude, an opencode snapshot that would otherwise match is ignored."""
+def test_wait_for_usage_source_predicate_in_cel_excludes_non_matching_sources() -> None:
+    """Users scope to one source via CEL: ``source == "claude"``. An opencode
+    snapshot that would otherwise satisfy the numeric predicate is ignored."""
     snapshots = [_make_snapshot("opencode", used=10.0, resets_at=2000)]
     clock = _FakeClock()
     result = wait_for_usage(
         poll_fn=lambda: snapshots,
-        until_filters=_compile_until(["five_hour.used_percentage < 50"]),
-        source_filter=("claude",),
+        until_filters=_compile_until(['source == "claude" && five_hour.used_percentage < 50']),
         timeout_seconds=60.0,
         interval_seconds=30.0,
         now_fn=lambda: 1000,
@@ -254,7 +251,6 @@ def test_wait_for_usage_multi_source_any_match_wins() -> None:
     result = wait_for_usage(
         poll_fn=lambda: snapshots,
         until_filters=_compile_until(["five_hour.used_percentage < 50"]),
-        source_filter=(),
         timeout_seconds=None,
         interval_seconds=30.0,
         now_fn=lambda: 1000,
@@ -272,7 +268,6 @@ def test_wait_for_usage_no_snapshots_keeps_polling_until_timeout() -> None:
     result = wait_for_usage(
         poll_fn=lambda: [],
         until_filters=_compile_until(["five_hour.used_percentage < 50"]),
-        source_filter=(),
         timeout_seconds=60.0,
         interval_seconds=30.0,
         now_fn=lambda: 1000,
@@ -283,35 +278,6 @@ def test_wait_for_usage_no_snapshots_keeps_polling_until_timeout() -> None:
     assert result.is_timed_out is True
     assert result.matched_source is None
     assert result.final_snapshots == ()
-
-
-def test_wait_for_usage_on_tick_called_each_poll() -> None:
-    """on_tick fires every poll; matched_source arg is None until the match tick."""
-    ticks: list[tuple[int, str | None]] = []
-    call_count = [0]
-
-    def poll_fn() -> list[UsageSnapshot]:
-        call_count[0] += 1
-        used = 80.0 if call_count[0] < 3 else 10.0
-        return [_make_snapshot("claude", used=used, resets_at=2000)]
-
-    clock = _FakeClock()
-    wait_for_usage(
-        poll_fn=poll_fn,
-        until_filters=_compile_until(["five_hour.used_percentage < 50"]),
-        source_filter=(),
-        timeout_seconds=None,
-        interval_seconds=30.0,
-        on_tick=lambda snapshots, matched: ticks.append((len(snapshots), matched)),
-        now_fn=lambda: 1000,
-        monotonic_fn=clock.monotonic,
-        sleep_fn=clock.sleep,
-    )
-    # 3 ticks: first two have matched=None (80% used), the third matches.
-    assert len(ticks) == 3
-    assert ticks[0] == (1, None)
-    assert ticks[1] == (1, None)
-    assert ticks[2] == (1, "claude")
 
 
 def test_wait_for_usage_handles_poll_error_and_keeps_trying() -> None:
@@ -328,7 +294,6 @@ def test_wait_for_usage_handles_poll_error_and_keeps_trying() -> None:
     result = wait_for_usage(
         poll_fn=poll_fn,
         until_filters=_compile_until(["five_hour.used_percentage < 50"]),
-        source_filter=(),
         timeout_seconds=None,
         interval_seconds=30.0,
         now_fn=lambda: 1000,
@@ -352,7 +317,6 @@ def test_wait_for_usage_elapsed_percentage_predicate() -> None:
     result = wait_for_usage(
         poll_fn=lambda: snapshots,
         until_filters=_compile_until(["five_hour.elapsed_percentage > 75.0 && five_hour.used_percentage < 50.0"]),
-        source_filter=(),
         timeout_seconds=None,
         interval_seconds=30.0,
         now_fn=lambda: 14500,

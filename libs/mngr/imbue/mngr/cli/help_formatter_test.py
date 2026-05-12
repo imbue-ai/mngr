@@ -650,11 +650,10 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
         }
     ),
     # ``mngr usage wait``'s synopsis enumerates the wait-specific predicate and
-    # wait-control options (--until / --source / --timeout / --interval). The
-    # standard agent-filter flags (--include / --exclude / --local / ... /
-    # --provider) are inherited via ``add_agent_filter_options`` and listed in
-    # the OPTIONS section of help/docs; keeping them out of the synopsis keeps
-    # it readable.
+    # wait-control options (--until / --timeout / --interval). The standard
+    # agent-filter flags (--include / --exclude / --local / ... / --provider)
+    # are inherited via ``add_agent_filter_options`` and listed in the OPTIONS
+    # section of help/docs; keeping them out of the synopsis keeps it readable.
     "usage.wait": frozenset(
         {
             "--active",

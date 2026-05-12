@@ -104,7 +104,6 @@ mngr usage wait [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--until` | text | CEL expression that must evaluate true for some source to win the wait [repeatable, all must match]. The CEL context is the per-source dict from `mngr usage --format json` (see help description for shape). | None |
-| `--source` | text | Only consider these writer sources (e.g. 'claude'). When omitted, any source may satisfy the predicate [repeatable]. | None |
 
 ## Wait options
 
@@ -155,10 +154,10 @@ mngr usage wait [OPTIONS]
 $ mngr usage wait --until 'five_hour.elapsed_percentage > 75 && five_hour.used_percentage < 50'
 ```
 
-**Restrict to Claude usage only**
+**Restrict to Claude usage only (via CEL)**
 
 ```bash
-$ mngr usage wait --source claude --until 'five_hour.used_percentage < 25'
+$ mngr usage wait --until 'source == "claude" && five_hour.used_percentage < 25'
 ```
 
 **Bail out after an hour**

@@ -10,8 +10,11 @@ mngr usage wait --until 'five_hour.elapsed_percentage > 75 && five_hour.used_per
 
 The CEL context per source matches `mngr usage --format json`'s
 `sources[i]`. Exit codes mirror `mngr wait` (0 matched, 1 error, 2
-timeout). `--source NAME` restricts which writer sources count for
-matching; default poll interval is 30s.
+timeout); JSONL output uses the same `state_change` envelope as
+`mngr wait` so downstream consumers see one consistent shape across
+both wait commands. Restrict matching to a specific writer with the
+top-level `source` field in CEL (e.g. `source == "claude"`). Default
+poll interval is 30s.
 
 The Claude writer now also emits `window_seconds` per fixed-duration
 window (`five_hour=18000`, `seven_day=604800`), enabling the reader to
