@@ -18,13 +18,13 @@ so the provisioner works for local and remote agents uniformly.
 
 from __future__ import annotations
 
-import importlib.resources
 import json
 from pathlib import Path
 
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.hosts.host import install_packaged_script_on_host
 from imbue.mngr.hosts.host import read_json_dict_via_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -87,13 +87,6 @@ def _write_user_statusline_cmd(host: OnlineHostInterface, commands_dir: Path, co
     host.write_file(sidecar, command.encode())
 
 
-def _install_resource_script(host: OnlineHostInterface, commands_dir: Path, filename: str) -> None:
-    """Install a packaged resource script onto the host with mode 0755."""
-    dst = commands_dir / filename
-    content = importlib.resources.files(_resources).joinpath(filename).read_text().encode()
-    host.write_file(dst, content, mode="0755")
-
-
 def _install_settings_local_statusline(host: OnlineHostInterface, work_dir: Path, statusline_command: str) -> None:
     """Set ``statusLine.command`` in ``<work_dir>/.claude/settings.local.json`` on the host.
 
@@ -117,8 +110,15 @@ def _provision_statusline_shim(host: OnlineHostInterface, state_dir: Path, work_
     shim_path = str(commands_dir / _STATUSLINE_SHIM_SCRIPT)
     user_cmd = _capture_existing_statusline_command(host, work_dir, our_shim_path=shim_path)
     _write_user_statusline_cmd(host, commands_dir, user_cmd)
-    _install_resource_script(host, commands_dir, _STATUSLINE_SHIM_SCRIPT)
-    _install_resource_script(host, commands_dir, _RATE_LIMITS_WRITER_SCRIPT)
+    install_packaged_script_on_host(
+        host, module=_resources, filename=_STATUSLINE_SHIM_SCRIPT, dest=commands_dir / _STATUSLINE_SHIM_SCRIPT
+    )
+    install_packaged_script_on_host(
+        host,
+        module=_resources,
+        filename=_RATE_LIMITS_WRITER_SCRIPT,
+        dest=commands_dir / _RATE_LIMITS_WRITER_SCRIPT,
+    )
     _install_settings_local_statusline(host, work_dir, shim_path)
 
 

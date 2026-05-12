@@ -194,6 +194,31 @@ def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
     return host_dir / "agents" / str(agent_id)
 
 
+def install_packaged_script_on_host(
+    host: OnlineHostInterface,
+    *,
+    module: Any,
+    filename: str,
+    dest: Path,
+    mode: str = "0755",
+) -> None:
+    """Read ``filename`` from a Python package's resources and write it onto ``host``.
+
+    Common per-agent provisioning pattern: a plugin ships a shell or Python
+    script as a package resource (under ``<package>/resources/``) and needs
+    to install it onto an agent's host (local or remote) so something on
+    that host can later execute it. ``host.write_file`` is host-portable
+    (works for the local filesystem, SSH'd hosts, Modal volumes, etc.) and
+    handles the executable-bit via the ``mode`` argument.
+
+    ``module`` is the package object (e.g. ``imbue.mngr_claude_usage.resources``);
+    ``filename`` is the file name inside it; ``dest`` is the absolute path on
+    the host where the script should land.
+    """
+    content = importlib.resources.files(module).joinpath(filename).read_text().encode()
+    host.write_file(dest, content, mode=mode)
+
+
 def read_json_dict_via_host(host: OnlineHostInterface, path: Path) -> dict[str, Any]:
     """Host-aware variant of ``mngr.utils.file_utils.read_json_dict``.
 
