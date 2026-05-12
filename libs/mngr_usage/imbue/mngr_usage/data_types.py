@@ -46,6 +46,13 @@ class WindowSnapshot(FrozenModel):
 
     used_percentage: float | None = Field(default=None)
     resets_at: int | None = Field(default=None, description="Unix timestamp when this window resets")
+    window_seconds: int | None = Field(
+        default=None,
+        description="Window duration in seconds. When present (together with resets_at), enables "
+        "the reader to derive elapsed_seconds / elapsed_percentage without baking per-window-class "
+        "knowledge into mngr_usage. Writers emit this for fixed-duration windows (five_hour, "
+        "seven_day, ...) and omit it for variable-duration windows (e.g. Claude's overage).",
+    )
     label: str | None = Field(default=None, description="Human-display label; falls back to the window key.")
     status: str | None = Field(default=None)
     is_using_overage: bool | None = Field(default=None)

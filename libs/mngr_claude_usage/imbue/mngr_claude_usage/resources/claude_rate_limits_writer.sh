@@ -58,6 +58,12 @@ timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")
 # identifier-safe so format templates like {five_hour.used_percentage}
 # remain functional.
 #
+# window_seconds gives mngr_usage enough info to derive elapsed_percentage
+# (= 1 - seconds_until_reset / window_seconds) without baking window-class
+# knowledge into the reader. Overage has no fixed window length so it's
+# omitted; the reader treats missing window_seconds as "no derived
+# elapsed metrics for this window."
+#
 # The `type == "object"` guard handles unexpected `rate_limits` shapes
 # (e.g. a string or array, if the statusline schema ever changes): the
 # value is passed through unchanged, and the CLI reader's
@@ -65,13 +71,18 @@ timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")
 # this guard, jq's reduce would error and `set -euo pipefail` would
 # abort the writer.
 labels='{"five_hour":"5h","seven_day":"7d","overage":"overage"}'
+window_seconds='{"five_hour":18000,"seven_day":604800}'
 event=$(printf '%s' "$rate_limits" | jq -c \
   --arg event_id "$event_id" \
   --arg timestamp "$timestamp" \
   --argjson labels "$labels" \
+  --argjson window_seconds "$window_seconds" \
   '{source:"claude/rate_limits",type:"rate_limit_snapshot",event_id:$event_id,timestamp:$timestamp,
     rate_limits:(if type == "object"
-                 then . as $rl | reduce (keys_unsorted[]) as $k ({}; .[$k] = ($rl[$k] + (if $labels[$k] then {label:$labels[$k]} else {} end)))
+                 then . as $rl | reduce (keys_unsorted[]) as $k ({};
+                   .[$k] = ($rl[$k]
+                           + (if $labels[$k] then {label:$labels[$k]} else {} end)
+                           + (if $window_seconds[$k] then {window_seconds:$window_seconds[$k]} else {} end)))
                  else . end)}')
 
 printf '%s\n' "$event" >> "$events_path"

@@ -32,6 +32,28 @@ human output and as an entry in the JSON `sources` array.
 - `mngr usage --format jsonl`
 - `mngr usage --format '5h:{five_hour.used_percentage}%/{seven_day.used_percentage}%'`
 
+## Waiting on a predicate
+
+`mngr usage wait --until <CEL>` blocks until at least one source's CEL
+context satisfies every `--until` expression, then exits 0. Composable with
+shell:
+
+```
+mngr usage wait --until 'five_hour.elapsed_percentage > 75 && five_hour.used_percentage < 50' \
+  && mngr message my-agent "ok, kick off the next batch"
+```
+
+The CEL context per source mirrors one entry of `mngr usage --format json`'s
+`sources` array. Each window exposes the writer-emitted fields
+(`used_percentage`, `resets_at`, `window_seconds`, `label`, ...) plus the
+reader-derived `seconds_until_reset`, `elapsed_seconds`, and
+`elapsed_percentage` (the last two require `window_seconds` from the
+writer; absent on variable-duration windows like Claude's overage).
+
+Exit codes mirror `mngr wait`: 0 matched, 1 error, 2 timeout. Default poll
+interval is 30s; use `--interval` for tighter cadence. `--source NAME`
+restricts which writer sources count for matching.
+
 ## Implementing a writer plugin
 
 A writer plugin is responsible for producing `rate_limit_snapshot` events at
@@ -55,3 +77,10 @@ The writer chooses both the window keys and (optionally) per-window
 should be identifier-safe if you want format-template support; the per-window
 `label` controls human display (e.g. `"5h"` vs the literal key `"five_hour"`).
 Render order is the writer's insertion order in the JSONL.
+
+Writers may also include `"window_seconds": <int>` per window to declare a
+fixed window duration. When present, `mngr usage` derives `elapsed_seconds`
+and `elapsed_percentage`, which `mngr usage wait` CEL predicates can use to
+express "75% of the window has elapsed" without callers hardcoding window
+durations. Omit `window_seconds` for windows without a fixed length (e.g.
+Claude's overage indicator).

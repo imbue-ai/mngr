@@ -1,57 +1,49 @@
 from __future__ import annotations
 
-import json
 import time
-from datetime import datetime
-from threading import Lock
 from typing import Any
 from typing import assert_never
 
 import click
 from click_option_group import optgroup
 from loguru import logger
-from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.events import discover_event_sources
-from imbue.mngr.api.events import read_event_content
-from imbue.mngr.api.events import try_build_events_target_for_agent
-from imbue.mngr.api.list import ErrorBehavior
-from imbue.mngr.api.list import list_agents
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.exit_codes import EXIT_CODE_ERROR
+from imbue.mngr.cli.exit_codes import EXIT_CODE_SUCCESS
+from imbue.mngr.cli.exit_codes import EXIT_CODE_TIMEOUT
 from imbue.mngr.cli.filter_opts import AgentFilterCliOptions
 from imbue.mngr.cli.filter_opts import add_agent_filter_options
 from imbue.mngr.cli.filter_opts import build_agent_filter_cel
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
+from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
+from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
-from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import MngrError
-from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.duration import parse_duration_to_seconds
+from imbue.mngr_usage.api import WaitForUsageResult
+from imbue.mngr_usage.api import derive_elapsed
+from imbue.mngr_usage.api import gather_usage_snapshots
+from imbue.mngr_usage.api import wait_for_usage
+from imbue.mngr_usage.api import window_render_dict
 from imbue.mngr_usage.data_types import UsagePluginConfig
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
 
-# Discovery convention: each agent's state dir holds rate-limits events at
-#   <agent_state_dir>/events/<source>/rate_limits/events.jsonl
-# This mirrors the common_transcript pattern (events/<source>/common_transcript/
-# events.jsonl) used by `mngr transcript`. The <source> segment names the
-# writer (a free-form identifier chosen by the writer plugin) and becomes the
-# UsageSnapshot.source_name for the event. ``mngr usage`` finds events by
-# enumerating agents via ``list_agents`` and reading per-agent events via the
-# events API -- this works uniformly for local and remote agents, and inherits
-# ``mngr list``'s CEL filter machinery (``--include``, ``--exclude``,
+# Discovery convention is documented on ``api.gather_usage_snapshots``;
+# the CLI just calls it. ``mngr usage`` finds events by enumerating agents
+# via ``list_agents`` and reading per-agent events via the events API --
+# this works uniformly for local and remote agents, and inherits ``mngr
+# list``'s CEL filter machinery (``--include``, ``--exclude``,
 # ``--provider``, ``--local``, ...).
-_RATE_LIMITS_SOURCE_SUFFIX = "/rate_limits"
-_EVENTS_JSONL_FILENAME = "events.jsonl"
 
 _NO_DATA_HINT = (
     "No usage data yet -- check that a usage writer plugin is installed in the env "
@@ -85,237 +77,6 @@ def _parse_max_age(value: str | None) -> int | None:
     if value is None or not value.strip():
         return None
     return int(parse_duration_to_seconds(value))
-
-
-# =============================================================================
-# Discovery + parsing
-# =============================================================================
-
-
-@pure
-def _last_valid_event_from_content(content: str, source_for_warnings: str) -> dict[str, Any] | None:
-    """Return the last well-formed JSON object from a JSONL events file's content.
-
-    Walks lines from the end; tolerates a truncated trailing line by skipping
-    it and trying the previous one. Returns None if no valid line exists.
-    ``source_for_warnings`` is included in any malformed-line warning so the
-    user can locate the offending events file.
-    """
-    for line in reversed([raw for raw in content.splitlines() if raw.strip()]):
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError as e:
-            # A truncated trailing line (writer mid-flight, no newline yet) is the
-            # most common case; skip it and try the previous one. We log at warning
-            # level for visibility because corrupt earlier lines indicate something
-            # worse and the user should know about it; expected truncation will
-            # resolve on the next render.
-            logger.warning("Skipping malformed event line in {}: {}", source_for_warnings, e)
-            continue
-        if isinstance(event, dict):
-            return event
-    return None
-
-
-@pure
-def _parse_iso_timestamp(value: Any) -> int | None:
-    """Convert an ISO 8601 ``timestamp`` field to a Unix timestamp, or None on failure.
-
-    Python 3.11+ ``datetime.fromisoformat`` accepts the trailing ``Z`` and
-    9-digit fractional seconds the writer emits, so no normalization needed.
-    """
-    if not isinstance(value, str):
-        return None
-    try:
-        return int(datetime.fromisoformat(value).timestamp())
-    except ValueError:
-        return None
-
-
-@pure
-def _coerce_optional_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-@pure
-def _coerce_optional_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-@pure
-def _coerce_optional_str(value: Any) -> str | None:
-    return value if isinstance(value, str) else None
-
-
-@pure
-def _coerce_optional_bool(value: Any) -> bool | None:
-    return value if isinstance(value, bool) else None
-
-
-def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
-    """Reshape an event's ``rate_limits`` payload into UsageSnapshot windows.
-
-    The on-disk event shape (matching what the writer emits) is:
-
-        {"source": "<source>/rate_limits", "type": "rate_limit_snapshot",
-         "event_id": ..., "timestamp": ...,
-         "rate_limits": {"<window_key>": {"used_percentage": 11, "resets_at": ...,
-                                          "label": "5h"}, ...}}
-
-    Window keys and their order are entirely up to the writer; we preserve
-    JSONL insertion order. Per-window ``label`` (optional) is what the
-    human renderer uses; missing labels fall back to the window key.
-    Missing fields are coerced to None.
-    """
-    rate_limits = event.get("rate_limits")
-    if not isinstance(rate_limits, dict):
-        return {}
-    windows: dict[str, WindowSnapshot] = {}
-    for window_key, window_value in rate_limits.items():
-        if not isinstance(window_value, dict):
-            continue
-        windows[str(window_key)] = WindowSnapshot(
-            used_percentage=_coerce_optional_float(window_value.get("used_percentage")),
-            resets_at=_coerce_optional_int(window_value.get("resets_at")),
-            label=_coerce_optional_str(window_value.get("label")),
-            status=_coerce_optional_str(window_value.get("status")),
-            is_using_overage=_coerce_optional_bool(window_value.get("is_using_overage")),
-        )
-    return windows
-
-
-def _snapshot_from_event(event: dict[str, Any], source_name: str) -> UsageSnapshot | None:
-    """Reshape one events.jsonl line into a UsageSnapshot, or None if unusable."""
-    timestamp = _parse_iso_timestamp(event.get("timestamp"))
-    if timestamp is None:
-        return None
-    windows = _windows_from_event(event)
-    if not windows:
-        return None
-    return UsageSnapshot(source_name=source_name, windows=windows, updated_at=timestamp)
-
-
-def _snapshots_for_agent(mngr_ctx: MngrContext, agent: AgentDetails) -> list[UsageSnapshot]:
-    """Read all rate-limit snapshots from one agent's events directory.
-
-    Builds an ``EventsTarget`` for the agent (works for local + remote +
-    volume-backed hosts), discovers source dirs under ``events/``, and for
-    each source matching ``<source>/rate_limits`` reads the last event and
-    converts to a ``UsageSnapshot``. Returns ``[]`` if the host has no
-    events access, has no rate_limits source, or all events fail to parse.
-    """
-    target = try_build_events_target_for_agent(
-        mngr_ctx=mngr_ctx,
-        agent_id=agent.id,
-        agent_name=str(agent.name),
-        host_id=agent.host.id,
-        provider_name=agent.host.provider_name,
-    )
-    if target is None:
-        return []
-    try:
-        sources = discover_event_sources(target)
-    except MngrError as e:
-        logger.debug("Could not discover events for agent {}: {}", agent.name, e)
-        return []
-    snapshots: list[UsageSnapshot] = []
-    for source in sources:
-        if not source.source_path.endswith(_RATE_LIMITS_SOURCE_SUFFIX) or not source.is_current_file_present:
-            continue
-        try:
-            content = read_event_content(target, f"{source.source_path}/{_EVENTS_JSONL_FILENAME}")
-        except (MngrError, FileNotFoundError) as e:
-            logger.debug("Could not read {} for agent {}: {}", source.source_path, agent.name, e)
-            continue
-        event = _last_valid_event_from_content(content, f"agent {agent.name} {source.source_path}")
-        if event is None:
-            continue
-        source_name = source.source_path.removesuffix(_RATE_LIMITS_SOURCE_SUFFIX)
-        snapshot = _snapshot_from_event(event, source_name)
-        if snapshot is not None:
-            snapshots.append(snapshot)
-    return snapshots
-
-
-class _SnapshotCollector(MutableModel):
-    """``list_agents`` on_agent callback that collects per-agent rate-limit snapshots.
-
-    Class-based rather than a closure so it can hold its own lock without
-    triggering the "no inline functions" ratchet (the callback runs from a
-    streaming provider thread).
-    """
-
-    mngr_ctx: MngrContext
-    snapshots: list[UsageSnapshot] = []
-    _lock: Lock = PrivateAttr(default_factory=Lock)
-
-    model_config = {"arbitrary_types_allowed": True}
-
-    def __call__(self, agent: AgentDetails) -> None:
-        agent_snapshots = _snapshots_for_agent(self.mngr_ctx, agent)
-        if not agent_snapshots:
-            return
-        with self._lock:
-            self.snapshots.extend(agent_snapshots)
-
-
-def _gather_snapshots(
-    mngr_ctx: MngrContext,
-    *,
-    include_filters: tuple[str, ...],
-    exclude_filters: tuple[str, ...],
-    provider_names: tuple[str, ...] | None,
-) -> list[UsageSnapshot]:
-    """Enumerate matching agents via ``list_agents`` and collect their rate-limit snapshots.
-
-    Inherits ``mngr list``'s CEL filtering, so e.g. ``mngr usage --local`` /
-    ``--provider local`` / ``--project foo`` work without per-command glue.
-    Errors from individual hosts are tolerated so a flaky remote provider
-    doesn't crash the whole pass; this matches ``mngr list``'s
-    ``CONTINUE`` behavior under stress (and is what users expect from a
-    glanceable status command).
-    """
-    collector = _SnapshotCollector(mngr_ctx=mngr_ctx)
-    list_agents(
-        mngr_ctx=mngr_ctx,
-        is_streaming=True,
-        include_filters=include_filters,
-        exclude_filters=exclude_filters,
-        provider_names=provider_names,
-        error_behavior=ErrorBehavior.CONTINUE,
-        on_agent=collector,
-    )
-    return collector.snapshots
-
-
-@pure
-def _collapse_by_source(snapshots: list[UsageSnapshot]) -> list[UsageSnapshot]:
-    """Reduce per-agent snapshots to one per ``source_name`` (the freshest).
-
-    Multiple agents may write to the same source (e.g. several Claude agents
-    all writing to ``events/claude/rate_limits/events.jsonl`` in their own
-    state dirs). The user wants the most recent reading of each source, not
-    a separate block per agent. The returned list's order is unspecified --
-    callers re-sort freshest-first by ``(updated_at, source_name)`` anyway.
-    """
-    by_source: dict[str, UsageSnapshot] = {}
-    for snap in snapshots:
-        existing = by_source.get(snap.source_name)
-        # ``existing`` was looked up under ``snap.source_name``, so the keys
-        # match by construction -- compare on ``updated_at`` alone.
-        if existing is None or snap.updated_at > existing.updated_at:
-            by_source[snap.source_name] = snap
-    return list(by_source.values())
 
 
 # =============================================================================
@@ -373,10 +134,14 @@ def _window_to_template_values(window: WindowSnapshot, now: int) -> dict[str, st
     else:
         seconds_until = ""
     used_percentage = "" if window.used_percentage is None else f"{window.used_percentage:.2f}"
+    elapsed_seconds, elapsed_percentage = derive_elapsed(window, now)
     return {
         "used_percentage": used_percentage,
         "resets_at": "" if window.resets_at is None else str(window.resets_at),
         "seconds_until_reset": seconds_until,
+        "window_seconds": "" if window.window_seconds is None else str(window.window_seconds),
+        "elapsed_seconds": "" if elapsed_seconds is None else str(elapsed_seconds),
+        "elapsed_percentage": "" if elapsed_percentage is None else f"{elapsed_percentage:.2f}",
         "is_present": "true" if window.used_percentage is not None or window.resets_at is not None else "false",
     }
 
@@ -422,16 +187,6 @@ def _build_render_model(snapshot: UsageSnapshot, max_age: int, now: int) -> _Usa
     )
 
 
-def _window_render_dict(snap: WindowSnapshot, now: int) -> dict[str, Any]:
-    """Window's snapshot fields plus computed seconds_until_reset / is_present."""
-    seconds_until_reset = None if snap.resets_at is None else max(0, snap.resets_at - now)
-    return {
-        **snap.model_dump(),
-        "seconds_until_reset": seconds_until_reset,
-        "is_present": snap.used_percentage is not None or snap.resets_at is not None,
-    }
-
-
 def _render_one_source_for_json(model: _UsageRenderModel, now: int) -> dict[str, Any]:
     """JSON shape for a single source's snapshot. Window order = writer's insertion order."""
     out: dict[str, Any] = {
@@ -440,7 +195,7 @@ def _render_one_source_for_json(model: _UsageRenderModel, now: int) -> dict[str,
         "is_stale": model.is_stale,
     }
     for key, snap in model.windows.items():
-        out[key] = _window_render_dict(snap, now)
+        out[key] = window_render_dict(snap, now)
     return out
 
 
@@ -569,7 +324,7 @@ def _emit_output(
             assert_never(unreachable)
 
 
-@click.command("usage")
+@click.group(name="usage", invoke_without_command=True)
 @click.option(
     "--max-age",
     default=None,
@@ -590,7 +345,15 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
     profile as ``mngr list``), reads each agent's ``events/<source>/
     rate_limits/events.jsonl`` via the events API (so remote agents work the
     same as local), and renders the freshest snapshot per source.
+
+    When invoked without a subcommand, prints the current snapshot. Use
+    ``mngr usage wait`` to block until a CEL predicate matches.
     """
+    # Group-with-default-action: when a subcommand is invoked we hand off
+    # entirely (no group-level reading or rendering). Without a subcommand
+    # we render the snapshot, the existing ``mngr usage`` behavior.
+    if ctx.invoked_subcommand is not None:
+        return
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="usage",
@@ -604,13 +367,11 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
 
     include_filters, exclude_filters = build_agent_filter_cel(opts, mngr_ctx.concurrency_group)
     provider_names = opts.provider if opts.provider else None
-    snapshots = _collapse_by_source(
-        _gather_snapshots(
-            mngr_ctx,
-            include_filters=include_filters,
-            exclude_filters=exclude_filters,
-            provider_names=provider_names,
-        )
+    snapshots = gather_usage_snapshots(
+        mngr_ctx,
+        include_filters=include_filters,
+        exclude_filters=exclude_filters,
+        provider_names=provider_names,
     )
     now = int(time.time())
 
@@ -648,3 +409,253 @@ chooses the ``<source>`` segment.""",
 ).register()
 
 add_pager_help_option(usage)
+
+
+# =============================================================================
+# `mngr usage wait` subcommand
+# =============================================================================
+
+
+class UsageWaitCliOptions(CommonCliOptions, AgentFilterCliOptions):
+    """Options for the ``mngr usage wait`` subcommand.
+
+    Inherits the common output options and the standard agent-filter
+    vocabulary (``--include``, ``--exclude``, ``--local``, ``--provider``,
+    ``--project``, ``--label``, ...) so a wait can scope to the same
+    agent set ``mngr usage`` would consider.
+
+    ``until_filters`` (from ``--until``) is the predicate vocabulary --
+    a list of CEL expressions, all of which must evaluate true against
+    a single source's CEL context for the wait to succeed. See
+    ``api.build_source_cel_context`` for the shape that's exposed.
+
+    ``source_filters`` (from ``--source``) restricts which writer
+    sources count for matching: ``--source claude`` only matches the
+    ``claude`` source, ignoring anything else even if it would
+    otherwise satisfy the predicate.
+    """
+
+    until_filters: tuple[str, ...]
+    source_filters: tuple[str, ...]
+    provider: tuple[str, ...]
+    timeout: str | None
+    interval: str
+
+
+@usage.command("wait")
+@optgroup.group("Predicate")
+@optgroup.option(
+    "--until",
+    "until_filters",
+    multiple=True,
+    required=True,
+    help="CEL expression that must evaluate true for some source to win the wait "
+    "[repeatable, all must match]. The CEL context is the per-source dict from "
+    "`mngr usage --format json` (see help description for shape).",
+)
+@optgroup.option(
+    "--source",
+    "source_filters",
+    multiple=True,
+    help="Only consider these writer sources (e.g. 'claude'). When omitted, any source "
+    "may satisfy the predicate [repeatable].",
+)
+@optgroup.group("Wait options")
+@optgroup.option(
+    "--timeout",
+    default=None,
+    help="Maximum time to wait (e.g. '30s', '5m', '1h'). Default: wait forever.",
+)
+@optgroup.option(
+    "--interval",
+    default="30s",
+    show_default=True,
+    help="Poll interval (e.g. '15s', '1m'). The usage snapshot is rebuilt every interval. "
+    "Default of 30s suits multi-hour windows; tighten for short-window predicates.",
+)
+@add_agent_filter_options
+@optgroup.option(
+    "--provider",
+    multiple=True,
+    help="Restrict to agents from the given provider(s) (repeatable, e.g. --provider local).",
+)
+@add_common_options
+@click.pass_context
+def wait(ctx: click.Context, **kwargs: Any) -> None:
+    """Block until a usage snapshot's CEL context satisfies all --until filters.
+
+    Polls ``gather_usage_snapshots`` every ``--interval`` and evaluates each
+    source's CEL context (same shape as ``mngr usage --format json`` source
+    entries) against every ``--until`` expression. The first source for
+    which all predicates evaluate true wins; the command exits 0.
+
+    Exit codes match ``mngr wait``:
+      0 - A source matched all --until filters.
+      1 - Error.
+      2 - Timed out.
+    """
+    mngr_ctx, output_opts, opts = setup_command_context(
+        ctx=ctx,
+        command_name="usage wait",
+        command_class=UsageWaitCliOptions,
+        is_format_template_supported=False,
+    )
+
+    include_filters, exclude_filters = build_agent_filter_cel(opts, mngr_ctx.concurrency_group)
+    provider_names = opts.provider if opts.provider else None
+
+    # ``compile_cel_filters`` raises MngrError on invalid CEL; let it bubble
+    # so the user sees the exact bad expression rather than a generic timeout.
+    until_programs, _unused_excludes = compile_cel_filters(opts.until_filters, exclude_filters=())
+
+    timeout_seconds = parse_duration_to_seconds(opts.timeout) if opts.timeout is not None else None
+    interval_seconds = parse_duration_to_seconds(opts.interval)
+
+    emit_info(
+        f"Waiting for usage predicate (poll {opts.interval}"
+        f"{', timeout ' + opts.timeout if opts.timeout is not None else ''}"
+        f"{', sources=' + ','.join(opts.source_filters) if opts.source_filters else ''}"
+        ")",
+        output_opts.output_format,
+    )
+
+    captured_output_format = output_opts.output_format
+    try:
+        result = wait_for_usage(
+            poll_fn=lambda: gather_usage_snapshots(
+                mngr_ctx,
+                include_filters=include_filters,
+                exclude_filters=exclude_filters,
+                provider_names=provider_names,
+            ),
+            until_filters=until_programs,
+            source_filter=opts.source_filters,
+            timeout_seconds=timeout_seconds,
+            interval_seconds=interval_seconds,
+            on_tick=lambda snapshots, matched: _emit_wait_tick(snapshots, matched, captured_output_format),
+        )
+    except KeyboardInterrupt:
+        logger.debug("Received keyboard interrupt")
+        ctx.exit(EXIT_CODE_ERROR)
+        return
+
+    _output_wait_result(result, output_opts.output_format)
+    if result.is_matched:
+        ctx.exit(EXIT_CODE_SUCCESS)
+    elif result.is_timed_out:
+        ctx.exit(EXIT_CODE_TIMEOUT)
+    else:
+        ctx.exit(EXIT_CODE_ERROR)
+
+
+def _emit_wait_tick(
+    snapshots: list[UsageSnapshot],
+    matched_source: str | None,
+    output_format: OutputFormat,
+) -> None:
+    """Per-tick progress emission, modeled on ``mngr wait``'s state_change events.
+
+    JSONL: one ``tick`` event per poll with a compact summary. Human: one
+    line per tick (silent in JSON mode, which prefers a single final
+    payload over noisy progress).
+    """
+    summary = {
+        "matched_source": matched_source,
+        "sources": [s.source_name for s in snapshots],
+    }
+    match output_format:
+        case OutputFormat.JSONL:
+            emit_event("tick", summary, OutputFormat.JSONL)
+        case OutputFormat.HUMAN:
+            if matched_source is not None:
+                write_human_line("[{}] matched", matched_source)
+            elif snapshots:
+                write_human_line("polled: {} (no match yet)", ", ".join(summary["sources"]))
+            else:
+                write_human_line("polled: no usage data yet")
+        case OutputFormat.JSON:
+            # JSON mode: silent until the final result payload.
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _output_wait_result(result: WaitForUsageResult, output_format: OutputFormat) -> None:
+    """Render the final wait result. JSON/JSONL emit one final record; human writes a summary line."""
+    payload = {
+        "is_matched": result.is_matched,
+        "is_timed_out": result.is_timed_out,
+        "matched_source": result.matched_source,
+        "elapsed_seconds": round(result.elapsed_seconds, 2),
+        "sources": [s.source_name for s in result.final_snapshots],
+    }
+    match output_format:
+        case OutputFormat.JSON:
+            emit_final_json(payload)
+        case OutputFormat.JSONL:
+            emit_event("result", payload, OutputFormat.JSONL)
+        case OutputFormat.HUMAN:
+            if result.is_matched:
+                write_human_line(
+                    "Matched on source '{}' after {:.1f}s",
+                    result.matched_source or "?",
+                    result.elapsed_seconds,
+                )
+            elif result.is_timed_out:
+                write_human_line("Timed out after {:.1f}s without match", result.elapsed_seconds)
+            else:
+                write_human_line("Wait ended after {:.1f}s without match", result.elapsed_seconds)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+CommandHelpMetadata(
+    key="usage wait",
+    one_line_description="Block until a usage snapshot matches a CEL predicate",
+    synopsis="mngr usage wait --until CEL [--until CEL ...] [--source NAME ...] [--timeout DURATION] [--interval DURATION]",
+    description="""Polls ``mngr usage`` snapshots until at least one source's CEL
+context satisfies every ``--until`` expression. Composable with shell:
+
+    mngr usage wait --until 'five_hour.used_percentage < 50 && five_hour.elapsed_percentage > 75' \\
+      && mngr message my-agent "ok, kick off the next batch"
+
+The CEL context per source mirrors one entry of ``mngr usage --format
+json``'s ``sources`` array, with these derived fields per window:
+
+- ``used_percentage``: from the writer.
+- ``resets_at`` / ``seconds_until_reset``: when the window resets.
+- ``window_seconds``: window duration (writer-provided; absent for
+  variable-duration windows like Claude's overage).
+- ``elapsed_seconds`` / ``elapsed_percentage``: derived from
+  ``window_seconds`` and ``seconds_until_reset``; absent when
+  ``window_seconds`` isn't emitted.
+
+Exit codes:
+  0 - A source matched all --until filters.
+  1 - Error (invalid CEL, interrupt).
+  2 - Timed out.""",
+    examples=(
+        (
+            "Wait for 75% of the 5h window to elapse while at most 50% of the limit is used",
+            "mngr usage wait --until 'five_hour.elapsed_percentage > 75 && five_hour.used_percentage < 50'",
+        ),
+        (
+            "Restrict to Claude usage only",
+            "mngr usage wait --source claude --until 'five_hour.used_percentage < 25'",
+        ),
+        (
+            "Bail out after an hour",
+            "mngr usage wait --until 'seven_day.used_percentage < 30' --timeout 1h",
+        ),
+        (
+            "Tighter poll for short-window predicates",
+            "mngr usage wait --until 'overage.is_using_overage == false' --interval 10s",
+        ),
+    ),
+    see_also=(
+        ("usage", "Show the current snapshot"),
+        ("wait", "Wait on agent/host lifecycle state (unrelated)"),
+    ),
+).register()
+
+add_pager_help_option(wait)
