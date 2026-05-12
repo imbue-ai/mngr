@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@todesktop/runtime": "^1.6.0",
-    "latchkey": "^2.8.0"
+    "latchkey": "link:/Users/gabeguralnick/utilities/latchkey"
   },
   "devDependencies": {
     "electron": "35.7.5",
