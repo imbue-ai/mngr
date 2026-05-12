@@ -88,10 +88,14 @@ mngr extras -i || warn "Some extras could not be installed. Run 'mngr extras' to
 if ! mngr config get commands.create.type --scope user >/dev/null 2>&1; then
     info "To set a default agent type for 'mngr create', run:"
     info "    mngr config set commands.create.type <name> --scope user"
-    info "Available agent types:"
-    mngr plugin list --kind agent-type --active --format '{name}' 2>/dev/null \
-        | sed 's/^/    /' \
-        || warn "Could not list agent-type plugins. Run 'mngr plugin list --kind agent-type' to investigate."
+    # Print the "Available agent types:" header only on success so that the
+    # failure path doesn't leave a dangling header above the warning.
+    if AGENT_TYPES_OUTPUT="$(mngr plugin list --kind agent-type --active --format '{name}' 2>/dev/null)"; then
+        info "Available agent types:"
+        printf '%s\n' "$AGENT_TYPES_OUTPUT" | sed 's/^/    /'
+    else
+        warn "Could not list agent-type plugins. Run 'mngr plugin list --kind agent-type' to investigate."
+    fi
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
