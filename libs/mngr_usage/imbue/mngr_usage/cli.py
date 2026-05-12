@@ -363,10 +363,10 @@ def _reject_group_options_when_subcommand_invoked(ctx: click.Context) -> None:
     ]
     if not explicit_param_names:
         return
-    flag_form = sorted(_flag_form_for_param(ctx, name) for name in explicit_param_names)
+    flag_forms = sorted(_flag_form_for_param(ctx, name) for name in explicit_param_names)
     subcommand = ctx.invoked_subcommand
     raise UserInputError(
-        f"Options {', '.join(flag_form)} are not supported on `mngr usage` when a "
+        f"Options {', '.join(flag_forms)} are not supported on `mngr usage` when a "
         f"subcommand is invoked (they would be silently ignored). Pass them after "
         f"`{subcommand}` instead: `mngr usage {subcommand} <options>`."
     )
