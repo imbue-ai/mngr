@@ -102,34 +102,45 @@ def test_deny_does_not_create_any_sidefiles(
     assert not (state_dir / "subagent_results").exists()
 
 
-def test_deny_reason_does_not_branch_on_run_in_background(hook_env: pytest.MonkeyPatch) -> None:
-    """The deny reason is identical regardless of any tool_input field.
+@pytest.mark.parametrize(
+    "payload_a, payload_b",
+    [
+        pytest.param(
+            _hook_input(run_in_background=False),
+            _hook_input(run_in_background=True),
+            id="run_in_background",
+        ),
+        pytest.param(
+            _hook_input(prompt="A" * 5000, description="big task"),
+            _hook_input(prompt="x", description=""),
+            id="prompt_and_description",
+        ),
+    ],
+)
+def test_deny_reason_is_uniform_across_tool_inputs(
+    payload_a: dict[str, object],
+    payload_b: dict[str, object],
+    hook_env: pytest.MonkeyPatch,
+) -> None:
+    """The deny reason is purely a function of plugin mode + depth, not tool_input content.
 
-    Claude Code's Bash tool already accepts ``run_in_background=true``,
-    so a Task call that wanted backgrounding can just bash the
-    skill-protocol commands that way. A second DENY-specific flag
-    would be a redundant way to say the same thing.
+    Two payloads that differ only in tool_input fields (``run_in_background``,
+    ``prompt``, ``description``) must produce identical deny reasons --
+    Claude Code's Bash tool already accepts ``run_in_background=true``, so
+    a Task call that wanted backgrounding can just bash the skill-protocol
+    commands that way; a DENY-specific flag would be redundant. Likewise,
+    long vs. minimal prompts must not trigger per-call customization.
     """
     del hook_env
-    response_sync = _run_deny(_hook_input(run_in_background=False))
-    response_bg = _run_deny(_hook_input(run_in_background=True))
+    response_a = _run_deny(payload_a)
+    response_b = _run_deny(payload_b)
 
-    sync_reason = response_sync["hookSpecificOutput"]["permissionDecisionReason"]
-    bg_reason = response_bg["hookSpecificOutput"]["permissionDecisionReason"]
-    assert sync_reason == bg_reason
-    assert "--spawn-only" not in sync_reason
-
-
-def test_deny_reason_is_uniform_regardless_of_tool_input(hook_env: pytest.MonkeyPatch) -> None:
-    """Every Task-call shape gets the same deny reason; no per-call customization."""
-    del hook_env
-    long_prompt_response = _run_deny(_hook_input(prompt="A" * 5000, description="big task"))
-    minimal_response = _run_deny(_hook_input(prompt="x", description=""))
-
-    assert (
-        long_prompt_response["hookSpecificOutput"]["permissionDecisionReason"]
-        == minimal_response["hookSpecificOutput"]["permissionDecisionReason"]
-    )
+    reason_a = response_a["hookSpecificOutput"]["permissionDecisionReason"]
+    reason_b = response_b["hookSpecificOutput"]["permissionDecisionReason"]
+    assert reason_a == reason_b
+    # Pin the absence of any PROXY-mode-style branching for the canonical
+    # sync vs. background case: there is no DENY-specific spawn-only flag.
+    assert "--spawn-only" not in reason_a
 
 
 def test_deny_does_not_require_state_dir_or_parent_name(clean_env: pytest.MonkeyPatch) -> None:
