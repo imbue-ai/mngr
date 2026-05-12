@@ -36,7 +36,9 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import Volume
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
@@ -130,10 +132,10 @@ class _AllEventsStreamState(MutableModel):
 def try_build_events_target_for_agent(
     *,
     mngr_ctx: MngrContext,
-    agent_id: Any,
+    agent_id: AgentId,
     agent_name: str,
-    host_id: Any,
-    provider_name: Any,
+    host_id: HostId,
+    provider_name: ProviderInstanceName,
 ) -> EventsTarget | None:
     """Build an ``EventsTarget`` for an agent given its identity, or None if unreadable.
 
