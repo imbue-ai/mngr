@@ -53,9 +53,12 @@ with the failing step number and error detail in `notes`.
    bullets across dates if they describe the same user-visible effect.
 
 4. In `CHANGELOG.md`, locate the `## [Unreleased]` heading (it sits
-   directly below the file header). If it is missing, create it
-   immediately below the header. Group the bullets you generated in
-   step 3 (across all dates) by category and merge them into the
+   directly below the file header — `scripts/release.py` guarantees it
+   is always present after each release, and the initial one was added
+   manually). If it is *not* present, the invariant has been broken;
+   emit a `failed` JSON object with "missing [Unreleased] heading in
+   CHANGELOG.md" in `notes` and stop. Group the bullets you generated
+   in step 3 (across all dates) by category and merge them into the
    `[Unreleased]` section under `### <Category>` subheadings, in the
    canonical order: Added, Changed, Deprecated, Removed, Fixed,
    Security. Append to any existing bullets under each subheading; do
