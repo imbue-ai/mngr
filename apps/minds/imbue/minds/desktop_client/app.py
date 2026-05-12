@@ -112,13 +112,14 @@ def _json_error(message: str, status_code: int) -> Response:
 
 
 def _enqueue_health_change(
-    health_queue: "asyncio.Queue[tuple[str, AgentHealth]]",
+    health_queue: "asyncio.Queue[tuple[str, AgentHealth, str | None]]",
     change_event: asyncio.Event,
     agent_id: AgentId,
     status: AgentHealth,
+    last_restart_error: str | None,
 ) -> None:
     """Push a health-change event into ``health_queue`` and wake the SSE loop."""
-    health_queue.put_nowait((str(agent_id), status))
+    health_queue.put_nowait((str(agent_id), status, last_restart_error))
     change_event.set()
 
 
@@ -1195,13 +1196,15 @@ async def _handle_chrome_events(
         # background threads (envelope reader, probe loop, restart endpoint).
         # We accumulate them into a per-connection queue and drain them
         # in the main generator loop so each subscriber sees every event.
-        health_queue: asyncio.Queue[tuple[str, AgentHealth]] = asyncio.Queue()
+        health_queue: asyncio.Queue[tuple[str, AgentHealth, str | None]] = asyncio.Queue()
 
         def _on_change() -> None:
             loop.call_soon_threadsafe(change_event.set)
 
-        def _on_health_change(agent_id: AgentId, status: AgentHealth) -> None:
-            loop.call_soon_threadsafe(_enqueue_health_change, health_queue, change_event, agent_id, status)
+        def _on_health_change(agent_id: AgentId, status: AgentHealth, error: str | None) -> None:
+            loop.call_soon_threadsafe(
+                _enqueue_health_change, health_queue, change_event, agent_id, status, error
+            )
 
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.add_on_change_callback(_on_change)
@@ -1230,12 +1233,15 @@ async def _handle_chrome_events(
             )
 
             if tracker is not None:
-                for aid, status in tracker.snapshot_all().items():
-                    yield "data: {}\n\n".format(
-                        json.dumps(
-                            {"type": "workspace_server_status", "agent_id": str(aid), "status": status.value}
-                        )
-                    )
+                for aid, (status, error) in tracker.snapshot_all().items():
+                    payload: dict[str, str | None] = {
+                        "type": "workspace_server_status",
+                        "agent_id": str(aid),
+                        "status": status.value,
+                    }
+                    if error is not None:
+                        payload["error"] = error
+                    yield "data: {}\n\n".format(json.dumps(payload))
 
             # Wait for changes and push updates until client disconnects.
             #
@@ -1276,12 +1282,15 @@ async def _handle_chrome_events(
                     break
 
                 while not health_queue.empty():
-                    aid_str, status = health_queue.get_nowait()
-                    yield "data: {}\n\n".format(
-                        json.dumps(
-                            {"type": "workspace_server_status", "agent_id": aid_str, "status": status.value}
-                        )
-                    )
+                    aid_str, status, error = health_queue.get_nowait()
+                    payload = {
+                        "type": "workspace_server_status",
+                        "agent_id": aid_str,
+                        "status": status.value,
+                    }
+                    if error is not None:
+                        payload["error"] = error
+                    yield "data: {}\n\n".format(json.dumps(payload))
 
                 current_data = _build_workspace_list(backend_resolver, session_store)
                 if current_data != last_workspace_data:

@@ -25,7 +25,7 @@ def test_single_failure_transitions_to_stuck_after_threshold() -> None:
     tracker = WorkspaceServerHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
     seen: list[tuple[AgentId, AgentHealth]] = []
-    tracker.add_on_change_callback(lambda a, h: seen.append((a, h)))
+    tracker.add_on_change_callback(lambda a, h, _e: seen.append((a, h)))
 
     tracker.record_failure(aid)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
@@ -38,7 +38,7 @@ def test_success_before_threshold_keeps_healthy_and_cancels_timer() -> None:
     tracker = WorkspaceServerHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
-    tracker.add_on_change_callback(lambda _a, h: seen.append(h))
+    tracker.add_on_change_callback(lambda _a, h, _e: seen.append(h))
 
     tracker.record_failure(aid)
     tracker.record_success(aid)
@@ -52,7 +52,7 @@ def test_success_after_stuck_transitions_back_to_healthy() -> None:
     tracker = WorkspaceServerHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
-    tracker.add_on_change_callback(lambda _a, h: seen.append(h))
+    tracker.add_on_change_callback(lambda _a, h, _e: seen.append(h))
 
     tracker.record_failure(aid)
     assert _wait_for(lambda: tracker.get_health(aid) == AgentHealth.STUCK)
@@ -66,7 +66,7 @@ def test_mark_restarting_cancels_pending_stuck_timer() -> None:
     tracker = WorkspaceServerHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
-    tracker.add_on_change_callback(lambda _a, h: seen.append(h))
+    tracker.add_on_change_callback(lambda _a, h, _e: seen.append(h))
 
     tracker.record_failure(aid)
     tracker.mark_restarting(aid)
@@ -91,7 +91,7 @@ def test_mark_stuck_rolls_back_restarting_and_fires_callback() -> None:
     tracker = WorkspaceServerHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
-    tracker.add_on_change_callback(lambda _a, h: seen.append(h))
+    tracker.add_on_change_callback(lambda _a, h, _e: seen.append(h))
 
     tracker.mark_restarting(aid)
     assert tracker.get_health(aid) == AgentHealth.RESTARTING
@@ -105,7 +105,7 @@ def test_mark_stuck_is_idempotent() -> None:
     tracker = WorkspaceServerHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
-    tracker.add_on_change_callback(lambda _a, h: seen.append(h))
+    tracker.add_on_change_callback(lambda _a, h, _e: seen.append(h))
 
     tracker.mark_stuck(aid)
     tracker.mark_stuck(aid)
@@ -116,7 +116,7 @@ def test_repeated_failures_during_window_do_not_double_fire() -> None:
     tracker = WorkspaceServerHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
-    tracker.add_on_change_callback(lambda _a, h: seen.append(h))
+    tracker.add_on_change_callback(lambda _a, h, _e: seen.append(h))
 
     for _ in range(5):
         tracker.record_failure(aid)
@@ -130,7 +130,7 @@ def test_remove_on_change_callback() -> None:
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
 
-    def cb(_a: AgentId, h: AgentHealth) -> None:
+    def cb(_a: AgentId, h: AgentHealth, _e: str | None) -> None:
         seen.append(h)
 
     tracker.add_on_change_callback(cb)
@@ -151,7 +151,7 @@ def test_snapshot_all_omits_healthy_agents() -> None:
     tracker.record_success(a2)
 
     snapshot = tracker.snapshot_all()
-    assert snapshot == {a1: AgentHealth.RESTARTING}
+    assert snapshot == {a1: (AgentHealth.RESTARTING, None)}
 
 
 def test_concurrent_failures_only_one_stuck_event() -> None:
@@ -160,7 +160,7 @@ def test_concurrent_failures_only_one_stuck_event() -> None:
     seen: list[AgentHealth] = []
     seen_lock = threading.Lock()
 
-    def cb(_a: AgentId, h: AgentHealth) -> None:
+    def cb(_a: AgentId, h: AgentHealth, _e: str | None) -> None:
         with seen_lock:
             seen.append(h)
 
@@ -177,15 +177,50 @@ def test_concurrent_failures_only_one_stuck_event() -> None:
         assert seen == [AgentHealth.STUCK]
 
 
+def test_mark_restart_failed_transitions_and_carries_error() -> None:
+    tracker = WorkspaceServerHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+    seen: list[tuple[AgentHealth, str | None]] = []
+    tracker.add_on_change_callback(lambda _a, h, e: seen.append((h, e)))
+
+    tracker.mark_restarting(aid)
+    tracker.mark_restart_failed(aid, "boom: connection refused")
+
+    assert tracker.get_health(aid) == AgentHealth.RESTART_FAILED
+    assert tracker.get_last_restart_error(aid) == "boom: connection refused"
+    assert seen == [
+        (AgentHealth.RESTARTING, None),
+        (AgentHealth.RESTART_FAILED, "boom: connection refused"),
+    ]
+
+
+def test_record_success_clears_restart_failed_error() -> None:
+    tracker = WorkspaceServerHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+    tracker.mark_restart_failed(aid, "boom")
+    assert tracker.get_last_restart_error(aid) == "boom"
+
+    tracker.record_success(aid)
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+    assert tracker.get_last_restart_error(aid) is None
+
+
+def test_snapshot_all_carries_restart_failed_error() -> None:
+    tracker = WorkspaceServerHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    a1 = AgentId.generate()
+    tracker.mark_restart_failed(a1, "container vanished")
+    assert tracker.snapshot_all() == {a1: (AgentHealth.RESTART_FAILED, "container vanished")}
+
+
 def test_callback_exception_does_not_break_subsequent_callbacks() -> None:
     tracker = WorkspaceServerHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
 
-    def bad_cb(_a: AgentId, _h: AgentHealth) -> None:
+    def bad_cb(_a: AgentId, _h: AgentHealth, _e: str | None) -> None:
         raise ValueError("boom")
 
-    def good_cb(_a: AgentId, h: AgentHealth) -> None:
+    def good_cb(_a: AgentId, h: AgentHealth, _e: str | None) -> None:
         seen.append(h)
 
     tracker.add_on_change_callback(bad_cb)

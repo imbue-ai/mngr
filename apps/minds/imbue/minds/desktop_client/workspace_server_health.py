@@ -10,7 +10,10 @@ applies a simple state machine:
   ``stuck_threshold_seconds`` with no intervening success.
 - STUCK -> RESTARTING: the restart endpoint marks the tracker so the chrome
   banner can render a different label and the probe loop keeps polling.
-- {STUCK, RESTARTING} -> HEALTHY: a successful probe.
+- RESTARTING -> RESTART_FAILED: the restart endpoint encountered a dispatch
+  error (SSH unreachable, docker SDK error, non-zero exit). Carries a
+  ``last_restart_error`` string so the modal can surface the reason.
+- {STUCK, RESTARTING, RESTART_FAILED} -> HEALTHY: a successful probe.
 
 State changes fire registered on-change callbacks. Callbacks are invoked
 outside the internal lock so they may take the FastAPI app's own locks
@@ -47,9 +50,10 @@ class AgentHealth(str, Enum):
     HEALTHY = "healthy"
     STUCK = "stuck"
     RESTARTING = "restarting"
+    RESTART_FAILED = "restart_failed"
 
 
-OnChangeCallback = Callable[[AgentId, AgentHealth], None]
+OnChangeCallback = Callable[[AgentId, AgentHealth, str | None], None]
 
 
 class _AgentRecord(MutableModel):
@@ -59,6 +63,10 @@ class _AgentRecord(MutableModel):
     first_failure_at: float | None = Field(
         default=None,
         description="time.monotonic() of the first failure in the current failing run, or None.",
+    )
+    last_restart_error: str | None = Field(
+        default=None,
+        description="Reason carried with RESTART_FAILED so the modal can surface it. Cleared on any non-failed transition.",
     )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -90,10 +98,12 @@ class WorkspaceServerHealthTracker(MutableModel):
     def add_on_change_callback(self, callback: OnChangeCallback) -> None:
         """Register a callback fired whenever any agent's health changes.
 
-        Callbacks receive ``(agent_id, new_health)`` and run on whichever
-        thread caused the transition (envelope reader, probe loop, restart
-        endpoint, or the stuck-threshold timer). Callbacks must be fast and
-        non-blocking; do real work on a queue or worker thread.
+        Callbacks receive ``(agent_id, new_health, last_restart_error)`` and
+        run on whichever thread caused the transition (envelope reader, probe
+        loop, restart endpoint, or the stuck-threshold timer). The
+        ``last_restart_error`` is non-None only when ``new_health`` is
+        RESTART_FAILED. Callbacks must be fast and non-blocking; do real work
+        on a queue or worker thread.
         """
         with self._lock:
             self._on_change_callbacks.append(callback)
@@ -136,8 +146,10 @@ class WorkspaceServerHealthTracker(MutableModel):
     def record_success(self, agent_id: AgentId) -> None:
         """Record a successful probe for ``agent_id``.
 
-        Clears any pending stuck timer; if the agent was STUCK or
-        RESTARTING, transitions it back to HEALTHY and fires on-change.
+        Clears any pending stuck timer; if the agent was non-HEALTHY,
+        transitions it back to HEALTHY and fires on-change. Clears any
+        ``last_restart_error`` so a recovered agent doesn't carry stale
+        error context.
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
@@ -147,37 +159,38 @@ class WorkspaceServerHealthTracker(MutableModel):
             if record is None:
                 return
             record.first_failure_at = None
+            record.last_restart_error = None
             if record.health != AgentHealth.HEALTHY:
                 record.health = AgentHealth.HEALTHY
                 fire_health = AgentHealth.HEALTHY
         if fire_health is not None:
-            self._fire_on_change(agent_id, fire_health)
+            self._fire_on_change(agent_id, fire_health, None)
 
     def mark_stuck(self, agent_id: AgentId) -> None:
         """Force-transition ``agent_id`` to STUCK.
 
-        Used by the restart endpoint to roll back a RESTARTING transition
-        when the dispatch fails: without this, a failed dispatch would
-        leave the chrome banner permanently labelled "Restarting..." until
-        an unrelated success/failure rewrote the state.
+        Used by the layer-2 probe to fast-track recovery when in-container
+        signals are already failing, so the modal doesn't have to wait the
+        full stuck-threshold window before showing the recovery UI.
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
         with self._lock:
             record = self._records.setdefault(aid_str, _AgentRecord())
             self._cancel_stuck_timer_locked(aid_str)
+            record.last_restart_error = None
             if record.health != AgentHealth.STUCK:
                 record.health = AgentHealth.STUCK
                 fire_health = AgentHealth.STUCK
         if fire_health is not None:
-            self._fire_on_change(agent_id, fire_health)
+            self._fire_on_change(agent_id, fire_health, None)
 
     def mark_restarting(self, agent_id: AgentId) -> None:
         """Mark ``agent_id`` as RESTARTING (called from the restart endpoint).
 
         Cancels any pending stuck timer (the agent is already known-bad and
         we don't need a delayed STUCK transition) and fires on-change so
-        the chrome banner can re-label.
+        the chrome modal can re-label.
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
@@ -185,11 +198,32 @@ class WorkspaceServerHealthTracker(MutableModel):
             record = self._records.setdefault(aid_str, _AgentRecord())
             self._cancel_stuck_timer_locked(aid_str)
             record.first_failure_at = None
+            record.last_restart_error = None
             if record.health != AgentHealth.RESTARTING:
                 record.health = AgentHealth.RESTARTING
                 fire_health = AgentHealth.RESTARTING
         if fire_health is not None:
-            self._fire_on_change(agent_id, fire_health)
+            self._fire_on_change(agent_id, fire_health, None)
+
+    def mark_restart_failed(self, agent_id: AgentId, error: str) -> None:
+        """Record that an in-flight restart dispatch failed.
+
+        Carries an ``error`` string so the modal can surface the reason
+        and offer a retry. A subsequent ``record_success`` clears it back
+        to HEALTHY; a subsequent ``mark_restarting`` clears the error.
+        """
+        aid_str = str(agent_id)
+        fire_health: AgentHealth | None = None
+        fire_error: str | None = None
+        with self._lock:
+            record = self._records.setdefault(aid_str, _AgentRecord())
+            self._cancel_stuck_timer_locked(aid_str)
+            record.last_restart_error = error
+            if record.health != AgentHealth.RESTART_FAILED:
+                record.health = AgentHealth.RESTART_FAILED
+            fire_health = AgentHealth.RESTART_FAILED
+            fire_error = error
+        self._fire_on_change(agent_id, fire_health, fire_error)
 
     def get_health(self, agent_id: AgentId) -> AgentHealth:
         """Return the current health for ``agent_id`` (HEALTHY by default)."""
@@ -199,17 +233,26 @@ class WorkspaceServerHealthTracker(MutableModel):
                 return AgentHealth.HEALTHY
             return record.health
 
-    def snapshot_all(self) -> dict[AgentId, AgentHealth]:
+    def get_last_restart_error(self, agent_id: AgentId) -> str | None:
+        """Return the error string carried with RESTART_FAILED, or None."""
+        with self._lock:
+            record = self._records.get(str(agent_id))
+            if record is None:
+                return None
+            return record.last_restart_error
+
+    def snapshot_all(self) -> dict[AgentId, tuple[AgentHealth, str | None]]:
         """Return a copy of all currently-tracked non-HEALTHY agents.
 
-        HEALTHY agents are omitted because the chrome banner and recovery
+        HEALTHY agents are omitted because the chrome and recovery
         page only care about agents with active recovery state; including
         every HEALTHY agent would make the SSE payload grow unboundedly
-        with workspace count.
+        with workspace count. Each entry pairs the health with the
+        carried ``last_restart_error`` (non-None only for RESTART_FAILED).
         """
         with self._lock:
             return {
-                AgentId(aid): record.health
+                AgentId(aid): (record.health, record.last_restart_error)
                 for aid, record in self._records.items()
                 if record.health != AgentHealth.HEALTHY
             }
@@ -238,13 +281,13 @@ class WorkspaceServerHealthTracker(MutableModel):
             record.health = AgentHealth.STUCK
             fire_health = AgentHealth.STUCK
         if fire_health is not None:
-            self._fire_on_change(AgentId(aid_str), fire_health)
+            self._fire_on_change(AgentId(aid_str), fire_health, None)
 
-    def _fire_on_change(self, agent_id: AgentId, new_health: AgentHealth) -> None:
+    def _fire_on_change(self, agent_id: AgentId, new_health: AgentHealth, error: str | None) -> None:
         with self._lock:
             callbacks = list(self._on_change_callbacks)
         for callback in callbacks:
             try:
-                callback(agent_id, new_health)
+                callback(agent_id, new_health, error)
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("WorkspaceServerHealthTracker on-change callback failed for {}: {}", agent_id, e)
