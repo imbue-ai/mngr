@@ -120,21 +120,29 @@ def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_n
        `app.run()` generator, which Modal treats as the calling program
        exit and triggers the app (plus its sandboxes) to stop server-side.
        For persistent apps (`App.lookup` with `create_if_missing=True`,
-       `run_context is None`) this is a no-op for app lifecycle: the
-       Modal-side app keeps running until something explicitly stops it
-       (typically the session-end leak detector's `_stop_modal_apps` step,
-       or the CI hourly cleanup script). Either way the app stays
-       registered in `worker_modal_app_names` so the leak detector runs
-       against the global `modal app list` -- we don't deregister apps
-       here because we can't tell from close_app alone whether the
-       Modal-side stop actually took effect (and there's a brief
-       eventually-consistent window for ephemeral apps too).
-    2. Delete the volume (must be done before environment deletion)
-    3. Delete the environment (cleans up any remaining resources)
-    4. Deregister volume + env from leak tracking *only* if their delete
-       calls succeeded or reported the resource was already gone. A real
-       cleanup failure leaves the resource tracked so the session-end leak
-       detector surfaces it.
+       `run_context is None`) this is a no-op locally; the persistent
+       app gets stopped by step 3 below (Modal's `environment delete`
+       documents that it "deletes all apps in the selected environment"
+       https://modal.com/docs/reference/cli/environment).
+    2. Delete the volume (must be done before environment deletion).
+    3. Delete the environment. Per Modal's docs this takes down every
+       app in the env, ephemeral or persistent.
+
+    Apps are deliberately not in the deregister chain. Even after step 3
+    has succeeded synchronously, Modal's `modal app list --json` endpoint
+    is subject to the same eventually-consistent listing window we
+    already work around for envs -- the apps can still appear "running"
+    for some seconds. So we leave every registered app tracked and let
+    `_get_leaked_modal_apps` (in the session-end leak detector) be the
+    authoritative source of app liveness. (`_get_leaked_modal_apps`
+    today is a single-shot list with `state != "stopped"` filter; a
+    forward-looking comment in this file flags the polling pattern to
+    adopt if false positives appear there too.)
+
+    Volume + env are deregistered from leak tracking *only* if their
+    delete calls succeeded or reported the resource was already gone.
+    A real cleanup failure leaves the resource tracked so the session-end
+    leak detector surfaces it.
     """
     ModalProviderBackend.close_app(app_name)
 
