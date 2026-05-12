@@ -176,6 +176,11 @@ def run(
     + destroy work, so the SessionStart hook itself returns immediately.
     Same behavior in PROXY and DENY modes.
     """
+    # 0o077 keeps any files written downstream (notably the
+    # subagent_destroy.log opened by destroy_agent_detached in the
+    # background-worker branch) at 0600. Matches hooks/cleanup.py and
+    # hooks/spawn.py, which set the same umask at the top of their run().
+    os.umask(0o077)
     try:
         stdin.read()
     except OSError:
