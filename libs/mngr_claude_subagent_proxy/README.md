@@ -259,7 +259,8 @@ prefix is the signal, not the exit code). Resolve with
 
 What deny mode installs:
 - `PreToolUse:Agent` hook (the skill-pointer deny).
-- `SessionStart` hook (a label-driven reaper -- see below).
+- `SessionStart` hook -- the same `hooks/reap.py` PROXY uses
+  (see "Reaping orphan children" below).
 - `.claude/skills/mngr-subagents/SKILL.md` -- the explicit
   spawn-and-wait protocol Claude is expected to use.
 
@@ -270,7 +271,9 @@ What deny mode does NOT install or run (vs. PROXY):
 - No `mngr-proxy.md` Haiku dispatcher.
 - No `_check_project_settings_stop_hooks_guarded` check on
   `.claude/settings.json`.
-- No env-conditional Stop-hook guarding of plugin `hooks.json` files.
+- No `hooks/guard_stop_hooks.py` SessionStart hook -- DENY children
+  are plain claude agents without the `MNGR_CLAUDE_SUBAGENT_PROXY_CHILD`
+  env var, so the guard predicate would never fire.
 - No Stop/SubagentStop compatibility checks on spawned children.
 - No per-tool_use_id sidefiles under `$MNGR_AGENT_STATE_DIR/`.
 
@@ -280,19 +283,25 @@ as PROXY-mode children, so they hide from
 `mngr list --exclude 'has(labels.mngr_claude_subagent_proxy_parent_name)'`
 and can be listed with the inverse filter.
 
-### Reaping orphan DENY children (label-driven)
+### Reaping orphan children (shared label-driven)
 
-PROXY mode's reaper keys off the parent's `subagent_map/` sidefiles,
-which DENY mode does not write. DENY mode installs its own
-`SessionStart` hook (`hooks/deny_reap.py`) that reaps by label
-instead: it queries `mngr list` for agents whose
+Both modes install the same `hooks/reap.py` SessionStart hook. It
+queries `mngr list` for agents whose
 `mngr_claude_subagent_proxy_parent_id` label matches the current
 parent's `MNGR_AGENT_ID` and destroys any whose state is terminal
 (DONE / STOPPED). RUNNING / WAITING children are left alone (they
-may still be doing useful work the user wants to observe). This
-mirrors PROXY mode's conservative cleanup scope and closes the
-orphan loop end-to-end -- the skill instructs Claude to set the
-parent_id label when spawning, and this hook reaps on top of it.
+may still be doing useful work the user wants to observe). Both
+spawn paths attach the label (PROXY's wait-script in `hooks/spawn.py`;
+DENY's skill instructs Claude to set it when spawning), so the same
+query identifies orphans regardless of mode.
+
+PROXY mode additionally cleans up stale per-tool_use_id sidefiles
+under `subagent_map/` etc. in the same reap pass (a no-op in DENY
+since those sidefiles are never written). PROXY mode's separate
+`hooks/guard_stop_hooks.py` SessionStart hook wraps Stop hooks in
+the per-agent plugin cache with the `MNGR_CLAUDE_SUBAGENT_PROXY_CHILD`
+env-conditional guard; DENY mode does not install this guard because
+DENY-spawned children are plain claude agents without that env var.
 
 ## Depth limit
 

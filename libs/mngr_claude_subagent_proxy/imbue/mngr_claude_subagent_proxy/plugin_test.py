@@ -399,16 +399,15 @@ def _ctx_with_plugin_config(base_ctx: MngrContext, config: SubagentProxyPluginCo
 def test_deny_mode_installs_pretooluse_deny_and_sessionstart_reaper(
     work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
 ) -> None:
-    """DENY mode installs PreToolUse:Agent (the skill-pointer deny) plus
-    SessionStart (the label-driven reaper for orphaned children).
+    """DENY mode installs PreToolUse:Agent (skill-pointer deny) + SessionStart (reap).
 
-    The reaper exists because the skill instructs Claude to label spawned
-    subagents with the parent's MNGR_AGENT_ID, so children left behind
-    by a previous session can be cleaned up by querying mngr list with
-    a label filter -- distinct from PROXY mode's subagent_map-based reaper.
+    The reaper is the same ``hooks/reap.py`` module that PROXY mode
+    uses -- label-driven, identical code across modes. DENY does NOT
+    install the PROXY-only ``guard_stop_hooks.py`` because DENY-spawned
+    children don't have the ``MNGR_CLAUDE_SUBAGENT_PROXY_CHILD`` env var.
 
-    No PostToolUse hook (no per-Task-call sidefiles to clean), no
-    mngr-proxy.md agent definition, no plugin cache hooks.json walk.
+    No PostToolUse hook (the deny hook never runs mngr create itself),
+    no mngr-proxy.md agent definition.
     """
     ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
@@ -424,11 +423,13 @@ def test_deny_mode_installs_pretooluse_deny_and_sessionstart_reaper(
     assert any(entry.get("matcher") == "Agent" for entry in hooks["PreToolUse"])
     pre_cmd = hooks["PreToolUse"][0]["hooks"][0]["command"]
     assert "imbue.mngr_claude_subagent_proxy.hooks.deny" in pre_cmd
-    # SessionStart is the label-driven reaper (deny_reap.py), distinct
-    # from PROXY mode's subagent_map-driven reaper.
+    # SessionStart installs the shared label-driven reaper -- same module
+    # PROXY uses. The PROXY-only guard_stop_hooks hook is NOT installed.
     assert "SessionStart" in hooks
-    session_cmd = hooks["SessionStart"][0]["hooks"][0]["command"]
-    assert "imbue.mngr_claude_subagent_proxy.hooks.deny_reap" in session_cmd
+    session_inner = hooks["SessionStart"][0]["hooks"]
+    session_cmds = [entry["command"] for entry in session_inner]
+    assert any("imbue.mngr_claude_subagent_proxy.hooks.reap" in cmd for cmd in session_cmds)
+    assert not any("guard_stop_hooks" in cmd for cmd in session_cmds)
     # No PostToolUse cleanup -- the deny hook never runs mngr create
     # itself, so no per-Task-call state on the parent to clean up.
     assert "PostToolUse" not in hooks

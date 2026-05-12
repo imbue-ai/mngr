@@ -516,57 +516,78 @@ def test_rewrite_ignores_unmapped_tool_use_id(
     assert destroy_calls == []
 
 
-def test_reap_fast_path_empty_state(
+def test_reap_skips_when_state_dir_unset(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
 ) -> None:
-    """Reaper exits immediately when subagent_map/ is missing or empty, without dispatching."""
+    """SessionStart with MNGR_AGENT_STATE_DIR unset is a no-op (no dispatch).
+
+    Hooks on plain Claude sessions without mngr context (e.g. user
+    running ``claude`` directly) should not crash or attempt to reap.
+    """
+    del tmp_path  # state dir is intentionally never set
     spawn_calls: list[None] = []
+    clean_env.delenv("MNGR_AGENT_STATE_DIR", raising=False)
 
-    def fake_spawn() -> None:
-        spawn_calls.append(None)
+    reap_hook.run(io.StringIO(""), spawn_background_callable=lambda: spawn_calls.append(None))
 
-    # Case 1: state dir does not exist at all.
-    state_dir = tmp_path / "no-state"
-    clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
-    reap_hook.run(io.StringIO(""), spawn_background_callable=fake_spawn)
-    assert spawn_calls == []
-
-    # Case 2: state dir exists with an empty subagent_map/.
-    state_dir2 = tmp_path / "empty-state"
-    (state_dir2 / "subagent_map").mkdir(parents=True)
-    clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir2))
-    reap_hook.run(io.StringIO(""), spawn_background_callable=fake_spawn)
     assert spawn_calls == []
 
 
-def test_reap_with_work_spawns_background_child(
+def test_reap_always_dispatches_background_when_state_dir_set(
     clean_env: pytest.MonkeyPatch,
     state_dir: Path,
 ) -> None:
-    """When map entries exist, the reaper dispatches a detached background child."""
-    (state_dir / "subagent_map").mkdir(parents=True)
-    (state_dir / "subagent_map" / "toolu_tid1234.json").write_text(
-        json.dumps(
-            {
-                "target_name": "fake-agent",
-                "subagent_type": "general-purpose",
-                "parent_cwd": "/tmp",
-                "run_in_background": False,
-            }
-        )
-    )
+    """SessionStart always dispatches the background reaper when state dir is set.
 
+    Same behavior in PROXY and DENY modes: we don't try to predict
+    whether there's work to do (would require a slow ``mngr list``
+    call in the foreground); the background child does the slow query
+    and short-circuits if there are no orphans. The dispatch itself is
+    cheap.
+    """
     spawn_calls: list[None] = []
-
-    def fake_spawn() -> None:
-        spawn_calls.append(None)
-
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
 
-    reap_hook.run(io.StringIO(""), spawn_background_callable=fake_spawn)
+    reap_hook.run(io.StringIO(""), spawn_background_callable=lambda: spawn_calls.append(None))
 
     assert len(spawn_calls) == 1
+
+
+def test_reap_background_worker_destroys_terminal_children_by_label(
+    clean_env: pytest.MonkeyPatch,
+    state_dir: Path,
+) -> None:
+    """Background reaper destroys children whose parent_id label matches ours
+    and whose state is terminal; non-terminal or non-matching children are
+    left alone. Same code path serves PROXY and DENY modes.
+    """
+    clean_env.setenv("MNGR_SUBAGENT_REAP_BACKGROUND", "1")
+    clean_env.setenv("MNGR_AGENT_ID", "parent-A")
+    clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
+
+    parent_label = "mngr_claude_subagent_proxy_parent_id"
+    agents_by_name = {
+        "child-done": make_test_agent_details(
+            name="child-done", state=AgentLifecycleState.DONE, labels={parent_label: "parent-A"}
+        ),
+        "child-running": make_test_agent_details(
+            name="child-running", state=AgentLifecycleState.RUNNING, labels={parent_label: "parent-A"}
+        ),
+        "other-parent-done": make_test_agent_details(
+            name="other-parent-done", state=AgentLifecycleState.DONE, labels={parent_label: "parent-B"}
+        ),
+    }
+    destroy_calls: list[tuple[str, Path]] = []
+
+    reap_hook.run(
+        io.StringIO(""),
+        list_callable=lambda: agents_by_name,
+        destroy_callable=lambda name, log: destroy_calls.append((name, log)),
+    )
+
+    destroyed_names = sorted(name for name, _ in destroy_calls)
+    assert destroyed_names == ["child-done"]
 
 
 def test_reap_background_worker_cleans_up_missing_agent(
@@ -708,38 +729,6 @@ def test_guard_per_agent_plugin_cache_noop_when_cache_missing(tmp_path: Path) ->
     _stop_hook_guard.guard_per_agent_plugin_cache(state_dir)
 
 
-def test_reap_run_invokes_per_agent_plugin_cache_guard(
-    clean_env: pytest.MonkeyPatch,
-    state_dir: Path,
-) -> None:
-    """The SessionStart reap hook calls guard_per_agent_plugin_cache for
-    the agent's own state dir BEFORE the orphan-reap fast path. This
-    closes the bug where a fresh-from-GitHub per-agent cache contained
-    an unguarded orchestrator that fired inside spawned subagents.
-    """
-    cache_hooks = (
-        state_dir
-        / "plugin"
-        / "claude"
-        / "anthropic"
-        / "plugins"
-        / "marketplaces"
-        / "x"
-        / "plugins"
-        / "p"
-        / "hooks"
-        / "hooks.json"
-    )
-    _write_unguarded_orchestrator_hooks(cache_hooks)
-    clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
-
-    # Empty subagent_map -- trips the fast-path `return`. The cache wrap
-    # must run BEFORE that early return; if it ran later (or only in the
-    # background-worker branch) this test would fail.
-    reap_hook.run(io.StringIO(""), spawn_background_callable=lambda: None)
-
-    cmd = json.loads(cache_hooks.read_text())["hooks"]["Stop"][0]["hooks"][0]["command"]
-    assert cmd.startswith('[ -n "$MNGR_CLAUDE_SUBAGENT_PROXY_CHILD" ] && exit 0; '), (
-        f"reap.run did not guard the per-agent plugin cache. Command after run: {cmd!r}. "
-        f"The SessionStart wrap of the cache must run before the orphan-reap fast path."
-    )
+# `_write_unguarded_orchestrator_hooks` above is also used by the
+# guard_stop_hooks SessionStart hook's tests in
+# imbue/mngr_claude_subagent_proxy/hooks/guard_stop_hooks_test.py.
