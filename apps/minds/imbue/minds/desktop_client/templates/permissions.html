@@ -95,6 +95,7 @@
 {% block scripts %}
 <script>
   (function () {
+    const agentReturnUrl = "{{ mngr_forward_origin }}/goto/{{ agent_id }}/";
     const form = document.getElementById("permissions-form");
     const approveBtn = document.getElementById("permissions-approve-btn");
     const errorBox = document.getElementById("permissions-error");
@@ -135,7 +136,7 @@
         }
         const data = await response.json();
         if (data.outcome === "GRANTED") {
-          window.location.href = "/";
+          window.location.href = agentReturnUrl;
           return;
         }
         if (progress) progress.classList.add("hidden");
@@ -176,7 +177,7 @@
         credentials: "same-origin",
         keepalive: true,
       }).catch(function () {});
-      window.location.href = "/";
+      window.location.href = agentReturnUrl;
     };
   })();
 </script>
