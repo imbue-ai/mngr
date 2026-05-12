@@ -16,8 +16,8 @@ importers:
         version: 2.10.0
     devDependencies:
       '@todesktop/cli':
-        specifier: ^1.24.0
-        version: 1.24.0
+        specifier: 1.25.0-0
+        version: 1.25.0-0
       electron:
         specifier: 35.7.5
         version: 35.7.5
@@ -670,8 +670,8 @@ packages:
     resolution: {integrity: sha512-4BAffykYOgO+5nzBWYwE3W90sBgLJoUPRWWcL8wlyiM8IB8ipJz3UMJ9KXQd1RKQXpKp8Tutn80HZtWsu2u76w==}
     engines: {node: '>=10'}
 
-  '@todesktop/cli@1.24.0':
-    resolution: {integrity: sha512-tetn0r6U73bBv6dj0ojHwXIU2HbOnebya9gIAPozlKF+WXD+DrqhvE3/4l5bAt55BiDWhNGucXkSYDkEdMiVEw==}
+  '@todesktop/cli@1.25.0-0':
+    resolution: {integrity: sha512-OAeXGn7+H0uPv7CYBTijsaa8BPUv1aae2voQgXEu+zhHelQ9FqZ2o3oNPhHgBDUBOpp5a3KZJy1rA0Q96bPgHQ==}
     engines: {node: '>=16'}
     hasBin: true
 
@@ -3250,7 +3250,7 @@ snapshots:
     dependencies:
       defer-to-connect: 2.0.1
 
-  '@todesktop/cli@1.24.0':
+  '@todesktop/cli@1.25.0-0':
     dependencies:
       '@segment/analytics-node': 2.3.0
       '@sentry/node': 10.52.0

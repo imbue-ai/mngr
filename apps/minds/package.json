@@ -1,6 +1,6 @@
 {
   "name": "minds",
-  "version": "0.2.14",
+  "version": "0.2.15",
   "description": "Minds - Self-improving, persistent AI agents",
   "homepage": "https://github.com/imbue-ai/mngr",
   "author": "Imbue <dev@imbue.com>",
@@ -17,7 +17,7 @@
     "latchkey": "^2.8.0"
   },
   "devDependencies": {
-    "@todesktop/cli": "^1.24.0",
+    "@todesktop/cli": "1.25.0-0",
     "electron": "35.7.5"
   }
 }
