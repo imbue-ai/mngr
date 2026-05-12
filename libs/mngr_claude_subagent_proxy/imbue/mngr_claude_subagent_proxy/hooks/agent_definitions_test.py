@@ -10,9 +10,14 @@ on-disk ``.md`` agent definition under one of three discovery roots:
   (Claude Code marketplace plugins; only used for ``plugin:agent``
   namespaced types)
 
-Tests use ``monkeypatch.setenv("HOME", ...)`` to root ``Path.home()`` in
-a per-test ``tmp_path`` so they don't read the developer's actual
-``~/.claude/`` directory.
+Tests use ``monkeypatch.setenv("HOME", ...)`` to point the resolver at a
+per-test ``tmp_path`` so they don't read the developer's actual
+``~/.claude/`` directory. The resolver actually goes through
+``get_user_claude_config_dir()``, which prefers ``$ORIGINAL_CLAUDE_CONFIG_DIR``
+then ``$CLAUDE_CONFIG_DIR`` then ``Path.home() / ".claude"``; the autouse
+``setup_test_mngr_env`` fixture (via ``isolate_home``) already ``delenv``'s
+the two config-dir vars, so the per-test ``HOME`` override is sufficient
+to redirect the lookup.
 """
 
 from __future__ import annotations
@@ -32,12 +37,16 @@ def _write_agent(path: Path, *, name: str, body: str, description: str = "test a
 
 @pytest.fixture
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Root ``Path.home()`` in a per-test ``tmp_path`` so the resolver
-    walks the test's fake home directory instead of the developer's.
+    """Point ``HOME`` at a per-test ``tmp_path`` so the resolver walks the
+    test's fake home directory instead of the developer's.
 
-    The resolver calls ``Path.home()`` at request time (not at import),
-    so a runtime monkeypatch of ``HOME`` is honored. Returns the fake
-    home path for tests that need to drop files under it.
+    The resolver resolves the user-scope Claude config dir at request
+    time (not at import) via ``get_user_claude_config_dir()``, so a
+    runtime monkeypatch of ``HOME`` is honored. This relies on the
+    autouse ``setup_test_mngr_env`` fixture having already cleared
+    ``$ORIGINAL_CLAUDE_CONFIG_DIR`` and ``$CLAUDE_CONFIG_DIR``, which
+    otherwise take precedence over ``HOME``. Returns the fake home
+    path for tests that need to drop files under it.
     """
     home = tmp_path / "fake_home"
     home.mkdir()
