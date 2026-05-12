@@ -442,7 +442,19 @@ def _get_leaked_modal_environments() -> list[str]:
         return not last_candidates
 
     poll_until(env_list_clean, timeout=_LEAK_POLL_TIMEOUT_S, poll_interval=_LEAK_POLL_INTERVAL_S)
-    return last_candidates if last_candidates else []
+    if last_candidates is None:
+        # Every poll attempt failed transiently. Don't fail teardown -- the CI
+        # hourly cleanup script is the real safety net -- but make this loud
+        # enough to be grepable in CI logs (the per-poll warnings are easy to
+        # miss in the noise of session-end output).
+        logger.error(
+            "Could not verify leaked Modal environments: every `modal environment list` "
+            "poll over the {}s budget failed. Treating as no leaks; check CI's hourly "
+            "cleanup script (cleanup_old_modal_test_environments.py) for actually-leaked envs.",
+            _LEAK_POLL_TIMEOUT_S,
+        )
+        return []
+    return last_candidates
 
 
 def _delete_modal_environments(environment_names: list[str]) -> None:
