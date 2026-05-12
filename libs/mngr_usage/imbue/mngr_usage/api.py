@@ -147,8 +147,11 @@ def derive_elapsed(window: WindowSnapshot, now: int) -> tuple[int | None, float 
     """
     if window.window_seconds is None or window.window_seconds <= 0 or window.resets_at is None:
         return None, None
+    # ``seconds_until_reset`` is non-negative, so ``window_seconds -
+    # seconds_until_reset`` is bounded above by ``window_seconds`` -- only the
+    # ``max(0, ...)`` lower-clamp does real work here.
     seconds_until_reset = max(0, window.resets_at - now)
-    elapsed_seconds = max(0, min(window.window_seconds, window.window_seconds - seconds_until_reset))
+    elapsed_seconds = max(0, window.window_seconds - seconds_until_reset)
     elapsed_percentage = elapsed_seconds / window.window_seconds * 100
     return elapsed_seconds, elapsed_percentage
 
