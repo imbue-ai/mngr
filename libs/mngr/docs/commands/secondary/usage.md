@@ -14,11 +14,11 @@ Show rolling-window usage / quota data from agent statusline events.
 Reports rolling-window usage / quota data captured by an agent's
 statusline.
 
-This command is agent-agnostic: it walks ``<host_dir>/agents/*/events/<source>/
-rate_limits/events.jsonl`` and renders the most recent event. The pattern
-mirrors how ``mngr transcript`` discovers ``common_transcript`` events --
-writer plugins emit events to the conventional path; ``mngr usage`` discovers
-them automatically without any agent-specific knowledge.
+Agent-agnostic and host-agnostic: enumerates matching agents via
+``list_agents`` (same machinery and filter vocabulary as ``mngr list``) and
+reads each agent's ``events/<source>/rate_limits/events.jsonl`` via the
+events API. Local and remote agents are read uniformly; the writer plugin
+chooses the ``<source>`` segment.
 
 **Usage:**
 
@@ -26,6 +26,23 @@ them automatically without any agent-specific knowledge.
 mngr usage [OPTIONS]
 ```
 **Options:**
+
+## Filtering
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--include` | text | Include agents matching CEL expression (repeatable) | None |
+| `--exclude` | text | Exclude agents matching CEL expression (repeatable) | None |
+| `--running` | boolean | Show only running agents (alias for --include 'state == "RUNNING"') | `False` |
+| `--stopped` | boolean | Show only stopped agents (alias for --include 'state == "STOPPED"') | `False` |
+| `--archived` | boolean | Show only archived agents (alias for --include 'has(labels.archived_at)') | `False` |
+| `--active` | boolean | Show only active agents (anything not archived/destroyed/crashed/failed) | `False` |
+| `--local` | boolean | Show only local agents (alias for --include 'host.provider == "local"') | `False` |
+| `--remote` | boolean | Show only remote agents (alias for --exclude 'host.provider == "local"') | `False` |
+| `--project` | text | Show only agents with this project label (repeatable; '.' expands to the current project) | None |
+| `--label` | text | Show only agents with this label (format: KEY=VALUE, repeatable) [experimental] | None |
+| `--host-label` | text | Show only agents on hosts with this host label (format: KEY=VALUE, repeatable) | None |
+| `--provider` | text | Show only agents from the given provider(s) (repeatable, e.g. --provider local) | None |
 
 ## Common
 
@@ -55,6 +72,18 @@ mngr usage [OPTIONS]
 
 ```bash
 $ mngr usage
+```
+
+**Local agents only**
+
+```bash
+$ mngr usage --local
+```
+
+**Specific providers**
+
+```bash
+$ mngr usage --provider local --provider modal
 ```
 
 **Treat the snapshot as stale after 60s (warning only)**
