@@ -592,9 +592,10 @@ def _emit_wait_tick(
     line per tick (silent in JSON mode, which prefers a single final
     payload over noisy progress).
     """
+    source_names: list[str] = [s.source_name for s in snapshots]
     summary = {
         "matched_source": matched_source,
-        "sources": [s.source_name for s in snapshots],
+        "sources": source_names,
     }
     match output_format:
         case OutputFormat.JSONL:
@@ -603,7 +604,7 @@ def _emit_wait_tick(
             if matched_source is not None:
                 write_human_line("[{}] matched", matched_source)
             elif snapshots:
-                write_human_line("polled: {} (no match yet)", ", ".join(summary["sources"]))
+                write_human_line("polled: {} (no match yet)", ", ".join(source_names))
             else:
                 write_human_line("polled: no usage data yet")
         case OutputFormat.JSON:
