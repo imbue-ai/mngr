@@ -1,4 +1,3 @@
-import enum
 import json
 import os
 import re
@@ -17,6 +16,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from enum import auto
 from io import StringIO
 from pathlib import Path
 from typing import Final
@@ -30,6 +30,7 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.cli.create import create as create_command
@@ -114,7 +115,7 @@ def register_modal_test_environment(environment_name: str) -> None:
         worker_modal_environment_names.append(environment_name)
 
 
-class ModalCleanupOutcome(enum.Enum):
+class ModalCleanupOutcome(UpperCaseStrEnum):
     """Outcome of a Modal-side delete call.
 
     Callers should treat `DELETED` and `NOT_FOUND` as success (the resource is
@@ -126,9 +127,9 @@ class ModalCleanupOutcome(enum.Enum):
     stopped agents). This enum classifies a single Modal-side delete only.
     """
 
-    DELETED = "deleted"
-    NOT_FOUND = "not_found"
-    FAILED = "failed"
+    DELETED = auto()
+    NOT_FOUND = auto()
+    FAILED = auto()
 
 
 def deregister_modal_test_app(app_name: str) -> None:
