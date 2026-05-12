@@ -21,7 +21,7 @@ from click.testing import CliRunner
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
-from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
 from imbue.mngr_latchkey.cli import ENV_LATCHKEY_BINARY
 from imbue.mngr_latchkey.cli import ENV_LATCHKEY_DIRECTORY
@@ -30,7 +30,7 @@ from imbue.mngr_latchkey.cli import _resolve_latchkey_settings
 from imbue.mngr_latchkey.cli import latchkey
 from imbue.mngr_latchkey.config import LatchkeyPluginConfig
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
-from imbue.mngr_latchkey.store import permissions_path_for_agent
+from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 
 # A version string the upstream ``Latchkey.initialize`` is happy with
@@ -38,10 +38,10 @@ from imbue.mngr_latchkey.store import plugin_data_dir
 # binary we drop on $PATH doesn't drift if the floor is bumped.
 _FAKE_LATCHKEY_VERSION: Final[str] = "2.9.0"
 
-# Globally-unique deterministic agent IDs (matches the convention in
+# Globally-unique deterministic host IDs (matches the convention in
 # ``mngr_forward/testing.py`` so test output is stable). The 32-char
-# hex constraint is enforced by ``AgentId``.
-_AGENT_ID_ONE: Final[AgentId] = AgentId("agent-" + "0" * 31 + "1")
+# hex constraint is enforced by ``HostId``.
+_HOST_ID_ONE: Final[HostId] = HostId("host-" + "0" * 31 + "1")
 
 
 # -- Fixtures ---------------------------------------------------------------
@@ -264,7 +264,7 @@ def test_link_permissions_replaces_opaque_with_symlink_to_canonical(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """End-to-end: after ``link-permissions`` the opaque path is a symlink to the canonical agent path."""
+    """End-to-end: after ``link-permissions`` the opaque path is a symlink to the canonical host path."""
     del clean_latchkey_env
     monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
     monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
@@ -285,8 +285,8 @@ def test_link_permissions_replaces_opaque_with_symlink_to_canonical(
         latchkey,
         [
             "link-permissions",
-            "--agent-id",
-            str(_AGENT_ID_ONE),
+            "--host-id",
+            str(_HOST_ID_ONE),
             "--opaque-path",
             str(opaque_path),
         ],
@@ -295,12 +295,12 @@ def test_link_permissions_replaces_opaque_with_symlink_to_canonical(
     )
     assert link_result.exit_code == 0, link_result.output
     assert opaque_path.is_symlink()
-    canonical = permissions_path_for_agent(plugin_data_dir(latchkey_root), _AGENT_ID_ONE)
+    canonical = permissions_path_for_host(plugin_data_dir(latchkey_root), _HOST_ID_ONE)
     assert opaque_path.resolve() == canonical.resolve()
     assert canonical.is_file()
 
 
-def test_link_permissions_rejects_invalid_agent_id(
+def test_link_permissions_rejects_invalid_host_id(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     latchkey_root: Path,
@@ -309,7 +309,7 @@ def test_link_permissions_rejects_invalid_agent_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """An ``--agent-id`` that doesn't conform to :class:`AgentId` exits non-zero with a usage error."""
+    """An ``--host-id`` that doesn't conform to :class:`HostId` exits non-zero with a usage error."""
     del clean_latchkey_env
     monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
     monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
@@ -322,8 +322,8 @@ def test_link_permissions_rejects_invalid_agent_id(
         latchkey,
         [
             "link-permissions",
-            "--agent-id",
-            "not-an-agent-id",
+            "--host-id",
+            "not-a-host-id",
             "--opaque-path",
             str(bogus_path),
         ],
@@ -352,8 +352,8 @@ def test_link_permissions_rejects_missing_opaque_path(
         latchkey,
         [
             "link-permissions",
-            "--agent-id",
-            str(_AGENT_ID_ONE),
+            "--host-id",
+            str(_HOST_ID_ONE),
             "--opaque-path",
             str(nonexistent),
         ],

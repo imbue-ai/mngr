@@ -74,13 +74,17 @@ def test_make_host_name_appends_host_suffix() -> None:
     assert _make_host_name(AgentName("alpha")) == "alpha-host"
 
 
-def test_build_mngr_create_command_lifts_latchkey_env_to_env_flags() -> None:
-    """``_build_mngr_create_command`` lifts each entry of ``latchkey_env`` into a ``--env`` flag.
+def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> None:
+    """``_build_mngr_create_command`` lifts each entry of ``latchkey_env`` into a ``--host-env`` flag.
 
     The shape of the env (which keys are set, which URL is used, etc.) is decided
     upstream by ``prepare_agent_latchkey``; this command-builder just plumbs
     whatever it gets through to ``mngr create``. The plugin's
     ``agent_setup_test.py`` covers all the per-mode permutations.
+
+    ``--host-env`` (not ``--env``) is used so the wiring is written to the
+    new host's env file once and every agent that ever runs on the host
+    inherits the same gateway URL / password / JWT.
     """
     command, _ = _build_mngr_create_command(
         launch_mode=LaunchMode.LOCAL,
@@ -97,9 +101,24 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_env_flags() -> None:
     assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=eyJhbGc.fake.jwt" in command
     assert "LATCHKEY_DISABLE_COUNTING=1" in command
 
+    # Each latchkey entry must be preceded by ``--host-env`` (not ``--env``)
+    # so every agent on the host shares the same gateway wiring.
+    latchkey_keys = {
+        "LATCHKEY_GATEWAY",
+        "LATCHKEY_GATEWAY_PASSWORD",
+        "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE",
+        "LATCHKEY_DISABLE_COUNTING",
+    }
+    for index, arg in enumerate(command):
+        if any(arg.startswith(f"{key}=") for key in latchkey_keys):
+            assert index > 0
+            assert command[index - 1] == "--host-env", (
+                f"Latchkey arg {arg!r} should be passed via --host-env, got {command[index - 1]!r}"
+            )
+
 
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
-    """Empty / ``None`` ``latchkey_env`` opts the agent out of latchkey wiring entirely."""
+    """Empty / ``None`` ``latchkey_env`` opts the host out of latchkey wiring entirely."""
     for latchkey_env in (None, {}):
         command, _ = _build_mngr_create_command(
             launch_mode=LaunchMode.LOCAL,
