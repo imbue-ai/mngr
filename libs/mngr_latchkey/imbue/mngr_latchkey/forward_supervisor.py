@@ -55,13 +55,22 @@ def _cmdline_looks_like_mngr_latchkey_forward(cmdline: list[str]) -> bool:
 
     Guards against PID reuse: requires the literal tokens ``latchkey`` and
     ``forward`` to appear after a ``mngr``-like argument anywhere in the
-    argv. This tolerates shebang rewrites (``/usr/bin/env python mngr``)
-    and absolute-path invocations.
+    argv. This tolerates shebang rewrites (``/usr/bin/env python mngr``),
+    absolute-path invocations (``/usr/local/bin/mngr``), and the
+    ``setproctitle``-style argv[0] overwrite that ``uv tool``'s entry-point
+    wrappers do (which puts the entire joined cmdline in argv[0] and zeros
+    out argv[1:], surfacing as ``["mngr latchkey forward ...", "", "",
+    ...]`` via :meth:`psutil.Process.cmdline`).
     """
-    if not cmdline:
+    # ``" ".join(cmdline).split()`` normalises both the
+    # one-clean-token-per-arg shape and the proctitle-overwrite shape
+    # (where everything lives in argv[0] separated by spaces) to the
+    # same list of literal tokens.
+    tokens = " ".join(cmdline).split()
+    if not tokens:
         return False
     mngr_idx: int | None = None
-    for idx, arg in enumerate(cmdline):
+    for idx, arg in enumerate(tokens):
         # ``mngr`` is a short token; match it as a path component so we
         # don't fire on substrings like ``manager`` or ``mngr-foo``.
         if arg == "mngr" or arg.endswith("/mngr"):
@@ -69,7 +78,7 @@ def _cmdline_looks_like_mngr_latchkey_forward(cmdline: list[str]) -> bool:
             break
     if mngr_idx is None:
         return False
-    remainder = cmdline[mngr_idx + 1 :]
+    remainder = tokens[mngr_idx + 1 :]
     return "latchkey" in remainder and "forward" in remainder
 
 

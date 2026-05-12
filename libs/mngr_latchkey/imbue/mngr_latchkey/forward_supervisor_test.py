@@ -113,6 +113,21 @@ def test_cmdline_matcher_accepts_plausible_mngr_latchkey_forward() -> None:
     assert _cmdline_looks_like_mngr_latchkey_forward(["/usr/local/bin/mngr", "latchkey", "forward"])
 
 
+def test_cmdline_matcher_handles_proctitle_overwrite() -> None:
+    """``uv tool``-style wrappers fuse argv into argv[0] and zero out the rest.
+
+    psutil surfaces this as ``["mngr latchkey forward ...", "", "", ...]``;
+    the matcher must still recognise it as ours, or the supervisor will
+    discard its own record and spawn a duplicate every time minds starts.
+    """
+    fused = (
+        "mngr latchkey forward --latchkey-directory /home/user/.minds/latchkey "
+        "--latchkey-binary /opt/latchkey/bin/latchkey --mngr-binary mngr"
+    )
+    cmdline = [fused] + [""] * 85
+    assert _cmdline_looks_like_mngr_latchkey_forward(cmdline)
+
+
 def test_cmdline_matcher_rejects_unrelated_processes() -> None:
     assert not _cmdline_looks_like_mngr_latchkey_forward([])
     # ``manager`` is not ``mngr``.
