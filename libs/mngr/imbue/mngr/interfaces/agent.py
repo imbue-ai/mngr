@@ -167,11 +167,12 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
     def send_message(self, message: str) -> None:
         """Send a message to the running agent.
 
-        Interactive agents deliver messages into the agent's tmux pane
-        via `tmux send-keys` (with paste-detection synchronization for
-        agents that echo input back). Headless agents do not accept
-        live messages and raise `SendMessageError`; their initial
-        prompt must be staged on disk before launch instead.
+        Messages are delivered via a mechanism like "tmux send-keys".
+
+        Not all agents accept messages while they are running.
+
+        Raises SendMessageError if the message fails to send for some reason
+        (including "the agent cannot send messages").
         """
         ...
 
