@@ -113,6 +113,35 @@ def register_modal_test_environment(environment_name: str) -> None:
         worker_modal_environment_names.append(environment_name)
 
 
+def deregister_modal_test_app(app_name: str) -> None:
+    """Stop tracking a Modal app for leak detection.
+
+    Call this after a test's cleanup hook has attempted to delete the app. The
+    session-end leak detector (in libs/mngr_modal/.../conftest.py) polls
+    `modal app list --json` to find tracked apps that are still alive, but
+    Modal's listing endpoints are eventually consistent w.r.t. deletion --
+    they can still return entries for seconds after the synchronous delete
+    call returned "not found". Trusting the cleanup hook's response and
+    deregistering immediately avoids paying that listing-convergence tail.
+    If the underlying delete silently failed, the CI hourly cleanup script
+    (cleanup_old_modal_test_environments.py) catches it as a safety net.
+    """
+    if app_name in worker_modal_app_names:
+        worker_modal_app_names.remove(app_name)
+
+
+def deregister_modal_test_volume(volume_name: str) -> None:
+    """Stop tracking a Modal volume for leak detection. See `deregister_modal_test_app`."""
+    if volume_name in worker_modal_volume_names:
+        worker_modal_volume_names.remove(volume_name)
+
+
+def deregister_modal_test_environment(environment_name: str) -> None:
+    """Stop tracking a Modal environment for leak detection. See `deregister_modal_test_app`."""
+    if environment_name in worker_modal_environment_names:
+        worker_modal_environment_names.remove(environment_name)
+
+
 class ModalSubprocessTestEnv(FrozenModel):
     """Environment configuration for Modal subprocess tests."""
 

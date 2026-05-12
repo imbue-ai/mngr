@@ -28,6 +28,9 @@ from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import delete_modal_apps_in_environment
 from imbue.mngr.utils.testing import delete_modal_environment
 from imbue.mngr.utils.testing import delete_modal_volumes_in_environment
+from imbue.mngr.utils.testing import deregister_modal_test_app
+from imbue.mngr.utils.testing import deregister_modal_test_environment
+from imbue.mngr.utils.testing import deregister_modal_test_volume
 from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import make_mngr_ctx
@@ -115,6 +118,8 @@ def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_n
     1. Close the Modal app context
     2. Delete the volume (must be done before environment deletion)
     3. Delete the environment (cleans up any remaining resources)
+    4. Deregister from leak tracking so the session-end detector doesn't pay
+       for Modal's eventually-consistent listing convergence
     """
     # Close the Modal app context first
     ModalProviderBackend.close_app(app_name)
@@ -130,6 +135,13 @@ def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_n
         delete_environment(environment_name)
     except (modal.exception.Error, OSError):
         pass
+
+    # Deregister so the session-end polling check skips these. See
+    # `deregister_modal_test_app` for the rationale; the CI hourly cleanup
+    # script remains the safety net if delete actually failed.
+    deregister_modal_test_app(app_name)
+    deregister_modal_test_volume(volume_name)
+    deregister_modal_test_environment(environment_name)
 
 
 @pytest.fixture
@@ -285,6 +297,11 @@ def modal_test_session_cleanup(
     delete_modal_apps_in_environment(environment_name)
     delete_modal_volumes_in_environment(environment_name)
     delete_modal_environment(environment_name)
+    # Deregister so the session-end polling check skips this env. The cleanup
+    # chain above is authoritative ("Environment not found" is a successful
+    # delete-or-already-deleted signal); Modal's global list, by contrast,
+    # can take longer than any defensible polling budget to converge.
+    deregister_modal_test_environment(environment_name)
 
 
 @pytest.fixture
