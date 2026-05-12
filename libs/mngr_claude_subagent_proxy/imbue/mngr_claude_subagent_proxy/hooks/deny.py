@@ -18,9 +18,12 @@ deny instead of the usual skill-pointer deny, so a chain of
 subagents that follow the skill's protocol cannot grow unbounded.
 
 No subagent is spawned automatically by this hook. No PostToolUse
-cleanup. No SessionStart reaper. No Stop-hook guarding. This is
-deliberately a much smaller surface than PROXY mode -- see the
-plugin README's "DENY mode" section.
+cleanup. No Stop-hook guarding. DENY mode does install the same
+label-driven ``hooks/reap.py`` SessionStart hook that PROXY uses
+(both spawn paths attach the same parent-id label), but that lives
+in its own module and is unrelated to the deny-on-Task behavior
+this file implements. See the plugin README's "DENY mode" section
+for the full surface comparison.
 """
 
 from __future__ import annotations
