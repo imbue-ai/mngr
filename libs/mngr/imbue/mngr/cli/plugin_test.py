@@ -28,6 +28,7 @@ from imbue.mngr.cli.plugin import _parse_fields
 from imbue.mngr.cli.plugin import _parse_pypi_package_name
 from imbue.mngr.cli.plugin import _parse_remove_sources
 from imbue.mngr.cli.plugin import _project_to_agent_type_entries
+from imbue.mngr.cli.plugin import _project_to_provider_entries
 from imbue.mngr.cli.plugin import _read_package_name_from_pyproject
 from imbue.mngr.cli.plugin import _validate_plugin_name_is_known
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -35,6 +36,9 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.data_types import PluginConfig
+from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.config.provider_config_registry import register_provider_config
+from imbue.mngr.config.provider_config_registry import reset_provider_config_registry
 from imbue.mngr.errors import PluginSpecifierError
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentTypeName
@@ -939,3 +943,44 @@ def test_project_to_agent_type_entries_keeps_user_config_types_when_no_plugins_l
 
     names = {p.name for p in result}
     assert "my-custom" in names
+
+
+# =============================================================================
+# Tests for _project_to_provider_entries (--kind provider filter)
+# =============================================================================
+
+
+def test_project_to_provider_entries_keeps_existing_metadata_when_names_match() -> None:
+    """A registered provider backend whose name matches a plugin entry-point should reuse metadata."""
+    reset_provider_config_registry()
+    try:
+        register_provider_config("docker", ProviderInstanceConfig)
+        plugins = [
+            PluginInfo(name="docker", version="1.2.3", description="Docker backend", is_enabled=True),
+            PluginInfo(name="some-unrelated-plugin", version="9.0", description="Other", is_enabled=True),
+        ]
+
+        result = _project_to_provider_entries(plugins)
+
+        by_name = {p.name: p for p in result}
+        assert "docker" in by_name
+        assert by_name["docker"].version == "1.2.3"
+        assert by_name["docker"].description == "Docker backend"
+        assert "some-unrelated-plugin" not in by_name
+    finally:
+        reset_provider_config_registry()
+
+
+def test_project_to_provider_entries_returns_empty_when_no_backends_registered() -> None:
+    """Registry empty -> output empty, regardless of input plugins."""
+    reset_provider_config_registry()
+    try:
+        plugins = [
+            PluginInfo(name="docker", version="1.0", description="x", is_enabled=True),
+        ]
+
+        result = _project_to_provider_entries(plugins)
+
+        assert result == []
+    finally:
+        reset_provider_config_registry()
