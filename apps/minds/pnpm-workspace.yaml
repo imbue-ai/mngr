@@ -12,3 +12,21 @@
 # Approving it costs ~100MB of cache space in CI but unblocks the build.
 allowBuilds:
   electron: true
+
+# Make pnpm produce a flat npm-style `node_modules/` with every transitive
+# dep visible at top level. The default pnpm layout puts most modules under
+# `node_modules/.pnpm/<pkg>@<ver>/node_modules/<pkg>/` -- which is fine for
+# Node's own resolution but invisible to packagers (electron-builder /
+# ToDesktop's asar bundler) that only walk top-level `node_modules/`.
+#
+# Without this, @todesktop/runtime's regular deps (electron-updater, del,
+# execa, eventemitter2, lodash.once, semver, winston) all live under .pnpm/
+# and are missing from app.asar -- the v0.2.17 build packaged cleanly but
+# crashed at launch with `Cannot find module 'electron-updater'`. With
+# `nodeLinker: hoisted`, every transitive dep is materialised at
+# `node_modules/<pkg>/` (same shape npm/pnpm 10 produced by default in
+# our older greens), so the bundler picks them up automatically.
+#
+# We use `hoisted` (not `isolated`) because we don't need pnpm's per-package
+# isolation here and the cost is just disk space.
+nodeLinker: hoisted
