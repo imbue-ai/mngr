@@ -10,11 +10,16 @@ from imbue.mngr.cli.transcript import _format_event_human
 from imbue.mngr.cli.transcript import _get_event_role
 from imbue.mngr.cli.transcript import _parse_transcript_events
 from imbue.mngr.cli.transcript import transcript
+from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.utils.testing import capture_loguru
+
+_DEFAULT_TARGET = AgentAddress(agent=AgentName("my-agent"))
 
 
 def _make_transcript_opts(
-    target: str = "my-agent",
+    target: AgentOrHostAddress = _DEFAULT_TARGET,
     role: tuple[str, ...] = (),
     tail: int | None = None,
     head: int | None = None,
@@ -41,7 +46,7 @@ def _make_transcript_opts(
 
 def test_transcript_cli_options_can_be_constructed() -> None:
     opts = _make_transcript_opts()
-    assert opts.target == "my-agent"
+    assert opts.target == AgentAddress(agent=AgentName("my-agent"))
     assert opts.role == ()
     assert opts.tail is None
     assert opts.head is None

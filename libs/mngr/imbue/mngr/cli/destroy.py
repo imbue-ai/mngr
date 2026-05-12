@@ -11,15 +11,17 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.data_types import GcResourceTypes
 from imbue.mngr.api.discovery_events import emit_agent_destroyed
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.discovery_events import emit_host_destroyed
 from imbue.mngr.api.find import AgentMatch
+from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.gc import gc as api_gc
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import parse_agent_addresses_or_raise
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -42,6 +44,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ErrorBehavior
@@ -122,7 +125,7 @@ class DestroyCliOptions(CommonCliOptions):
     """
 
     agents: tuple[str, ...]
-    agent_list: tuple[str, ...]
+    agent_list: tuple[AgentAddress, ...]
     force: bool
     gc: bool
     remove_created_branch: bool
@@ -136,8 +139,9 @@ class DestroyCliOptions(CommonCliOptions):
 @optgroup.option(
     "--agent",
     "agent_list",
+    type=AGENT_ADDRESS,
     multiple=True,
-    help="Agent name or ID to destroy (can be specified multiple times)",
+    help="Agent address (NAME[@HOST[.PROVIDER]]) to destroy (can be specified multiple times)",
 )
 @optgroup.option(
     "--session",
@@ -181,12 +185,14 @@ def destroy(ctx: click.Context, **kwargs) -> None:
         is_format_template_supported=True,
     )
 
-    # Validate input
-    agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
+    # Validate input. Variadic positional is parsed here (after stdin expansion);
+    # --agent is already typed by Click.
+    expanded_positional = parse_agent_addresses_or_raise(expand_stdin_placeholder(opts.agents))
+    agent_addresses: list[AgentAddress] = expanded_positional + list(opts.agent_list)
 
     # Handle --session option by extracting agent names from session names
     if opts.sessions:
-        if agent_identifiers:
+        if agent_addresses:
             raise UserInputError("Cannot specify --session with agent names")
         for session_name in opts.sessions:
             agent_name = get_agent_name_from_session(session_name, mngr_ctx.config.prefix)
@@ -195,9 +201,9 @@ def destroy(ctx: click.Context, **kwargs) -> None:
                     f"Session '{session_name}' does not match the expected format. "
                     f"Session names should start with the configured prefix '{mngr_ctx.config.prefix}'."
                 )
-            agent_identifiers.append(agent_name)
+            agent_addresses.append(parse_agent_addresses_or_raise([agent_name])[0])
 
-    if not agent_identifiers:
+    if not agent_addresses:
         if STDIN_PLACEHOLDER not in opts.agents:
             raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
         return
@@ -205,7 +211,7 @@ def destroy(ctx: click.Context, **kwargs) -> None:
     # Find agents to destroy
     try:
         targets = _find_agents_to_destroy(
-            agent_identifiers=agent_identifiers,
+            addresses=agent_addresses,
             mngr_ctx=mngr_ctx,
         )
     except AgentNotFoundError as e:
@@ -282,22 +288,17 @@ def destroy(ctx: click.Context, **kwargs) -> None:
 
 
 def _find_agents_to_destroy(
-    agent_identifiers: Sequence[str],
+    addresses: Sequence[AgentAddress],
     mngr_ctx: MngrContext,
 ) -> _DestroyTargets:
     """Find all agents to destroy.
 
-    Uses find_agents_by_addresses for matching (supports NAME@HOST.PROVIDER syntax),
-    then partitions results into online agents vs offline hosts.
-
     Returns _DestroyTargets containing online agents and offline hosts to destroy.
-    Raises AgentNotFoundError if any specified identifier does not match an agent.
+    Raises AgentNotFoundError if any specified address does not match an agent.
     """
-    # Find matching agents using the shared address-aware resolution.
-    # This handles address parsing, name/ID matching, and host/provider filtering.
     # include_destroyed=True so we can find and clean up agents on already-destroyed hosts.
-    matches = find_agents_by_addresses(
-        raw_identifiers=agent_identifiers,
+    matches = find_all_agents(
+        addresses=addresses,
         filter_all=False,
         target_state=None,
         mngr_ctx=mngr_ctx,

@@ -11,8 +11,11 @@ mngr event TARGET [SOURCES...] [--source SOURCE] [--include CEL] [--exclude CEL]
 
 View events from an agent or host.
 
-TARGET identifies an agent (by name or ID) or a host (by name or ID).
-The command first tries to match TARGET as an agent, then as a host.
+TARGET identifies an agent or a host by text:
+- Agents: `NAME`, `NAME@HOST`, or `NAME@HOST.PROVIDER`.
+- Hosts: `@HOST`, `@HOST.PROVIDER`, or a bare `host-...` ID.
+
+Bare names without `@` are always interpreted as agent names.
 
 Streams all events from all sources in date-sorted order. Use --source
 or positional SOURCES arguments to restrict which event sources to include.
@@ -33,7 +36,7 @@ mngr event [OPTIONS] TARGET [SOURCES]...
 ```
 ## Arguments
 
-- `TARGET`: Agent or host name/ID whose events to view
+- `TARGET`: Agent or host whose events to view. Agents are `NAME` or `NAME@HOST[.PROVIDER]`. Hosts are `@HOST[.PROVIDER]` (the `@` prefix is required to disambiguate from agent names) or a `host-...` ID.
 - `SOURCES`: Event sources to include (optional; includes all sources if omitted). These are paths relative to the target's events/ directory (e.g. 'messages', 'logs/mngr').
 
 **Options:**
