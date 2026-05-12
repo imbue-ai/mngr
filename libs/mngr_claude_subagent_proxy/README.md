@@ -51,8 +51,14 @@ mode = "PROXY"   # default: route Task calls through a mngr-managed subagent
   built-in tools, so we route via Haiku rather than via PostToolUse).
 - **`PostToolUse:Agent` hook** cascade-destroys the subagent, then
   cleans up local state.
-- **`SessionStart` hook** reaps orphaned proxy subagents from prior
-  sessions (parent crash / Ctrl+C cases).
+- **`SessionStart` hooks** -- two of them:
+  - `hooks/reap.py` reaps orphaned proxy subagents from prior
+    sessions (parent crash / Ctrl+C cases).
+  - `hooks/guard_stop_hooks.py` wraps every Stop / SubagentStop
+    command in this agent's per-agent plugin cache with the
+    `MNGR_CLAUDE_SUBAGENT_PROXY_CHILD` env-conditional guard (see the
+    "Stop-hook handling" section below). PROXY-only; DENY mode does
+    not install this hook.
 - **`on_before_agent_destroy`** hookimpl cascade-destroys all recorded
   proxy children before the parent's state dir is wiped.
 
