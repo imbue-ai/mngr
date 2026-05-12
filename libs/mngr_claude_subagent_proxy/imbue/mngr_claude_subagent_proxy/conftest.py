@@ -26,12 +26,16 @@ def clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> pytest.MonkeyP
     ``MNGR_SUBAGENT_REAP_BACKGROUND`` (reap hook background-worker switch).
 
     Also reroutes ``$HOME`` into a per-test ``tmp_path`` so the
-    typed-subagent agent-definition resolver (which walks
-    ``Path.home() / ".claude" / ...``) cannot accidentally read the
-    developer's real ``~/.claude/agents/`` or installed marketplace
-    plugins. Tests that exercise typed-subagent paths can drop files
-    under the fake home; tests that don't get a deterministic empty
-    home that resolves nothing.
+    typed-subagent agent-definition resolver (which goes through
+    ``get_user_claude_config_dir()``: ``$ORIGINAL_CLAUDE_CONFIG_DIR``
+    then ``$CLAUDE_CONFIG_DIR`` then ``Path.home() / ".claude"``)
+    cannot accidentally read the developer's real ``~/.claude/agents/``
+    or installed marketplace plugins. The autouse
+    ``setup_test_mngr_env`` fixture (via ``isolate_home``) already
+    clears the two config-dir vars, so overriding ``HOME`` here is
+    enough to redirect the lookup. Tests that exercise typed-subagent
+    paths can drop files under the fake home; tests that don't get a
+    deterministic empty home that resolves nothing.
     """
     for name in (
         "MNGR_AGENT_STATE_DIR",
