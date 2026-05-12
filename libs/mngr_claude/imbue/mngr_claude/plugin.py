@@ -1983,7 +1983,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             # This copies sessions, memory, transcript offsets, etc. The subsequent config setup
             # will overwrite identity-specific files (.claude.json, credentials) with fresh values.
             if options.source_agent_state_location is not None:
-                self._transfer_source_plugin_data(host, options.source_agent_state_location)
+                self._transfer_source_plugin_data(options.source_agent_state_location)
 
             # Set up per-agent config directory (for both local and remote hosts)
             self._setup_per_agent_config_dir(host, options, mngr_ctx)
@@ -2041,11 +2041,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         host.write_text_file(self._get_agent_dir() / "claude_session_id", last_session_id)
         logger.info("Adopted {} session(s), active session: {}", len(adopt_session_args), last_session_id)
 
-    def _transfer_source_plugin_data(
-        self,
-        host: OnlineHostInterface,
-        source_agent_state_location: HostLocation,
-    ) -> None:
+    def _transfer_source_plugin_data(self, source_agent_state_location: HostLocation) -> None:
         """Copy the source agent's plugin/ directory into this agent's state
         directory. Runs before _setup_per_agent_config_dir, which overwrites
         identity-specific config files with fresh values for the new agent.
@@ -2059,7 +2055,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             return
 
         with log_span("Transferring source plugin data"):
-            host.copy_directory(source_host, source_plugin_dir, dest_plugin_dir)
+            self.host.copy_directory(source_host, source_plugin_dir, dest_plugin_dir)
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve session files and clean up per-agent credentials and trust entries.
