@@ -75,6 +75,7 @@ def _create_local_agent(
     agent_name: str,
     source_dir: Path,
     env: ModalSubprocessTestEnv,
+    prompt: str = "just say 'hello'",
 ) -> subprocess.CompletedProcess[str]:
     """Create a Claude agent on the local (test sandbox) host.
 
@@ -101,7 +102,7 @@ def _create_local_agent(
             "--",
             "--dangerously-skip-permissions",
             "-p",
-            "just say 'hello'",
+            prompt,
         ],
         capture_output=True,
         text=True,
@@ -133,6 +134,21 @@ def _clone_agent_to_modal(
         capture_output=True,
         text=True,
         timeout=600,
+        env=env.env,
+    )
+
+
+def _exec_on_modal_agent(
+    agent_name: str,
+    command: str,
+    env: ModalSubprocessTestEnv,
+) -> subprocess.CompletedProcess[str]:
+    """Run a shell command on a Modal-hosted agent's host."""
+    return subprocess.run(
+        ["uv", "run", "mngr", "exec", agent_name, command],
+        capture_output=True,
+        text=True,
+        timeout=120,
         env=env.env,
     )
 
@@ -300,41 +316,69 @@ def test_destroy_stopped_modal_agent_preserves_sessions_from_volume(
     _assert_sessions_preserved(modal_subprocess_env.host_dir, agent_name)
 
 
+def _read_preserved_session_text(host_dir: Path, agent_name: str) -> str:
+    """Return the concatenated text of all preserved session JSONLs for an agent."""
+    preserved_sessions_dir = host_dir / "plugin" / "mngr_claude" / "preserved_sessions"
+    agent_dirs = [d for d in preserved_sessions_dir.iterdir() if d.is_dir() and d.name.startswith(agent_name)]
+    assert len(agent_dirs) == 1, (
+        f"Expected exactly one preserved dir for {agent_name}, "
+        f"found: {[d.name for d in preserved_sessions_dir.iterdir()]}"
+    )
+    session_files = list((agent_dirs[0] / "projects").rglob("*.jsonl"))
+    assert len(session_files) >= 1, f"No session .jsonl files under {agent_dirs[0] / 'projects'}"
+    return "\n".join(f.read_text() for f in session_files)
+
+
 @pytest.mark.release
 @pytest.mark.rsync
 @pytest.mark.tmux
 @pytest.mark.timeout(600)
-def test_clone_local_claude_agent_to_modal(
+def test_clone_local_claude_agent_to_modal_rekeys_for_resume(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
 ) -> None:
-    """Regression: ``mngr clone <local-agent> <new>@.modal`` must succeed
-    and actually transfer the source agent's plugin/ session data.
+    """End-to-end: ``mngr clone <local-agent> <new>@.modal`` must transfer the
+    source agent's plugin/ session data AND rewrite it so that the cloned
+    agent's claude can resume the source session.
 
-    Previously this failed during plugin-data transfer with::
+    Two distinct regressions this guards against:
 
-        rsync: change_dir ".../<source-agent>/plugin" failed: No such file or directory
+    1. **Cross-host rsync** -- the original bug. ``_transfer_source_plugin_data``
+       passed the destination Modal host as both source and target of
+       ``copy_directory``. Rsync then ran on the Modal sandbox looking for
+       the source plugin dir there (where it doesn't exist) and aborted
+       with ``rsync: change_dir ".../plugin" failed: No such file or
+       directory``.
 
-    because ``_transfer_source_plugin_data`` passed the destination Modal host
-    as both source and target of ``copy_directory``. Rsync then ran on the
-    Modal sandbox looking for the source plugin dir there (where it doesn't
-    exist) instead of pushing it from the source host. The fix threads the
-    source agent's location (host + state dir) through
-    ``CreateAgentOptions.source_agent_state_location`` and passes that host as
-    the rsync source, so the cross-host transfer (local->Modal in this test)
-    actually runs from the right machine.
+    2. **Session rekeying** -- session JSONL files are filed under the
+       source's encoded work_dir (Claude's per-project layout). After clone
+       the destination's work_dir encodes differently, so without renaming
+       the project subdir Claude won't find the JSONL and starts a fresh
+       session. Similarly, ``claude_session_id`` lives outside ``plugin/``
+       so the rsync alone leaves the destination pointing at a new id.
+       ``_adopt_cloned_session`` re-encodes the project subdir and copies
+       the source's session id (+ history) to the destination.
 
-    The test then destroys the target so the preserved-sessions mechanism
-    pulls the modal agent's plugin/ data back locally, and asserts the
-    source's session data made it across. A silent regression (e.g. the
-    transfer is skipped because ``path_exists`` returns False against the
-    wrong host) would leave that preserved dir empty.
+    Verifies (1) by exercising the clone command end-to-end against a real
+    Modal sandbox. Verifies (2) by inspecting the cloned agent's plugin/
+    layout on Modal: the project subdir must be named after the
+    destination's encoded work_dir (not the source's), and the source's
+    ``claude_session_id`` file must have been copied over to the
+    destination state dir. Verifying that claude itself actually resumes
+    the conversation interactively (a la ``test_adopt_session.py``) would
+    require an interactive ``mngr message`` + tmux pane-capture flow; that
+    is a possible follow-up.
     """
     source_name = f"test-clone-src-{get_short_random_string()}"
     target_name = f"test-clone-dst-{get_short_random_string()}"
     _setup_claude_gitignore(temp_source_dir)
 
-    create_result = _create_local_agent(source_name, temp_source_dir, modal_subprocess_env)
+    # Source's prompt embeds a unique token so we can later confirm the
+    # source's session content actually made it onto the clone's host.
+    secret = f"hocus{get_short_random_string()}pocus"
+    source_prompt = f"Memorize this secret token: '{secret}'. Just acknowledge with 'ok'."
+
+    create_result = _create_local_agent(source_name, temp_source_dir, modal_subprocess_env, prompt=source_prompt)
     assert create_result.returncode == 0, (
         f"Local create failed (rc={create_result.returncode}):\n"
         f"stdout: {create_result.stdout}\nstderr: {create_result.stderr}"
@@ -346,15 +390,54 @@ def test_clone_local_claude_agent_to_modal(
         f"stdout: {clone_result.stdout}\nstderr: {clone_result.stderr}"
     )
 
-    # Destroying the target Modal agent preserves its plugin/ session files back
-    # to the local host_dir (same mechanism as test_destroy_modal_agent_preserves_sessions_locally).
-    # Finding session files under the target's preserved_sessions dir proves the
-    # cross-host clone actually transferred the source agent's session data to
-    # the destination -- a silent no-op in _transfer_source_plugin_data would
-    # leave preserved_sessions empty.
+    # The clone's work_dir on Modal is /mngr/projects/agent-<uuid>; its
+    # encoding starts with "-mngr-projects-". After rekeying, exactly that
+    # subdir should appear under projects/ on the clone.
+    list_result = _exec_on_modal_agent(
+        target_name,
+        "ls /mngr/agents/*/plugin/claude/anthropic/projects/",
+        modal_subprocess_env,
+    )
+    assert list_result.returncode == 0, (
+        f"Listing projects dir on clone failed:\nstdout: {list_result.stdout}\nstderr: {list_result.stderr}"
+    )
+    project_subdirs = [line.strip() for line in list_result.stdout.split("\n") if line.strip()]
+    assert any(name.startswith("-mngr-projects-") for name in project_subdirs), (
+        f"No clone-encoded project subdir under plugin/claude/anthropic/projects/ on the clone "
+        f"(rekeying regressed?). Saw: {project_subdirs}"
+    )
+    # The source's local encoded work_dir would start with "-private-var" (macOS pytest tmp).
+    # After rekeying, that name must no longer be present.
+    assert not any(name.startswith("-private-var") or name.startswith("-tmp-") for name in project_subdirs), (
+        f"Found a source-encoded project subdir on the clone (rekeying did not run or did not rename). "
+        f"Saw: {project_subdirs}"
+    )
+
+    # claude_session_id should have been copied from the source so claude
+    # resumes the right session. If adoption didn't run, this file would
+    # either be missing or contain the clone's own agent UUID.
+    sid_result = _exec_on_modal_agent(
+        target_name,
+        "cat /mngr/agents/*/claude_session_id 2>/dev/null",
+        modal_subprocess_env,
+    )
+    assert sid_result.returncode == 0, (
+        f"Reading claude_session_id on clone failed:\nstdout: {sid_result.stdout}\nstderr: {sid_result.stderr}"
+    )
+    clone_sid = sid_result.stdout.strip()
+    assert clone_sid, "claude_session_id on clone is empty -- _adopt_cloned_session did not run"
+
+    # Destroying the target preserves its plugin/ session files back to
+    # local host_dir, so we can also sanity-check the source's content
+    # survived the round trip.
     destroy_target_result = _destroy_modal_agent(target_name, modal_subprocess_env)
     assert destroy_target_result.returncode == 0, (
         f"Destroy of target failed (rc={destroy_target_result.returncode}):\n"
         f"stdout: {destroy_target_result.stdout}\nstderr: {destroy_target_result.stderr}"
     )
     _assert_sessions_preserved(modal_subprocess_env.host_dir, target_name)
+    preserved_text = _read_preserved_session_text(modal_subprocess_env.host_dir, target_name)
+    assert secret in preserved_text, (
+        f"Source's secret token '{secret}' missing from preserved JSONL "
+        f"(plugin transfer regressed?). First 2000 chars:\n{preserved_text[:2000]}"
+    )

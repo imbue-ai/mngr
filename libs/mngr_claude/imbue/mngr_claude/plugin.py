@@ -2047,7 +2047,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         identity-specific config files with fresh values for the new agent.
         """
         source_host = source_agent_state_location.host
-        source_plugin_dir = source_agent_state_location.path / "plugin"
+        source_state_dir = source_agent_state_location.path
+        source_plugin_dir = source_state_dir / "plugin"
         dest_plugin_dir = self._get_agent_dir() / "plugin"
 
         if not source_host.path_exists(source_plugin_dir):
@@ -2056,6 +2057,64 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         with log_span("Transferring source plugin data"):
             self.host.copy_directory(source_host, source_plugin_dir, dest_plugin_dir)
+
+        self._adopt_cloned_session(source_host, source_state_dir)
+
+    def _adopt_cloned_session(self, source_host: OnlineHostInterface, source_state_dir: Path) -> None:
+        """Rewire the transferred plugin/ so ``claude --resume`` finds the source's session.
+
+        The plugin/ copy preserves session JSONL files but leaves them filed
+        under the *source* agent's encoded work_dir. Claude on the destination
+        searches ``projects/<encoded-current-work-dir>/<session>.jsonl``, so
+        without renaming the project subdir on the destination, the JSONL is
+        invisible and Claude starts a fresh session. Similarly, the active
+        session id lives in ``<state_dir>/claude_session_id`` (outside
+        plugin/, so the rsync doesn't touch it) -- without copying it the
+        startup command's ``claude --resume "$MAIN_CLAUDE_SESSION_ID"``
+        targets the new agent's auto-generated id.
+        """
+        # Carry over the active session id (and its history) from the source
+        # agent state dir top-level. Skip gracefully if the source never had
+        # an active session.
+        source_sid_path = source_state_dir / "claude_session_id"
+        if source_host.path_exists(source_sid_path):
+            source_sid = source_host.read_text_file(source_sid_path).strip()
+            if source_sid:
+                self.host.write_text_file(self._get_agent_dir() / "claude_session_id", source_sid)
+
+        source_history_path = source_state_dir / "claude_session_id_history"
+        if source_host.path_exists(source_history_path):
+            self.host.write_text_file(
+                self._get_agent_dir() / "claude_session_id_history",
+                source_host.read_text_file(source_history_path),
+            )
+
+        # Re-encode the project subdir under plugin/claude/anthropic/projects/
+        # so its name matches the destination agent's work_dir. The original
+        # name uses the source agent's work_dir encoding.
+        dest_projects_dir = self._get_agent_dir() / "plugin" / "claude" / "anthropic" / "projects"
+        dest_project_name = encode_claude_project_dir_name(self.work_dir)
+        list_result = self.host.execute_idempotent_command(
+            f"ls -1 {shlex.quote(str(dest_projects_dir))} 2>/dev/null", timeout_seconds=5.0
+        )
+        if not list_result.success:
+            return
+        subdirs = [line.strip() for line in list_result.stdout.split("\n") if line.strip()]
+        target_dir = dest_projects_dir / dest_project_name
+        for subdir in subdirs:
+            if subdir == dest_project_name:
+                continue
+            source_subdir = dest_projects_dir / subdir
+            # Move source_subdir into target_dir, merging if target already
+            # exists (e.g. multiple source project dirs collapsing into one).
+            move_cmd = (
+                f"mkdir -p {shlex.quote(str(target_dir))} && "
+                f"if [ -d {shlex.quote(str(source_subdir))} ]; then "
+                f"  cp -a {shlex.quote(str(source_subdir))}/. {shlex.quote(str(target_dir))}/ && "
+                f"  rm -rf {shlex.quote(str(source_subdir))}; "
+                f"fi"
+            )
+            self.host.execute_idempotent_command(move_cmd, timeout_seconds=60.0)
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve session files and clean up per-agent credentials and trust entries.

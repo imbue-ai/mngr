@@ -3168,7 +3168,11 @@ def test_transfer_source_plugin_data_copies_plugin_dir(
     plugin_dir = source_dir / "plugin" / "claude" / "anthropic"
     plugin_dir.mkdir(parents=True)
     (plugin_dir / ".claude.json").write_text('{"trust": true}')
-    projects_dir = plugin_dir / "projects" / "test-project"
+    # The source's project subdir is named after the source agent's work_dir
+    # encoding. After clone it should be re-keyed to the *destination* agent's
+    # encoding (see test_transfer_source_plugin_data_rekeys_project_dir).
+    source_project_subdir = "source-encoded-work-dir"
+    projects_dir = plugin_dir / "projects" / source_project_subdir
     projects_dir.mkdir(parents=True)
     (projects_dir / "session.jsonl").write_text('{"type":"message"}\n')
 
@@ -3177,9 +3181,14 @@ def test_transfer_source_plugin_data_copies_plugin_dir(
     # data.json should be untouched (only plugin/ is copied)
     assert json.loads((dest_dir / "data.json").read_text())["id"] == "new-agent"
 
-    # Plugin files should have been copied
+    # Plugin files should have been copied (non-project data preserved as-is)
     assert (dest_dir / "plugin" / "claude" / "anthropic" / ".claude.json").exists()
-    assert (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / "test-project" / "session.jsonl").exists()
+    # The session JSONL ended up under the destination's encoded work_dir,
+    # not the source's -- verified more directly in
+    # test_transfer_source_plugin_data_rekeys_project_dir below.
+    dest_project_name = encode_claude_project_dir_name(agent.work_dir)
+    assert (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / dest_project_name / "session.jsonl").exists()
+    assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / source_project_subdir).exists()
 
 
 def test_transfer_source_plugin_data_skips_when_no_plugin_dir(
@@ -3196,6 +3205,63 @@ def test_transfer_source_plugin_data_skips_when_no_plugin_dir(
 
     # Should not raise
     agent._transfer_source_plugin_data(HostLocation(host=host, path=source_dir))
+
+
+@pytest.mark.rsync
+def test_transfer_source_plugin_data_rekeys_project_dir(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """After clone, the project subdir under plugin/claude/anthropic/projects/
+    should be renamed from the source agent's encoded work_dir to the
+    destination agent's, so ``claude --resume`` on the destination finds the
+    session JSONL.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    dest_dir = agent._get_agent_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / "source_agent_state"
+    plugin_dir = source_dir / "plugin" / "claude" / "anthropic"
+    # Project subdir name uses the source's (different) work_dir encoding.
+    src_project = plugin_dir / "projects" / "-Users-ev-some-source-workdir"
+    src_project.mkdir(parents=True)
+    (src_project / "abc-session.jsonl").write_text('{"type":"message"}\n')
+
+    agent._transfer_source_plugin_data(HostLocation(host=host, path=source_dir))
+
+    dest_project_name = encode_claude_project_dir_name(agent.work_dir)
+    rekeyed = dest_dir / "plugin" / "claude" / "anthropic" / "projects" / dest_project_name
+    assert (rekeyed / "abc-session.jsonl").exists(), (
+        f"Expected session JSONL under {rekeyed}, dest projects dir is "
+        f"{[p.name for p in (dest_dir / 'plugin' / 'claude' / 'anthropic' / 'projects').iterdir()]}"
+    )
+    # Source-encoded subdir should be gone.
+    assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / "-Users-ev-some-source-workdir").exists()
+
+
+@pytest.mark.rsync
+def test_transfer_source_plugin_data_carries_session_id(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The source agent's ``claude_session_id`` (and history) live at the top of
+    the source state dir -- not inside plugin/ -- so the plugin rsync alone
+    doesn't move them. _transfer_source_plugin_data should still copy them
+    into the destination so ``claude --resume "$MAIN_CLAUDE_SESSION_ID"``
+    targets the source's session.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    dest_dir = agent._get_agent_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / "source_agent_state"
+    (source_dir / "plugin").mkdir(parents=True)
+    (source_dir / "claude_session_id").write_text("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n")
+    (source_dir / "claude_session_id_history").write_text("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee startup\n")
+
+    agent._transfer_source_plugin_data(HostLocation(host=host, path=source_dir))
+
+    assert (dest_dir / "claude_session_id").read_text().strip() == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    assert "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee startup" in (dest_dir / "claude_session_id_history").read_text()
 
 
 # =============================================================================
