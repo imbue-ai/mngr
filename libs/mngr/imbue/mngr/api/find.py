@@ -95,6 +95,24 @@ def find_all_matching_hosts(
 
 
 @pure
+def find_one_matching_host(
+    address: HostAddress,
+    all_hosts: Sequence[DiscoveredHost],
+) -> DiscoveredHost:
+    """Find the single host matching a :class:`HostAddress` filter.
+
+    Raises :class:`UserInputError` when no host matches or when more than one
+    matches.
+    """
+    matches = find_all_matching_hosts(address, all_hosts)
+    if len(matches) == 0:
+        raise UserInputError(f"Could not find host with ID or name: {address}")
+    if len(matches) > 1:
+        raise UserInputError(f"Multiple hosts found with name: {address}")
+    return matches[0]
+
+
+@pure
 def find_all_matching_agents(
     agent: AgentNameOrId,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
@@ -110,57 +128,6 @@ def find_all_matching_agents(
             if is_match:
                 matches.append((host_ref, agent_ref))
     return matches
-
-
-@pure
-def _find_one_matching_host(
-    host: HostNameOrId | None,
-    provider: ProviderInstanceName | None,
-    all_hosts: Sequence[DiscoveredHost],
-) -> DiscoveredHost | None:
-    """Find the single host matching the given filter components.
-
-    Returns ``None`` when both arguments are ``None``. Raises
-    :class:`UserInputError` when no host matches or when more than one matches.
-    """
-    if host is None and provider is None:
-        return None
-
-    matches = _find_matching_hosts(host, provider, all_hosts)
-    if len(matches) == 0:
-        descriptor = _host_descriptor(host, provider)
-        raise UserInputError(f"Could not find host with ID or name: {descriptor}")
-    if len(matches) > 1:
-        descriptor = _host_descriptor(host, provider)
-        raise UserInputError(f"Multiple hosts found with name: {descriptor}")
-    return matches[0]
-
-
-@pure
-def _host_descriptor(host: HostNameOrId | None, provider: ProviderInstanceName | None) -> str:
-    """Render filter components back into the user-facing ``host.provider`` form."""
-    if host is not None and provider is not None:
-        return f"{host}.{provider}"
-    if host is not None:
-        return str(host)
-    if provider is not None:
-        return f".{provider}"
-    return ""
-
-
-@pure
-def resolve_host_reference(
-    address: HostAddress | None,
-    all_hosts: Sequence[DiscoveredHost],
-) -> DiscoveredHost | None:
-    """Resolve a :class:`HostAddress` to a unique :class:`DiscoveredHost`.
-
-    Returns ``None`` if ``address`` is ``None``. Raises
-    :class:`UserInputError` if no host matches or if more than one matches.
-    """
-    if address is None:
-        return None
-    return _find_one_matching_host(address.host, address.provider, all_hosts)
 
 
 @pure
@@ -217,8 +184,12 @@ def resolve_source_location(
     )
 
     all_hosts = list(agents_by_host.keys())
-    with log_span("Resolving host reference"):
-        resolved_host = resolve_host_reference(parsed.host, all_hosts)
+    resolved_host: DiscoveredHost | None
+    if parsed.host is None:
+        resolved_host = None
+    else:
+        with log_span("Resolving host reference"):
+            resolved_host = find_one_matching_host(parsed.host, all_hosts)
     with log_span("Resolving agent reference"):
         agent_result = resolve_agent_reference(parsed.agent, resolved_host, agents_by_host)
 

@@ -12,8 +12,8 @@ from imbue.mngr.api.address_parsers import parse_agent_address
 from imbue.mngr.api.address_parsers import parse_agent_name_or_id
 from imbue.mngr.api.address_parsers import parse_host_address
 from imbue.mngr.api.discover import discover_by_address
+from imbue.mngr.api.find import find_one_matching_host
 from imbue.mngr.api.find import resolve_agent_reference
-from imbue.mngr.api.find import resolve_host_reference
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostConnectionError
@@ -101,13 +101,11 @@ def _build_host_resolved_target(
     all_hosts: list[DiscoveredHost],
     mngr_ctx: MngrContext,
 ) -> ResolvedTarget:
-    """Build a ResolvedTarget for a host identifier using find.py's resolve_host_reference.
+    """Build a ResolvedTarget for a host identifier using find.py's find_one_matching_host.
 
-    resolve_host_reference raises UserInputError if not found; it only returns None
-    when identifier is None, which cannot happen here.
+    find_one_matching_host raises UserInputError if the host cannot be found.
     """
-    host_ref = resolve_host_reference(parse_host_address(identifier), all_hosts)
-    assert host_ref is not None
+    host_ref = find_one_matching_host(parse_host_address(identifier), all_hosts)
     provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
     return ResolvedTarget(
         target=WaitTarget(identifier=identifier, target_type=WaitTargetType.HOST),
@@ -141,7 +139,7 @@ def _resolve_by_name(
     host_ref: DiscoveredHost | None = None
     host_error: UserInputError | None = None
     try:
-        host_ref = resolve_host_reference(parse_host_address(identifier), all_hosts)
+        host_ref = find_one_matching_host(parse_host_address(identifier), all_hosts)
     except UserInputError as exc:
         host_error = exc
 

@@ -10,8 +10,8 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import find_agents_by_addresses
+from imbue.mngr.api.find import find_one_matching_host
 from imbue.mngr.api.find import group_agents_by_host
-from imbue.mngr.api.find import resolve_host_reference
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import HOST_ADDRESS
@@ -229,8 +229,7 @@ def _resolve_host_addresses(
     all_hosts = _build_host_references(mngr_ctx)
     resolved_ids: set[HostId] = set()
     for host_address in host_addresses:
-        resolved_host = resolve_host_reference(host_address, all_hosts)
-        assert resolved_host is not None
+        resolved_host = find_one_matching_host(host_address, all_hosts)
         resolved_ids.add(resolved_host.host_id)
     return resolved_ids
 
@@ -465,8 +464,7 @@ def _apply_host_only_changes(
 
     Raises UserInputError if the host address cannot be resolved.
     """
-    resolved_host = resolve_host_reference(host_address, all_hosts)
-    assert resolved_host is not None
+    resolved_host = find_one_matching_host(host_address, all_hosts)
 
     provider = get_provider_instance(resolved_host.provider_name, mngr_ctx)
     host = provider.get_host(resolved_host.host_id)

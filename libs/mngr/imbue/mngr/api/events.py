@@ -29,8 +29,8 @@ from imbue.mngr.api.address_parsers import parse_agent_address
 from imbue.mngr.api.address_parsers import parse_host_address
 from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.find import find_one_matching_host
 from imbue.mngr.api.find import resolve_agent_reference
-from imbue.mngr.api.find import resolve_host_reference
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MalformedJsonlLineError
@@ -143,7 +143,7 @@ def resolve_events_target(
 
     Tries to interpret the identifier as an agent first, then falls back to
     interpreting it as a host. Uses :func:`resolve_agent_reference` and
-    :func:`resolve_host_reference` from :mod:`imbue.mngr.api.find`.
+    :func:`find_one_matching_host` from :mod:`imbue.mngr.api.find`.
 
     When the target host is online, the returned :class:`EventsTarget`
     includes the online host and events path for direct command execution
@@ -228,7 +228,7 @@ def resolve_events_target(
     host_ref: DiscoveredHost | None = None
     if host_address is not None:
         try:
-            host_ref = resolve_host_reference(host_address, all_hosts)
+            host_ref = find_one_matching_host(host_address, all_hosts)
         except UserInputError as e:
             if "Multiple" in str(e):
                 raise

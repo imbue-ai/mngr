@@ -12,11 +12,11 @@ from imbue.mngr.api.find import determine_resolved_path
 from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import find_all_matching_agents
 from imbue.mngr.api.find import find_all_matching_hosts
+from imbue.mngr.api.find import find_one_matching_host
 from imbue.mngr.api.find import get_host_from_list_by_id
 from imbue.mngr.api.find import get_unique_host_from_list_by_name
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.find import resolve_agent_reference
-from imbue.mngr.api.find import resolve_host_reference
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -120,16 +120,7 @@ def test_parse_hosted_location_colon_prefix_is_local_path() -> None:
     assert parsed == HostedLocation(path=Path("my-dir"))
 
 
-def test_resolve_host_reference_with_none() -> None:
-    result = resolve_host_reference(
-        address=None,
-        all_hosts=[],
-    )
-
-    assert result is None
-
-
-def test_resolve_host_reference_by_id() -> None:
+def test_find_one_matching_host_by_id() -> None:
     host_id = HostId.generate()
     host_ref = DiscoveredHost(
         host_id=host_id,
@@ -137,7 +128,7 @@ def test_resolve_host_reference_by_id() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = resolve_host_reference(
+    result = find_one_matching_host(
         address=HostAddress(host=host_id),
         all_hosts=[host_ref],
     )
@@ -145,14 +136,14 @@ def test_resolve_host_reference_by_id() -> None:
     assert result == host_ref
 
 
-def test_resolve_host_reference_by_name() -> None:
+def test_find_one_matching_host_by_name() -> None:
     host_ref = DiscoveredHost(
         host_id=HostId.generate(),
         host_name=HostName("test-host"),
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = resolve_host_reference(
+    result = find_one_matching_host(
         address=HostAddress(host=HostName("test-host")),
         all_hosts=[host_ref],
     )
@@ -160,16 +151,16 @@ def test_resolve_host_reference_by_name() -> None:
     assert result == host_ref
 
 
-def test_resolve_host_reference_raises_when_not_found() -> None:
+def test_find_one_matching_host_raises_when_not_found() -> None:
     with pytest.raises(UserInputError, match="Could not find host with ID or name: nonexistent"):
-        resolve_host_reference(
+        find_one_matching_host(
             address=HostAddress(host=HostName("nonexistent")),
             all_hosts=[],
         )
 
 
-def test_resolve_host_reference_disambiguates_with_host_provider_form() -> None:
-    """resolve_host_reference should pick the right host when 'host.provider' is given."""
+def test_find_one_matching_host_disambiguates_with_host_provider_form() -> None:
+    """find_one_matching_host should pick the right host when 'host.provider' is given."""
     host_modal = DiscoveredHost(
         host_id=HostId.generate(),
         host_name=HostName("m1"),
@@ -181,7 +172,7 @@ def test_resolve_host_reference_disambiguates_with_host_provider_form() -> None:
         provider_name=ProviderInstanceName("docker"),
     )
 
-    result = resolve_host_reference(
+    result = find_one_matching_host(
         address=HostAddress(host=HostName("m1"), provider=ProviderInstanceName("modal")),
         all_hosts=[host_modal, host_docker],
     )
@@ -189,7 +180,7 @@ def test_resolve_host_reference_disambiguates_with_host_provider_form() -> None:
     assert result == host_modal
 
 
-def test_resolve_host_reference_raises_when_multiple_hosts_with_same_name() -> None:
+def test_find_one_matching_host_raises_when_multiple_hosts_with_same_name() -> None:
     host_ref1 = DiscoveredHost(
         host_id=HostId.generate(),
         host_name=HostName("test-host"),
@@ -202,7 +193,7 @@ def test_resolve_host_reference_raises_when_multiple_hosts_with_same_name() -> N
     )
 
     with pytest.raises(UserInputError, match="Multiple hosts found with name: test-host"):
-        resolve_host_reference(
+        find_one_matching_host(
             address=HostAddress(host=HostName("test-host")),
             all_hosts=[host_ref1, host_ref2],
         )
