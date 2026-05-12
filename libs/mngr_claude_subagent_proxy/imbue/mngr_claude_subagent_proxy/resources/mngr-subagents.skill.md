@@ -76,10 +76,17 @@ input channel (`mngr create --message-file`), so you must inline the
 system prompt yourself: prepend the body of the agent definition `.md`
 file to your prompt file before running `mngr create`.
 
-The plugin's deny reason names the resolved path when it finds one
-(searching `<work_dir>/.claude/agents/`, `~/.claude/agents/`, and
-`~/.claude/plugins/marketplaces/*/plugins/<plugin>/agents/`). Write
-the prompt file like:
+The plugin's deny reason names the resolved path when it finds one.
+Resolution branches on whether the `subagent_type` contains a `:`:
+
+- Plugin-namespaced (`plugin:agent`): only
+  `~/.claude/plugins/marketplaces/*/plugins/<plugin>/agents/<agent>.md`
+  is checked.
+- Non-namespaced: `<work_dir>/.claude/agents/<name>.md` then
+  `~/.claude/agents/<name>.md` (project-local wins). The flat
+  agents/ directories are NOT a fallback for namespaced types.
+
+Write the prompt file like:
 
     # System prompt for subagent_type 'imbue-code-guardian:verify-and-fix'
 
