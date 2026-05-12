@@ -57,6 +57,29 @@ Both fields are overridable via the matching env vars
 CLI flags (`--latchkey-directory`, `--latchkey-binary`). Precedence is
 CLI flag > env var > settings.toml > built-in default.
 
+## Embedding
+
+Embedders (such as the minds desktop client) typically want a single
+detached ``mngr latchkey forward`` supervisor that survives embedder
+restarts and adopts the existing one instead of double-spawning. The
+:class:`LatchkeyForwardSupervisor` does exactly that:
+
+```python
+from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
+
+supervisor = LatchkeyForwardSupervisor(
+    mngr_binary="/path/to/mngr",          # default: ``mngr`` on PATH
+    latchkey_binary="/path/to/latchkey",  # default: ``latchkey`` on PATH
+    latchkey_directory=root_dir,
+)
+supervisor.ensure_running()  # idempotent; spawns or adopts as needed
+# ... do whatever the embedder does ...
+# Optional: ``supervisor.stop()`` to terminate the detached process and
+# tear down the gateway. Omitting this leaves the supervisor running
+# detached, which is what minds does so the gateway survives a
+# desktop-client restart.
+```
+
 ## Python API
 
 Every CLI subcommand is a thin wrapper around the library; the library

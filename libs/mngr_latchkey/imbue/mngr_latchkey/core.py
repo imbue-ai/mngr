@@ -489,7 +489,13 @@ class Latchkey(MutableModel):
             if self._is_initialized:
                 return
             if is_alive and existing is not None:
-                logger.info(
+                # Debug-level so one-shot CLI commands that only need
+                # ``initialize()`` (``mngr latchkey create-agent-env``,
+                # ``mngr latchkey link-permissions``) do not emit a noisy
+                # info line about a gateway they never touch. The same
+                # line still shows up under ``--verbose`` for users who
+                # actually want to see the reconciliation outcome.
+                logger.debug(
                     "Adopted existing shared Latchkey gateway (pid={}, {}:{})",
                     existing.pid,
                     existing.host,
@@ -497,7 +503,7 @@ class Latchkey(MutableModel):
                 )
                 self._info = existing
             elif existing is not None:
-                logger.info(
+                logger.debug(
                     "Discarding stale Latchkey gateway record (pid={})",
                     existing.pid,
                 )

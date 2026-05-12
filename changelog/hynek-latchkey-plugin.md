@@ -144,3 +144,62 @@ fans the relevant events out to `LatchkeyDiscoveryHandler` /
 `_FakeLatchkey` test double to a shared `FakeLatchkey` so the new
 `cli_test.py` and the existing `agent_setup_test.py` share one
 implementation.
+
+## mngr-latchkey: `LatchkeyForwardSupervisor` and minds rewiring
+
+Follow-up after the `mngr latchkey` CLI plugin.
+
+### `LatchkeyForwardSupervisor`
+
+New class in `imbue.mngr_latchkey.forward_supervisor`. Owns the
+lifecycle of a single detached `mngr latchkey forward` subprocess for
+a given `latchkey_directory`:
+
+- `ensure_running()` -- idempotent. Spawns a fresh detached supervisor
+  if no record exists; adopts the existing one if its PID is still
+  alive and its cmdline matches `mngr latchkey forward`; otherwise
+  discards the stale record and spawns a fresh one. Mirrors the same
+  on-disk reconciliation pattern `Latchkey` already uses for the
+  gateway.
+- `stop()` -- SIGTERMs the supervisor (which cascades into
+  coupled-lifetime shutdown of the shared gateway + reverse tunnels)
+  and deletes the record.
+- `get_forward_info()` -- read-only inspection of the on-disk
+  `LatchkeyForwardInfo` record.
+
+New on-disk record at `<plugin_data_dir>/latchkey_forward.json` and a
+log file at `<plugin_data_dir>/latchkey_forward.log`, with matching
+`save_forward_info` / `load_forward_info` / `delete_forward_info`
+helpers in `store.py`. The spawn helper sits in `_spawn.py` next to
+the existing `spawn_detached_latchkey_gateway`; the cmdline-based
+liveness probe guards against PID reuse.
+
+### `mngr latchkey forward` now also accepts the common settings flags
+
+`--latchkey-directory` and `--latchkey-binary` were available on
+`create-agent-env` and `link-permissions` but not on `forward` (an
+oversight in the original PR). They are now uniformly available on
+all three subcommands.
+
+### minds: spawn `mngr latchkey forward` as a detached subprocess
+
+`apps/minds/imbue/minds/cli/run.py` no longer constructs
+`SSHTunnelManager` / `LatchkeyDiscoveryHandler` /
+`LatchkeyDestructionHandler` in-process; it instead calls
+`LatchkeyForwardSupervisor.ensure_running()` at startup, which spawns
+the canonical `mngr latchkey forward` process detached. Minds does
+*not* call `supervisor.stop()` on shutdown -- the supervisor keeps
+running across desktop-client restarts and the next minds session
+adopts it. This matches how minds already treated the underlying
+`latchkey gateway` subprocess.
+
+Side effect: the `_LatchkeyDiscoveryAdapter` class in `cli/run.py` is
+gone, plus its supporting `MindsRemoteSSHInfo` / `AgentId` imports.
+
+### Quieter logs from one-shot CLI subcommands
+
+`Latchkey.initialize()` no longer logs "Adopted existing shared
+Latchkey gateway" / "Discarding stale ..." at INFO level. Both lines
+are now DEBUG, so one-shot invocations of `mngr latchkey create-agent-env`
+and `mngr latchkey link-permissions` (which `initialize()` but never
+touch the gateway) no longer emit a misleading line on stderr.

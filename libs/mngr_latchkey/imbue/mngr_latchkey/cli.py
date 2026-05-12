@@ -499,6 +499,7 @@ process.""",
     ),
 ).register()
 
+_add_common_latchkey_options(_forward_command)
 add_pager_help_option(_forward_command)
 
 

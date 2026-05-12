@@ -62,6 +62,8 @@ PLUGIN_DATA_SUBDIR_NAME: Final[str] = "mngr_latchkey"
 
 _GATEWAY_RECORD_FILENAME: Final[str] = "latchkey_gateway.json"
 _GATEWAY_LOG_FILENAME: Final[str] = "latchkey_gateway.log"
+_FORWARD_RECORD_FILENAME: Final[str] = "latchkey_forward.json"
+_FORWARD_LOG_FILENAME: Final[str] = "latchkey_forward.log"
 _DEFAULT_PERMISSIONS_FILENAME: Final[str] = "latchkey_default_permissions.json"
 _PERMISSIONS_FILENAME: Final[str] = "latchkey_permissions.json"
 _AGENTS_DIR_NAME: Final[str] = "agents"
@@ -133,6 +135,62 @@ def delete_gateway_info(data_dir: Path) -> None:
 def gateway_log_path(data_dir: Path) -> Path:
     """Return the log file path for the shared gateway subprocess."""
     return data_dir / _GATEWAY_LOG_FILENAME
+
+
+# -- Forward supervisor info ---------------------------------------------------
+
+
+class LatchkeyForwardInfo(FrozenModel):
+    """Metadata identifying a running detached ``mngr latchkey forward`` supervisor."""
+
+    pid: int = Field(description="PID of the ``mngr latchkey forward`` process")
+    started_at: datetime = Field(description="UTC timestamp when the supervisor was started")
+
+
+def forward_info_path(data_dir: Path) -> Path:
+    """Return the path to the forward supervisor info record."""
+    return data_dir / _FORWARD_RECORD_FILENAME
+
+
+def save_forward_info(data_dir: Path, info: LatchkeyForwardInfo) -> None:
+    """Write the forward supervisor info record, overwriting any existing one."""
+    path = forward_info_path(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(info.model_dump_json(indent=2))
+    logger.debug("Saved mngr latchkey forward info at {}", path)
+
+
+def load_forward_info(data_dir: Path) -> LatchkeyForwardInfo | None:
+    """Read the forward supervisor info, or None if missing or malformed."""
+    path = forward_info_path(data_dir)
+    if not path.is_file():
+        return None
+    try:
+        raw = path.read_text()
+    except OSError as e:
+        logger.warning("Failed to read mngr latchkey forward info at {}: {}", path, e)
+        return None
+    try:
+        return LatchkeyForwardInfo.model_validate_json(raw)
+    except ValueError as e:
+        logger.warning("Malformed mngr latchkey forward info at {}: {}", path, e)
+        return None
+
+
+def delete_forward_info(data_dir: Path) -> None:
+    """Remove the stored forward supervisor info (no-op if absent)."""
+    path = forward_info_path(data_dir)
+    if path.is_file():
+        try:
+            path.unlink()
+            logger.debug("Deleted mngr latchkey forward info at {}", path)
+        except OSError as e:
+            logger.warning("Failed to delete mngr latchkey forward info at {}: {}", path, e)
+
+
+def forward_log_path(data_dir: Path) -> Path:
+    """Return the log file path for the detached ``mngr latchkey forward`` subprocess."""
+    return data_dir / _FORWARD_LOG_FILENAME
 
 
 def ensure_browser_log_path(data_dir: Path) -> Path:
