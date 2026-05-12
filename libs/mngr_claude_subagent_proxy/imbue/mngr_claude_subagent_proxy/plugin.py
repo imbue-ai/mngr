@@ -169,10 +169,11 @@ def build_subagent_proxy_deny_hooks_config() -> dict[str, Any]:
     """Build the deny-mode hooks config: PreToolUse:Agent deny + SessionStart reap.
 
     - PreToolUse (Agent): emit a short skill-pointer ``permissionDecisionReason``
-      that directs Claude at the ``mngr-subagents`` skill (installed under
-      ``.claude/skills/`` by ``_write_mngr_subagents_skill``); the
-      ``mngr create`` / ``subagent_wait`` protocol lives in that skill,
-      not in the deny reason itself.
+      that directs Claude at the ``mngr-subagents`` skill (installed
+      under the per-agent CLAUDE_CONFIG_DIR by
+      ``_write_mngr_subagents_skill``); the ``mngr create`` /
+      ``subagent_wait`` protocol lives in that skill, not in the deny
+      reason itself.
     - SessionStart: same shared label-driven reaper that PROXY mode uses
       (``hooks/reap.py``). Both spawn paths attach
       ``mngr_claude_subagent_proxy_parent_id=${MNGR_AGENT_ID}`` to every
@@ -222,16 +223,33 @@ def _write_proxy_agent_definition(host: OnlineHostInterface, work_dir: Path) -> 
     host.write_text_file(agents_dir / "mngr-proxy.md", content)
 
 
-def _write_mngr_subagents_skill(host: OnlineHostInterface, work_dir: Path) -> None:
-    """Write the ``mngr-subagents`` Claude skill under the agent's .claude/skills/.
+def _write_mngr_subagents_skill(host: OnlineHostInterface, agent: AgentInterface) -> None:
+    """Write the ``mngr-subagents`` Claude skill under the per-agent
+    CLAUDE_CONFIG_DIR rather than the worktree.
 
     Used in DENY mode to give Claude the full context for delegating to
     mngr-managed subagents. The deny hook's ``permissionDecisionReason``
     is intentionally short -- a one-liner pointing at this skill -- so
     the verbose two-command spawn-and-wait protocol is loaded on demand
     by Claude rather than crowding every Task transcript.
+
+    Destination: ``<state_dir>/plugin/claude/anthropic/skills/mngr-subagents/SKILL.md``,
+    where ``<state_dir>`` is ``host.host_dir / "agents" / agent.id``. This
+    is the per-agent CLAUDE_CONFIG_DIR mngr_claude points the spawned
+    Claude session at (see ``ClaudeAgent.get_claude_config_dir``), so
+    Claude Code loads skills from this directory at session start --
+    same mechanism by which ``_CLAUDE_HOME_SYNC_DIRS`` syncs the user's
+    ``~/.claude/skills/`` into the per-agent config dir.
+
+    Why not the worktree (``work_dir / ".claude" / "skills"``): for
+    git-tracked projects the skill file shows up as untracked and trips
+    "clean tree" stop hooks (e.g. imbue-code-guardian's
+    stop_hook_orchestrator). Writing the runtime artifact to the
+    per-agent state dir, which is outside any source repo, sidesteps
+    this entirely.
     """
-    skill_dir = work_dir / ".claude" / "skills" / "mngr-subagents"
+    state_dir = get_agent_state_dir_path(host.host_dir, agent.id)
+    skill_dir = state_dir / "plugin" / "claude" / "anthropic" / "skills" / "mngr-subagents"
     host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(skill_dir))}", timeout_seconds=5.0)
     content = _load_resource(_MNGR_SUBAGENTS_SKILL)
     host.write_text_file(skill_dir / "SKILL.md", content)
@@ -541,8 +559,9 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
       write the mngr-proxy agent definition, guard project Stop hooks.
     - ``DENY``: install the PreToolUse:Agent deny hook plus the shared
       label-driven SessionStart reaper (same ``hooks/reap.py`` PROXY
-      uses), and write the ``mngr-subagents`` skill under
-      ``.claude/skills/``. The other PROXY-only plumbing does NOT run
+      uses), and write the ``mngr-subagents`` skill into the per-agent
+      CLAUDE_CONFIG_DIR (outside the worktree so it doesn't pollute
+      git-tracked projects). The other PROXY-only plumbing does NOT run
       (no PostToolUse cleanup, no Stop-hook guard, no project
       settings.json check). The deny hook never invokes ``mngr create``
       and does not generate per-Task wait-scripts; Claude reads the
@@ -556,7 +575,7 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
     mode = _resolve_plugin_mode(mngr_ctx)
     if mode == SubagentProxyMode.DENY:
         _merge_subagent_proxy_deny_hooks(host, agent.work_dir)
-        _write_mngr_subagents_skill(host, agent.work_dir)
+        _write_mngr_subagents_skill(host, agent)
         return
 
     _check_project_settings_stop_hooks_guarded(host, agent.work_dir)

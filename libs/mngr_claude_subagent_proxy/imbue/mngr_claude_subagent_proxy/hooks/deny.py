@@ -2,10 +2,11 @@
 
 Emits a PreToolUse decision JSON on stdout that DENIES the Task tool
 with a short ``permissionDecisionReason`` pointing Claude at the
-``mngr-subagents`` Claude skill (provisioned at
-``.claude/skills/mngr-subagents/SKILL.md`` by ``plugin.py``). The
-skill explains the explicit two-command spawn-and-wait protocol
-Claude should use instead of Task.
+``mngr-subagents`` Claude skill (provisioned by ``plugin.py`` under
+the per-agent CLAUDE_CONFIG_DIR -- outside the worktree to keep
+git-tracked projects clean). The skill explains the explicit
+two-command spawn-and-wait protocol Claude should use instead of
+Task.
 
 We deliberately do NOT generate per-Task-call wait-scripts or write
 prompt sidefiles. The skill is the single source of truth for the

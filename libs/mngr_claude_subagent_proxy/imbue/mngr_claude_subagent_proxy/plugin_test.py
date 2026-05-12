@@ -453,21 +453,41 @@ def test_deny_mode_does_not_write_proxy_agent_definition(
 
 
 def test_deny_mode_writes_mngr_subagents_skill(
-    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+    work_dir: Path, host_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
 ) -> None:
-    """DENY mode provisions the ``mngr-subagents`` Claude skill at .claude/skills/.
+    """DENY mode provisions the ``mngr-subagents`` Claude skill under the
+    per-agent CLAUDE_CONFIG_DIR (outside the worktree).
 
     The skill carries the verbose context (when to use, how to parse
     subagent_wait output, how to inspect a running subagent, etc.) so
     the deny hook's permissionDecisionReason can stay short.
+
+    Destination is ``<state_dir>/plugin/claude/anthropic/skills/...``
+    rather than ``<work_dir>/.claude/skills/`` so it doesn't show up as
+    an untracked file in git-tracked projects (which would trip
+    clean-tree stop hooks like imbue-code-guardian's).
     """
     ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
-    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+    agent_id = AgentId.generate()
+    agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
 
     _provision(agent, fake_host, ctx)
 
-    skill_path = work_dir / ".claude" / "skills" / "mngr-subagents" / "SKILL.md"
+    skill_path = (
+        host_dir
+        / "agents"
+        / str(agent_id)
+        / "plugin"
+        / "claude"
+        / "anthropic"
+        / "skills"
+        / "mngr-subagents"
+        / "SKILL.md"
+    )
     assert skill_path.is_file()
+    # Worktree must stay clean -- the worktree-side path is what the
+    # previous implementation polluted, so pin its absence too.
+    assert not (work_dir / ".claude" / "skills" / "mngr-subagents" / "SKILL.md").exists()
     body = skill_path.read_text()
     # Frontmatter wires the skill into Claude Code's skill-discovery mechanism.
     assert body.startswith("---\n")
@@ -493,21 +513,37 @@ def test_deny_mode_writes_mngr_subagents_skill(
 
 
 def test_proxy_mode_does_not_write_mngr_subagents_skill(
-    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+    work_dir: Path, host_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
 ) -> None:
     """PROXY mode does NOT write the deny-mode skill.
 
     The skill explains a workflow (Claude runs Bash to spawn) that
     only applies in DENY mode. In PROXY mode Claude calls Task as
-    usual; surfacing the skill would be confusing.
+    usual; surfacing the skill would be confusing. Pin the absence at
+    BOTH the legacy worktree path and the per-agent state-dir path
+    that DENY mode now uses, so a future refactor can't accidentally
+    reintroduce the skill under PROXY.
     """
     ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.PROXY))
-    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+    agent_id = AgentId.generate()
+    agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
 
     _provision(agent, fake_host, ctx)
 
-    skill_path = work_dir / ".claude" / "skills" / "mngr-subagents" / "SKILL.md"
-    assert not skill_path.exists()
+    worktree_skill_path = work_dir / ".claude" / "skills" / "mngr-subagents" / "SKILL.md"
+    state_dir_skill_path = (
+        host_dir
+        / "agents"
+        / str(agent_id)
+        / "plugin"
+        / "claude"
+        / "anthropic"
+        / "skills"
+        / "mngr-subagents"
+        / "SKILL.md"
+    )
+    assert not worktree_skill_path.exists()
+    assert not state_dir_skill_path.exists()
 
 
 def test_deny_mode_skips_project_stop_hook_check(
