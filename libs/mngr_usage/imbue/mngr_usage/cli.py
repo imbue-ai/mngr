@@ -40,12 +40,12 @@ from imbue.mngr_usage.data_types import UsagePluginConfig
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
 
-# Discovery convention is documented on ``api.gather_usage_snapshots``;
-# the CLI just calls it. ``mngr usage`` finds events by enumerating agents
-# via ``list_agents`` and reading per-agent events via the events API --
-# this works uniformly for local and remote agents, and inherits ``mngr
-# list``'s CEL filter machinery (``--include``, ``--exclude``,
-# ``--provider``, ``--local``, ...).
+# Discovery convention is documented in the ``mngr_usage.api`` module
+# docstring; the CLI just calls it. ``mngr usage`` finds events by
+# enumerating agents via ``list_agents`` and reading per-agent events via
+# the events API -- this works uniformly for local and remote agents, and
+# inherits ``mngr list``'s CEL filter machinery (``--include``,
+# ``--exclude``, ``--provider``, ``--local``, ...).
 
 _NO_DATA_HINT = (
     "No usage data yet -- check that a usage writer plugin is installed in the env "
