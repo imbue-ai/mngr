@@ -9,11 +9,11 @@ to main. To run them locally:
 """
 
 import subprocess
-import time
 from pathlib import Path
 
 import pytest
 
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import get_short_random_string
 
@@ -183,9 +183,9 @@ def _wait_for_text_in_agent_pane(
     ``_wait_for_text_in_pane``, just routed through ``mngr capture`` since
     the agent's tmux session lives on the Modal sandbox.
     """
-    deadline = time.time() + timeout
-    last_capture = ""
-    while time.time() < deadline:
+    last_capture: list[str] = [""]
+
+    def _capture_if_match() -> str | None:
         result = subprocess.run(
             ["uv", "run", "mngr", "capture", agent_name, "--full"],
             capture_output=True,
@@ -193,14 +193,16 @@ def _wait_for_text_in_agent_pane(
             timeout=60,
             env=env.env,
         )
-        last_capture = result.stdout
-        if expected in last_capture:
-            return last_capture
-        time.sleep(3.0)
-    raise AssertionError(
-        f"Did not see {expected!r} in mngr capture of agent {agent_name!r} within {timeout}s.\n"
-        f"Last capture (tail):\n{last_capture[-3000:]}"
-    )
+        last_capture[0] = result.stdout
+        return result.stdout if expected in result.stdout else None
+
+    capture, _, _ = poll_for_value(_capture_if_match, timeout=timeout, poll_interval=3.0)
+    if capture is None:
+        raise AssertionError(
+            f"Did not see {expected!r} in mngr capture of agent {agent_name!r} within {timeout}s.\n"
+            f"Last capture (tail):\n{last_capture[0][-3000:]}"
+        )
+    return capture
 
 
 def _destroy_modal_agent(agent_name: str, env: ModalSubprocessTestEnv) -> subprocess.CompletedProcess[str]:

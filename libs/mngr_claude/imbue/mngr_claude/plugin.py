@@ -2002,7 +2002,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
     ) -> None:
         """Adopt a session so the agent's claude resumes existing context.
 
-        Two mutually-exclusive sources of an adoption directive:
+        Two sources of an adoption directive (the ``on_before_create``
+        hook rejects the combination, so at most one is set here):
         * ``--adopt-session`` (one or more session ids / .jsonl paths) --
           handled by ``_adopt_explicit_sessions``.
         * cloning via ``--from <agent>`` -- handled by
@@ -2012,12 +2013,19 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         Both paths converge on positioning the adopted session's JSONL
         under the destination's encoded project dir and then finalizing
-        with ``_finalize_adopted_session``.
+        with ``_finalize_adopted_session``. With neither set, this is a
+        no-op and the agent starts a fresh claude session.
         """
         adopt_session_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
+        # Defensive: ``on_before_create`` already rejects this combo, but
+        # if a future change re-introduces the path we want to fail loudly
+        # rather than silently pick one and drop the other.
+        assert not (adopt_session_args and options.source_agent_state_location is not None), (
+            "--adopt-session and --from <agent> are mutually exclusive (should have been rejected by on_before_create)"
+        )
         if adopt_session_args:
             self._adopt_explicit_sessions(host, adopt_session_args)
-        elif options.source_agent_state_location is not None:
+        if options.source_agent_state_location is not None:
             self._adopt_cloned_session(host, options.source_agent_state_location)
 
     def _adopt_explicit_sessions(
@@ -2671,6 +2679,10 @@ def on_before_create(args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
 
     When plugin_data contains "adopt_session":
     - Validates the agent type is claude (or unset/default)
+    - Rejects the combination with cloning via ``--from <agent>``
+      (``source_agent_state_location`` is set), since both adopt a
+      session into the new agent and the plugin's
+      ``on_after_provisioning`` would silently let one win.
     """
     adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
     if not adopt_session:
@@ -2679,6 +2691,12 @@ def on_before_create(args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
     agent_type = args.agent_options.agent_type
     if agent_type is not None and str(agent_type) != "claude":
         raise UserInputError(f"--adopt-session can only be used with the claude agent type, not '{agent_type}'.")
+
+    if args.agent_options.source_agent_state_location is not None:
+        raise UserInputError(
+            "--adopt-session is incompatible with cloning via --from <agent>: both "
+            "adopt a session into the new agent. Pick one."
+        )
 
     return None
 
