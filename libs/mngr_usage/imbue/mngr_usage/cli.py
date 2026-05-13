@@ -212,12 +212,22 @@ def _format_cost_line(
 _SESSION_DETAIL_ID_PREFIX_LEN = 8
 
 
-_SESSION_MODE_TAGS: dict[CostMode, str] = {CostMode.SUBSCRIPTION: "sub", CostMode.API_KEY: "api"}
-"""Compact one-token mode tags for ``--detail`` per-session lines.
+@pure
+def _session_mode_tag(cost_mode: CostMode) -> str:
+    """Compact one-token tag for ``--detail`` per-session lines.
 
-Long-form labels live on the cost-line ("subscription cost (imputed)", "api cost"),
-so per-session lines just need a short tag that distinguishes them at a glance.
-"""
+    Long-form labels live on the cost-line ("subscription cost (imputed)",
+    "api cost"), so per-session lines just need a short tag that
+    distinguishes them at a glance. Exhaustive ``match`` so adding a new
+    ``CostMode`` variant is a static error rather than a runtime KeyError.
+    """
+    match cost_mode:
+        case CostMode.SUBSCRIPTION:
+            return "sub"
+        case CostMode.API_KEY:
+            return "api"
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 @pure
@@ -238,7 +248,7 @@ def _format_session_detail_line(session: SessionCostRecord, now: int) -> str | N
     if cost_usd is None:
         return None
     age_seconds = max(0, now - session.last_event_at)
-    tag = _SESSION_MODE_TAGS[session.cost_mode]
+    tag = _session_mode_tag(session.cost_mode)
     return (
         f"  [{tag}] {session.session_id[:_SESSION_DETAIL_ID_PREFIX_LEN]}: "
         f"{_format_usd(cost_usd)} ({_format_age_phrase(age_seconds)})"
