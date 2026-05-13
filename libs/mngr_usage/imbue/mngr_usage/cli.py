@@ -176,12 +176,15 @@ def _format_cost_line(
     ``mode_label`` is the human-display tag for this mode's cost (e.g.
     ``"subscription cost"`` or ``"api cost"``); ``mode_suffix`` is a
     parenthetical (e.g. ``" (imputed)"``) appended only when the mode's
-    semantics deserve a callout. The combination yields lines like:
+    semantics deserve a callout. The ``in last <since>`` suffix is
+    rendered through ``_format_duration`` -- the default 24h plugin
+    config thus prints ``in last 1d``. The combination yields lines
+    like:
 
       subscription cost (imputed): $0.42 (2m ago)            (N == 1)
-      subscription cost (imputed): $5.43 across 3 sessions in last 24h
+      subscription cost (imputed): $5.43 across 3 sessions in last 1d
       api cost: $0.42 (2m ago)
-      api cost: $5.43 across 3 sessions in last 24h
+      api cost: $5.43 across 3 sessions in last 1d
 
     Two shapes:
     - One session: ``... $0.42 (2m ago)``. The aggregate is the only
