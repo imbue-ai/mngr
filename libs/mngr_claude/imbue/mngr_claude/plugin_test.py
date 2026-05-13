@@ -3323,6 +3323,58 @@ def test_clone_adoption_uses_jsonl_filename_not_source_session_id_file(
     assert stale_agent_uuid in (dest_dir / "claude_session_id_history").read_text()
 
 
+@pytest.mark.rsync
+def test_clone_adoption_refuses_to_clobber_existing_target(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """When the source has a project subdir whose name coincidentally matches
+    the destination's encoded work_dir AND a separate, more-recently-active
+    source-encoded subdir, the rsync brings both over and the rekey ``mv``
+    would clobber the pre-existing target. _adopt_cloned_session refuses
+    the clobber and returns without writing claude_session_id, leaving
+    both subdirs intact for manual inspection. This guards a defensive
+    branch designed to prevent silent data loss when source has visited
+    multiple cwds.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    dest_dir = agent._get_agent_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / "source_agent_state"
+    plugin_dir = source_dir / "plugin" / "claude" / "anthropic"
+
+    # (a) A project subdir whose name happens to equal the destination's
+    # encoded work_dir -- this becomes the pre-existing target after rsync.
+    dest_project_name = encode_claude_project_dir_name(agent.work_dir)
+    coincident_subdir = plugin_dir / "projects" / dest_project_name
+    coincident_subdir.mkdir(parents=True)
+    older_session_id = "00000000-0000-0000-0000-000000000001"
+    older_jsonl = coincident_subdir / f"{older_session_id}.jsonl"
+    older_jsonl.write_text('{"type":"older"}\n')
+
+    # (b) A separate source-encoded subdir holding the most-recently-active
+    # session JSONL so ``ls -t`` picks it as latest_on_source.
+    src_project = plugin_dir / "projects" / "-Users-ev-some-source-workdir"
+    src_project.mkdir(parents=True)
+    newer_session_id = "11111111-2222-3333-4444-555555555555"
+    newer_jsonl = src_project / f"{newer_session_id}.jsonl"
+    newer_jsonl.write_text('{"type":"newer"}\n')
+
+    # Set explicit mtimes so ``ls -t`` ordering is deterministic regardless
+    # of write-order timing.
+    os.utime(older_jsonl, (1_000_000_000, 1_000_000_000))
+    os.utime(newer_jsonl, (2_000_000_000, 2_000_000_000))
+
+    _run_clone_adoption(agent, host, source_dir)
+
+    dest_projects = dest_dir / "plugin" / "claude" / "anthropic" / "projects"
+    # Both subdirs survive: the rekey was refused, no clobber happened.
+    assert (dest_projects / dest_project_name / f"{older_session_id}.jsonl").exists()
+    assert (dest_projects / "-Users-ev-some-source-workdir" / f"{newer_session_id}.jsonl").exists()
+    # claude_session_id was NOT written: the function bailed before finalize.
+    assert not (dest_dir / "claude_session_id").exists()
+
+
 # =============================================================================
 # _rewrite_installed_plugins_paths Tests
 # =============================================================================
