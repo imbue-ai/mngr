@@ -358,20 +358,10 @@ def modal_test_session_user_id() -> UserId:
 
 @pytest.fixture(scope="session")
 def modal_test_session_cleanup(
-    # IMPORTANT: take `modal_session_cleanup` as a dependency so pytest sets
-    # it up FIRST, which makes LIFO teardown order put OUR teardown (which
-    # deregisters the session env) BEFORE `modal_session_cleanup`'s teardown
-    # (the leak check). Without this explicit dependency, the leak check
-    # fires against the still-registered env, ~30 s of polling never
-    # converges because the env really does exist in Modal at that point
-    # (no delete has been issued yet), and the assertion fires before our
-    # own cleanup chain runs.
-    modal_session_cleanup: None,
     modal_test_session_env_name: str,
     modal_test_session_user_id: UserId,
 ) -> Generator[None, None, None]:
     """Session-scoped fixture that cleans up the Modal environment at session end."""
-    del modal_session_cleanup
     prefix = f"{modal_test_session_env_name}-"
     environment_name = f"{prefix}{modal_test_session_user_id}"
     if len(environment_name) > 64:
@@ -578,18 +568,23 @@ def _delete_modal_environments(environment_names: list[str]) -> None:
             pass
 
 
-@pytest.fixture(scope="session", autouse=True)
-def modal_session_cleanup() -> Generator[None, None, None]:
-    """Detect and clean up leaked Modal resources at the end of the test session.
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Detect and clean up leaked Modal resources at the very end of the test session.
 
-    Note on ordering: the actual pytest teardown order for autouse session-scoped
-    fixtures is to run BEFORE non-autouse session fixtures of the same scope,
-    not after. To make sure this leak check runs after `modal_test_session_cleanup`'s
-    own cleanup chain has had a chance to deregister tracked envs,
-    `modal_test_session_cleanup` takes this fixture as an explicit dependency
-    -- which forces this one to be set up first and (LIFO) torn down last.
+    Implemented as a pytest hook (not a fixture) so it runs AFTER all session-
+    scoped fixture teardowns -- including `modal_test_session_cleanup`'s
+    deregister chain. Earlier attempts to enforce this ordering via fixture
+    dependencies did not hold: pytest's autouse session-scoped fixtures tear
+    down before non-autouse session-scoped fixtures regardless of declared
+    dependencies, so a leak check living in an autouse fixture polls a
+    still-registered env, fails, and only then lets the deregister run.
+    The hook bypasses fixture-ordering entirely.
+
+    Failure mode: sets `session.exitstatus` to TESTS_FAILED and writes a
+    loud error to stderr/loguru. Does not raise -- raising from
+    `pytest_sessionfinish` is silently dropped by pytest.
     """
-    yield
+    del exitstatus
     errors: list[str] = []
     leaked_apps = _get_leaked_modal_apps()
     if leaked_apps:
@@ -616,7 +611,7 @@ def modal_session_cleanup() -> Generator[None, None, None]:
     _delete_modal_volumes(leaked_volumes)
     _delete_modal_environments(leaked_envs)
     if errors:
-        raise AssertionError(
+        message = (
             "=" * 70
             + "\nMODAL SESSION CLEANUP FOUND LEAKED RESOURCES!\n"
             + "=" * 70
@@ -624,6 +619,11 @@ def modal_session_cleanup() -> Generator[None, None, None]:
             + "\n\n".join(errors)
             + "\n\nThese resources have been cleaned up, but tests should not leak!\n"
         )
+        logger.error(message)
+        # Force the test session to fail. Raising from pytest_sessionfinish
+        # is silently swallowed; setting exitstatus on the session is the
+        # documented way to signal failure from this hook.
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 # =============================================================================
