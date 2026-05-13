@@ -40,12 +40,26 @@ class WindowSnapshot(FrozenModel):
     window's key as the label. Writers can use this to give compact display
     names while keeping keys identifier-safe so format templates work.
 
+    ``window_seconds``, when present, declares the window's fixed duration
+    in seconds. ``mngr usage`` uses it to derive ``elapsed_seconds`` /
+    ``elapsed_percentage`` without baking per-window-class knowledge into
+    the reader. Writers should emit it for fixed-duration windows and omit
+    it for variable-duration ones (e.g. Claude's overage); when omitted the
+    derived elapsed fields are reported as ``None``.
+
     ``status`` and ``is_using_overage`` are declared as optional fields
     defaulting to None; reserved for forward-compat without a schema bump.
     """
 
     used_percentage: float | None = Field(default=None)
     resets_at: int | None = Field(default=None, description="Unix timestamp when this window resets")
+    window_seconds: int | None = Field(
+        default=None,
+        description="Window duration in seconds. When present (together with resets_at), enables "
+        "the reader to derive elapsed_seconds / elapsed_percentage without baking per-window-class "
+        "knowledge into mngr_usage. Writers emit this for fixed-duration windows (five_hour, "
+        "seven_day, ...) and omit it for variable-duration windows (e.g. Claude's overage).",
+    )
     label: str | None = Field(default=None, description="Human-display label; falls back to the window key.")
     status: str | None = Field(default=None)
     is_using_overage: bool | None = Field(default=None)

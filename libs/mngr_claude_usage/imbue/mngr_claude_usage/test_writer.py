@@ -88,6 +88,28 @@ def test_writer_emits_event_with_rate_limits(writer_path: Path, events_file: Pat
     # these, the renderer would fall back to the literal key (`five_hour: ...`).
     assert event["rate_limits"]["five_hour"]["label"] == "5h"
     assert event["rate_limits"]["seven_day"]["label"] == "7d"
+    # window_seconds gives mngr_usage what it needs to derive elapsed_percentage
+    # without hardcoding per-window-class knowledge in the reader.
+    assert event["rate_limits"]["five_hour"]["window_seconds"] == 18000
+    assert event["rate_limits"]["seven_day"]["window_seconds"] == 604800
+
+
+def test_writer_omits_window_seconds_for_overage(writer_path: Path, events_file: Path) -> None:
+    """Overage has no fixed window length, so the writer omits window_seconds for it.
+    The reader treats a missing window_seconds as 'no derived elapsed metrics for this window'."""
+    payload = json.dumps(
+        {
+            "rate_limits": {
+                "overage": {"used_percentage": 5.0, "resets_at": 1777673400},
+            }
+        }
+    )
+    result = _run_writer(writer_path, payload, events_file)
+    assert result.returncode == 0, result.stderr
+    event = _read_last_event(events_file)
+    assert "window_seconds" not in event["rate_limits"]["overage"]
+    # Label is still present though -- only window_seconds is class-specific.
+    assert event["rate_limits"]["overage"]["label"] == "overage"
 
 
 def test_writer_skips_when_no_rate_limits(writer_path: Path, events_file: Path) -> None:

@@ -21,15 +21,15 @@ from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr_usage.api import collapse_by_source
+from imbue.mngr_usage.api import last_valid_event_from_content
+from imbue.mngr_usage.api import snapshot_from_event
 from imbue.mngr_usage.cli import _build_render_model
-from imbue.mngr_usage.cli import _collapse_by_source
 from imbue.mngr_usage.cli import _flatten_primary_for_template
 from imbue.mngr_usage.cli import _format_duration
 from imbue.mngr_usage.cli import _format_human_line
 from imbue.mngr_usage.cli import _format_reset_phrase
-from imbue.mngr_usage.cli import _last_valid_event_from_content
 from imbue.mngr_usage.cli import _parse_max_age
-from imbue.mngr_usage.cli import _snapshot_from_event
 from imbue.mngr_usage.cli import usage
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
@@ -122,18 +122,18 @@ def test_last_valid_event_picks_last_valid_line() -> None:
         + "\n"
         + "{not valid json"
     )
-    event = _last_valid_event_from_content(content, "test")
+    event = last_valid_event_from_content(content, "test")
     assert event is not None
     assert event["timestamp"] == "2026-05-08T11:00:00.000000000Z"
 
 
 def test_last_valid_event_returns_none_when_no_valid_lines() -> None:
-    assert _last_valid_event_from_content("garbage\nstill garbage\n", "test") is None
+    assert last_valid_event_from_content("garbage\nstill garbage\n", "test") is None
 
 
 def test_last_valid_event_returns_none_for_empty_content() -> None:
-    assert _last_valid_event_from_content("", "test") is None
-    assert _last_valid_event_from_content("\n\n", "test") is None
+    assert last_valid_event_from_content("", "test") is None
+    assert last_valid_event_from_content("\n\n", "test") is None
 
 
 def test_snapshot_from_event_drops_events_without_rate_limits() -> None:
@@ -144,17 +144,17 @@ def test_snapshot_from_event_drops_events_without_rate_limits() -> None:
         "type": "rate_limit_snapshot",
         # no rate_limits field
     }
-    assert _snapshot_from_event(event, source_name="claude") is None
+    assert snapshot_from_event(event, source_name="claude") is None
 
 
 def test_snapshot_from_event_drops_unparseable_timestamps() -> None:
     event = _make_event("not-a-timestamp")
-    assert _snapshot_from_event(event, source_name="claude") is None
+    assert snapshot_from_event(event, source_name="claude") is None
 
 
 def test_snapshot_from_event_round_trips_window_data() -> None:
     event = _make_event("2026-05-08T10:00:00.000000000Z", used_percentage=42.5, resets_at=1778280000)
-    snap = _snapshot_from_event(event, source_name="claude")
+    snap = snapshot_from_event(event, source_name="claude")
     assert snap is not None
     assert snap.source_name == "claude"
     assert snap.windows["five_hour"].used_percentage == 42.5
@@ -185,7 +185,7 @@ def test_collapse_by_source_picks_freshest_per_source() -> None:
     older_claude = _snap(name="claude", at=1000, percentage=10.0)
     newer_claude = _snap(name="claude", at=2000, percentage=20.0)
     only_opencode = _snap(name="opencode", at=1500, percentage=30.0)
-    result = _collapse_by_source([older_claude, newer_claude, only_opencode])
+    result = collapse_by_source([older_claude, newer_claude, only_opencode])
     assert {s.source_name for s in result} == {"claude", "opencode"}
     claude_snap = next(s for s in result if s.source_name == "claude")
     assert claude_snap.updated_at == 2000
@@ -193,7 +193,7 @@ def test_collapse_by_source_picks_freshest_per_source() -> None:
 
 
 def test_collapse_by_source_returns_empty_for_empty_input() -> None:
-    assert _collapse_by_source([]) == []
+    assert collapse_by_source([]) == []
 
 
 def test_render_model_marks_past_reset_as_stale() -> None:
@@ -352,8 +352,60 @@ def test_usage_command_json_format(
     assert payload["sources"][0]["source"] == "claude"
     assert payload["sources"][0]["five_hour"]["used_percentage"] == 12.3
     assert payload["sources"][0]["five_hour"]["is_present"] is True
+    # No window_seconds emitted in this event, so derived elapsed_* fields are None.
+    assert payload["sources"][0]["five_hour"]["window_seconds"] is None
+    assert payload["sources"][0]["five_hour"]["elapsed_seconds"] is None
+    assert payload["sources"][0]["five_hour"]["elapsed_percentage"] is None
     # seven_day was not emitted by the writer, so it doesn't appear in the JSON either.
     assert "seven_day" not in payload["sources"][0]
+
+
+@pytest.mark.tmux
+def test_usage_command_json_surfaces_elapsed_when_window_seconds_present(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """When the writer emits window_seconds, the JSON output exposes elapsed_seconds + elapsed_percentage.
+
+    Anchors `resets_at` 5400s into the future of a 18000s window so 70% has elapsed,
+    independent of when the test runs.
+    """
+    now_s = int(datetime.now(timezone.utc).timestamp())
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/rate_limits",
+            "type": "rate_limit_snapshot",
+            "event_id": "evt-1",
+            # Use a fresh ISO timestamp so the snapshot isn't age-stale.
+            "timestamp": datetime.fromtimestamp(now_s, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z"),
+            "rate_limits": {
+                "five_hour": {
+                    "used_percentage": 12.3,
+                    "resets_at": now_s + 5400,
+                    "window_seconds": 18000,
+                },
+            },
+        },
+    )
+    result = cli_runner.invoke(
+        usage, ["--format", "json", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip())
+    five_hour = payload["sources"][0]["five_hour"]
+    assert five_hour["window_seconds"] == 18000
+    # Compute the expected elapsed off the CLI's own ``now`` (echoed in the JSON
+    # payload) rather than a clock the test captured before invoking, so any
+    # wall-clock drift between test setup and CLI invocation is cancelled out.
+    cli_now = payload["now"]
+    expected_elapsed = 18000 - (now_s + 5400 - cli_now)
+    assert five_hour["elapsed_seconds"] == expected_elapsed
+    assert five_hour["elapsed_percentage"] == expected_elapsed / 18000 * 100
 
 
 @pytest.mark.tmux
@@ -456,7 +508,7 @@ def test_usage_command_picks_freshest_across_agents(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output.strip())
     # Both events share source_name="claude" since they live under .../events/claude/...
-    # _collapse_by_source keeps only the freshest per source, so we see exactly one
+    # collapse_by_source keeps only the freshest per source, so we see exactly one
     # entry and its data is the newer event's.
     assert len(payload["sources"]) == 1
     assert payload["sources"][0]["source"] == "claude"
@@ -496,6 +548,147 @@ def test_usage_command_uses_reset_specific_warning_when_window_just_reset(
     assert "now ago" not in result.output
     # Reset-specific warning fires instead.
     assert "a window already reset" in result.output
+
+
+@pytest.mark.tmux
+def test_usage_wait_matches_when_predicate_already_true(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """End-to-end: planted snapshot already satisfies the predicate -> exit 0 on first poll."""
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/rate_limits",
+            "type": "rate_limit_snapshot",
+            "event_id": "evt-1",
+            "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "rate_limits": {
+                "five_hour": {"used_percentage": 12.0, "resets_at": 9_999_999_999_999, "window_seconds": 18000},
+            },
+        },
+    )
+    result = cli_runner.invoke(
+        usage,
+        ["wait", "--until", "five_hour.used_percentage < 50", "--interval", "1s", "--timeout", "5s"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert "Matched on source" in result.output or "matched" in result.output.lower()
+
+
+@pytest.mark.tmux
+def test_usage_wait_times_out_when_predicate_never_satisfied(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """End-to-end: predicate always false -> exit 2 (timeout) after --timeout passes."""
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/rate_limits",
+            "type": "rate_limit_snapshot",
+            "event_id": "evt-1",
+            "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "rate_limits": {
+                "five_hour": {"used_percentage": 90.0, "resets_at": 9_999_999_999_999, "window_seconds": 18000},
+            },
+        },
+    )
+    result = cli_runner.invoke(
+        usage,
+        ["wait", "--until", "five_hour.used_percentage < 50", "--interval", "1s", "--timeout", "1s"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    # Exit code 2 == EXIT_CODE_TIMEOUT from mngr.cli.exit_codes; matches `mngr wait`.
+    assert result.exit_code == 2, result.output
+    assert "Timed out" in result.output
+
+
+def test_usage_wait_rejects_group_level_options_when_subcommand_invoked(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    cli_profile_dir: Path,
+) -> None:
+    """Group-level options like `--local` placed before the subcommand are silently
+    ignored by Click's early-return. We surface a UserInputError instead so the user
+    sees their flag is in the wrong position."""
+    result = cli_runner.invoke(
+        usage,
+        ["--local", "wait", "--until", "true", "--timeout", "1s"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    # The error names the offending flag and the corrective placement.
+    assert "--local" in result.output
+    assert "wait" in result.output
+
+
+def test_usage_wait_rejection_uses_visible_flag_name_for_renamed_params(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    cli_profile_dir: Path,
+) -> None:
+    """The error message must use the user-visible CLI flag (e.g. ``--format``),
+    not the underlying click param name (``output_format``). Otherwise the
+    suggestion sends the user looking for a flag that doesn't exist."""
+    result = cli_runner.invoke(
+        usage,
+        ["--format", "json", "wait", "--until", "true", "--timeout", "1s"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    assert "--format" in result.output
+    # The internal param name must NOT leak into the message.
+    assert "--output-format" not in result.output
+
+
+def test_usage_wait_accepts_subcommand_level_options(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    cli_profile_dir: Path,
+) -> None:
+    """Sanity: putting the same flag after the subcommand is the supported form
+    and reaches the wait body (here it times out since no matching agent exists)."""
+    result = cli_runner.invoke(
+        usage,
+        ["wait", "--until", "true", "--local", "--interval", "1s", "--timeout", "1s"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    # `--until 'true'` would normally match instantly, but with no agents present
+    # there are no snapshots to evaluate against, so the wait times out (exit 2).
+    assert result.exit_code in (0, 2), result.output
+
+
+def test_usage_wait_rejects_invalid_cel(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    cli_profile_dir: Path,
+) -> None:
+    """Invalid CEL must fail fast with a clear error rather than time out."""
+    result = cli_runner.invoke(
+        usage,
+        ["wait", "--until", "this is not a valid cel expression {[", "--interval", "1s", "--timeout", "1s"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    # MngrError bubbles up as a non-zero exit; the user-visible signal is the
+    # "Invalid include filter" message.
+    assert result.exit_code != 0
+    assert "Invalid" in result.output or "invalid" in result.output.lower()
 
 
 @pytest.mark.tmux
