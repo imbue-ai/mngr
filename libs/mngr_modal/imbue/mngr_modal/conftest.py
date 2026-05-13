@@ -578,12 +578,12 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     Implemented as a pytest hook (not a fixture) so it runs AFTER all session-
     scoped fixture teardowns -- including `modal_test_session_cleanup`'s
-    deregister chain. Earlier attempts to enforce this ordering via fixture
-    dependencies did not hold: pytest's autouse session-scoped fixtures tear
-    down before non-autouse session-scoped fixtures regardless of declared
-    dependencies, so a leak check living in an autouse fixture polls a
-    still-registered env, fails, and only then lets the deregister run.
-    The hook bypasses fixture-ordering entirely.
+    deregister chain. Fixture-dependency ordering alone is insufficient
+    because pytest's autouse session-scoped fixtures tear down before non-
+    autouse session-scoped fixtures regardless of declared dependencies, so
+    an autouse leak-check fixture would poll a still-registered env. The
+    `pytest_sessionfinish` hook runs after every session-scoped fixture
+    teardown and bypasses fixture-ordering entirely.
 
     Failure mode: writes a loud error to stderr/loguru and, if the session
     was otherwise passing (`exitstatus == 0`), sets `session.exitstatus`
