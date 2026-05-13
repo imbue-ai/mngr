@@ -414,8 +414,10 @@ def _emit_output(
     actionable info regardless of which output format the caller chose.
 
     The hint fires for two distinct no-data conditions:
-    - Zero sources (no events files anywhere): fires for every output format
-      (HUMAN, JSON/JSONL, format-template).
+    - Zero sources (no events files anywhere): fires under HUMAN and JSON/JSONL
+      only. Format-template returns before the hint and intentionally suppresses
+      it so a `--format '...'` consumer gets a single predictable stdout line
+      (with empty substitutions) and no stderr noise.
     - At least one source exists but no source produced any renderable section
       (no current-session line, no total line, no populated window line): fires
       only under HUMAN, since the JSON/JSONL surfaces still emit a structured
