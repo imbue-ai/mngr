@@ -1,6 +1,6 @@
 `mngr create` no longer hard-codes `claude` as the default agent type. The agent type must now come from a positional argument, `--type`, or `[commands.create] type` in user settings. If none of those is supplied, `mngr create` exits with a clear error listing the registered agent types and pointing at `mngr config set commands.create.type <name> --scope user`.
 
-New subcommand `mngr extras default-type`: with an interactive terminal, presents a numbered picker of every available agent type plus a "keep no default" option, and writes the selection to `[commands.create] type` in user settings. Without a terminal, prints the suggested `mngr config set` command and lists available agent types -- writes nothing.
+New subcommand `mngr extras default-type`: with an interactive terminal, presents a numbered picker of every available agent type plus a "keep no default" option, and writes the selection to `[commands.create] type` in user settings. With `-y` or without a terminal, prints the suggested `mngr config set` command and lists available agent types -- writes nothing.
 
 `mngr extras -i` now also walks through the default-type prompt as a final step, alongside the existing plugins / completion / Claude-plugin steps. `mngr extras` (no flag) reports the current default agent type as part of the status block.
 
