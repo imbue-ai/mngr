@@ -503,7 +503,7 @@ def _get_leaked_modal_environments() -> list[str]:
             return []
         envs = json.loads(result.stdout)
         return [e.get("name", "") for e in envs if e.get("name", "") in worker_modal_environment_names]
-    except (subprocess.SubprocessError, json.JSONDecodeError, FileNotFoundError) as e:
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
         logger.warning("Failed to list leaked modal environments: {}", e)
         return []
 
