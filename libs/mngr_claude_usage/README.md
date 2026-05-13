@@ -47,9 +47,14 @@ authenticated:
 
 So `mngr usage` shows rate-limit windows only for subscribers, but
 cost-per-session works under both auth modes. The writer emits one event
-whenever **either** `rate_limits` or `cost` is present -- so an API-key user
-still gets cost tracking and CEL predicates like
-`cost.total_cost_usd > 5.0` continue to work.
+whenever **either** `rate_limits` or `cost` is present -- so an API-key
+user still gets cost tracking. The reader uses the presence/absence of
+`rate_limits` to classify each Claude Code process as `SUBSCRIPTION`
+(cost is imputed by Claude Code, not billable) or `API_KEY` (cost is
+real billable spend), and exposes the two aggregates separately:
+`api_cost.total_cost_usd > 5.0` predicates real spend (the case here),
+while `subscription_cost.total_cost_usd > 50.0` predicates imputed
+value-received under a flat subscription.
 
 `session_id` is carried alongside cost to anchor the cost reading to a
 specific Claude Code session. Cost resets per session, so a delta across
@@ -66,11 +71,16 @@ silently mix them:
 - Rate-limit windows are reduced freshest-wins per source, so the displayed
   five_hour / seven_day reading is for whichever account rendered most
   recently -- not any specific one.
-- Cost is grouped by `session_id`, so per-session records in `sessions[]`
-  stay correct individually. But the aggregate `cost.*` (and the human
-  `cost:` line) sums across every session in the recency window
-  regardless of account, and `sessions[0]` is just whichever session
-  last rendered.
+- Cost is grouped per-session (and per-(agent, Claude Code process)
+  upstream), so per-session records in `sessions[]` stay correct
+  individually. But the per-mode aggregates `subscription_cost.*` /
+  `api_cost.*` (and the human `subscription cost (imputed):` /
+  `api cost:` lines) sum across every session in the recency window of
+  the corresponding mode regardless of account, and `sessions[0]` is
+  just whichever session last rendered. Subscription accounts and
+  API-key accounts stay distinguishable in the split (the auth mode is
+  detected per process), but two Pro/Max accounts both contributing
+  to `subscription_cost` are not.
 
 This is rare in practice (one user = one Anthropic account), but if you run
 multiple Claude Code sessions logged into different Pro/Max accounts, treat
