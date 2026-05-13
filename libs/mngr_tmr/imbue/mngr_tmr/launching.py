@@ -121,6 +121,7 @@ def _build_agent_options(
         target_path=target_path,
         transfer_mode=transfer_mode,
         git=AgentGitOptions(
+            base_branch=config.base_commit,
             new_branch_name=branch_name,
         ),
         data_options=AgentDataOptions(is_rsync_enabled=False),

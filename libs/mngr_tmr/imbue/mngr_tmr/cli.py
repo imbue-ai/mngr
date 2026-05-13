@@ -320,6 +320,7 @@ def _run_reintegrate(
     integrator_config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,
+        base_commit=base_commit,
         agent_type=AgentTypeName(integrator_agent_type),
         provider_name=ProviderInstanceName(opts.integrator_provider),
         env_options=env_options,
@@ -601,6 +602,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,
+        base_commit=base_commit,
         agent_type=AgentTypeName(opts.agent_type),
         provider_name=ProviderInstanceName(opts.provider),
         env_options=env_options,
@@ -728,6 +730,7 @@ def _run_tmr_pipeline(
     integrator_config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,
+        base_commit=base_commit,
         agent_type=AgentTypeName(integrator_agent_type),
         provider_name=ProviderInstanceName(opts.integrator_provider),
         env_options=env_options,

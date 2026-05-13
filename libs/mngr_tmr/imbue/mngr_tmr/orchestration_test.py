@@ -105,6 +105,7 @@ def _make_config(provider: str = "local", snapshot: SnapshotName | None = None) 
     return TmrLaunchConfig.model_construct(
         source_dir=Path("/tmp/src"),
         source_host=None,
+        base_commit="0" * 40,
         agent_type=AgentTypeName("claude"),
         provider_name=ProviderInstanceName(provider),
         env_options=AgentEnvironmentOptions(),
@@ -147,6 +148,7 @@ def test_build_agent_options_passes_env_and_labels() -> None:
     config_with_env_and_labels = TmrLaunchConfig.model_construct(
         source_dir=config.source_dir,
         source_host=None,
+        base_commit=config.base_commit,
         agent_type=config.agent_type,
         provider_name=config.provider_name,
         env_options=env,

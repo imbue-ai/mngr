@@ -101,6 +101,7 @@ class TmrLaunchConfig(FrozenModel):
 
     source_dir: Path = Field(description="Source directory for agent work dirs")
     source_host: OnlineHostInterface = Field(description="Local host where source code lives")
+    base_commit: str = Field(description="Commit at source_dir HEAD when the run started; used as the bundle base")
     agent_type: AgentTypeName = Field(description="Type of agent to run (claude, codex, etc.)")
     provider_name: ProviderInstanceName = Field(description="Provider for agent hosts (local, docker, modal)")
     env_options: AgentEnvironmentOptions = Field(
