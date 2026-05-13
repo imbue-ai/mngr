@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from imbue.mngr.cli import extras as extras_mod
 from imbue.mngr.cli.extras import _completion_status
 from imbue.mngr.cli.extras import _detect_shell
 from imbue.mngr.cli.extras import _generate_completion_script
@@ -99,7 +98,7 @@ def test_completion_status_returns_tuple() -> None:
     assert isinstance(rc_path, Path)
 
 
-def test_install_completion_auto_writes_script(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_install_completion_auto_writes_script(tmp_path: Path) -> None:
     """_install_completion writes the script when auto=True; reports configured once present."""
     rc = tmp_path / ".zshrc"
     rc.write_text("# existing config\n")
@@ -108,14 +107,12 @@ def test_install_completion_auto_writes_script(tmp_path: Path, monkeypatch: pyte
     def _status() -> tuple[bool, str, Path]:
         return ("_mngr_complete" in rc.read_text(), "zsh", rc)
 
-    monkeypatch.setattr(extras_mod, "_completion_status", _status)
-
     # First call: not configured yet -> writes the script
-    assert _install_completion(auto=True) is True
+    assert _install_completion(auto=True, status_fn=_status) is True
     assert "_mngr_complete" in rc.read_text()
 
     # Second call: now configured -> returns True without re-writing
-    assert _install_completion(auto=False) is True
+    assert _install_completion(auto=False, status_fn=_status) is True
 
 
 def test_install_completion_no_tty() -> None:
@@ -126,15 +123,13 @@ def test_install_completion_no_tty() -> None:
     assert isinstance(result, bool)
 
 
-def test_install_claude_plugin_status_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_install_claude_plugin_status_branches() -> None:
     """_install_claude_plugin returns correct values for different _claude_plugin_status results."""
     # When claude is not available -> returns False
-    monkeypatch.setattr(extras_mod, "_claude_plugin_status", lambda: (False, False))
-    assert _install_claude_plugin(auto=True) is False
+    assert _install_claude_plugin(auto=True, status_fn=lambda: (False, False)) is False
 
     # When plugin is already installed -> returns True
-    monkeypatch.setattr(extras_mod, "_claude_plugin_status", lambda: (True, True))
-    assert _install_claude_plugin(auto=True) is True
+    assert _install_claude_plugin(auto=True, status_fn=lambda: (True, True)) is True
 
 
 def test_plugins_status_returns_string() -> None:
