@@ -822,9 +822,13 @@ class ModalProviderInstance(BaseProviderInstance):
     ) -> ImageInterface:
         """Build a Modal image.
 
-        If dockerfile is provided, builds from that Dockerfile with per-layer caching.
-        Each instruction is applied separately, so if a build fails at step N,
-        steps 1 through N-1 are cached and don't need to be re-run.
+        If dockerfile is provided, builds from that Dockerfile. Single-stage
+        Dockerfiles are applied instruction-by-instruction with per-layer
+        caching, so if a build fails at step N, steps 1 through N-1 are cached
+        and don't need to be re-run. Multistage Dockerfiles (more than one
+        FROM) are built as a single image via modal.Image.from_dockerfile,
+        without per-layer caching, because the incremental path cannot honor
+        `COPY --from=<stage>` references to earlier stages.
 
         Elif base_image is provided (e.g., "python:3.12-slim"), uses that as the
         base. Otherwise uses debian:bookworm-slim.
