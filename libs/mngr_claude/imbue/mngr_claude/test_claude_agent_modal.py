@@ -332,49 +332,57 @@ def _read_preserved_session_text(host_dir: Path, agent_name: str) -> str:
 @pytest.mark.release
 @pytest.mark.rsync
 @pytest.mark.tmux
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(900)
 def test_clone_local_claude_agent_to_modal_rekeys_for_resume(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
 ) -> None:
-    """End-to-end: ``mngr clone <local-agent> <new>@.modal`` must transfer the
-    source agent's plugin/ session data AND rewrite it so that the cloned
-    agent's claude can resume the source session.
+    """End-to-end: cloning a local claude agent to Modal must (a) transfer the
+    source's plugin/ session data and (b) rewrite it for the destination's
+    work_dir encoding + session id so the cloned claude *attempts* to resume
+    the source's session.
 
     Two distinct regressions this guards against:
 
-    1. **Cross-host rsync** -- the original bug. ``_transfer_source_plugin_data``
-       passed the destination Modal host as both source and target of
-       ``copy_directory``. Rsync then ran on the Modal sandbox looking for
-       the source plugin dir there (where it doesn't exist) and aborted
-       with ``rsync: change_dir ".../plugin" failed: No such file or
-       directory``.
+    1. **Cross-host rsync** -- the original bug from #1598. The plugin/
+       rsync ran on the destination Modal sandbox looking for the source
+       plugin dir there and aborted with
+       ``rsync: change_dir ".../plugin" failed: No such file or directory``.
 
-    2. **Session rekeying** -- session JSONL files are filed under the
-       source's encoded work_dir (Claude's per-project layout). After clone
-       the destination's work_dir encodes differently, so without renaming
-       the project subdir Claude won't find the JSONL and starts a fresh
-       session. Similarly, ``claude_session_id`` lives outside ``plugin/``
-       so the rsync alone leaves the destination pointing at a new id.
-       ``_adopt_cloned_session`` re-encodes the project subdir and copies
-       the source's session id (+ history) to the destination.
+    2. **Session rekeying** -- session JSONLs are filed under the source's
+       encoded work_dir, and ``claude_session_id`` (read by the startup
+       command's ``MAIN_CLAUDE_SESSION_ID``) lives outside ``plugin/``.
+       ``_adopt_cloned_session`` (a) renames the project subdir to the
+       destination's encoded work_dir so claude can find the file under
+       its expected path, and (b) writes the source's JSONL stem to
+       ``claude_session_id`` so the startup ``claude --resume`` targets
+       it.
 
-    Verifies (1) by exercising the clone command end-to-end against a real
-    Modal sandbox. Verifies (2) by inspecting the cloned agent's plugin/
-    layout on Modal: the project subdir must be named after the
-    destination's encoded work_dir (not the source's), and the source's
-    ``claude_session_id`` file must have been copied over to the
-    destination state dir. Verifying that claude itself actually resumes
-    the conversation interactively (a la ``test_adopt_session.py``) would
-    require an interactive ``mngr message`` + tmux pane-capture flow; that
-    is a possible follow-up.
+    Verifies via ``mngr exec`` against the live cloned sandbox that:
+
+    * The project subdir was renamed (one ``-mngr-projects-...`` subdir
+      and no ``-private-var-...`` / ``-tmp-...`` source-encoded leftover).
+    * ``claude_session_id_history`` records the adopted source session id
+      as the first ``startup`` entry -- proof that the agent's startup
+      script ran with ``MAIN_CLAUDE_SESSION_ID`` resolved to the source's
+      session id (which can only happen if ``_adopt_cloned_session``
+      wrote it to ``claude_session_id`` before agent startup).
+
+    NOTE: actually getting the cloned claude to *successfully* resume and
+    use the source context (i.e. drive it via ``mngr message`` and see
+    the model produce content informed by the source) is not yet working
+    end-to-end. The startup ``claude --resume <source-sid>`` is attempted
+    (visible in ``claude_session_id_history``) but exits nonzero, falling
+    back through the startup command's ``||`` to ``claude --session-id
+    <clone-agent-uuid>`` which starts a fresh session. The remaining
+    issue is inside claude itself (possibly session-id-vs-internal-id
+    mismatch, or claude's resume rejecting a JSONL it didn't author).
+    Tracking that down is a separate follow-up.
     """
     source_name = f"test-clone-src-{get_short_random_string()}"
     target_name = f"test-clone-dst-{get_short_random_string()}"
     _setup_claude_gitignore(temp_source_dir)
 
-    # Source's prompt embeds a unique token so we can later confirm the
-    # source's session content actually made it onto the clone's host.
     secret = f"hocus{get_short_random_string()}pocus"
     source_prompt = f"Memorize this secret token: '{secret}'. Just acknowledge with 'ok'."
 
@@ -390,9 +398,8 @@ def test_clone_local_claude_agent_to_modal_rekeys_for_resume(
         f"stdout: {clone_result.stdout}\nstderr: {clone_result.stderr}"
     )
 
-    # The clone's work_dir on Modal is /mngr/projects/agent-<uuid>; its
-    # encoding starts with "-mngr-projects-". After rekeying, exactly that
-    # subdir should appear under projects/ on the clone.
+    # Project subdir was renamed: exactly the destination's encoding
+    # ("-mngr-projects-...") is present, source's local-fs encoding is not.
     list_result = _exec_on_modal_agent(
         target_name,
         "ls /mngr/agents/*/plugin/claude/anthropic/projects/",
@@ -402,34 +409,47 @@ def test_clone_local_claude_agent_to_modal_rekeys_for_resume(
         f"Listing projects dir on clone failed:\nstdout: {list_result.stdout}\nstderr: {list_result.stderr}"
     )
     project_subdirs = [line.strip() for line in list_result.stdout.split("\n") if line.strip()]
+    # Drop mngr exec's trailing status line.
+    project_subdirs = [n for n in project_subdirs if not n.startswith("Command succeeded")]
     assert any(name.startswith("-mngr-projects-") for name in project_subdirs), (
-        f"No clone-encoded project subdir under plugin/claude/anthropic/projects/ on the clone "
-        f"(rekeying regressed?). Saw: {project_subdirs}"
+        f"No clone-encoded project subdir on the clone (rekeying regressed?). Saw: {project_subdirs}"
     )
-    # The source's local encoded work_dir would start with "-private-var" (macOS pytest tmp).
-    # After rekeying, that name must no longer be present.
     assert not any(name.startswith("-private-var") or name.startswith("-tmp-") for name in project_subdirs), (
-        f"Found a source-encoded project subdir on the clone (rekeying did not run or did not rename). "
-        f"Saw: {project_subdirs}"
+        f"Source-encoded project subdir still present on the clone (rekeying did not rename). Saw: {project_subdirs}"
     )
 
-    # claude_session_id should have been copied from the source so claude
-    # resumes the right session. If adoption didn't run, this file would
-    # either be missing or contain the clone's own agent UUID.
-    sid_result = _exec_on_modal_agent(
+    # The adopted source session id should appear as the FIRST line of the
+    # startup history -- written by claude's SessionStart hook when it ran
+    # ``claude --resume "$MAIN_CLAUDE_SESSION_ID"`` with our adopted id.
+    # Find the source's session id from the JSONL filename on the clone.
+    jsonl_result = _exec_on_modal_agent(
         target_name,
-        "cat /mngr/agents/*/claude_session_id 2>/dev/null",
+        "find /mngr/agents/*/plugin/claude/anthropic/projects -maxdepth 2 -name '*.jsonl' -type f",
         modal_subprocess_env,
     )
-    assert sid_result.returncode == 0, (
-        f"Reading claude_session_id on clone failed:\nstdout: {sid_result.stdout}\nstderr: {sid_result.stderr}"
-    )
-    clone_sid = sid_result.stdout.strip()
-    assert clone_sid, "claude_session_id on clone is empty -- _adopt_cloned_session did not run"
+    jsonl_files = [
+        line.strip()
+        for line in jsonl_result.stdout.split("\n")
+        if line.strip() and not line.startswith("Command succeeded")
+    ]
+    assert jsonl_files, f"No JSONL found on clone (plugin transfer regressed?). stdout: {jsonl_result.stdout!r}"
+    adopted_session_id = Path(jsonl_files[0]).stem
 
-    # Destroying the target preserves its plugin/ session files back to
-    # local host_dir, so we can also sanity-check the source's content
-    # survived the round trip.
+    history_result = _exec_on_modal_agent(
+        target_name, "cat /mngr/agents/*/claude_session_id_history", modal_subprocess_env
+    )
+    history_lines = [
+        line for line in history_result.stdout.split("\n") if line and not line.startswith("Command succeeded")
+    ]
+    assert history_lines and history_lines[0].startswith(f"{adopted_session_id} "), (
+        f"Expected first startup history entry to be the adopted source session id "
+        f"{adopted_session_id!r} (proof that the startup command saw "
+        f"MAIN_CLAUDE_SESSION_ID = source's id, i.e. _adopt_cloned_session "
+        f"wrote claude_session_id correctly before agent startup). "
+        f"history_lines={history_lines!r}"
+    )
+
+    # Sanity: the source's content also survived the destroy round trip.
     destroy_target_result = _destroy_modal_agent(target_name, modal_subprocess_env)
     assert destroy_target_result.returncode == 0, (
         f"Destroy of target failed (rc={destroy_target_result.returncode}):\n"

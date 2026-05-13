@@ -3214,7 +3214,9 @@ def test_transfer_source_plugin_data_rekeys_project_dir(
     """After clone, the project subdir under plugin/claude/anthropic/projects/
     should be renamed from the source agent's encoded work_dir to the
     destination agent's, so ``claude --resume`` on the destination finds the
-    session JSONL.
+    session JSONL. The destination's ``claude_session_id`` should be set to
+    the JSONL filename's stem so the startup command's
+    ``claude --resume "$MAIN_CLAUDE_SESSION_ID"`` targets that file.
     """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     dest_dir = agent._get_agent_dir()
@@ -3225,43 +3227,63 @@ def test_transfer_source_plugin_data_rekeys_project_dir(
     # Project subdir name uses the source's (different) work_dir encoding.
     src_project = plugin_dir / "projects" / "-Users-ev-some-source-workdir"
     src_project.mkdir(parents=True)
-    (src_project / "abc-session.jsonl").write_text('{"type":"message"}\n')
+    session_id = "11111111-2222-3333-4444-555555555555"
+    (src_project / f"{session_id}.jsonl").write_text('{"type":"message"}\n')
 
     agent._transfer_source_plugin_data(HostLocation(host=host, path=source_dir))
 
     dest_project_name = encode_claude_project_dir_name(agent.work_dir)
     rekeyed = dest_dir / "plugin" / "claude" / "anthropic" / "projects" / dest_project_name
-    assert (rekeyed / "abc-session.jsonl").exists(), (
+    assert (rekeyed / f"{session_id}.jsonl").exists(), (
         f"Expected session JSONL under {rekeyed}, dest projects dir is "
         f"{[p.name for p in (dest_dir / 'plugin' / 'claude' / 'anthropic' / 'projects').iterdir()]}"
     )
     # Source-encoded subdir should be gone.
     assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / "-Users-ev-some-source-workdir").exists()
+    # Session id should be the JSONL stem so ``claude --resume`` finds the file.
+    assert (dest_dir / "claude_session_id").read_text().strip() == session_id
 
 
 @pytest.mark.rsync
-def test_transfer_source_plugin_data_carries_session_id(
+def test_transfer_source_plugin_data_uses_jsonl_filename_not_source_session_id_file(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """The source agent's ``claude_session_id`` (and history) live at the top of
-    the source state dir -- not inside plugin/ -- so the plugin rsync alone
-    doesn't move them. _transfer_source_plugin_data should still copy them
-    into the destination so ``claude --resume "$MAIN_CLAUDE_SESSION_ID"``
-    targets the source's session.
+    """``claude_session_id`` on the destination must be the *actual* session
+    JSONL filename's stem, not the contents of the source's
+    ``claude_session_id`` file. When the source ran ``claude -p``, claude's
+    ``--session-id`` flag was ignored and claude auto-generated its own id,
+    so the source's ``claude_session_id`` file (which the SessionStart hook
+    default-fills with the agent UUID) doesn't agree with the JSONL on disk.
+    The JSONL filename is the ground truth for what ``claude --resume <id>``
+    can find.
     """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     dest_dir = agent._get_agent_dir()
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     source_dir = tmp_path / "source_agent_state"
-    (source_dir / "plugin").mkdir(parents=True)
-    (source_dir / "claude_session_id").write_text("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n")
-    (source_dir / "claude_session_id_history").write_text("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee startup\n")
+    plugin_dir = source_dir / "plugin" / "claude" / "anthropic"
+    src_project = plugin_dir / "projects" / "-source-encoded"
+    src_project.mkdir(parents=True)
+
+    actual_session_id_from_jsonl = "aaaa1111-bbbb-2222-cccc-333344445555"
+    stale_agent_uuid = "ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb"
+    (src_project / f"{actual_session_id_from_jsonl}.jsonl").write_text('{"type":"message"}\n')
+    # The source's claude_session_id contains a *different* id (the agent
+    # UUID written by the SessionStart hook default).
+    (source_dir / "claude_session_id").write_text(f"{stale_agent_uuid}\n")
+    (source_dir / "claude_session_id_history").write_text(f"{stale_agent_uuid} startup\n")
 
     agent._transfer_source_plugin_data(HostLocation(host=host, path=source_dir))
 
-    assert (dest_dir / "claude_session_id").read_text().strip() == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-    assert "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee startup" in (dest_dir / "claude_session_id_history").read_text()
+    # Destination's claude_session_id must be the JSONL filename's stem,
+    # not the source's claude_session_id contents.
+    assert (dest_dir / "claude_session_id").read_text().strip() == actual_session_id_from_jsonl, (
+        f"claude_session_id on destination should be {actual_session_id_from_jsonl} "
+        f"(JSONL stem), got {(dest_dir / 'claude_session_id').read_text().strip()}"
+    )
+    # History is still carried verbatim for traceability.
+    assert stale_agent_uuid in (dest_dir / "claude_session_id_history").read_text()
 
 
 # =============================================================================

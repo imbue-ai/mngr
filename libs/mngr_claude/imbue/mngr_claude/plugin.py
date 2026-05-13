@@ -2068,27 +2068,18 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         searches ``projects/<encoded-current-work-dir>/<session>.jsonl``, so
         without renaming the project subdir on the destination, the JSONL is
         invisible and Claude starts a fresh session. Similarly, the active
-        session id lives in ``<state_dir>/claude_session_id`` (outside
-        plugin/, so the rsync doesn't touch it) -- without copying it the
-        startup command's ``claude --resume "$MAIN_CLAUDE_SESSION_ID"``
-        targets the new agent's auto-generated id.
+        session id has to be written to ``<state_dir>/claude_session_id`` so
+        the startup command's ``claude --resume "$MAIN_CLAUDE_SESSION_ID"``
+        targets the source's session.
+
+        The session id is derived from the source's JSONL filename rather
+        than from the source's ``claude_session_id`` file: when the source
+        ran ``claude -p``, claude's ``--session-id`` flag was ignored and
+        claude auto-generated its own id, so the file (whose contents are
+        the agent UUID written by the SessionStart hook default) and the
+        actual session id on disk don't agree. The JSONL filename is the
+        ground truth for what ``claude --resume <id>`` will look for.
         """
-        # Carry over the active session id (and its history) from the source
-        # agent state dir top-level. Skip gracefully if the source never had
-        # an active session.
-        source_sid_path = source_state_dir / "claude_session_id"
-        if source_host.path_exists(source_sid_path):
-            source_sid = source_host.read_text_file(source_sid_path).strip()
-            if source_sid:
-                self.host.write_text_file(self._get_agent_dir() / "claude_session_id", source_sid)
-
-        source_history_path = source_state_dir / "claude_session_id_history"
-        if source_host.path_exists(source_history_path):
-            self.host.write_text_file(
-                self._get_agent_dir() / "claude_session_id_history",
-                source_host.read_text_file(source_history_path),
-            )
-
         # Re-encode the project subdir under plugin/claude/anthropic/projects/
         # so its name matches the destination agent's work_dir. The original
         # name uses the source agent's work_dir encoding.
@@ -2115,6 +2106,30 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                 f"fi"
             )
             self.host.execute_idempotent_command(move_cmd, timeout_seconds=60.0)
+
+        # Pick the most recently modified main-session JSONL on the
+        # destination (after the rename, all sessions live under
+        # target_dir). ``ls -t .../*.jsonl`` lists by mtime, newest first;
+        # the glob ``target_dir/*.jsonl`` deliberately excludes nested
+        # subagent transcripts at ``<sid>/subagents/agent-X.jsonl``. The
+        # filename's stem is the session id ``claude --resume`` needs.
+        latest_result = self.host.execute_idempotent_command(
+            f"ls -t {shlex.quote(str(target_dir))}/*.jsonl 2>/dev/null | head -n1",
+            timeout_seconds=5.0,
+        )
+        if latest_result.success and latest_result.stdout.strip():
+            latest_jsonl = latest_result.stdout.strip()
+            adopted_session_id = Path(latest_jsonl).stem
+            self.host.write_text_file(self._get_agent_dir() / "claude_session_id", adopted_session_id)
+
+        # Carry the source's claude_session_id_history forward so the
+        # destination's history reflects the prior run.
+        source_history_path = source_state_dir / "claude_session_id_history"
+        if source_host.path_exists(source_history_path):
+            self.host.write_text_file(
+                self._get_agent_dir() / "claude_session_id_history",
+                source_host.read_text_file(source_history_path),
+            )
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve session files and clean up per-agent credentials and trust entries.
