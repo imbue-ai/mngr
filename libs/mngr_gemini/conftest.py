@@ -13,3 +13,6 @@ from imbue.mngr.utils.logging import suppress_warnings
 
 suppress_warnings()
 register_conftest_hooks(globals())
+
+# Inherit fixtures from mngr's conftest (local_provider, temp_mngr_ctx, etc.).
+pytest_plugins = ["imbue.mngr.conftest"]

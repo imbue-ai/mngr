@@ -1,6 +1,19 @@
 """Unit tests for GeminiAgentConfig and GeminiAgent."""
 
+from datetime import datetime
+from datetime import timezone
+from pathlib import Path
+
+import pytest
+
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.hosts.host import Host
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import HostName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_gemini.plugin import GeminiAgent
 from imbue.mngr_gemini.plugin import GeminiAgentConfig
 from imbue.mngr_gemini.plugin import register_agent_type
@@ -47,3 +60,39 @@ def test_register_agent_type_returns_gemini_class_and_config() -> None:
     assert name == "gemini"
     assert agent_class is GeminiAgent
     assert config_class is GeminiAgentConfig
+
+
+@pytest.fixture
+def gemini_agent(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> GeminiAgent:
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    return GeminiAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-gemini"),
+        agent_type=AgentTypeName("gemini"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=local_provider.mngr_ctx,
+        agent_config=GeminiAgentConfig(),
+        host=host,
+    )
+
+
+def test_assemble_command_injects_skip_trust(gemini_agent: GeminiAgent) -> None:
+    command = gemini_agent.assemble_command(gemini_agent.host, (), command_override=None)
+    tokens = str(command).split()
+    assert "gemini" in tokens
+    assert "--skip-trust" in tokens
+
+
+def test_assemble_command_preserves_user_agent_args(gemini_agent: GeminiAgent) -> None:
+    command = gemini_agent.assemble_command(gemini_agent.host, ("--debug",), command_override=None)
+    tokens = str(command).split()
+    assert "--skip-trust" in tokens
+    assert "--debug" in tokens

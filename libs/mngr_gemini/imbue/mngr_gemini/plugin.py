@@ -6,6 +6,7 @@ from imbue.mngr import hookimpl
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
 
 
@@ -37,6 +38,19 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig]):
         # signal a tmux wait-for channel, so we just press Enter and trust the
         # paste-visibility check that already ran upstream.
         return False
+
+    def assemble_command(
+        self,
+        host: OnlineHostInterface,
+        agent_args: tuple[str, ...],
+        command_override: CommandString | None,
+        initial_message: str | None = None,
+    ) -> CommandString:
+        # Inject --skip-trust so gemini does not block on the "Do you trust this
+        # folder?" first-run dialog. Without it the agent reaches the TUI but
+        # cannot accept input until a human picks an option.
+        augmented_args = ("--skip-trust", *agent_args)
+        return super().assemble_command(host, augmented_args, command_override, initial_message)
 
 
 @hookimpl
