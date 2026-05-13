@@ -2104,7 +2104,18 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             timeout_seconds=5.0,
         )
         if not (latest_on_source.success and latest_on_source.stdout.strip()):
-            logger.debug("Clone adopt: source has no session JSONL under {}", source_projects_dir)
+            # Reaching this branch after a successful plugin/ rsync is unusual:
+            # either the source genuinely has no sessions (so the cloned agent
+            # will start a fresh claude session), or the ``ls`` itself failed
+            # (permissions, transient remote error). Either way it is worth
+            # surfacing so a silent regression doesn't hide as DEBUG noise.
+            logger.warning(
+                "Clone adopt: no session JSONL found at source {} (ls success={}, stderr={!r}); "
+                "cloned agent will start a fresh claude session",
+                source_projects_dir,
+                latest_on_source.success,
+                latest_on_source.stderr.strip(),
+            )
             return
         latest_path = Path(latest_on_source.stdout.strip())
         source_project_name = latest_path.parent.name
