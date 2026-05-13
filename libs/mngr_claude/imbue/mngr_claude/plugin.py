@@ -50,6 +50,7 @@ from imbue.mngr.interfaces.data_types import RelativePath
 from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
@@ -1981,8 +1982,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             # Transfer plugin data from source agent before config setup (if cloning via --from).
             # This copies sessions, memory, transcript offsets, etc. The subsequent config setup
             # will overwrite identity-specific files (.claude.json, credentials) with fresh values.
-            if options.source_agent_state_dir is not None:
-                self._transfer_source_plugin_data(host, options.source_agent_state_dir)
+            if options.source_agent_state_location is not None:
+                self._transfer_source_plugin_data(options.source_agent_state_location)
 
             # Set up per-agent config directory (for both local and remote hosts)
             self._setup_per_agent_config_dir(host, options, mngr_ctx)
@@ -2040,27 +2041,21 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         host.write_text_file(self._get_agent_dir() / "claude_session_id", last_session_id)
         logger.info("Adopted {} session(s), active session: {}", len(adopt_session_args), last_session_id)
 
-    def _transfer_source_plugin_data(
-        self,
-        host: OnlineHostInterface,
-        source_agent_state_dir: Path,
-    ) -> None:
-        """Transfer plugin data from a source agent's state directory during clone.
-
-        Copies the source agent's plugin/ directory into this agent's state
-        directory. This runs before _setup_per_agent_config_dir, which will
-        overwrite identity-specific config files with fresh values for the
-        new agent.
+    def _transfer_source_plugin_data(self, source_agent_state_location: HostLocation) -> None:
+        """Copy the source agent's plugin/ directory into this agent's state
+        directory. Runs before _setup_per_agent_config_dir, which overwrites
+        identity-specific config files with fresh values for the new agent.
         """
-        source_plugin_dir = source_agent_state_dir / "plugin"
+        source_host = source_agent_state_location.host
+        source_plugin_dir = source_agent_state_location.path / "plugin"
         dest_plugin_dir = self._get_agent_dir() / "plugin"
 
-        if not source_plugin_dir.exists():
+        if not source_host.path_exists(source_plugin_dir):
             logger.debug("No plugin directory in source agent, skipping clone transfer")
             return
 
         with log_span("Transferring source plugin data"):
-            host.copy_directory(host, source_plugin_dir, dest_plugin_dir)
+            self.host.copy_directory(source_host, source_plugin_dir, dest_plugin_dir)
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve session files and clean up per-agent credentials and trust entries.

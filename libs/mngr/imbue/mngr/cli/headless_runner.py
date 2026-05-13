@@ -15,11 +15,11 @@ from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName

@@ -19,11 +19,21 @@
 {% extends 'permissions.html' %}
 {% import '_macros.html' as ui %}
 
+{% block workspace_meta %}
+  {# Latchkey state (gateway URL, password, JWT, permissions config) #}
+  {# is keyed per-host: every agent that runs on this workspace's host #}
+  {# inherits the same grants. The bracket note tells the user the #}
+  {# scope of the decision they are about to make is host-wide, not #}
+  {# just for the agent that triggered the request. #}
+  <span class="ml-1 text-xs text-zinc-500">(grants apply to every agent on this host)</span>
+{% endblock %}
+
 {% block permissions_form_body %}
   <h2 class="text-sm font-medium text-zinc-700 mb-2">Permissions to grant</h2>
   <p class="text-xs text-zinc-500 mb-3">
-    Select which permissions the agent may use for {{ display_name }}.
+    Select which permissions to grant for {{ display_name }}.
     Existing grants for this service are checked; uncheck to revoke them.
+    Permissions are shared across every agent running on this workspace's host.
   </p>
   <div class="bg-white border border-zinc-200 rounded-xl p-4 space-y-2">
     {% for permission in permission_schemas %}

@@ -26,6 +26,7 @@ from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import LifecycleHook
+from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import Permission
 from imbue.mngr.primitives import PluginName
@@ -877,17 +878,17 @@ class CreateCliOptions(CommonCliOptions):
     For that information, see the click.option() and click.argument() decorators on the create() function itself.
     """
 
-    positional_name: str | None
+    positional_name: NewAgentLocation | None
     positional_agent_type: str | None
     agent_args: tuple[str, ...]
     template: tuple[str, ...]
-    type: str | None
+    type: str
     reuse: bool
     connect: bool
     foreground: bool
     connect_command: str | None
     ensure_clean: bool
-    name: str | None
+    name: NewAgentLocation | None
     id: str | None
     name_style: str
     extra_window: tuple[str, ...]
@@ -923,7 +924,7 @@ class CreateCliOptions(CommonCliOptions):
     idle_mode: str | None
     activity_sources: str | None
     worktree_base_folder: str | None
-    start_on_boot: bool | None
+    start_on_boot: bool
     start_host: bool
     grant: tuple[str, ...]
     extra_provision_command: tuple[str, ...]

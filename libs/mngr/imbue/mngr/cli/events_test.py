@@ -10,10 +10,15 @@ from imbue.mngr.cli.events import _emit_event_record
 from imbue.mngr.cli.events import _write_and_flush_stdout
 from imbue.mngr.cli.events import events
 from imbue.mngr.cli.testing import create_agent_with_events_dir
+from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentOrHostAddress
+
+_DEFAULT_TARGET = AgentAddress(agent=AgentName("my-agent"))
 
 
 def _make_events_opts(
-    target: str = "my-agent",
+    target: AgentOrHostAddress = _DEFAULT_TARGET,
     sources: tuple[str, ...] = (),
     source: tuple[str, ...] = (),
     include: tuple[str, ...] = (),
@@ -49,7 +54,7 @@ def test_events_cli_command_is_named_event_singular() -> None:
 def test_events_cli_options_can_be_constructed() -> None:
     """Verify the options class can be instantiated with all required fields."""
     opts = _make_events_opts()
-    assert opts.target == "my-agent"
+    assert opts.target == AgentAddress(agent=AgentName("my-agent"))
     assert opts.follow is False
     assert opts.tail is None
     assert opts.head is None

@@ -29,20 +29,15 @@ def test_prevent_eval() -> None:
 
 
 def test_prevent_while_true() -> None:
-    rc.check_while_true(_DIR, snapshot(1))
+    rc.check_while_true(_DIR, snapshot(0))
 
 
 def test_prevent_time_sleep() -> None:
-    # Count is 2 rather than 1 because of a regex misfire:
-    # ``imbue/minds/desktop_client/latchkey/core_test.py`` embeds a fake
-    # ``latchkey`` binary as a Python source string. That source string
-    # contains a literal ``time.sleep(0.5)`` call inside the *spawned
-    # subprocess* -- not in test framework code -- to artificially widen
-    # the spawn-race window so the regression test for the
-    # ``ensure_gateway_started`` double-spawn bug reliably triggers.
-    # The regex cannot distinguish a string literal containing
-    # ``time.sleep(`` from real code that calls ``time.sleep``.
-    rc.check_time_sleep(_DIR, snapshot(2))
+    # The one remaining match is in ``destroying_test.py`` (a real test
+    # poll loop). The fake-binary string literal that previously
+    # contributed a second match lived in the now-relocated latchkey
+    # core_test.py, which moved to the ``mngr_latchkey`` package.
+    rc.check_time_sleep(_DIR, snapshot(1))
 
 
 def test_prevent_global_keyword() -> None:
@@ -61,7 +56,7 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(1))
+    rc.check_broad_exception_catch(_DIR, snapshot(0))
 
 
 def test_prevent_base_exception_catch() -> None:

@@ -1,0 +1,87 @@
+# imbue-mngr-usage
+
+`mngr usage` -- agent-agnostic CLI for rolling-window usage / quota data.
+
+## What it does
+
+Provides a single `mngr usage` command that surfaces rolling-window usage data
+in human / json / jsonl / format-template output. The command itself knows
+nothing about any specific agent type or provider; it walks events files on
+disk and renders whatever it finds.
+
+## Architecture
+
+This package contains:
+
+- The `mngr usage` CLI command and its rendering helpers.
+- The `UsageSnapshot` and `WindowSnapshot` data types.
+
+Discovery is by path convention. The CLI walks
+`<host_dir>/agents/*/events/<source>/rate_limits/events.jsonl` (the same shape
+`mngr transcript` uses for `events/<source>/common_transcript/...`), reads the
+last event from each file, and renders the freshest snapshot per `<source>`.
+The `<source>` segment is free-form -- whatever the writer plugin chose.
+
+When multiple writers contribute, each renders as its own `[source]` section in
+human output and as an entry in the JSON `sources` array.
+
+## Output formats
+
+- `mngr usage` (human, with stale warning when applicable)
+- `mngr usage --format json`
+- `mngr usage --format jsonl`
+- `mngr usage --format '5h:{five_hour.used_percentage}%/{seven_day.used_percentage}%'`
+
+## Waiting on a predicate
+
+`mngr usage wait --until <CEL>` blocks until at least one source's CEL
+context satisfies every `--until` expression, then exits 0. Composable with
+shell:
+
+```
+mngr usage wait --until 'five_hour.elapsed_percentage > 75 && five_hour.used_percentage < 50' \
+  && mngr message my-agent "ok, kick off the next batch"
+```
+
+The CEL context per source mirrors one entry of `mngr usage --format json`'s
+`sources` array. Each window exposes the writer-emitted fields
+(`used_percentage`, `resets_at`, `window_seconds`, `label`, ...) plus the
+reader-derived `seconds_until_reset`, `elapsed_seconds`, and
+`elapsed_percentage` (the last two require `window_seconds` from the
+writer; absent on variable-duration windows like Claude's overage).
+
+Exit codes mirror `mngr wait`: 0 matched, 1 error, 2 timeout. Default poll
+interval is 30s; use `--interval` for tighter cadence. To restrict matching
+to a specific writer, use the top-level `source` field in CEL (e.g.
+`--until 'source == "claude" && five_hour.used_percentage < 50'`).
+
+## Implementing a writer plugin
+
+A writer plugin is responsible for producing `rate_limit_snapshot` events at
+the conventional path. The minimal contract is just the JSONL line shape:
+
+```jsonl
+{"source":"<your-source>/rate_limits","type":"rate_limit_snapshot","event_id":"evt-<hex>","timestamp":"<ISO 8601>","rate_limits":{"<window-key>":{"used_percentage":<float>,"resets_at":<unix-ts>}}}
+```
+
+Append one line per refresh to:
+
+```
+<agent_state_dir>/events/<your-source>/rate_limits/events.jsonl
+```
+
+`mngr usage` will pick it up automatically -- no plugin registration with this
+package required.
+
+The writer chooses both the window keys and (optionally) per-window
+`label`s. Keys are used by format templates (`{<key>.used_percentage}`) and
+should be identifier-safe if you want format-template support; the per-window
+`label` controls human display (e.g. `"5h"` vs the literal key `"five_hour"`).
+Render order is the writer's insertion order in the JSONL.
+
+Writers may also include `"window_seconds": <int>` per window to declare a
+fixed window duration. When present, `mngr usage` derives `elapsed_seconds`
+and `elapsed_percentage`, which `mngr usage wait` CEL predicates can use to
+express "75% of the window has elapsed" without callers hardcoding window
+durations. Omit `window_seconds` for windows without a fixed length (e.g.
+Claude's overage indicator).
