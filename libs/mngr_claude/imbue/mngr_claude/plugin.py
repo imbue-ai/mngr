@@ -2080,6 +2080,17 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         actual session id on disk don't agree. The JSONL filename is the
         ground truth for what ``claude --resume <id>`` will look for.
         """
+        # Carry the source's claude_session_id_history forward so the
+        # destination's history reflects the prior run. Done first because
+        # it is independent of the projects-dir rename below; we don't want
+        # to skip it if listing the projects dir fails.
+        source_history_path = source_state_dir / "claude_session_id_history"
+        if source_host.path_exists(source_history_path):
+            self.host.write_text_file(
+                self._get_agent_dir() / "claude_session_id_history",
+                source_host.read_text_file(source_history_path),
+            )
+
         # Re-encode the project subdir under plugin/claude/anthropic/projects/
         # so its name matches the destination agent's work_dir. The original
         # name uses the source agent's work_dir encoding.
@@ -2089,6 +2100,11 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             f"ls -1 {shlex.quote(str(dest_projects_dir))} 2>/dev/null", timeout_seconds=5.0
         )
         if not list_result.success:
+            logger.debug(
+                "Skipping cloned session rekey: could not list {}: {}",
+                dest_projects_dir,
+                list_result.stderr.strip(),
+            )
             return
         subdirs = [line.strip() for line in list_result.stdout.split("\n") if line.strip()]
         target_dir = dest_projects_dir / dest_project_name
@@ -2105,7 +2121,14 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                 f"  rm -rf {shlex.quote(str(source_subdir))}; "
                 f"fi"
             )
-            self.host.execute_idempotent_command(move_cmd, timeout_seconds=60.0)
+            move_result = self.host.execute_idempotent_command(move_cmd, timeout_seconds=60.0)
+            if not move_result.success:
+                logger.warning(
+                    "Failed to rekey cloned project subdir {} -> {}: {}",
+                    source_subdir,
+                    target_dir,
+                    move_result.stderr.strip(),
+                )
 
         # Pick the most recently modified main-session JSONL on the
         # destination (after the rename, all sessions live under
@@ -2121,14 +2144,10 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             latest_jsonl = latest_result.stdout.strip()
             adopted_session_id = Path(latest_jsonl).stem
             self.host.write_text_file(self._get_agent_dir() / "claude_session_id", adopted_session_id)
-
-        # Carry the source's claude_session_id_history forward so the
-        # destination's history reflects the prior run.
-        source_history_path = source_state_dir / "claude_session_id_history"
-        if source_host.path_exists(source_history_path):
-            self.host.write_text_file(
-                self._get_agent_dir() / "claude_session_id_history",
-                source_host.read_text_file(source_history_path),
+        else:
+            logger.debug(
+                "No session JSONL found under {} after rekey; claude_session_id left unset",
+                target_dir,
             )
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
