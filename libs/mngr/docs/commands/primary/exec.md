@@ -39,7 +39,7 @@ mngr exec [OPTIONS] [AGENTS]... COMMAND
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--agent` | text | Agent name or ID to exec on (can be specified multiple times) | None |
+| `--agent` | agent_address | Agent address (NAME[@HOST[.PROVIDER]]) to exec on (can be specified multiple times) | None |
 
 ## Execution
 

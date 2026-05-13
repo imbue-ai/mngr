@@ -1468,6 +1468,7 @@ def _make_erroring_host(provider: LocalProviderInstance, host_cls: type[Host]) -
     connector = PyinfraConnector(pyinfra_host)
     return host_cls(
         id=provider.host_id,
+        host_name=HostName("test"),
         connector=connector,
         provider_instance=provider,
         mngr_ctx=provider.mngr_ctx,
@@ -1491,7 +1492,7 @@ def test_gc_single_host_work_dir_skips_host_offline_error(
 
     host_ref = DiscoveredHost(
         host_id=erroring_host.id,
-        host_name=erroring_host.get_name(),
+        host_name=erroring_host.get_connector_host_name(),
         provider_name=provider.name,
         host_state=HostState.RUNNING,
     )
@@ -1520,7 +1521,7 @@ def test_gc_single_host_work_dir_skips_host_auth_error(
 
     host_ref = DiscoveredHost(
         host_id=erroring_host.id,
-        host_name=erroring_host.get_name(),
+        host_name=erroring_host.get_connector_host_name(),
         provider_name=provider.name,
         host_state=HostState.RUNNING,
     )
@@ -2295,6 +2296,7 @@ def _make_remote_host(
     )
     return host_cls(
         id=host_id,
+        host_name=HostName("remote-test-host"),
         connector=connector,
         provider_instance=provider,
         mngr_ctx=provider.mngr_ctx,

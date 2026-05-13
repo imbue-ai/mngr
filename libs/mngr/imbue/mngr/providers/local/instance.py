@@ -170,6 +170,7 @@ class LocalProviderInstance(BaseProviderInstance):
 
         return Host(
             id=host_id,
+            host_name=name,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,

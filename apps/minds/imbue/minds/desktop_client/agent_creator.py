@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from collections.abc import Mapping
 from enum import auto
 from pathlib import Path
 from typing import Final
@@ -43,15 +44,6 @@ from imbue.minds.desktop_client.api_key_store import save_api_key_hash
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
-from imbue.minds.desktop_client.latchkey.core import AGENT_SIDE_LATCHKEY_PORT
-from imbue.minds.desktop_client.latchkey.core import Latchkey
-from imbue.minds.desktop_client.latchkey.core import LatchkeyError
-from imbue.minds.desktop_client.latchkey.core import LatchkeyJwtMintError
-from imbue.minds.desktop_client.latchkey.store import LatchkeyPermissionsConfig
-from imbue.minds.desktop_client.latchkey.store import LatchkeyStoreError
-from imbue.minds.desktop_client.latchkey.store import link_opaque_permissions_to_agent
-from imbue.minds.desktop_client.latchkey.store import new_opaque_permissions_path
-from imbue.minds.desktop_client.latchkey.store import save_permissions
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
@@ -63,6 +55,12 @@ from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
+from imbue.mngr_latchkey.agent_setup import finalize_agent_permissions
+from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
+from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.store import LatchkeyStoreError
 
 # Inlined to avoid pulling the ``imbue-mngr-forward`` package into minds'
 # import graph -- minds spawns the plugin as a subprocess and otherwise has
@@ -352,9 +350,7 @@ def _build_mngr_create_command(
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
-    latchkey_gateway_url: str | None = None,
-    latchkey_gateway_password: str | None = None,
-    latchkey_permissions_override_jwt: str | None = None,
+    latchkey_env: Mapping[str, str] | None = None,
 ) -> tuple[list[str], str]:
     """Build the mngr create command and generate an API key for the agent.
 
@@ -366,7 +362,6 @@ def _build_mngr_create_command(
     host's pre-baked id anyway, and pre-generating one led to bugs (e.g.
     keying gateway state under a fictional id).
 
-    DEV mode: --template main --template dev (runs in-place on local provider)
     LOCAL mode: --template main --template docker (runs in Docker container)
     LIMA mode: --template main --template lima (runs in Lima VM)
     CLOUD mode: --template main --template vultr (runs in Docker on a Vultr VPS)
@@ -375,12 +370,12 @@ def _build_mngr_create_command(
         ``agent_name``); ``imbue_cloud_*`` arguments encode the lease
         attributes (--build-arg).
 
-    For modes that create a separate host (LOCAL, LIMA, CLOUD, IMBUE_CLOUD),
-    the agent address uses ``agent_name@{agent_name}-host`` so hosts are
-    clearly attributable. ``--reuse`` and ``--update`` are passed for the
-    non-IMBUE_CLOUD modes so re-deploying resets the agent on the same
-    host instead of failing on a duplicate name (IMBUE_CLOUD's lease
-    flow is one-shot per pool host, so reuse is not meaningful there).
+    Every mode creates a separate host, so the agent address uses
+    ``agent_name@{agent_name}-host`` so hosts are clearly attributable.
+    ``--reuse`` and ``--update`` are passed for the non-IMBUE_CLOUD modes
+    so re-deploying resets the agent on the same host instead of failing
+    on a duplicate name (IMBUE_CLOUD's lease flow is one-shot per pool
+    host, so reuse is not meaningful there).
 
     Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``, ``GH_TOKEN``)
     are forwarded by the FCT template's own ``pass_(host_)env`` declarations,
@@ -389,33 +384,15 @@ def _build_mngr_create_command(
     them up. Keeping the forwarding declaration in FCT means the same
     template works for ``mngr create`` invocations from outside minds too.
 
-    For container/VM/VPS/leased modes, ``LATCHKEY_GATEWAY`` defaults to the
-    constant agent-side URL ``http://127.0.0.1:<AGENT_SIDE_LATCHKEY_PORT>``
-    (the loopback port that ``LatchkeyDiscoveryHandler`` reverse-tunnels
-    to the host-side gateway post-discovery), so containerized agents
-    always get a working URL without the caller having to know the live
-    gateway port. DEV mode runs on the bare host with no reverse tunnel,
-    so the constant agent-side URL is meaningless there -- callers that
-    want latchkey wiring for a DEV agent must pass
-    ``latchkey_gateway_url`` explicitly with the gateway's live host
-    address (typically ``http://127.0.0.1:<dynamic_host_port>``).
-
-    Passing ``latchkey_gateway_url`` for *any* mode overrides the
-    default. Passing ``None`` for DEV opts out of latchkey wiring
-    entirely for that agent.
-
-    When ``latchkey_gateway_password`` is supplied, it is also injected as
-    ``LATCHKEY_GATEWAY_PASSWORD`` so the agent's ``latchkey`` CLI authenticates
-    to the password-protected shared gateway.
-
-    When ``latchkey_permissions_override_jwt`` is supplied, it is injected as
-    ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` so the gateway evaluates this
-    agent's requests against its own per-agent permissions file instead of the
-    gateway's deny-all default.
+    ``latchkey_env`` is the latchkey wiring (gateway URL, password, JWT,
+    disable-counting flag) computed by
+    :func:`imbue.mngr_latchkey.agent_setup.prepare_agent_latchkey`. The
+    caller decides whether the agent is tunneled (constant agent-side
+    loopback URL) or running on the bare host (live gateway port);
+    this function just lifts the entries into ``--env`` flags. Pass
+    ``None`` or an empty dict to opt the agent out of latchkey wiring.
     """
     match launch_mode:
-        case LaunchMode.DEV:
-            address = str(agent_name)
         case LaunchMode.LOCAL:
             address = f"{agent_name}@{_make_host_name(agent_name)}.docker"
         case LaunchMode.LIMA:
@@ -437,30 +414,10 @@ def _build_mngr_create_command(
     # ``--format jsonl`` makes mngr emit ``{"event": "created", "agent_id": ..., "host_id": ...}``
     # as the final stdout line; ``run_mngr_create`` parses that to recover
     # the canonical agent id.
-    # Non-DEV modes bridge the agent's loopback to a host-side latchkey
-    # gateway via the reverse tunnel ``LatchkeyDiscoveryHandler`` sets up
-    # post-discovery, so the URL is always the constant agent-side port.
-    # DEV mode runs the agent on the bare host with no tunnel; tests there
-    # set ``LATCHKEY_GATEWAY`` themselves if they want one.
-    # Default the URL to the constant agent-side port for tunneled modes.
-    # DEV agents run on the bare host with no reverse tunnel and so have
-    # no constant URL to fall back on; callers that want latchkey wiring
-    # for DEV must compute and pass the live gateway URL explicitly.
-    effective_latchkey_url = latchkey_gateway_url
-    if effective_latchkey_url is None and launch_mode is not LaunchMode.DEV:
-        effective_latchkey_url = f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
-
     latchkey_env_args: list[str] = []
-    if effective_latchkey_url is not None:
-        latchkey_env_args = ["--env", f"LATCHKEY_GATEWAY={effective_latchkey_url}"]
-        if latchkey_gateway_password is not None:
-            latchkey_env_args.extend(["--env", f"LATCHKEY_GATEWAY_PASSWORD={latchkey_gateway_password}"])
-        if latchkey_permissions_override_jwt is not None:
-            latchkey_env_args.extend(
-                ["--env", f"LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE={latchkey_permissions_override_jwt}"]
-            )
-        # Suppress the per-workspace daily ping to avoid counting every agent as a separate user.
-        latchkey_env_args.extend(["--env", "LATCHKEY_DISABLE_COUNTING=1"])
+    if latchkey_env:
+        for key, value in latchkey_env.items():
+            latchkey_env_args.extend(["--env", f"{key}={value}"])
 
     mngr_command: list[str] = [
         MNGR_BINARY,
@@ -495,11 +452,6 @@ def _build_mngr_create_command(
     # while runtime-only knobs that vary per-invocation (``--new-host``,
     # ``-b lease_attributes``) stay inline.
     match launch_mode:
-        case LaunchMode.DEV:
-            # Local (same-machine) mode: the agent inherits the bootstrap-set
-            # MNGR_HOST_DIR/MNGR_PREFIX via os.environ directly, so no
-            # host-env plumbing is needed.
-            mngr_command.extend(["--template", "main", "--template", "dev"])
         case LaunchMode.LOCAL:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "docker"])
             mngr_command.extend(_remote_host_env_flags())
@@ -668,9 +620,7 @@ def run_mngr_create(
     anthropic_api_key: str | None = None,
     anthropic_base_url: str | None = None,
     gh_token: str | None = None,
-    latchkey_gateway_url: str | None = None,
-    latchkey_gateway_password: str | None = None,
-    latchkey_permissions_override_jwt: str | None = None,
+    latchkey_env: Mapping[str, str] | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> tuple[str, AgentId]:
@@ -686,7 +636,7 @@ def run_mngr_create(
     ``anthropic_api_key`` / ``anthropic_base_url`` / ``gh_token`` are placed
     into the subprocess env (not argv) so they don't show up in ``ps`` output;
     the FCT template's own ``pass_(host_)env`` declarations cause mngr to
-    forward them onto the host (or the DEV agent) as appropriate.
+    forward them onto the host as appropriate.
 
     Returns ``(api_key, canonical_agent_id)``. The canonical id is parsed
     out of the ``"event": "created"`` JSONL line that ``mngr create``
@@ -701,9 +651,7 @@ def run_mngr_create(
         imbue_cloud_account=imbue_cloud_account,
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
-        latchkey_gateway_url=latchkey_gateway_url,
-        latchkey_gateway_password=latchkey_gateway_password,
-        latchkey_permissions_override_jwt=latchkey_permissions_override_jwt,
+        latchkey_env=latchkey_env,
     )
 
     # Build the subprocess env from the parent's env + any secrets we inject
@@ -895,7 +843,7 @@ class AgentCreator(MutableModel):
           interactively in the workspace.
 
         ``gh_token`` is optional; when provided it's forwarded to the host
-        (or the agent in DEV mode) as ``GH_TOKEN``.
+        as ``GH_TOKEN``.
 
         For ``LaunchMode.IMBUE_CLOUD``, the agent runs on a leased pool host
         via the ``imbue_cloud_<account-slug>`` provider; the plugin's
@@ -1005,7 +953,7 @@ class AgentCreator(MutableModel):
 
         For ``ai_provider == IMBUE_CLOUD``, mints a LiteLLM key (via the
         plugin CLI) and forwards ``ANTHROPIC_API_KEY``/``ANTHROPIC_BASE_URL``
-        onto the host (or DEV agent) via the subprocess env + matching
+        onto the host via the subprocess env + matching
         ``--pass-(host-)env`` flags. For ``API_KEY``, forwards the
         user-supplied key as ``ANTHROPIC_API_KEY``. For ``SUBSCRIPTION``,
         injects neither.
@@ -1143,21 +1091,26 @@ class AgentCreator(MutableModel):
                 # ``mngr create``. The JWT references an *opaque*
                 # UUID-named permissions handle that we materialize
                 # here with a deny-all baseline; after ``mngr create``
-                # returns the canonical agent id, ``_finalize_latchkey_permissions``
+                # returns the canonical agent id, ``finalize_agent_permissions``
                 # replaces that handle with a symlink to the canonical
                 # ``permissions_path_for_agent`` location. This avoids
                 # the post-create ``mngr provision --env`` step (which
                 # was fragile and could silently leave
                 # ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` missing in
-                # the agent env). For DEV mode we also compute the
-                # live gateway URL up front (no reverse tunnel exists
-                # for DEV, so the agent talks straight to the
-                # gateway's host port).
-                latchkey_gateway_url = self._maybe_compute_latchkey_gateway_url(launch_mode, log_queue)
-                latchkey_gateway_password = self._maybe_derive_gateway_password(log_queue)
-                latchkey_opaque_path, latchkey_permissions_jwt = self._maybe_prepare_latchkey_permissions_handle(
-                    log_queue
-                )
+                # the agent env). Every launch mode is ``is_tunneled=True``
+                # since the only on-host launch mode (DEV) was removed --
+                # all remaining modes reach the gateway via the reverse
+                # tunnel ``LatchkeyDiscoveryHandler`` sets up post-discovery.
+                #
+                # ``prepare_agent_latchkey`` raises on infrastructure
+                # failures (latchkey CLI broken, on-disk write failed,
+                # etc.). Minds tolerates those by falling back to an
+                # empty setup so the agent still comes up -- it just
+                # won't authenticate to a password-protected gateway and
+                # won't have its own permissions file. The user can
+                # recover by fixing the latchkey installation and
+                # re-creating the agent.
+                latchkey_setup = self._prepare_latchkey_or_warn(log_queue)
 
                 parsed_name = AgentName(agent_name)
                 log_queue.put("[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value))
@@ -1166,9 +1119,7 @@ class AgentCreator(MutableModel):
                     workspace_dir=workspace_dir,
                     agent_name=parsed_name,
                     on_output=emit_log,
-                    latchkey_gateway_url=latchkey_gateway_url,
-                    latchkey_gateway_password=latchkey_gateway_password,
-                    latchkey_permissions_override_jwt=latchkey_permissions_jwt,
+                    latchkey_env=latchkey_setup.env,
                     imbue_cloud_account=account_email if launch_mode is LaunchMode.IMBUE_CLOUD else None,
                     # Don't constrain the lease on ``repo_url`` here:
                     # ``repo_source`` is whatever the user picked in the UI
@@ -1200,12 +1151,33 @@ class AgentCreator(MutableModel):
                 # at the canonical agent-keyed permissions file. After
                 # this, ``LatchkeyPermissionGrantHandler`` can write to
                 # the canonical path and the gateway will see the
-                # changes via the symlink. Same flow for every mode
-                # (DEV included): the symlink lives under ``data_dir``
-                # which both the desktop client and any in-process DEV
-                # agent can see.
-                if latchkey_opaque_path is not None:
-                    self._finalize_latchkey_permissions(canonical_id, latchkey_opaque_path, log_queue)
+                # changes via the symlink.
+                #
+                # We downgrade ``LatchkeyStoreError`` here to a warning
+                # rather than failing agent creation: the gateway still
+                # has the deny-all baseline at the opaque path (the JWT
+                # already points there), so the agent comes up working
+                # but any later UI-driven permission grants will not
+                # take effect. The user can recover by re-creating the
+                # agent.
+                if self.latchkey is not None:
+                    try:
+                        finalize_agent_permissions(
+                            self.latchkey,
+                            latchkey_setup.opaque_permissions_path,
+                            canonical_id,
+                        )
+                    except LatchkeyStoreError as link_error:
+                        logger.warning(
+                            "Failed to link latchkey permissions handle for agent {}: {}",
+                            canonical_id,
+                            link_error,
+                        )
+                        log_queue.put(
+                            "[minds] Warning: could not link latchkey permissions handle to "
+                            f"canonical path for agent {canonical_id}; permission grants will not "
+                            f"take effect until the agent is re-created. Reason: {link_error}"
+                        )
 
                 log_queue.put("[minds] Agent created successfully.")
 
@@ -1251,142 +1223,27 @@ class AgentCreator(MutableModel):
         finally:
             log_queue.put(LOG_SENTINEL)
 
-    def _maybe_derive_gateway_password(self, log_queue: queue.Queue[str]) -> str | None:
-        """Return the shared latchkey gateway password, or ``None`` on failure.
-
-        ``Latchkey.derive_gateway_password`` is cached, so repeated calls
-        across many creations are cheap. A failure here (e.g. no Latchkey
-        encryption key configured) is logged as a warning rather than
-        raised: the agent still gets the gateway URL and can be created,
-        but its requests will be rejected by a password-protected
-        gateway. That's a recoverable degradation -- and is more useful
-        for the user than aborting agent creation entirely.
-        """
-        if self.latchkey is None:
-            return None
-        try:
-            return self.latchkey.derive_gateway_password()
-        except (LatchkeyError, LatchkeyJwtMintError) as e:
-            logger.warning("Failed to derive latchkey gateway password: {}", e)
-            log_queue.put(f"[minds] Warning: latchkey password injection skipped: {e}")
-            return None
-
-    def _maybe_compute_latchkey_gateway_url(
+    def _prepare_latchkey_or_warn(
         self,
-        launch_mode: LaunchMode,
         log_queue: queue.Queue[str],
-    ) -> str | None:
-        """Return the ``LATCHKEY_GATEWAY`` URL to inject for this agent, or ``None``.
+    ) -> AgentLatchkeySetup:
+        """Run :func:`prepare_agent_latchkey` and downgrade its errors to warnings.
 
-        For tunneled modes (LOCAL / LIMA / CLOUD / IMBUE_CLOUD) the URL is
-        the constant agent-side loopback (``127.0.0.1:<AGENT_SIDE_LATCHKEY_PORT>``)
-        which ``LatchkeyDiscoveryHandler`` reverse-tunnels to whatever
-        port the host-side gateway happens to be listening on. We return
-        ``None`` for those modes so ``_build_mngr_create_command``'s own
-        constant-fallback handles them; that keeps the constant URL in a
-        single place.
-
-        For DEV mode there is no reverse tunnel: the agent runs in
-        process on the bare host and talks directly to the gateway's
-        live host-side port. We must therefore ensure the gateway is
-        actually running and read its dynamic port out of the live
-        info. Returns ``None`` (and logs a warning) when ``Latchkey``
-        is not configured or the gateway can't be started -- the agent
-        will then have no ``LATCHKEY_GATEWAY`` set and its ``latchkey``
-        CLI will fall back to local mode (no gateway proxying), which
-        is the same behaviour DEV had before this change. Other
-        latchkey env vars (password / JWT) are skipped too in that
-        case via the standard ``effective_latchkey_url is None`` gate
-        in ``_build_mngr_create_command``.
+        The plugin raises on infrastructure failures so the caller can
+        decide. Minds's policy is to fall back to an empty setup -- the
+        agent still comes up without latchkey wiring, and the user can
+        fix the latchkey installation and re-create the agent.
         """
-        if launch_mode is not LaunchMode.DEV:
-            return None
-        if self.latchkey is None:
-            return None
         try:
-            info = self.latchkey.ensure_gateway_started()
+            return prepare_agent_latchkey(self.latchkey, is_tunneled=True)
         except LatchkeyError as e:
-            logger.warning("Failed to start latchkey gateway for DEV agent: {}", e)
-            log_queue.put(f"[minds] Warning: latchkey wiring skipped for DEV agent: {e}")
-            return None
-        return f"http://{info.host}:{info.port}"
-
-    def _maybe_prepare_latchkey_permissions_handle(
-        self,
-        log_queue: queue.Queue[str],
-    ) -> tuple[Path | None, str | None]:
-        """Allocate a fresh opaque permissions handle and mint a JWT for it.
-
-        Returns ``(opaque_path, jwt)`` on success, or ``(None, None)`` on
-        failure or when no ``Latchkey`` instance is configured. The
-        opaque path lives at ``data_dir / "latchkey/permissions/<uuid>.json"``
-        and is materialized with a deny-all baseline so the gateway has
-        a valid (non-permissive) file to read from the moment the JWT
-        is honored.
-
-        ``_finalize_latchkey_permissions`` later replaces the opaque
-        file with a symlink to the canonical agent-keyed path; until
-        then, the JWT references the deny-all baseline directly.
-
-        Failures (no Latchkey configured, JWT mint failure) degrade
-        gracefully: the agent still gets ``LATCHKEY_GATEWAY=...`` and
-        ``LATCHKEY_GATEWAY_PASSWORD=...`` (so the gateway lets it past
-        password protection), but no per-agent override -- the gateway
-        evaluates its requests against the shared deny-all default and
-        rejects them per-service rather than wholesale 401'ing.
-        """
-        if self.latchkey is None:
-            return None, None
-        opaque_path = new_opaque_permissions_path(self.paths.data_dir)
-        save_permissions(opaque_path, LatchkeyPermissionsConfig())
-        try:
-            jwt = self.latchkey.create_permissions_override_jwt(opaque_path)
-        except (LatchkeyError, LatchkeyJwtMintError) as e:
-            logger.warning("Failed to mint latchkey permissions-override JWT: {}", e)
-            log_queue.put(f"[minds] Warning: latchkey JWT preparation skipped: {e}")
-            # Best-effort cleanup so we don't leave an orphan baseline
-            # file lying around for an agent that never got a JWT.
-            try:
-                opaque_path.unlink()
-            except OSError:
-                pass
-            return None, None
-        return opaque_path, jwt
-
-    def _finalize_latchkey_permissions(
-        self,
-        agent_id: AgentId,
-        opaque_path: Path,
-        log_queue: queue.Queue[str],
-    ) -> None:
-        """Point the opaque permissions handle at the canonical agent path.
-
-        Run once ``mngr create`` has returned the canonical agent id.
-        ``link_opaque_permissions_to_agent`` moves the deny-all baseline
-        to ``permissions_path_for_agent(data_dir, agent_id)`` (or keeps
-        a pre-existing file there from a prior incarnation of the same
-        agent) and replaces ``opaque_path`` with a symlink to that
-        canonical location. After this, ``LatchkeyPermissionGrantHandler``
-        writes to the canonical path via ``permissions_path_for_agent``
-        and the gateway sees the changes through the symlink without
-        any further indirection.
-
-        Failures here are logged but do not abort agent creation -- the
-        gateway will still find the deny-all baseline at ``opaque_path``
-        (since that file is what the JWT refers to and we created it
-        with empty rules), so the agent comes up with no service
-        permissions but otherwise works. The user can re-create the
-        agent to recover.
-        """
-        try:
-            link_opaque_permissions_to_agent(self.paths.data_dir, opaque_path, agent_id)
+            logger.warning("Failed to prepare latchkey wiring: {}", e)
+            log_queue.put("[minds] Warning: latchkey wiring skipped: {}".format(e))
+            return AgentLatchkeySetup(env={}, opaque_permissions_path=None)
         except LatchkeyStoreError as e:
-            logger.warning("Failed to link latchkey permissions handle for agent {}: {}", agent_id, e)
-            log_queue.put(
-                "[minds] Warning: could not link latchkey permissions handle to canonical "
-                f"path for agent {agent_id}; permission grants will not take effect until "
-                f"the agent is re-created. Reason: {e}"
-            )
+            logger.warning("Failed to materialize latchkey permissions handle: {}", e)
+            log_queue.put("[minds] Warning: latchkey wiring skipped: {}".format(e))
+            return AgentLatchkeySetup(env={}, opaque_permissions_path=None)
 
     def _build_redirect_url(self, agent_id: AgentId) -> str:
         """Build the absolute URL the UI should navigate to after creation.

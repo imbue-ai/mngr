@@ -1041,6 +1041,7 @@ def _create_host_with_fake_connector(
     connector = PyinfraConnector(cast(PyinfraHost, fake_host))
     return Host(
         id=HostId.generate(),
+        host_name=HostName("test"),
         connector=connector,
         provider_instance=local_provider,
         mngr_ctx=local_provider.mngr_ctx,
@@ -1150,6 +1151,7 @@ def _create_host_with_custom_sftp_and_fake(
     connector = PyinfraConnector(cast(PyinfraHost, fake))
     host = _HostWithCustomSFTP(
         id=HostId.generate(),
+        host_name=HostName("test"),
         connector=connector,
         provider_instance=local_provider,
         mngr_ctx=local_provider.mngr_ctx,
@@ -1541,6 +1543,7 @@ def test_get_file_wraps_ssh_exception_in_host_connection_error(
     connector = PyinfraConnector(cast(PyinfraHost, fake))
     host = _HostWithImmediateSSHFailure(
         id=HostId.generate(),
+        host_name=HostName("test"),
         connector=connector,
         provider_instance=local_provider,
         mngr_ctx=local_provider.mngr_ctx,
@@ -1735,6 +1738,7 @@ def test_run_shell_command_wraps_ssh_exception_in_host_connection_error(
     connector = PyinfraConnector(cast(PyinfraHost, fake))
     host = _HostWithImmediateSSHFailure(
         id=HostId.generate(),
+        host_name=HostName("test"),
         connector=connector,
         provider_instance=local_provider,
         mngr_ctx=local_provider.mngr_ctx,
@@ -1762,6 +1766,7 @@ def test_disconnect_closes_paramiko_client(
     connector = PyinfraConnector(cast(PyinfraHost, fake))
     host = Host(
         id=HostId.generate(),
+        host_name=HostName("test"),
         connector=connector,
         provider_instance=local_provider,
         mngr_ctx=local_provider.mngr_ctx,
@@ -1780,6 +1785,7 @@ def test_disconnect_is_safe_without_paramiko_client(
     connector = PyinfraConnector(cast(PyinfraHost, fake))
     host = Host(
         id=HostId.generate(),
+        host_name=HostName("test"),
         connector=connector,
         provider_instance=local_provider,
         mngr_ctx=local_provider.mngr_ctx,
@@ -1935,11 +1941,23 @@ def test_host_get_reported_activity_content_returns_none_for_non_boot_type(
 # =========================================================================
 
 
-def test_host_get_name_strips_at_prefix_for_local_host(
+def test_host_get_connector_host_name_strips_at_prefix_for_local_host(
     local_host: Host,
 ) -> None:
-    """get_name() should strip pyinfra's internal '@' prefix from local host names."""
-    assert local_host.get_name() == HostName("local")
+    """get_connector_host_name() should strip pyinfra's internal '@' prefix from local host names."""
+    assert local_host.get_connector_host_name() == HostName("local")
+
+
+def test_host_get_name_returns_host_name(
+    local_host: Host,
+) -> None:
+    """get_name() returns the explicit host_name supplied at Host construction.
+
+    Local provider hosts construct Host with host_name=LOCAL_HOST_NAME
+    ("localhost") rather than relying on the pyinfra connector's "@local"
+    string.
+    """
+    assert local_host.get_name() == HostName(LOCAL_HOST_NAME)
 
 
 # =========================================================================
@@ -1954,7 +1972,6 @@ def test_host_get_certified_data_returns_defaults_when_no_file(
     host = local_host
     data = host.get_certified_data()
     assert data.host_id == str(host.id)
-    # The validator normalizes 'local' (from get_name()) to 'localhost'.
     assert data.host_name == LOCAL_HOST_NAME
 
 

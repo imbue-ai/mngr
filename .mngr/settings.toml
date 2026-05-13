@@ -47,3 +47,6 @@ default_sandbox_timeout = 7200
 
 [plugins.forward]
 enabled = true
+
+[plugins.claude_subagent_proxy]
+enabled = false

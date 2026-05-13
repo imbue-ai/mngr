@@ -37,8 +37,8 @@ mngr start [OPTIONS] [AGENTS]...
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--agent` | text | Agent name or ID to start (can be specified multiple times) | None |
-| `--host` | text | Host(s) to start all stopped agents on [repeatable] [future] | None |
+| `--agent` | agent_address | Agent address (NAME[@HOST[.PROVIDER]]) to start (can be specified multiple times) | None |
+| `--host` | host_address | Host(s) to start all stopped agents on [repeatable] [future] | None |
 
 ## Behavior
 

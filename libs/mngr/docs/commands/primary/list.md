@@ -105,6 +105,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 **Existence checks:**
 - `has(url)` - Agents that have a URL set
 - `has(host.ssh)` - Agents on remote hosts with SSH access
+- `has(labels.foo)` - Agents that have a `foo` label set
 
 
 

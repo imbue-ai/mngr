@@ -1694,3 +1694,56 @@ def test_parse_plugins_normalizes_hyphens() -> None:
         assert parsed.custom_field == "value"
     finally:
         _plugin_config_registry.pop(PluginName("hyphen-test-plugin"), None)
+
+
+# =============================================================================
+# Tests for silent=True warning suppression (used by `mngr plugin add`)
+# =============================================================================
+
+
+def test_parse_providers_silent_does_not_warn_on_unknown_backend(log_warnings: list[str]) -> None:
+    """_parse_providers with strict=False, silent=True must not warn about an unknown backend.
+
+    Regression guard for the issue where `mngr plugin add` was emitting
+    `Provider X references unknown backend Y` warnings during installation,
+    since the user is *about to install* the missing backend.
+    """
+    raw = {"modal": {"backend": "modal"}}
+    result = _parse_providers(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    # Provider with unknown backend was skipped (same as non-silent strict=False path).
+    assert ProviderInstanceName("modal") not in result
+    # No warning was emitted.
+    assert not any("references unknown backend" in msg for msg in log_warnings), log_warnings
+
+
+def test_parse_providers_silent_does_not_warn_on_unknown_field(log_warnings: list[str]) -> None:
+    """_parse_providers with silent=True must not warn about unknown fields on a known backend."""
+    raw = {"my-local": {"backend": "local", "typo_field": "value"}}
+    result = _parse_providers(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    assert ProviderInstanceName("my-local") in result
+    # Unknown field still stripped from the parsed model -- silent affects only the warning.
+    assert "typo_field" not in result[ProviderInstanceName("my-local")].model_dump()
+    assert not any("typo_field" in msg for msg in log_warnings), log_warnings
+
+
+def test_parse_agent_types_silent_does_not_warn_on_unknown_field(log_warnings: list[str]) -> None:
+    """_parse_agent_types with silent=True must not warn about unknown fields."""
+    raw = {"claude": {"bogus_option": "value"}}
+    result = _parse_agent_types(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    # Unknown field still stripped -- silent affects only the warning.
+    assert AgentTypeName("claude") in result
+    assert not any("bogus_option" in msg for msg in log_warnings), log_warnings
+
+
+def test_parse_plugins_silent_does_not_warn_on_unknown_field(log_warnings: list[str]) -> None:
+    """_parse_plugins with silent=True must not warn about unknown fields."""
+    raw = {"some-plugin": {"unknown_setting": "x"}}
+    _parse_plugins(raw, strict=False, silent=True)
+    assert not any("unknown_setting" in msg for msg in log_warnings), log_warnings
+
+
+def test_parse_config_silent_does_not_warn_on_unknown_top_level_field(log_warnings: list[str]) -> None:
+    """parse_config with silent=True must not warn about unknown top-level fields."""
+    raw = {"future_top_level_field": "x"}
+    parse_config(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    assert not any("future_top_level_field" in msg for msg in log_warnings), log_warnings

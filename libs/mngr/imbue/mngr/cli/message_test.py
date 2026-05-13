@@ -16,6 +16,8 @@ from imbue.mngr.cli.message import _emit_output
 from imbue.mngr.cli.message import _get_message_content
 from imbue.mngr.cli.message import message
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
 
 _DEFAULT_OPTS = MessageCliOptions(
@@ -40,7 +42,7 @@ def test_message_cli_options_has_expected_fields() -> None:
     """Test that MessageCliOptions has all expected fields."""
     opts = MessageCliOptions(
         agents=("agent1", "agent2"),
-        agent_list=("agent3",),
+        agent_list=(AgentAddress(agent=AgentName("agent3")),),
         message_content="Hello",
         message_file=None,
         on_error="continue",
@@ -55,7 +57,7 @@ def test_message_cli_options_has_expected_fields() -> None:
         disable_plugin=(),
     )
     assert opts.agents == ("agent1", "agent2")
-    assert opts.agent_list == ("agent3",)
+    assert opts.agent_list == (AgentAddress(agent=AgentName("agent3")),)
     assert opts.message_content == "Hello"
     assert opts.message_file is None
 

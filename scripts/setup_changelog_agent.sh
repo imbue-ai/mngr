@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Idempotent setup of the nightly changelog consolidation agent.
-#
-# This script ensures exactly one "changelog-consolidation" schedule exists.
-# Safe to run multiple times: skips creation if the schedule already exists.
+# (Re)deploy the nightly changelog-consolidation schedule from the current
+# source. Removes any existing "changelog-consolidation" schedule first, so
+# running this is the way to redeploy after editing the prompt or this
+# script.
 #
 # The scheduled agent runs at midnight PST as a headless_claude agent. The
 # orchestration steps live in scripts/changelog_consolidation_prompt.md and
@@ -17,10 +17,19 @@ set -euo pipefail
 # Usage:
 #   ./scripts/setup_changelog_agent.sh
 #
-# Environment:
-#   CHANGELOG_PROVIDER  - Provider to use (default: "modal").
-#   CHANGELOG_VERIFY    - Verification mode (default: "none"). Set to "quick"
-#                         or "full" to run the agent once during deploy.
+# Required environment:
+#   GH_TOKEN          - token for bot@imbue.com.
+#   ANTHROPIC_API_KEY - used by claude inside the cron container.
+#
+# Optional environment:
+#   CHANGELOG_PROVIDER - Provider to use (default: "modal").
+#   CHANGELOG_VERIFY   - Verification mode (default: "none"). Set to "quick"
+#                        or "full" to run the agent once during deploy.
+#
+# To trigger a fire on demand and read its JSON outcome (status / pr_url / notes):
+#   env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME=mngr-changelog-schedule \
+#     uv run mngr schedule run changelog-consolidation --provider modal $DISABLE_PLUGIN_ARGS
+# (claude's final assistant message is the structured outcome; see also Modal app logs)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -60,9 +69,8 @@ names = sorted({ep.name for ep in importlib.metadata.entry_points(group='mngr')}
 print(' '.join(f'--disable-plugin {n}' for n in names))
 ")
 
-# Check if the trigger already exists. Error unless CHANGELOG_REPLACE=1 was
-# set, since the user probably wants to know they're about to clobber a live
-# schedule.
+# Always remove an existing trigger before recreating, so the deployed
+# schedule reflects the current source no matter what was deployed before.
 EXISTING=$(uv run mngr schedule list --provider "$PROVIDER" --all --format json $DISABLE_PLUGIN_ARGS 2>/dev/null || echo '{"schedules":[]}')
 if echo "$EXISTING" | python3 -c "
 import json, sys
@@ -70,12 +78,7 @@ data = json.load(sys.stdin)
 names = [s['trigger']['name'] for s in data.get('schedules', [])]
 sys.exit(0 if '${TRIGGER_NAME}' in names else 1)
 " 2>/dev/null; then
-    if [ "${CHANGELOG_REPLACE:-}" != "1" ]; then
-        echo "Error: Schedule '${TRIGGER_NAME}' already exists on provider '$PROVIDER'." >&2
-        echo "       Set CHANGELOG_REPLACE=1 to remove the existing schedule and redeploy." >&2
-        exit 1
-    fi
-    echo "CHANGELOG_REPLACE=1 set. Removing existing schedule before redeploy..."
+    echo "Removing existing schedule '${TRIGGER_NAME}' before redeploy..."
     uv run mngr schedule remove "$TRIGGER_NAME" --provider "$PROVIDER" --force $DISABLE_PLUGIN_ARGS
 fi
 
@@ -121,7 +124,8 @@ uv run mngr schedule add "$TRIGGER_NAME" \
     --provider "$PROVIDER" \
     --verify "$VERIFY" \
     --full-copy \
-    --no-auto-merge \
+    --auto-merge \
+    --auto-merge-branch main \
     --exclude-user-settings \
     --exclude-project-settings \
     --pass-env GH_TOKEN \
@@ -135,5 +139,6 @@ uv run mngr schedule add "$TRIGGER_NAME" \
 echo "Schedule '${TRIGGER_NAME}' created successfully."
 echo ""
 echo "To trigger a run on demand and read its outcome JSON:"
-echo "  uv run mngr schedule run $TRIGGER_NAME --provider $PROVIDER $DISABLE_PLUGIN_ARGS"
+echo "  env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME=mngr-changelog-schedule \\"
+echo "    uv run mngr schedule run $TRIGGER_NAME --provider $PROVIDER $DISABLE_PLUGIN_ARGS"
 echo "(claude's final assistant message is a single JSON object: {status, pr_url, notes})"
