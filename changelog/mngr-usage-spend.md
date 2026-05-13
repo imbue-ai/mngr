@@ -18,12 +18,15 @@ instead of just rendering the freshest event's reading:
   builds a `SessionCostRecord` per `(source, session_id)`, and filters to
   sessions whose last event is within `--since` (default 24h, configurable
   per-invocation or via plugin config).
-- Human output: between the source header and the window lines, a single
-  `cost: $X.YY (Xm ago)` line when one session is in the window, or
-  `cost: $A.BB across N sessions in last <since>` when there are more.
-- JSON output: `source.cost` is the aggregate; `source.sessions[]`
-  enumerates all sessions in the window (newest-first);
-  `source.session_count` and `source.since_seconds` are also exposed.
+- Human output (default): one cost line per source -- `cost: $X.YY (Xm ago)`
+  when one session is in the window, or `cost: $A.BB across N sessions in
+  last <since>` when there are more.
+- Human output with `--detail`: adds indented per-session lines (newest-first)
+  between the cost line and the window lines.
+- JSON output (default): `source.cost` is the aggregate; `source.session_count`
+  and `source.since_seconds` are also exposed. `sessions[]` is omitted to
+  keep the default payload small.
+- JSON output with `--detail`: adds `source.sessions[]` (newest-first records).
 - `mngr usage wait --until` CEL surface: `cost.total_cost_usd` is the
   aggregate (sum across recent sessions). To predicate on a specific
   session, index `sessions[]` directly. New `--since` flag affects the

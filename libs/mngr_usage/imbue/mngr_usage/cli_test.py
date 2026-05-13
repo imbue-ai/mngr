@@ -996,9 +996,9 @@ def test_usage_command_json_includes_session_id_and_cost(
     cli_test_agent: AgentInterface,
     cli_profile_dir: Path,
 ) -> None:
-    """JSON output exposes aggregate cost at the source level plus the full
-    sessions list (newest-first). Per-session data is read by indexing
-    ``sessions[]`` -- there's no separate ``current_session`` key."""
+    """Default JSON output is summary-only: aggregate ``cost``, ``session_count``,
+    and the windows. ``sessions[]`` is omitted unless ``--detail`` is passed,
+    keeping the common-case payload small."""
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
     _plant_event_for_agent(
         local_host,
@@ -1026,13 +1026,47 @@ def test_usage_command_json_includes_session_id_and_cost(
     # Fields the writer didn't supply are still present in the dict with None values
     # (sum of [None] yields None).
     assert source["cost"]["total_lines_added"] is None
-    # sessions[] enumerates every session in the recency window, newest-first.
+    assert source["session_count"] == 1
+    # Summary-only by default: no per-session breakdown unless --detail is set.
+    assert "sessions" not in source
+    assert "current_session" not in source
+
+
+@pytest.mark.tmux
+def test_usage_command_detail_flag_includes_sessions_in_json(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """``--detail`` adds ``sessions[]`` (newest-first) to each source in the JSON output."""
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-1",
+            "timestamp": now_iso,
+            "session_id": "uuid-abc",
+            "cost": {"total_cost_usd": 0.42},
+        },
+    )
+    result = cli_runner.invoke(
+        usage,
+        ["--format", "json", "--max-age", "300", "--detail"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip())
+    source = payload["sources"][0]
+    assert source["session_count"] == 1
     assert len(source["sessions"]) == 1
     assert source["sessions"][0]["session_id"] == "uuid-abc"
     assert source["sessions"][0]["cost"]["total_cost_usd"] == 0.42
-    assert source["session_count"] == 1
-    # current_session is no longer exposed -- consumers should index sessions[].
-    assert "current_session" not in source
 
 
 @pytest.mark.tmux
@@ -1092,7 +1126,10 @@ def test_usage_command_aggregates_cost_across_agents_in_same_source(
         },
     )
     result = cli_runner.invoke(
-        usage, ["--format", "json", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False
+        usage,
+        ["--format", "json", "--max-age", "300", "--detail"],
+        obj=plugin_manager,
+        catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output.strip())
@@ -1100,7 +1137,7 @@ def test_usage_command_aggregates_cost_across_agents_in_same_source(
     assert source["session_count"] == 2
     # Aggregate cost is the sum across all sessions in the recency window.
     assert source["cost"]["total_cost_usd"] == pytest.approx(1.70)
-    # Both session_ids appear under sessions[].
+    # With --detail, both session_ids appear under sessions[].
     session_ids = {s["session_id"] for s in source["sessions"]}
     assert session_ids == {"session-aaaa-uuid", "session-bbbb-uuid"}
 
@@ -1146,8 +1183,59 @@ def test_usage_command_emits_total_line_with_multiple_sessions(
     assert result.exit_code == 0, result.output
     # With multiple sessions, the cost line shows the aggregate with a session count.
     assert "cost: $1.30 across 2 sessions" in result.output
-    # No per-session id appears in the human view -- consumers needing that use --format json.
-    assert "session current" not in result.output
+    # No per-session id appears in the default human view -- those are --detail-only.
+    assert "currents" not in result.output
+    assert "olderses" not in result.output
+
+
+@pytest.mark.tmux
+def test_usage_command_detail_flag_emits_per_session_lines_in_human_output(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """``--detail`` adds indented per-session lines between the cost line and the
+    window lines, newest-first. Suppressed when there's only one session (the
+    cost line already names that session's reading)."""
+    base = datetime.now(timezone.utc)
+    now_iso = base.strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    earlier_iso = (base - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-earlier",
+            "timestamp": earlier_iso,
+            "session_id": "olderseessionid",
+            "cost": {"total_cost_usd": 1.00},
+        },
+    )
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-now",
+            "timestamp": now_iso,
+            "session_id": "currentsession",
+            "cost": {"total_cost_usd": 0.30},
+        },
+    )
+    result = cli_runner.invoke(usage, ["--detail", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    # Cost line still shows the aggregate.
+    assert "cost: $1.30 across 2 sessions" in result.output, result.output
+    # Per-session lines appear (newest-first, indented). 8-char prefixes:
+    # "currentsession" -> "currents"; "olderseessionid" -> "oldersee".
+    cost_idx = result.output.index("cost: $1.30")
+    current_idx = result.output.index("currents:")
+    older_idx = result.output.index("oldersee:")
+    assert cost_idx < current_idx < older_idx, result.output
 
 
 @pytest.mark.tmux

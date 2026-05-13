@@ -29,10 +29,15 @@ human output and as an entry in the JSON `sources` array.
 
 ## Output formats
 
-- `mngr usage` (human, with stale warning when applicable)
-- `mngr usage --format json`
+- `mngr usage` (human summary: aggregate cost line + window lines)
+- `mngr usage --detail` (human + per-session breakdown lines)
+- `mngr usage --format json` (summary JSON: aggregate `cost`, `session_count`, windows)
+- `mngr usage --format json --detail` (JSON with `sessions[]` per source)
 - `mngr usage --format jsonl`
 - `mngr usage --format '5h:{five_hour.used_percentage}%/{seven_day.used_percentage}%'`
+
+The `--detail` flag is independent of `--verbose` (which controls log
+level). It toggles only the per-session breakdown surfaces.
 
 ## Waiting on a predicate
 

@@ -66,10 +66,18 @@ class UsageCliOptions(CommonCliOptions, AgentFilterCliOptions):
     ``--exclude``, ``--local``, ``--running``, ``--project``, ``--label``,
     ...) from ``AgentFilterCliOptions`` so the same filtering vocabulary
     ``mngr list`` and ``mngr kanpan`` use applies here too.
+
+    ``--verbose`` controls logging level (BUILD/DEBUG/TRACE) and is
+    separate from ``--detail``, which controls the **display** breakdown:
+    without ``--detail`` the human and JSON outputs are summary-only
+    (aggregate cost + windows); with ``--detail`` they additionally
+    surface per-session records. Splitting the two avoids conflating
+    'log more' with 'show more'.
     """
 
     max_age: str | None
     since: str | None
+    detail: bool
     provider: tuple[str, ...]
 
 
@@ -181,6 +189,28 @@ def _format_cost_line(
     return f"cost: {_format_money(total)} across {session_count} sessions in last {_format_duration(since_seconds)}"
 
 
+_SESSION_DETAIL_ID_PREFIX_LEN = 8
+
+
+@pure
+def _format_session_detail_line(session: SessionCostRecord, now: int) -> str | None:
+    """Render one indented per-session line for ``--detail`` view: ``  abc12345: $0.42 (2m ago)``.
+
+    Returns None when the session has no ``total_cost_usd`` (treat as no
+    data; the breakdown for this session is dropped from the display).
+    Session id is truncated to ``_SESSION_DETAIL_ID_PREFIX_LEN`` chars
+    for visual compactness; full UUID stays in JSON's ``sessions[]``.
+    """
+    cost_usd = session.cost.total_cost_usd
+    if cost_usd is None:
+        return None
+    age_seconds = max(0, now - session.last_event_at)
+    return (
+        f"  {session.session_id[:_SESSION_DETAIL_ID_PREFIX_LEN]}: "
+        f"{_format_money(cost_usd)} ({_format_age_phrase(age_seconds)})"
+    )
+
+
 @pure
 def _window_to_template_values(window: WindowSnapshot, now: int) -> dict[str, str]:
     """Render a window's fields into string values keyed for format-template substitution."""
@@ -273,13 +303,14 @@ def _build_render_model(snapshot: UsageSnapshot, max_age: int, now: int) -> _Usa
     )
 
 
-def _render_one_source_for_json(model: _UsageRenderModel, now: int) -> dict[str, Any]:
+def _render_one_source_for_json(model: _UsageRenderModel, now: int, detail: bool) -> dict[str, Any]:
     """JSON shape for a single source's snapshot.
 
     ``cost`` is the aggregate across all sessions in the recency window.
-    The full per-session breakdown is in ``sessions[]`` (newest first);
-    consumers that want "the most recent session's cost" should read
-    ``sessions[0].cost``.
+    With ``detail=True`` the full per-session breakdown is included as
+    ``sessions[]`` (newest first); without ``detail`` the key is omitted
+    entirely so the default JSON stays small. ``session_count`` is always
+    present so consumers can tell how many sessions backed the aggregate.
     """
     out: dict[str, Any] = {
         "source": model.source_name,
@@ -288,8 +319,9 @@ def _render_one_source_for_json(model: _UsageRenderModel, now: int) -> dict[str,
         "since_seconds": model.since_seconds,
         "session_count": model.session_count,
         "cost": model.aggregate_cost.model_dump(),
-        "sessions": [session_render_dict(s, now) for s in model.sessions],
     }
+    if detail:
+        out["sessions"] = [session_render_dict(s, now) for s in model.sessions]
     for key, snap in model.windows.items():
         out[key] = window_render_dict(snap, now)
     return out
@@ -325,19 +357,24 @@ def _flatten_primary_for_template(model: _UsageRenderModel, now: int) -> dict[st
     return flat
 
 
-def _write_source_section(model: _UsageRenderModel, now: int, header: str) -> bool:
-    """Render one source's section: header, single cost line, window lines.
+def _write_source_section(model: _UsageRenderModel, now: int, header: str, detail: bool) -> bool:
+    """Render one source's section: header, single cost line, optional per-session breakdown, window lines.
 
-    Layout::
+    Default layout::
 
       [source]
       cost: $0.42 (2m ago)                              when N == 1
       cost: $5.43 across N sessions in last <since>     when N > 1
       <window-label>: <pct>% used, <reset-phrase>       one per populated window
 
+    With ``detail=True`` and N > 1, indented per-session lines are inserted
+    between the cost line and the window lines (newest first, matching
+    ``sessions[]`` order). For N == 1 the cost line already names the only
+    session's reading so the breakdown is suppressed to avoid duplication.
+
     The cost line is skipped when the aggregate has no ``total_cost_usd``
-    (i.e. no usable cost data anywhere). The per-session breakdown lives
-    in JSON's ``sessions[]`` for callers that need it.
+    (i.e. no usable cost data anywhere). Per-session lines are skipped
+    individually when that session has no usable cost.
 
     Returns True if anything renderable was emitted -- this gates the
     catch-all "no usage data" hint and the per-source staleness warnings
@@ -356,6 +393,11 @@ def _write_source_section(model: _UsageRenderModel, now: int, header: str) -> bo
     if cost_line is not None:
         write_human_line(cost_line)
         any_renderable = True
+    if detail and model.session_count > 1:
+        for session in model.sessions:
+            session_line = _format_session_detail_line(session, now)
+            if session_line is not None:
+                write_human_line(session_line)
     for key, snap in model.windows.items():
         if snap.used_percentage is None and snap.resets_at is None:
             continue
@@ -370,6 +412,7 @@ def _emit_output(
     format_template: str | None,
     now: int,
     since_seconds: int,
+    detail: bool,
 ) -> None:
     """Write output for zero or more sources, freshest-first.
 
@@ -419,7 +462,7 @@ def _emit_output(
             payload: dict[str, Any] = {
                 "now": now,
                 "since_seconds": since_seconds,
-                "sources": [_render_one_source_for_json(model, now) for _, model in snapshots_with_models],
+                "sources": [_render_one_source_for_json(model, now, detail) for _, model in snapshots_with_models],
             }
             emit_final_json(payload)
         case OutputFormat.HUMAN:
@@ -436,7 +479,7 @@ def _emit_output(
             for index, (_, model) in enumerate(snapshots_with_models):
                 if index > 0:
                     write_human_line("")
-                section_had_renderable = _write_source_section(model, now, f"[{model.source_name}]")
+                section_had_renderable = _write_source_section(model, now, f"[{model.source_name}]", detail)
                 any_renderable_anywhere = any_renderable_anywhere or section_had_renderable
                 if not section_had_renderable or model.snapshot_updated_at is None:
                     continue
@@ -520,6 +563,14 @@ def _reject_group_options_when_subcommand_invoked(ctx: click.Context) -> None:
     "last event is older are dropped from `sessions[]` and from the aggregate `cost.*` "
     "computed off them. Default: from plugin config (24h).",
 )
+@click.option(
+    "--detail",
+    is_flag=True,
+    default=False,
+    help="Expand summary view: show per-session breakdown lines under each source's cost line "
+    "(human), and include the `sessions[]` array under each source (JSON). Default omits the "
+    "per-session breakdown for terseness; the aggregate cost line and window lines are unchanged.",
+)
 @add_agent_filter_options
 @optgroup.option(
     "--provider",
@@ -534,9 +585,9 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
     Enumerates agents via ``list_agents`` (same machinery, filters, and speed
     profile as ``mngr list``), reads each agent's ``events/<source>/
     usage/events.jsonl`` via the events API (so remote agents work the
-    same as local), and renders one section per source: a current-session
-    cost line, an aggregate-total line (when there's more than one
-    recent session), and one line per populated rate-limit window.
+    same as local), and renders one section per source: an aggregate cost
+    line (plus per-session breakdown when ``--detail`` is passed) followed
+    by one line per populated rate-limit window.
 
     When invoked without a subcommand, prints the current snapshot. Use
     ``mngr usage wait`` to block until a CEL predicate matches.
@@ -582,6 +633,7 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
         output_opts.format_template,
         now,
         effective_since,
+        opts.detail,
     )
 
 
@@ -613,6 +665,7 @@ Per-source aggregation:
         ("Specific providers", "mngr usage --provider local --provider modal"),
         ("Aggregate cost across the last week", "mngr usage --since 7d"),
         ("Treat the snapshot as stale after 60s (warning only)", "mngr usage --max-age 60"),
+        ("Per-session breakdown (human + JSON)", "mngr usage --detail"),
         ("Machine-readable output", "mngr usage --format json"),
         (
             "Custom format template (aggregate cost only)",
