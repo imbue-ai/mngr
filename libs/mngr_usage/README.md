@@ -31,8 +31,8 @@ human output and as an entry in the JSON `sources` array.
 
 - `mngr usage` (human summary: aggregate cost line + window lines)
 - `mngr usage --detail` (human + per-session breakdown lines)
-- `mngr usage --format json` (summary JSON: aggregate `cost`, `session_count`, windows)
-- `mngr usage --format json --detail` (JSON with `sessions[]` per source)
+- `mngr usage --format json` (summary JSON: per-mode aggregates `subscription_cost` and `api_cost`, `session_count` plus per-mode counts, windows)
+- `mngr usage --format json --detail` (JSON with `sessions[]` per source; each session carries a `cost_mode` tag)
 - `mngr usage --format jsonl`
 - `mngr usage --format '5h:{five_hour.used_percentage}%/{seven_day.used_percentage}%'`
 
@@ -56,14 +56,22 @@ The CEL context per source mirrors one entry of `mngr usage --format json`'s
 reader-derived `seconds_until_reset`, `elapsed_seconds`, and
 `elapsed_percentage` (the last two require `window_seconds` from the
 writer; absent on variable-duration windows like Claude's overage).
-Source-level fields are exposed too: `cost.*` is the aggregate across
-sessions in the recency window (e.g. `cost.total_cost_usd > 20.0` means
-'I've spent more than $20 across recent sessions'); `session_count`,
-`since_seconds`, and `sessions[]` (every session in the window,
-newest-first) are available as well. Use `--since` to tighten or widen
-the aggregation window from its default (24h). For a per-session
-predicate, index `sessions[]` directly (e.g. `sessions[0].cost.total_cost_usd
-> 5` for the most recent session).
+Source-level fields are exposed too. Cost is split by auth mode and
+**never lumped**: `subscription_cost.*` aggregates sessions whose Claude
+Code process was on a Claude.ai Pro/Max subscription (cost is **imputed**
+by Claude Code -- the user actually pays a flat subscription), and
+`api_cost.*` aggregates sessions whose process was on a direct
+`ANTHROPIC_API_KEY` (cost is **real** billable spend). Pick the mode you
+care about, e.g. `api_cost.total_cost_usd > 20.0` means "I've spent more
+than $20 of real API money across recent sessions". `session_count` is
+the total across both modes; `subscription_session_count` and
+`api_session_count` break that down per mode. `since_seconds` and
+`sessions[]` (every session in the window, newest-first, each carrying
+a `cost_mode` of `"SUBSCRIPTION"` or `"API_KEY"`) are available as well.
+Use `--since` to tighten or widen the aggregation window from its
+default (24h). For a per-session predicate, index `sessions[]` directly
+(e.g. `sessions[0].cost.total_cost_usd > 5` for the most recent
+session's own contribution).
 
 Exit codes mirror `mngr wait`: 0 matched, 1 error, 2 timeout. Default poll
 interval is 30s; use `--interval` for tighter cadence. To restrict matching
