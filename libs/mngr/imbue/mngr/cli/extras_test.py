@@ -316,20 +316,20 @@ def test_install_default_agent_type_skip_writes_nothing() -> None:
     assert written == []
 
 
-def test_extras_default_type_subcommand(cli_runner: CliRunner) -> None:
-    """The 'extras default-type' subcommand should work."""
-    result = cli_runner.invoke(extras, ["default-type"])
+def test_extras_config_subcommand(cli_runner: CliRunner) -> None:
+    """The 'extras config' subcommand should work."""
+    result = cli_runner.invoke(extras, ["config"])
     assert result.exit_code == 0
 
 
-def test_extras_default_type_yes_flag(cli_runner: CliRunner) -> None:
-    """The 'extras default-type -y' subcommand runs non-interactively."""
-    result = cli_runner.invoke(extras, ["default-type", "-y"])
+def test_extras_config_yes_flag(cli_runner: CliRunner) -> None:
+    """The 'extras config -y' subcommand runs non-interactively."""
+    result = cli_runner.invoke(extras, ["config", "-y"])
     assert result.exit_code == 0
 
 
 def test_extras_interactive_includes_default_type(cli_runner: CliRunner) -> None:
-    """Running 'mngr extras -i' walks through the default-type prompt."""
+    """Running 'mngr extras -i' walks through the default agent type prompt."""
     result = cli_runner.invoke(extras, ["-i"])
     assert result.exit_code == 0
     assert "Default Agent Type" in result.output

@@ -362,7 +362,7 @@ def _print_extras_status() -> None:
     else:
         write_human_line("  claude-plugin    not installed")
 
-    # Default agent type
+    # Default agent type (the only setting `extras config` walks through today)
     current_default, _ = _default_agent_type_status()
     if current_default is not None:
         write_human_line("  default-type     {}", current_default)
@@ -420,7 +420,7 @@ def extras(ctx: click.Context, **kwargs: Any) -> None:
     # Newly-installed plugin agent types only become visible on the next
     # mngr invocation, so users who installed plugins above will only see
     # agent types that were already registered at startup; they can pick
-    # one then or re-run `mngr extras default-type` later.
+    # one then or re-run `mngr extras config` later.
     _install_default_agent_type(auto=False)
 
 
@@ -451,20 +451,22 @@ def extras_claude_plugin(ctx: click.Context, **kwargs: Any) -> None:
     _install_claude_plugin(auto=kwargs["yes"])
 
 
-@extras.command(name="default-type")
+@extras.command(name="config")
 @click.option(
     "-y",
     "--yes",
     is_flag=True,
-    help="Skip the picker; just print the suggested `mngr config set` command",
+    help="Skip prompts; just print suggested commands for unset settings",
 )
 @add_common_options
 @click.pass_context
-def extras_default_type(ctx: click.Context, **kwargs: Any) -> None:
-    # Mirrors the other extras subcommands: with `-y` or no interactive
-    # terminal, print the suggested `mngr config set` command and the
-    # list of available agent types -- never write anything. With a TTY
-    # and no `-y`, show a numbered picker and write the user's choice.
+def extras_config(ctx: click.Context, **kwargs: Any) -> None:
+    # Walks through user-scope config settings the installer would
+    # otherwise leave blank. Currently just the default agent type for
+    # `mngr create`; future config-related setup steps will be added
+    # here as additional walk steps. Each step short-circuits if the
+    # corresponding setting is already configured, so re-running this
+    # subcommand only prompts for the gaps.
     _install_default_agent_type(auto=kwargs["yes"])
 
 
@@ -472,7 +474,7 @@ def extras_default_type(ctx: click.Context, **kwargs: Any) -> None:
 
 CommandHelpMetadata(
     key="extras",
-    one_line_description="Install optional extras (plugins, completion, Claude Code plugin, default agent type)",
+    one_line_description="Install optional extras (plugins, completion, Claude Code plugin, user config)",
     synopsis="mngr extras [OPTIONS] [COMMAND]",
     description="""Manage optional extras that enhance mngr. With no subcommand, shows
 the status of all extras. Use -i to walk through each extra interactively.
@@ -481,14 +483,14 @@ Extras:
   plugins        Run the plugin install wizard
   completion     Set up shell tab completion
   claude-plugin  Install the Claude Code review plugin
-  default-type   Pick a default agent type for `mngr create`""",
+  config         Walk through user-scope config settings (e.g. default agent type)""",
     examples=(
         ("Show status of all extras", "mngr extras"),
         ("Interactively set up all extras", "mngr extras -i"),
         ("Set up shell completion", "mngr extras completion"),
         ("Auto-install shell completion", "mngr extras completion -y"),
         ("Install Claude Code plugin", "mngr extras claude-plugin"),
-        ("Pick a default agent type", "mngr extras default-type"),
+        ("Walk through user-scope config settings", "mngr extras config"),
     ),
     see_also=(
         ("dependencies", "Check and install system dependencies"),
@@ -536,22 +538,25 @@ Requires Claude Code to be installed. Use -y to skip the confirmation prompt."""
 ).register()
 
 CommandHelpMetadata(
-    key="extras.default-type",
-    one_line_description="Pick a default agent type for `mngr create`",
-    synopsis="mngr extras default-type [-y]",
-    description="""Set the default agent type used by `mngr create` when no type is
-provided on the command line.
+    key="extras.config",
+    one_line_description="Walk through user-scope config settings",
+    synopsis="mngr extras config [-y]",
+    description="""Walk through user-scope config settings the installer would otherwise
+leave blank. Each step short-circuits if the corresponding setting is
+already configured, so re-running this subcommand only prompts for the
+gaps.
 
+Currently this just covers the default agent type for `mngr create`.
 With an interactive terminal, presents a numbered picker of every
-available agent type plus an option to keep no default. The selection
-is written to `[commands.create] type` in your user-scope settings.toml.
+available agent type plus an option to keep no default; writes the
+selection to `[commands.create] type` in your user-scope settings.toml.
 
 With `-y` or without an interactive terminal, prints the suggested
 `mngr config set commands.create.type <name> --scope user` command and
 the list of available agent types -- writes nothing.""",
     examples=(
-        ("Pick a default agent type", "mngr extras default-type"),
-        ("Print the suggested config command without prompting", "mngr extras default-type -y"),
+        ("Walk through user-scope config settings", "mngr extras config"),
+        ("Print suggested config commands without prompting", "mngr extras config -y"),
     ),
     see_also=(
         ("config set", "Write a config value directly"),
@@ -563,4 +568,4 @@ add_pager_help_option(extras)
 add_pager_help_option(extras_plugins)
 add_pager_help_option(extras_completion)
 add_pager_help_option(extras_claude_plugin)
-add_pager_help_option(extras_default_type)
+add_pager_help_option(extras_config)
