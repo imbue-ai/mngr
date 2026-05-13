@@ -17,7 +17,8 @@ class UsagePluginConfig(PluginConfig):
         "updated_at is older than this, `mngr usage` prints a stale-snapshot warning. "
         "Reader-only -- this plugin doesn't capture data, it walks events files "
         "produced by writer plugins (one event per provisioned agent's render) and "
-        "renders the freshest.",
+        "aggregates them per-source (rate-limit windows reduce freshest-wins; "
+        "cost is grouped per session_id and filtered to a recency window).",
     )
     since_seconds: int = Field(
         default=86400,
