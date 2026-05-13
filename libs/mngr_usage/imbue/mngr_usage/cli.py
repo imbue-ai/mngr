@@ -249,10 +249,12 @@ class _UsageRenderModel(FrozenModel):
     text for each cause (avoiding "snapshot last updated now ago" when the
     snapshot itself just updated but a window already reset).
 
-    The per-source aggregation is already done in ``UsageSnapshot`` (windows
-    are freshest-wins; sessions are per-(session_id) latest cost within the
-    recency window). The render model just adds CLI-only concerns:
-    staleness flags and the ``now`` baseline for age phrases.
+    The per-source aggregation is already done in ``UsageSnapshot``
+    (windows are freshest-wins; sessions are per-(agent, Claude Code
+    process, session_id) own-contribution records within the recency
+    window -- see ``SessionCostRecord`` for the full shape). The render
+    model just adds CLI-only concerns: staleness flags and the ``now``
+    baseline for age phrases.
     """
 
     source_name: str
