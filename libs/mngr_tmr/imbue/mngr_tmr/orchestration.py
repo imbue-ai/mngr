@@ -37,6 +37,13 @@ _TERMINAL_STATES = frozenset(
 
 _MISSING_AGENT_MAX_ROUNDS = 30
 
+# How many poll cycles we wait for the outputs archive to become visible
+# on the agent's volume after the agent reaches a terminal lifecycle state.
+# Volumes (notably Modal) propagate writes asynchronously, so we give the
+# orchestrator's view a chance to catch up before declaring the agent
+# failed. At the default 10s poll cadence this is ~2 minutes.
+_TERMINAL_WITHOUT_OUTPUTS_MAX_ROUNDS = 12
+
 
 def launch_and_poll_agents(
     test_node_ids: list[str],
@@ -78,6 +85,7 @@ def launch_and_poll_agents(
     missing_rounds: dict[str, int] = {}
     cached_results: dict[str, TestResult] = {}
     last_result_check: dict[str, float] = {}
+    terminal_without_outputs_rounds: dict[str, int] = {}
 
     for info in all_agents:
         agent_id_str = str(info.agent_id)
@@ -167,16 +175,43 @@ def launch_and_poll_agents(
             if agent_detail.state not in _TERMINAL_STATES:
                 continue
 
+            host = all_hosts[agent_id_str]
+            archive_ready = is_agent_outputs_ready(mngr_ctx, config.provider_name, host.id, agent_detail.id)
+            if not archive_ready:
+                # The agent's lifecycle says it's done but the outputs archive
+                # is not visible on the volume yet -- typically a volume
+                # propagation delay. Keep it pending and try again next cycle.
+                # Give up after a grace window so a genuinely-crashed agent
+                # doesn't keep the run from finishing.
+                rounds = terminal_without_outputs_rounds.get(agent_id_str, 0) + 1
+                terminal_without_outputs_rounds[agent_id_str] = rounds
+                if rounds < _TERMINAL_WITHOUT_OUTPUTS_MAX_ROUNDS:
+                    logger.info(
+                        "Agent '{}' in state {} but outputs not yet visible (round {}/{})",
+                        agent_detail.name,
+                        agent_detail.state,
+                        rounds,
+                        _TERMINAL_WITHOUT_OUTPUTS_MAX_ROUNDS,
+                    )
+                    continue
+                logger.warning(
+                    "Agent '{}' has been in state {} for {} rounds without publishing outputs; giving up",
+                    agent_detail.name,
+                    agent_detail.state,
+                    rounds,
+                )
+
             logger.info("Agent '{}' finished (state={})", agent_detail.name, agent_detail.state)
             final_details[agent_id_str] = agent_detail
             pending_ids.discard(agent_id_str)
             missing_rounds.pop(agent_id_str, None)
+            terminal_without_outputs_rounds.pop(agent_id_str, None)
             changed = True
 
             pre_read = finalize_agent(
                 mngr_ctx=mngr_ctx,
                 provider_name=config.provider_name,
-                host=all_hosts[agent_id_str],
+                host=host,
                 agent_id=agent_detail.id,
                 agent_name=agent_detail.name,
                 branch_name=agent_detail.initial_branch,
