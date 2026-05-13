@@ -143,6 +143,19 @@ def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_n
     delete calls succeeded or reported the resource was already gone.
     A real cleanup failure leaves the resource tracked so the session-end
     leak detector surfaces it.
+
+    Known limitation: treating NOT_FOUND as success has a residual failure
+    mode under Modal's eventual consistency. If a `modal environment delete`
+    hits a replica that hasn't yet observed our env (because env-create
+    propagation is itself async across Modal replicas), it can return
+    "Environment not found" even though the env actually exists. We'd then
+    deregister, and the in-session leak detector would never see the real
+    leak. The CI hourly cleanup script
+    (scripts/cleanup_old_modal_test_environments.py) is the safety net for
+    that case -- it sweeps any leaked test env >1h old on every workflow
+    run. The alternative (only deregister on DELETED, not NOT_FOUND) makes
+    the leak detector pay the polling-tail cost on every test, which is
+    not worth it for a rare failure mode that has a working safety net.
     """
     ModalProviderBackend.close_app(app_name)
 
@@ -364,6 +377,12 @@ def modal_test_session_cleanup(
     # endpoint is eventually consistent and can lag past any defensible
     # polling budget, but the synchronous delete call's response is
     # authoritative.
+    #
+    # Known limitation: NOT_FOUND from a stale Modal replica (one that hasn't
+    # observed our env's create yet) is indistinguishable from a real
+    # already-deleted, and we deregister in both cases. The CI hourly
+    # cleanup script catches genuine leaks that slip through this way; see
+    # `_cleanup_modal_test_resources`'s docstring for the full discussion.
     match env_result:
         case ModalCleanupOutcome.DELETED | ModalCleanupOutcome.NOT_FOUND:
             deregister_modal_test_environment(environment_name)
