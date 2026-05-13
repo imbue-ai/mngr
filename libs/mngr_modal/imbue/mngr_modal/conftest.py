@@ -347,14 +347,11 @@ def modal_test_session_cleanup(
     # IMPORTANT: take `modal_session_cleanup` as a dependency so pytest sets
     # it up FIRST, which makes LIFO teardown order put OUR teardown (which
     # deregisters the session env) BEFORE `modal_session_cleanup`'s teardown
-    # (the leak check). Without this explicit dependency, the actual observed
-    # teardown order was the inverse -- the leak check fired against the
-    # still-registered env, ~30 s of polling never converged because the env
-    # really did exist in Modal at that point (no delete had been issued
-    # yet), and the assertion fired before our own cleanup chain ran. Note
-    # this is the opposite of what `modal_session_cleanup`'s docstring
-    # claimed about autouse session-scoped fixtures running cleanup "after"
-    # non-autouse ones.
+    # (the leak check). Without this explicit dependency, the leak check
+    # fires against the still-registered env, ~30 s of polling never
+    # converges because the env really does exist in Modal at that point
+    # (no delete has been issued yet), and the assertion fires before our
+    # own cleanup chain runs.
     modal_session_cleanup: None,
     modal_test_session_env_name: str,
     modal_test_session_user_id: UserId,
