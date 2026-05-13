@@ -22,6 +22,7 @@ import json
 import subprocess
 import sys
 from collections import deque
+from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import cast
@@ -29,6 +30,8 @@ from typing import cast
 import httpx
 import semver
 import tomlkit
+from changelog_release_utils import finalize_changelog_unreleased
+from changelog_release_utils import today_pacific
 from utils import PACKAGES
 from utils import PACKAGE_BY_PYPI_NAME
 from utils import REPO_ROOT
@@ -39,6 +42,8 @@ from imbue.mngr.utils.polling import poll_for_value
 
 BUMP_KINDS: Final[tuple[str, ...]] = ("major", "minor", "patch")
 BUMP_LEVEL_ORDER: Final[dict[str, int]] = {"patch": 0, "minor": 1, "major": 2}
+CHANGELOG_FILE: Final[Path] = REPO_ROOT / "CHANGELOG.md"
+
 PUBLISH_WORKFLOW: Final[str] = "publish.yml"
 ACTIONS_URL: Final[str] = "https://github.com/imbue-ai/mngr/actions/workflows/publish.yml"
 POLL_INTERVAL_SECONDS: Final[int] = 10
@@ -653,11 +658,23 @@ def main() -> None:
     print("Regenerating uv.lock...")
     run("uv", "lock")
 
+    # Finalize CHANGELOG.md: rename [Unreleased] -> [v<version>] - <date>
+    release_date = today_pacific()
+    had_content = finalize_changelog_unreleased(CHANGELOG_FILE, new_mngr_version, release_date)
+    if had_content:
+        print(f"Finalized CHANGELOG.md: [Unreleased] -> [v{new_mngr_version}] - {release_date}")
+    else:
+        print(f"WARNING: [Unreleased] was empty; emitted empty [v{new_mngr_version}] section.")
+
     # Commit, tag, push
     all_released_names = sorted(set(new_versions.keys()) | confirmed_new)
     commit_msg = f"Release {tag} ({', '.join(all_released_names)})"
 
-    files_to_add = [str(pkg.pyproject_path.relative_to(REPO_ROOT)) for pkg in PACKAGES] + ["uv.lock"]
+    files_to_add = [
+        *[str(pkg.pyproject_path.relative_to(REPO_ROOT)) for pkg in PACKAGES],
+        "uv.lock",
+        str(CHANGELOG_FILE.relative_to(REPO_ROOT)),
+    ]
     run("git", "add", *files_to_add)
     run("git", "commit", "-m", commit_msg)
     run("git", "tag", tag)

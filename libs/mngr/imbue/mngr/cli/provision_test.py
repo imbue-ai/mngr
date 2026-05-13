@@ -10,6 +10,8 @@ from imbue.mngr.cli.provision import ProvisionCliOptions
 from imbue.mngr.cli.provision import _output_result
 from imbue.mngr.cli.provision import provision
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
 
 # =============================================================================
@@ -20,7 +22,7 @@ from imbue.mngr.primitives import OutputFormat
 def test_provision_cli_options_can_be_instantiated() -> None:
     """Test that ProvisionCliOptions can be instantiated with all required fields."""
     opts = ProvisionCliOptions(
-        agent="my-agent",
+        agent=AgentAddress(agent=AgentName("my-agent")),
         agent_option=None,
         host=None,
         bootstrap=None,
@@ -39,7 +41,7 @@ def test_provision_cli_options_can_be_instantiated() -> None:
         plugin=(),
         disable_plugin=(),
     )
-    assert opts.agent == "my-agent"
+    assert opts.agent == AgentAddress(agent=AgentName("my-agent"))
     assert opts.restart is True
     assert opts.extra_provision_command == ()
 
