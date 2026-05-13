@@ -174,9 +174,11 @@ def _format_cost_line(
     """Render one cost line under each source header for a single [[cost-mode]].
 
     ``mode_label`` is the human-display tag for this mode's cost (e.g.
-    ``"subscription cost"`` or ``"api cost"``); ``mode_suffix`` is a
-    parenthetical (e.g. ``" (imputed)"``) appended only when the mode's
-    semantics deserve a callout. The ``in last <since>`` suffix is
+    ``"subscription cost"`` or ``"api cost"``); ``mode_suffix`` is
+    appended verbatim to the label. Use ``""`` when the mode's semantics
+    don't need a callout (api cost), and a leading-space parenthetical
+    like ``" (imputed)"`` when they do (subscription cost). The
+    ``in last <since>`` suffix is
     rendered through ``_format_duration`` -- the default 24h plugin
     config thus prints ``in last 1d``. The combination yields lines
     like:
