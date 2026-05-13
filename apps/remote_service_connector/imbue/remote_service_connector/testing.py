@@ -1064,15 +1064,16 @@ class FakePoolBackend:
         container_ssh_port: int = 2222,
         agent_id: str = "agent-abc123",
         host_id_str: str = "host-xyz",
+        host_name: str = "pool-fake-stage",
     ) -> FakePoolRow:
         """Add an available host to the in-memory pool.
 
         In production, available rows carry the bake-time ``host_name``
         slug (e.g. ``pool-<uuid>-stage``) that the pool baker inserts;
         the lease endpoint overwrites it with the caller's chosen
-        workspace name at lease time. This fake leaves ``host_name``
-        as ``None`` for simplicity because no test currently exercises
-        the bake-time slug on an available row.
+        workspace name at lease time. The fixture mirrors that by
+        defaulting ``host_name`` to a plausible bake-time slug so the
+        column is populated the way migration 002 requires.
         """
         row = _make_pool_row(
             host_id=host_id,
@@ -1083,6 +1084,7 @@ class FakePoolBackend:
             ssh_user=ssh_user,
             container_ssh_port=container_ssh_port,
             version=version,
+            host_name=host_name,
         )
         self.pool_rows.append(row)
         return row
