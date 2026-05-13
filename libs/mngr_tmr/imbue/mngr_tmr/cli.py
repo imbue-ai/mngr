@@ -18,6 +18,7 @@ from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.env_utils import resolve_env_vars
 from imbue.mngr.cli.env_utils import resolve_labels
+from imbue.mngr.cli.headless_runner import get_local_host
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
@@ -39,7 +40,6 @@ from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
-from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.registry import get_config_class
 from imbue.mngr_tmr.data_types import IntegratorResult
 from imbue.mngr_tmr.data_types import TestAgentInfo
@@ -255,9 +255,7 @@ def _run_reintegrate(
         return
 
     # Get local host (needed for local agent host mapping and integrator config)
-    local_provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-    local_host_ref = local_provider.get_host(HostName(LOCAL_HOST_NAME))
-    source_host, _ = ensure_host_started(local_host_ref, is_start_desired=True, provider=local_provider)
+    source_host = get_local_host(mngr_ctx)
 
     # Build agent infos and hosts from discovered agents
     agent_infos: list[TestAgentInfo] = []
@@ -615,9 +613,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     _emit_test_count(len(test_node_ids), output_opts)
 
     # Step 3: Get the local host for source_location (tests are collected locally)
-    local_provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-    local_host_ref = local_provider.get_host(HostName(LOCAL_HOST_NAME))
-    source_host, _ = ensure_host_started(local_host_ref, is_start_desired=True, provider=local_provider)
+    source_host = get_local_host(mngr_ctx)
 
     # Step 4: Build launch config and launch agents
     env_options = AgentEnvironmentOptions(env_vars=resolve_env_vars((), opts.env))
