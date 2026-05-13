@@ -27,6 +27,7 @@ from imbue.mngr_usage.api import aggregate_events_to_snapshots
 from imbue.mngr_usage.api import parse_events_from_content
 from imbue.mngr_usage.cli import _build_render_model
 from imbue.mngr_usage.cli import _flatten_primary_for_template
+from imbue.mngr_usage.cli import _format_cost_line
 from imbue.mngr_usage.cli import _format_duration
 from imbue.mngr_usage.cli import _format_human_line
 from imbue.mngr_usage.cli import _format_reset_phrase
@@ -115,6 +116,86 @@ def test_format_human_line_uses_past_tense_after_reset() -> None:
 def test_format_human_line_no_data_drops_reset_suffix() -> None:
     snap = WindowSnapshot(used_percentage=None, resets_at=1000)
     assert _format_human_line("5h", snap, now=1000) == "5h: no data"
+
+
+def test_format_cost_line_returns_none_when_aggregate_has_no_cost() -> None:
+    """No usable cost in the aggregate -> the caller drops the line entirely."""
+    assert (
+        _format_cost_line(
+            mode_label="api cost",
+            mode_suffix="",
+            aggregate_cost=CostSnapshot(),
+            session_count=0,
+            since_seconds=86400,
+            latest_event_at=None,
+            now=2000,
+        )
+        is None
+    )
+
+
+def test_format_cost_line_single_session_shape_uses_age_phrase() -> None:
+    """One session in the aggregate -> render the age phrase (not the session count).
+
+    Both empty and non-empty ``mode_suffix`` are exercised here: subscription
+    appends ` (imputed)` after the label; api appends nothing.
+    """
+    sub_line = _format_cost_line(
+        mode_label="subscription cost",
+        mode_suffix=" (imputed)",
+        aggregate_cost=CostSnapshot(total_cost_usd=0.4275),
+        session_count=1,
+        since_seconds=86400,
+        latest_event_at=1880,
+        now=2000,
+    )
+    assert sub_line == "subscription cost (imputed): $0.43 (2m ago)"
+    api_line = _format_cost_line(
+        mode_label="api cost",
+        mode_suffix="",
+        aggregate_cost=CostSnapshot(total_cost_usd=1.23),
+        session_count=1,
+        since_seconds=86400,
+        latest_event_at=2000,
+        now=2000,
+    )
+    assert api_line == "api cost: $1.23 (just now)"
+
+
+def test_format_cost_line_multi_session_shape_uses_since_suffix() -> None:
+    """Multiple sessions -> render the session count + ``in last <since>`` suffix.
+
+    Drops the age annotation because it would be ambiguous (which session?).
+    """
+    line = _format_cost_line(
+        mode_label="api cost",
+        mode_suffix="",
+        aggregate_cost=CostSnapshot(total_cost_usd=5.43),
+        session_count=3,
+        since_seconds=86400,
+        latest_event_at=2000,
+        now=2000,
+    )
+    assert line == "api cost: $5.43 across 3 sessions in last 1d"
+
+
+def test_format_cost_line_uses_multi_session_shape_when_latest_event_unknown() -> None:
+    """``latest_event_at is None`` falls back to the multi-session shape even at N == 1.
+
+    Defensive case: an aggregate with cost but no event timestamp wouldn't
+    have a sensible age to print, so dropping to the across-N-sessions shape
+    avoids fabricating one.
+    """
+    line = _format_cost_line(
+        mode_label="api cost",
+        mode_suffix="",
+        aggregate_cost=CostSnapshot(total_cost_usd=0.50),
+        session_count=1,
+        since_seconds=3600,
+        latest_event_at=None,
+        now=2000,
+    )
+    assert line == "api cost: $0.50 across 1 sessions in last 1h"
 
 
 # =============================================================================
