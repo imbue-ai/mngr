@@ -401,6 +401,29 @@ class _GatewayLogWriter(MutableModel):
                 logger.warning("Failed to write latchkey gateway log line to {}: {}", self.log_path, e)
 
 
+class _RunningGateway(FrozenModel):
+    """In-memory record of the live gateway subprocess for one :class:`Latchkey`.
+
+    A single ``Latchkey`` only ever owns at most one running gateway,
+    so this is stored as a private ``_running_gateway: _RunningGateway | None``
+    field. ``None`` means "not running"; non-``None`` carries both the
+    bound listen port (cached so idempotent :meth:`Latchkey.start_gateway`
+    calls can return the port without re-deriving it from the spawned
+    subprocess) and the :class:`RunningProcess` so :meth:`stop_gateway`
+    can terminate the child.
+    """
+
+    port: int = Field(description="TCP port the spawned ``latchkey gateway`` subprocess bound to.")
+    process: RunningProcess = Field(
+        description="Owning :class:`RunningProcess` returned by the spawning :class:`ConcurrencyGroup`.",
+    )
+
+    # ``RunningProcess`` is not pydantic-native; tolerate it through
+    # the model so we can keep the field properly typed without
+    # falling back to ``Any``.
+    model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
+
+
 class Latchkey(MutableModel):
     """Wraps every interaction with the upstream ``latchkey`` CLI.
 
@@ -432,12 +455,13 @@ class Latchkey(MutableModel):
         ),
     )
 
-    # ``_gateway_port`` doubles as the "is the gateway running?" flag
-    # (None means not running). ``_gateway_process`` is kept around so
-    # ``stop_gateway`` can SIGTERM the child via the :class:`RunningProcess`
-    # the spawning :class:`ConcurrencyGroup` returned.
-    _gateway_port: int | None = PrivateAttr(default=None)
-    _gateway_process: RunningProcess | None = PrivateAttr(default=None)
+    # ``_running_gateway`` is the single source of truth for the
+    # gateway's lifecycle: ``None`` means "not running"; non-``None``
+    # carries both the bound listen port (for return-value caching
+    # across idempotent :meth:`start_gateway` calls) and the
+    # :class:`RunningProcess` so :meth:`stop_gateway` can SIGTERM the
+    # child.
+    _running_gateway: _RunningGateway | None = PrivateAttr(default=None)
     _gateway_password: str | None = PrivateAttr(default=None)
     _admin_jwt: str | None = PrivateAttr(default=None)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -496,8 +520,8 @@ class Latchkey(MutableModel):
         with self._lock:
             self._is_initialized = True
 
-    def start_gateway(self, concurrency_group: ConcurrencyGroup) -> None:
-        """Start the shared gateway if this :class:`Latchkey` has not spawned one yet.
+    def start_gateway(self, concurrency_group: ConcurrencyGroup) -> int:
+        """Start the shared gateway and return its bound listen port.
 
         ``concurrency_group`` owns the gateway subprocess: when it exits
         (e.g. on ``mngr latchkey forward`` shutdown), the gateway is
@@ -506,30 +530,33 @@ class Latchkey(MutableModel):
         gateway is ``mngr latchkey forward``, and the supervisor wrapper
         makes sure at most one such process runs per latchkey directory.
 
-        In-process idempotent: subsequent calls observe :attr:`is_gateway_running`
-        and return immediately. Thread-safe within a single process via
+        In-process idempotent: subsequent calls observe the cached
+        :class:`_RunningGateway` and return the already-bound port
+        without re-spawning. Thread-safe within a single process via
         ``_spawn_lock``.
 
-        After a successful call, callers can read :attr:`gateway_port`
-        / :attr:`gateway_url` to learn where the gateway is listening.
+        Pair the returned port with :attr:`listen_host` to build the
+        gateway URL (``http://<listen_host>:<port>``).
         """
         # Fast path: already running.
         with self._lock:
             self._require_initialized_locked()
-            if self._gateway_port is not None:
-                return
+            running = self._running_gateway
+            if running is not None:
+                return running.port
         plugin_dir = self.plugin_data_dir
         # Slow path: serialize spawning. Double-check after acquiring
         # the spawn lock so a concurrent caller that already spawned
         # is observed before we duplicate the work.
         with self._spawn_lock:
             with self._lock:
-                if self._gateway_port is not None:
-                    return
+                running = self._running_gateway
+                if running is not None:
+                    return running.port
             port, process = self._spawn_gateway(concurrency_group, plugin_dir)
             with self._lock:
-                self._gateway_port = port
-                self._gateway_process = process
+                self._running_gateway = _RunningGateway(port=port, process=process)
+        return port
 
     def stop_gateway(self) -> None:
         """Terminate the gateway tracked by this :class:`Latchkey` instance.
@@ -549,14 +576,16 @@ class Latchkey(MutableModel):
         reboots.
         """
         with self._lock:
-            port = self._gateway_port
-            process = self._gateway_process
-            self._gateway_port = None
-            self._gateway_process = None
-        if process is not None and port is not None:
-            logger.info("Stopping shared Latchkey gateway ({}:{})", self.listen_host, port)
+            running = self._running_gateway
+            self._running_gateway = None
+        if running is not None:
+            logger.info(
+                "Stopping shared Latchkey gateway ({}:{})",
+                self.listen_host,
+                running.port,
+            )
             try:
-                process.terminate()
+                running.process.terminate()
             except (OSError, RuntimeError) as e:
                 logger.warning("Failed to terminate Latchkey gateway cleanly: {}", e)
 
@@ -564,30 +593,7 @@ class Latchkey(MutableModel):
     def is_gateway_running(self) -> bool:
         """Whether this :class:`Latchkey` has spawned a gateway and not yet stopped it."""
         with self._lock:
-            return self._gateway_port is not None
-
-    @property
-    def gateway_port(self) -> int:
-        """Port the shared gateway is listening on.
-
-        Raises :class:`LatchkeyNotInitializedError` when no gateway has
-        been started. Pair with :attr:`listen_host` to build a URL, or
-        use :attr:`gateway_url` directly.
-        """
-        with self._lock:
-            port = self._gateway_port
-        if port is None:
-            raise LatchkeyNotInitializedError("Latchkey gateway has not been started")
-        return port
-
-    @property
-    def gateway_url(self) -> str:
-        """``http://<listen_host>:<gateway_port>`` for the running gateway.
-
-        Raises :class:`LatchkeyNotInitializedError` when no gateway has
-        been started.
-        """
-        return f"http://{self.listen_host}:{self.gateway_port}"
+            return self._running_gateway is not None
 
     # -- Password / JWT derivation ------------------------------------------
 

@@ -394,10 +394,14 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     # subprocess is owned by ``mngr_ctx.concurrency_group`` and gets
     # terminated when this command's click context exits.
     try:
-        latchkey.start_gateway(mngr_ctx.concurrency_group)
+        gateway_port = latchkey.start_gateway(mngr_ctx.concurrency_group)
     except LatchkeyError as e:
         raise click.ClickException(f"Failed to start shared Latchkey gateway: {e}") from e
-    logger.info("Started shared Latchkey gateway at {}", latchkey.gateway_url)
+    logger.info(
+        "Started shared Latchkey gateway at http://{}:{}",
+        latchkey.listen_host,
+        gateway_port,
+    )
 
     # Stamp the freshly-bound gateway port onto the on-disk supervisor
     # record so other in-process consumers (notably the minds desktop
@@ -405,7 +409,7 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     # password is intentionally NOT persisted -- consumers derive it
     # on demand via :meth:`Latchkey.derive_gateway_password` (a pure
     # function of the user's latchkey encryption key).
-    update_forward_info_gateway_port(latchkey.plugin_data_dir, latchkey.gateway_port)
+    update_forward_info_gateway_port(latchkey.plugin_data_dir, gateway_port)
 
     tunnel_manager = SSHTunnelManager()
     tunnel_manager.start_reverse_tunnel_health_check()

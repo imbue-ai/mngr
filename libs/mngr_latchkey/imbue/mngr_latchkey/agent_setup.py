@@ -155,8 +155,8 @@ def prepare_agent_latchkey(
             "prepare_agent_latchkey(is_tunneled=False) needs a concurrency_group to own the spawned gateway subprocess"
         )
     else:
-        latchkey.start_gateway(concurrency_group)
-        gateway_url = latchkey.gateway_url
+        gateway_port = latchkey.start_gateway(concurrency_group)
+        gateway_url = f"http://{latchkey.listen_host}:{gateway_port}"
 
     env: dict[str, str] = {ENV_LATCHKEY_GATEWAY: gateway_url}
     opaque_path: Path | None = None

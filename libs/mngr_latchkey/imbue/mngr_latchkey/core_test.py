@@ -242,18 +242,15 @@ def test_start_gateway_spawns_subprocess(tmp_path: Path) -> None:
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-        manager.start_gateway(cg)
+        port = manager.start_gateway(cg)
         assert manager.is_gateway_running
-        port = manager.gateway_port
         assert port > 0
-        assert manager.gateway_url == f"http://127.0.0.1:{port}"
         assert _wait_for_listening("127.0.0.1", port), "gateway did not start listening"
 
         # In-process idempotent: a second call is a no-op; the port
         # stays the same. Cross-process adoption was removed along
         # with the on-disk gateway record.
-        manager.start_gateway(cg)
-        assert manager.gateway_port == port
+        assert manager.start_gateway(cg) == port
 
         # ``stop_gateway`` must run inside the CG so the long-running
         # gateway subprocess is gone before the CG waits for strands
@@ -275,8 +272,8 @@ def test_start_gateway_materializes_deny_all_default_permissions(tmp_path: Path)
     perms_path = default_permissions_path(manager.plugin_data_dir)
     assert not perms_path.exists()
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-        manager.start_gateway(cg)
-        assert _wait_for_listening("127.0.0.1", manager.gateway_port)
+        port = manager.start_gateway(cg)
+        assert _wait_for_listening("127.0.0.1", port)
         assert perms_path.is_file()
         assert json.loads(perms_path.read_text()) == {"rules": []}
         manager.stop_gateway()
@@ -290,8 +287,8 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
     extensions_dir = tmp_path / "extensions"
     assert not extensions_dir.exists()
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-        manager.start_gateway(cg)
-        assert _wait_for_listening("127.0.0.1", manager.gateway_port)
+        port = manager.start_gateway(cg)
+        assert _wait_for_listening("127.0.0.1", port)
         mjs_files = sorted(p.name for p in extensions_dir.iterdir() if p.suffix == ".mjs")
         assert mjs_files == ["permission_requests.mjs", "permissions.mjs"]
         # The destination files must be non-empty -- ``importlib.resources``
@@ -312,8 +309,8 @@ def test_start_gateway_overwrites_existing_extensions(tmp_path: Path) -> None:
     stale_file = extensions_dir / "permissions.mjs"
     stale_file.write_text("// stale\n")
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-        manager.start_gateway(cg)
-        assert _wait_for_listening("127.0.0.1", manager.gateway_port)
+        port = manager.start_gateway(cg)
+        assert _wait_for_listening("127.0.0.1", port)
         assert stale_file.read_text() != "// stale\n"
         manager.stop_gateway()
 
@@ -387,8 +384,8 @@ def test_start_gateway_sets_extension_permissions_root_env_var(tmp_path: Path) -
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
     manager.initialize()
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-        manager.start_gateway(cg)
-        assert _wait_for_listening("127.0.0.1", manager.gateway_port)
+        port = manager.start_gateway(cg)
+        assert _wait_for_listening("127.0.0.1", port)
         # The child process writes the env value to env_dump_path as
         # one of its first acts; poll briefly for the file.
         deadline = time.monotonic() + 5.0
@@ -409,8 +406,8 @@ def test_start_gateway_preserves_existing_default_permissions_file(tmp_path: Pat
     existing = '{"rules": [{"some-scope": ["any"]}]}'
     perms_path.write_text(existing)
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-        manager.start_gateway(cg)
-        assert _wait_for_listening("127.0.0.1", manager.gateway_port)
+        port = manager.start_gateway(cg)
+        assert _wait_for_listening("127.0.0.1", port)
         assert perms_path.read_text() == existing
         manager.stop_gateway()
 
@@ -472,9 +469,9 @@ def test_concurrent_start_gateway_spawns_at_most_one_subprocess(tmp_path: Path) 
             # the same instant. This maximises the chance of catching a
             # regression to the no-lock behaviour.
             barrier.wait()
-            manager.start_gateway(cg)
+            port = manager.start_gateway(cg)
             with observed_lock:
-                observed_ports.append(manager.gateway_port)
+                observed_ports.append(port)
 
         threads = [threading.Thread(target=worker, name=f"spawn-race-{i}") for i in range(8)]
         for t in threads:
@@ -498,15 +495,12 @@ def test_stop_gateway_clears_in_memory_state(tmp_path: Path) -> None:
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-        manager.start_gateway(cg)
+        port = manager.start_gateway(cg)
         assert manager.is_gateway_running
-        port = manager.gateway_port
         assert _wait_for_listening("127.0.0.1", port)
 
         manager.stop_gateway()
         assert not manager.is_gateway_running
-        with pytest.raises(LatchkeyNotInitializedError):
-            _ = manager.gateway_port
         # Idempotent no-op so the CG has nothing left to wait for when it exits.
         manager.stop_gateway()
 
@@ -647,8 +641,8 @@ def test_start_gateway_passes_password_to_subprocess(tmp_path: Path) -> None:
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
     manager.initialize()
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-        manager.start_gateway(cg)
-        assert _wait_for_listening("127.0.0.1", manager.gateway_port)
+        port = manager.start_gateway(cg)
+        assert _wait_for_listening("127.0.0.1", port)
         # Wait for the report file to be written.
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline and not report_path.is_file():
@@ -684,7 +678,10 @@ def test_discovery_handler_spawns_shared_gateway_for_every_provider(tmp_path: Pa
                 handler(AgentId(), None, provider_name)
             assert manager.is_gateway_running
             # Same shared gateway across all five callbacks; ensure it actually came up.
-            assert _wait_for_listening("127.0.0.1", manager.gateway_port)
+            # ``start_gateway`` is idempotent and returns the bound port even
+            # when the gateway is already running, so the test can use it as
+            # the supported way to read the live port.
+            assert _wait_for_listening("127.0.0.1", manager.start_gateway(cg))
         finally:
             manager.stop_gateway()
             tunnel_manager.cleanup()
@@ -732,7 +729,10 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: 
         handler(agent_id, ssh_info, "docker")
 
         assert manager.is_gateway_running
-        host_side_port = manager.gateway_port
+        # ``start_gateway`` is idempotent and returns the bound port even
+        # when the gateway is already running, so the test can use it as
+        # the supported way to read the live port.
+        host_side_port = manager.start_gateway(cg)
 
         # Exactly one reverse tunnel, bridging the dynamic host-side gateway port
         # to the fixed agent-side port on the container's loopback. The tunnel
