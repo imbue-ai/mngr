@@ -33,7 +33,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
-from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -1329,8 +1329,10 @@ class CostThresholdDialogIndicator(DialogIndicator):
         return self._MATCH_SPENDING_TEXT in content and self._MATCH_DOCS_URL in content
 
 
-class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
+class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
     """Agent implementation for Claude with session resumption support."""
+
+    TUI_READY_INDICATOR = "Claude Code"
 
     @classmethod
     def preflight_check(
@@ -1388,25 +1390,6 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         shell command with exports and fallbacks, but the actual process is always 'claude'.
         """
         return "claude"
-
-    def uses_paste_detection_send(self) -> bool:
-        """Enable paste-detection send_message for Claude Code.
-
-        Claude Code echoes input to the terminal and has a complex input handler
-        that can misinterpret Enter as a literal newline if sent too quickly after
-        the message text. The paste-detection approach waits for the pasted content
-        to appear on screen before submitting.
-        """
-        return True
-
-    def get_tui_ready_indicator(self) -> str | None:
-        """Return Claude Code's banner text as the TUI ready indicator.
-
-        Claude Code displays "Claude Code" in its banner when the TUI is ready.
-        Waiting for this ensures we don't send input before the UI is fully rendered,
-        which would cause the input to be lost or appear as raw text.
-        """
-        return "Claude Code"
 
     _DIALOG_INDICATORS: tuple[DialogIndicator, ...] = (
         TrustDialogIndicator(),
