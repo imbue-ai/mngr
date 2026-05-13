@@ -118,13 +118,11 @@ def register_modal_test_environment(environment_name: str) -> None:
 class ModalCleanupOutcome(UpperCaseStrEnum):
     """Outcome of a Modal-side delete call.
 
-    Callers should treat `DELETED` and `NOT_FOUND` as success (the resource is
-    conceptually gone, regardless of whether we did the deleting) and only
-    `FAILED` as a reason to keep tracking the resource for leak detection.
+    DELETED and NOT_FOUND both mean the resource is gone (whether we did the
+    deleting); only FAILED is a reason to keep tracking it for leak detection.
 
-    Distinct from `imbue.mngr.api.data_types.CleanupResult`, which is the
-    pydantic model returned by the `mngr cleanup` CLI (lists of destroyed/
-    stopped agents). This enum classifies a single Modal-side delete only.
+    Distinct from `imbue.mngr.api.data_types.CleanupResult` (Pydantic model
+    returned by `mngr cleanup`).
     """
 
     DELETED = auto()
@@ -135,17 +133,11 @@ class ModalCleanupOutcome(UpperCaseStrEnum):
 def deregister_modal_test_volume(volume_name: str) -> None:
     """Stop tracking a Modal volume for leak detection.
 
-    Call this only when the caller has positively confirmed the volume was
-    deleted (or was already gone). The session-end leak detector polls
-    `modal volume list --json` to find tracked volumes that are still alive,
-    but Modal's listing endpoints are eventually consistent w.r.t. deletion
-    -- they can still return entries for seconds after the synchronous
-    delete call returned "not found". Trusting the cleanup hook's response
-    and deregistering immediately avoids paying that listing-convergence
-    tail. On a real cleanup failure (anything other than DELETED/NOT_FOUND),
-    callers must NOT deregister: leaving the name tracked lets the leak
-    detector surface it, with the CI hourly cleanup script
-    (cleanup_old_modal_test_environments.py) as the ultimate safety net.
+    Call only when the caller's delete returned DELETED or NOT_FOUND;
+    the synchronous response is authoritative and avoids paying Modal's
+    listing-convergence tail. On FAILED, do NOT call this -- leaving the
+    name tracked lets the session-end leak detector surface it, with
+    `cleanup_old_modal_test_environments.py` as the hourly safety net.
     """
     if volume_name in worker_modal_volume_names:
         worker_modal_volume_names.remove(volume_name)

@@ -115,47 +115,32 @@ def modal_mngr_ctx(
 def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_name: str) -> None:
     """Clean up Modal test resources after a test completes.
 
-    This helper performs cleanup in the correct order:
     1. Close the Modal app context. For ephemeral apps this advances the
-       `app.run()` generator, which Modal treats as the calling program
-       exit and triggers the app (plus its sandboxes) to stop server-side.
-       For persistent apps (`App.lookup` with `create_if_missing=True`,
-       `run_context is None`) this is a no-op locally; the persistent
-       app gets stopped by step 3 below (Modal's `environment delete`
-       documents that it "deletes all apps in the selected environment"
-       https://modal.com/docs/reference/cli/environment).
-    2. Delete the volume (must be done before environment deletion).
-    3. Delete the environment. Per Modal's docs this takes down every
-       app in the env, ephemeral or persistent.
+       `app.run()` generator, which Modal treats as the calling-program exit
+       and stops the app + its sandboxes server-side. For persistent apps
+       (`App.lookup` with `create_if_missing=True`, `run_context is None`)
+       this is a no-op locally; the app gets stopped by step 3, since
+       `modal environment delete` "deletes all apps in the selected
+       environment" (https://modal.com/docs/reference/cli/environment).
+    2. Delete the volume (must precede env deletion).
+    3. Delete the environment.
 
-    Apps are deliberately not in the deregister chain. Even after step 3
-    has succeeded synchronously, Modal's `modal app list --json` endpoint
-    is subject to the same eventually-consistent listing window we
-    already work around for envs -- the apps can still appear "running"
-    for some seconds. So we leave every registered app tracked and let
-    `_get_leaked_modal_apps` (in the session-end leak detector) be the
-    authoritative source of app liveness. (`_get_leaked_modal_apps`
-    today is a single-shot list with `state != "stopped"` filter; a
-    forward-looking comment in this file flags the polling pattern to
-    adopt if false positives appear there too.)
+    Apps are deliberately not in the deregister chain. `modal app list --json`
+    is subject to the same eventually-consistent window we work around for
+    envs, so we leave registered apps tracked and let `_get_leaked_modal_apps`
+    (single-shot today; forward-looking comment flags the polling pattern if
+    that proves insufficient) be the authoritative source of app liveness.
 
-    Volume + env are deregistered from leak tracking *only* if their
-    delete calls succeeded or reported the resource was already gone.
-    A real cleanup failure leaves the resource tracked so the session-end
-    leak detector surfaces it.
+    Volume + env are deregistered only on DELETED/NOT_FOUND. FAILED leaves the
+    resource tracked so the session-end leak detector surfaces it.
 
     Known limitation: treating NOT_FOUND as success has a residual failure
-    mode under Modal's eventual consistency. If a `modal environment delete`
-    hits a replica that hasn't yet observed our env (because env-create
-    propagation is itself async across Modal replicas), it can return
-    "Environment not found" even though the env actually exists. We'd then
-    deregister, and the in-session leak detector would never see the real
-    leak. The CI hourly cleanup script
-    (scripts/cleanup_old_modal_test_environments.py) is the safety net for
-    that case -- it sweeps any leaked test env >1h old on every workflow
-    run. The alternative (only deregister on DELETED, not NOT_FOUND) makes
-    the leak detector pay the polling-tail cost on every test, which is
-    not worth it for a rare failure mode that has a working safety net.
+    mode. If env-create propagation is eventually consistent across Modal
+    replicas, a delete that hits a stale replica returns NOT_FOUND for a
+    resource that actually exists, and we'd deregister. The CI hourly cleanup
+    script (`cleanup_old_modal_test_environments.py`) is the safety net. The
+    alternative (only deregister on DELETED) makes every test pay the polling
+    tail -- not worth it for a rare case with a working safety net.
     """
     ModalProviderBackend.close_app(app_name)
 
@@ -371,18 +356,11 @@ def modal_test_session_cleanup(
     delete_modal_apps_in_environment(environment_name)
     delete_modal_volumes_in_environment(environment_name)
     env_result = delete_modal_environment(environment_name)
-    # Only deregister if Modal confirmed the env is gone (deleted or already
-    # not-found). On real cleanup failure, keep it tracked so the session-end
-    # polling check still has a chance to surface it. Modal's global list
-    # endpoint is eventually consistent and can lag past any defensible
-    # polling budget, but the synchronous delete call's response is
-    # authoritative.
-    #
-    # Known limitation: NOT_FOUND from a stale Modal replica (one that hasn't
-    # observed our env's create yet) is indistinguishable from a real
-    # already-deleted, and we deregister in both cases. The CI hourly
-    # cleanup script catches genuine leaks that slip through this way; see
-    # `_cleanup_modal_test_resources`'s docstring for the full discussion.
+    # Deregister only on DELETED/NOT_FOUND (synchronous response is
+    # authoritative; global env list lags). FAILED leaves the env tracked
+    # so the polling check at session end can still surface it. See
+    # `_cleanup_modal_test_resources` docstring for the NOT_FOUND-treated-
+    # as-success limitation and its safety net.
     match env_result:
         case ModalCleanupOutcome.DELETED | ModalCleanupOutcome.NOT_FOUND:
             deregister_modal_test_environment(environment_name)
@@ -505,23 +483,17 @@ def _delete_modal_volumes(volume_names: list[str]) -> None:
             pass
 
 
-# `modal environment list --json` is observably inconsistent with other
-# Modal endpoints in a short window after the test session creates an env:
-# this branch's earlier CI runs had cleanup chains where `modal env delete X`
-# and `modal app list --env=X` both returned "Environment 'X' not found" at
-# session-teardown time, yet `modal environment list --json` a few seconds
-# later returned X. We don't know whether the right framing is "env-delete
-# is eventually consistent and the global list lags", "env-create is
-# eventually consistent across replicas and one replica hadn't caught up yet
-# when cleanup ran", or some mix. Either way, no single Modal endpoint
-# query is reliable across a few-second window, so a single-shot leak check
-# can't tell a stale-listing entry from a real leak.
-#
-# Mitigation: poll the global list until it converges (candidate disappears)
-# or until a budget elapses; anything still listed after the budget gets
-# flagged. The budget is generous compared to the observed window (~5 s in
-# the runs that motivated this) but bounded so a genuinely-leaked env
-# doesn't stall teardown indefinitely.
+# Modal endpoints disagree across a few-second window: earlier CI runs on
+# this branch had `modal env delete X` and `modal app list --env=X` both
+# returning "Environment 'X' not found" while `modal environment list --json`
+# a few seconds later returned X. Cause is unclear -- could be
+# eventually-consistent delete, eventually-consistent create across replicas,
+# or some mix. Either way, no single Modal endpoint snapshot is reliable
+# here, so a single-shot leak check can't tell a stale-listing entry from a
+# real leak. Mitigation: poll the global list until candidates converge or a
+# budget elapses; anything still listed after the budget is flagged. Budget
+# is generous vs the observed ~5 s window but bounded so a real leak can't
+# stall teardown.
 _LEAK_POLL_TIMEOUT_S = 30.0
 _LEAK_POLL_INTERVAL_S = 2.0
 
