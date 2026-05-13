@@ -8,7 +8,6 @@ single-select: Enter immediately confirms the focused row.
 
 from collections.abc import Sequence
 
-from pydantic import ConfigDict
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.event_loop.main_loop import MainLoop
 from urwid.widget.attr_map import AttrMap
@@ -25,11 +24,12 @@ from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 
 
 class _PickerState(MutableModel):
-    """Mutable state shared with the input filter."""
+    """Mutable state shared with the input filter.
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    Holds only the confirm flag the input filter needs to flip; the
+    listbox itself is owned by ``run_single_select_picker`` as a local.
+    """
 
-    listbox: ListBox
     is_confirmed: bool = False
 
 
@@ -79,7 +79,7 @@ def run_single_select_picker(
     if 0 <= initial_focus < len(options):
         listbox.set_focus(initial_focus)
 
-    state = _PickerState(listbox=listbox)
+    state = _PickerState()
 
     header = Pile(
         [
