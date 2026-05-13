@@ -25,7 +25,7 @@ from imbue.mngr_modal.instance import ModalProviderInstance
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
 def test_provision_statusline_shim_on_modal_host(real_modal_provider: ModalProviderInstance) -> None:
-    """Provision the rate-limits statusline shim onto a real Modal sandbox host
+    """Provision the usage statusline shim onto a real Modal sandbox host
     and verify each artifact lands correctly via ``host.read_text_file``.
 
     Covers the full host-portable pipeline:
