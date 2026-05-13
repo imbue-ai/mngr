@@ -145,7 +145,15 @@ def deregister_modal_test_volume(volume_name: str) -> None:
 
 
 def deregister_modal_test_environment(environment_name: str) -> None:
-    """Stop tracking a Modal environment for leak detection. See `deregister_modal_test_volume`."""
+    """Stop tracking a Modal environment for leak detection.
+
+    Call only when the caller's delete returned DELETED or NOT_FOUND;
+    the synchronous response is authoritative and avoids paying Modal's
+    listing-convergence tail. On FAILED, do NOT call this -- leaving the
+    name tracked lets the session-end leak detector surface it, with
+    `cleanup_old_modal_test_environments.py` as the hourly safety net.
+    Mirrors `deregister_modal_test_volume`.
+    """
     if environment_name in worker_modal_environment_names:
         worker_modal_environment_names.remove(environment_name)
 
