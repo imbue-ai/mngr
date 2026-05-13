@@ -23,9 +23,13 @@ from typing import TextIO
 
 from loguru import logger
 
+from imbue.mngr_claude_subagent_proxy.hook_io import DEFAULT_MAX_SUBAGENT_DEPTH
+from imbue.mngr_claude_subagent_proxy.hook_io import emit_depth_limit_deny
+from imbue.mngr_claude_subagent_proxy.hook_io import emit_json_response
+from imbue.mngr_claude_subagent_proxy.hook_io import parse_int_env
+from imbue.mngr_claude_subagent_proxy.hook_io import read_hook_stdin_json
 from imbue.mngr_claude_subagent_proxy.mngr_binary import get_mngr_command_shell_form
 
-_DEFAULT_MAX_DEPTH: Final[int] = 3
 _PASS_THROUGH_RESPONSE: Final[dict[str, Any]] = {
     "hookSpecificOutput": {
         "hookEventName": "PreToolUse",
@@ -34,64 +38,8 @@ _PASS_THROUGH_RESPONSE: Final[dict[str, Any]] = {
 }
 
 
-def _emit(stdout: TextIO, response: dict[str, Any]) -> None:
-    """Write a JSON response to stdout and flush."""
-    stdout.write(json.dumps(response) + "\n")
-    stdout.flush()
-
-
 def _emit_pass_through(stdout: TextIO) -> None:
-    _emit(stdout, _PASS_THROUGH_RESPONSE)
-
-
-def _emit_depth_limit_deny(stdout: TextIO, depth: int, max_depth: int) -> None:
-    """Emit a deny decision with an explanatory reason (depth limit reached)."""
-    reason = (
-        f"mngr_claude_subagent_proxy: subagent depth limit ({depth}/{max_depth}) reached. "
-        "Cannot spawn nested Task tools beyond this depth."
-    )
-    _emit(
-        stdout,
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
-        },
-    )
-
-
-def _read_stdin_json(stdin: TextIO) -> dict[str, Any] | None:
-    """Read hook JSON from stdin; return None on empty or malformed input."""
-    try:
-        raw = stdin.read()
-    except OSError as e:
-        logger.warning("spawn: failed to read stdin: {}", e)
-        return None
-    if not raw:
-        logger.warning("spawn: empty stdin")
-        return None
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        logger.warning("spawn: malformed stdin JSON: {}", e)
-        return None
-    if not isinstance(parsed, dict):
-        logger.warning("spawn: stdin JSON is not an object")
-        return None
-    return parsed
-
-
-def _parse_int_env(name: str, default: int) -> int:
-    """Parse an int-valued env var; return default on missing/invalid."""
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
+    emit_json_response(stdout, _PASS_THROUGH_RESPONSE)
 
 
 def slugify(text: str) -> str:
@@ -279,14 +227,14 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         _emit_pass_through(stdout)
         return
 
-    depth = _parse_int_env("MNGR_SUBAGENT_DEPTH", 0)
-    max_depth = _parse_int_env("MNGR_MAX_SUBAGENT_DEPTH", _DEFAULT_MAX_DEPTH)
+    depth = parse_int_env("MNGR_SUBAGENT_DEPTH", 0)
+    max_depth = parse_int_env("MNGR_MAX_SUBAGENT_DEPTH", DEFAULT_MAX_SUBAGENT_DEPTH)
     if depth >= max_depth:
         logger.warning("spawn: depth {}/{} reached; denying Task", depth, max_depth)
-        _emit_depth_limit_deny(stdout, depth, max_depth)
+        emit_depth_limit_deny(stdout, depth, max_depth)
         return
 
-    payload = _read_stdin_json(stdin)
+    payload = read_hook_stdin_json(stdin, "spawn")
     if payload is None:
         _emit_pass_through(stdout)
         return
@@ -441,7 +389,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
             },
         }
     }
-    _emit(stdout, response)
+    emit_json_response(stdout, response)
 
 
 def main() -> None:

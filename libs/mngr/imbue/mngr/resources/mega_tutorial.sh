@@ -1178,7 +1178,18 @@ mngr observe --discovery-only | while read -r line; do
   echo "$line" | python -c "import sys, json; d=json.load(sys.stdin); print(d.get('name', 'unknown'))"
 done
 
-# TODO: make examples of using "mngr wait"
+# `mngr usage wait` blocks until a CEL predicate over the current usage snapshot
+# evaluates true, then exits 0 (exit 2 on --timeout). Compose it with `mngr create`
+# to opportunistically spawn work when you're near the end of a rate-limit window
+# with spare capacity -- the predicate below means "more than 75% of the 5h
+# window has elapsed AND under half the limit has been used", so there's budget
+# headroom that would otherwise reset unused.
+# The CEL context per source matches `mngr usage --format json` sources[i]; see
+# the `mngr usage wait --help` page for the full field list.
+mngr usage wait --until 'five_hour.elapsed_percentage > 75 && five_hour.used_percentage < 50' \
+  && mngr create chore@.modal --no-connect --message "Find and fix an issue in the codebase."
+
+# TODO: make examples of using "mngr wait" (lifecycle-state wait, distinct from `mngr usage wait` above)
 
 # TODO: make more examples here (observe, events, streaming, transcript, using jq and python, etc)
 

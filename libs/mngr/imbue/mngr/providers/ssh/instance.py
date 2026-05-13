@@ -165,6 +165,7 @@ class SSHProviderInstance(BaseProviderInstance):
 
         return Host(
             id=host_id,
+            host_name=HostName(host_name),
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
