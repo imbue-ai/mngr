@@ -36,6 +36,7 @@ _CONTAINER_SSH_PORT: Final[int] = 2222
 # A previous 10-min cap occasionally killed otherwise-healthy provisions.
 _MNGR_COMMAND_TIMEOUT_SECONDS: Final[int] = 1800
 _SSH_COMMAND_TIMEOUT_SECONDS: Final[int] = 60
+_POOL_AGENT_NAME: Final[str] = "system-services"
 
 _RSYNC_EXCLUDES: Final[tuple[str, ...]] = (
     ".git",
@@ -141,8 +142,13 @@ def _run_ssh_command(
     return True
 
 
-def _get_agent_info(agent_name: str, provider: str = "vultr") -> dict[str, Any] | None:
-    """Query mngr list --format json and find the agent by name.
+def _get_agent_info_by_address(address: str, provider: str = "vultr") -> dict[str, Any] | None:
+    """Query mngr list --format json and find the (agent, host) pair by address.
+
+    The address has the form ``<agent_name>@<host_name>``. Pool bakes use
+    a unique bake-time host name per pool host (``pool-<uuid>-stage``)
+    while every agent on those hosts shares the name ``system-services``,
+    so filtering by host name is the way to find the right row.
 
     Scopes to ``--provider <provider>`` (the bake only ever creates on vultr
     today, so the default matches the call site) and passes ``--on-error
@@ -153,6 +159,8 @@ def _get_agent_info(agent_name: str, provider: str = "vultr") -> dict[str, Any] 
     path is handled by the normal "agent_info is None" check at the call
     site, so genuine create failures are not papered over.
     """
+    agent_name_part, _, host_name_part = address.partition("@")
+    include = f'name == "{agent_name_part}" && host.name == "{host_name_part}"'
     result = _run_mngr_command(
         [
             "list",
@@ -163,7 +171,7 @@ def _get_agent_info(agent_name: str, provider: str = "vultr") -> dict[str, Any] 
             "--on-error",
             "continue",
             "--include",
-            f'name == "{agent_name}"',
+            include,
         ],
         timeout=60,
     )
@@ -186,7 +194,12 @@ def _get_agent_info(agent_name: str, provider: str = "vultr") -> dict[str, Any] 
         return None
 
     for agent in agents:
-        if isinstance(agent, dict) and agent.get("name") == agent_name:
+        if not isinstance(agent, dict):
+            continue
+        if agent.get("name") != agent_name_part:
+            continue
+        host = agent.get("host")
+        if isinstance(host, dict) and host.get("name") == host_name_part:
             return agent
     return None
 
@@ -226,13 +239,25 @@ def _create_single_pool_host(
 ) -> bool:
     """Create a single pool host. Returns True on success.
 
+    The agent is always named ``system-services`` -- the bake-time host
+    name is a throwaway ``pool-<uuid>-stage`` slug that the user-facing
+    ``host_name`` column overwrites at lease time. Inline labels
+    (``is_primary=true``, ``user_created=true``) come from the FCT
+    ``[create_templates.system_services]`` template; only the
+    bake-specific ``pool_attributes`` label is set inline here.
+
     Inserts a row with the request-side ``attributes`` dict so the connector's
     ``attributes @>`` match can find it.
     """
     suffix = uuid4().hex
-    agent_name = f"pool-{suffix}"
-    host_name = f"{agent_name}-host"
-    address = f"{agent_name}@{host_name}.vultr"
+    # The bake-time host name disambiguates concurrent bakes locally;
+    # it lives on the address used to talk to ``mngr`` (``stop``,
+    # ``exec``, etc.) until the lease endpoint overwrites the
+    # connector's ``host_name`` column with the user's chosen name.
+    # The agent itself is always named ``system-services``.
+    bake_host_name = f"pool-{suffix}-stage"
+    agent_name = _POOL_AGENT_NAME
+    address = f"{agent_name}@{bake_host_name}.vultr"
 
     logger.info("Creating pool host: {}", address)
 
@@ -244,15 +269,9 @@ def _create_single_pool_host(
         "--idle-mode",
         "disabled",
         "--template",
-        "main",
+        "system_services",
         "--template",
         "vultr",
-        "--label",
-        f"workspace={agent_name}",
-        "--label",
-        "user_created=true",
-        "--label",
-        "is_primary=true",
         "--label",
         f"pool_attributes={_json.dumps(attributes)}",
         "--host-env",
@@ -266,9 +285,13 @@ def _create_single_pool_host(
         logger.error("mngr create failed: {}", create_result.stderr)
         return False
 
-    logger.info("  Created agent: {}", agent_name)
+    logger.info("  Created agent: {} (bake host {})", agent_name, bake_host_name)
 
-    stop_result = _run_mngr_command(["stop", agent_name])
+    # Stop the agent but keep the container running. Multiple pool hosts
+    # share the agent name ``system-services``, so we have to disambiguate
+    # by the host address so ``mngr stop`` resolves to the right one.
+    address_no_provider = f"{agent_name}@{bake_host_name}"
+    stop_result = _run_mngr_command(["stop", address_no_provider])
     if stop_result.returncode != 0:
         logger.warning("mngr stop failed (continuing): {}", stop_result.stderr)
 
@@ -281,7 +304,7 @@ def _create_single_pool_host(
     _run_mngr_command(
         [
             "exec",
-            agent_name,
+            address_no_provider,
             "/usr/sbin/sshd",
             "-o",
             "MaxSessions=100",
@@ -291,9 +314,9 @@ def _create_single_pool_host(
         timeout=30,
     )
 
-    agent_info = _get_agent_info(agent_name)
+    agent_info = _get_agent_info_by_address(address_no_provider)
     if agent_info is None:
-        logger.error("Could not find agent info for {}", agent_name)
+        logger.error("Could not find agent info for {}", address_no_provider)
         return False
 
     host = agent_info.get("host")
@@ -335,8 +358,12 @@ def _create_single_pool_host(
     _run_ssh_command(vps_ip, vps_key_path, 22, install_cmd)
 
     logger.info("  Installing management key in container via mngr exec")
-    _run_mngr_command(["exec", agent_name, install_cmd], timeout=60)
+    _run_mngr_command(["exec", address_no_provider, install_cmd], timeout=60)
 
+    # Insert into pool_hosts table. ``host_name`` is the bake-time slug; the
+    # lease endpoint overwrites it with the user-chosen workspace name when
+    # the row transitions from ``available`` to ``leased``. The NOT NULL
+    # constraint requires a value here even on available rows.
     row_id = uuid4()
     conn = psycopg2.connect(database_url)
     try:
@@ -344,15 +371,16 @@ def _create_single_pool_host(
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO pool_hosts "
-                    "(id, vps_ip, vps_instance_id, agent_id, host_id, ssh_port, ssh_user, "
+                    "(id, vps_ip, vps_instance_id, agent_id, host_id, host_name, ssh_port, ssh_user, "
                     "container_ssh_port, status, attributes, created_at) "
-                    "VALUES (%s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, NOW())",
+                    "VALUES (%s, %s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, NOW())",
                     (
                         str(row_id),
                         vps_ip,
                         host_id,
                         agent_id,
                         host_id,
+                        bake_host_name,
                         _CONTAINER_SSH_PORT,
                         _json.dumps(attributes),
                     ),

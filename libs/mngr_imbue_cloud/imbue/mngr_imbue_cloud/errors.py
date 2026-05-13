@@ -21,6 +21,16 @@ class ImbueCloudLeaseUnavailableError(ImbueCloudError):
     """Raised when the connector returns 503 (no matching pool host)."""
 
 
+class ImbueCloudHostNameConflictError(ImbueCloudError):
+    """Raised when the connector returns 409 on lease / rename.
+
+    The caller already has a leased host using the requested name. Surfacing
+    this as a dedicated exception lets the minds desktop client render the
+    conflict back to the user as a form-level error so they can pick a
+    different workspace name.
+    """
+
+
 class ImbueCloudKeyError(ImbueCloudError):
     """Raised when a LiteLLM key operation fails."""
 

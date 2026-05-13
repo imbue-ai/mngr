@@ -15,7 +15,28 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.instance import ImbueCloudProvider
 from imbue.mngr_imbue_cloud.instance import _map_docker_status_to_host_state
+from imbue.mngr_imbue_cloud.instance import _resolve_lease_host_name
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
+
+
+def _make_lease(
+    *,
+    host_id: str = "host-001",
+    host_name: str = "test-workspace",
+) -> LeasedHostInfo:
+    """Build a minimal ``LeasedHostInfo`` for the precedence tests."""
+    return LeasedHostInfo(
+        host_db_id=LeaseDbId("lease-db-id"),
+        vps_ip="203.0.113.1",
+        ssh_port=22,
+        ssh_user="user1",
+        container_ssh_port=2222,
+        agent_id="agent-xxx",
+        host_id=host_id,
+        host_name=host_name,
+        attributes={},
+        leased_at="2025-01-01T00:00:00Z",
+    )
 
 
 @pytest.mark.parametrize(
@@ -97,6 +118,7 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
         container_ssh_port=2222,
         agent_id=str(agent_id),
         host_id=str(host_id),
+        host_name="test-workspace",
         attributes={},
         leased_at="2025-01-01T00:00:00Z",
     )
@@ -142,3 +164,25 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
     assert len(agent_details_list) == 1
     assert agent_details_list[0].id == agent_id
     assert agent_details_list[0].host == host_details
+
+
+def test_resolve_lease_host_name_prefers_lease_host_name() -> None:
+    """``lease.host_name`` wins over ``certified_data.host_name`` and ``lease.host_id``."""
+    lease = _make_lease(host_id="host-id-only", host_name="user-chosen-workspace")
+    raw = {"certified_data": {"host_name": "old-bake-name"}}
+    assert _resolve_lease_host_name(lease, raw) == "user-chosen-workspace"
+
+
+def test_resolve_lease_host_name_falls_back_to_certified_data() -> None:
+    """When the lease has no ``host_name`` but ``raw`` does, the certified name is used."""
+    lease = _make_lease(host_id="host-id-only", host_name="")
+    raw = {"certified_data": {"host_name": "older-bake-name"}}
+    assert _resolve_lease_host_name(lease, raw) == "older-bake-name"
+
+
+def test_resolve_lease_host_name_falls_back_to_host_id() -> None:
+    """Last-resort placeholder when nothing else is available is ``lease.host_id``."""
+    lease = _make_lease(host_id="host-id-only", host_name="")
+    assert _resolve_lease_host_name(lease, raw=None) == "host-id-only"
+    # Also fall back to host_id when ``raw`` lacks a certified host name.
+    assert _resolve_lease_host_name(lease, raw={"certified_data": {}}) == "host-id-only"

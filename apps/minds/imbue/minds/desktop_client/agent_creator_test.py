@@ -27,7 +27,6 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
-from imbue.minds.desktop_client.agent_creator import _make_host_name
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
@@ -71,10 +70,6 @@ def test_redact_url_credentials_in_text_strips_embedded_userinfo() -> None:
     assert _redact_url_credentials_in_text(msg) == "fatal: unable to access 'https://github.com/x/y': bad"
 
 
-def test_make_host_name_appends_host_suffix() -> None:
-    assert _make_host_name(AgentName("alpha")) == "alpha-host"
-
-
 def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> None:
     """``_build_mngr_create_command`` lifts each entry of ``latchkey_env`` into a ``--host-env`` flag.
 
@@ -89,7 +84,7 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> Non
     """
     command, _ = _build_mngr_create_command(
         launch_mode=LaunchMode.LOCAL,
-        agent_name=AgentName("hello"),
+        workspace_name=AgentName("hello"),
         latchkey_env={
             "LATCHKEY_GATEWAY": "http://127.0.0.1:1989",
             "LATCHKEY_GATEWAY_PASSWORD": "sup3rs3cret",
@@ -123,7 +118,7 @@ def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
     for latchkey_env in (None, {}):
         command, _ = _build_mngr_create_command(
             launch_mode=LaunchMode.LOCAL,
-            agent_name=AgentName("hello"),
+            workspace_name=AgentName("hello"),
             latchkey_env=latchkey_env,
         )
         joined = " ".join(command)
@@ -131,16 +126,32 @@ def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
         assert "LATCHKEY_DISABLE_COUNTING" not in joined
 
 
-def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() -> None:
+def test_build_mngr_create_command_uses_system_services_template_and_omits_message_arg() -> None:
     command, api_key = _build_mngr_create_command(
         launch_mode=LaunchMode.LOCAL,
-        agent_name=AgentName("hello"),
+        workspace_name=AgentName("hello"),
     )
-    assert "--template" in command
-    assert "main" in command
-    # The /welcome message now lives in forever-claude-template's
-    # [create_templates.main] section, so the explicit --message arg is gone.
+    template_args = [command[i + 1] for i, arg in enumerate(command) if arg == "--template" and i + 1 < len(command)]
+    # The system-services template is the new primary-agent template; ``main``
+    # is gone.
+    assert "system_services" in template_args
+    assert "main" not in template_args
+    # The agent address uses the fixed agent name ``system-services``; the
+    # user's chosen workspace name lands on the *host* portion of the
+    # address (no -host suffix).
+    joined = " ".join(command)
+    assert "system-services@hello.docker" in joined
+    # The /welcome message now lives in bootstrap (which creates the
+    # ``assistant`` chat agent on first run); no explicit --message arg here.
     assert "--message" not in command
+    # ``is_primary=true`` / ``user_created=true`` come from the FCT
+    # ``[create_templates.system_services]`` template's ``label = [...]``,
+    # so they no longer appear inline.
+    assert "is_primary=true" not in joined
+    assert "user_created=true" not in joined
+    # ``workspace=<workspace_name>`` is still inline so existing CEL filters
+    # like ``has(agent.labels.workspace)`` keep matching.
+    assert "workspace=hello" in joined
     assert api_key
     # minds no longer pre-generates an agent id; mngr generates one and we
     # parse it out of the JSONL ``created`` event in run_mngr_create.
@@ -158,15 +169,16 @@ def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() ->
 def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> None:
     command, api_key = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
-        agent_name=AgentName("hello"),
+        workspace_name=AgentName("hello"),
         imbue_cloud_account="alice@imbue.com",
         imbue_cloud_repo_url="https://github.com/imbue-ai/forever-claude-template",
         imbue_cloud_branch_or_tag="v1.2.3",
     )
     joined = " ".join(command)
     # Address points at the imbue_cloud_<slug> provider so mngr routes
-    # create_host to ImbueCloudProvider.
-    assert "@hello-host.imbue_cloud_alice-imbue-com" in joined
+    # create_host to ImbueCloudProvider. Agent name is ``system-services``;
+    # the user-chosen workspace name is the host component.
+    assert "system-services@hello.imbue_cloud_alice-imbue-com" in joined
     # IMBUE_CLOUD does not pass --reuse / --update (each lease is one-shot)
     # nor --id (the canonical id is parsed from the JSONL ``created`` event).
     assert "--id" not in command
@@ -184,13 +196,11 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     assert "ANTHROPIC_BASE_URL" not in joined
     assert "GH_TOKEN" not in joined
     assert "--pass-host-env" not in command
-    # IMBUE_CLOUD now uses the symmetric ``--template main --template imbue_cloud``
-    # shape (mirroring how LOCAL/LIMA/CLOUD use ``--template main --template <provider>``).
-    # The provider-specific knobs (idle_mode, pass_host_env) live in the
-    # ``imbue_cloud`` template instead of being inlined here.
+    # IMBUE_CLOUD uses the symmetric ``--template system_services --template imbue_cloud`` shape
+    # (mirroring how LOCAL/LIMA/CLOUD use ``--template system_services --template <provider>``).
     assert "--template" in command
     template_args = [command[i + 1] for i, arg in enumerate(command) if arg == "--template" and i + 1 < len(command)]
-    assert "main" in template_args
+    assert "system_services" in template_args
     assert "imbue_cloud" in template_args
     # ``--idle-mode disabled`` also moved into the template.
     assert "--idle-mode" not in command
@@ -208,7 +218,7 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
     ):
         command, _ = _build_mngr_create_command(
             launch_mode=mode,
-            agent_name=AgentName("hello"),
+            workspace_name=AgentName("hello"),
             imbue_cloud_account=account,
         )
         joined = " ".join(command)

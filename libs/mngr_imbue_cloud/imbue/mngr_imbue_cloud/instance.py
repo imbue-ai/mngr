@@ -1,12 +1,18 @@
-"""ImbueCloudProvider: discover, destroy, delete leased pool hosts.
+"""ImbueCloudProvider: lease, discover, destroy, delete leased pool hosts.
 
-Lease creation is intentionally NOT done as part of `mngr create --provider
-imbue_cloud_<account>`. Users go through `mngr imbue_cloud claim` (which is
-the analogue of today's minds LEASED flow consolidated into the plugin).
-That command produces a lease, registers the host with the connector, and
-runs the rename + label + env-injection sequence in 2 SSH round trips.
+Lease creation runs inline as part of `mngr create --provider
+imbue_cloud_<account> --new-host` (see ``create_host`` below): the provider
+calls the connector's /hosts/lease endpoint with the user-chosen workspace
+name as ``host_name``, waits for the leased container's sshd, and returns
+an ``ImbueCloudHost`` that the rest of mngr's create pipeline adopts the
+pre-baked agent on. The agent itself is kept verbatim from the bake -- no
+rename, no label patching, no env-injection round-trip. ``mngr imbue_cloud
+claim`` is still available as an out-of-band claim flow for callers that
+don't want the inline lease.
 
-This provider's responsibilities are then:
+This provider's responsibilities are:
+- `create_host` -- lease a pool host that matches the requested attributes.
+- `rename_host` -- update the user-facing ``host_name`` on the lease.
 - `discover_hosts` -- list this account's leased hosts via the connector.
 - `get_host` -- build a Host pointing at the leased VPS:container_ssh_port.
 - `destroy_host` -- stop the docker container on the VPS via SSH; lease and
@@ -100,10 +106,41 @@ _SSH_WAIT_TIMEOUT_SECONDS: Final[float] = 120.0
 
 
 def _certified_host_name(raw: Mapping[str, Any]) -> str | None:
-    """Pull the friendly host name out of the listing raw output, if present."""
+    """Pull the friendly host name out of the listing raw output, if present.
+
+    Returns the ``certified_data.host_name`` written by the agent into its
+    on-host ``data.json`` (older bake). Used as a middle-priority fallback
+    in :func:`_resolve_lease_host_name`: ``lease.host_name`` wins when set,
+    this function's return value is next, and ``lease.host_id`` is the
+    last resort.
+    """
     certified = raw.get("certified_data") or {}
     name = certified.get("host_name")
     return name if isinstance(name, str) and name else None
+
+
+def _resolve_lease_host_name(lease: LeasedHostInfo, raw: Mapping[str, Any] | None = None) -> str:
+    """Pick the best display name for a leased host.
+
+    Single source of truth for the discovery precedence:
+
+    1. ``lease.host_name`` -- the user-facing name set on the lease row.
+       New leases always have this populated (the connector enforces
+       non-empty); pre-migration legacy rows received a random
+       ``workspace-<hex>`` backfill.
+    2. ``certified_data.host_name`` from the on-host ``data.json`` --
+       only consulted when ``raw`` is provided (i.e. an outer-SSH listing
+       reached the container) and the lease's own ``host_name`` is empty.
+    3. ``lease.host_id`` -- last-resort placeholder so we never produce
+       an empty ``HostName``.
+    """
+    if lease.host_name:
+        return lease.host_name
+    if raw is not None:
+        certified = _certified_host_name(raw)
+        if certified is not None:
+            return certified
+    return lease.host_id
 
 
 def _derive_host_state_from_raw(raw: Mapping[str, Any]) -> HostState:
@@ -356,7 +393,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         return [
             DiscoveredHost(
                 host_id=HostId(entry.host_id),
-                host_name=HostName(entry.host_id),
+                host_name=HostName(_resolve_lease_host_name(entry)),
                 provider_name=self.name,
                 host_state=HostState.RUNNING,
             )
@@ -400,7 +437,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 fallback_state = HostState.UNAUTHENTICATED if is_auth_failure else HostState.CRASHED
                 host_ref = DiscoveredHost(
                     host_id=host_id,
-                    host_name=HostName(entry.host_id),
+                    host_name=HostName(_resolve_lease_host_name(entry)),
                     provider_name=self.name,
                     host_state=fallback_state,
                 )
@@ -424,9 +461,14 @@ class ImbueCloudProvider(BaseProviderInstance):
             host_state = _derive_host_state_from_raw(raw)
             if host_state == HostState.DESTROYED and not include_destroyed:
                 continue
+            # Prefer the lease's authoritative ``host_name`` (set by the
+            # user at create time and rewritten on rename); fall back to
+            # the certified data on the host for older bakes that didn't
+            # have a connector-side name yet. See
+            # :func:`_resolve_lease_host_name` for the full precedence.
             host_ref = DiscoveredHost(
                 host_id=host_id,
-                host_name=HostName(_certified_host_name(raw) or entry.host_id),
+                host_name=HostName(_resolve_lease_host_name(entry, raw)),
                 provider_name=self.name,
                 host_state=host_state,
             )
@@ -672,9 +714,12 @@ class ImbueCloudProvider(BaseProviderInstance):
         # baked at provision time. It carries name, image, idle settings,
         # tags, plugin state, etc. -- richer than what the lease object
         # alone tells us. Fall back to lease-level defaults when the
-        # remote read produced an empty dict.
+        # remote read produced an empty dict. The lease's own
+        # ``host_name`` wins over the certified-data fallback because
+        # the user can rename the host after the bake's data.json was
+        # written (see :func:`_resolve_lease_host_name`).
         certified = raw.get("certified_data") or {}
-        host_name_str = certified.get("host_name") or lease.host_id
+        host_name_str = _resolve_lease_host_name(lease, raw)
         image = certified.get("image", "")
         tags = dict(certified.get("user_tags", {}))
         plugin = dict(certified.get("plugin", {}))
@@ -810,7 +855,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         connector = PyinfraConnector(pyinfra_host)
         host = ImbueCloudHost(
             id=host_id,
-            host_name=HostName(lease.host_id),
+            host_name=HostName(_resolve_lease_host_name(lease)),
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -846,7 +891,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         now = datetime.now(timezone.utc)
         certified_host_data = CertifiedHostData(
             host_id=str(host_id),
-            host_name=lease.host_id,
+            host_name=_resolve_lease_host_name(lease),
             created_at=now,
             updated_at=now,
         )
@@ -900,10 +945,16 @@ class ImbueCloudProvider(BaseProviderInstance):
         ``account`` is extracted from ``build_args``; remaining keys are
         parsed into ``LeaseAttributes`` and sent to the connector, which
         finds an available pool host whose ``attributes`` JSONB row
-        matches. The returned ``ImbueCloudHost`` carries the pre-baked
-        agent id so the rest of mngr's create pipeline (agent state, env
-        injection, agent start) can adopt the existing agent under the
-        caller's chosen name.
+        matches. The caller-supplied ``name`` is forwarded to the
+        connector as the lease's ``host_name`` so the user-facing
+        workspace name is stamped onto the lease row authoritatively.
+        The returned ``ImbueCloudHost`` carries the pre-baked agent id
+        so the rest of mngr's create pipeline (agent state, env
+        injection, agent start) adopts the pool's pre-baked agent
+        *verbatim* -- its baked name (``system-services``) and command
+        are kept, only the caller's ``--label`` flags are merged in on
+        top of the bake's defaults. The canonical agent id stays the
+        bake's id rather than being regenerated.
         """
         if snapshot is not None:
             raise SnapshotsNotSupportedError(self.name)
@@ -931,7 +982,14 @@ class ImbueCloudProvider(BaseProviderInstance):
         tmp_private_key, tmp_public_key = save_ssh_keypair(tmp_key_dir, "ssh_key")
         public_key_text = tmp_public_key.read_text().strip()
 
-        lease_result = self.client.lease_host(token, attributes, public_key_text)
+        # ``name`` is the mngr ``HostName`` the caller passed in (e.g. the
+        # user's chosen workspace name from the minds UI). We forward it as
+        # the connector's ``host_name`` so the lease row stores it
+        # authoritatively -- the older flow of "lease, then rename the
+        # adopted agent" is gone. A 409 propagates back up to the caller
+        # as ``ImbueCloudHostNameConflictError`` so the UI can prompt the
+        # user to pick a different name.
+        lease_result = self.client.lease_host(token, attributes, public_key_text, host_name=str(name))
         self.reset_caches()
 
         host_id = HostId(lease_result.host_id)
@@ -983,6 +1041,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             container_ssh_port=lease_result.container_ssh_port,
             agent_id=lease_result.agent_id,
             host_id=lease_result.host_id,
+            host_name=lease_result.host_name,
             attributes=lease_result.attributes,
             leased_at="",
         )
@@ -1212,7 +1271,9 @@ class ImbueCloudProvider(BaseProviderInstance):
             outer.disconnect()
 
     # ------------------------------------------------------------------
-    # Snapshots / volumes / tags / rename: not supported
+    # Snapshots / volumes / tags: not supported. Rename IS supported
+    # (see rename_host below), since the connector owns the lease's
+    # ``host_name`` and exposes a PATCH endpoint for it.
     # ------------------------------------------------------------------
 
     def create_snapshot(
@@ -1273,7 +1334,26 @@ class ImbueCloudProvider(BaseProviderInstance):
         host: HostInterface | HostId,
         name: HostName,
     ) -> Host:
-        raise NotImplementedError("imbue_cloud does not support renaming hosts (the host_id is fixed by the lease)")
+        """Update the user-facing name on the lease, then return a fresh Host.
+
+        The connector owns the canonical ``host_name``; we PATCH the lease
+        row and reset our cache so the next discovery sees the new name.
+        The mngr ``HostId`` itself never changes -- only the friendly
+        ``HostName`` rendered in `mngr list` and used as the address
+        component on subsequent CLI invocations.
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        leased = self._find_leased(host_id)
+        if leased is None:
+            raise HostNotFoundError(host_id)
+        account = self._require_account()
+        token = self._get_access_token(account)
+        self.client.rename_host(token, leased.host_db_id, str(name))
+        self.reset_caches()
+        refreshed = self._find_leased(host_id)
+        if refreshed is None:
+            raise HostNotFoundError(host_id)
+        return self._build_host_object(refreshed)
 
     # ------------------------------------------------------------------
     # pyinfra connector lookup

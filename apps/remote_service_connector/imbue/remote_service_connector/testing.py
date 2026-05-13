@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 from uuid import UUID
 
+import psycopg2
 import pytest
 from supertokens_python.recipe.emailpassword.interfaces import ConsumePasswordResetTokenOkResult
 from supertokens_python.recipe.emailpassword.interfaces import EmailAlreadyExistsError
@@ -763,6 +764,7 @@ class FakePoolRow:
     vps_instance_id: str
     agent_id: str
     host_id_str: str
+    host_name: str | None
     ssh_port: int
     ssh_user: str
     container_ssh_port: int
@@ -808,6 +810,7 @@ def _make_pool_row(
     status: str = "available",
     leased_to_user: str | None = None,
     leased_at: str | None = None,
+    host_name: str | None = None,
 ) -> FakePoolRow:
     row = FakePoolRow()
     row.host_id = host_id
@@ -815,6 +818,7 @@ def _make_pool_row(
     row.vps_instance_id = f"vps-{host_id}"
     row.agent_id = agent_id
     row.host_id_str = host_id_str
+    row.host_name = host_name
     row.ssh_port = ssh_port
     row.ssh_user = ssh_user
     row.container_ssh_port = container_ssh_port
@@ -839,7 +843,29 @@ class FakeCursor:
         self._result_idx = 0
         query_lower = query.strip().lower()
 
-        if "from pool_hosts" in query_lower and "status = 'available'" in query_lower:
+        if "select 1 from pool_hosts" in query_lower and "host_name = %s" in query_lower:
+            # Duplicate-name check fired before lease (and during rename).
+            # The rename variant also has ``id <> %s``; both paths key on
+            # (leased_to_user, host_name, optional excluded id).
+            if "id <> %s" in query_lower:
+                username, requested_name, excluded_id_raw = params
+                excluded_id = UUID(excluded_id_raw) if isinstance(excluded_id_raw, str) else excluded_id_raw
+            else:
+                username, requested_name = params
+                excluded_id = None
+            for row in self._backend.pool_rows:
+                if row.status != "leased":
+                    continue
+                if row.leased_to_user != username:
+                    continue
+                if row.host_name != requested_name:
+                    continue
+                if excluded_id is not None and row.host_id == excluded_id:
+                    continue
+                self._results = [(1,)]
+                break
+
+        elif "from pool_hosts" in query_lower and "status = 'available'" in query_lower:
             # The connector serialises the request attributes via json.dumps
             # before passing them to the SQL bind parameter, so we always get
             # a JSON string here.
@@ -866,26 +892,48 @@ class FakeCursor:
                 break
 
         elif "update pool_hosts set status = 'leased'" in query_lower:
-            username, host_id = params
+            if self._backend.raise_unique_violation_on_lease_update:
+                # Simulate the race-loser hitting the partial unique index from
+                # migration 002 (``pool_hosts_host_name_per_user_uniq``).
+                raise psycopg2.errors.UniqueViolation(
+                    'duplicate key value violates unique constraint "pool_hosts_host_name_per_user_uniq"'
+                )
+            username, host_name, host_id = params
             for row in self._backend.pool_rows:
                 if row.host_id == host_id:
                     row.status = "leased"
                     row.leased_to_user = username
+                    row.host_name = host_name
                     row.leased_at = "2026-01-01T00:00:00+00:00"
+                    break
+
+        elif "update pool_hosts set host_name = %s" in query_lower:
+            if self._backend.raise_unique_violation_on_rename_update:
+                raise psycopg2.errors.UniqueViolation(
+                    'duplicate key value violates unique constraint "pool_hosts_host_name_per_user_uniq"'
+                )
+            new_name_raw, raw_host_id = params
+            host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
+            for row in self._backend.pool_rows:
+                if row.host_id == host_id:
+                    row.host_name = new_name_raw
                     break
 
         elif (
             "from pool_hosts" in query_lower and "status = 'leased'" in query_lower and "leased_to_user" in query_lower
         ):
             if "select leased_to_user" in query_lower:
-                # Release endpoint: lookup by id. The connector stringifies
+                # Release / rename endpoint: lookup by id. The connector stringifies
                 # the UUID before passing it as a bind param (psycopg2 can't
                 # adapt Python ``UUID`` directly), so accept either form.
                 raw_host_id = params[0]
                 host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
                 for row in self._backend.pool_rows:
                     if row.host_id == host_id and row.status == "leased":
-                        self._results = [(row.leased_to_user,)]
+                        if "host_name" in query_lower:
+                            self._results = [(row.leased_to_user, row.host_name)]
+                        else:
+                            self._results = [(row.leased_to_user,)]
                         break
             else:
                 # List endpoint: lookup by user
@@ -901,6 +949,7 @@ class FakeCursor:
                                 row.container_ssh_port,
                                 row.agent_id,
                                 row.host_id_str,
+                                row.host_name,
                                 _row_attributes(row),
                                 row.leased_at,
                             )
@@ -972,6 +1021,12 @@ class FakePoolBackend:
 
     pool_rows: list[FakePoolRow]
     append_key_calls: list[tuple[str, int, str, str, str]]
+    # Toggles that simulate the partial unique index from migration 002
+    # firing on a concurrent lease / rename. Used by tests to exercise the
+    # endpoint's race-loser path without actually running concurrent
+    # transactions.
+    raise_unique_violation_on_lease_update: bool
+    raise_unique_violation_on_rename_update: bool
 
     def install_on_app_module(self, app_mod: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         """Swap DB and SSH functions on the app module with fakes.
@@ -1009,8 +1064,17 @@ class FakePoolBackend:
         container_ssh_port: int = 2222,
         agent_id: str = "agent-abc123",
         host_id_str: str = "host-xyz",
+        host_name: str = "pool-fake-stage",
     ) -> FakePoolRow:
-        """Add an available host to the in-memory pool."""
+        """Add an available host to the in-memory pool.
+
+        In production, available rows carry the bake-time ``host_name``
+        slug (e.g. ``pool-<uuid>-stage``) that the pool baker inserts;
+        the lease endpoint overwrites it with the caller's chosen
+        workspace name at lease time. The fixture mirrors that by
+        defaulting ``host_name`` to a plausible bake-time slug so the
+        column is populated the way migration 002 requires.
+        """
         row = _make_pool_row(
             host_id=host_id,
             vps_ip=vps_ip,
@@ -1020,6 +1084,7 @@ class FakePoolBackend:
             ssh_user=ssh_user,
             container_ssh_port=container_ssh_port,
             version=version,
+            host_name=host_name,
         )
         self.pool_rows.append(row)
         return row
@@ -1035,6 +1100,7 @@ class FakePoolBackend:
         container_ssh_port: int = 2222,
         agent_id: str = "agent-abc123",
         host_id_str: str = "host-xyz",
+        host_name: str = "workspace-fake",
     ) -> FakePoolRow:
         """Add a leased host to the in-memory pool."""
         row = _make_pool_row(
@@ -1049,6 +1115,7 @@ class FakePoolBackend:
             status="leased",
             leased_to_user=leased_to_user,
             leased_at="2026-01-01T00:00:00+00:00",
+            host_name=host_name,
         )
         self.pool_rows.append(row)
         return row
@@ -1059,4 +1126,6 @@ def make_fake_pool_backend() -> FakePoolBackend:
     backend = FakePoolBackend()
     backend.pool_rows = []
     backend.append_key_calls = []
+    backend.raise_unique_violation_on_lease_update = False
+    backend.raise_unique_violation_on_rename_update = False
     return backend

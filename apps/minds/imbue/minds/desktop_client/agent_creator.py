@@ -129,7 +129,12 @@ class AgentCreationInfo(FrozenModel):
 
 
 def extract_repo_name(git_url: str) -> str:
-    """Extract a short name from a git URL or path for use as agent name.
+    """Extract a short name from a git URL or path for use as the workspace / host name.
+
+    The returned value becomes the mngr ``HostName`` (and, for imbue_cloud,
+    the connector lease's ``host_name``) when the user didn't type a
+    workspace name in the create form. The created agent itself is always
+    named ``system-services`` and never derived from the repo.
 
     Strips .git suffix and trailing slashes, then takes the last path component.
     Non-alphanumeric characters (except hyphens and underscores) are replaced
@@ -337,17 +342,12 @@ def _rsync_worktree_over_clone(
         )
 
 
-def _make_host_name(agent_name: AgentName) -> str:
-    """Build the host name for an agent.
-
-    Uses ``{agent_name}-host`` so it is obvious why the host was created.
-    """
-    return f"{agent_name}-host"
+_SYSTEM_SERVICES_AGENT_NAME: Final[AgentName] = AgentName("system-services")
 
 
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
-    agent_name: AgentName,
+    workspace_name: AgentName,
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
@@ -363,20 +363,32 @@ def _build_mngr_create_command(
     host's pre-baked id anyway, and pre-generating one led to bugs (e.g.
     keying gateway state under a fictional id).
 
-    LOCAL mode: --template main --template docker (runs in Docker container)
-    LIMA mode: --template main --template lima (runs in Lima VM)
-    CLOUD mode: --template main --template vultr (runs in Docker on a Vultr VPS)
-    IMBUE_CLOUD mode: --new-host on the imbue_cloud_<slug> provider (the
-        plugin's create_host adopts the pool's pre-baked agent under
-        ``agent_name``); ``imbue_cloud_*`` arguments encode the lease
-        attributes (--build-arg).
+    The agent name is always ``system-services`` -- the user-chosen
+    workspace name applies only to the *host*. For LOCAL/LIMA/CLOUD modes
+    the host name is passed directly via the ``@<workspace_name>.<provider>``
+    address (no ``-host`` suffix). For IMBUE_CLOUD the host name is also
+    on the address; the provider's ``create_host`` forwards it to the
+    connector as the lease's ``host_name``.
 
-    Every mode creates a separate host, so the agent address uses
-    ``agent_name@{agent_name}-host`` so hosts are clearly attributable.
+    LOCAL mode: --template system_services --template docker (runs in Docker container)
+    LIMA mode: --template system_services --template lima (runs in Lima VM)
+    CLOUD mode: --template system_services --template vultr (runs in Docker on a Vultr VPS)
+    IMBUE_CLOUD mode: --new-host on the imbue_cloud_<slug> provider (the
+        plugin's create_host adopts the pool's pre-baked agent as-is, with
+        the bake's own name `system-services`); ``imbue_cloud_*`` arguments
+        encode the lease attributes (--build-arg).
+
     ``--reuse`` and ``--update`` are passed for the non-IMBUE_CLOUD modes
     so re-deploying resets the agent on the same host instead of failing
     on a duplicate name (IMBUE_CLOUD's lease flow is one-shot per pool
     host, so reuse is not meaningful there).
+
+    The ``workspace=<name>`` label is *still* passed inline so the desktop
+    client's CEL filters keep finding the agent; the ``is_primary=true`` /
+    ``user_created=true`` labels are now declared on the FCT template
+    instead of inline. The `/welcome` initial message is no longer
+    injected here either -- bootstrap creates the assistant chat agent
+    on first run with its own `/welcome`.
 
     Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``, ``GH_TOKEN``)
     are forwarded by the FCT template's own ``pass_(host_)env`` declarations,
@@ -387,33 +399,38 @@ def _build_mngr_create_command(
 
     ``latchkey_env`` is the latchkey wiring (gateway URL, password, JWT,
     disable-counting flag) computed by
-    :func:`imbue.mngr_latchkey.agent_setup.prepare_agent_latchkey`. The
-    caller decides whether the agent is tunneled (constant agent-side
-    loopback URL) or running on the bare host (live gateway port);
-    this function just lifts the entries into ``--host-env`` flags so
-    every agent that ever runs on the new host inherits the same
-    gateway wiring. Pass ``None`` or an empty dict to opt the host out
-    of latchkey wiring.
+    :func:`imbue.mngr_latchkey.agent_setup.prepare_agent_latchkey`.
+
+    Note on the ``workspace_name: AgentName`` type: the minds-internal
+    ``AgentName`` is a ``NonEmptyStr`` representing "user-typed name from
+    the create form". Historically that was the agent name; after the
+    primary-chat removal it is the host name. We keep the type label
+    rather than introduce a new minds primitive to avoid churn in the
+    callers that thread the value through. See
+    :class:`imbue.minds.primitives.AgentName` for the full story.
     """
+    agent_name = _SYSTEM_SERVICES_AGENT_NAME
+    # The user-supplied workspace name *is* the host name -- no transformation
+    # is applied. The host's name also lands on the imbue_cloud lease as
+    # ``host_name`` so it shows up identically across mngr / the connector / the UI.
+    host_name = str(workspace_name)
     match launch_mode:
         case LaunchMode.LOCAL:
-            address = f"{agent_name}@{_make_host_name(agent_name)}.docker"
+            address = f"{agent_name}@{host_name}.docker"
         case LaunchMode.LIMA:
-            address = f"{agent_name}@{_make_host_name(agent_name)}.lima"
+            address = f"{agent_name}@{host_name}.lima"
         case LaunchMode.CLOUD:
-            address = f"{agent_name}@{_make_host_name(agent_name)}.vultr"
+            address = f"{agent_name}@{host_name}.vultr"
         case LaunchMode.IMBUE_CLOUD:
             if not imbue_cloud_account:
                 raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_account")
             slug = _slugify_account(imbue_cloud_account)
-            address = f"{agent_name}@{_make_host_name(agent_name)}.imbue_cloud_{slug}"
+            address = f"{agent_name}@{host_name}.imbue_cloud_{slug}"
         case _ as unreachable:
             assert_never(unreachable)
 
     api_key = generate_api_key()
 
-    # The `/welcome` initial message is now baked into the FCT template's
-    # [create_templates.main] section, so we no longer pass `--message` here.
     # ``--format jsonl`` makes mngr emit ``{"event": "created", "agent_id": ..., "host_id": ...}``
     # as the final stdout line; ``run_mngr_create`` parses that to recover
     # the canonical agent id (and the canonical host id, used to swing
@@ -433,15 +450,17 @@ def _build_mngr_create_command(
         "--no-connect",
         "--format",
         "jsonl",
+        # ``workspace=<workspace_name>`` lives on the agent (in addition to
+        # the host) so existing CEL filters like
+        # ``has(agent.labels.workspace) && has(agent.labels.is_primary)``
+        # keep matching. ``is_primary=true`` / ``user_created=true`` come
+        # from the FCT [create_templates.system_services] template's
+        # ``label = [...]`` declaration, not from inline flags.
         "--label",
-        f"workspace={agent_name}",
+        f"workspace={workspace_name}",
         "--env",
         f"MINDS_API_KEY={api_key}",
-        "--label",
-        "user_created=true",
         *latchkey_host_env_args,
-        "--label",
-        "is_primary=true",
     ]
 
     match launch_mode:
@@ -454,27 +473,22 @@ def _build_mngr_create_command(
             mngr_command.extend(["--reuse", "--update"])
 
     # Per-mode template + per-mode runtime flags. All modes use
-    # ``--template main --template <mode>``; the per-mode template provides
-    # the provider-specific knobs (idle_mode, pass_host_env, build_arg, ...)
-    # while runtime-only knobs that vary per-invocation (``--new-host``,
-    # ``-b lease_attributes``) stay inline.
+    # ``--template system_services --template <mode>``; the per-mode template
+    # provides the provider-specific knobs (idle_mode, pass_host_env,
+    # build_arg, ...) while runtime-only knobs that vary per-invocation
+    # (``--new-host``, ``-b lease_attributes``) stay inline.
     match launch_mode:
         case LaunchMode.LOCAL:
-            mngr_command.extend(["--new-host", "--template", "main", "--template", "docker"])
+            mngr_command.extend(["--new-host", "--template", "system_services", "--template", "docker"])
             mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.LIMA:
-            mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
+            mngr_command.extend(["--new-host", "--template", "system_services", "--template", "lima"])
             mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.CLOUD:
-            mngr_command.extend(["--new-host", "--template", "main", "--template", "vultr"])
+            mngr_command.extend(["--new-host", "--template", "system_services", "--template", "vultr"])
             mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.IMBUE_CLOUD:
-            # imbue_cloud follows the same shape as the other modes: the
-            # ``main`` + ``imbue_cloud`` templates set ``idle_mode = disabled``
-            # + ``pass_host_env`` for the LiteLLM creds, and the runtime-only
-            # lease-attribute ``-b`` flags stay inline because they vary per
-            # invocation.
-            mngr_command.extend(["--new-host", "--template", "main", "--template", "imbue_cloud"])
+            mngr_command.extend(["--new-host", "--template", "system_services", "--template", "imbue_cloud"])
             if imbue_cloud_repo_url:
                 mngr_command.extend(["-b", f"repo_url={imbue_cloud_repo_url}"])
             if imbue_cloud_branch_or_tag:
@@ -619,7 +633,7 @@ class _CreateEventCapture(MutableModel):
 def run_mngr_create(
     launch_mode: LaunchMode,
     workspace_dir: Path | None,
-    agent_name: AgentName,
+    workspace_name: AgentName,
     on_output: OutputCallback | None = None,
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
@@ -632,6 +646,12 @@ def run_mngr_create(
     parent_cg: ConcurrencyGroup | None = None,
 ) -> tuple[str, AgentId, HostId]:
     """Create an mngr agent via ``mngr create --format jsonl``.
+
+    ``workspace_name`` is the user-chosen workspace name -- it becomes the
+    mngr ``HostName`` (and, for imbue_cloud, the connector's lease
+    ``host_name``) but is never the agent name. The created agent itself
+    is always named ``system-services`` (the bootstrap-only system agent
+    that runs every minds workspace).
 
     The repo's own ``.mngr/settings.toml`` defines agent types, templates,
     environment variables, and all other configuration. ``workspace_dir`` is
@@ -656,7 +676,7 @@ def run_mngr_create(
     """
     mngr_command, api_key = _build_mngr_create_command(
         launch_mode,
-        agent_name,
+        workspace_name,
         imbue_cloud_account=imbue_cloud_account,
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
@@ -743,8 +763,10 @@ class AgentCreator(MutableModel):
         description=(
             "Wrapper around `mngr imbue_cloud …`. Used by IMBUE_CLOUD-mode creations to mint "
             "a LiteLLM virtual key before the standard ``mngr create`` invocation, and by "
-            "destruction to release the lease. The lease + SSH bootstrap + agent rename "
-            "themselves run inside the plugin's ``ImbueCloudProvider.create_host``, so minds "
+            "destruction to release the lease. The lease + SSH bootstrap themselves run "
+            "inside the plugin's ``ImbueCloudProvider.create_host``, which forwards the "
+            "user-chosen workspace name to the connector as the lease's ``host_name`` "
+            "(the pre-baked agent itself is adopted verbatim, never renamed), so minds "
             "no longer maintains its own SuperTokens session, host pool, or LiteLLM key code. "
             "Other launch modes do not consult this client."
         ),
@@ -863,9 +885,11 @@ class AgentCreator(MutableModel):
         via the ``imbue_cloud_<account-slug>`` provider; the plugin's
         ``ImbueCloudProvider.create_host`` runs the lease + SSH bootstrap
         and the rest of mngr's create pipeline adopts the pool host's
-        pre-baked agent under the requested name. The plugin owns the
-        SuperTokens session, so minds only needs to know which account to
-        ask for.
+        pre-baked agent *verbatim* (always named ``system-services`` -- the
+        agent is no longer renamed at adoption time). The user-supplied
+        workspace name lands on the *host* (as the connector lease's
+        ``host_name``), not on the agent. The plugin owns the SuperTokens
+        session, so minds only needs to know which account to ask for.
 
         When ``on_created`` is provided, it is called with the canonical
         ``AgentId`` once ``mngr create`` returns (immediately before the
@@ -1126,12 +1150,12 @@ class AgentCreator(MutableModel):
                 # re-creating the agent.
                 latchkey_setup = self._prepare_latchkey_or_warn(log_queue)
 
-                parsed_name = AgentName(agent_name)
-                log_queue.put("[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value))
+                parsed_workspace_name = AgentName(agent_name)
+                log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(agent_name, launch_mode.value))
                 api_key, canonical_id, canonical_host_id = run_mngr_create(
                     launch_mode=launch_mode,
                     workspace_dir=workspace_dir,
-                    agent_name=parsed_name,
+                    workspace_name=parsed_workspace_name,
                     on_output=emit_log,
                     latchkey_env=latchkey_setup.env,
                     imbue_cloud_account=account_email if launch_mode is LaunchMode.IMBUE_CLOUD else None,

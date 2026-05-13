@@ -2,21 +2,31 @@
 
 Subclasses mngr's ``Host`` so the standard ``mngr create --provider
 imbue_cloud_<account> --new-host`` pipeline can adopt a pool host's
-pre-baked agent under the caller's chosen name when one exists, and
-fall back to mngr's standard create flow when it doesn't (e.g. after
-``mngr destroy`` has wiped the previous agent's state on the leased
-container). Adoption is purely an optimization that skips a slow
-file-transfer + provisioning round when we can.
+pre-baked agent verbatim when one exists, and fall back to mngr's
+standard create flow when it doesn't (e.g. after ``mngr destroy`` has
+wiped the previous agent's state on the leased container). Adoption is
+purely an optimization that skips a slow file-transfer + provisioning
+round when we can.
+
+The user-facing workspace name lives on the *host* (set on the lease
+record via the connector's ``host_name`` field, surfaced through
+``HostName``), not on the agent. The pre-baked agent's name and command
+are kept verbatim from the bake (today's bake produces a system-services
+agent that is never renamed). Labels are merged: bake-supplied defaults
+(e.g. ``is_primary=true``) plus the caller's ``--label`` flags (e.g.
+``workspace=<workspace_name>``), with the caller winning on key
+collisions.
 
 Overrides:
 
 - ``set_env_vars`` always merges into the pre-baked ``/mngr/env``
   (clobbering would lose ``MNGR_HOST_DIR``/``MNGR_PREFIX``/etc. that
   the pool baking wrote).
-- ``create_agent_state`` always pins ``options.agent_id`` to
-  ``pre_baked_agent_id`` so the lease's canonical id stays stable
-  across destroy/recreate cycles, regardless of whether on-disk state
-  survives. The parent's ``data.json`` write then runs as usual.
+- ``create_agent_state`` adopts the pre-baked agent's ``data.json``
+  but merges caller-supplied labels (and persists ``created_branch_name``
+  when supplied) when it exists; otherwise pins ``options.agent_id``
+  to ``pre_baked_agent_id`` and delegates to ``super()`` so the
+  lease's canonical id stays stable across destroy/recreate cycles.
 - ``create_agent_work_dir`` and ``provision_agent`` short-circuit to a
   no-transfer + minimal-provision path *only* when the pre-baked
   agent's ``data.json`` is still on disk; otherwise they delegate to
@@ -63,8 +73,13 @@ def _parse_create_time(value: Any) -> datetime:
 class ImbueCloudHost(Host):
     """A leased pool host.
 
-    The pre-baked agent's id is captured at lease time so ``create_agent_state``
-    can adopt that agent under the caller's name instead of generating a new id.
+    The pre-baked agent's id is captured at lease time so
+    ``create_agent_state`` can adopt the bake's agent verbatim (its name
+    ``system-services`` and command are kept; caller-supplied ``--label``
+    flags are merged on top of the bake's defaults) and so the canonical
+    agent id stays the bake's id rather than being regenerated. The
+    user-facing workspace name lives on the *host* (via the lease's
+    ``host_name`` field), not on the agent.
     """
 
     pre_baked_agent_id: AgentId | None = Field(
@@ -143,27 +158,33 @@ class ImbueCloudHost(Host):
         options: CreateAgentOptions,
         created_branch_name: str | None = None,
     ) -> AgentInterface:
-        """Adopt the pre-baked agent's state instead of writing a fresh ``data.json``.
+        """Adopt the pre-baked agent's state, merging in caller-supplied labels.
 
         When ``pre_baked_agent_id`` is set (i.e. this is the leased-pool-host
         path), we *load* the existing ``data.json`` from the host -- which the
-        bake wrote with ``--template main --template vultr`` and therefore
-        already contains the ``additional_commands`` that start
-        ``minds-workspace-server``, ``cloudflared``, etc. -- and patch only
-        the minds-driven fields in place: ``name``, ``labels.workspace``,
-        and ``command`` (regenerated via ``assemble_command`` so the embedded
-        ``<MNGR_PREFIX><name>`` tmux session reference matches the new name).
-        Everything else (``additional_commands``, ``create_time``, ``work_dir``,
-        ``agent_type``, the agent UUID baked into the ``--session-id``
-        fallback) is preserved verbatim from the bake.
+        bake wrote with ``--template system_services --template vultr`` and
+        therefore already contains the right ``name`` (always
+        ``system-services``), ``command`` (``uv run bootstrap``), and
+        ``additional_commands`` -- and return an agent object that mirrors
+        it. The user-facing workspace name now lives on the *host* (via the
+        lease's ``host_name`` field), not on the agent, so we do **not**
+        rewrite ``name`` / ``command`` / ``additional_commands``.
 
-        The previous version of this method just pinned ``options.agent_id``
-        and called ``super().create_agent_state``, which unconditionally
-        wrote a brand-new ``data.json`` from ``CreateAgentOptions``. For the
-        adopt path that clobbered the bake's ``additional_commands`` (so
-        the workspace server never started on lease) and was incompatible
-        with minds' newer "don't pre-generate an agent id" model anyway
-        (``options.agent_id`` is now always ``None`` from the minds side).
+        Two fields *are* patched when the caller supplies new values:
+
+        - ``labels``: the bake's template-supplied defaults (e.g.
+          ``is_primary=true``, ``user_created=true``) are merged with
+          ``options.label_options.labels`` (caller-supplied wins on key
+          collisions). This is required because the minds desktop client
+          passes ``--label workspace=<workspace_name>`` for every launch
+          mode, and the ``mngr forward`` / ``backend_resolver`` CEL filter
+          (``has(agent.labels.workspace) && has(agent.labels.is_primary)``)
+          would otherwise stop matching IMBUE_CLOUD-leased workspaces.
+        - ``created_branch_name``: per-create-cycle state (which branch
+          mngr created for this run), not bake state.
+
+        ``data.json`` is only rewritten when at least one of those fields
+        actually changes, so the no-op fast path stays cheap.
 
         Falls back to ``super()`` when ``pre_baked_agent_id`` is unset or
         the on-disk ``data.json`` is missing -- e.g. after ``mngr destroy``
@@ -188,17 +209,19 @@ class ImbueCloudHost(Host):
             options_with_id = options.model_copy(update={"agent_id": self.pre_baked_agent_id})
             return super().create_agent_state(work_dir_path, options_with_id, created_branch_name)
 
-        # Hydrate the agent class so we can re-run ``assemble_command`` against
-        # the user-supplied name + the bake's UUID-derived session-id fallback.
-        agent_type = AgentTypeName(str(existing.get("type", "claude")))
+        # Hydrate the agent class from the bake's data.json so the rest of
+        # mngr's create pipeline has a real ``AgentInterface`` to call
+        # ``provision_agent`` / ``start_agents`` on. ``name`` / ``command`` /
+        # ``additional_commands`` come straight from the bake.
+        agent_type = AgentTypeName(str(existing.get("type", "command")))
         resolved = resolve_agent_type(agent_type, self.mngr_ctx.config)
         baked_work_dir = Path(str(existing.get("work_dir", str(work_dir_path))))
         create_time = _parse_create_time(existing.get("create_time"))
-        new_name = options.name or AgentName(str(existing["name"]))
+        baked_name = AgentName(str(existing["name"]))
 
         agent = resolved.agent_class(
             id=self.pre_baked_agent_id,
-            name=new_name,
+            name=baked_name,
             agent_type=agent_type,
             work_dir=baked_work_dir,
             create_time=create_time,
@@ -207,41 +230,22 @@ class ImbueCloudHost(Host):
             mngr_ctx=self.mngr_ctx,
             agent_config=resolved.agent_config,
         )
-        new_command = agent.assemble_command(
-            host=self,
-            agent_args=options.agent_args,
-            command_override=options.command,
-            initial_message=options.initial_message,
-        )
 
-        # Merge labels: bake's defaults + minds' user-supplied (latter wins).
-        # Update ``workspace`` to track the new name so the minds UI's "agents
-        # for workspace foo" lookup finds this agent.
-        merged_labels: dict[str, str] = dict(existing.get("labels") or {})
-        merged_labels.update(options.label_options.labels)
-        merged_labels["workspace"] = str(new_name)
-
-        # Build the new data dict by patching the existing one in place. Any
-        # bake-time fields we don't explicitly touch (``additional_commands``,
-        # ``permissions``, ``start_on_boot``, ``initial_message`` /
-        # ``resume_message`` / ``ready_timeout_seconds`` if minds didn't
-        # supply replacements, etc.) survive untouched. ``agent_id`` stays
-        # the bake's pre-baked id by construction.
-        patched: dict[str, Any] = dict(existing)
-        patched["name"] = str(new_name)
-        patched["command"] = str(new_command)
-        patched["labels"] = merged_labels
-        if options.initial_message is not None:
-            patched["initial_message"] = options.initial_message
-        if options.resume_message is not None:
-            patched["resume_message"] = options.resume_message
-        if options.ready_timeout_seconds is not None:
-            patched["ready_timeout_seconds"] = options.ready_timeout_seconds
-        if created_branch_name is not None:
-            patched["created_branch_name"] = created_branch_name
-
-        data_path = self.host_dir / "agents" / str(self.pre_baked_agent_id) / "data.json"
-        self.write_text_file(data_path, _json.dumps(patched, indent=2))
+        # Merge bake defaults with the caller's --label flags. Caller wins
+        # on key collisions so a future ``mngr create --label is_primary=false``
+        # would override the bake's default rather than the other way around.
+        baked_labels: dict[str, str] = dict(existing.get("labels") or {})
+        merged_labels: dict[str, str] = {**baked_labels, **dict(options.label_options.labels)}
+        labels_changed = merged_labels != baked_labels
+        branch_changed = created_branch_name is not None and existing.get("created_branch_name") != created_branch_name
+        if labels_changed or branch_changed:
+            patched: dict[str, Any] = dict(existing)
+            if labels_changed:
+                patched["labels"] = merged_labels
+            if branch_changed:
+                patched["created_branch_name"] = created_branch_name
+            data_path = self.host_dir / "agents" / str(self.pre_baked_agent_id) / "data.json"
+            self.write_text_file(data_path, _json.dumps(patched, indent=2))
         return agent
 
     def provision_agent(
@@ -254,11 +258,15 @@ class ImbueCloudHost(Host):
 
         When the pre-baked agent's ``data.json`` is still on disk, the
         container has all the packages and file transfers the FCT template
-        installed and we only need to (a) write the agent env file (so
-        ``MNGR_AGENT_NAME`` / ``--env`` overrides land) and (b) patch the
-        claude config when ``ANTHROPIC_API_KEY`` is set anywhere in env
-        (the LiteLLM key flows through ``--pass-host-env`` for minds, so
-        we have to look at host env, not just agent env).
+        installed and we only need to write the agent env file so
+        ``MNGR_AGENT_NAME`` / ``--env`` overrides land.
+
+        The pre-baked agent is the system-services bootstrap process (a
+        ``command``-type agent), so there is no per-agent claude config to
+        patch here -- ``ANTHROPIC_API_KEY`` lives on host env and is
+        inherited by the *assistant* chat agent that bootstrap creates from
+        inside the container, where mngr_claude's standard provisioning
+        handles the claude config setup.
 
         When the pre-baked agent state has been wiped (``mngr destroy``
         on a previous lease cycle, etc.), fall through to mngr's standard
@@ -270,132 +278,3 @@ class ImbueCloudHost(Host):
             return
         agent_env = self._collect_agent_env_vars(agent, options)
         self._write_agent_env_file(agent, agent_env)
-        anthropic_api_key = agent_env.get("ANTHROPIC_API_KEY") or self.get_env_vars().get("ANTHROPIC_API_KEY")
-        if anthropic_api_key:
-            patch_command = _build_patch_claude_config_command(anthropic_api_key, agent.id)
-            result = self.execute_idempotent_command(patch_command)
-            if not result.success:
-                raise RuntimeError(f"Failed to patch claude config on imbue_cloud host {self.id}: {result.stderr}")
-
-
-def build_combined_inject_command(
-    agent_id: AgentId,
-    agent_env_path: str,
-    host_env_path: str,
-    minds_api_key: str | None,
-    anthropic_api_key: str | None,
-    anthropic_base_url: str | None,
-    mngr_prefix: str | None,
-    extra_env: Mapping[str, str] | None = None,
-) -> str | None:
-    """Build the single bash command that injects credentials into a leased agent.
-
-    Mirrors the consolidated approach in ``apps/minds/imbue/minds/desktop_client/
-    agent_creator.py`` (commit b65f52ac4): all writes are joined with ``&&`` so a
-    single SSH round trip is sufficient and partial-failure leaves no
-    half-injected state.
-
-    Returns None when there is nothing to inject (caller should skip the exec).
-    """
-    pieces: list[str] = []
-
-    if minds_api_key is not None:
-        pieces.append(_sed_replace_env_line(agent_env_path, "MINDS_API_KEY", minds_api_key))
-
-    if anthropic_api_key is not None:
-        pieces.append(_sed_replace_env_line(host_env_path, "ANTHROPIC_API_KEY", anthropic_api_key))
-
-    if anthropic_base_url is not None:
-        pieces.append(_sed_replace_env_line(host_env_path, "ANTHROPIC_BASE_URL", anthropic_base_url))
-
-    if anthropic_api_key is not None:
-        pieces.append(_build_patch_claude_config_command(anthropic_api_key, agent_id))
-
-    if mngr_prefix is not None:
-        pieces.append(_sed_replace_env_line(host_env_path, "MNGR_PREFIX", mngr_prefix))
-
-    if extra_env:
-        for key, value in extra_env.items():
-            pieces.append(_sed_replace_env_line(host_env_path, key, value))
-
-    if not pieces:
-        return None
-    return " && ".join(pieces)
-
-
-def _sed_replace_env_line(path: str, var_name: str, value: str) -> str:
-    """Build a sed+echo expression that replaces ``KEY=...`` in an env file.
-
-    Uses sed -i to delete any prior occurrence of the var, then appends a fresh
-    KEY=VALUE line. The value is single-quoted in the echo, but for safety we
-    escape embedded single quotes using the standard ``'\\''`` trick.
-    """
-    safe_value = value.replace("'", "'\\''")
-    return f"sed -i '/^{var_name}=/d' {path} && echo '{var_name}={safe_value}' >> {path}"
-
-
-def _build_patch_claude_config_command(litellm_key: str, agent_id: AgentId) -> str:
-    """Build a python one-liner that patches the agent's claude config to approve the new key.
-
-    Mirrors ``_build_patch_claude_config_command`` in minds' agent_creator.py.
-    """
-    claude_config_path = f"/mngr/agents/{agent_id}/plugin/claude/anthropic/.claude.json"
-    key_suffix = litellm_key[-20:]
-    return (
-        'python3 -c "'
-        "import json; "
-        f"p='{claude_config_path}'; "
-        "d=json.load(open(p)); "
-        f"d['primaryApiKey']='{litellm_key}'; "
-        "a=d.setdefault('customApiKeyResponses',{}).setdefault('approved',[]); "
-        f"s='{key_suffix}'; "
-        "a.append(s) if s not in a else None; "
-        "d['customApiKeyResponses']['rejected']=[]; "
-        "json.dump(d,open(p,'w'),indent=2)"
-        '"'
-    )
-
-
-def _ensure_no_quote_chars(value: str, field_name: str) -> str:
-    """Defensive guard so injected values can't break out of the sed/echo quoting.
-
-    Raises ValueError if the value contains characters that we don't escape.
-    """
-    if any(c in value for c in ("\n", "\r", "\x00")):
-        raise ValueError(f"{field_name} cannot contain newlines or null bytes: {value!r}")
-    return value
-
-
-def normalize_inject_args(
-    minds_api_key: str | None,
-    anthropic_api_key: str | None,
-    anthropic_base_url: str | None,
-    mngr_prefix: str | None,
-    extra_env: Mapping[str, str] | None,
-) -> dict[str, Any]:
-    """Validate and clean inject arguments before they are interpolated into bash.
-
-    Centralized here so the claim CLI and any future caller share the same checks.
-    """
-    cleaned_extra: dict[str, str] = {}
-    if extra_env:
-        for key, value in extra_env.items():
-            if not key or "=" in key:
-                raise ValueError(f"Invalid env var name: {key!r}")
-            cleaned_extra[key] = _ensure_no_quote_chars(value, f"env[{key}]")
-    return {
-        "minds_api_key": _ensure_no_quote_chars(minds_api_key, "MINDS_API_KEY") if minds_api_key else None,
-        "anthropic_api_key": _ensure_no_quote_chars(anthropic_api_key, "ANTHROPIC_API_KEY")
-        if anthropic_api_key
-        else None,
-        "anthropic_base_url": _ensure_no_quote_chars(anthropic_base_url, "ANTHROPIC_BASE_URL")
-        if anthropic_base_url
-        else None,
-        "mngr_prefix": _ensure_no_quote_chars(mngr_prefix, "MNGR_PREFIX") if mngr_prefix else None,
-        "extra_env": cleaned_extra or None,
-    }
-
-
-def host_label_for_agent(agent_name: AgentName) -> str:
-    """Default host name suffix for an agent (matches today's minds convention)."""
-    return f"{agent_name}-host"
