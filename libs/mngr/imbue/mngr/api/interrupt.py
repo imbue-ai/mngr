@@ -99,7 +99,6 @@ def interrupt_agents(
                     compiled_include_filters=compiled_include_filters,
                     compiled_exclude_filters=compiled_exclude_filters,
                     all_agents=all_agents,
-                    include_filters=include_filters,
                     error_behavior=error_behavior,
                     result=result,
                     result_lock=result_lock,
@@ -122,7 +121,6 @@ def _process_host_for_interrupt(
     compiled_include_filters: list[Any],
     compiled_exclude_filters: list[Any],
     all_agents: bool,
-    include_filters: tuple[str, ...],
     error_behavior: ErrorBehavior,
     result: InterruptResult,
     result_lock: Lock,
@@ -172,8 +170,6 @@ def _process_host_for_interrupt(
                     exclude_filters=compiled_exclude_filters,
                     error_context_description=f"agent {agent.name}",
                 )
-                if not all_agents and not include_filters and not is_included:
-                    continue
                 if not is_included:
                     continue
 
