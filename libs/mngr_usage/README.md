@@ -29,7 +29,7 @@ human output and as an entry in the JSON `sources` array.
 
 ## Output formats
 
-- `mngr usage` (human summary: aggregate cost line + window lines)
+- `mngr usage` (human summary: per-mode cost line(s) + window lines)
 - `mngr usage --detail` (human + per-session breakdown lines)
 - `mngr usage --format json` (summary JSON: per-mode aggregates `subscription_cost` and `api_cost`, `session_count` plus per-mode counts, windows)
 - `mngr usage --format json --detail` (JSON with `sessions[]` per source; each session carries a `cost_mode` tag)
