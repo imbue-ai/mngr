@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
+from typing import Any
 from typing import Final
 
 from loguru import logger
@@ -262,7 +263,7 @@ def _refresh_tail_path(state: TailState, location: AgentLocation) -> None:
 _TERMINAL_STOP_REASONS: Final[frozenset[str]] = frozenset({"end_turn", "stop_sequence", "max_tokens"})
 
 
-def is_end_turn_event(event: dict) -> bool:
+def is_end_turn_event(event: dict[str, Any]) -> bool:
     """Return True for an assistant message that finishes the turn without a tool call."""
     if event.get("type") != "assistant":
         return False
@@ -280,7 +281,7 @@ def is_end_turn_event(event: dict) -> bool:
     return True
 
 
-def extract_assistant_text(event: dict) -> str:
+def extract_assistant_text(event: dict[str, Any]) -> str:
     """Concatenate text blocks from an assistant message event."""
     message = event.get("message")
     if not isinstance(message, dict):
@@ -422,7 +423,7 @@ class _WaitRuntime:
     target_missing_since: float | None = None
 
 
-def is_api_error_event(event: dict) -> bool:
+def is_api_error_event(event: dict[str, Any]) -> bool:
     """Return True if the event is an assistant message Claude Code marked
     as an API error (e.g. rate limit, transient API failure).
 
