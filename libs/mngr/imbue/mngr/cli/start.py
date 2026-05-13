@@ -6,7 +6,6 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.imbue_common.logging import log_span
 from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
@@ -16,6 +15,7 @@ from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.api.start import send_resume_message_if_configured
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -28,11 +28,9 @@ from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.utils.polling import poll_until
 
 
 class StartCliOptions(CommonCliOptions):
@@ -69,34 +67,6 @@ def _output_result(started_agents: Sequence[str], output_opts: OutputOptions) ->
                 write_human_line("Successfully started {} agent(s)", len(started_agents))
         case _ as unreachable:
             assert_never(unreachable)
-
-
-def _send_resume_message_if_configured(agent: AgentInterface, output_opts: OutputOptions) -> None:
-    """Send the resume message to an agent if one is configured."""
-    resume_message = agent.get_resume_message()
-    if resume_message is None:
-        return
-
-    _output(f"Sending resume message to {agent.name}...", output_opts)
-    # Wait for the agent to signal readiness via the WAITING lifecycle state.
-    # Agents like Claude configure hooks that remove the 'active' file when idle.
-    # If the timeout expires (agent doesn't support hooks or is slow), proceed anyway.
-    timeout = agent.get_ready_timeout_seconds()
-    with log_span("Waiting for agent to become ready before sending resume message"):
-        is_ready = poll_until(
-            lambda: agent.get_lifecycle_state() == AgentLifecycleState.WAITING,
-            timeout=timeout,
-            poll_interval=0.2,
-        )
-    if is_ready:
-        logger.debug("Signaled agent readiness via WAITING state")
-    else:
-        logger.debug(
-            "Failed to reach WAITING state within {}s, proceeding anyway",
-            timeout,
-        )
-    agent.send_message(resume_message)
-    logger.debug("Sent resume message to agent {}", agent.name)
 
 
 @click.command(name="start")
@@ -194,7 +164,10 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
             for agent in online_host.get_agents():
                 if agent.id == match.agent_id:
                     # Send resume message if configured
-                    _send_resume_message_if_configured(agent, output_opts)
+                    send_resume_message_if_configured(
+                        agent,
+                        on_status=lambda msg: _output(msg, output_opts),
+                    )
 
                     # Track for potential connect
                     if opts.connect:

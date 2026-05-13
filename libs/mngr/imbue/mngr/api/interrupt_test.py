@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -28,15 +29,16 @@ def test_interrupt_agents_returns_empty_when_no_agents_match(
 
 
 @pytest.mark.tmux
-def test_interrupt_agents_records_non_interruptible_agent_as_failed(
+def test_interrupt_agents_calls_stop_then_start_on_host(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
     local_provider: LocalProviderInstance,
 ) -> None:
-    """Generic agents (BaseAgent) do not implement InterruptibleAgentMixin.
+    """interrupt_agents must drive host.stop_agents followed by host.start_agents.
 
-    They must be reported in failed_agents with a clear reason rather than
-    silently skipped or raising.
+    This is the core contract of the new interrupt semantics: kill the agent
+    process so any in-flight work and background tasks are gone, then restart
+    the agent so it resumes from its saved state.
     """
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
@@ -44,25 +46,36 @@ def test_interrupt_agents_records_non_interruptible_agent_as_failed(
     agent = host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
-            name=AgentName("non-interruptible-test"),
+            name=AgentName("interrupt-test"),
             agent_type=AgentTypeName("generic"),
             command=CommandString("sleep 847290"),
         ),
     )
     host.start_agents([agent.id])
 
-    error_agents: list[tuple[str, str]] = []
+    call_order: list[str] = []
 
-    result = interrupt_agents(
-        mngr_ctx=temp_mngr_ctx,
-        include_filters=('name == "non-interruptible-test"',),
-        on_error=lambda name, err: error_agents.append((name, err)),
-    )
+    real_stop = Host.stop_agents
+    real_start = Host.start_agents
 
-    host.destroy_agent(agent)
+    def tracked_stop(self: Host, agent_ids, *args, **kwargs) -> None:
+        call_order.append(f"stop:{','.join(agent_ids)}")
+        real_stop(self, agent_ids, *args, **kwargs)
 
-    assert result.successful_agents == []
-    assert len(result.failed_agents) == 1
-    assert result.failed_agents[0][0] == "non-interruptible-test"
-    assert "does not support interrupt" in result.failed_agents[0][1]
-    assert ("non-interruptible-test", result.failed_agents[0][1]) in error_agents
+    def tracked_start(self: Host, agent_ids, *args, **kwargs) -> None:
+        call_order.append(f"start:{','.join(agent_ids)}")
+        real_start(self, agent_ids, *args, **kwargs)
+
+    try:
+        with patch.object(Host, "stop_agents", tracked_stop):
+            with patch.object(Host, "start_agents", tracked_start):
+                result = interrupt_agents(
+                    mngr_ctx=temp_mngr_ctx,
+                    include_filters=('name == "interrupt-test"',),
+                )
+    finally:
+        host.destroy_agent(agent)
+
+    assert result.failed_agents == []
+    assert result.successful_agents == ["interrupt-test"]
+    assert call_order == [f"stop:{agent.id}", f"start:{agent.id}"]
