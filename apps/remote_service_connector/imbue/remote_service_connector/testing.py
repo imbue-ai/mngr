@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 from uuid import UUID
 
+import psycopg2
 import pytest
 from supertokens_python.recipe.emailpassword.interfaces import ConsumePasswordResetTokenOkResult
 from supertokens_python.recipe.emailpassword.interfaces import EmailAlreadyExistsError
@@ -891,6 +892,12 @@ class FakeCursor:
                 break
 
         elif "update pool_hosts set status = 'leased'" in query_lower:
+            if self._backend.raise_unique_violation_on_lease_update:
+                # Simulate the race-loser hitting the partial unique index from
+                # migration 002 (``pool_hosts_host_name_per_user_uniq``).
+                raise psycopg2.errors.UniqueViolation(
+                    'duplicate key value violates unique constraint "pool_hosts_host_name_per_user_uniq"'
+                )
             username, host_name, host_id = params
             for row in self._backend.pool_rows:
                 if row.host_id == host_id:
@@ -901,6 +908,10 @@ class FakeCursor:
                     break
 
         elif "update pool_hosts set host_name = %s" in query_lower:
+            if self._backend.raise_unique_violation_on_rename_update:
+                raise psycopg2.errors.UniqueViolation(
+                    'duplicate key value violates unique constraint "pool_hosts_host_name_per_user_uniq"'
+                )
             new_name_raw, raw_host_id = params
             host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
             for row in self._backend.pool_rows:
@@ -1010,6 +1021,12 @@ class FakePoolBackend:
 
     pool_rows: list[FakePoolRow]
     append_key_calls: list[tuple[str, int, str, str, str]]
+    # Toggles that simulate the partial unique index from migration 002
+    # firing on a concurrent lease / rename. Used by tests to exercise the
+    # endpoint's race-loser path without actually running concurrent
+    # transactions.
+    raise_unique_violation_on_lease_update: bool
+    raise_unique_violation_on_rename_update: bool
 
     def install_on_app_module(self, app_mod: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         """Swap DB and SSH functions on the app module with fakes.
@@ -1107,4 +1124,6 @@ def make_fake_pool_backend() -> FakePoolBackend:
     backend = FakePoolBackend()
     backend.pool_rows = []
     backend.append_key_calls = []
+    backend.raise_unique_violation_on_lease_update = False
+    backend.raise_unique_violation_on_rename_update = False
     return backend

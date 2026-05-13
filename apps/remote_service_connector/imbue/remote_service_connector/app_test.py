@@ -1686,6 +1686,60 @@ def test_lease_host_rejects_duplicate_host_name(monkeypatch: pytest.MonkeyPatch)
     assert backend.append_key_calls == []
 
 
+def test_lease_host_maps_db_unique_violation_to_409(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A UniqueViolation from the UPDATE (the race-loser path) surfaces as 409, not 500.
+
+    The endpoint's upfront duplicate-name SELECT narrows but does not close the
+    race window before the UPDATE. The partial unique index from migration 002
+    catches the race-loser at the DB level; the endpoint must translate that
+    into the same 409 the upfront check uses so clients see uniform behaviour.
+
+    Simulated here by toggling ``raise_unique_violation_on_lease_update`` on the
+    fake backend so the FakeCursor raises ``psycopg2.errors.UniqueViolation`` on
+    the lease-UPDATE step.
+    """
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-000000000001"), version="v0.1.0")
+    backend.raise_unique_violation_on_lease_update = True
+
+    resp = client.post(
+        "/hosts/lease",
+        json={
+            "ssh_public_key": "ssh-ed25519 AAAA testkey",
+            "host_name": "raced-name",
+            "attributes": {"version": "v0.1.0"},
+        },
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 409
+    # The host should remain available (the lease UPDATE was rolled back).
+    assert backend.pool_rows[0].status == "available"
+
+
+def test_rename_host_maps_db_unique_violation_to_409(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A UniqueViolation from PATCH /hosts/{id}/name surfaces as 409, not 500.
+
+    Same race-window protection as ``lease_host``: a concurrent rename can sneak
+    in between the pre-check and the UPDATE.
+    """
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000042"),
+        version="v0.1.0",
+        leased_to_user=_ADMIN_STUB_USERNAME,
+        host_name="old-name",
+    )
+    backend.raise_unique_violation_on_rename_update = True
+
+    resp = client.patch(
+        "/hosts/00000000-0000-0000-0000-000000000042/name",
+        json={"host_name": "raced-name"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 409
+    assert backend.pool_rows[0].host_name == "old-name"
+
+
 def test_lease_host_rejects_empty_host_name(monkeypatch: pytest.MonkeyPatch) -> None:
     """POST /hosts/lease returns 400 when host_name is empty or whitespace."""
     client, _backend = _make_pool_test_client(monkeypatch)

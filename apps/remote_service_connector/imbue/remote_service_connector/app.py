@@ -1636,12 +1636,29 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                             status_code=502, detail=f"Failed to inject SSH key on host: {exc}"
                         ) from exc
 
-                    cur.execute(
-                        "UPDATE pool_hosts SET status = 'leased', leased_to_user = %s, "
-                        "leased_at = NOW(), host_name = %s "
-                        "WHERE id = %s",
-                        (admin.username, requested_host_name, host_db_id),
-                    )
+                    # The pre-check above narrows the race window but does not
+                    # close it: between the SELECT and this UPDATE another
+                    # concurrent lease request from the same user could land
+                    # the same name. The partial unique index added in
+                    # migration 002 (``pool_hosts_host_name_per_user_uniq``)
+                    # catches that at the DB level; convert the resulting
+                    # IntegrityError to the same 409 the upfront check uses
+                    # so the race-loser sees a uniform error.
+                    try:
+                        cur.execute(
+                            "UPDATE pool_hosts SET status = 'leased', leased_to_user = %s, "
+                            "leased_at = NOW(), host_name = %s "
+                            "WHERE id = %s",
+                            (admin.username, requested_host_name, host_db_id),
+                        )
+                    except psycopg2.errors.UniqueViolation as exc:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                f"You already have a leased host named {requested_host_name!r}. "
+                                "Pick a different name or release the existing lease first."
+                            ),
+                        ) from exc
         finally:
             conn.close()
         attrs_dict = attributes if isinstance(attributes, dict) else {}
@@ -1701,10 +1718,21 @@ def rename_host(request: Request, host_db_id: UUID, body: RenameHostRequest) -> 
                             status_code=409,
                             detail=(f"You already have a leased host named {new_name!r}. Pick a different name."),
                         )
-                    cur.execute(
-                        "UPDATE pool_hosts SET host_name = %s WHERE id = %s",
-                        (new_name, str(host_db_id)),
-                    )
+                    # Same race-window protection as ``lease_host``: the
+                    # pre-check narrows the conflict window but does not
+                    # close it. The partial unique index from migration 002
+                    # catches a concurrent rename to the same name; convert
+                    # that to the same 409 the upfront check uses.
+                    try:
+                        cur.execute(
+                            "UPDATE pool_hosts SET host_name = %s WHERE id = %s",
+                            (new_name, str(host_db_id)),
+                        )
+                    except psycopg2.errors.UniqueViolation as exc:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(f"You already have a leased host named {new_name!r}. Pick a different name."),
+                        ) from exc
         finally:
             conn.close()
     return {"status": "renamed", "host_name": new_name}
