@@ -5,19 +5,18 @@ import pytest
 from pydantic import Field
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.api.address_parsers import parse_hosted_location
 from imbue.mngr.api.find import AgentMatch
-from imbue.mngr.api.find import ParsedSourceLocation
+from imbue.mngr.api.find import _find_agents_by_identifiers_or_state
 from imbue.mngr.api.find import determine_resolved_path
 from imbue.mngr.api.find import ensure_agent_started
-from imbue.mngr.api.find import find_agents_by_identifiers_or_state
-from imbue.mngr.api.find import find_all_matching_agents
-from imbue.mngr.api.find import find_all_matching_hosts
+from imbue.mngr.api.find import filter_all_agents
+from imbue.mngr.api.find import filter_all_hosts
+from imbue.mngr.api.find import filter_one_agent
+from imbue.mngr.api.find import filter_one_host
 from imbue.mngr.api.find import get_host_from_list_by_id
 from imbue.mngr.api.find import get_unique_host_from_list_by_name
 from imbue.mngr.api.find import group_agents_by_host
-from imbue.mngr.api.find import parse_source_string
-from imbue.mngr.api.find import resolve_agent_reference
-from imbue.mngr.api.find import resolve_host_reference
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -32,98 +31,96 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostedLocation
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 
-def test_parse_source_string_with_agent_only() -> None:
-    parsed = parse_source_string("my-agent")
+def test_parse_hosted_location_with_agent_only() -> None:
+    parsed = parse_hosted_location("my-agent")
 
-    assert parsed == ParsedSourceLocation(agent="my-agent")
-
-
-def test_parse_source_string_with_agent_and_host() -> None:
-    parsed = parse_source_string("my-agent@my-host")
-
-    assert parsed == ParsedSourceLocation(agent="my-agent", host_name=HostName("my-host"))
+    assert parsed == HostedLocation(agent=AgentName("my-agent"))
 
 
-def test_parse_source_string_with_agent_host_and_provider() -> None:
-    parsed = parse_source_string("my-agent@my-host.modal")
+def test_parse_hosted_location_with_agent_and_host() -> None:
+    parsed = parse_hosted_location("my-agent@my-host")
 
-    assert parsed == ParsedSourceLocation(
-        agent="my-agent",
-        host_name=HostName("my-host"),
-        provider_name=ProviderInstanceName("modal"),
+    assert parsed == HostedLocation(
+        agent=AgentName("my-agent"),
+        host=HostAddress(host=HostName("my-host")),
     )
 
 
-def test_parse_source_string_with_agent_host_and_path() -> None:
-    parsed = parse_source_string("my-agent@my-host:/path/to/dir")
+def test_parse_hosted_location_with_agent_host_and_provider() -> None:
+    parsed = parse_hosted_location("my-agent@my-host.modal")
 
-    assert parsed == ParsedSourceLocation(
-        agent="my-agent",
-        host_name=HostName("my-host"),
-        path="/path/to/dir",
+    assert parsed == HostedLocation(
+        agent=AgentName("my-agent"),
+        host=HostAddress(host=HostName("my-host"), provider=ProviderInstanceName("modal")),
     )
 
 
-def test_parse_source_string_with_host_and_path() -> None:
-    parsed = parse_source_string("@my-host:/path/to/dir")
+def test_parse_hosted_location_with_agent_host_and_path() -> None:
+    parsed = parse_hosted_location("my-agent@my-host:/path/to/dir")
 
-    assert parsed == ParsedSourceLocation(host_name=HostName("my-host"), path="/path/to/dir")
-
-
-def test_parse_source_string_with_absolute_path() -> None:
-    parsed = parse_source_string("/path/to/dir")
-
-    assert parsed == ParsedSourceLocation(path="/path/to/dir")
+    assert parsed == HostedLocation(
+        agent=AgentName("my-agent"),
+        host=HostAddress(host=HostName("my-host")),
+        path=Path("/path/to/dir"),
+    )
 
 
-def test_parse_source_string_with_relative_path() -> None:
-    parsed = parse_source_string("./path/to/dir")
+def test_parse_hosted_location_with_host_and_path() -> None:
+    parsed = parse_hosted_location("@my-host:/path/to/dir")
 
-    assert parsed == ParsedSourceLocation(path="./path/to/dir")
-
-
-def test_parse_source_string_with_home_path() -> None:
-    parsed = parse_source_string("~/path/to/dir")
-
-    assert parsed == ParsedSourceLocation(path="~/path/to/dir")
+    assert parsed == HostedLocation(
+        host=HostAddress(host=HostName("my-host")),
+        path=Path("/path/to/dir"),
+    )
 
 
-def test_parse_source_string_with_parent_path() -> None:
-    parsed = parse_source_string("../path/to/dir")
+def test_parse_hosted_location_with_absolute_path() -> None:
+    parsed = parse_hosted_location("/path/to/dir")
 
-    assert parsed == ParsedSourceLocation(path="../path/to/dir")
+    assert parsed == HostedLocation(path=Path("/path/to/dir"))
 
 
-def test_parse_source_string_bare_name_is_agent_not_path() -> None:
+def test_parse_hosted_location_with_relative_path() -> None:
+    parsed = parse_hosted_location("./path/to/dir")
+
+    assert parsed == HostedLocation(path=Path("./path/to/dir"))
+
+
+def test_parse_hosted_location_with_home_path() -> None:
+    parsed = parse_hosted_location("~/path/to/dir")
+
+    assert parsed == HostedLocation(path=Path("~/path/to/dir"))
+
+
+def test_parse_hosted_location_with_parent_path() -> None:
+    parsed = parse_hosted_location("../path/to/dir")
+
+    assert parsed == HostedLocation(path=Path("../path/to/dir"))
+
+
+def test_parse_hosted_location_bare_name_is_agent_not_path() -> None:
     """A bare name like 'foo' refers to agent 'foo', not directory 'foo'."""
-    parsed = parse_source_string("foo")
+    parsed = parse_hosted_location("foo")
 
-    assert parsed == ParsedSourceLocation(agent="foo")
+    assert parsed == HostedLocation(agent=AgentName("foo"))
 
 
-def test_parse_source_string_colon_prefix_is_local_path() -> None:
+def test_parse_hosted_location_colon_prefix_is_local_path() -> None:
     """:dirname is how to specify a relative local directory."""
-    parsed = parse_source_string(":my-dir")
+    parsed = parse_hosted_location(":my-dir")
 
-    assert parsed == ParsedSourceLocation(path="my-dir")
-
-
-def test_resolve_host_reference_with_none() -> None:
-    result = resolve_host_reference(
-        host_identifier=None,
-        all_hosts=[],
-    )
-
-    assert result is None
+    assert parsed == HostedLocation(path=Path("my-dir"))
 
 
-def test_resolve_host_reference_by_id() -> None:
+def test_filter_one_host_by_id() -> None:
     host_id = HostId.generate()
     host_ref = DiscoveredHost(
         host_id=host_id,
@@ -131,39 +128,39 @@ def test_resolve_host_reference_by_id() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = resolve_host_reference(
-        host_identifier=str(host_id),
+    result = filter_one_host(
+        address=HostAddress(host=host_id),
         all_hosts=[host_ref],
     )
 
     assert result == host_ref
 
 
-def test_resolve_host_reference_by_name() -> None:
+def test_filter_one_host_by_name() -> None:
     host_ref = DiscoveredHost(
         host_id=HostId.generate(),
         host_name=HostName("test-host"),
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = resolve_host_reference(
-        host_identifier="test-host",
+    result = filter_one_host(
+        address=HostAddress(host=HostName("test-host")),
         all_hosts=[host_ref],
     )
 
     assert result == host_ref
 
 
-def test_resolve_host_reference_raises_when_not_found() -> None:
+def test_filter_one_host_raises_when_not_found() -> None:
     with pytest.raises(UserInputError, match="Could not find host with ID or name: nonexistent"):
-        resolve_host_reference(
-            host_identifier="nonexistent",
+        filter_one_host(
+            address=HostAddress(host=HostName("nonexistent")),
             all_hosts=[],
         )
 
 
-def test_resolve_host_reference_disambiguates_with_host_provider_form() -> None:
-    """resolve_host_reference should pick the right host when 'host.provider' is given."""
+def test_filter_one_host_disambiguates_with_host_provider_form() -> None:
+    """filter_one_host should pick the right host when 'host.provider' is given."""
     host_modal = DiscoveredHost(
         host_id=HostId.generate(),
         host_name=HostName("m1"),
@@ -175,15 +172,15 @@ def test_resolve_host_reference_disambiguates_with_host_provider_form() -> None:
         provider_name=ProviderInstanceName("docker"),
     )
 
-    result = resolve_host_reference(
-        host_identifier="m1.modal",
+    result = filter_one_host(
+        address=HostAddress(host=HostName("m1"), provider=ProviderInstanceName("modal")),
         all_hosts=[host_modal, host_docker],
     )
 
     assert result == host_modal
 
 
-def test_resolve_host_reference_raises_when_multiple_hosts_with_same_name() -> None:
+def test_filter_one_host_raises_when_multiple_hosts_with_same_name() -> None:
     host_ref1 = DiscoveredHost(
         host_id=HostId.generate(),
         host_name=HostName("test-host"),
@@ -196,23 +193,13 @@ def test_resolve_host_reference_raises_when_multiple_hosts_with_same_name() -> N
     )
 
     with pytest.raises(UserInputError, match="Multiple hosts found with name: test-host"):
-        resolve_host_reference(
-            host_identifier="test-host",
+        filter_one_host(
+            address=HostAddress(host=HostName("test-host")),
             all_hosts=[host_ref1, host_ref2],
         )
 
 
-def test_resolve_agent_reference_with_none() -> None:
-    result = resolve_agent_reference(
-        agent_identifier=None,
-        resolved_host=None,
-        agents_by_host={},
-    )
-
-    assert result is None
-
-
-def test_resolve_agent_reference_by_id() -> None:
+def test_filter_one_agent_by_id() -> None:
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     host_ref = DiscoveredHost(
@@ -227,8 +214,8 @@ def test_resolve_agent_reference_by_id() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = resolve_agent_reference(
-        agent_identifier=str(agent_id),
+    result = filter_one_agent(
+        agent=agent_id,
         resolved_host=None,
         agents_by_host={host_ref: [agent_ref]},
     )
@@ -236,7 +223,7 @@ def test_resolve_agent_reference_by_id() -> None:
     assert result == (host_ref, agent_ref)
 
 
-def test_resolve_agent_reference_by_name() -> None:
+def test_filter_one_agent_by_name() -> None:
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     host_ref = DiscoveredHost(
@@ -251,8 +238,8 @@ def test_resolve_agent_reference_by_name() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = resolve_agent_reference(
-        agent_identifier="test-agent",
+    result = filter_one_agent(
+        agent=AgentName("test-agent"),
         resolved_host=None,
         agents_by_host={host_ref: [agent_ref]},
     )
@@ -260,7 +247,7 @@ def test_resolve_agent_reference_by_name() -> None:
     assert result == (host_ref, agent_ref)
 
 
-def test_resolve_agent_reference_with_resolved_host_filters_by_host() -> None:
+def test_filter_one_agent_with_resolved_host_filters_by_host() -> None:
     host_id1 = HostId.generate()
     host_id2 = HostId.generate()
     agent_id1 = AgentId.generate()
@@ -290,8 +277,8 @@ def test_resolve_agent_reference_with_resolved_host_filters_by_host() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = resolve_agent_reference(
-        agent_identifier="test-agent",
+    result = filter_one_agent(
+        agent=AgentName("test-agent"),
         resolved_host=host_ref1,
         agents_by_host={
             host_ref1: [agent_ref1],
@@ -302,16 +289,30 @@ def test_resolve_agent_reference_with_resolved_host_filters_by_host() -> None:
     assert result == (host_ref1, agent_ref1)
 
 
-def test_resolve_agent_reference_raises_when_not_found() -> None:
+def test_filter_one_agent_raises_when_not_found() -> None:
     with pytest.raises(UserInputError, match="Could not find agent with ID or name: nonexistent"):
-        resolve_agent_reference(
-            agent_identifier="nonexistent",
+        filter_one_agent(
+            agent=AgentName("nonexistent"),
             resolved_host=None,
             agents_by_host={},
         )
 
 
-def test_resolve_agent_reference_raises_when_multiple_agents_match() -> None:
+def test_filter_one_agent_raises_agent_not_found_for_unknown_id() -> None:
+    """An unknown AgentId raises AgentNotFoundError (not UserInputError).
+
+    The distinction lets callers detect "the specific agent you named no
+    longer exists" separately from "your search term didn't match anything".
+    """
+    with pytest.raises(AgentNotFoundError):
+        filter_one_agent(
+            agent=AgentId.generate(),
+            resolved_host=None,
+            agents_by_host={},
+        )
+
+
+def test_filter_one_agent_raises_when_multiple_agents_match() -> None:
     host_id1 = HostId.generate()
     host_id2 = HostId.generate()
     agent_id1 = AgentId.generate()
@@ -341,9 +342,9 @@ def test_resolve_agent_reference_raises_when_multiple_agents_match() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    with pytest.raises(UserInputError, match="Multiple agents found with ID or name: test-agent"):
-        resolve_agent_reference(
-            agent_identifier="test-agent",
+    with pytest.raises(UserInputError, match="Multiple agents found with name 'test-agent'"):
+        filter_one_agent(
+            agent=AgentName("test-agent"),
             resolved_host=None,
             agents_by_host={
                 host_ref1: [agent_ref1],
@@ -352,79 +353,76 @@ def test_resolve_agent_reference_raises_when_multiple_agents_match() -> None:
         )
 
 
-def test_parse_source_string_with_colons_in_path() -> None:
-    parsed = parse_source_string("@my-host:/path/with:colons:in:it.txt")
+def test_parse_hosted_location_with_colons_in_path() -> None:
+    parsed = parse_hosted_location("@my-host:/path/with:colons:in:it.txt")
 
-    assert parsed == ParsedSourceLocation(
-        host_name=HostName("my-host"),
-        path="/path/with:colons:in:it.txt",
+    assert parsed == HostedLocation(
+        host=HostAddress(host=HostName("my-host")),
+        path=Path("/path/with:colons:in:it.txt"),
     )
 
 
-def test_parse_source_string_with_agent_host_and_colons_in_path() -> None:
-    parsed = parse_source_string("agent@host:/weird:path:file.txt")
+def test_parse_hosted_location_with_agent_host_and_colons_in_path() -> None:
+    parsed = parse_hosted_location("agent@host:/weird:path:file.txt")
 
-    assert parsed == ParsedSourceLocation(
-        agent="agent",
-        host_name=HostName("host"),
-        path="/weird:path:file.txt",
+    assert parsed == HostedLocation(
+        agent=AgentName("agent"),
+        host=HostAddress(host=HostName("host")),
+        path=Path("/weird:path:file.txt"),
     )
 
 
-def test_parse_source_string_with_empty_path_after_colon() -> None:
-    parsed = parse_source_string("@my-host:")
+def test_parse_hosted_location_with_empty_path_after_colon() -> None:
+    parsed = parse_hosted_location("@my-host:")
 
-    assert parsed == ParsedSourceLocation(host_name=HostName("my-host"))
-
-
-def test_parse_source_string_with_agent_and_path() -> None:
-    parsed = parse_source_string("my-agent:http://example.com/path")
-
-    assert parsed == ParsedSourceLocation(agent="my-agent", path="http://example.com/path")
+    assert parsed == HostedLocation(host=HostAddress(host=HostName("my-host")))
 
 
-def test_parse_source_string_with_agent_host_provider() -> None:
-    parsed = parse_source_string("my-agent@my-host.docker")
+def test_parse_hosted_location_with_agent_and_path() -> None:
+    parsed = parse_hosted_location("my-agent:http://example.com/path")
 
-    assert parsed == ParsedSourceLocation(
-        agent="my-agent",
-        host_name=HostName("my-host"),
-        provider_name=ProviderInstanceName("docker"),
+    assert parsed == HostedLocation(agent=AgentName("my-agent"), path=Path("http://example.com/path"))
+
+
+def test_parse_hosted_location_with_agent_host_provider() -> None:
+    parsed = parse_hosted_location("my-agent@my-host.docker")
+
+    assert parsed == HostedLocation(
+        agent=AgentName("my-agent"),
+        host=HostAddress(host=HostName("my-host"), provider=ProviderInstanceName("docker")),
     )
 
 
-def test_parse_source_string_with_agent_host_provider_and_path() -> None:
-    parsed = parse_source_string("my-agent@my-host.modal:/path/to/dir")
+def test_parse_hosted_location_with_agent_host_provider_and_path() -> None:
+    parsed = parse_hosted_location("my-agent@my-host.modal:/path/to/dir")
 
-    assert parsed == ParsedSourceLocation(
-        agent="my-agent",
-        host_name=HostName("my-host"),
-        provider_name=ProviderInstanceName("modal"),
-        path="/path/to/dir",
+    assert parsed == HostedLocation(
+        agent=AgentName("my-agent"),
+        host=HostAddress(host=HostName("my-host"), provider=ProviderInstanceName("modal")),
+        path=Path("/path/to/dir"),
     )
 
 
-def test_parse_source_string_with_host_provider_and_path() -> None:
-    parsed = parse_source_string("@my-host.docker:/path/to/dir")
+def test_parse_hosted_location_with_host_provider_and_path() -> None:
+    parsed = parse_hosted_location("@my-host.docker:/path/to/dir")
 
-    assert parsed == ParsedSourceLocation(
-        host_name=HostName("my-host"),
-        provider_name=ProviderInstanceName("docker"),
-        path="/path/to/dir",
+    assert parsed == HostedLocation(
+        host=HostAddress(host=HostName("my-host"), provider=ProviderInstanceName("docker")),
+        path=Path("/path/to/dir"),
     )
 
 
-def test_parse_source_string_with_agent_colon_path() -> None:
+def test_parse_hosted_location_with_agent_colon_path() -> None:
     """Agent name followed by colon and path (no host)."""
-    parsed = parse_source_string("C:/Windows/path")
+    parsed = parse_hosted_location("C:/Windows/path")
 
-    assert parsed == ParsedSourceLocation(agent="C", path="/Windows/path")
+    assert parsed == HostedLocation(agent=AgentName("C"), path=Path("/Windows/path"))
 
 
-def test_parse_source_string_rejects_multi_dot_host() -> None:
-    """parse_source_string should reject HOST.PROVIDER strings with more than one dot."""
+def test_parse_hosted_location_rejects_multi_dot_host() -> None:
+    """parse_hosted_location should reject HOST.PROVIDER strings with more than one dot."""
     with pytest.raises(UserInputError, match="contains more than one dot"):
-        parse_source_string("@a.b.c:/path")
+        parse_hosted_location("@a.b.c:/path")
 
 
 def test_get_host_from_list_by_id_returns_matching_host() -> None:
@@ -466,7 +464,7 @@ def test_get_unique_host_from_list_by_name_returns_none_when_empty() -> None:
 def test_determine_resolved_path_uses_parsed_path_when_available() -> None:
     """determine_resolved_path should prefer parsed_path when available."""
     result = determine_resolved_path(
-        parsed_path="/explicit/path",
+        parsed_path=Path("/explicit/path"),
         resolved_agent=None,
         agent_work_dir_if_available=None,
     )
@@ -498,7 +496,7 @@ def test_determine_resolved_path_prefers_parsed_path_over_agent_work_dir() -> No
         provider_name=ProviderInstanceName("local"),
     )
     result = determine_resolved_path(
-        parsed_path="/explicit/path",
+        parsed_path=Path("/explicit/path"),
         resolved_agent=agent_ref,
         agent_work_dir_if_available=Path("/agent/work/dir"),
     )
@@ -531,10 +529,10 @@ def test_determine_resolved_path_raises_when_no_path_and_no_agent() -> None:
         )
 
 
-def test_parse_source_string_with_empty_prefix_before_colon() -> None:
-    """parse_source_string should handle :path format (empty prefix before colon)."""
-    parsed = parse_source_string(":/path/to/dir")
-    assert parsed == ParsedSourceLocation(path="/path/to/dir")
+def test_parse_hosted_location_with_empty_prefix_before_colon() -> None:
+    """parse_hosted_location should handle :path format (empty prefix before colon)."""
+    parsed = parse_hosted_location(":/path/to/dir")
+    assert parsed == HostedLocation(path=Path("/path/to/dir"))
 
 
 # =============================================================================
@@ -648,15 +646,15 @@ def test_group_agents_by_host_key_format() -> None:
 
 
 # =============================================================================
-# find_agents_by_identifiers_or_state Tests
+# _find_agents_by_identifiers_or_state Tests
 # =============================================================================
 
 
-def test_find_agents_by_identifiers_or_state_no_agents_returns_empty(
+def test__find_agents_by_identifiers_or_state_no_agents_returns_empty(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """find_agents_by_identifiers_or_state should return empty list when no agents exist and filter_all is True."""
-    result = find_agents_by_identifiers_or_state(
+    """_find_agents_by_identifiers_or_state should return empty list when no agents exist and filter_all is True."""
+    result = _find_agents_by_identifiers_or_state(
         agent_identifiers=[],
         filter_all=True,
         target_state=None,
@@ -665,11 +663,11 @@ def test_find_agents_by_identifiers_or_state_no_agents_returns_empty(
     assert result == []
 
 
-def test_find_agents_by_identifiers_or_state_no_identifiers_and_not_all(
+def test__find_agents_by_identifiers_or_state_no_identifiers_and_not_all(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """find_agents_by_identifiers_or_state should return empty list when no identifiers and filter_all is False."""
-    result = find_agents_by_identifiers_or_state(
+    """_find_agents_by_identifiers_or_state should return empty list when no identifiers and filter_all is False."""
+    result = _find_agents_by_identifiers_or_state(
         agent_identifiers=[],
         filter_all=False,
         target_state=None,
@@ -678,13 +676,13 @@ def test_find_agents_by_identifiers_or_state_no_identifiers_and_not_all(
     assert result == []
 
 
-def test_find_agents_by_identifiers_or_state_raises_on_unknown_identifier(
+def test__find_agents_by_identifiers_or_state_raises_on_unknown_identifier(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """find_agents_by_identifiers_or_state should raise AgentNotFoundError for unrecognized identifiers."""
+    """_find_agents_by_identifiers_or_state should raise AgentNotFoundError for unrecognized identifiers."""
     with pytest.raises(AgentNotFoundError, match="No agent"):
-        find_agents_by_identifiers_or_state(
-            agent_identifiers=["nonexistent-agent-xyz"],
+        _find_agents_by_identifiers_or_state(
+            agent_identifiers=[AgentName("nonexistent-agent-xyz")],
             filter_all=False,
             target_state=None,
             mngr_ctx=temp_mngr_ctx,
@@ -692,12 +690,12 @@ def test_find_agents_by_identifiers_or_state_raises_on_unknown_identifier(
 
 
 @pytest.mark.tmux
-def test_find_agents_by_identifiers_or_state_finds_by_name(
+def test__find_agents_by_identifiers_or_state_finds_by_name(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
     local_host: Host,
 ) -> None:
-    """find_agents_by_identifiers_or_state should find an agent by its name."""
+    """_find_agents_by_identifiers_or_state should find an agent by its name."""
     agent = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
@@ -707,8 +705,8 @@ def test_find_agents_by_identifiers_or_state_finds_by_name(
         ),
     )
 
-    results = find_agents_by_identifiers_or_state(
-        agent_identifiers=["find-by-name-test"],
+    results = _find_agents_by_identifiers_or_state(
+        agent_identifiers=[AgentName("find-by-name-test")],
         filter_all=False,
         target_state=None,
         mngr_ctx=temp_mngr_ctx,
@@ -721,12 +719,12 @@ def test_find_agents_by_identifiers_or_state_finds_by_name(
 
 
 @pytest.mark.tmux
-def test_find_agents_by_identifiers_or_state_finds_by_id(
+def test__find_agents_by_identifiers_or_state_finds_by_id(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
     local_host: Host,
 ) -> None:
-    """find_agents_by_identifiers_or_state should find an agent by its ID."""
+    """_find_agents_by_identifiers_or_state should find an agent by its ID."""
     agent = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
@@ -736,9 +734,8 @@ def test_find_agents_by_identifiers_or_state_finds_by_id(
         ),
     )
 
-    agent_id_str = str(agent.id)
-    results = find_agents_by_identifiers_or_state(
-        agent_identifiers=[agent_id_str],
+    results = _find_agents_by_identifiers_or_state(
+        agent_identifiers=[agent.id],
         filter_all=False,
         target_state=None,
         mngr_ctx=temp_mngr_ctx,
@@ -747,16 +744,16 @@ def test_find_agents_by_identifiers_or_state_finds_by_id(
     local_host.destroy_agent(agent)
 
     assert len(results) == 1
-    assert str(results[0].agent_id) == agent_id_str
+    assert results[0].agent_id == agent.id
 
 
 @pytest.mark.tmux
-def test_find_agents_by_identifiers_or_state_filter_all_returns_all(
+def test__find_agents_by_identifiers_or_state_filter_all_returns_all(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
     local_host: Host,
 ) -> None:
-    """find_agents_by_identifiers_or_state with filter_all=True, target_state=None returns all agents."""
+    """_find_agents_by_identifiers_or_state with filter_all=True, target_state=None returns all agents."""
     agent1 = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
@@ -774,7 +771,7 @@ def test_find_agents_by_identifiers_or_state_filter_all_returns_all(
         ),
     )
 
-    results = find_agents_by_identifiers_or_state(
+    results = _find_agents_by_identifiers_or_state(
         agent_identifiers=[],
         filter_all=True,
         target_state=None,
@@ -790,12 +787,12 @@ def test_find_agents_by_identifiers_or_state_filter_all_returns_all(
 
 
 @pytest.mark.tmux
-def test_find_agents_by_identifiers_or_state_filter_by_stopped_state(
+def test__find_agents_by_identifiers_or_state_filter_by_stopped_state(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
     local_host: Host,
 ) -> None:
-    """find_agents_by_identifiers_or_state with target_state=STOPPED should only return stopped agents."""
+    """_find_agents_by_identifiers_or_state with target_state=STOPPED should only return stopped agents."""
     # Create an agent but don't start it (so it's stopped)
     agent = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
@@ -806,7 +803,7 @@ def test_find_agents_by_identifiers_or_state_filter_by_stopped_state(
         ),
     )
 
-    results = find_agents_by_identifiers_or_state(
+    results = _find_agents_by_identifiers_or_state(
         agent_identifiers=[],
         filter_all=True,
         target_state=AgentLifecycleState.STOPPED,
@@ -819,83 +816,76 @@ def test_find_agents_by_identifiers_or_state_filter_by_stopped_state(
     assert "find-stopped-test" in found_names
 
 
-# --- find_all_matching_hosts ---
+# --- filter_all_hosts ---
 
 
-def test_find_all_matching_hosts_by_name() -> None:
+def test_filter_all_hosts_by_name() -> None:
     host = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("my-host"), provider_name=ProviderInstanceName("local")
     )
-    result = find_all_matching_hosts("my-host", [host])
+    result = filter_all_hosts(HostAddress(host=HostName("my-host")), [host])
     assert result == [host]
 
 
-def test_find_all_matching_hosts_by_id() -> None:
+def test_filter_all_hosts_by_id() -> None:
     host = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("my-host"), provider_name=ProviderInstanceName("local")
     )
-    result = find_all_matching_hosts(str(host.host_id), [host])
+    result = filter_all_hosts(HostAddress(host=host.host_id), [host])
     assert result == [host]
 
 
-def test_find_all_matching_hosts_no_match() -> None:
+def test_filter_all_hosts_no_match() -> None:
     host = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("other"), provider_name=ProviderInstanceName("local")
     )
-    assert find_all_matching_hosts("nonexistent", [host]) == []
+    assert filter_all_hosts(HostAddress(host=HostName("nonexistent")), [host]) == []
 
 
-def test_find_all_matching_hosts_multiple() -> None:
+def test_filter_all_hosts_multiple() -> None:
     host1 = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("shared"), provider_name=ProviderInstanceName("local")
     )
     host2 = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("shared"), provider_name=ProviderInstanceName("local")
     )
-    result = find_all_matching_hosts("shared", [host1, host2])
+    result = filter_all_hosts(HostAddress(host=HostName("shared")), [host1, host2])
     assert len(result) == 2
 
 
-def test_find_all_matching_hosts_by_host_provider_form() -> None:
-    """find_all_matching_hosts should match the 'host.provider' form."""
+def test_filter_all_hosts_by_host_provider_form() -> None:
+    """filter_all_hosts should match the 'host.provider' form."""
     host_modal = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("m1"), provider_name=ProviderInstanceName("modal")
     )
     host_docker = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("m1"), provider_name=ProviderInstanceName("docker")
     )
-    result = find_all_matching_hosts("m1.modal", [host_modal, host_docker])
+    result = filter_all_hosts(
+        HostAddress(host=HostName("m1"), provider=ProviderInstanceName("modal")),
+        [host_modal, host_docker],
+    )
     assert result == [host_modal]
 
 
-def test_find_all_matching_hosts_dot_always_splits() -> None:
-    """Any dot in the input is treated as a host.provider separator (deterministic)."""
-    host_literal = DiscoveredHost(
-        host_id=HostId.generate(),
-        host_name=HostName("foo.bar"),
-        provider_name=ProviderInstanceName("docker"),
-    )
-    host_split = DiscoveredHost(
-        host_id=HostId.generate(),
-        host_name=HostName("foo"),
-        provider_name=ProviderInstanceName("bar"),
-    )
-    result = find_all_matching_hosts("foo.bar", [host_literal, host_split])
-    assert result == [host_split]
-
-
-def test_find_all_matching_hosts_host_provider_form_no_match() -> None:
+def test_filter_all_hosts_host_provider_form_no_match() -> None:
     """If the provider suffix does not match any host, return no matches."""
     host = DiscoveredHost(
         host_id=HostId.generate(), host_name=HostName("m1"), provider_name=ProviderInstanceName("modal")
     )
-    assert find_all_matching_hosts("m1.docker", [host]) == []
+    assert (
+        filter_all_hosts(
+            HostAddress(host=HostName("m1"), provider=ProviderInstanceName("docker")),
+            [host],
+        )
+        == []
+    )
 
 
-# --- find_all_matching_agents ---
+# --- filter_all_agents ---
 
 
-def test_find_all_matching_agents_by_name() -> None:
+def test_filter_all_agents_by_name() -> None:
     host_id = HostId.generate()
     host = DiscoveredHost(host_id=host_id, host_name=HostName("h"), provider_name=ProviderInstanceName("local"))
     agent = DiscoveredAgent(
@@ -904,12 +894,12 @@ def test_find_all_matching_agents_by_name() -> None:
         agent_name=AgentName("my-agent"),
         provider_name=ProviderInstanceName("local"),
     )
-    result = find_all_matching_agents("my-agent", {host: [agent]})
+    result = filter_all_agents(AgentName("my-agent"), {host: [agent]})
     assert len(result) == 1
     assert result[0] == (host, agent)
 
 
-def test_find_all_matching_agents_by_id() -> None:
+def test_filter_all_agents_by_id() -> None:
     host_id = HostId.generate()
     host = DiscoveredHost(host_id=host_id, host_name=HostName("h"), provider_name=ProviderInstanceName("local"))
     agent = DiscoveredAgent(
@@ -918,11 +908,11 @@ def test_find_all_matching_agents_by_id() -> None:
         agent_name=AgentName("a"),
         provider_name=ProviderInstanceName("local"),
     )
-    result = find_all_matching_agents(str(agent.agent_id), {host: [agent]})
+    result = filter_all_agents(agent.agent_id, {host: [agent]})
     assert len(result) == 1
 
 
-def test_find_all_matching_agents_no_match() -> None:
+def test_filter_all_agents_no_match() -> None:
     host_id = HostId.generate()
     host = DiscoveredHost(host_id=host_id, host_name=HostName("h"), provider_name=ProviderInstanceName("local"))
     agent = DiscoveredAgent(
@@ -931,10 +921,10 @@ def test_find_all_matching_agents_no_match() -> None:
         agent_name=AgentName("other"),
         provider_name=ProviderInstanceName("local"),
     )
-    assert find_all_matching_agents("nonexistent", {host: [agent]}) == []
+    assert filter_all_agents(AgentName("nonexistent"), {host: [agent]}) == []
 
 
-def test_find_all_matching_agents_multiple() -> None:
+def test_filter_all_agents_multiple() -> None:
     host1_id = HostId.generate()
     host2_id = HostId.generate()
     host1 = DiscoveredHost(host_id=host1_id, host_name=HostName("h1"), provider_name=ProviderInstanceName("local"))
@@ -951,11 +941,11 @@ def test_find_all_matching_agents_multiple() -> None:
         agent_name=AgentName("shared"),
         provider_name=ProviderInstanceName("local"),
     )
-    result = find_all_matching_agents("shared", {host1: [agent1], host2: [agent2]})
+    result = filter_all_agents(AgentName("shared"), {host1: [agent1], host2: [agent2]})
     assert len(result) == 2
 
 
-def test_find_all_matching_agents_filtered_by_host() -> None:
+def test_filter_all_agents_filtered_by_host() -> None:
     host1_id = HostId.generate()
     host2_id = HostId.generate()
     host1 = DiscoveredHost(host_id=host1_id, host_name=HostName("h1"), provider_name=ProviderInstanceName("local"))
@@ -972,7 +962,7 @@ def test_find_all_matching_agents_filtered_by_host() -> None:
         agent_name=AgentName("shared"),
         provider_name=ProviderInstanceName("local"),
     )
-    result = find_all_matching_agents("shared", {host1: [agent1], host2: [agent2]}, resolved_host=host1)
+    result = filter_all_agents(AgentName("shared"), {host1: [agent1], host2: [agent2]}, resolved_host=host1)
     assert len(result) == 1
     assert result[0] == (host1, agent1)
 

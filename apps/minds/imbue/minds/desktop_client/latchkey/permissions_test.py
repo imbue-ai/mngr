@@ -15,9 +15,10 @@ from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.store import load_permissions
-from imbue.mngr_latchkey.store import permissions_path_for_agent
+from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
 def _make_recording_binary(tmp_path: Path, name: str, *, exit_code: int = 0, stderr: str = "") -> Path:
@@ -184,10 +185,12 @@ def test_mngr_message_sender_does_not_raise_on_failure(tmp_path: Path) -> None:
 def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(tmp_path: Path) -> None:
     handler = _build_handler(tmp_path, credential_status="valid")
     agent_id = AgentId()
+    host_id = HostId()
 
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=agent_id,
+        host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all", "slack-write-all"),
     )
@@ -197,8 +200,8 @@ def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(
     assert result.set_credentials_example is None
     # Auth browser must not have been invoked.
     assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
-    # Permissions file reflects the new rule.
-    config = load_permissions(permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id))
+    # Permissions file reflects the new rule and is keyed by host (not agent).
+    config = load_permissions(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id))
     assert config.rules == ({"slack-api": ["slack-read-all", "slack-write-all"]},)
     # Response event was written and mngr message sent.
     responses = load_response_events(tmp_path)
@@ -218,6 +221,7 @@ def test_grant_with_missing_credentials_invokes_auth_browser(tmp_path: Path) -> 
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=agent_id,
+        host_id=HostId(),
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -234,6 +238,7 @@ def test_grant_with_invalid_credentials_also_invokes_auth_browser(tmp_path: Path
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=AgentId(),
+        host_id=HostId(),
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -273,6 +278,7 @@ def test_grant_with_unknown_credentials_invokes_auth_browser(tmp_path: Path) -> 
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=AgentId(),
+        host_id=HostId(),
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -289,10 +295,12 @@ def test_grant_treats_failed_browser_flow_as_deny_with_distinct_message(tmp_path
         auth_browser_stderr="user cancelled",
     )
     agent_id = AgentId()
+    host_id = HostId()
 
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=agent_id,
+        host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -301,7 +309,7 @@ def test_grant_treats_failed_browser_flow_as_deny_with_distinct_message(tmp_path
     assert "sign-in" in result.message.lower()
     assert "user cancelled" in result.message
     # latchkey_permissions.json must NOT have been written.
-    assert not permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id).exists()
+    assert not permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).exists()
     # A DENIED response event was appended (no separate AUTH_FAILED status).
     responses = load_response_events(tmp_path)
     assert len(responses) == 1
@@ -318,6 +326,7 @@ def test_grant_rejects_empty_granted_permissions(tmp_path: Path) -> None:
         handler.grant(
             request_event_id="evt-abc",
             agent_id=AgentId(),
+            host_id=HostId(),
             service_info=_SLACK_SERVICE_INFO,
             granted_permissions=(),
         )
@@ -333,6 +342,7 @@ def test_grant_rejects_permissions_outside_catalog(tmp_path: Path) -> None:
         handler.grant(
             request_event_id="evt-abc",
             agent_id=AgentId(),
+            host_id=HostId(),
             service_info=_SLACK_SERVICE_INFO,
             granted_permissions=("not-a-real-permission",),
         )
@@ -343,21 +353,24 @@ def test_grant_rejects_permissions_outside_catalog(tmp_path: Path) -> None:
 def test_grant_replaces_existing_rule_for_same_scope(tmp_path: Path) -> None:
     handler = _build_handler(tmp_path, credential_status="valid")
     agent_id = AgentId()
+    host_id = HostId()
 
     handler.grant(
         request_event_id="evt-1",
         agent_id=agent_id,
+        host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
     handler.grant(
         request_event_id="evt-2",
         agent_id=agent_id,
+        host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all", "slack-write-all"),
     )
 
-    config = load_permissions(permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id))
+    config = load_permissions(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id))
     assert config.rules == ({"slack-api": ["slack-read-all", "slack-write-all"]},)
 
 
@@ -373,10 +386,12 @@ def test_grant_refuses_when_browser_auth_unsupported_and_returns_set_example(tmp
         set_credentials_example=base_example,
     )
     agent_id = AgentId()
+    host_id = HostId()
 
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=agent_id,
+        host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -395,7 +410,7 @@ def test_grant_refuses_when_browser_auth_unsupported_and_returns_set_example(tmp
     # The request must remain pending: no response event, no permissions
     # file, no mngr message.
     assert load_response_events(tmp_path) == []
-    assert not permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id).exists()
+    assert not permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).exists()
     assert not (tmp_path / "mngr_report.jsonl").exists()
 
 
@@ -410,6 +425,7 @@ def test_grant_falls_back_to_generic_example_when_latchkey_omits_one(tmp_path: P
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=AgentId(),
+        host_id=HostId(),
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -442,6 +458,7 @@ def test_grant_prefixes_set_example_with_latchkey_directory_when_pinned(tmp_path
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=AgentId(),
+        host_id=HostId(),
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -477,6 +494,7 @@ def test_grant_prefixes_set_example_with_pinned_latchkey_directory(tmp_path: Pat
     result = handler.grant(
         request_event_id="evt-abc",
         agent_id=AgentId(),
+        host_id=HostId(),
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -517,10 +535,12 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
         mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
     )
     agent_id = AgentId()
+    host_id = HostId()
 
     first = handler.grant(
         request_event_id="evt-abc",
         agent_id=agent_id,
+        host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -532,6 +552,7 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
     second = handler.grant(
         request_event_id="evt-abc",
         agent_id=agent_id,
+        host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
@@ -594,12 +615,31 @@ def test_render_request_page_omits_browser_notice_when_browser_auth_unsupported(
     assert "Granting permission" in html
 
 
+def test_render_request_page_notes_grants_are_shared_per_host(tmp_path: Path) -> None:
+    """Dialog must tell the user the grant applies to every agent on the host.
+
+    Latchkey state (gateway URL, password, JWT, permissions config) is
+    keyed per-host, so every agent that runs on this workspace's host
+    inherits the same grants. The dialog surfaces that scope so the user
+    isn't surprised by it.
+    """
+    handler = _build_handler(tmp_path, credential_status="valid")
+
+    html = _render_dialog_html(handler)
+
+    # Short bracket note next to the workspace link.
+    assert "grants apply to every agent on this host" in html
+    # Reinforced in the form body so users who skim past the header still see it.
+    assert "shared across every agent running on this workspace's host" in html
+
+
 # -- LatchkeyPermissionGrantHandler.deny --
 
 
 def test_deny_writes_response_event_without_touching_permissions_file(tmp_path: Path) -> None:
     handler = _build_handler(tmp_path, credential_status="valid")
     agent_id = AgentId()
+    host_id = HostId()
 
     handler.deny(
         request_event_id="evt-abc",
@@ -610,8 +650,8 @@ def test_deny_writes_response_event_without_touching_permissions_file(tmp_path: 
     responses = load_response_events(tmp_path)
     assert len(responses) == 1
     assert responses[0].status == str(RequestStatus.DENIED)
-    # No permissions file should have been created.
-    assert not permissions_path_for_agent(tmp_path / "mngr_latchkey", agent_id).exists()
+    # No permissions file should have been created on either path.
+    assert not permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).exists()
     # The auth-browser binary must not have been invoked either.
     assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
 
