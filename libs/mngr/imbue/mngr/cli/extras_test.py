@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from imbue.mngr.cli import extras as extras_mod
 from imbue.mngr.cli.extras import _completion_status
 from imbue.mngr.cli.extras import _detect_shell
 from imbue.mngr.cli.extras import _generate_completion_script
@@ -102,42 +101,96 @@ def test_completion_status_returns_tuple() -> None:
     assert isinstance(rc_path, Path)
 
 
-def test_install_completion_auto_writes_script(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_install_completion_auto_writes_script(tmp_path: Path) -> None:
     """_install_completion writes the script when auto=True; reports configured once present."""
     rc = tmp_path / ".zshrc"
     rc.write_text("# existing config\n")
 
-    # Helper that returns different status depending on whether the script was already written
     def _status() -> tuple[bool, str, Path]:
         return ("_mngr_complete" in rc.read_text(), "zsh", rc)
 
-    monkeypatch.setattr(extras_mod, "_completion_status", _status)
-
     # First call: not configured yet -> writes the script
-    assert _install_completion(auto=True) is True
+    assert _install_completion(auto=True, status_fn=_status) is True
     assert "_mngr_complete" in rc.read_text()
 
     # Second call: now configured -> returns True without re-writing
-    assert _install_completion(auto=False) is True
+    assert _install_completion(auto=False, status_fn=_status) is True
 
 
-def test_install_completion_no_tty() -> None:
-    """_install_completion returns a boolean when no TTY is available."""
-    # In the test environment, read_tty_choice returns "" because /dev/tty is unavailable,
-    # so the function either skips (False) or reports already configured (True).
-    result = _install_completion(auto=False)
-    assert isinstance(result, bool)
+def test_install_completion_skips_without_tty(tmp_path: Path) -> None:
+    """Without an interactive terminal, _install_completion skips and returns False.
+
+    The confirm_fn would install if reached, but the is_interactive_fn
+    gate fires first.
+    """
+    rc = tmp_path / ".zshrc"
+    rc.write_text("# existing config\n")
+    assert (
+        _install_completion(
+            auto=False,
+            status_fn=lambda: (False, "zsh", rc),
+            is_interactive_fn=lambda: False,
+            confirm_fn=lambda _rc: True,
+        )
+        is False
+    )
+    assert "_mngr_complete" not in rc.read_text()
 
 
-def test_install_claude_plugin_status_branches(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_install_claude_plugin returns correct values for different _claude_plugin_status results."""
-    # When claude is not available -> returns False
-    monkeypatch.setattr(extras_mod, "_claude_plugin_status", lambda: (False, False))
-    assert _install_claude_plugin(auto=True) is False
+def test_install_completion_picker_skip_writes_nothing(tmp_path: Path) -> None:
+    """When the picker confirm returns False, no script is written."""
+    rc = tmp_path / ".zshrc"
+    rc.write_text("# existing config\n")
+    assert (
+        _install_completion(
+            auto=False,
+            status_fn=lambda: (False, "zsh", rc),
+            is_interactive_fn=lambda: True,
+            confirm_fn=lambda _rc: False,
+        )
+        is False
+    )
+    assert "_mngr_complete" not in rc.read_text()
 
-    # When plugin is already installed -> returns True
-    monkeypatch.setattr(extras_mod, "_claude_plugin_status", lambda: (True, True))
-    assert _install_claude_plugin(auto=True) is True
+
+def test_install_claude_plugin_returns_false_when_claude_missing() -> None:
+    """When claude is not on PATH, _install_claude_plugin returns False."""
+    assert _install_claude_plugin(auto=True, status_fn=lambda: (False, False)) is False
+
+
+def test_install_claude_plugin_returns_true_when_already_installed() -> None:
+    """When the plugin is already installed, _install_claude_plugin short-circuits to True."""
+    assert _install_claude_plugin(auto=True, status_fn=lambda: (True, True)) is True
+
+
+def test_install_claude_plugin_skips_without_tty() -> None:
+    """Without an interactive terminal, _install_claude_plugin skips and returns False.
+
+    The confirm_fn would install if reached, but the is_interactive_fn
+    gate fires first.
+    """
+    assert (
+        _install_claude_plugin(
+            auto=False,
+            status_fn=lambda: (True, False),
+            is_interactive_fn=lambda: False,
+            confirm_fn=lambda: True,
+        )
+        is False
+    )
+
+
+def test_install_claude_plugin_picker_skip_returns_false() -> None:
+    """When the picker confirm returns False, the plugin is not installed and returns False."""
+    assert (
+        _install_claude_plugin(
+            auto=False,
+            status_fn=lambda: (True, False),
+            is_interactive_fn=lambda: True,
+            confirm_fn=lambda: False,
+        )
+        is False
+    )
 
 
 def test_plugins_status_returns_string() -> None:

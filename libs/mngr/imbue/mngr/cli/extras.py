@@ -20,9 +20,9 @@ from imbue.mngr.cli.complete import generate_zsh_script
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
-from imbue.mngr.cli.output_helpers import read_tty_choice
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.plugin_install_wizard import install_wizard_impl
+from imbue.mngr.cli.urwid_picker import run_single_select_picker
 from imbue.mngr.cli.urwid_utils import has_interactive_terminal
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.loader import get_or_create_profile_dir
@@ -71,6 +71,23 @@ def _generate_completion_script(shell_type: str) -> str:
     return generate_bash_script()
 
 
+# -- Shared picker helper --
+
+
+def _confirm_install(question: str, install_label: str, skip_label: str = "Skip") -> bool:
+    """Show a 2-option picker. Returns True if the user picks the install option.
+
+    Caller must check ``has_interactive_terminal()`` before calling: this
+    helper assumes a TTY is available.
+    """
+    idx = run_single_select_picker(
+        options=[install_label, skip_label],
+        title="mngr extras",
+        header_text=question,
+    )
+    return idx == 0
+
+
 # -- Completion extra --
 
 
@@ -82,22 +99,31 @@ def _completion_status() -> tuple[bool, str, Path]:
     return configured, shell_type, rc_path
 
 
-def _install_completion(auto: bool) -> bool:
+def _install_completion(
+    auto: bool,
+    *,
+    # Dependencies are exposed as keyword arguments so tests can substitute
+    # in-memory fakes without monkeypatching module-level callables.
+    status_fn: Callable[[], tuple[bool, str, Path]] = _completion_status,
+    is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
+    confirm_fn: Callable[[Path], bool] = lambda rc_path: _confirm_install(
+        f"Enable shell completion? This will add a line to {rc_path}.",
+        "Enable shell completion",
+    ),
+) -> bool:
     """Install shell completion. Returns True if installed (or already configured)."""
-    configured, shell_type, rc_path = _completion_status()
+    configured, shell_type, rc_path = status_fn()
 
     if configured:
         write_human_line("Shell completion already configured in {}", rc_path)
         return True
 
     if not auto:
-        write_human_line("Enable shell completion? This will add a line to {}", rc_path)
-        choice = read_tty_choice("[y/n]: ")
-        if choice == "" or choice.lower() != "y":
-            if choice == "":
-                write_human_line("No interactive terminal available. Skipping shell completion.")
-            else:
-                write_human_line("Skipping shell completion.")
+        if not is_interactive_fn():
+            write_human_line("No interactive terminal available. Skipping shell completion.")
+            return False
+        if not confirm_fn(rc_path):
+            write_human_line("Skipping shell completion.")
             return False
 
     script = _generate_completion_script(shell_type)
@@ -128,9 +154,20 @@ def _claude_plugin_status() -> tuple[bool, bool]:
         return True, False
 
 
-def _install_claude_plugin(auto: bool) -> bool:
+def _install_claude_plugin(
+    auto: bool,
+    *,
+    # Dependencies are exposed as keyword arguments so tests can substitute
+    # in-memory fakes without monkeypatching module-level callables.
+    status_fn: Callable[[], tuple[bool, bool]] = _claude_plugin_status,
+    is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
+    confirm_fn: Callable[[], bool] = lambda: _confirm_install(
+        "Install the Claude Code review plugin (imbue-code-guardian)?",
+        "Install the Claude Code review plugin",
+    ),
+) -> bool:
     """Install the Claude Code review plugin. Returns True if installed (or already present)."""
-    claude_available, plugin_installed = _claude_plugin_status()
+    claude_available, plugin_installed = status_fn()
 
     if not claude_available:
         write_human_line("Claude Code is not installed -- skipping Claude Code plugin.")
@@ -141,13 +178,11 @@ def _install_claude_plugin(auto: bool) -> bool:
         return True
 
     if not auto:
-        write_human_line("Install the Claude Code review plugin (imbue-code-guardian)?")
-        choice = read_tty_choice("[y/n]: ")
-        if choice == "" or choice.lower() != "y":
-            if choice == "":
-                write_human_line("No interactive terminal available. Skipping Claude Code plugin.")
-            else:
-                write_human_line("Skipping Claude Code plugin.")
+        if not is_interactive_fn():
+            write_human_line("No interactive terminal available. Skipping Claude Code plugin.")
+            return False
+        if not confirm_fn():
+            write_human_line("Skipping Claude Code plugin.")
             return False
 
     write_human_line("Installing Claude Code review plugin...")
@@ -257,36 +292,25 @@ def _write_default_agent_type(value: str) -> Path:
 
 
 def _prompt_default_agent_type_choice(available: list[str]) -> str | None:
-    """Show a numbered picker and return the chosen agent type, or None to skip.
+    """Show an urwid picker and return the chosen agent type, or None to skip.
 
-    Returns None if the user picks "keep no default", enters something
-    other than a valid number, or if no TTY is available. The "skip"
-    option is always last.
+    Returns None if the user picks "Keep no default" (the trailing
+    sentinel row) or cancels via q/Ctrl+C. Caller must check
+    ``has_interactive_terminal()`` first.
     """
-    write_human_line("Pick a default agent type for 'mngr create':")
-    for index, name in enumerate(available, start=1):
-        write_human_line("  {}) {}", index, name)
-    skip_index = len(available) + 1
-    write_human_line("  {}) keep no default", skip_index)
-
-    choice = read_tty_choice(f"[1-{skip_index}]: ")
-    if choice == "":
-        write_human_line("No interactive terminal available. Skipping default agent type.")
+    options = [*available, "Keep no default"]
+    idx = run_single_select_picker(
+        options=options,
+        title="mngr extras",
+        header_text="Pick a default agent type for 'mngr create':",
+    )
+    if idx is None:
+        write_human_line("Cancelled; skipping default agent type.")
         return None
-
-    try:
-        picked = int(choice)
-    except ValueError:
-        write_human_line("Not a number; skipping default agent type.")
-        return None
-
-    if picked == skip_index:
+    if idx == len(available):
         write_human_line("Skipping default agent type.")
         return None
-    if 1 <= picked <= len(available):
-        return available[picked - 1]
-    write_human_line("Out of range; skipping default agent type.")
-    return None
+    return available[idx]
 
 
 def _install_default_agent_type(
