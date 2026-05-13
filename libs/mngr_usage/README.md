@@ -74,10 +74,15 @@ conventional path. The minimal contract is just the JSONL line shape:
 {"source":"<your-source>/usage","type":"cost_snapshot","event_id":"evt-<hex>","timestamp":"<ISO 8601>","session_id":"<uuid|null>","cost":{"total_cost_usd":<float>},"rate_limits":{"<window-key>":{"used_percentage":<float>,"resets_at":<unix-ts>}}}
 ```
 
-The `session_id`, `cost`, and `rate_limits` fields are all individually
-optional; at least one must be present and non-null for the reader to keep
-the event. The `type` field is informational -- the reader doesn't validate
-it -- but `"cost_snapshot"` is the current convention.
+Every event must carry a `session_id` (non-empty string) plus at least one
+of `rate_limits` or `cost`. Events missing `session_id` are dropped with a
+WARNING log naming the source and event_id -- so if you're writing a usage
+plugin and don't see your data in `mngr usage`, check the log first. Any
+plausible statusline source has a session identifier handy, so this is
+rarely a constraint; if a future tool doesn't, synthesize a stable
+per-session id on the writer side. The `type` field is informational --
+the reader doesn't validate it -- but `"cost_snapshot"` is the current
+convention.
 
 Append one line per refresh to:
 

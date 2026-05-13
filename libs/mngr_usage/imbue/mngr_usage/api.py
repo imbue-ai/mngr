@@ -201,6 +201,14 @@ def _build_snapshot_for_source(
 ) -> UsageSnapshot | None:
     """Aggregate one source's parsed events into a UsageSnapshot.
 
+    Every event must carry a non-empty ``session_id``. Events that don't
+    are dropped (debug log) -- ``session_id`` is the keying field for cost
+    aggregation, and a writer can't usefully participate without supplying
+    it. The bundled Claude writer always emits it; any future writer must
+    do the same (synthesize a stable per-session identifier if the
+    upstream tool doesn't have one). This makes the contract simple: every
+    event has a session_id, plus rate_limits or cost (or both) as payload.
+
     Single pass over the events list (caller already parsed JSON):
     - Windows: keep the freshest event's rate_limits payload (the rate-limit
       counter is account-level, so freshest-wins is the right reduction
@@ -222,6 +230,19 @@ def _build_snapshot_for_source(
     max_timestamp = -1
 
     for event in events:
+        session_id = _session_id_from_event(event)
+        if session_id is None:
+            # session_id is a required field on every event; the bundled Claude
+            # writer always emits it, so a missing one means writer/reader drift
+            # or a hand-edited events file. Warn (not debug) so the user sees
+            # data getting silently dropped rather than discovering it via
+            # missing rows in `mngr usage`.
+            logger.warning(
+                "Dropping event without session_id from source {} (event_id={})",
+                source_name,
+                event.get("event_id"),
+            )
+            continue
         timestamp = _parse_iso_timestamp(event.get("timestamp"))
         if timestamp is None:
             continue
@@ -233,9 +254,8 @@ def _build_snapshot_for_source(
             freshest_windows_timestamp = timestamp
             freshest_windows = windows
 
-        session_id = _session_id_from_event(event)
         cost = _cost_from_event(event)
-        if session_id is None or cost is None:
+        if cost is None:
             continue
 
         existing = session_accumulators.get(session_id)

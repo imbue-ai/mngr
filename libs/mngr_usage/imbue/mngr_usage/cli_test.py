@@ -12,6 +12,7 @@ from typing import Any
 import pluggy
 import pytest
 from click.testing import CliRunner
+from loguru import logger
 
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.errors import UserInputError
@@ -177,18 +178,51 @@ def test_aggregate_keeps_freshest_windows_across_events() -> None:
             "source": "claude/usage",
             "type": "cost_snapshot",
             "timestamp": "2026-05-08T10:00:00.000000000Z",
+            "session_id": "session-x",
             "rate_limits": {"five_hour": {"used_percentage": 10.0, "resets_at": 9_999_999_999}},
         },
         {
             "source": "claude/usage",
             "type": "cost_snapshot",
             "timestamp": "2026-05-08T11:00:00.000000000Z",
+            "session_id": "session-x",
             "rate_limits": {"five_hour": {"used_percentage": 50.0, "resets_at": 9_999_999_999}},
         },
     ]
     snapshots = aggregate_events_to_snapshots({"claude": events}, since_seconds=86400, now=2_000_000_000)
     assert len(snapshots) == 1
     assert snapshots[0].windows["five_hour"].used_percentage == 50.0
+
+
+def test_aggregate_drops_events_without_session_id() -> None:
+    """The reader requires session_id on every event. Events that lack it
+    (writer bug or upstream-payload drift) are dropped entirely -- they
+    don't contribute windows or cost -- and the reader emits a WARNING so
+    the user notices the data loss instead of silently missing rows in
+    ``mngr usage``. With the bundled Claude writer this case doesn't occur
+    because Claude Code always emits session_id."""
+    events = [
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-orphan",
+            "timestamp": "2026-05-08T11:00:00.000000000Z",
+            "rate_limits": {"five_hour": {"used_percentage": 10.0, "resets_at": 9_999_999_999}},
+        }
+    ]
+    captured: list[str] = []
+    sink_id = logger.add(lambda msg: captured.append(msg.record["message"]), level="WARNING", format="{message}")
+    try:
+        snapshots = aggregate_events_to_snapshots({"claude": events}, since_seconds=86400, now=2_000_000_000)
+    finally:
+        logger.remove(sink_id)
+    # No session_id -> event dropped -> source has nothing renderable -> no snapshot.
+    assert snapshots == []
+    # And the user is warned about the dropped event so the data loss is visible.
+    warning_text = " ".join(captured)
+    assert "session_id" in warning_text
+    assert "evt-orphan" in warning_text
+    assert "claude" in warning_text
 
 
 def test_aggregate_groups_per_session_keeping_latest_cost() -> None:
@@ -267,9 +301,10 @@ def test_aggregate_returns_cost_only_snapshot_when_no_rate_limits() -> None:
     assert snap.sessions[0].cost.total_cost_usd == 1.23
 
 
-def test_aggregate_drops_invalid_session_id_types() -> None:
-    """A non-string session_id is treated as absent rather than raising; the event
-    is dropped from per-session aggregation but contributes to windows / timestamps."""
+def test_aggregate_drops_event_with_non_string_session_id() -> None:
+    """A non-string session_id is treated as absent (writer bug); the entire
+    event is dropped -- including its rate_limits payload -- because the
+    reader requires session_id to be a valid string on every event."""
     events = [
         {
             "source": "claude/usage",
@@ -285,12 +320,8 @@ def test_aggregate_drops_invalid_session_id_types() -> None:
         since_seconds=86400,
         now=int(datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).timestamp()),
     )
-    assert len(snapshots) == 1
-    snap = snapshots[0]
-    assert snap.sessions == ()
-    # The windows from the event are still kept (a writer bug on session_id
-    # shouldn't black-hole the rate-limit data).
-    assert snap.windows["five_hour"].used_percentage == 10.0
+    # No usable events for the source -> no snapshot.
+    assert snapshots == []
 
 
 def test_aggregate_returns_no_snapshot_when_only_sessions_outside_window_and_no_windows() -> None:
@@ -501,6 +532,7 @@ def test_usage_command_human_format(
             "event_id": "evt-1",
             # Timestamp in the future so the snapshot won't be stale-by-age in the test
             "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "human-format-session",
             "rate_limits": {
                 "five_hour": {"used_percentage": 73.4, "resets_at": 9_999_999_999_999, "label": "5h"},
             },
@@ -529,6 +561,7 @@ def test_usage_command_json_format(
             "type": "cost_snapshot",
             "event_id": "evt-1",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "json-format-session",
             "rate_limits": {"five_hour": {"used_percentage": 12.3, "resets_at": 9_999_999_999_999}},
         },
     )
@@ -571,6 +604,7 @@ def test_usage_command_json_surfaces_elapsed_when_window_seconds_present(
             "event_id": "evt-1",
             # Use a fresh ISO timestamp so the snapshot isn't age-stale.
             "timestamp": datetime.fromtimestamp(now_s, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z"),
+            "session_id": "elapsed-window-session",
             "rate_limits": {
                 "five_hour": {
                     "used_percentage": 12.3,
@@ -612,6 +646,7 @@ def test_usage_command_format_template(
             "type": "cost_snapshot",
             "event_id": "evt-1",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "format-template-session",
             "rate_limits": {
                 "five_hour": {"used_percentage": 88.0, "resets_at": 9_999_999_999_999},
                 "seven_day": {"used_percentage": 44.0, "resets_at": 9_999_999_999_999},
@@ -676,6 +711,7 @@ def test_usage_command_picks_freshest_across_agents(
             "type": "cost_snapshot",
             "event_id": "evt-old",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "freshest-test-session-old",
             "rate_limits": {"five_hour": {"used_percentage": 10.0, "resets_at": 9_999_999_999_999}},
         },
     )
@@ -687,6 +723,7 @@ def test_usage_command_picks_freshest_across_agents(
             "type": "cost_snapshot",
             "event_id": "evt-new",
             "timestamp": "2056-05-08T11:00:00.000000000Z",
+            "session_id": "freshest-test-session-new",
             "rate_limits": {"five_hour": {"used_percentage": 99.0, "resets_at": 9_999_999_999_999}},
         },
     )
@@ -725,6 +762,7 @@ def test_usage_command_uses_reset_specific_warning_when_window_just_reset(
             "type": "cost_snapshot",
             "event_id": "evt-fresh",
             "timestamp": now_iso,
+            "session_id": "reset-warning-session",
             "rate_limits": {
                 "five_hour": {"used_percentage": 37.0, "resets_at": 1000, "label": "5h"},
             },
@@ -756,6 +794,7 @@ def test_usage_wait_matches_when_predicate_already_true(
             "type": "cost_snapshot",
             "event_id": "evt-1",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "wait-matches-session",
             "rate_limits": {
                 "five_hour": {"used_percentage": 12.0, "resets_at": 9_999_999_999_999, "window_seconds": 18000},
             },
@@ -788,6 +827,7 @@ def test_usage_wait_times_out_when_predicate_never_satisfied(
             "type": "cost_snapshot",
             "event_id": "evt-1",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "wait-timeout-session",
             "rate_limits": {
                 "five_hour": {"used_percentage": 90.0, "resets_at": 9_999_999_999_999, "window_seconds": 18000},
             },
@@ -1210,6 +1250,7 @@ def test_usage_command_human_format_multi_source(
             "type": "cost_snapshot",
             "event_id": "evt-claude",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "multi-source-claude-session",
             "rate_limits": {"five_hour": {"used_percentage": 11.0, "resets_at": 9_999_999_999_999}},
         },
         source="claude",
@@ -1222,6 +1263,7 @@ def test_usage_command_human_format_multi_source(
             "type": "cost_snapshot",
             "event_id": "evt-opencode",
             "timestamp": "2056-05-08T11:00:00.000000000Z",
+            "session_id": "multi-source-opencode-session",
             "rate_limits": {"five_hour": {"used_percentage": 22.0, "resets_at": 9_999_999_999_999}},
         },
         source="opencode",
