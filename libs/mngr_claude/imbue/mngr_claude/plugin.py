@@ -2080,8 +2080,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         actual session id on disk don't agree. The JSONL filename is the
         ground truth for what ``claude --resume <id>`` will look for. We
         read it from the *source* host -- the destination filesystem is the
-        same data, but reading source-side avoids depending on rsync
-        preserving mtimes when there are multiple JSONLs.
+        same data, but reading source-side means we can pick the active
+        session and bail (with no destination-side rename) without a second
+        remote round-trip after rsync.
         """
         # Carry the source's claude_session_id_history forward so the
         # destination's history reflects the prior run. Independent of the
