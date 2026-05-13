@@ -207,7 +207,7 @@ def _process_host_for_interrupt(
                 refreshed = refreshed_by_id.get(agent.id, agent)
                 resume_futures.append(
                     resume_executor.submit(
-                        _finalize_single_agent,
+                        _send_resume_message_and_record_result,
                         agent=refreshed,
                         result=result,
                         result_lock=result_lock,
@@ -226,7 +226,7 @@ def _process_host_for_interrupt(
         logger.warning("Error accessing host {}: {}", host_ref.host_id, e)
 
 
-def _finalize_single_agent(
+def _send_resume_message_and_record_result(
     agent: AgentInterface,
     result: InterruptResult,
     result_lock: Lock,
