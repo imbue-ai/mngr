@@ -269,8 +269,9 @@ def _window_to_template_values(window: WindowSnapshot, now: int) -> dict[str, st
 def _stringify_for_template(value: Any) -> str:
     """Render a single CEL/JSON value as a string for format-template substitution.
 
-    Treats None as empty so a template like ``{cost.total_cost_usd}`` doesn't
-    render the literal ``None`` when the field is absent.
+    Treats None as empty so a template like ``{api_cost.total_cost_usd}``
+    doesn't render the literal ``None`` when the field is absent (e.g. for
+    a subscription-only user whose api_cost aggregate is all-None).
     """
     return "" if value is None else str(value)
 
