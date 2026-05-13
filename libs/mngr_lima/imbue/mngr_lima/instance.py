@@ -49,6 +49,7 @@ from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_com
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
+from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
@@ -155,6 +156,29 @@ class LimaProviderInstance(BaseProviderInstance):
         """Path to the known_hosts file for this provider instance."""
         return self._keys_dir / "known_hosts"
 
+    def _host_keypair_paths(self, host_id: HostId) -> tuple[Path, Path]:
+        """Return (private_key_path, public_key_path) for this host's pre-injected sshd host key.
+
+        Per-host (not per-provider) so each VM has its own identity and removing
+        a host cleanly leaves no shared state. Mirrors mngr_imbue_cloud's
+        per-host keypair layout.
+        """
+        host_keys_dir = self._keys_dir / "hosts" / str(host_id)
+        return host_keys_dir / "ssh_host_ed25519_key", host_keys_dir / "ssh_host_ed25519_key.pub"
+
+    def _ensure_host_keypair(self, host_id: HostId) -> tuple[str, str]:
+        """Generate (or load) this host's pre-injected ed25519 keypair.
+
+        Returns (private_key_pem, public_key_openssh). The keypair is injected
+        into the VM via the Lima provision script and added to known_hosts on
+        the host machine atomically -- no ssh-keyscan required.
+        """
+        private_path, public_path = self._host_keypair_paths(host_id)
+        private_path.parent.mkdir(parents=True, exist_ok=True)
+        if not (private_path.exists() and public_path.exists()):
+            load_or_create_host_keypair(private_path.parent, "ssh_host_ed25519_key")
+        return private_path.read_text(), public_path.read_text().strip()
+
     @property
     def _tags_dir(self) -> Path:
         """Directory for per-host tag files."""
@@ -229,12 +253,14 @@ class LimaProviderInstance(BaseProviderInstance):
         host_name: HostName,
         ssh_config: LimaSshConfig,
     ) -> Host:
-        """Create a Host object from SSH connection info."""
-        # Get the host key via ssh-keyscan and add to known_hosts
-        self._keys_dir.mkdir(parents=True, exist_ok=True)
+        """Create a Host object from SSH connection info.
 
-        # Add the host to known_hosts by scanning its key
-        self._scan_and_add_host_key(ssh_config.hostname, ssh_config.port)
+        Assumes the per-host ed25519 keypair has already been generated (and
+        injected into the VM during ``create_host``). Re-applies the entry to
+        known_hosts each call so that a Lima restart -- which can change the
+        host-side forwarded port -- stays in sync without scanning.
+        """
+        self._record_pre_injected_host_key(host_id, ssh_config.hostname, ssh_config.port)
 
         pyinfra_host = create_pyinfra_host(
             hostname=ssh_config.hostname,
@@ -256,30 +282,28 @@ class LimaProviderInstance(BaseProviderInstance):
             ),
         )
 
-    def _scan_and_add_host_key(self, hostname: str, port: int) -> None:
-        """Scan SSH host keys and add all of them to known_hosts.
+    def _record_pre_injected_host_key(self, host_id: HostId, hostname: str, port: int) -> None:
+        """Write the host's known_hosts entry from the pre-injected per-host public key.
 
-        First removes any stale keys for this host:port (from previous VMs
-        that may have reused the same port), then adds all key types from
-        ssh-keyscan so paramiko can negotiate any of them.
+        Clears any stale entry for this host:port first (Lima reassigns ports
+        across restarts, so the same hostname+port pair may have referred to a
+        different VM earlier). Idempotent: re-running with a matching key is a
+        no-op write.
         """
+        self._keys_dir.mkdir(parents=True, exist_ok=True)
+        _, public_key_path = self._host_keypair_paths(host_id)
+        if not public_key_path.exists():
+            # Legacy host created before the pre-injection change; no known
+            # public key on disk. Skip; the caller (or pyinfra) will TOFU.
+            logger.warning(
+                "No pre-injected host key on disk for {}; known_hosts will not be populated "
+                "(legacy host? destroy + recreate to migrate).",
+                host_id,
+            )
+            return
+        public_key = public_key_path.read_text().strip()
         clear_host_from_known_hosts(self._known_hosts_path, hostname, port)
-        result = self.mngr_ctx.concurrency_group.run_process_to_completion(
-            ["ssh-keyscan", "-t", "rsa,ecdsa,ed25519", "-p", str(port), hostname],
-            timeout=10.0,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            added_any = False
-            for line in result.stdout.strip().splitlines():
-                if line and not line.startswith("#"):
-                    parts = line.split(None, 2)
-                    if len(parts) >= 3:
-                        key_type_and_data = f"{parts[1]} {parts[2]}"
-                        add_host_to_known_hosts(self._known_hosts_path, hostname, port, key_type_and_data)
-                        added_any = True
-            if added_any:
-                return
-        logger.warning("Could not scan SSH host key for {}:{}", hostname, port)
+        add_host_to_known_hosts(self._known_hosts_path, hostname, port, public_key)
 
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData) -> None:
         """Update the certified host data in the host record."""
@@ -397,6 +421,12 @@ sudo poweroff
         # Create the persistent volume directory
         volume_dir = self._ensure_host_volume_dir(host_id)
 
+        # Pre-generate the sshd host keypair so we can both inject it into the
+        # VM (via the Lima provision script) and atomically populate
+        # known_hosts on the host machine -- eliminating the ssh-keyscan race
+        # that the host-side TCP forwarder otherwise exposes during VM boot.
+        host_private_key_pem, host_public_key_openssh = self._ensure_host_keypair(host_id)
+
         # Generate or load Lima YAML config
         yaml_path_from_build_args = parse_build_args_for_yaml_path(tuple(build_args or ()))
         if yaml_path_from_build_args is not None:
@@ -406,6 +436,8 @@ sudo poweroff
                 host_dir=str(self.host_dir),
                 config_image_url_aarch64=self.config.default_image_url_aarch64,
                 config_image_url_x86_64=self.config.default_image_url_x86_64,
+                host_private_key_pem=host_private_key_pem,
+                host_public_key_openssh=host_public_key_openssh,
             )
             lima_config = merge_lima_yaml(base_config, user_config)
         else:
@@ -416,6 +448,8 @@ sudo poweroff
                 custom_image_url=image_url,
                 config_image_url_aarch64=self.config.default_image_url_aarch64,
                 config_image_url_x86_64=self.config.default_image_url_x86_64,
+                host_private_key_pem=host_private_key_pem,
+                host_public_key_openssh=host_public_key_openssh,
             )
 
         # Write the YAML config to a temp file
