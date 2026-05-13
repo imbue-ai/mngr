@@ -202,12 +202,13 @@ def _build_snapshot_for_source(
     """Aggregate one source's parsed events into a UsageSnapshot.
 
     Every event must carry a non-empty ``session_id``. Events that don't
-    are dropped (debug log) -- ``session_id`` is the keying field for cost
-    aggregation, and a writer can't usefully participate without supplying
-    it. The bundled Claude writer always emits it; any future writer must
-    do the same (synthesize a stable per-session identifier if the
-    upstream tool doesn't have one). This makes the contract simple: every
-    event has a session_id, plus rate_limits or cost (or both) as payload.
+    are dropped with a warning log (naming source and event_id) --
+    ``session_id`` is the keying field for cost aggregation, and a writer
+    can't usefully participate without supplying it. The bundled Claude
+    writer always emits it; any future writer must do the same (synthesize
+    a stable per-session identifier if the upstream tool doesn't have
+    one). This makes the contract simple: every event has a session_id,
+    plus rate_limits or cost (or both) as payload.
 
     Single pass over the events list (caller already parsed JSON):
     - Windows: keep the freshest event's rate_limits payload (the rate-limit
