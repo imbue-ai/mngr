@@ -1078,8 +1078,9 @@ def test_usage_command_aggregates_cost_across_agents_in_same_source(
     cli_profile_dir: Path,
 ) -> None:
     """Two Claude agents on different sessions both contribute to ``claude``'s
-    aggregate cost. The human output shows the current session's line plus a
-    total line, and JSON exposes both session records under sessions[]."""
+    aggregate cost. With ``--detail`` the JSON output exposes both session
+    records under ``sessions[]`` and the aggregate ``cost.total_cost_usd``
+    sums across them."""
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
     agent_a_dir = tmp_path / "agent-a"
     agent_a_dir.mkdir()
