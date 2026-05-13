@@ -3239,8 +3239,8 @@ def _is_multistage_dockerfile(dockerfile_contents: str) -> bool:
     """Return True if the Dockerfile contains more than one FROM instruction.
 
     Uses DockerfileParser to mirror the same multistage detection that Modal's
-    image builder uses. ``cache_content=True`` keeps the parser in-memory --
-    no temp file is created.
+    image builder uses. Passing ``fileobj=io.BytesIO()`` and assigning
+    ``dfp.content`` keeps the parser in-memory -- no temp file is created.
     """
     dfp = DockerfileParser(fileobj=io.BytesIO())
     dfp.content = dockerfile_contents
