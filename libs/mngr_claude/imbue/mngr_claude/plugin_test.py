@@ -2989,6 +2989,29 @@ def test_on_before_create_rejects_non_claude_agent_type() -> None:
         on_before_create(args=args)
 
 
+def test_on_before_create_rejects_adopt_session_with_clone_source(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """on_before_create should raise UserInputError when both --adopt-session
+    and a clone source (source_agent_state_location) are passed: each is its
+    own session-adoption directive and on_after_provisioning would silently
+    pick one and drop the other otherwise.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    args = OnBeforeCreateArgs(
+        agent_options=CreateAgentOptions(
+            agent_type=AgentTypeName("claude"),
+            plugin_data={"adopt_session": ("some-id",)},
+            source_agent_state_location=HostLocation(host=host, path=tmp_path / "src"),
+        ),
+        target_host=NewHostOptions(provider=ProviderInstanceName("local")),
+        create_work_dir=True,
+    )
+    with pytest.raises(UserInputError, match="incompatible with cloning via --from"):
+        on_before_create(args=args)
+
+
 # =============================================================================
 # on_after_provisioning Session Adoption Tests
 # =============================================================================
