@@ -145,8 +145,11 @@ def test_destroy_yes_does_not_swallow_agent_not_found(
         obj=plugin_manager,
         catch_exceptions=True,
     )
-    # Unlike --force, --yes does not swallow not-found errors.
+    # Unlike --force, --yes does not swallow not-found errors: the agent name
+    # must appear in the surfaced error output (the AgentNotFoundError message
+    # includes the unmatched agent name).
     assert result.exit_code != 0
+    assert "nonexistent-agent-12345" in result.output
 
 
 def test_destroy_requires_agent_or_all(
