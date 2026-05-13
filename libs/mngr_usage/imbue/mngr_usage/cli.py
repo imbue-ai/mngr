@@ -457,11 +457,12 @@ def _write_source_section(model: _UsageRenderModel, now: int, header: str, detai
     (imputed)`` line; both render under the rare case where one agent
     swaps auth mode within the window.
 
-    With ``detail=True`` and at least two sessions across both modes,
-    indented per-session lines are inserted between the cost lines and
-    the window lines (newest first, matching ``sessions[]`` order). For
-    a single session the cost line already names that session's reading
-    so the breakdown is suppressed to avoid duplication.
+    With ``detail=True`` and at least two sessions total (counting both
+    modes together), indented per-session lines are inserted between the
+    cost lines and the window lines (newest first, matching
+    ``sessions[]`` order). For a single session the cost line already
+    names that session's reading so the breakdown is suppressed to avoid
+    duplication.
 
     Per-session lines are skipped individually when that session has no
     usable cost.
