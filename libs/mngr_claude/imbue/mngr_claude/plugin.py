@@ -2124,12 +2124,20 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         # Rename the source-encoded project subdir on the destination (just
         # rsynced) to the destination agent's encoded work_dir. Both paths
         # live on the same destination host, so a plain ``mv`` is enough.
+        # ``rm -rf target_dir`` first because ``mv`` would otherwise nest
+        # source_subdir *inside* target_dir if the source's plugin/ happened
+        # to contain a subdir matching dest_project_name (e.g. source agent
+        # had run in multiple cwds, one encoding to ours). rm -rf is a no-op
+        # if target_dir does not exist; the && guard skips mv if rm fails.
         dest_projects_dir = self._get_agent_dir() / "plugin" / "claude" / "anthropic" / "projects"
         dest_project_name = encode_claude_project_dir_name(self.work_dir)
         if source_project_name != dest_project_name:
             source_subdir = dest_projects_dir / source_project_name
             target_dir = dest_projects_dir / dest_project_name
-            rename_cmd = f"mv {shlex.quote(str(source_subdir))} {shlex.quote(str(target_dir))}"
+            rename_cmd = (
+                f"rm -rf {shlex.quote(str(target_dir))} && "
+                f"mv {shlex.quote(str(source_subdir))} {shlex.quote(str(target_dir))}"
+            )
             rename_result = self.host.execute_idempotent_command(rename_cmd, timeout_seconds=10.0)
             if not rename_result.success:
                 logger.warning(
