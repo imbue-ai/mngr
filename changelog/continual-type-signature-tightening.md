@@ -1,0 +1,1 @@
+- Types: progressively tighten type annotations across `libs/mngr/` and the `libs/mngr_*/` plugins -- bare generics get parameterized, `Optional[T]` migrates to PEP-604 `T | None`, and `Any` is narrowed where a real type works. Same principle as the `PREVENT_BARE_GENERIC_TYPES` ratchet. Behaviour unchanged.
