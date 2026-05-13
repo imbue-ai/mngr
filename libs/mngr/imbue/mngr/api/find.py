@@ -278,9 +278,7 @@ def ensure_host_started(
             return online_host, False
         case HostInterface() as offline_host:
             if is_start_desired:
-                with log_span(
-                    "Starting offline host", host_id=offline_host.id, provider=provider.name
-                ):
+                with log_span("Starting offline host", host_id=offline_host.id, provider=provider.name):
                     started_host = provider.start_host(offline_host)
                 return started_host, True
             else:

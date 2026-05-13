@@ -893,9 +893,7 @@ def _create_agent(
         # milestones to the user here -- api_create itself only emits debug-level
         # log_span entries for these steps, per the api/cli logging split.
         logger.info("Starting agent {} ...", create_result.agent.name)
-        if setup.initial_message is not None and not isinstance(
-            create_result.agent, StreamingHeadlessAgentMixin
-        ):
+        if setup.initial_message is not None and not isinstance(create_result.agent, StreamingHeadlessAgentMixin):
             logger.info("Sending initial message...")
 
         # If --edit-message was used, wait for editor and send the message.
