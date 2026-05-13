@@ -109,16 +109,38 @@ def _certified_host_name(raw: Mapping[str, Any]) -> str | None:
     """Pull the friendly host name out of the listing raw output, if present.
 
     Returns the ``certified_data.host_name`` written by the agent into its
-    on-host ``data.json`` (older bake), used as a fallback when the lease
-    record doesn't yet have a ``host_name`` populated. New leases always
-    carry the user-facing ``host_name`` directly on the connector row, so
-    this function's return value is preferred over the lease's ``host_id``
-    placeholder but is itself overridden by ``lease.host_name`` in
-    discovery.
+    on-host ``data.json`` (older bake). Used as a middle-priority fallback
+    in :func:`_resolve_lease_host_name`: ``lease.host_name`` wins when set,
+    this function's return value is next, and ``lease.host_id`` is the
+    last resort.
     """
     certified = raw.get("certified_data") or {}
     name = certified.get("host_name")
     return name if isinstance(name, str) and name else None
+
+
+def _resolve_lease_host_name(lease: LeasedHostInfo, raw: Mapping[str, Any] | None = None) -> str:
+    """Pick the best display name for a leased host.
+
+    Single source of truth for the discovery precedence:
+
+    1. ``lease.host_name`` -- the user-facing name set on the lease row.
+       New leases always have this populated (the connector enforces
+       non-empty); pre-migration legacy rows received a random
+       ``workspace-<hex>`` backfill.
+    2. ``certified_data.host_name`` from the on-host ``data.json`` --
+       only consulted when ``raw`` is provided (i.e. an outer-SSH listing
+       reached the container) and the lease's own ``host_name`` is empty.
+    3. ``lease.host_id`` -- last-resort placeholder so we never produce
+       an empty ``HostName``.
+    """
+    if lease.host_name:
+        return lease.host_name
+    if raw is not None:
+        certified = _certified_host_name(raw)
+        if certified is not None:
+            return certified
+    return lease.host_id
 
 
 def _derive_host_state_from_raw(raw: Mapping[str, Any]) -> HostState:
@@ -371,7 +393,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         return [
             DiscoveredHost(
                 host_id=HostId(entry.host_id),
-                host_name=HostName(entry.host_name),
+                host_name=HostName(_resolve_lease_host_name(entry)),
                 provider_name=self.name,
                 host_state=HostState.RUNNING,
             )
@@ -415,7 +437,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 fallback_state = HostState.UNAUTHENTICATED if is_auth_failure else HostState.CRASHED
                 host_ref = DiscoveredHost(
                     host_id=host_id,
-                    host_name=HostName(entry.host_name),
+                    host_name=HostName(_resolve_lease_host_name(entry)),
                     provider_name=self.name,
                     host_state=fallback_state,
                 )
@@ -442,11 +464,11 @@ class ImbueCloudProvider(BaseProviderInstance):
             # Prefer the lease's authoritative ``host_name`` (set by the
             # user at create time and rewritten on rename); fall back to
             # the certified data on the host for older bakes that didn't
-            # have a connector-side name yet.
-            resolved_host_name = entry.host_name or _certified_host_name(raw) or entry.host_id
+            # have a connector-side name yet. See
+            # :func:`_resolve_lease_host_name` for the full precedence.
             host_ref = DiscoveredHost(
                 host_id=host_id,
-                host_name=HostName(resolved_host_name),
+                host_name=HostName(_resolve_lease_host_name(entry, raw)),
                 provider_name=self.name,
                 host_state=host_state,
             )
@@ -695,9 +717,9 @@ class ImbueCloudProvider(BaseProviderInstance):
         # remote read produced an empty dict. The lease's own
         # ``host_name`` wins over the certified-data fallback because
         # the user can rename the host after the bake's data.json was
-        # written.
+        # written (see :func:`_resolve_lease_host_name`).
         certified = raw.get("certified_data") or {}
-        host_name_str = lease.host_name or certified.get("host_name") or lease.host_id
+        host_name_str = _resolve_lease_host_name(lease, raw)
         image = certified.get("image", "")
         tags = dict(certified.get("user_tags", {}))
         plugin = dict(certified.get("plugin", {}))
@@ -833,7 +855,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         connector = PyinfraConnector(pyinfra_host)
         host = ImbueCloudHost(
             id=host_id,
-            host_name=HostName(lease.host_name or lease.host_id),
+            host_name=HostName(_resolve_lease_host_name(lease)),
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
