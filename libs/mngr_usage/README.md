@@ -18,8 +18,10 @@ This package contains:
 
 Discovery is by path convention. The CLI walks
 `<host_dir>/agents/*/events/<source>/usage/events.jsonl` (the same shape
-`mngr transcript` uses for `events/<source>/common_transcript/...`), reads the
-last event from each file, and renders the freshest snapshot per `<source>`.
+`mngr transcript` uses for `events/<source>/common_transcript/...`), scans
+every event line, and aggregates per `<source>`: rate-limit windows
+collapse freshest-wins (the account-level counter), while cost is grouped
+per `session_id` and filtered to a recency window (`--since`, default 24h).
 The `<source>` segment is free-form -- whatever the writer plugin chose.
 
 When multiple writers contribute, each renders as its own `[source]` section in
@@ -49,9 +51,14 @@ The CEL context per source mirrors one entry of `mngr usage --format json`'s
 reader-derived `seconds_until_reset`, `elapsed_seconds`, and
 `elapsed_percentage` (the last two require `window_seconds` from the
 writer; absent on variable-duration windows like Claude's overage).
-Source-level fields are exposed too: `session_id` (writer-supplied
-session UUID) and `cost.*` (e.g. `cost.total_cost_usd`), so predicates
-like `cost.total_cost_usd > 5.0` work the same as window predicates.
+Source-level fields are exposed too: `cost.*` is the aggregate across
+sessions in the recency window (e.g. `cost.total_cost_usd > 20.0` means
+'I've spent more than $20 across recent sessions'); `current_session.*`
+exposes the most-recently-updated session's full record (use
+`current_session.cost.total_cost_usd` to predicate on just that session);
+`session_count`, `since_seconds`, and `sessions[]` (every session in the
+window) are available as well. Use `--since` to tighten or widen the
+aggregation window from its default (24h).
 
 Exit codes mirror `mngr wait`: 0 matched, 1 error, 2 timeout. Default poll
 interval is 30s; use `--interval` for tighter cadence. To restrict matching
