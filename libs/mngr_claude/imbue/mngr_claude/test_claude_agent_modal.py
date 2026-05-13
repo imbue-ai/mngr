@@ -161,12 +161,8 @@ def _wait_for_text_in_agent_pane(
     timeout: float,
 ) -> str:
     """Poll ``mngr capture --full`` until ``expected`` appears in the pane.
-
-    Uses ``--full`` to read the entire scrollback so a fast-scrolling claude
-    response isn't missed if it has already left the visible window by the
-    time we look. Same pattern as ``test_adopt_session.py``'s
-    ``_wait_for_text_in_pane``, just routed through ``mngr capture`` since
-    the agent's tmux session lives on the Modal sandbox.
+    Uses ``--full`` so a response that has already scrolled out of the visible
+    window isn't missed.
     """
     last_capture: list[str] = [""]
 
@@ -377,49 +373,24 @@ def test_clone_local_claude_agent_to_modal_resumes_session(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
 ) -> None:
-    """End-to-end: cloning a local claude agent to Modal transfers the source's
-    session data AND the cloned claude actually resumes the source's
-    conversation (the model sees and acts on the source's history).
+    """End-to-end resume verification: plant a secret in the source agent's
+    prompt, clone to Modal, ask the cloned claude to recall it via
+    ``mngr message``, and assert the recall lands in the tmux pane. The
+    recall response only contains the secret if claude on the clone
+    actually resumed the source's session.
 
-    Strategy (mirrors ``test_adopt_session.py``): plant a unique secret in
-    the source's prompt, clone to Modal, and ask the cloned agent to
-    recall the secret via ``mngr message`` + tmux pane capture. The recall
-    response only contains the secret if claude on the clone actually
-    resumed the source's session and saw the prior context.
-
-    Three regressions this guards against, each of which would cause the
-    cloned claude to start a fresh session and fail to recall the secret:
-
-    1. Cross-host rsync (``_transfer_source_plugin_data``): plugin/ rsync
-       must use the source agent's host as the rsync source, otherwise
-       it runs on the destination looking for a path that doesn't exist
-       there and aborts with ``rsync: change_dir failed``.
-
-    2. Project-dir rekeying with the canonical work_dir
-       (``_adopt_cloned_session``): the rsynced JSONL is filed under the
-       source's encoded work_dir; claude searches under the
-       ``readlink -f``-resolved encoding of the destination's work_dir
-       (e.g. ``/mngr/projects/agent-X`` resolves to
-       ``/__modal/volumes/<vol-id>/projects/agent-X`` on Modal). Without
-       renaming the project subdir to match the resolved path, the
-       rsynced JSONL is invisible to claude.
-
-    3. Adopted session id (``_adopt_cloned_session``): the destination's
-       ``claude_session_id`` (read by the startup command's
-       ``MAIN_CLAUDE_SESSION_ID``) must be the source's actual session id
-       (the JSONL filename's stem on disk) so the startup
-       ``claude --resume "$MAIN_CLAUDE_SESSION_ID"`` targets the source's
-       session. The source's own ``claude_session_id`` file holds the
-       agent UUID written by the SessionStart hook default, which when
-       claude ``-p`` ran did not match the JSONL claude actually wrote.
+    Same secret-recall pattern as ``test_adopt_session.py``, exercising
+    the full clone-adoption stack: cross-host plugin/ rsync, source-host
+    JSONL discovery, project-subdir rename to the canonical-resolved
+    destination work_dir, and the ``claude_session_id`` rewrite to the
+    JSONL stem.
     """
     source_name = f"test-clone-src-{get_short_random_string()}"
     target_name = f"test-clone-dst-{get_short_random_string()}"
     _setup_claude_gitignore(temp_source_dir)
 
-    # Two halves of a random secret -- the model can't accidentally guess
-    # the combined form, and concatenation only happens if it actually saw
-    # both halves in the resumed conversation.
+    # Two halves so the combined form only appears if the model saw both
+    # in the resumed conversation (no accidental match on prior knowledge).
     secret_left = f"hocus{get_short_random_string()}"
     secret_right = f"pocus{get_short_random_string()}"
     combined = secret_left + secret_right
@@ -444,12 +415,6 @@ def test_clone_local_claude_agent_to_modal_resumes_session(
         f"stdout: {clone_result.stdout}\nstderr: {clone_result.stderr}"
     )
 
-    # Drive the cloned agent: send the recall prompt and wait for the
-    # combined secret to appear in the Modal sandbox's tmux pane (captured
-    # via ``mngr capture``). The combined form does not appear in the
-    # source's portion of the JSONL, so finding it in the cloned agent's
-    # pane proves both (a) the cloned claude actually resumed the source's
-    # session and (b) the model produced new content informed by it.
     msg_result = _send_message_to_agent(target_name, recall_prompt, modal_subprocess_env)
     assert msg_result.returncode == 0, (
         f"Sending recall message to clone failed (rc={msg_result.returncode}):\n"
