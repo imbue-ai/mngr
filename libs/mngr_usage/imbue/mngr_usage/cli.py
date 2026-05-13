@@ -278,34 +278,66 @@ def _stringify_for_template(value: Any) -> str:
 class _UsageRenderModel(FrozenModel):
     """Top-level view used both for JSON output and template rendering.
 
+    Wraps the underlying ``UsageSnapshot`` and adds the CLI-only concerns
+    (the two staleness flags and the ``now`` baseline for age phrases).
+    Per-mode aggregation (``subscription_cost`` / ``api_cost`` /
+    ``*_session_count`` / ``sessions``) is delegated to the snapshot --
+    duplicating it here would risk drift with the canonical implementation.
+
     Two separate staleness flags so the warning emitter can pick the right
     text for each cause (avoiding "snapshot last updated now ago" when the
     snapshot itself just updated but a window already reset).
 
-    The per-source aggregation is already done in ``UsageSnapshot``
-    (windows are freshest-wins; sessions are per-(agent, Claude Code
-    process, session_id) own-contribution records within the recency
-    window -- see ``SessionCostRecord`` for the full shape). The render
-    model just adds CLI-only concerns: staleness flags and the ``now``
-    baseline for age phrases.
-
-    Cost is held as two separate aggregates -- ``subscription_cost``
-    (imputed by Claude Code) and ``api_cost`` (real billable spend) --
-    matching ``UsageSnapshot``'s split. The renderer emits a separate
-    line per non-empty mode rather than a single combined line so the
-    user can tell at a glance which spend is real and which is informational.
+    ``snapshot`` is ``None`` only for the synthetic "no sources" render
+    used to drive an empty format-template substitution. In that case all
+    delegating properties report empty/None so a ``{...}`` template
+    expansion produces empty strings rather than KeyErrors.
     """
 
-    source_name: str
+    snapshot: UsageSnapshot | None
     now: int
     is_age_stale: bool
     has_past_reset: bool
-    snapshot_updated_at: int | None
-    windows: dict[str, WindowSnapshot]
-    sessions: tuple[SessionCostRecord, ...] = ()
-    subscription_cost: CostSnapshot = CostSnapshot()
-    api_cost: CostSnapshot = CostSnapshot()
-    since_seconds: int = 0
+
+    @property
+    def source_name(self) -> str:
+        return "" if self.snapshot is None else self.snapshot.source_name
+
+    @property
+    def snapshot_updated_at(self) -> int | None:
+        return None if self.snapshot is None else self.snapshot.updated_at
+
+    @property
+    def windows(self) -> dict[str, WindowSnapshot]:
+        return {} if self.snapshot is None else self.snapshot.windows
+
+    @property
+    def sessions(self) -> tuple[SessionCostRecord, ...]:
+        return () if self.snapshot is None else self.snapshot.sessions
+
+    @property
+    def subscription_cost(self) -> CostSnapshot:
+        return CostSnapshot() if self.snapshot is None else self.snapshot.subscription_cost
+
+    @property
+    def api_cost(self) -> CostSnapshot:
+        return CostSnapshot() if self.snapshot is None else self.snapshot.api_cost
+
+    @property
+    def since_seconds(self) -> int:
+        return 0 if self.snapshot is None else self.snapshot.since_seconds
+
+    @property
+    def session_count(self) -> int:
+        return 0 if self.snapshot is None else self.snapshot.session_count
+
+    @property
+    def subscription_session_count(self) -> int:
+        return 0 if self.snapshot is None else self.snapshot.subscription_session_count
+
+    @property
+    def api_session_count(self) -> int:
+        return 0 if self.snapshot is None else self.snapshot.api_session_count
 
     @property
     def is_stale(self) -> bool:
@@ -313,35 +345,19 @@ class _UsageRenderModel(FrozenModel):
         return self.is_age_stale or self.has_past_reset
 
     @property
-    def subscription_sessions(self) -> tuple[SessionCostRecord, ...]:
-        return tuple(s for s in self.sessions if s.cost_mode == CostMode.SUBSCRIPTION)
-
-    @property
-    def api_sessions(self) -> tuple[SessionCostRecord, ...]:
-        return tuple(s for s in self.sessions if s.cost_mode == CostMode.API_KEY)
-
-    @property
-    def session_count(self) -> int:
-        return len(self.sessions)
-
-    @property
-    def subscription_session_count(self) -> int:
-        return len(self.subscription_sessions)
-
-    @property
-    def api_session_count(self) -> int:
-        return len(self.api_sessions)
-
-    @property
     def latest_subscription_event_at(self) -> int | None:
         """Timestamp of the freshest subscription session's last event, or None."""
-        subs = self.subscription_sessions
+        if self.snapshot is None:
+            return None
+        subs = self.snapshot.subscription_sessions
         return subs[0].last_event_at if subs else None
 
     @property
     def latest_api_event_at(self) -> int | None:
         """Timestamp of the freshest api_key session's last event, or None."""
-        apis = self.api_sessions
+        if self.snapshot is None:
+            return None
+        apis = self.snapshot.api_sessions
         return apis[0].last_event_at if apis else None
 
 
@@ -356,16 +372,25 @@ def _build_render_model(snapshot: UsageSnapshot, max_age: int, now: int) -> _Usa
       The snapshot itself may be brand-new in this case.
     """
     return _UsageRenderModel(
-        source_name=snapshot.source_name,
+        snapshot=snapshot,
         now=now,
         is_age_stale=(now - snapshot.updated_at) > max_age,
         has_past_reset=any(snap.resets_at is not None and snap.resets_at < now for snap in snapshot.windows.values()),
-        snapshot_updated_at=snapshot.updated_at,
-        windows=snapshot.windows,
-        sessions=snapshot.sessions,
-        subscription_cost=snapshot.subscription_cost,
-        api_cost=snapshot.api_cost,
-        since_seconds=snapshot.since_seconds,
+    )
+
+
+def _build_empty_render_model(now: int) -> _UsageRenderModel:
+    """Render model used when no sources contributed; drives empty format-template output.
+
+    ``snapshot=None`` causes every delegating property to report an
+    empty/None value (matching the prior behavior: e.g. ``updated_at``
+    template substitution yields ``""`` rather than ``"0"``).
+    """
+    return _UsageRenderModel(
+        snapshot=None,
+        now=now,
+        is_age_stale=True,
+        has_past_reset=False,
     )
 
 
@@ -543,18 +568,7 @@ def _emit_output(
         # windows at top level for ergonomics; multi-source consumers should
         # use --format json. With no sources at all, all fields are empty.
         if not snapshots_with_models:
-            empty = _UsageRenderModel(
-                source_name="",
-                now=now,
-                is_age_stale=True,
-                has_past_reset=False,
-                snapshot_updated_at=None,
-                windows={},
-                sessions=(),
-                subscription_cost=CostSnapshot(),
-                api_cost=CostSnapshot(),
-                since_seconds=since_seconds,
-            )
+            empty = _build_empty_render_model(now)
             line = render_format_template(format_template, _flatten_primary_for_template(empty, now))
         else:
             _, primary_model = snapshots_with_models[0]
