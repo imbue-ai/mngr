@@ -1235,10 +1235,11 @@ def cleanup_old_modal_test_environments(
     2. Deletes all volumes in the environment
     3. Deletes the environment itself
 
-    This function is designed to be robust to concurrent deletion. Any failure to
-    delete an environment, app, or volume results in a warning, not an error.
-    This allows the cleanup to continue even if some resources were already deleted
-    by another process.
+    This function is designed to be robust to concurrent deletion: it never raises
+    on a failed delete, so the loop always processes every old environment. App
+    and volume failures log at warning level. A FAILED environment delete logs at
+    error level so a stuck safety-net run is greppable in the cron/CI logs that
+    drive this script (DELETED and NOT_FOUND are silent successes).
 
     Returns the number of environments that were processed (attempted deletion).
     """
