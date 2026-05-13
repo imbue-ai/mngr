@@ -1237,7 +1237,9 @@ class ImbueCloudProvider(BaseProviderInstance):
             outer.disconnect()
 
     # ------------------------------------------------------------------
-    # Snapshots / volumes / tags / rename: not supported
+    # Snapshots / volumes / tags: not supported. Rename IS supported
+    # (see rename_host below), since the connector owns the lease's
+    # ``host_name`` and exposes a PATCH endpoint for it.
     # ------------------------------------------------------------------
 
     def create_snapshot(
