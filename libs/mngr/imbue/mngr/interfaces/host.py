@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 from abc import ABC
 from abc import abstractmethod
 from contextlib import contextmanager
@@ -324,6 +325,17 @@ class OuterHostInterface(MutableModel, ABC):
         close them. The default is a no-op.
         """
 
+    def path_exists(self, path: Path) -> bool:
+        """Whether ``path`` exists on this host.
+
+        Uses the local filesystem for local hosts and ``test -e`` over SSH for
+        remote hosts. Implemented on the interface so callers (including plugins)
+        don't have to branch on ``is_local`` themselves.
+        """
+        if self.is_local:
+            return path.exists()
+        return self.execute_idempotent_command(f"test -e {shlex.quote(str(path))}", timeout_seconds=5.0).success
+
 
 class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
     """Interface for hosts that are currently online and accessible for operations.
@@ -625,6 +637,17 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         yield None
 
 
+class HostLocation(FrozenModel):
+    """A path on a specific host."""
+
+    host: OnlineHostInterface = Field(
+        description="The actual host where the source resides",
+    )
+    path: Path = Field(
+        description="The actual path to the source directory on the host",
+    )
+
+
 class CreateWorkDirResult(FrozenModel):
     """Result of creating an agent work directory."""
 
@@ -904,10 +927,10 @@ class CreateAgentOptions(FrozenModel):
         description="Opaque dict for plugins to pass data through the creation pipeline. "
         "Keys are namespaced by plugin (e.g. 'adopt_session' for ClaudeAgent).",
     )
-    source_agent_state_dir: Path | None = Field(
+    source_agent_state_location: HostLocation | None = Field(
         default=None,
-        description="Agent state directory of the source agent, used to transfer "
-        "per-agent data during clone operations (set when cloning via --from with an agent source)",
+        description="Location of the source agent's state directory "
+        "(set when cloning via --from with an agent source).",
     )
     is_update: bool = Field(
         default=False,
