@@ -9,7 +9,9 @@ from click.testing import CliRunner
 from imbue.mngr.cli.destroy import DestroyCliOptions
 from imbue.mngr.cli.destroy import _DestroyTargets
 from imbue.mngr.cli.destroy import _OfflineHostToDestroy
+from imbue.mngr.cli.destroy import _bypasses_running_check
 from imbue.mngr.cli.destroy import _output_result
+from imbue.mngr.cli.destroy import _should_skip_confirmation
 from imbue.mngr.cli.destroy import destroy
 from imbue.mngr.cli.destroy import get_agent_name_from_session
 from imbue.mngr.config.data_types import OutputOptions
@@ -56,12 +58,13 @@ def test_destroy_targets_has_expected_fields() -> None:
     assert "offline_hosts" in _DestroyTargets.model_fields
 
 
-def test_destroy_cli_options_can_be_instantiated() -> None:
-    """Test that DestroyCliOptions can be instantiated with all required fields."""
-    opts = DestroyCliOptions(
+def _make_opts(*, force: bool, yes: bool) -> DestroyCliOptions:
+    """Construct a minimal ``DestroyCliOptions`` for predicate tests."""
+    return DestroyCliOptions(
         agents=("agent1",),
         agent_list=(),
-        force=False,
+        force=force,
+        yes=yes,
         gc=True,
         remove_created_branch=False,
         allow_worktree_removal=True,
@@ -74,8 +77,89 @@ def test_destroy_cli_options_can_be_instantiated() -> None:
         plugin=(),
         disable_plugin=(),
     )
+
+
+def test_destroy_cli_options_can_be_instantiated() -> None:
+    """Test that DestroyCliOptions can be instantiated with all required fields."""
+    opts = _make_opts(force=False, yes=False)
     assert opts.agents == ("agent1",)
     assert opts.force is False
+    assert opts.yes is False
+
+
+# =============================================================================
+# --force vs --yes flag matrix
+#
+# The four cases below cover the (running x flag) matrix for the two policy
+# predicates that gate destruction. The agent-running outcomes are encoded by
+# ``_bypasses_running_check``; both predicates are evaluated before any host
+# interaction happens, so testing them directly is equivalent to checking the
+# behavior of ``mngr destroy`` against (stopped/running) x (--yes/--force).
+# =============================================================================
+
+
+def test_yes_skips_confirmation_for_stopped_agent() -> None:
+    """``--yes`` on a stopped agent: skip prompt, do not bypass running check."""
+    opts = _make_opts(force=False, yes=True)
+    assert _should_skip_confirmation(opts) is True
+    assert _bypasses_running_check(opts) is False
+
+
+def test_force_skips_confirmation_for_stopped_agent() -> None:
+    """``--force`` on a stopped agent: skip prompt and (irrelevantly) bypass running check."""
+    opts = _make_opts(force=True, yes=False)
+    assert _should_skip_confirmation(opts) is True
+    assert _bypasses_running_check(opts) is True
+
+
+def test_yes_refuses_running_agent() -> None:
+    """``--yes`` alone does NOT permit destroying a running agent."""
+    opts = _make_opts(force=False, yes=True)
+    # Same gate as ``agent.is_running() and not _bypasses_running_check(opts)`` --
+    # with a running agent and --yes, the inner expression is True -> refuse.
+    assert _bypasses_running_check(opts) is False
+
+
+def test_force_permits_running_agent_and_skips_prompt() -> None:
+    """``--force`` permits destroying a running agent AND skips the prompt (unchanged behavior)."""
+    opts = _make_opts(force=True, yes=False)
+    assert _bypasses_running_check(opts) is True
+    assert _should_skip_confirmation(opts) is True
+
+
+def test_no_flags_prompts_and_keeps_running_check() -> None:
+    """No flags: prompt fires and the running-agent safety check stays in place."""
+    opts = _make_opts(force=False, yes=False)
+    assert _should_skip_confirmation(opts) is False
+    assert _bypasses_running_check(opts) is False
+
+
+def test_destroy_help_documents_yes_and_force_separately(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """``mngr destroy --help`` documents -f/--force and -y/--yes with distinct semantics."""
+    result = cli_runner.invoke(destroy, ["--help"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0
+    assert "--force" in result.output
+    assert "-f" in result.output
+    assert "--yes" in result.output
+    assert "-y" in result.output
+
+
+def test_destroy_yes_does_not_swallow_agent_not_found(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """``--yes`` should not bypass safety: AgentNotFoundError still propagates (unlike --force)."""
+    result = cli_runner.invoke(
+        destroy,
+        ["nonexistent-agent-12345", "--yes"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    # Unlike --force, --yes does not swallow not-found errors.
+    assert result.exit_code != 0
 
 
 def test_destroy_requires_agent_or_all(
