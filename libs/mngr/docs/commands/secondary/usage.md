@@ -16,9 +16,18 @@ statusline.
 
 Agent-agnostic and host-agnostic: enumerates matching agents via
 ``list_agents`` (same machinery and filter vocabulary as ``mngr list``) and
-reads each agent's ``events/<source>/rate_limits/events.jsonl`` via the
+reads each agent's ``events/<source>/usage/events.jsonl`` via the
 events API. Local and remote agents are read uniformly; the writer plugin
 chooses the ``<source>`` segment.
+
+Per-source aggregation:
+
+- Rate-limit windows track an account-level counter, so the freshest reading
+  across all agents wins.
+- Cost is per-session and resets when a new session starts, so we keep one
+  record per ``session_id`` and aggregate across sessions within the
+  ``--since`` recency window (default 24h).
+- ``current_session`` is the most-recently-updated session in that window.
 
 **Usage:**
 
@@ -65,6 +74,7 @@ mngr usage [OPTIONS] COMMAND [ARGS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--max-age` | text | Stale-warning threshold (e.g. '300', '5m', '2h'). Default: from plugin config. | None |
+| `--since` | text | Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose last event is older are dropped from all per-session surfaces (sessions[], current_session, session_count) and from the aggregate cost computed off them. Default: from plugin config (24h). | None |
 
 ## mngr usage wait
 
@@ -77,7 +87,8 @@ mngr usage wait --until 'five_hour.used_percentage < 50 && five_hour.elapsed_per
       && mngr message my-agent "ok, kick off the next batch"
 
 The CEL context per source mirrors one entry of ``mngr usage --format
-json``'s ``sources`` array, with these derived fields per window:
+json``'s ``sources`` array. Window fields (under each window key, e.g.
+``five_hour``):
 
 - ``used_percentage``: from the writer.
 - ``resets_at`` / ``seconds_until_reset``: when the window resets.
@@ -86,6 +97,18 @@ json``'s ``sources`` array, with these derived fields per window:
 - ``elapsed_seconds`` / ``elapsed_percentage``: derived from
   ``window_seconds`` and ``seconds_until_reset``; absent when
   ``window_seconds`` isn't emitted.
+
+Source-level fields:
+
+- ``cost.total_cost_usd`` / ``cost.total_duration_ms`` / ... : aggregate
+  across the recency window (sum across all sessions in the last
+  ``--since`` duration).
+- ``current_session.session_id``: most recently-active session's UUID.
+- ``current_session.cost.total_cost_usd`` / ... : the current session's
+  cost reading (for "wait until *this session* crosses $5").
+- ``session_count``: number of recent sessions contributing to the cost
+  aggregate.
+- ``sessions``: full list of session-cost records in the recency window.
 
 Exit codes:
   0 - A source matched all --until filters.
@@ -111,6 +134,7 @@ mngr usage wait [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--timeout` | text | Maximum time to wait (e.g. '30s', '5m', '1h'). Default: wait forever. | None |
 | `--interval` | text | Poll interval (e.g. '15s', '1m'). The usage snapshot is rebuilt every interval. Default of 30s suits multi-hour windows; tighten for short-window predicates. | `30s` |
+| `--since` | text | Recency window for per-session cost aggregation (e.g. '24h', '7d'). Affects every per-session surface in the CEL context: `cost.*` (aggregate across recent sessions), `current_session.*` (latest in-window session), `sessions[]`, and `session_count`. Default: from plugin config (24h). | None |
 
 ## Filtering
 
@@ -172,6 +196,24 @@ $ mngr usage wait --until 'seven_day.used_percentage < 30' --timeout 1h
 $ mngr usage wait --until 'overage.is_using_overage == false' --interval 10s
 ```
 
+**Wait until cumulative spend over the last 24h crosses $20**
+
+```bash
+$ mngr usage wait --until 'cost.total_cost_usd > 20.0'
+```
+
+**Wait until the current session crosses $5**
+
+```bash
+$ mngr usage wait --until 'current_session.cost.total_cost_usd > 5.0'
+```
+
+**Aggregate cost over the last week instead of 24h**
+
+```bash
+$ mngr usage wait --until 'cost.total_cost_usd > 100.0' --since 7d
+```
+
 ## Examples
 
 **Show current usage**
@@ -192,6 +234,12 @@ $ mngr usage --local
 $ mngr usage --provider local --provider modal
 ```
 
+**Aggregate cost across the last week**
+
+```bash
+$ mngr usage --since 7d
+```
+
 **Treat the snapshot as stale after 60s (warning only)**
 
 ```bash
@@ -204,8 +252,8 @@ $ mngr usage --max-age 60
 $ mngr usage --format json
 ```
 
-**Custom format template**
+**Custom format template (aggregate cost + current session)**
 
 ```bash
-$ mngr usage --format '{five_hour.used_percentage}/{seven_day.used_percentage}'
+$ mngr usage --format '{cost.total_cost_usd} ({current_session.session_id})'
 ```
