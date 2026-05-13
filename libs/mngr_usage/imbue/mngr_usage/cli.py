@@ -656,8 +656,13 @@ Per-source aggregation:
 
 - Rate-limit windows track an account-level counter, so the freshest reading
   across all agents wins.
-- Cost is per-session and resets when a new session starts, so we keep one
-  record per ``session_id`` and aggregate across sessions within the
+- Cost is process-cumulative as emitted (Claude Code's ``total_cost_usd``
+  grows across session boundaries and only resets when the Claude Code
+  process itself is relaunched; ``/clear`` does NOT reset it). The reader
+  detects process boundaries via cost-drop signals within each agent's
+  event stream and stores each session's *own contribution* (delta from
+  the prior session's cumulative reading in the same process). Records
+  are summed across all (agent, process, session) tuples within the
   ``--since`` recency window (default 24h).
 - The JSON output's ``sessions[]`` array is ordered newest-first; consumers
   that want a specific session's reading can index ``sessions[0]``.""",
