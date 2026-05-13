@@ -195,7 +195,9 @@ class UsageSnapshot(FrozenModel):
         when ``sessions`` is empty. The same field semantics as a single
         session's cost, so CEL predicates like ``cost.total_cost_usd > 5.0``
         work both for per-session and aggregate contexts (just at a different
-        scope).
+        scope). When ``sessions`` has exactly one entry the aggregate equals
+        that one session's reading -- by design; consumers that want
+        per-session data should read ``sessions`` directly.
         """
         return CostSnapshot(
             total_cost_usd=_sum_optional([s.cost.total_cost_usd for s in self.sessions]),
@@ -204,11 +206,6 @@ class UsageSnapshot(FrozenModel):
             total_lines_added=_sum_optional([s.cost.total_lines_added for s in self.sessions]),
             total_lines_removed=_sum_optional([s.cost.total_lines_removed for s in self.sessions]),
         )
-
-    @property
-    def current_session(self) -> SessionCostRecord | None:
-        """The most recently-updated session, or None when no sessions are in the window."""
-        return self.sessions[0] if self.sessions else None
 
     @property
     def session_count(self) -> int:

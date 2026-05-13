@@ -358,21 +358,6 @@ def session_render_dict(session: SessionCostRecord, now: int) -> dict[str, Any]:
     }
 
 
-def empty_current_session_dict() -> dict[str, Any]:
-    """Default current_session shape when no sessions are present.
-
-    Keeps the CEL/JSON surface stable: ``current_session.cost.total_cost_usd``
-    is always a queryable path, even when the source has no recent sessions.
-    """
-    return {
-        "session_id": None,
-        "cost": CostSnapshot().model_dump(),
-        "first_event_at": None,
-        "last_event_at": None,
-        "age_seconds": None,
-    }
-
-
 def build_source_cel_context(snapshot: UsageSnapshot, now: int) -> dict[str, Any]:
     """Build the per-source dict that ``mngr usage wait``'s ``--until`` CEL filters evaluate against.
 
@@ -384,22 +369,18 @@ def build_source_cel_context(snapshot: UsageSnapshot, now: int) -> dict[str, Any
 
     Top-level ``cost`` is the **aggregate** across the snapshot's sessions
     (sum of each numeric field), so predicates like ``cost.total_cost_usd
-    > 5.0`` mean 'I've spent more than $5 across recent sessions'. To
-    predicate on the most recent session specifically, use the
-    ``current_session.*`` paths (e.g. ``current_session.cost.total_cost_usd``).
-    ``current_session`` is always a dict -- it has None-valued fields when
-    no sessions are present -- so CEL paths don't need to guard for absence.
+    > 5.0`` mean 'I've spent more than $5 across recent sessions'. When
+    ``sessions`` has exactly one entry the aggregate equals that one
+    session's reading -- by design; consumers that need to dig into a
+    specific session should index ``sessions`` (e.g. ``sessions[0].
+    cost.total_cost_usd`` for the most recent one).
     """
-    current_session = snapshot.current_session
     ctx: dict[str, Any] = {
         "source": snapshot.source_name,
         "updated_at": snapshot.updated_at,
         "since_seconds": snapshot.since_seconds,
         "cost": snapshot.cost.model_dump(),
         "session_count": snapshot.session_count,
-        "current_session": (
-            session_render_dict(current_session, now) if current_session is not None else empty_current_session_dict()
-        ),
         "sessions": [session_render_dict(s, now) for s in snapshot.sessions],
     }
     for key, window in snapshot.windows.items():

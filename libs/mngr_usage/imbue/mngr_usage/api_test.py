@@ -127,11 +127,11 @@ def test_build_source_cel_context_shape_matches_per_source_json() -> None:
     assert ctx["seven_day"]["used_percentage"] == 11.0
 
 
-def test_build_source_cel_context_exposes_aggregate_and_current_session() -> None:
-    """Top-level ``cost.*`` is the aggregate across sessions; the latest session is
-    repeated under ``current_session.*``. Predicates can use either:
-    ``cost.total_cost_usd > 5.0`` (across recent sessions) or
-    ``current_session.cost.total_cost_usd > 5.0`` (latest session only).
+def test_build_source_cel_context_exposes_aggregate_and_sessions() -> None:
+    """Top-level ``cost.*`` is the aggregate across sessions. The per-session
+    breakdown is available via ``sessions[]`` (newest-first), so a predicate
+    that needs the latest session's reading specifically can index
+    ``sessions[0]``.
     """
     snapshot = UsageSnapshot(
         source_name="claude",
@@ -157,26 +157,25 @@ def test_build_source_cel_context_exposes_aggregate_and_current_session() -> Non
     # Aggregate sums numeric fields across sessions.
     assert ctx["cost"]["total_cost_usd"] == pytest.approx(1.42)
     assert ctx["cost"]["total_duration_ms"] == 17000
-    # current_session is the latest by last_event_at.
-    assert ctx["current_session"]["session_id"] == "newer"
-    assert ctx["current_session"]["cost"]["total_cost_usd"] == 0.42
     assert ctx["session_count"] == 2
     assert ctx["since_seconds"] == 86400
-    # sessions[] enumerates every session in the window.
+    # sessions[] enumerates every session in the window, newest first.
     assert len(ctx["sessions"]) == 2
+    assert ctx["sessions"][0]["session_id"] == "newer"
+    assert ctx["sessions"][0]["cost"]["total_cost_usd"] == 0.42
+    assert ctx["sessions"][1]["session_id"] == "older"
 
 
-def test_build_source_cel_context_current_session_default_when_no_sessions() -> None:
-    """When the snapshot has no sessions, ``current_session`` is still a dict with
-    None-valued fields so CEL paths don't have to guard for absence."""
+def test_build_source_cel_context_no_sessions_has_empty_list() -> None:
+    """When the snapshot has no sessions, ``sessions`` is an empty list and the
+    aggregate ``cost.*`` is all-None. ``current_session`` is no longer exposed."""
     snapshot = UsageSnapshot(
         source_name="claude",
         updated_at=900,
         windows={"five_hour": WindowSnapshot(used_percentage=42.0, resets_at=15400, window_seconds=18000)},
     )
     ctx = build_source_cel_context(snapshot, now=1000)
-    assert ctx["current_session"]["session_id"] is None
-    assert ctx["current_session"]["cost"]["total_cost_usd"] is None
+    assert ctx["sessions"] == []
     assert ctx["session_count"] == 0
     # Top-level cost (aggregate over no sessions) is all-None too.
     assert ctx["cost"]["total_cost_usd"] is None

@@ -68,8 +68,8 @@ silently mix them:
   recently -- not any specific one.
 - Cost is grouped by `session_id`, so per-session records in `sessions[]`
   stay correct individually. But the aggregate `cost.*` (and the human
-  `total:` line) sums across every session in the recency window
-  regardless of account, and `current_session` is just whichever session
+  `cost:` line) sums across every session in the recency window
+  regardless of account, and `sessions[0]` is just whichever session
   last rendered.
 
 This is rare in practice (one user = one Anthropic account), but if you run

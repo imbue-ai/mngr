@@ -273,7 +273,7 @@ def test_aggregate_filters_sessions_outside_recency_window() -> None:
 
 
 def test_aggregate_sessions_sorted_newest_first() -> None:
-    """``sessions`` is ordered by last_event_at descending so ``current_session`` is sessions[0]."""
+    """``sessions`` is ordered by last_event_at descending so the newest is sessions[0]."""
     events = [
         _cost_event("2026-05-08T10:00:00.000000000Z", session_id="old", cost_usd=0.10),
         _cost_event("2026-05-08T11:00:00.000000000Z", session_id="mid", cost_usd=0.20),
@@ -285,8 +285,7 @@ def test_aggregate_sessions_sorted_newest_first() -> None:
         now=int(datetime(2026, 5, 8, 13, 0, tzinfo=timezone.utc).timestamp()),
     )
     assert [s.session_id for s in snapshots[0].sessions] == ["new", "mid", "old"]
-    assert snapshots[0].current_session is not None
-    assert snapshots[0].current_session.session_id == "new"
+    assert snapshots[0].sessions[0].session_id == "new"
 
 
 def test_aggregate_returns_cost_only_snapshot_when_no_rate_limits() -> None:
@@ -382,10 +381,12 @@ def test_render_model_fresh() -> None:
     assert model.is_stale is False
 
 
-def test_flatten_for_template_always_includes_cost_and_current_session_keys() -> None:
-    """``cost.*`` and ``current_session.*`` template keys are always populated
-    (empty string when absent) so format templates referencing them don't
-    KeyError on snapshots that pre-date session/cost capture."""
+def test_flatten_for_template_always_includes_cost_keys() -> None:
+    """``cost.*`` template keys are always populated (empty string when absent)
+    so format templates referencing them don't KeyError on snapshots that
+    pre-date session/cost capture. The format-template surface intentionally
+    doesn't expose per-session paths -- callers wanting that should use
+    ``--format json`` and index ``sessions[]``."""
     snapshot_without_cost = UsageSnapshot(
         source_name="claude",
         updated_at=900,
@@ -394,12 +395,13 @@ def test_flatten_for_template_always_includes_cost_and_current_session_keys() ->
     flat = _flatten_primary_for_template(_build_render_model(snapshot_without_cost, max_age=300, now=1000), now=1000)
     assert flat["cost.total_cost_usd"] == ""
     assert flat["cost.total_duration_ms"] == ""
-    assert flat["current_session.session_id"] == ""
-    assert flat["current_session.cost.total_cost_usd"] == ""
     assert flat["session_count"] == "0"
+    # Per-session paths are intentionally not exposed in the format-template surface.
+    assert "current_session.session_id" not in flat
+    assert "sessions" not in flat
 
 
-def test_flatten_for_template_populates_cost_and_current_session_when_present() -> None:
+def test_flatten_for_template_populates_cost_when_present() -> None:
     snapshot = UsageSnapshot(
         source_name="claude",
         updated_at=900,
@@ -418,19 +420,11 @@ def test_flatten_for_template_populates_cost_and_current_session_when_present() 
     # Top-level cost is the aggregate; with one session it equals the session's reading.
     assert flat["cost.total_cost_usd"] == "0.42"
     assert flat["cost.total_duration_ms"] == "12000"
-    # current_session paths expose the latest session's specific reading.
-    assert flat["current_session.session_id"] == "uuid-abc"
-    assert flat["current_session.cost.total_cost_usd"] == "0.42"
-    assert flat["current_session.age_seconds"] == "50"
     assert flat["session_count"] == "1"
 
 
 def test_flatten_for_template_aggregates_cost_across_sessions() -> None:
-    """Aggregate cost = sum of latest cost per session, exposed as ``cost.*``.
-
-    The snapshot's ``sessions`` is ordered newest-first by contract (the
-    aggregator does the sort); ``current_session`` is just ``sessions[0]``.
-    """
+    """Aggregate cost = sum of latest cost per session, exposed as ``cost.*``."""
     snapshot = UsageSnapshot(
         source_name="claude",
         updated_at=2000,
@@ -454,8 +448,6 @@ def test_flatten_for_template_aggregates_cost_across_sessions() -> None:
     flat = _flatten_primary_for_template(_build_render_model(snapshot, max_age=300, now=2000), now=2000)
     assert flat["cost.total_cost_usd"] == "1.42"
     assert flat["session_count"] == "2"
-    # current_session is the latest by last_event_at (the first element).
-    assert flat["current_session.session_id"] == "def"
 
 
 def test_flatten_for_template_emits_only_present_windows() -> None:
@@ -926,20 +918,17 @@ def test_usage_wait_rejects_invalid_cel(
 
 
 @pytest.mark.tmux
-def test_usage_command_renders_session_cost_line_for_subscription_user(
+def test_usage_command_renders_cost_line_for_subscription_user(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     local_host: Host,
     cli_test_agent: AgentInterface,
     cli_profile_dir: Path,
 ) -> None:
-    """Subscription users get both rate_limits AND cost in the statusline payload.
-    The human output should show a session-anchored cost line between the source
-    header and the window lines.
-
-    Uses a fresh ISO timestamp (not a far-future literal) so the session
-    falls inside the 24h recency window the reader applies. With only one
-    session the renderer suppresses the redundant 'total: ...' line."""
+    """Subscription users get both rate_limits AND cost. With one session the
+    human output renders a single 'cost: $X.YY (<age>)' line between the source
+    header and the window lines -- no per-session id in the human view (it's
+    available via JSON's sessions[] for callers who need it)."""
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
     _plant_event_for_agent(
         local_host,
@@ -958,16 +947,13 @@ def test_usage_command_renders_session_cost_line_for_subscription_user(
     )
     result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
-    # Session ID is truncated to 8 chars for the human view; cost is shown with 2 decimals.
-    assert "session abc12345:" in result.output
-    assert "$0.43" in result.output
-    # Single session => no total line (it would duplicate the session line).
-    assert "total:" not in result.output
+    # Cost is shown with 2 decimals.
+    assert "cost: $0.43" in result.output
     # The window line still renders alongside.
     assert "5h:" in result.output
-    # The session/cost line must appear between the [source] header and the window line.
-    assert result.output.index("[claude]") < result.output.index("session abc12345:")
-    assert result.output.index("session abc12345:") < result.output.index("5h:")
+    # The cost line must appear between the [source] header and the window line.
+    cost_idx = result.output.index("cost: $0.43")
+    assert result.output.index("[claude]") < cost_idx < result.output.index("5h:")
 
 
 @pytest.mark.tmux
@@ -997,8 +983,7 @@ def test_usage_command_renders_cost_only_for_api_key_user(
     )
     result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
-    assert "session deadbeef:" in result.output
-    assert "$1.23" in result.output
+    assert "cost: $1.23" in result.output
     # The "No usage data yet" hint must not fire -- cost IS data.
     assert "No usage data yet" not in result.output
 
@@ -1011,8 +996,9 @@ def test_usage_command_json_includes_session_id_and_cost(
     cli_test_agent: AgentInterface,
     cli_profile_dir: Path,
 ) -> None:
-    """JSON output exposes aggregate cost at the source level, the current
-    session under ``current_session``, and the full sessions list."""
+    """JSON output exposes aggregate cost at the source level plus the full
+    sessions list (newest-first). Per-session data is read by indexing
+    ``sessions[]`` -- there's no separate ``current_session`` key."""
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
     _plant_event_for_agent(
         local_host,
@@ -1040,13 +1026,13 @@ def test_usage_command_json_includes_session_id_and_cost(
     # Fields the writer didn't supply are still present in the dict with None values
     # (sum of [None] yields None).
     assert source["cost"]["total_lines_added"] is None
-    # current_session carries the latest session's full record.
-    assert source["current_session"]["session_id"] == "uuid-abc"
-    assert source["current_session"]["cost"]["total_cost_usd"] == 0.42
-    # sessions[] enumerates every session in the recency window.
+    # sessions[] enumerates every session in the recency window, newest-first.
     assert len(source["sessions"]) == 1
     assert source["sessions"][0]["session_id"] == "uuid-abc"
+    assert source["sessions"][0]["cost"]["total_cost_usd"] == 0.42
     assert source["session_count"] == 1
+    # current_session is no longer exposed -- consumers should index sessions[].
+    assert "current_session" not in source
 
 
 @pytest.mark.tmux
@@ -1158,13 +1144,10 @@ def test_usage_command_emits_total_line_with_multiple_sessions(
     )
     result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
-    # Current session line shows the latest session's truncated id and its cost.
-    # "currentsession" truncated to 8 chars = "currents".
-    assert "session currents:" in result.output
-    assert "$0.30" in result.output
-    # Total line shows the aggregate and the session count.
-    assert "total: $1.30" in result.output
-    assert "2 sessions" in result.output
+    # With multiple sessions, the cost line shows the aggregate with a session count.
+    assert "cost: $1.30 across 2 sessions" in result.output
+    # No per-session id appears in the human view -- consumers needing that use --format json.
+    assert "session current" not in result.output
 
 
 @pytest.mark.tmux

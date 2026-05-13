@@ -53,12 +53,12 @@ reader-derived `seconds_until_reset`, `elapsed_seconds`, and
 writer; absent on variable-duration windows like Claude's overage).
 Source-level fields are exposed too: `cost.*` is the aggregate across
 sessions in the recency window (e.g. `cost.total_cost_usd > 20.0` means
-'I've spent more than $20 across recent sessions'); `current_session.*`
-exposes the most-recently-updated session's full record (use
-`current_session.cost.total_cost_usd` to predicate on just that session);
-`session_count`, `since_seconds`, and `sessions[]` (every session in the
-window) are available as well. Use `--since` to tighten or widen the
-aggregation window from its default (24h).
+'I've spent more than $20 across recent sessions'); `session_count`,
+`since_seconds`, and `sessions[]` (every session in the window,
+newest-first) are available as well. Use `--since` to tighten or widen
+the aggregation window from its default (24h). For a per-session
+predicate, index `sessions[]` directly (e.g. `sessions[0].cost.total_cost_usd
+> 5` for the most recent session).
 
 Exit codes mirror `mngr wait`: 0 matched, 1 error, 2 timeout. Default poll
 interval is 30s; use `--interval` for tighter cadence. To restrict matching
