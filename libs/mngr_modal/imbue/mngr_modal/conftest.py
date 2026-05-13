@@ -4,6 +4,7 @@ import subprocess
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Final
 from typing import Generator
 from typing import assert_never
 from uuid import uuid4
@@ -513,8 +514,8 @@ def _delete_modal_volumes(volume_names: list[str]) -> None:
 # budget elapses; anything still listed after the budget is flagged. Budget
 # is generous vs the observed ~5 s window but bounded so a real leak can't
 # stall teardown.
-_LEAK_POLL_TIMEOUT_S = 30.0
-_LEAK_POLL_INTERVAL_S = 2.0
+_LEAK_POLL_TIMEOUT_S: Final[float] = 30.0
+_LEAK_POLL_INTERVAL_S: Final[float] = 2.0
 
 
 def _get_leaked_modal_environments() -> list[str]:
