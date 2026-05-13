@@ -287,57 +287,52 @@ class _UsageRenderModel(FrozenModel):
     Two separate staleness flags so the warning emitter can pick the right
     text for each cause (avoiding "snapshot last updated now ago" when the
     snapshot itself just updated but a window already reset).
-
-    ``snapshot`` is ``None`` only for the synthetic "no sources" render
-    used to drive an empty format-template substitution. In that case all
-    delegating properties report empty/None so a ``{...}`` template
-    expansion produces empty strings rather than KeyErrors.
     """
 
-    snapshot: UsageSnapshot | None
+    snapshot: UsageSnapshot
     now: int
     is_age_stale: bool
     has_past_reset: bool
 
     @property
     def source_name(self) -> str:
-        return "" if self.snapshot is None else self.snapshot.source_name
+        return self.snapshot.source_name
 
     @property
-    def snapshot_updated_at(self) -> int | None:
-        return None if self.snapshot is None else self.snapshot.updated_at
+    def snapshot_updated_at(self) -> int:
+        return self.snapshot.updated_at
 
     @property
     def windows(self) -> dict[str, WindowSnapshot]:
-        return {} if self.snapshot is None else self.snapshot.windows
+        return self.snapshot.windows
 
     @property
     def sessions(self) -> tuple[SessionCostRecord, ...]:
-        return () if self.snapshot is None else self.snapshot.sessions
+        return self.snapshot.sessions
 
     @property
     def subscription_cost(self) -> CostSnapshot:
-        return CostSnapshot() if self.snapshot is None else self.snapshot.subscription_cost
+        return self.snapshot.subscription_cost
 
     @property
     def api_cost(self) -> CostSnapshot:
-        return CostSnapshot() if self.snapshot is None else self.snapshot.api_cost
+        return self.snapshot.api_cost
 
     @property
     def since_seconds(self) -> int:
-        return 0 if self.snapshot is None else self.snapshot.since_seconds
+        return self.snapshot.since_seconds
 
     @property
     def session_count(self) -> int:
-        return 0 if self.snapshot is None else self.snapshot.session_count
+        return self.snapshot.session_count
 
     @property
     def subscription_session_count(self) -> int:
-        return 0 if self.snapshot is None else self.snapshot.subscription_session_count
+        return self.snapshot.subscription_session_count
 
     @property
     def api_session_count(self) -> int:
-        return 0 if self.snapshot is None else self.snapshot.api_session_count
+        return self.snapshot.api_session_count
 
     @property
     def is_stale(self) -> bool:
@@ -347,16 +342,12 @@ class _UsageRenderModel(FrozenModel):
     @property
     def latest_subscription_event_at(self) -> int | None:
         """Timestamp of the freshest subscription session's last event, or None."""
-        if self.snapshot is None:
-            return None
         subs = self.snapshot.subscription_sessions
         return subs[0].last_event_at if subs else None
 
     @property
     def latest_api_event_at(self) -> int | None:
         """Timestamp of the freshest api_key session's last event, or None."""
-        if self.snapshot is None:
-            return None
         apis = self.snapshot.api_sessions
         return apis[0].last_event_at if apis else None
 
@@ -376,21 +367,6 @@ def _build_render_model(snapshot: UsageSnapshot, max_age: int, now: int) -> _Usa
         now=now,
         is_age_stale=(now - snapshot.updated_at) > max_age,
         has_past_reset=any(snap.resets_at is not None and snap.resets_at < now for snap in snapshot.windows.values()),
-    )
-
-
-def _build_empty_render_model(now: int) -> _UsageRenderModel:
-    """Render model used when no sources contributed; drives empty format-template output.
-
-    ``snapshot=None`` causes every delegating property to report an
-    empty/None value (matching the prior behavior: e.g. ``updated_at``
-    template substitution yields ``""`` rather than ``"0"``).
-    """
-    return _UsageRenderModel(
-        snapshot=None,
-        now=now,
-        is_age_stale=True,
-        has_past_reset=False,
     )
 
 
@@ -448,7 +424,7 @@ def _flatten_primary_for_template(model: _UsageRenderModel, now: int) -> dict[st
         "source": model.source_name,
         "now": str(now),
         "is_stale": str(model.is_stale).lower(),
-        "updated_at": "" if model.snapshot_updated_at is None else str(model.snapshot_updated_at),
+        "updated_at": str(model.snapshot_updated_at),
         "since_seconds": str(model.since_seconds),
         "session_count": str(model.session_count),
         "subscription_session_count": str(model.subscription_session_count),
@@ -566,13 +542,13 @@ def _emit_output(
     if format_template is not None:
         # Format templates always reference the primary (freshest) source's
         # windows at top level for ergonomics; multi-source consumers should
-        # use --format json. With no sources at all, all fields are empty.
+        # use --format json. With no sources at all there's no data to
+        # substitute; print nothing to stdout (no synthesized empty line)
+        # and let the caller detect the no-data case by empty output.
         if not snapshots_with_models:
-            empty = _build_empty_render_model(now)
-            line = render_format_template(format_template, _flatten_primary_for_template(empty, now))
-        else:
-            _, primary_model = snapshots_with_models[0]
-            line = render_format_template(format_template, _flatten_primary_for_template(primary_model, now))
+            return
+        _, primary_model = snapshots_with_models[0]
+        line = render_format_template(format_template, _flatten_primary_for_template(primary_model, now))
         write_human_line(line)
         return
 
@@ -603,7 +579,7 @@ def _emit_output(
                     write_human_line("")
                 section_had_renderable = _write_source_section(model, now, f"[{model.source_name}]", detail)
                 any_renderable_anywhere = any_renderable_anywhere or section_had_renderable
-                if not section_had_renderable or model.snapshot_updated_at is None:
+                if not section_had_renderable:
                     continue
                 if model.is_age_stale:
                     age_stale_sources.append((model.source_name, max(0, now - model.snapshot_updated_at)))
