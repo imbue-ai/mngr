@@ -18,9 +18,13 @@ Aggregation shape (per source):
 - ``windows``: freshest event's rate_limits payload across all agents.
   Rate limits are an account-level counter so freshest-wins is the right
   reduction.
-- ``sessions``: per-(session_id) latest cost reading across all agents,
-  filtered to a recency window (``since_seconds``, default 24h).
-  Cost is per-session, so we keep one record per session_id.
+- ``sessions``: per-session own-contribution records across all agents,
+  filtered to a recency window (``since_seconds``, default 24h). Each
+  agent's stream is partitioned into Claude Code processes via cost-drop
+  detection, and within each process every session_id gets a record
+  whose ``cost`` is its delta from the prior session's cumulative reading.
+  Summing those deltas across all sessions recovers the true total spend
+  (see the per-source aggregation block comment below for details).
 
 The reader scans every event line in each agent's events file (not just
 the last) so per-session aggregation across the recency window is
