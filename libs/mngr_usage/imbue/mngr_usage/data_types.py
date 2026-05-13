@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import overload
+
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -119,23 +121,26 @@ class SessionCostRecord(FrozenModel):
     last_event_at: int = Field(description="Unix timestamp of the most recent event seen for this session.")
 
 
-def _sum_optional_floats(values: list[float | None]) -> float | None:
+@overload
+def _sum_optional(values: list[int | None]) -> int | None: ...
+
+
+@overload
+def _sum_optional(values: list[float | None]) -> float | None: ...
+
+
+def _sum_optional(values: list[int | None] | list[float | None]) -> int | float | None:
     """Sum non-None values; return None when all inputs are None.
 
     Treats None as 'missing data' rather than zero. If any value is present
     we sum the present ones (a None doesn't drag the total to None) -- this
     matches the user-facing 'how much have I spent' question, where one
     session missing a sub-field shouldn't black-hole the whole aggregate.
-    """
-    present = [v for v in values if v is not None]
-    return sum(present) if present else None
 
-
-def _sum_optional_ints(values: list[int | None]) -> int | None:
-    """Integer-typed twin of ``_sum_optional_floats`` -- the typed CostSnapshot
-    fields are split between int (durations / line counts) and float (USD),
-    so we need separate helpers to keep the aggregate's field types matching
-    the per-session field types (no implicit int->float widening).
+    Overloaded for ``int`` and ``float`` separately so the aggregate's field
+    types match the per-session field types in ``CostSnapshot`` (durations /
+    line counts stay int; USD stays float). The runtime implementation is
+    type-agnostic; only the static-type surface bifurcates.
     """
     present = [v for v in values if v is not None]
     return sum(present) if present else None
@@ -192,11 +197,11 @@ class UsageSnapshot(FrozenModel):
         scope).
         """
         return CostSnapshot(
-            total_cost_usd=_sum_optional_floats([s.cost.total_cost_usd for s in self.sessions]),
-            total_duration_ms=_sum_optional_ints([s.cost.total_duration_ms for s in self.sessions]),
-            total_api_duration_ms=_sum_optional_ints([s.cost.total_api_duration_ms for s in self.sessions]),
-            total_lines_added=_sum_optional_ints([s.cost.total_lines_added for s in self.sessions]),
-            total_lines_removed=_sum_optional_ints([s.cost.total_lines_removed for s in self.sessions]),
+            total_cost_usd=_sum_optional([s.cost.total_cost_usd for s in self.sessions]),
+            total_duration_ms=_sum_optional([s.cost.total_duration_ms for s in self.sessions]),
+            total_api_duration_ms=_sum_optional([s.cost.total_api_duration_ms for s in self.sessions]),
+            total_lines_added=_sum_optional([s.cost.total_lines_added for s in self.sessions]),
+            total_lines_removed=_sum_optional([s.cost.total_lines_removed for s in self.sessions]),
         )
 
     @property
