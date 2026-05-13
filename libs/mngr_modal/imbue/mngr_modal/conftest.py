@@ -536,7 +536,8 @@ def _get_leaked_modal_environments() -> list[str]:
             envs = json.loads(result.stdout)
             modal_listed = [e.get("name", "") for e in envs]
             last_candidates = [name for name in modal_listed if name in worker_modal_environment_names]
-        except (subprocess.TimeoutExpired, subprocess.SubprocessError, json.JSONDecodeError, FileNotFoundError) as e:
+        except (subprocess.SubprocessError, json.JSONDecodeError, FileNotFoundError) as e:
+            # subprocess.SubprocessError covers TimeoutExpired and CalledProcessError.
             logger.warning("Failed to list leaked modal environments: {}", e)
             # Transient failure -- keep polling.
             return False
