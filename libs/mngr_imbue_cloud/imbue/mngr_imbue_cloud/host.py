@@ -73,8 +73,13 @@ def _parse_create_time(value: Any) -> datetime:
 class ImbueCloudHost(Host):
     """A leased pool host.
 
-    The pre-baked agent's id is captured at lease time so ``create_agent_state``
-    can adopt that agent under the caller's name instead of generating a new id.
+    The pre-baked agent's id is captured at lease time so
+    ``create_agent_state`` can adopt the bake's agent verbatim (its name
+    ``system-services`` and command are kept; caller-supplied ``--label``
+    flags are merged on top of the bake's defaults) and so the canonical
+    agent id stays the bake's id rather than being regenerated. The
+    user-facing workspace name lives on the *host* (via the lease's
+    ``host_name`` field), not on the agent.
     """
 
     pre_baked_agent_id: AgentId | None = Field(
