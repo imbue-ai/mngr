@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import pytest
+
 from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr_usage.api import build_source_cel_context
@@ -19,6 +21,7 @@ from imbue.mngr_usage.api import derive_elapsed
 from imbue.mngr_usage.api import wait_for_usage
 from imbue.mngr_usage.api import window_render_dict
 from imbue.mngr_usage.data_types import CostSnapshot
+from imbue.mngr_usage.data_types import SessionCostRecord
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
 
@@ -123,37 +126,58 @@ def test_build_source_cel_context_shape_matches_per_source_json() -> None:
     assert ctx["seven_day"]["used_percentage"] == 11.0
 
 
-def test_build_source_cel_context_exposes_session_id_and_cost() -> None:
-    """session_id and cost.* are exposed at the source level so predicates like
-    ``cost.total_cost_usd > 5.0`` work the same as window predicates."""
+def test_build_source_cel_context_exposes_aggregate_and_current_session() -> None:
+    """Top-level ``cost.*`` is the aggregate across sessions; the latest session is
+    repeated under ``current_session.*``. Predicates can use either:
+    ``cost.total_cost_usd > 5.0`` (across recent sessions) or
+    ``current_session.cost.total_cost_usd > 5.0`` (latest session only).
+    """
     snapshot = UsageSnapshot(
         source_name="claude",
-        updated_at=900,
+        updated_at=2000,
         windows={},
-        session_id="uuid-abc",
-        cost=CostSnapshot(total_cost_usd=0.42, total_duration_ms=12000),
+        sessions=(
+            SessionCostRecord(
+                session_id="newer",
+                cost=CostSnapshot(total_cost_usd=0.42, total_duration_ms=12000),
+                first_event_at=1500,
+                last_event_at=2000,
+            ),
+            SessionCostRecord(
+                session_id="older",
+                cost=CostSnapshot(total_cost_usd=1.00, total_duration_ms=5000),
+                first_event_at=900,
+                last_event_at=1100,
+            ),
+        ),
+        since_seconds=86400,
     )
-    ctx = build_source_cel_context(snapshot, now=1000)
-    assert ctx["session_id"] == "uuid-abc"
-    assert ctx["cost"]["total_cost_usd"] == 0.42
-    assert ctx["cost"]["total_duration_ms"] == 12000
-    # Fields the writer didn't supply are still present (as None) so predicates
-    # don't have to guard against missing keys.
-    assert ctx["cost"]["total_lines_added"] is None
+    ctx = build_source_cel_context(snapshot, now=2000)
+    # Aggregate sums numeric fields across sessions.
+    assert ctx["cost"]["total_cost_usd"] == pytest.approx(1.42)
+    assert ctx["cost"]["total_duration_ms"] == 17000
+    # current_session is the latest by last_event_at.
+    assert ctx["current_session"]["session_id"] == "newer"
+    assert ctx["current_session"]["cost"]["total_cost_usd"] == 0.42
+    assert ctx["session_count"] == 2
+    assert ctx["since_seconds"] == 86400
+    # sessions[] enumerates every session in the window.
+    assert len(ctx["sessions"]) == 2
 
 
-def test_build_source_cel_context_cost_always_a_dict_even_when_absent() -> None:
-    """When the writer didn't emit cost, ctx['cost'] is still a dict with all-None
-    fields. This lets ``cost.total_cost_usd > X`` predicates parse without an
-    explicit ``has()`` guard."""
+def test_build_source_cel_context_current_session_default_when_no_sessions() -> None:
+    """When the snapshot has no sessions, ``current_session`` is still a dict with
+    None-valued fields so CEL paths don't have to guard for absence."""
     snapshot = UsageSnapshot(
         source_name="claude",
         updated_at=900,
         windows={"five_hour": WindowSnapshot(used_percentage=42.0, resets_at=15400, window_seconds=18000)},
     )
     ctx = build_source_cel_context(snapshot, now=1000)
-    assert ctx["session_id"] is None
-    assert isinstance(ctx["cost"], dict)
+    assert ctx["current_session"]["session_id"] is None
+    assert ctx["current_session"]["cost"]["total_cost_usd"] is None
+    assert ctx["session_count"] == 0
+    # Top-level cost (aggregate over no sessions) is all-None too.
     assert ctx["cost"]["total_cost_usd"] is None
 
 

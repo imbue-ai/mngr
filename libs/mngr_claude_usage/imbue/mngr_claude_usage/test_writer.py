@@ -1,7 +1,7 @@
-"""Integration tests for claude_rate_limits_writer.sh.
+"""Integration tests for claude_usage_writer.sh.
 
 Exercises the bash writer directly via subprocess to ensure it appends
-properly-shaped JSONL events to the per-agent rate-limits events file.
+properly-shaped JSONL events to the per-agent usage events file.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import pytest
 
 from imbue.mngr_claude_usage import resources as _resources
 
-WRITER_SCRIPT_NAME = "claude_rate_limits_writer.sh"
+WRITER_SCRIPT_NAME = "claude_usage_writer.sh"
 
 
 @pytest.fixture
@@ -33,18 +33,18 @@ def writer_path(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def events_file(tmp_path: Path) -> Path:
-    return tmp_path / "events" / "claude" / "rate_limits" / "events.jsonl"
+    return tmp_path / "events" / "claude" / "usage" / "events.jsonl"
 
 
 def _has_jq() -> bool:
     return shutil.which("jq") is not None
 
 
-pytestmark = pytest.mark.skipif(not _has_jq(), reason="jq not installed; required by claude_rate_limits_writer.sh")
+pytestmark = pytest.mark.skipif(not _has_jq(), reason="jq not installed; required by claude_usage_writer.sh")
 
 
 def _run_writer(writer_path: Path, stdin: str, events_file: Path) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, "MNGR_RATE_LIMITS_EVENTS_PATH": str(events_file)}
+    env = {**os.environ, "MNGR_USAGE_EVENTS_PATH": str(events_file)}
     return subprocess.run(
         [str(writer_path)],
         input=stdin,
@@ -76,7 +76,7 @@ def test_writer_emits_event_with_rate_limits(writer_path: Path, events_file: Pat
     result = _run_writer(writer_path, payload, events_file)
     assert result.returncode == 0, result.stderr
     event = _read_last_event(events_file)
-    assert event["source"] == "claude/rate_limits"
+    assert event["source"] == "claude/usage"
     assert event["type"] == "cost_snapshot"
     assert event["event_id"].startswith("evt-")
     # ISO 8601 timestamps always contain a 'T' separator
@@ -208,8 +208,8 @@ def test_writer_handles_concurrent_appends(writer_path: Path, events_file: Path)
 
 
 def test_writer_errors_when_no_path_resolution_possible(writer_path: Path, tmp_path: Path) -> None:
-    """If neither MNGR_RATE_LIMITS_EVENTS_PATH nor MNGR_AGENT_STATE_DIR is set, exit 64."""
-    env = {k: v for k, v in os.environ.items() if k not in ("MNGR_RATE_LIMITS_EVENTS_PATH", "MNGR_AGENT_STATE_DIR")}
+    """If neither MNGR_USAGE_EVENTS_PATH nor MNGR_AGENT_STATE_DIR is set, exit 64."""
+    env = {k: v for k, v in os.environ.items() if k not in ("MNGR_USAGE_EVENTS_PATH", "MNGR_AGENT_STATE_DIR")}
     result = subprocess.run(
         [str(writer_path)],
         input='{"rate_limits": {}}',

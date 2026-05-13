@@ -2,15 +2,10 @@
 
 Claude data provider for `mngr usage`. Single responsibility: install a tiny
 statusline shim into each Claude agent so each render appends one event to
-`$MNGR_AGENT_STATE_DIR/events/claude/rate_limits/events.jsonl`. The event
+`$MNGR_AGENT_STATE_DIR/events/claude/usage/events.jsonl`. The event
 carries three things from the Claude Code statusline payload: `rate_limits`
 (Pro/Max only), `cost` (always), and `session_id` (always). The
 `mngr usage` CLI walks those events files itself (see `imbue-mngr-usage`).
-
-The events directory is named `rate_limits` for historical reasons -- it
-predates the cost / session_id capture. Renaming it would orphan events on
-already-provisioned agents, so the path is part of the discovery contract
-with `mngr_usage` and stays.
 
 ## How the pieces fit
 
@@ -18,21 +13,21 @@ with `mngr_usage` and stays.
 mngr_claude_usage's on_before_provisioning hookimpl
   └─→ writes <work_dir>/.claude/settings.local.json statusLine.command
   └─→ installs <state_dir>/commands/claude_statusline.sh (the shim)
-  └─→ installs <state_dir>/commands/claude_rate_limits_writer.sh (the writer)
+  └─→ installs <state_dir>/commands/claude_usage_writer.sh (the writer)
   └─→ captures any pre-existing user statusLine.command into
       <state_dir>/commands/user_statusline_cmd (the sidecar)
 
 Claude Code statusline render (every turn)
   └─→ <work_dir>/.claude/settings.local.json's statusLine.command
         └─→ claude_statusline.sh
-              ├─→ claude_rate_limits_writer.sh
-              │     └─→ events/claude/rate_limits/events.jsonl (append one event)
+              ├─→ claude_usage_writer.sh
+              │     └─→ events/claude/usage/events.jsonl (append one event)
               └─→ user's pre-existing statusLine.command (chain through, if any)
 
 mngr usage
   └─→ list_agents (mngr core's CEL-filterable enumeration)
-        └─→ for each matching agent: read events via the events API
-              └─→ collapse to freshest snapshot per source; render
+        └─→ for each matching agent: scan events, aggregate by (source, session_id),
+            render per-session costs + freshest rate limits
 ```
 
 All file I/O goes through `host.read_text_file` / `host.write_file`, so the

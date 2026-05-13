@@ -4,13 +4,9 @@
 # Reads a Claude Code statusline JSON object from stdin and appends one
 # event line per render to the per-agent events file:
 #
-#     $MNGR_AGENT_STATE_DIR/events/claude/rate_limits/events.jsonl
+#     $MNGR_AGENT_STATE_DIR/events/claude/usage/events.jsonl
 #
-# (Path can be overridden via $MNGR_RATE_LIMITS_EVENTS_PATH for testing.
-# The directory name is `rate_limits` for historical reasons -- the file
-# now carries cost + session_id too, but the discovery path is part of
-# the contract with mngr_usage and renaming it would orphan events on
-# already-provisioned agents.)
+# Path can be overridden via $MNGR_USAGE_EVENTS_PATH for testing.
 #
 # What's captured from each statusline payload (per Claude Code docs):
 #   - rate_limits   -- five_hour / seven_day / overage windows. Present only
@@ -27,7 +23,7 @@
 # Event envelope follows mngr's standard shape (matching common_transcript
 # and mngr/activity):
 #
-#     {"source":"claude/rate_limits","type":"cost_snapshot",
+#     {"source":"claude/usage","type":"cost_snapshot",
 #      "event_id":"evt-<hex>","timestamp":"<ISO 8601>",
 #      "session_id":"<uuid|null>","cost":<cost-or-null>,
 #      "rate_limits":<rate-limits-or-null>}
@@ -41,13 +37,13 @@
 # write nothing -- emitting an all-null event would just clutter the log.
 set -euo pipefail
 
-events_path="${MNGR_RATE_LIMITS_EVENTS_PATH:-}"
+events_path="${MNGR_USAGE_EVENTS_PATH:-}"
 if [ -z "$events_path" ]; then
   if [ -z "${MNGR_AGENT_STATE_DIR:-}" ]; then
-    echo "claude_rate_limits_writer: neither MNGR_RATE_LIMITS_EVENTS_PATH nor MNGR_AGENT_STATE_DIR is set" >&2
+    echo "claude_usage_writer: neither MNGR_USAGE_EVENTS_PATH nor MNGR_AGENT_STATE_DIR is set" >&2
     exit 64
   fi
-  events_path="$MNGR_AGENT_STATE_DIR/events/claude/rate_limits/events.jsonl"
+  events_path="$MNGR_AGENT_STATE_DIR/events/claude/usage/events.jsonl"
 fi
 
 input=$(cat)
@@ -95,7 +91,7 @@ event=$(printf '%s' "$input" | jq -c \
   --argjson labels "$labels" \
   --argjson window_seconds "$window_seconds" \
   '{
-    source: "claude/rate_limits",
+    source: "claude/usage",
     type: "cost_snapshot",
     event_id: $event_id,
     timestamp: $timestamp,

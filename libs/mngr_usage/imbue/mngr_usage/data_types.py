@@ -14,8 +14,15 @@ class UsagePluginConfig(PluginConfig):
         description="Snapshot freshness threshold in seconds. When the snapshot's "
         "updated_at is older than this, `mngr usage` prints a stale-snapshot warning. "
         "Reader-only -- this plugin doesn't capture data, it walks events files "
-        "produced by writer plugins (one event per provisioned agent's rate-limit "
-        "render) and renders the freshest.",
+        "produced by writer plugins (one event per provisioned agent's render) and "
+        "renders the freshest.",
+    )
+    since_seconds: int = Field(
+        default=86400,
+        description="Recency window for per-session cost aggregation, in seconds. Sessions whose "
+        "last event is older than this are excluded from the rendered total. Default is 24h, "
+        "which matches the 'how much have I spent today' question; tighten with --since for "
+        "right-now views, widen for longer-tail accounting.",
     )
 
     def merge_with(self, override: PluginConfig) -> UsagePluginConfig:
@@ -25,6 +32,7 @@ class UsagePluginConfig(PluginConfig):
         return UsagePluginConfig(
             enabled=override.enabled if override.enabled is not None else self.enabled,
             max_age_seconds=override.max_age_seconds if override.max_age_seconds is not None else self.max_age_seconds,
+            since_seconds=override.since_seconds if override.since_seconds is not None else self.since_seconds,
         )
 
 
@@ -38,6 +46,13 @@ class CostSnapshot(FrozenModel):
     -- any usage source emitting session cost can populate the same
     fields, and CEL predicates like ``cost.total_cost_usd > 5.0`` apply
     uniformly across sources.
+
+    Note: a ``CostSnapshot`` plays two roles in this model. At
+    ``SessionCostRecord.cost`` it represents one session's latest reading.
+    At ``UsageSnapshot.cost`` (a computed property) it's the sum of those
+    per-session readings across the snapshot's sessions tuple. The same
+    type works for both because each numeric field has well-defined sum
+    semantics.
     """
 
     total_cost_usd: float | None = Field(default=None, description="Cumulative session cost in USD (writer-supplied).")
@@ -88,37 +103,107 @@ class WindowSnapshot(FrozenModel):
     is_using_overage: bool | None = Field(default=None)
 
 
-class UsageSnapshot(FrozenModel):
-    """A complete usage snapshot derived from one writer's events file.
+class SessionCostRecord(FrozenModel):
+    """One session's cost data, latest reading.
 
-    Carries:
-    - ``source_name``: free-form identifier for the writer (taken from the
-      ``<source>`` segment of ``events/<source>/rate_limits/events.jsonl``).
-      Used in the ``[source]`` header and as a tiebreaker when multiple
-      writers contribute. Should not contain spaces.
-    - ``windows``: per-window state. Keys are writer-chosen and treated as
-      opaque by ``mngr usage``; render order is the writer's insertion order
-      (preserved through the JSONL serialization). Per-window optional
-      ``label`` controls the human display name (falls back to the key).
-    - ``updated_at``: Unix timestamp the writer regards as the snapshot's
-      freshness. The CLI uses this to pick the freshest snapshot when
-      multiple writers contribute, and to compute the stale-warning age.
+    Cost within a session is monotonically increasing (Claude Code accumulates
+    it across the session), so the latest reading IS the session total --
+    no per-event arithmetic needed. ``first_event_at`` / ``last_event_at``
+    let consumers tell how long the session has been observed and how recent
+    the data is.
+    """
+
+    session_id: str = Field(description="Writer-supplied session UUID.")
+    cost: CostSnapshot = Field(description="Latest cost reading for this session.")
+    first_event_at: int = Field(description="Unix timestamp of the earliest event seen for this session.")
+    last_event_at: int = Field(description="Unix timestamp of the most recent event seen for this session.")
+
+
+def _sum_optional_floats(values: list[float | None]) -> float | None:
+    """Sum non-None values; return None when all inputs are None.
+
+    Treats None as 'missing data' rather than zero. If any value is present
+    we sum the present ones (a None doesn't drag the total to None) -- this
+    matches the user-facing 'how much have I spent' question, where one
+    session missing a sub-field shouldn't black-hole the whole aggregate.
+    """
+    present = [v for v in values if v is not None]
+    return sum(present) if present else None
+
+
+def _sum_optional_ints(values: list[int | None]) -> int | None:
+    """Integer-typed twin of ``_sum_optional_floats`` -- the typed CostSnapshot
+    fields are split between int (durations / line counts) and float (USD),
+    so we need separate helpers to keep the aggregate's field types matching
+    the per-session field types (no implicit int->float widening).
+    """
+    present = [v for v in values if v is not None]
+    return sum(present) if present else None
+
+
+class UsageSnapshot(FrozenModel):
+    """A complete usage snapshot derived from one writer's source.
+
+    Aggregates events from every agent writing to this source (e.g. all
+    Claude agents share ``source_name="claude"``). The data has two
+    distinct shapes inside:
+
+    - ``windows`` is the freshest rate-limit reading across all events for
+      this source. Rate limits are an account-level counter (same across
+      all agents for one Anthropic account), so freshest-wins is the right
+      reduction.
+    - ``sessions`` is the per-(session_id) latest cost reading across all
+      events for this source, filtered to the recency window passed at
+      gather time. Cost is per-session, so we keep one record per session.
+      Ordered newest-first by ``last_event_at``.
+
+    Computed views (``cost``, ``current_session``, ``session_count``) read
+    off ``sessions`` and are recomputed each access -- cheap because the
+    tuple is small.
     """
 
     source_name: str = Field(description="Writer-chosen source identifier")
+    updated_at: int = Field(
+        description="Unix timestamp of the freshest event seen for this source. Drives the staleness warning."
+    )
     windows: dict[str, WindowSnapshot] = Field(
         default_factory=dict,
-        description="Per-window state, keyed by writer-chosen window names (insertion-order preserved).",
+        description="Per-window state, keyed by writer-chosen window names (insertion-order preserved). "
+        "Reflects the freshest event's rate_limits payload for this source.",
     )
-    updated_at: int = Field(description="Unix timestamp this snapshot was last refreshed")
-    session_id: str | None = Field(
-        default=None,
-        description="Writer-supplied session identifier. Lets consumers correlate a cost reading to the "
-        "session it accumulated in -- meaningful because cost typically resets per session, so a delta "
-        "across snapshots is only well-defined within one session_id.",
+    sessions: tuple[SessionCostRecord, ...] = Field(
+        default=(),
+        description="Per-session cost records within the recency window, ordered newest-first by last_event_at.",
     )
-    cost: CostSnapshot | None = Field(
-        default=None,
-        description="Writer-supplied session cost snapshot (e.g. total_cost_usd). Present when the writer "
-        "captures session-level cost data; absent when the writer only emits per-window quota state.",
+    since_seconds: int = Field(
+        default=0,
+        description="Recency window used to filter sessions, in seconds. Echoed back so consumers can "
+        "label aggregates with the same window they asked for (e.g. 'total in last 24h').",
     )
+
+    @property
+    def cost(self) -> CostSnapshot:
+        """Aggregate cost across every session in ``sessions``.
+
+        Sum of each numeric field's non-None values across sessions; all-None
+        when ``sessions`` is empty. The same field semantics as a single
+        session's cost, so CEL predicates like ``cost.total_cost_usd > 5.0``
+        work both for per-session and aggregate contexts (just at a different
+        scope).
+        """
+        return CostSnapshot(
+            total_cost_usd=_sum_optional_floats([s.cost.total_cost_usd for s in self.sessions]),
+            total_duration_ms=_sum_optional_ints([s.cost.total_duration_ms for s in self.sessions]),
+            total_api_duration_ms=_sum_optional_ints([s.cost.total_api_duration_ms for s in self.sessions]),
+            total_lines_added=_sum_optional_ints([s.cost.total_lines_added for s in self.sessions]),
+            total_lines_removed=_sum_optional_ints([s.cost.total_lines_removed for s in self.sessions]),
+        )
+
+    @property
+    def current_session(self) -> SessionCostRecord | None:
+        """The most recently-updated session, or None when no sessions are in the window."""
+        return self.sessions[0] if self.sessions else None
+
+    @property
+    def session_count(self) -> int:
+        return len(self.sessions)

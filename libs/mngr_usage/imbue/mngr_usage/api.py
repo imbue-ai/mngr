@@ -13,6 +13,19 @@ only derived knowledge that lives in this module is *how* to compute
 ``elapsed_seconds`` / ``elapsed_percentage`` *given* a ``window_seconds``
 the writer chose to emit -- that's pure arithmetic, not per-writer
 knowledge.
+
+Aggregation shape (per source):
+- ``windows``: freshest event's rate_limits payload across all agents.
+  Rate limits are an account-level counter so freshest-wins is the right
+  reduction.
+- ``sessions``: per-(session_id) latest cost reading across all agents,
+  filtered to a recency window (``since_seconds``, default 24h).
+  Cost is per-session, so we keep one record per session_id.
+
+The reader scans every event line in each agent's events file (not just
+the last) so per-session aggregation across the recency window is
+correct. Files are bounded in size in practice (<1MB after thousands of
+renders), so the linear scan is cheap.
 """
 
 from __future__ import annotations
@@ -44,13 +57,14 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
 from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr_usage.data_types import CostSnapshot
+from imbue.mngr_usage.data_types import SessionCostRecord
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
 
-# Discovery convention: each agent's state dir holds rate-limits events at
-#   <agent_state_dir>/events/<source>/rate_limits/events.jsonl
+# Discovery convention: each agent's state dir holds usage events at
+#   <agent_state_dir>/events/<source>/usage/events.jsonl
 # This mirrors the common_transcript pattern used by ``mngr transcript``.
-_RATE_LIMITS_SOURCE_SUFFIX = "/rate_limits"
+_USAGE_SOURCE_SUFFIX = "/usage"
 _EVENTS_JSONL_FILENAME = "events.jsonl"
 
 
@@ -60,26 +74,25 @@ _EVENTS_JSONL_FILENAME = "events.jsonl"
 
 
 @pure
-def last_valid_event_from_content(content: str, source_for_warnings: str) -> dict[str, Any] | None:
-    """Return the last well-formed JSON object from a JSONL events file's content.
+def parse_events_from_content(content: str, source_for_warnings: str) -> list[dict[str, Any]]:
+    """Return every well-formed JSON object from a JSONL events file's content.
 
-    Walks lines from the end; tolerates a truncated trailing line by skipping
-    it and trying the previous one. Returns None if no valid line exists.
-    ``source_for_warnings`` is included in any malformed-line warning so the
-    user can locate the offending events file.
+    Skips malformed lines with a warning (most commonly a writer mid-flight
+    truncated trailing line); ``source_for_warnings`` is included in the
+    warning so the user can locate the offending events file.
     """
-    for line in reversed([raw for raw in content.splitlines() if raw.strip()]):
+    events: list[dict[str, Any]] = []
+    for raw in content.splitlines():
+        if not raw.strip():
+            continue
         try:
-            event = json.loads(line)
+            event = json.loads(raw)
         except json.JSONDecodeError as e:
-            # A truncated trailing line (writer mid-flight, no newline yet) is the
-            # most common case; skip it and try the previous one. Earlier corrupt
-            # lines indicate something worse so we warn for visibility.
             logger.warning("Skipping malformed event line in {}: {}", source_for_warnings, e)
             continue
         if isinstance(event, dict):
-            return event
-    return None
+            events.append(event)
+    return events
 
 
 @pure
@@ -144,31 +157,130 @@ def _session_id_from_event(event: dict[str, Any]) -> str | None:
     return session_id if isinstance(session_id, str) and session_id else None
 
 
-def snapshot_from_event(event: dict[str, Any], source_name: str) -> UsageSnapshot | None:
-    """Reshape one events.jsonl line into a UsageSnapshot, or None if unusable.
+# =============================================================================
+# Per-source aggregation
+# =============================================================================
 
-    A snapshot is built whenever the event contributes *any* renderable
-    content -- a window, a cost block, or a session_id. The "no windows
-    means unusable" rule that older versions of this reader applied has
-    been relaxed: cost-only events (typical for API-key auth, where
-    Claude Code never emits rate_limits) still produce a snapshot so
-    cost tracking works for those users.
+
+class _SessionAccumulator(MutableModel):
+    """Per-session running state during aggregation.
+
+    Tracks first/last event timestamps and the most recent cost reading.
+    Mutable on purpose: the aggregator updates one of these per event, then
+    freezes them into ``SessionCostRecord`` instances at the end. Using a
+    mutable scratchpad here avoids constructing N immutable copies as we
+    walk a long events file.
     """
-    timestamp = _parse_iso_timestamp(event.get("timestamp"))
-    if timestamp is None:
+
+    session_id: str
+    cost: CostSnapshot
+    first_event_at: int
+    last_event_at: int
+
+    def to_record(self) -> SessionCostRecord:
+        return SessionCostRecord(
+            session_id=self.session_id,
+            cost=self.cost,
+            first_event_at=self.first_event_at,
+            last_event_at=self.last_event_at,
+        )
+
+
+def _build_snapshot_for_source(
+    source_name: str,
+    events: list[dict[str, Any]],
+    *,
+    since_seconds: int,
+    now: int,
+) -> UsageSnapshot | None:
+    """Aggregate one source's parsed events into a UsageSnapshot.
+
+    Single pass over the events list (caller already parsed JSON):
+    - Windows: keep the freshest event's rate_limits payload (the rate-limit
+      counter is account-level, so freshest-wins is the right reduction
+      across agents that share an account).
+    - Sessions: build a SessionCostRecord per session_id, updating its
+      ``cost`` to whichever event has the latest timestamp for that
+      session and tracking ``first_event_at`` / ``last_event_at``.
+      Filtered to ``last_event_at >= now - since_seconds`` and sorted
+      newest-first.
+
+    Returns None when no event contributes anything renderable (no
+    parseable timestamps, no windows, no cost-bearing sessions in the
+    window).
+    """
+    cutoff = now - since_seconds
+    session_accumulators: dict[str, _SessionAccumulator] = {}
+    freshest_windows_timestamp = -1
+    freshest_windows: dict[str, WindowSnapshot] = {}
+    max_timestamp = -1
+
+    for event in events:
+        timestamp = _parse_iso_timestamp(event.get("timestamp"))
+        if timestamp is None:
+            continue
+        if timestamp > max_timestamp:
+            max_timestamp = timestamp
+
+        windows = _windows_from_event(event)
+        if windows and timestamp > freshest_windows_timestamp:
+            freshest_windows_timestamp = timestamp
+            freshest_windows = windows
+
+        session_id = _session_id_from_event(event)
+        cost = _cost_from_event(event)
+        if session_id is None or cost is None:
+            continue
+
+        existing = session_accumulators.get(session_id)
+        if existing is None:
+            session_accumulators[session_id] = _SessionAccumulator(
+                session_id=session_id,
+                cost=cost,
+                first_event_at=timestamp,
+                last_event_at=timestamp,
+            )
+            continue
+        # Cost reading wins by timestamp; first/last bracket all observed events for this session.
+        if timestamp >= existing.last_event_at:
+            existing.cost = cost
+            existing.last_event_at = timestamp
+        if timestamp < existing.first_event_at:
+            existing.first_event_at = timestamp
+
+    if max_timestamp < 0:
         return None
-    windows = _windows_from_event(event)
-    cost = _cost_from_event(event)
-    session_id = _session_id_from_event(event)
-    if not windows and cost is None and session_id is None:
+
+    in_window = [a for a in session_accumulators.values() if a.last_event_at >= cutoff]
+    in_window.sort(key=lambda a: a.last_event_at, reverse=True)
+    sessions = tuple(a.to_record() for a in in_window)
+
+    if not freshest_windows and not sessions:
         return None
+
     return UsageSnapshot(
         source_name=source_name,
-        windows=windows,
-        updated_at=timestamp,
-        session_id=session_id,
-        cost=cost,
+        updated_at=max_timestamp,
+        windows=freshest_windows,
+        sessions=sessions,
+        since_seconds=since_seconds,
     )
+
+
+@pure
+def aggregate_events_to_snapshots(
+    events_by_source: dict[str, list[dict[str, Any]]],
+    *,
+    since_seconds: int,
+    now: int,
+) -> list[UsageSnapshot]:
+    """Build a UsageSnapshot per source from already-parsed events."""
+    snapshots: list[UsageSnapshot] = []
+    for source_name, events in events_by_source.items():
+        snapshot = _build_snapshot_for_source(source_name, events, since_seconds=since_seconds, now=now)
+        if snapshot is not None:
+            snapshots.append(snapshot)
+    return snapshots
 
 
 # =============================================================================
@@ -201,9 +313,6 @@ def derive_elapsed(window: WindowSnapshot, now: int) -> tuple[int | None, float 
     """
     if window.window_seconds is None or window.window_seconds <= 0 or window.resets_at is None:
         return None, None
-    # ``seconds_until_reset`` is non-negative, so ``window_seconds -
-    # seconds_until_reset`` is bounded above by ``window_seconds`` -- only the
-    # ``max(0, ...)`` lower-clamp does real work here.
     seconds_until_reset = max(0, window.resets_at - now)
     elapsed_seconds = max(0, window.window_seconds - seconds_until_reset)
     elapsed_percentage = elapsed_seconds / window.window_seconds * 100
@@ -229,6 +338,32 @@ def window_render_dict(snap: WindowSnapshot, now: int) -> dict[str, Any]:
     }
 
 
+def session_render_dict(session: SessionCostRecord, now: int) -> dict[str, Any]:
+    """Render one session record as a dict for JSON / CEL surfaces."""
+    return {
+        "session_id": session.session_id,
+        "cost": session.cost.model_dump(),
+        "first_event_at": session.first_event_at,
+        "last_event_at": session.last_event_at,
+        "age_seconds": max(0, now - session.last_event_at),
+    }
+
+
+def empty_current_session_dict() -> dict[str, Any]:
+    """Default current_session shape when no sessions are present.
+
+    Keeps the CEL/JSON surface stable: ``current_session.cost.total_cost_usd``
+    is always a queryable path, even when the source has no recent sessions.
+    """
+    return {
+        "session_id": None,
+        "cost": CostSnapshot().model_dump(),
+        "first_event_at": None,
+        "last_event_at": None,
+        "age_seconds": None,
+    }
+
+
 def build_source_cel_context(snapshot: UsageSnapshot, now: int) -> dict[str, Any]:
     """Build the per-source dict that ``mngr usage wait``'s ``--until`` CEL filters evaluate against.
 
@@ -238,15 +373,25 @@ def build_source_cel_context(snapshot: UsageSnapshot, now: int) -> dict[str, Any
     ``mngr usage --format json | jq .sources[0]`` and paste the same field
     paths into ``--until``.
 
-    ``cost`` is always present as a dict (with all-None fields when the
-    writer didn't supply cost) so predicates like ``cost.total_cost_usd >
-    5.0`` don't have to guard against the field's absence.
+    Top-level ``cost`` is the **aggregate** across the snapshot's sessions
+    (sum of each numeric field), so predicates like ``cost.total_cost_usd
+    > 5.0`` mean 'I've spent more than $5 across recent sessions'. To
+    predicate on the most recent session specifically, use the
+    ``current_session.*`` paths (e.g. ``current_session.cost.total_cost_usd``).
+    ``current_session`` is always a dict -- it has None-valued fields when
+    no sessions are present -- so CEL paths don't need to guard for absence.
     """
+    current_session = snapshot.current_session
     ctx: dict[str, Any] = {
         "source": snapshot.source_name,
         "updated_at": snapshot.updated_at,
-        "session_id": snapshot.session_id,
-        "cost": (snapshot.cost if snapshot.cost is not None else CostSnapshot()).model_dump(),
+        "since_seconds": snapshot.since_seconds,
+        "cost": snapshot.cost.model_dump(),
+        "session_count": snapshot.session_count,
+        "current_session": (
+            session_render_dict(current_session, now) if current_session is not None else empty_current_session_dict()
+        ),
+        "sessions": [session_render_dict(s, now) for s in snapshot.sessions],
     }
     for key, window in snapshot.windows.items():
         ctx[key] = window_render_dict(window, now)
@@ -258,14 +403,14 @@ def build_source_cel_context(snapshot: UsageSnapshot, now: int) -> dict[str, Any
 # =============================================================================
 
 
-def _snapshots_for_agent(mngr_ctx: MngrContext, agent: AgentDetails) -> list[UsageSnapshot]:
-    """Read all rate-limit snapshots from one agent's events directory.
+def _events_per_source_for_agent(mngr_ctx: MngrContext, agent: AgentDetails) -> dict[str, list[dict[str, Any]]]:
+    """Read all usage events from one agent's events directory, grouped by source_name.
 
     Builds an ``EventsTarget`` for the agent (works for local + remote +
     volume-backed hosts), discovers source dirs under ``events/``, and for
-    each source matching ``<source>/rate_limits`` reads the last event and
-    converts to a ``UsageSnapshot``. Returns ``[]`` if the host has no
-    events access, has no rate_limits source, or all events fail to parse.
+    each source matching ``<source>/usage`` parses every event line.
+    Returns ``{}`` if the host has no events access, has no usage source,
+    or all events fail to parse.
     """
     target = try_build_events_target_for_agent(
         mngr_ctx=mngr_ctx,
@@ -275,33 +420,31 @@ def _snapshots_for_agent(mngr_ctx: MngrContext, agent: AgentDetails) -> list[Usa
         provider_name=agent.host.provider_name,
     )
     if target is None:
-        return []
+        return {}
     try:
         sources = discover_event_sources(target)
     except MngrError as e:
         logger.debug("Could not discover events for agent {}: {}", agent.name, e)
-        return []
-    snapshots: list[UsageSnapshot] = []
+        return {}
+    by_source: dict[str, list[dict[str, Any]]] = {}
     for source in sources:
-        if not source.source_path.endswith(_RATE_LIMITS_SOURCE_SUFFIX) or not source.is_current_file_present:
+        if not source.source_path.endswith(_USAGE_SOURCE_SUFFIX) or not source.is_current_file_present:
             continue
         try:
             content = read_event_content(target, f"{source.source_path}/{_EVENTS_JSONL_FILENAME}")
         except (MngrError, FileNotFoundError) as e:
             logger.debug("Could not read {} for agent {}: {}", source.source_path, agent.name, e)
             continue
-        event = last_valid_event_from_content(content, f"agent {agent.name} {source.source_path}")
-        if event is None:
+        events = parse_events_from_content(content, f"agent {agent.name} {source.source_path}")
+        if not events:
             continue
-        source_name = source.source_path.removesuffix(_RATE_LIMITS_SOURCE_SUFFIX)
-        snapshot = snapshot_from_event(event, source_name)
-        if snapshot is not None:
-            snapshots.append(snapshot)
-    return snapshots
+        source_name = source.source_path.removesuffix(_USAGE_SOURCE_SUFFIX)
+        by_source.setdefault(source_name, []).extend(events)
+    return by_source
 
 
-class _SnapshotCollector(MutableModel):
-    """``list_agents`` on_agent callback that collects per-agent rate-limit snapshots.
+class _RawEventsCollector(MutableModel):
+    """``list_agents`` on_agent callback that collects raw events grouped by source_name.
 
     The ``_lock`` here is required, not defensive. ``list_agents(is_streaming=True)``
     fans out across an executor with ``max_workers=32`` per provider AND a nested
@@ -309,41 +452,25 @@ class _SnapshotCollector(MutableModel):
     ``_list_agents_streaming`` and ``_construct_discover_and_emit_for_provider``),
     and ``_collect_and_emit_details_for_host`` invokes ``on_agent`` *outside* the
     results_lock. Multiple host threads can therefore enter ``__call__`` concurrently;
-    without the lock, the ``list.extend`` would race.
+    without the lock, the ``dict.setdefault().extend`` would race.
 
     Class-based rather than a closure so it can hold its own lock without
     triggering the "no inline functions" ratchet.
     """
 
     mngr_ctx: MngrContext
-    snapshots: list[UsageSnapshot] = []
+    events_by_source: dict[str, list[dict[str, Any]]] = {}
     _lock: Lock = PrivateAttr(default_factory=Lock)
 
     model_config = {"arbitrary_types_allowed": True}
 
     def __call__(self, agent: AgentDetails) -> None:
-        agent_snapshots = _snapshots_for_agent(self.mngr_ctx, agent)
-        if not agent_snapshots:
+        per_source = _events_per_source_for_agent(self.mngr_ctx, agent)
+        if not per_source:
             return
         with self._lock:
-            self.snapshots.extend(agent_snapshots)
-
-
-@pure
-def collapse_by_source(snapshots: list[UsageSnapshot]) -> list[UsageSnapshot]:
-    """Reduce per-agent snapshots to one per ``source_name`` (the freshest).
-
-    Multiple agents may write to the same source (e.g. several Claude agents
-    all writing to ``events/claude/rate_limits/events.jsonl`` in their own
-    state dirs). Returns the freshest reading per source; order is
-    unspecified -- callers re-sort as needed.
-    """
-    by_source: dict[str, UsageSnapshot] = {}
-    for snap in snapshots:
-        existing = by_source.get(snap.source_name)
-        if existing is None or snap.updated_at > existing.updated_at:
-            by_source[snap.source_name] = snap
-    return list(by_source.values())
+            for source_name, events in per_source.items():
+                self.events_by_source.setdefault(source_name, []).extend(events)
 
 
 def gather_usage_snapshots(
@@ -352,15 +479,25 @@ def gather_usage_snapshots(
     include_filters: tuple[str, ...] = (),
     exclude_filters: tuple[str, ...] = (),
     provider_names: tuple[str, ...] | None = None,
+    since_seconds: int = 86400,
+    now: int | None = None,
 ) -> list[UsageSnapshot]:
-    """Enumerate matching agents via ``list_agents`` and collect rate-limit snapshots, freshest-per-source.
+    """Enumerate matching agents, collect raw events, aggregate per source.
 
     Inherits ``mngr list``'s CEL filtering, so e.g. ``--local`` /
     ``--provider local`` / ``--project foo`` work without per-command glue.
     Errors from individual hosts are tolerated so a flaky remote provider
     doesn't crash the whole pass.
+
+    ``since_seconds`` is the recency window for per-session aggregation;
+    sessions whose last event is older than that are excluded from the
+    snapshot's ``sessions`` tuple. The freshest rate-limit windows are
+    kept regardless of session recency, since rate limits track the
+    underlying account quota's current state.
     """
-    collector = _SnapshotCollector(mngr_ctx=mngr_ctx)
+    if now is None:
+        now = int(time.time())
+    collector = _RawEventsCollector(mngr_ctx=mngr_ctx)
     list_agents(
         mngr_ctx=mngr_ctx,
         is_streaming=True,
@@ -370,7 +507,7 @@ def gather_usage_snapshots(
         error_behavior=ErrorBehavior.CONTINUE,
         on_agent=collector,
     )
-    return collapse_by_source(collector.snapshots)
+    return aggregate_events_to_snapshots(collector.events_by_source, since_seconds=since_seconds, now=now)
 
 
 # =============================================================================
@@ -434,10 +571,10 @@ def wait_for_usage(
 ) -> WaitForUsageResult:
     """Poll until any source's CEL context satisfies all ``until_filters``, or timeout.
 
-    Per tick: ``poll_fn()`` returns the (already collapsed-by-source)
-    snapshot list. For each source, build a CEL context and evaluate
-    against ``until_filters``. First passing source wins. If no match
-    and not timed out, sleep ``interval_seconds`` and try again.
+    Per tick: ``poll_fn()`` returns the snapshot list. For each source,
+    build a CEL context and evaluate against ``until_filters``. First
+    passing source wins. If no match and not timed out, sleep
+    ``interval_seconds`` and try again.
 
     Clock and sleep are injected so tests can run the loop fast without
     real time elapsing. The default callable for ``now_fn`` reads

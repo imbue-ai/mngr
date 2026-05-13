@@ -33,11 +33,14 @@ from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr_usage.api import WaitForUsageResult
 from imbue.mngr_usage.api import derive_elapsed
+from imbue.mngr_usage.api import empty_current_session_dict
 from imbue.mngr_usage.api import gather_usage_snapshots
+from imbue.mngr_usage.api import session_render_dict
 from imbue.mngr_usage.api import wait_for_usage
 from imbue.mngr_usage.api import window_has_data
 from imbue.mngr_usage.api import window_render_dict
 from imbue.mngr_usage.data_types import CostSnapshot
+from imbue.mngr_usage.data_types import SessionCostRecord
 from imbue.mngr_usage.data_types import UsagePluginConfig
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
@@ -55,6 +58,12 @@ _NO_DATA_HINT = (
     "after that plugin was installed and (b) is still alive."
 )
 
+# How many characters of the session UUID to show in the human view.
+# Full UUIDs (~36 chars) dominate the line; first 8 disambiguate well
+# enough for the at-a-glance summary while keeping the line short. JSON
+# and format-template surfaces always carry the full UUID.
+_SESSION_ID_DISPLAY_PREFIX_LEN = 8
+
 
 class UsageCliOptions(CommonCliOptions, AgentFilterCliOptions):
     """Options for the `mngr usage` command.
@@ -67,16 +76,17 @@ class UsageCliOptions(CommonCliOptions, AgentFilterCliOptions):
     """
 
     max_age: str | None
+    since: str | None
     provider: tuple[str, ...]
 
 
 @pure
-def _parse_max_age(value: str | None) -> int | None:
-    """Thin wrapper around ``parse_duration_to_seconds`` for the optional CLI flag.
+def _parse_optional_duration(value: str | None) -> int | None:
+    """Thin wrapper around ``parse_duration_to_seconds`` for optional CLI duration flags.
 
-    Returns ``None`` when the user didn't supply ``--max-age``; otherwise
-    delegates to ``parse_duration_to_seconds`` so durations are accepted
-    consistently with the rest of mngr.
+    Returns ``None`` when the flag wasn't supplied (or was empty); otherwise
+    delegates so durations are accepted consistently with the rest of mngr
+    (e.g. ``300``, ``5m``, ``2h``, ``1d``).
     """
     if value is None or not value.strip():
         return None
@@ -117,6 +127,25 @@ def _format_reset_phrase(resets_at: int, now: int) -> str:
 
 
 @pure
+def _format_money(value: float) -> str:
+    """Render a USD amount in a money-conventional way: ``$0.42``, ``$5.43``.
+
+    Two decimals everywhere for visual stability; users who need more
+    precision can drop to ``--format json`` or a format template, which
+    carry the raw floats unchanged.
+    """
+    return f"${value:.2f}"
+
+
+@pure
+def _format_age_phrase(seconds: int) -> str:
+    """Render ``seconds`` as a relative-time phrase: ``2m ago`` / ``just now``."""
+    if seconds <= 1:
+        return "just now"
+    return f"{_format_duration(seconds)} ago"
+
+
+@pure
 def _format_human_line(window_label: str, window: WindowSnapshot, now: int) -> str:
     """Render one window's status as a single human-readable line."""
     if window.used_percentage is None:
@@ -127,6 +156,41 @@ def _format_human_line(window_label: str, window: WindowSnapshot, now: int) -> s
     else:
         parts.append("reset time unknown")
     return " ".join(parts)
+
+
+@pure
+def _format_session_line(session: SessionCostRecord, now: int) -> str | None:
+    """Render the current session's cost line: ``session abc12345: $0.42 (2m ago)``.
+
+    Returns None when there's nothing useful to show (no total_cost_usd).
+    Truncates the session UUID to ``_SESSION_ID_DISPLAY_PREFIX_LEN`` chars
+    for visual compactness; the full UUID is still in JSON / format-template
+    surfaces.
+    """
+    cost_usd = session.cost.total_cost_usd
+    if cost_usd is None:
+        return None
+    age_seconds = max(0, now - session.last_event_at)
+    return (
+        f"session {session.session_id[:_SESSION_ID_DISPLAY_PREFIX_LEN]}: "
+        f"{_format_money(cost_usd)} ({_format_age_phrase(age_seconds)})"
+    )
+
+
+@pure
+def _format_total_line(aggregate_cost: CostSnapshot, session_count: int, since_seconds: int) -> str | None:
+    """Render the aggregate cost line: ``total: $5.43 across 4 sessions in last 24h``.
+
+    Returns None when the aggregate has no total_cost_usd (no usable cost
+    data anywhere). Callers should only emit this for snapshots with more
+    than one session; the single-session case is already covered by the
+    per-session line and the total would be a redundant restatement.
+    """
+    total = aggregate_cost.total_cost_usd
+    if total is None:
+        return None
+    session_word = "session" if session_count == 1 else "sessions"
+    return f"total: {_format_money(total)} across {session_count} {session_word} in last {_format_duration(since_seconds)}"
 
 
 @pure
@@ -150,12 +214,27 @@ def _window_to_template_values(window: WindowSnapshot, now: int) -> dict[str, st
     }
 
 
+@pure
+def _stringify_for_template(value: Any) -> str:
+    """Render a single CEL/JSON value as a string for format-template substitution.
+
+    Treats None as empty so a template like ``{cost.total_cost_usd}`` doesn't
+    render the literal ``None`` when the field is absent.
+    """
+    return "" if value is None else str(value)
+
+
 class _UsageRenderModel(FrozenModel):
     """Top-level view used both for JSON output and template rendering.
 
     Two separate staleness flags so the warning emitter can pick the right
     text for each cause (avoiding "snapshot last updated now ago" when the
     snapshot itself just updated but a window already reset).
+
+    The per-source aggregation is already done in ``UsageSnapshot`` (windows
+    are freshest-wins; sessions are per-(session_id) latest cost within the
+    recency window). The render model just adds CLI-only concerns:
+    staleness flags and the ``now`` baseline for age phrases.
     """
 
     source_name: str
@@ -164,13 +243,23 @@ class _UsageRenderModel(FrozenModel):
     has_past_reset: bool
     snapshot_updated_at: int | None
     windows: dict[str, WindowSnapshot]
-    session_id: str | None = None
-    cost: CostSnapshot | None = None
+    sessions: tuple[SessionCostRecord, ...] = ()
+    aggregate_cost: CostSnapshot = CostSnapshot()
+    since_seconds: int = 0
 
     @property
     def is_stale(self) -> bool:
         """Combined flag retained for JSON / format-template surfaces."""
         return self.is_age_stale or self.has_past_reset
+
+    @property
+    def current_session(self) -> SessionCostRecord | None:
+        """Most-recently-updated session, or None when sessions is empty."""
+        return self.sessions[0] if self.sessions else None
+
+    @property
+    def session_count(self) -> int:
+        return len(self.sessions)
 
 
 def _build_render_model(snapshot: UsageSnapshot, max_age: int, now: int) -> _UsageRenderModel:
@@ -190,100 +279,118 @@ def _build_render_model(snapshot: UsageSnapshot, max_age: int, now: int) -> _Usa
         has_past_reset=any(snap.resets_at is not None and snap.resets_at < now for snap in snapshot.windows.values()),
         snapshot_updated_at=snapshot.updated_at,
         windows=snapshot.windows,
-        session_id=snapshot.session_id,
-        cost=snapshot.cost,
+        sessions=snapshot.sessions,
+        aggregate_cost=snapshot.cost,
+        since_seconds=snapshot.since_seconds,
     )
 
 
 def _render_one_source_for_json(model: _UsageRenderModel, now: int) -> dict[str, Any]:
-    """JSON shape for a single source's snapshot. Window order = writer's insertion order.
+    """JSON shape for a single source's snapshot.
 
-    Always emits ``session_id`` and ``cost`` at the source level (with None /
-    all-None values when absent) so downstream consumers can rely on the
-    keys' presence.
+    The top-level ``cost`` is the aggregate across all sessions in the
+    recency window. The most recent session is repeated under
+    ``current_session`` (with full session-record fields) so callers can
+    distinguish "what's the current session's cost" from "what have I spent
+    in the last 24h". The full ``sessions`` array is included for callers
+    that want the full breakdown.
     """
+    current_session = model.current_session
     out: dict[str, Any] = {
         "source": model.source_name,
         "updated_at": model.snapshot_updated_at,
         "is_stale": model.is_stale,
-        "session_id": model.session_id,
-        "cost": (model.cost if model.cost is not None else CostSnapshot()).model_dump(),
+        "since_seconds": model.since_seconds,
+        "session_count": model.session_count,
+        "cost": model.aggregate_cost.model_dump(),
+        "current_session": (
+            session_render_dict(current_session, now) if current_session is not None else empty_current_session_dict()
+        ),
+        "sessions": [session_render_dict(s, now) for s in model.sessions],
     }
     for key, snap in model.windows.items():
         out[key] = window_render_dict(snap, now)
     return out
 
 
+def _flatten_current_session_for_template(session: SessionCostRecord | None, now: int) -> dict[str, str]:
+    """Flatten one session into ``current_session.*`` keys (empty strings when absent).
+
+    Keeping the same key set populated whether or not a session is present
+    lets format-template authors reference ``{current_session.cost.total_cost_usd}``
+    without a KeyError on cost-free snapshots.
+    """
+    cost_dump = (session.cost if session is not None else CostSnapshot()).model_dump()
+    flat: dict[str, str] = {
+        "current_session.session_id": session.session_id if session is not None else "",
+        "current_session.first_event_at": str(session.first_event_at) if session is not None else "",
+        "current_session.last_event_at": str(session.last_event_at) if session is not None else "",
+        "current_session.age_seconds": (str(max(0, now - session.last_event_at)) if session is not None else ""),
+    }
+    for cost_field, cost_value in cost_dump.items():
+        flat[f"current_session.cost.{cost_field}"] = _stringify_for_template(cost_value)
+    return flat
+
+
 def _flatten_primary_for_template(model: _UsageRenderModel, now: int) -> dict[str, str]:
     """Flatten the freshest source's render model for format-template substitution.
 
     The format-template surface is intentionally simple: it reflects the
-    primary (freshest) source's windows at top level. Window keys come from
-    the writer; if a writer wants format-template support it must emit
-    identifier-safe keys (Python's ``str.format`` parses them as identifiers).
-    Multi-source consumers should use ``--format json``.
+    primary (freshest) source at top level. Window keys come from the
+    writer; if a writer wants format-template support it must emit
+    identifier-safe keys (Python's ``str.format`` parses them as
+    identifiers). Multi-source consumers should use ``--format json``.
 
-    ``session_id`` and ``cost.*`` keys are always populated (with empty
-    strings when the writer didn't supply them) so a template like
-    ``{cost.total_cost_usd}`` works without a KeyError when cost is absent.
+    ``cost.*`` is the aggregate across the recency window (sum of each
+    field across sessions). ``current_session.*`` is the latest session.
+    Both surfaces are always populated (empty string when absent) so
+    referencing them never KeyErrors.
     """
     flat: dict[str, str] = {
         "source": model.source_name,
         "now": str(now),
         "is_stale": str(model.is_stale).lower(),
         "updated_at": "" if model.snapshot_updated_at is None else str(model.snapshot_updated_at),
-        "session_id": model.session_id or "",
+        "since_seconds": str(model.since_seconds),
+        "session_count": str(model.session_count),
     }
-    cost_for_template = model.cost if model.cost is not None else CostSnapshot()
-    for cost_field, cost_value in cost_for_template.model_dump().items():
-        flat[f"cost.{cost_field}"] = "" if cost_value is None else str(cost_value)
+    for cost_field, cost_value in model.aggregate_cost.model_dump().items():
+        flat[f"cost.{cost_field}"] = _stringify_for_template(cost_value)
+    flat.update(_flatten_current_session_for_template(model.current_session, now))
     for key, snap in model.windows.items():
         for sub_key, value in _window_to_template_values(snap, now).items():
             flat[f"{key}.{sub_key}"] = value
     return flat
 
 
-_SESSION_ID_DISPLAY_PREFIX_LEN = 8
-
-
-@pure
-def _format_session_cost_line(session_id: str | None, cost: CostSnapshot | None) -> str | None:
-    """Render the session/cost line that sits between the source header and the window lines.
-
-    The user view is "cost, anchored to the session it accumulated in" --
-    cost without a session_id is still useful (show the cost), session_id
-    without cost is not (there's nothing to anchor), so we suppress the
-    latter. Returns None when there's nothing to show.
-
-    Session IDs are UUIDs (~36 chars) which would dominate the line, so
-    we truncate to the first 8 chars for the human view (full UUID stays
-    in JSON / format-template surfaces).
-    """
-    if cost is None or cost.total_cost_usd is None:
-        return None
-    cost_str = f"${cost.total_cost_usd:.4f}"
-    if session_id:
-        return f"session {session_id[:_SESSION_ID_DISPLAY_PREFIX_LEN]}: {cost_str}"
-    return f"cost: {cost_str}"
-
-
 def _write_source_section(model: _UsageRenderModel, now: int, header: str) -> bool:
-    """Render one source's window lines (always preceded by a ``[source]`` header).
+    """Render one source's section: header, session/total lines, window lines.
 
-    Window order is the writer's insertion order. The line label is the
-    window's ``label`` field if present, else the literal key. A session /
-    cost line (when available) is rendered between the header and the
-    windows so cost is visually grouped with the session it came from.
-    Returns True if anything renderable (cost line or any window with
-    percentage / reset) was emitted -- this gates the catch-all "no usage
-    data" hint and the per-source staleness warnings downstream. An API-key
-    session that has cost but never gets rate_limits should count as data.
+    Layout::
+
+      [source]
+      session <id-prefix>: $X.YY (<age> ago)            current session, if any
+      total: $A.BB across N sessions in last <since>    only when N > 1
+      <window-label>: <pct>% used, <reset-phrase>       one per populated window
+
+    Returns True if anything renderable was emitted -- this gates the
+    catch-all "no usage data" hint and the per-source staleness warnings
+    downstream. An API-key session that has cost but never gets
+    rate_limits should count as data.
     """
     write_human_line(header)
-    session_cost_line = _format_session_cost_line(model.session_id, model.cost)
-    any_renderable = session_cost_line is not None
-    if session_cost_line is not None:
-        write_human_line(session_cost_line)
+    any_renderable = False
+    current_session = model.current_session
+    if current_session is not None:
+        session_line = _format_session_line(current_session, now)
+        if session_line is not None:
+            write_human_line(session_line)
+            any_renderable = True
+    if model.session_count > 1:
+        total_line = _format_total_line(model.aggregate_cost, model.session_count, model.since_seconds)
+        if total_line is not None:
+            write_human_line(total_line)
+            any_renderable = True
     for key, snap in model.windows.items():
         if snap.used_percentage is None and snap.resets_at is None:
             continue
@@ -297,6 +404,7 @@ def _emit_output(
     output_format: OutputFormat,
     format_template: str | None,
     now: int,
+    since_seconds: int,
 ) -> None:
     """Write output for zero or more sources, freshest-first.
 
@@ -305,8 +413,7 @@ def _emit_output(
     (b) matches the existing stale-cache warning's channel, and (c) carries
     actionable info regardless of which output format the caller chose.
     Two no-data cases trigger it: zero sources (no events files anywhere)
-    and "every source's events lack used_percentage" (renders as percentage-
-    less window lines, but still actionable for the user).
+    and "every source's events lack used_percentage AND lack cost".
     """
     if format_template is not None:
         # Format templates always reference the primary (freshest) source's
@@ -320,6 +427,9 @@ def _emit_output(
                 has_past_reset=False,
                 snapshot_updated_at=None,
                 windows={},
+                sessions=(),
+                aggregate_cost=CostSnapshot(),
+                since_seconds=since_seconds,
             )
             line = render_format_template(format_template, _flatten_primary_for_template(empty, now))
         else:
@@ -335,6 +445,7 @@ def _emit_output(
         case OutputFormat.JSON | OutputFormat.JSONL:
             payload: dict[str, Any] = {
                 "now": now,
+                "since_seconds": since_seconds,
                 "sources": [_render_one_source_for_json(model, now) for _, model in snapshots_with_models],
             }
             emit_final_json(payload)
@@ -429,6 +540,12 @@ def _reject_group_options_when_subcommand_invoked(ctx: click.Context) -> None:
     default=None,
     help="Stale-warning threshold (e.g. '300', '5m', '2h'). Default: from plugin config.",
 )
+@click.option(
+    "--since",
+    default=None,
+    help="Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose "
+    "last event is older are excluded from the rendered total. Default: from plugin config (24h).",
+)
 @add_agent_filter_options
 @optgroup.option(
     "--provider",
@@ -442,21 +559,14 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
 
     Enumerates agents via ``list_agents`` (same machinery, filters, and speed
     profile as ``mngr list``), reads each agent's ``events/<source>/
-    rate_limits/events.jsonl`` via the events API (so remote agents work the
-    same as local), and renders the freshest snapshot per source.
+    usage/events.jsonl`` via the events API (so remote agents work the
+    same as local), and renders one section per source: a current-session
+    cost line, an aggregate-total line (when there's more than one
+    recent session), and one line per populated rate-limit window.
 
     When invoked without a subcommand, prints the current snapshot. Use
     ``mngr usage wait`` to block until a CEL predicate matches.
     """
-    # Group-with-default-action: when a subcommand is invoked we hand off
-    # entirely (no group-level reading or rendering). Without a subcommand
-    # we render the snapshot, the existing ``mngr usage`` behavior.
-    #
-    # Reject group-level options when a subcommand is invoked, instead of
-    # silently ignoring them. ``mngr usage --local wait --until X`` looks
-    # like ``--local`` should scope the wait, but Click parses it as a
-    # group option and our early-return drops it. The explicit error
-    # tells the user to put flags after the subcommand.
     if ctx.invoked_subcommand is not None:
         _reject_group_options_when_subcommand_invoked(ctx)
         return
@@ -468,28 +578,37 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
     )
     plugin_config = mngr_ctx.get_plugin_config("usage", UsagePluginConfig)
 
-    max_age_override = _parse_max_age(opts.max_age)
+    max_age_override = _parse_optional_duration(opts.max_age)
     effective_max_age = max_age_override if max_age_override is not None else plugin_config.max_age_seconds
+    since_override = _parse_optional_duration(opts.since)
+    effective_since = since_override if since_override is not None else plugin_config.since_seconds
 
     include_filters, exclude_filters = build_agent_filter_cel(opts, mngr_ctx.concurrency_group)
     provider_names = opts.provider if opts.provider else None
+    now = int(time.time())
     snapshots = gather_usage_snapshots(
         mngr_ctx,
         include_filters=include_filters,
         exclude_filters=exclude_filters,
         provider_names=provider_names,
+        since_seconds=effective_since,
+        now=now,
     )
-    now = int(time.time())
 
-    # One render model per source (freshest snapshot for that source), sorted
-    # freshest-first across sources. Tiebreak by source_name so the order is
-    # stable in tests.
+    # One render model per source (already collapsed in the aggregation pipeline),
+    # sorted freshest-first. Tiebreak by source_name so the order is stable in tests.
     snapshots_with_models = sorted(
         ((s, _build_render_model(s, effective_max_age, now)) for s in snapshots),
         key=lambda sm: (sm[0].updated_at, sm[0].source_name),
         reverse=True,
     )
-    _emit_output(snapshots_with_models, output_opts.output_format, output_opts.format_template, now)
+    _emit_output(
+        snapshots_with_models,
+        output_opts.output_format,
+        output_opts.format_template,
+        now,
+        effective_since,
+    )
 
 
 CommandHelpMetadata(
@@ -501,16 +620,29 @@ statusline.
 
 Agent-agnostic and host-agnostic: enumerates matching agents via
 ``list_agents`` (same machinery and filter vocabulary as ``mngr list``) and
-reads each agent's ``events/<source>/rate_limits/events.jsonl`` via the
+reads each agent's ``events/<source>/usage/events.jsonl`` via the
 events API. Local and remote agents are read uniformly; the writer plugin
-chooses the ``<source>`` segment.""",
+chooses the ``<source>`` segment.
+
+Per-source aggregation:
+
+- Rate-limit windows track an account-level counter, so the freshest reading
+  across all agents wins.
+- Cost is per-session and resets when a new session starts, so we keep one
+  record per ``session_id`` and aggregate across sessions within the
+  ``--since`` recency window (default 24h).
+- ``current_session`` is the most-recently-updated session in that window.""",
     examples=(
         ("Show current usage", "mngr usage"),
         ("Local agents only", "mngr usage --local"),
         ("Specific providers", "mngr usage --provider local --provider modal"),
+        ("Aggregate cost across the last week", "mngr usage --since 7d"),
         ("Treat the snapshot as stale after 60s (warning only)", "mngr usage --max-age 60"),
         ("Machine-readable output", "mngr usage --format json"),
-        ("Custom format template", "mngr usage --format '{five_hour.used_percentage}/{seven_day.used_percentage}'"),
+        (
+            "Custom format template (aggregate cost + current session)",
+            "mngr usage --format '{cost.total_cost_usd} ({current_session.session_id})'",
+        ),
     ),
 ).register()
 
@@ -543,6 +675,7 @@ class UsageWaitCliOptions(CommonCliOptions, AgentFilterCliOptions):
     provider: tuple[str, ...]
     timeout: str | None
     interval: str
+    since: str | None
 
 
 @usage.command("wait")
@@ -568,6 +701,12 @@ class UsageWaitCliOptions(CommonCliOptions, AgentFilterCliOptions):
     show_default=True,
     help="Poll interval (e.g. '15s', '1m'). The usage snapshot is rebuilt every interval. "
     "Default of 30s suits multi-hour windows; tighten for short-window predicates.",
+)
+@optgroup.option(
+    "--since",
+    default=None,
+    help="Recency window for per-session cost aggregation (e.g. '24h', '7d'). Affects "
+    "`cost.*` aggregate fields in the CEL context. Default: from plugin config (24h).",
 )
 @add_agent_filter_options
 @optgroup.option(
@@ -596,16 +735,17 @@ def wait(ctx: click.Context, **kwargs: Any) -> None:
         command_class=UsageWaitCliOptions,
         is_format_template_supported=False,
     )
+    plugin_config = mngr_ctx.get_plugin_config("usage", UsagePluginConfig)
 
     include_filters, exclude_filters = build_agent_filter_cel(opts, mngr_ctx.concurrency_group)
     provider_names = opts.provider if opts.provider else None
 
-    # ``compile_cel_filters`` raises MngrError on invalid CEL; let it bubble
-    # so the user sees the exact bad expression rather than a generic timeout.
     until_programs, _unused_excludes = compile_cel_filters(opts.until_filters, exclude_filters=())
 
     timeout_seconds = parse_duration_to_seconds(opts.timeout) if opts.timeout is not None else None
     interval_seconds = parse_duration_to_seconds(opts.interval)
+    since_override = _parse_optional_duration(opts.since)
+    effective_since = since_override if since_override is not None else plugin_config.since_seconds
 
     emit_info(
         f"Waiting for usage predicate (poll {opts.interval}"
@@ -621,6 +761,7 @@ def wait(ctx: click.Context, **kwargs: Any) -> None:
                 include_filters=include_filters,
                 exclude_filters=exclude_filters,
                 provider_names=provider_names,
+                since_seconds=effective_since,
             ),
             until_filters=until_programs,
             timeout_seconds=timeout_seconds,
@@ -690,10 +831,6 @@ def _output_wait_result(result: WaitForUsageResult, output_format: OutputFormat)
         case OutputFormat.JSONL:
             emit_event("result", payload, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
-            # ``wait_for_usage`` returns from exactly two paths: match (is_matched=True,
-            # is_timed_out=False) or timeout (is_matched=False, is_timed_out=True). The
-            # is_matched/timed_out booleans are therefore exhaustive; treat anything
-            # else as a programming error and raise so it doesn't silently disappear.
             if result.is_matched:
                 write_human_line(
                     "Matched on source '{}' after {:.1f}s",
@@ -722,7 +859,8 @@ context satisfies every ``--until`` expression. Composable with shell:
       && mngr message my-agent "ok, kick off the next batch"
 
 The CEL context per source mirrors one entry of ``mngr usage --format
-json``'s ``sources`` array, with these derived fields per window:
+json``'s ``sources`` array. Window fields (under each window key, e.g.
+``five_hour``):
 
 - ``used_percentage``: from the writer.
 - ``resets_at`` / ``seconds_until_reset``: when the window resets.
@@ -732,14 +870,17 @@ json``'s ``sources`` array, with these derived fields per window:
   ``window_seconds`` and ``seconds_until_reset``; absent when
   ``window_seconds`` isn't emitted.
 
-Source-level fields also exposed for predicates:
+Source-level fields:
 
-- ``session_id``: writer-supplied session UUID (the session cost
-  accumulated in).
-- ``cost.total_cost_usd`` / ``cost.total_duration_ms`` / ``cost.total_api_duration_ms``
-  / ``cost.total_lines_added`` / ``cost.total_lines_removed``: session-level
-  cost data when the writer captures it (always present as a dict but
-  individual fields may be null).
+- ``cost.total_cost_usd`` / ``cost.total_duration_ms`` / ... : aggregate
+  across the recency window (sum across all sessions in the last
+  ``--since`` duration).
+- ``current_session.session_id``: most recently-active session's UUID.
+- ``current_session.cost.total_cost_usd`` / ... : the current session's
+  cost reading (for "wait until *this session* crosses $5").
+- ``session_count``: number of recent sessions contributing to the cost
+  aggregate.
+- ``sessions``: full list of session-cost records in the recency window.
 
 Exit codes:
   0 - A source matched all --until filters.
@@ -763,8 +904,16 @@ Exit codes:
             "mngr usage wait --until 'overage.is_using_overage == false' --interval 10s",
         ),
         (
-            "Wait for the session cost to cross a budget threshold",
-            "mngr usage wait --until 'cost.total_cost_usd > 5.0'",
+            "Wait until cumulative spend over the last 24h crosses $20",
+            "mngr usage wait --until 'cost.total_cost_usd > 20.0'",
+        ),
+        (
+            "Wait until the current session crosses $5",
+            "mngr usage wait --until 'current_session.cost.total_cost_usd > 5.0'",
+        ),
+        (
+            "Aggregate cost over the last week instead of 24h",
+            "mngr usage wait --until 'cost.total_cost_usd > 100.0' --since 7d",
         ),
     ),
     see_also=(

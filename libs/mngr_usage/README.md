@@ -17,7 +17,7 @@ This package contains:
 - The `UsageSnapshot`, `WindowSnapshot`, and `CostSnapshot` data types.
 
 Discovery is by path convention. The CLI walks
-`<host_dir>/agents/*/events/<source>/rate_limits/events.jsonl` (the same shape
+`<host_dir>/agents/*/events/<source>/usage/events.jsonl` (the same shape
 `mngr transcript` uses for `events/<source>/common_transcript/...`), reads the
 last event from each file, and renders the freshest snapshot per `<source>`.
 The `<source>` segment is free-form -- whatever the writer plugin chose.
@@ -64,7 +64,7 @@ A writer plugin is responsible for producing `cost_snapshot` events at the
 conventional path. The minimal contract is just the JSONL line shape:
 
 ```jsonl
-{"source":"<your-source>/rate_limits","type":"cost_snapshot","event_id":"evt-<hex>","timestamp":"<ISO 8601>","session_id":"<uuid|null>","cost":{"total_cost_usd":<float>},"rate_limits":{"<window-key>":{"used_percentage":<float>,"resets_at":<unix-ts>}}}
+{"source":"<your-source>/usage","type":"cost_snapshot","event_id":"evt-<hex>","timestamp":"<ISO 8601>","session_id":"<uuid|null>","cost":{"total_cost_usd":<float>},"rate_limits":{"<window-key>":{"used_percentage":<float>,"resets_at":<unix-ts>}}}
 ```
 
 The `session_id`, `cost`, and `rate_limits` fields are all individually
@@ -75,7 +75,7 @@ it -- but `"cost_snapshot"` is the current convention.
 Append one line per refresh to:
 
 ```
-<agent_state_dir>/events/<your-source>/rate_limits/events.jsonl
+<agent_state_dir>/events/<your-source>/usage/events.jsonl
 ```
 
 `mngr usage` will pick it up automatically -- no plugin registration with this
