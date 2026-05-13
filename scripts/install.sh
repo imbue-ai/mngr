@@ -73,7 +73,7 @@ fi
 # when they need interactive input, so they work even when stdin is piped.
 mngr dependencies -i || warn "Some dependencies could not be installed. Run 'mngr dependencies' to see what's missing."
 
-# ── Step 4: Optional extras (plugins, completion, Claude plugin, default type) ──
+# ── Step 4: Optional extras (plugins, shell completion, Claude Code plugin, default agent type) ──
 
 mngr extras -i || warn "Some extras could not be installed. Run 'mngr extras' to see status."
 
