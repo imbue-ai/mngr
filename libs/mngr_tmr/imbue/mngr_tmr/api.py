@@ -15,7 +15,6 @@ from pathlib import Path
 
 from loguru import logger
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -39,10 +38,10 @@ from imbue.mngr_tmr.launching import stop_agent_on_host
 from imbue.mngr_tmr.mngr_cli import CliError
 from imbue.mngr_tmr.mngr_cli import list_agents as cli_list_agents
 from imbue.mngr_tmr.pulling import finalize_agent
+from imbue.mngr_tmr.pulling import is_agent_outputs_ready
 from imbue.mngr_tmr.pulling import pull_agent_branch as pull_agent_branch
 from imbue.mngr_tmr.pulling import pull_agent_outputs as pull_agent_outputs
 from imbue.mngr_tmr.pulling import read_integrator_result as read_integrator_result
-from imbue.mngr_tmr.pulling import try_read_agent_result
 from imbue.mngr_tmr.pulling import try_read_integrator_outcome
 from imbue.mngr_tmr.report import generate_html_report
 from imbue.mngr_tmr.utils import CollectTestsError as CollectTestsError
@@ -95,11 +94,6 @@ def should_pull_changes(result: TestMapReduceResult) -> bool:
     return _should_pull(result.errored, result.changes, result.tests_passing_before, result.tests_passing_after)
 
 
-def should_pull_changes_from_result(result: TestResult) -> bool:
-    """Determine whether an agent's changes should be pulled (from a TestResult)."""
-    return _should_pull(result.errored, result.changes, result.tests_passing_before, result.tests_passing_after)
-
-
 def launch_and_poll_agents(
     test_node_ids: list[str],
     config: TmrLaunchConfig,
@@ -116,7 +110,6 @@ def launch_and_poll_agents(
     launch_failures: list[TestMapReduceResult],
     artifact_output_dir: Path | None = None,
     source_dir: Path | None = None,
-    base_commit: str | None = None,
 ) -> tuple[dict[str, AgentDetails], set[str], dict[str, TestResult]]:
     """Launch agents incrementally and poll until all finish.
 
@@ -178,15 +171,16 @@ def launch_and_poll_agents(
             info = agent_id_to_info[agent_id_str]
             elapsed = now - info.created_at
             if elapsed >= agent_timeout_seconds:
-                result = try_read_agent_result(info.work_dir, all_hosts[agent_id_str])
-                if result is not None:
+                host = all_hosts[agent_id_str]
+                if is_agent_outputs_ready(mngr_ctx, config.provider_name, host.id, AgentId(agent_id_str)):
                     logger.info(
-                        "Agent '{}' has result file (found before timeout stop), treating as done", info.agent_name
+                        "Agent '{}' has outputs archive (found before timeout stop), treating as done",
+                        info.agent_name,
                     )
                     pending_ids.discard(agent_id_str)
                     continue
                 logger.warning("Agent '{}' timed out after {:.0f}s, stopping", info.agent_name, elapsed)
-                stop_agent_on_host(all_hosts[agent_id_str], AgentId(agent_id_str), info.agent_name)
+                stop_agent_on_host(host, AgentId(agent_id_str), info.agent_name)
                 pending_ids.discard(agent_id_str)
                 timed_out_ids.add(agent_id_str)
                 timed_out_this_round = True
@@ -238,25 +232,19 @@ def launch_and_poll_agents(
             changed = True
 
             pre_read = finalize_agent(
+                mngr_ctx=mngr_ctx,
+                provider_name=config.provider_name,
+                host=all_hosts[agent_id_str],
                 agent_id=agent_detail.id,
                 agent_name=agent_detail.name,
-                host=all_hosts[agent_id_str],
+                branch_name=agent_detail.initial_branch,
                 artifact_output_dir=artifact_output_dir,
+                source_dir=source_dir,
                 cg=mngr_ctx.concurrency_group,
                 should_stop=agent_detail.state == AgentLifecycleState.WAITING,
             )
             if pre_read is not None:
                 cached_results[agent_id_str] = pre_read
-                if base_commit is not None and source_dir is not None and should_pull_changes_from_result(pre_read):
-                    pull_agent_branch(
-                        agent_detail.id,
-                        agent_detail.name,
-                        agent_detail.initial_branch,
-                        all_hosts[agent_id_str],
-                        source_dir,
-                        mngr_ctx.concurrency_group,
-                        base_commit,
-                    )
 
         for agent_id_str in list(pending_ids):
             if agent_id_str not in seen_ids:
@@ -276,36 +264,26 @@ def launch_and_poll_agents(
             if now - last_result_check[agent_id_str] >= result_check_interval_seconds:
                 last_result_check[agent_id_str] = now
                 info = agent_id_to_info[agent_id_str]
-                result = try_read_agent_result(info.work_dir, all_hosts[agent_id_str])
-                if result is not None:
+                host = all_hosts[agent_id_str]
+                if is_agent_outputs_ready(mngr_ctx, config.provider_name, host.id, AgentId(agent_id_str)):
                     logger.info(
-                        "Agent '{}' has result file (detected via direct check), treating as done",
+                        "Agent '{}' has outputs archive (detected via direct check), treating as done",
                         info.agent_name,
                     )
                     pre_read = finalize_agent(
+                        mngr_ctx=mngr_ctx,
+                        provider_name=config.provider_name,
+                        host=host,
                         agent_id=AgentId(agent_id_str),
                         agent_name=info.agent_name,
-                        host=all_hosts[agent_id_str],
+                        branch_name=info.branch_name,
                         artifact_output_dir=artifact_output_dir,
+                        source_dir=source_dir,
                         cg=mngr_ctx.concurrency_group,
                         should_stop=True,
                     )
                     if pre_read is not None:
                         cached_results[agent_id_str] = pre_read
-                        if (
-                            base_commit is not None
-                            and source_dir is not None
-                            and should_pull_changes_from_result(pre_read)
-                        ):
-                            pull_agent_branch(
-                                AgentId(agent_id_str),
-                                info.agent_name,
-                                info.branch_name,
-                                all_hosts[agent_id_str],
-                                source_dir,
-                                mngr_ctx.concurrency_group,
-                                base_commit,
-                            )
                     pending_ids.discard(agent_id_str)
                     changed = True
 
@@ -330,7 +308,13 @@ def _collect_agent_results(
     missing_detail_summary: str,
     cached_results: dict[str, TestResult] | None = None,
 ) -> list[TestMapReduceResult]:
-    """Shared iteration over agents to build result list."""
+    """Shared iteration over agents to build result list.
+
+    Relies entirely on ``cached_results``: an agent that finished writes its
+    outcome into the outputs archive, which is downloaded and parsed during
+    finalization. An agent with no cached result either is still running
+    (intermediate report) or failed to publish (final report).
+    """
     cached_results = cached_results or {}
     results: list[TestMapReduceResult] = []
 
@@ -349,27 +333,24 @@ def _collect_agent_results(
             continue
 
         detail = final_details.get(agent_id_str)
+        test_result = cached_results.get(agent_id_str)
 
         if detail is None:
-            if agent_id_str in hosts:
-                direct_result = cached_results.get(agent_id_str) or try_read_agent_result(
-                    agent_info.work_dir, hosts[agent_id_str]
-                )
-                if direct_result is not None:
-                    results.append(
-                        TestMapReduceResult(
-                            test_node_id=agent_info.test_node_id,
-                            agent_name=agent_info.agent_name,
-                            changes=direct_result.changes,
-                            errored=direct_result.errored,
-                            tests_passing_before=direct_result.tests_passing_before,
-                            tests_passing_after=direct_result.tests_passing_after,
-                            summary_markdown=direct_result.summary_markdown,
-                            branch_name=agent_info.branch_name,
-                            test_runs=direct_result.test_runs,
-                        )
+            if test_result is not None:
+                results.append(
+                    TestMapReduceResult(
+                        test_node_id=agent_info.test_node_id,
+                        agent_name=agent_info.agent_name,
+                        changes=test_result.changes,
+                        errored=test_result.errored,
+                        tests_passing_before=test_result.tests_passing_before,
+                        tests_passing_after=test_result.tests_passing_after,
+                        summary_markdown=test_result.summary_markdown,
+                        branch_name=agent_info.branch_name,
+                        test_runs=test_result.test_runs,
                     )
-                    continue
+                )
+                continue
             results.append(
                 TestMapReduceResult(
                     test_node_id=agent_info.test_node_id,
@@ -380,9 +361,6 @@ def _collect_agent_results(
             )
             continue
 
-        test_result = cached_results.get(agent_id_str) or try_read_agent_result(
-            agent_info.work_dir, hosts[agent_id_str]
-        )
         if test_result is not None:
             results.append(
                 TestMapReduceResult(
@@ -416,16 +394,15 @@ def gather_results(
     final_details: dict[str, AgentDetails],
     timed_out_ids: set[str],
     hosts: dict[str, OnlineHostInterface],
-    source_dir: Path,
-    cg: ConcurrencyGroup,
-    base_commit: str | None = None,
     cached_results: dict[str, TestResult] | None = None,
     launch_failures: Sequence[TestMapReduceResult] = (),
 ) -> list[TestMapReduceResult]:
-    """Gather results from all finished agents, pulling branches where appropriate.
+    """Gather results from all finished agents.
 
-    ``launch_failures`` are prepended to the returned list so agents that
-    failed to launch still appear in the report.
+    Branches were already applied via each agent's bundle during the per-agent
+    pull step, so this function just assembles the per-agent result records.
+    ``launch_failures`` are prepended so agents that failed to launch still
+    appear in the report.
     """
     results = _collect_agent_results(
         agents=agents,
@@ -436,25 +413,6 @@ def gather_results(
         missing_detail_summary="Agent details not found after polling",
         cached_results=cached_results,
     )
-
-    # Pull branches from remote agents whose changes should be kept.
-    # In the main polling flow, branches are pulled during finalization (before
-    # stopping agents). This loop serves as a fallback for the reintegrate flow.
-    if base_commit is not None:
-        for result in results:
-            if should_pull_changes(result):
-                agent_id_str = next(str(info.agent_id) for info in agents if info.test_node_id == result.test_node_id)
-                detail = final_details.get(agent_id_str)
-                if detail is not None:
-                    pull_agent_branch(
-                        detail.id,
-                        detail.name,
-                        detail.initial_branch,
-                        hosts[agent_id_str],
-                        source_dir,
-                        cg,
-                        base_commit=base_commit,
-                    )
 
     return [*launch_failures, *results]
 

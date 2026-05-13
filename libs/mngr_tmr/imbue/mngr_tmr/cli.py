@@ -297,28 +297,32 @@ def _run_reintegrate(
         html_path = output_dir / "index.html"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Pull outputs (artifacts + result.json) for each agent, then gather results
+    # Pull outputs (artifacts + outcome + branch bundle) for each agent via
+    # the volume API. The host does not need to be online for this step.
     cached_results: dict[str, TestResult] = {}
     cg = mngr_ctx.concurrency_group
-    for info in agent_infos:
-        agent_id_str = str(info.agent_id)
-        if agent_id_str in agent_hosts:
-            result = pull_agent_outputs(info.agent_id, info.agent_name, agent_hosts[agent_id_str], output_dir, cg)
-            if result is not None:
-                cached_results[agent_id_str] = result
+    for detail in matching_agents:
+        agent_id_str = str(detail.id)
+        result = pull_agent_outputs(
+            mngr_ctx=mngr_ctx,
+            provider_name=detail.host.provider_name,
+            host_id=detail.host.id,
+            agent_id=detail.id,
+            agent_name=detail.name,
+            branch_name=detail.initial_branch,
+            destination_dir=output_dir,
+            source_dir=source_dir,
+            cg=cg,
+        )
+        if result is not None:
+            cached_results[agent_id_str] = result
 
     base_commit = get_base_commit(source_dir, cg)
-    is_remote_provider = any(
-        d.host is not None and d.host.provider_name != LOCAL_PROVIDER_NAME for d in matching_agents
-    )
     results = gather_results(
         agents=agent_infos,
         final_details=final_details,
         timed_out_ids=set(),
         hosts=agent_hosts,
-        source_dir=source_dir,
-        cg=cg,
-        base_commit=base_commit if is_remote_provider else None,
         cached_results=cached_results,
     )
 
@@ -723,7 +727,6 @@ def _run_tmr_pipeline(
         _emit_agents_launched(len(agent_infos), output_opts)
         remaining_node_ids = []
 
-    is_remote_provider = ProviderInstanceName(opts.provider).lower() != LOCAL_PROVIDER_NAME
     final_details, timed_out_ids, cached_results = launch_and_poll_agents(
         test_node_ids=remaining_node_ids,
         config=config,
@@ -740,22 +743,18 @@ def _run_tmr_pipeline(
         launch_failures=launch_failures,
         artifact_output_dir=output_dir,
         source_dir=source_dir,
-        base_commit=base_commit if is_remote_provider else None,
     )
 
     if use_batched:
         _emit_agents_launched(len(agent_infos), output_opts)
 
-    # Step 8: Gather final results (branches already pulled during polling for
-    # remote providers; gather_results re-attempts for any that were missed)
+    # Step 8: Gather final results (artifacts and branch bundles were already
+    # downloaded and applied during per-agent finalization).
     results = gather_results(
         agents=agent_infos,
         final_details=final_details,
         timed_out_ids=timed_out_ids,
         hosts=agent_hosts,
-        source_dir=source_dir,
-        cg=mngr_ctx.concurrency_group,
-        base_commit=base_commit if is_remote_provider else None,
         cached_results=cached_results,
         launch_failures=launch_failures,
     )

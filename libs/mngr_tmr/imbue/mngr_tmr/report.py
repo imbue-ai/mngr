@@ -402,8 +402,10 @@ def _find_test_artifact_runs(
 
     run_descriptions: dict[str, str] = {tr.run_name: tr.description_markdown for tr in test_runs}
 
+    # Extracted layout from outputs.tar.gz: <agent_dir>/test_output/e2e/<run>/...
+    test_output_dir = agent_dir / "test_output"
     found: list[tuple[str, str, Path]] = []
-    for candidate_root in [agent_dir / "e2e", agent_dir]:
+    for candidate_root in [test_output_dir / "e2e", test_output_dir, agent_dir / "e2e", agent_dir]:
         if not candidate_root.is_dir():
             continue
         for run_dir in sorted(candidate_root.iterdir()):

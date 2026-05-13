@@ -376,9 +376,10 @@ def test_build_current_results_launch_failures_come_before_running_agents() -> N
 
 
 def _write_local_result(local_dir: Path, content: str) -> None:
-    """Write a testing_agent_outcome.json in a local agent output directory."""
-    local_dir.mkdir(parents=True, exist_ok=True)
-    (local_dir / TESTING_AGENT_OUTCOME_FILENAME).write_text(content)
+    """Write a testing_agent_outcome.json under the local agent's extracted test_output dir."""
+    test_output_dir = local_dir / "test_output"
+    test_output_dir.mkdir(parents=True, exist_ok=True)
+    (test_output_dir / TESTING_AGENT_OUTCOME_FILENAME).write_text(content)
 
 
 def _write_integrator_result_in_work_dir(work_dir: Path, content: str) -> None:
