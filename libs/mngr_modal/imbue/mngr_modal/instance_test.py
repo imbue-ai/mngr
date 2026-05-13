@@ -1803,12 +1803,15 @@ def test_parse_docker_build_args_raises_for_bad_format() -> None:
         _parse_docker_build_args(dockerfile, ("no-equals-sign",))
 
 
-def test_parse_docker_build_args_does_not_substitute() -> None:
-    """Unlike _substitute_dockerfile_build_args, the parse helper must NOT mutate
-    the Dockerfile content -- Modal applies build_args natively."""
+def test_parse_docker_build_args_returns_override_not_dockerfile_default() -> None:
+    """Unlike _substitute_dockerfile_build_args, the parse helper does not consult
+    the Dockerfile's ARG default -- the returned dict carries the override values
+    from build_args verbatim, ready for Modal to apply natively."""
     dockerfile = 'FROM python:3.11\nARG VERSION="1.0.0"\n'
-    _parse_docker_build_args(dockerfile, ("VERSION=2.0.0",))
-    assert 'ARG VERSION="1.0.0"' in dockerfile  # unchanged
+    result = _parse_docker_build_args(dockerfile, ("VERSION=2.0.0",))
+    # The returned value is the override, not the Dockerfile default.
+    assert result == {"VERSION": "2.0.0"}
+    assert result["VERSION"] != "1.0.0"
 
 
 # =============================================================================
