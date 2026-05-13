@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 import click
 from click_option_group import optgroup
@@ -181,7 +182,7 @@ class PullCliOptions(CommonCliOptions):
 )
 @add_common_options
 @click.pass_context
-def pull(ctx: click.Context, **kwargs) -> None:
+def pull(ctx: click.Context, **kwargs: Any) -> None:
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="pull",
