@@ -10,9 +10,12 @@ round when we can.
 
 The user-facing workspace name lives on the *host* (set on the lease
 record via the connector's ``host_name`` field, surfaced through
-``HostName``), not on the agent. The pre-baked agent's name and labels
+``HostName``), not on the agent. The pre-baked agent's name and command
 are kept verbatim from the bake (today's bake produces a system-services
-agent that is never renamed).
+agent that is never renamed). Labels are merged: bake-supplied defaults
+(e.g. ``is_primary=true``) plus the caller's ``--label`` flags (e.g.
+``workspace=<workspace_name>``), with the caller winning on key
+collisions.
 
 Overrides:
 
@@ -20,10 +23,10 @@ Overrides:
   (clobbering would lose ``MNGR_HOST_DIR``/``MNGR_PREFIX``/etc. that
   the pool baking wrote).
 - ``create_agent_state`` adopts the pre-baked agent's ``data.json``
-  verbatim (no name/labels/command patching) when it exists; otherwise
-  pins ``options.agent_id`` to ``pre_baked_agent_id`` and delegates
-  to ``super()`` so the lease's canonical id stays stable across
-  destroy/recreate cycles.
+  but merges caller-supplied labels (and persists ``created_branch_name``
+  when supplied) when it exists; otherwise pins ``options.agent_id``
+  to ``pre_baked_agent_id`` and delegates to ``super()`` so the
+  lease's canonical id stays stable across destroy/recreate cycles.
 - ``create_agent_work_dir`` and ``provision_agent`` short-circuit to a
   no-transfer + minimal-provision path *only* when the pre-baked
   agent's ``data.json`` is still on disk; otherwise they delegate to
@@ -150,19 +153,33 @@ class ImbueCloudHost(Host):
         options: CreateAgentOptions,
         created_branch_name: str | None = None,
     ) -> AgentInterface:
-        """Adopt the pre-baked agent's state verbatim.
+        """Adopt the pre-baked agent's state, merging in caller-supplied labels.
 
         When ``pre_baked_agent_id`` is set (i.e. this is the leased-pool-host
         path), we *load* the existing ``data.json`` from the host -- which the
         bake wrote with ``--template system_services --template vultr`` and
         therefore already contains the right ``name`` (always
-        ``system-services``), ``command`` (``uv run bootstrap``), labels, and
+        ``system-services``), ``command`` (``uv run bootstrap``), and
         ``additional_commands`` -- and return an agent object that mirrors
-        it. We do **not** rewrite ``data.json``: the user-facing workspace
-        name now lives on the *host* (via the lease's ``host_name`` field),
-        not on the agent. The only field we ever patch is
-        ``created_branch_name`` when the caller supplied one (it's per-create-cycle
-        state, not bake state).
+        it. The user-facing workspace name now lives on the *host* (via the
+        lease's ``host_name`` field), not on the agent, so we do **not**
+        rewrite ``name`` / ``command`` / ``additional_commands``.
+
+        Two fields *are* patched when the caller supplies new values:
+
+        - ``labels``: the bake's template-supplied defaults (e.g.
+          ``is_primary=true``, ``user_created=true``) are merged with
+          ``options.label_options.labels`` (caller-supplied wins on key
+          collisions). This is required because the minds desktop client
+          passes ``--label workspace=<workspace_name>`` for every launch
+          mode, and the ``mngr forward`` / ``backend_resolver`` CEL filter
+          (``has(agent.labels.workspace) && has(agent.labels.is_primary)``)
+          would otherwise stop matching IMBUE_CLOUD-leased workspaces.
+        - ``created_branch_name``: per-create-cycle state (which branch
+          mngr created for this run), not bake state.
+
+        ``data.json`` is only rewritten when at least one of those fields
+        actually changes, so the no-op fast path stays cheap.
 
         Falls back to ``super()`` when ``pre_baked_agent_id`` is unset or
         the on-disk ``data.json`` is missing -- e.g. after ``mngr destroy``
@@ -189,9 +206,8 @@ class ImbueCloudHost(Host):
 
         # Hydrate the agent class from the bake's data.json so the rest of
         # mngr's create pipeline has a real ``AgentInterface`` to call
-        # ``provision_agent`` / ``start_agents`` on. The fields below come
-        # straight from the bake -- we don't touch ``name`` / ``command`` /
-        # ``labels`` because the bake is authoritative for them now.
+        # ``provision_agent`` / ``start_agents`` on. ``name`` / ``command`` /
+        # ``additional_commands`` come straight from the bake.
         agent_type = AgentTypeName(str(existing.get("type", "command")))
         resolved = resolve_agent_type(agent_type, self.mngr_ctx.config)
         baked_work_dir = Path(str(existing.get("work_dir", str(work_dir_path))))
@@ -210,14 +226,19 @@ class ImbueCloudHost(Host):
             agent_config=resolved.agent_config,
         )
 
-        # ``created_branch_name`` is per-create-cycle state (which branch
-        # mngr created for this run), not bake state, so we do still
-        # persist it when the caller provided one. Everything else --
-        # name, command, labels, additional_commands, initial_message --
-        # is the bake's responsibility.
-        if created_branch_name is not None and existing.get("created_branch_name") != created_branch_name:
+        # Merge bake defaults with the caller's --label flags. Caller wins
+        # on key collisions so a future ``mngr create --label is_primary=false``
+        # would override the bake's default rather than the other way around.
+        baked_labels: dict[str, str] = dict(existing.get("labels") or {})
+        merged_labels: dict[str, str] = {**baked_labels, **dict(options.label_options.labels)}
+        labels_changed = merged_labels != baked_labels
+        branch_changed = created_branch_name is not None and existing.get("created_branch_name") != created_branch_name
+        if labels_changed or branch_changed:
             patched: dict[str, Any] = dict(existing)
-            patched["created_branch_name"] = created_branch_name
+            if labels_changed:
+                patched["labels"] = merged_labels
+            if branch_changed:
+                patched["created_branch_name"] = created_branch_name
             data_path = self.host_dir / "agents" / str(self.pre_baked_agent_id) / "data.json"
             self.write_text_file(data_path, _json.dumps(patched, indent=2))
         return agent
