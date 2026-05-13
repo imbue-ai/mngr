@@ -12,7 +12,9 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import ListResult
+from imbue.mngr.api.list import ProviderErrorInfo
 from imbue.mngr.cli.list import _StreamingHumanRenderer
 from imbue.mngr.cli.list import _StreamingTemplateEmitter
 from imbue.mngr.cli.list import _compute_column_widths
@@ -23,6 +25,7 @@ from imbue.mngr.cli.list import _format_streaming_header_row
 from imbue.mngr.cli.list import _format_value_as_string
 from imbue.mngr.cli.list import _get_field_value
 from imbue.mngr.cli.list import _get_header_label
+from imbue.mngr.cli.list import _has_fatal_errors
 from imbue.mngr.cli.list import _is_streaming_eligible
 from imbue.mngr.cli.list import _parse_slice_spec
 from imbue.mngr.cli.list import _render_format_template
@@ -1242,26 +1245,36 @@ class FakeApiListAgents:
     """Replacement for api_list_agents that returns pre-built agents.
 
     When the list command calls api_list_agents, this callable returns a
-    ListResult containing the pre-configured agents. If the caller passes
-    an on_agent callback (streaming mode), agents are delivered via that
-    callback as well.
+    ListResult containing the pre-configured agents (and optional pre-built
+    errors). If the caller passes an on_agent callback (streaming mode),
+    agents are delivered via that callback; the on_error callback receives
+    each pre-built error similarly.
     """
 
-    def __init__(self, agents: list[AgentDetails]) -> None:
+    def __init__(self, agents: list[AgentDetails], errors: list[ErrorInfo] | None = None) -> None:
         self.agents = agents
+        self.errors: list[ErrorInfo] = list(errors) if errors else []
 
     def __call__(self, **kwargs: Any) -> ListResult:
-        result = ListResult(agents=list(self.agents))
+        result = ListResult(agents=list(self.agents), errors=list(self.errors))
         on_agent: Callable[[AgentDetails], None] | None = kwargs.get("on_agent")
         if on_agent is not None:
             for agent in self.agents:
                 on_agent(agent)
+        on_error: Callable[[ErrorInfo], None] | None = kwargs.get("on_error")
+        if on_error is not None:
+            for error in self.errors:
+                on_error(error)
         return result
 
 
-def _patch_list_agents(monkeypatch: pytest.MonkeyPatch, agents: list[AgentDetails]) -> None:
-    """Replace api_list_agents with a fake that returns the given agents."""
-    monkeypatch.setattr("imbue.mngr.cli.list.api_list_agents", FakeApiListAgents(agents))
+def _patch_list_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    agents: list[AgentDetails],
+    errors: list[ErrorInfo] | None = None,
+) -> None:
+    """Replace api_list_agents with a fake that returns the given agents and errors."""
+    monkeypatch.setattr("imbue.mngr.cli.list.api_list_agents", FakeApiListAgents(agents, errors))
 
 
 # =============================================================================
@@ -1700,3 +1713,148 @@ def test_emit_human_output_empty_list_is_noop(capsys: pytest.CaptureFixture[str]
     _emit_human_output([], fields=["name", "state"])
     captured = capsys.readouterr()
     assert captured.out == ""
+
+
+# =============================================================================
+# Per-provider availability failures are warnings, not exit-1 errors.
+#
+# These tests cover the ticket's success criteria: when a single provider is
+# unavailable (Modal unauthed, Docker daemon down, etc.) `mngr list` must
+# emit a WARNING, exit 0, and still show the agents from the providers that
+# did work. Mirrors `_discover_hosts_for_gc` in api/gc.py, which is what
+# `mngr destroy --force` already does.
+# =============================================================================
+
+
+def test_has_fatal_errors_returns_false_when_only_provider_unavailable() -> None:
+    """Provider-availability errors alone are warnings, not fatal."""
+    errors: list[ErrorInfo] = [
+        ProviderErrorInfo.build_for_provider(
+            RuntimeError("Modal token missing"),
+            ProviderInstanceName("modal"),
+            is_provider_unavailable=True,
+        ),
+    ]
+    assert _has_fatal_errors(errors) is False
+
+
+def test_has_fatal_errors_returns_true_when_provider_error_is_fatal() -> None:
+    """A ProviderErrorInfo without the unavailable flag (e.g. mismatched provider
+    in batch mode) is still fatal."""
+    errors: list[ErrorInfo] = [
+        ProviderErrorInfo.build_for_provider(
+            RuntimeError("provider X claimed by host but not loaded"),
+            ProviderInstanceName("ghost"),
+        ),
+    ]
+    assert _has_fatal_errors(errors) is True
+
+
+def test_has_fatal_errors_returns_true_when_plain_error() -> None:
+    """Non-provider errors (host/agent level) are always fatal."""
+    errors: list[ErrorInfo] = [ErrorInfo.build(RuntimeError("something broke"))]
+    assert _has_fatal_errors(errors) is True
+
+
+def test_has_fatal_errors_returns_false_for_empty_list() -> None:
+    """No errors -> not fatal."""
+    assert _has_fatal_errors([]) is False
+
+
+@pytest.mark.parametrize(
+    "output_format",
+    [None, "json", "jsonl"],
+    ids=["human", "json", "jsonl"],
+)
+def test_list_command_exits_zero_when_only_providers_unavailable(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+    output_format: str | None,
+) -> None:
+    """`mngr list` exits 0 when the only errors are provider-unavailable warnings.
+
+    This is the ticket's primary success criterion: a Modal-auth-fail (or any
+    similar per-provider failure) must NOT crash the listing of providers
+    that did work. Verified across all three primary output formats.
+    """
+    agents = [make_test_agent_details(name="from-working-provider")]
+    errors: list[ErrorInfo] = [
+        ProviderErrorInfo.build_for_provider(
+            RuntimeError("Modal token missing"),
+            ProviderInstanceName("modal"),
+            is_provider_unavailable=True,
+        ),
+    ]
+    _patch_list_agents(monkeypatch, agents, errors)
+
+    args = []
+    if output_format is not None:
+        args.extend(["--format", output_format])
+
+    result = cli_runner.invoke(
+        list_command,
+        args,
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "from-working-provider" in result.output
+
+
+def test_list_command_exits_one_when_a_fatal_error_is_present(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-availability errors still trigger exit 1.
+
+    Sanity check that we haven't accidentally turned every list-time error
+    into a warning -- a host/agent-level failure or other genuine error
+    must still fail the command so scripts can detect it.
+    """
+    agents = [make_test_agent_details(name="some-agent")]
+    errors: list[ErrorInfo] = [ErrorInfo.build(RuntimeError("host blew up"))]
+    _patch_list_agents(monkeypatch, agents, errors)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--sort", "name"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 1
+
+
+def test_list_command_streaming_human_exits_zero_when_only_providers_unavailable(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The streaming human path also degrades gracefully.
+
+    Default `mngr list` (no explicit --sort, human format) takes a different
+    code path (`_list_streaming_human`) than the batch path, so it gets its
+    own exit-code check.
+    """
+    agents = [make_test_agent_details(name="streamed")]
+    errors: list[ErrorInfo] = [
+        ProviderErrorInfo.build_for_provider(
+            RuntimeError("Docker daemon unavailable"),
+            ProviderInstanceName("docker"),
+            is_provider_unavailable=True,
+        ),
+    ]
+    _patch_list_agents(monkeypatch, agents, errors)
+
+    result = cli_runner.invoke(
+        list_command,
+        [],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "streamed" in result.output

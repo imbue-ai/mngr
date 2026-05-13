@@ -19,6 +19,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.api.list import ErrorInfo
+from imbue.mngr.api.list import ProviderErrorInfo
 from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
 from imbue.mngr.cli.common_opts import add_common_options
@@ -44,6 +45,25 @@ from imbue.mngr.utils.cel_utils import evaluate_cel_sort_key
 from imbue.mngr.utils.terminal import ANSI_DIM_GRAY
 from imbue.mngr.utils.terminal import ANSI_ERASE_LINE
 from imbue.mngr.utils.terminal import ANSI_RESET
+
+
+@pure
+def _has_fatal_errors(errors: Sequence[ErrorInfo]) -> bool:
+    """True if `errors` contains any error that should fail the listing.
+
+    Per-provider availability failures (Modal unauthed, Docker daemon
+    down, missing API key, etc.) are surfaced as warnings: the listing
+    of the *other* providers still succeeded, so the command exits 0.
+    Any other error -- host/agent level, mismatched provider data,
+    unexpected exceptions -- triggers exit 1 so scripts can detect a
+    real failure.
+    """
+    for error in errors:
+        if isinstance(error, ProviderErrorInfo) and error.is_provider_unavailable:
+            continue
+        return True
+    return False
+
 
 _DEFAULT_HUMAN_DISPLAY_FIELDS: Final[tuple[str, ...]] = (
     "name",
@@ -375,8 +395,10 @@ def _list_jsonl(
         on_error=_emit_jsonl_error,
         is_streaming=False,
     )
-    # Exit with non-zero code if there were errors (per error_handling.md spec)
-    if result.errors:
+    # Exit with non-zero code if there were errors (per error_handling.md spec).
+    # Per-provider availability failures are warnings, not errors -- see
+    # `_has_fatal_errors` for the distinction.
+    if _has_fatal_errors(result.errors):
         ctx.exit(1)
 
 
@@ -413,6 +435,7 @@ def _list_streaming_human(
     if result.errors:
         for error in result.errors:
             logger.warning("{}: {}", error.exception_type, error.message)
+    if _has_fatal_errors(result.errors):
         ctx.exit(1)
 
 
@@ -442,6 +465,7 @@ def _list_streaming_template(
     if result.errors:
         for error in result.errors:
             logger.warning("{}: {}", error.exception_type, error.message)
+    if _has_fatal_errors(result.errors):
         ctx.exit(1)
 
 
@@ -697,6 +721,7 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
     if result.errors:
         for error in result.errors:
             logger.warning("{}: {}", error.exception_type, error.message)
+    has_fatal = _has_fatal_errors(result.errors)
 
     # Apply sorting to results
     agents_to_display = _sort_agents_by_cel(result.agents, params.compiled_sort_keys)
@@ -717,7 +742,7 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
             # JSONL is handled above with streaming, so this should be unreachable
             raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")
         # Exit with non-zero code if there were errors (per error_handling.md spec)
-        if result.errors:
+        if has_fatal:
             ctx.exit(1)
         return
 
@@ -733,7 +758,7 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
         raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")
 
     # Exit with non-zero code if there were errors (per error_handling.md spec)
-    if result.errors:
+    if has_fatal:
         ctx.exit(1)
 
 

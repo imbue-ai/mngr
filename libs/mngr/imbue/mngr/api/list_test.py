@@ -1396,7 +1396,7 @@ def _make_broken_provider_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
     )
 
 
-@pytest.mark.allow_warnings(match=r"Error discovering agents for provider")
+@pytest.mark.allow_warnings(match=r"Failed to list agents from provider")
 def test_list_agents_streaming_continue_mode_records_failing_provider_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -1418,10 +1418,11 @@ def test_list_agents_streaming_continue_mode_records_failing_provider_error(
     provider_errors = [e for e in result.errors if isinstance(e, ProviderErrorInfo)]
     assert len(provider_errors) == 1
     assert provider_errors[0].provider_name == ProviderInstanceName("broken-provider")
+    assert provider_errors[0].is_provider_unavailable is True
     assert "nonexistent-backend-xyz" in provider_errors[0].message
 
 
-@pytest.mark.allow_warnings(match=r"Error discovering agents for provider")
+@pytest.mark.allow_warnings(match=r"Failed to list agents from provider")
 def test_list_agents_batch_continue_mode_records_failing_provider_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -1438,25 +1439,37 @@ def test_list_agents_batch_continue_mode_records_failing_provider_error(
     )
 
     assert len(result.errors) == 1
+    assert isinstance(result.errors[0], ProviderErrorInfo)
+    assert result.errors[0].is_provider_unavailable is True
     assert "nonexistent-backend-xyz" in result.errors[0].message
 
 
-def test_list_agents_abort_mode_propagates_top_level_mngr_error(
+@pytest.mark.allow_warnings(match=r"Failed to list agents from provider")
+def test_list_agents_abort_mode_records_provider_unavailable_without_raising(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """list_agents with ABORT mode re-raises a top-level MngrError.
+    """ABORT mode does NOT propagate per-provider availability failures.
 
-    The same unknown-backend configuration triggers an error, but in ABORT
-    mode it must propagate rather than be swallowed.
+    Per-provider construction/discovery errors are always demoted to
+    warnings (mirroring ``_discover_hosts_for_gc`` in ``api/gc.py``), so
+    a single broken provider doesn't prevent listing the rest. The
+    failure is recorded as a ``ProviderErrorInfo`` with
+    ``is_provider_unavailable=True`` so callers (including the CLI exit
+    code logic) can distinguish it from a fatal error.
     """
     failing_ctx = _make_broken_provider_ctx(temp_mngr_ctx)
 
-    with pytest.raises(MngrError, match="nonexistent-backend-xyz"):
-        list_agents(
-            mngr_ctx=failing_ctx,
-            is_streaming=False,
-            error_behavior=ErrorBehavior.ABORT,
-        )
+    result = list_agents(
+        mngr_ctx=failing_ctx,
+        is_streaming=False,
+        error_behavior=ErrorBehavior.ABORT,
+    )
+
+    provider_errors = [e for e in result.errors if isinstance(e, ProviderErrorInfo)]
+    assert len(provider_errors) == 1
+    assert provider_errors[0].provider_name == ProviderInstanceName("broken-provider")
+    assert provider_errors[0].is_provider_unavailable is True
+    assert "nonexistent-backend-xyz" in provider_errors[0].message
 
 
 # =============================================================================
@@ -1618,7 +1631,7 @@ def _make_raising_provider_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
     )
 
 
-@pytest.mark.allow_warnings(match=r"Error discovering agents for provider")
+@pytest.mark.allow_warnings(match=r"Failed to list agents from provider")
 def test_construct_discover_and_emit_for_provider_continue_mode_records_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -1652,6 +1665,7 @@ def test_construct_discover_and_emit_for_provider_continue_mode_records_error(
         assert len(result.errors) == 1
         assert isinstance(result.errors[0], ProviderErrorInfo)
         assert result.errors[0].provider_name == ProviderInstanceName("raising-provider")
+        assert result.errors[0].is_provider_unavailable is True
         assert "simulated discovery failure from test" in result.errors[0].message
         assert len(captured_errors) == 1
         assert captured_errors[0] is result.errors[0]
@@ -1660,10 +1674,18 @@ def test_construct_discover_and_emit_for_provider_continue_mode_records_error(
         del _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME]
 
 
-def test_construct_discover_and_emit_for_provider_abort_mode_propagates_error(
+@pytest.mark.allow_warnings(match=r"Failed to list agents from provider")
+def test_construct_discover_and_emit_for_provider_abort_mode_records_provider_unavailable(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_construct_discover_and_emit_for_provider re-raises the MngrError in ABORT mode."""
+    """ABORT mode also demotes per-provider discovery failures to warnings.
+
+    The streaming helper used to re-raise in ABORT mode, but mirroring the
+    destroy/GC pattern (`_discover_hosts_for_gc`), all per-provider
+    failures are now treated as warnings regardless of error_behavior.
+    The failure is still surfaced as a ``ProviderErrorInfo`` with
+    ``is_provider_unavailable=True``.
+    """
     _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME] = _RaisingDiscoveryProviderBackend
     _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
     try:
@@ -1672,17 +1694,20 @@ def test_construct_discover_and_emit_for_provider_abort_mode_propagates_error(
         lock = Lock()
         params = _make_list_params(error_behavior=ErrorBehavior.ABORT)
 
-        with pytest.raises(MngrError, match="simulated discovery failure from test"):
-            _construct_discover_and_emit_for_provider(
-                provider_name=ProviderInstanceName("raising-provider"),
-                mngr_ctx=mngr_ctx,
-                params=params,
-                result=result,
-                results_lock=lock,
-                reset_caches=False,
-            )
+        _construct_discover_and_emit_for_provider(
+            provider_name=ProviderInstanceName("raising-provider"),
+            mngr_ctx=mngr_ctx,
+            params=params,
+            result=result,
+            results_lock=lock,
+            reset_caches=False,
+        )
 
-        assert result.errors == []
+        assert len(result.errors) == 1
+        assert isinstance(result.errors[0], ProviderErrorInfo)
+        assert result.errors[0].provider_name == ProviderInstanceName("raising-provider")
+        assert result.errors[0].is_provider_unavailable is True
+        assert "simulated discovery failure from test" in result.errors[0].message
     finally:
         del _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME]
         del _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME]

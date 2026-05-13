@@ -108,17 +108,35 @@ class ErrorInfo(FrozenModel):
 
 
 class ProviderErrorInfo(ErrorInfo):
-    """Error information with provider context."""
+    """Error information with provider context.
+
+    ``is_provider_unavailable`` is True when the underlying failure was a
+    per-provider availability problem (auth, daemon, network, bad backend
+    in config, etc.). The listing CLI keeps exit code 0 for those failures
+    -- the listing of the *other* providers succeeded -- and only exits
+    non-zero on truly-fatal errors. This mirrors how ``mngr destroy``'s GC
+    pass treats per-provider failures: warn and continue.
+    """
 
     provider_name: ProviderInstanceName = Field(description="Name of the provider where the error occurred")
+    is_provider_unavailable: bool = Field(
+        default=False,
+        description="True when this represents a per-provider availability failure that the CLI treats as a warning.",
+    )
 
     @classmethod
-    def build_for_provider(cls, exception: BaseException, provider_name: ProviderInstanceName) -> "ProviderErrorInfo":
+    def build_for_provider(
+        cls,
+        exception: BaseException,
+        provider_name: ProviderInstanceName,
+        is_provider_unavailable: bool = False,
+    ) -> "ProviderErrorInfo":
         """Build a ProviderErrorInfo from an exception and provider name."""
         return cls(
             exception_type=type(exception).__name__,
             message=str(exception),
             provider_name=provider_name,
+            is_provider_unavailable=is_provider_unavailable,
         )
 
 
@@ -301,8 +319,14 @@ def _construct_and_discover_for_provider(
 ) -> None:
     """Construct one provider and discover its hosts/agents, merging into shared dicts.
 
-    On failure, honors `params.error_behavior`: ABORT re-raises (wrapped to
-    `MngrError`); CONTINUE records a `ProviderErrorInfo` on `result.errors`.
+    Per-provider construction/discovery failures (auth, daemon down, network,
+    bogus backend in config, etc.) are downgraded to warnings: the provider
+    is skipped, the error is recorded on `result.errors` with
+    `is_provider_unavailable=True` so the CLI can distinguish it from a real
+    fatal error, and the listing proceeds with the providers that did work.
+    This mirrors `_discover_hosts_for_gc` in `api/gc.py`, which destroy uses.
+    `params.error_behavior` still governs host- and agent-level errors
+    encountered later in the listing pipeline.
     """
     try:
         provider = get_provider_instance(provider_name, mngr_ctx)
@@ -310,29 +334,53 @@ def _construct_and_discover_for_provider(
             provider.reset_caches()
         provider_results = provider.discover_hosts_and_agents(cg=mngr_ctx.concurrency_group, include_destroyed=True)
     except Exception as e:
-        if params.error_behavior == ErrorBehavior.ABORT:
-            if isinstance(e, MngrError):
-                raise
-            raise MngrError(str(e)) from e
-        logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
-        emit_discovery_error_event(
-            mngr_ctx.config,
-            error_type=type(e).__name__,
-            error_message=str(e),
-            source_name=str(provider_name),
-            provider_name=str(provider_name),
+        _record_provider_unavailable(
+            provider_name=provider_name,
+            exception=e,
+            mngr_ctx=mngr_ctx,
+            params=params,
+            result=result,
+            results_lock=results_lock,
         )
-        error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
-        with results_lock:
-            result.errors.append(error_info)
-        if params.on_error:
-            params.on_error(error_info)
         return
 
     with providers_lock:
         providers.append(provider)
     with results_lock:
         agents_by_host.update(provider_results)
+
+
+def _record_provider_unavailable(
+    provider_name: ProviderInstanceName,
+    exception: BaseException,
+    mngr_ctx: MngrContext,
+    params: _ListAgentsParams,
+    result: ListResult,
+    results_lock: Lock,
+) -> None:
+    """Log a per-provider failure as a warning and record it on `result.errors`.
+
+    Used by both the batch and streaming listing paths so they degrade
+    identically when a single provider can't load. The recorded
+    `ProviderErrorInfo` carries `is_provider_unavailable=True`; the CLI uses
+    that flag to keep the exit code at 0 (the listing of the working
+    providers succeeded).
+    """
+    logger.warning("Failed to list agents from provider {}: {}", provider_name, exception)
+    emit_discovery_error_event(
+        mngr_ctx.config,
+        error_type=type(exception).__name__,
+        error_message=str(exception),
+        source_name=str(provider_name),
+        provider_name=str(provider_name),
+    )
+    error_info = ProviderErrorInfo.build_for_provider(
+        exception, provider_name, is_provider_unavailable=True
+    )
+    with results_lock:
+        result.errors.append(error_info)
+    if params.on_error:
+        params.on_error(error_info)
 
 
 def _construct_and_discover_all_providers(
@@ -490,6 +538,11 @@ def _construct_discover_and_emit_for_provider(
     Streaming counterpart to the batch approach. Each provider independently
     constructs, loads hosts, fetches agent references, then processes hosts --
     firing on_agent callbacks without waiting for other providers.
+
+    Construction and discovery are wrapped so per-provider failures degrade
+    to warnings (see ``_record_provider_unavailable``); the per-host
+    processing futures still re-raise so ``error_behavior=ABORT`` continues
+    to propagate host-level errors.
     """
     cg = mngr_ctx.concurrency_group
     try:
@@ -499,51 +552,44 @@ def _construct_discover_and_emit_for_provider(
 
         # Phase 1: list hosts and get agent refs
         provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=True)
-
-        # Warn if any host names are duplicated within this provider
-        warn_on_duplicate_host_names(provider_results)
-
-        # Phase 2: immediately process hosts (fire on_agent for this provider)
-        host_futures: list[Future[None]] = []
-        with mngr_executor(parent_cg=cg, name=f"stream_hosts_{provider.name}", max_workers=32) as executor:
-            for host_ref, agent_refs in provider_results.items():
-                if not agent_refs:
-                    continue
-
-                host_futures.append(
-                    executor.submit(
-                        _process_host_with_error_handling,
-                        host_ref,
-                        agent_refs,
-                        provider,
-                        params,
-                        result,
-                        results_lock,
-                    )
-                )
-
-        # Re-raise any thread exceptions
-        for future in host_futures:
-            future.result()
-
     except Exception as e:
-        if params.error_behavior == ErrorBehavior.ABORT:
-            if isinstance(e, MngrError):
-                raise
-            raise MngrError(str(e)) from e
-        logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
-        emit_discovery_error_event(
-            mngr_ctx.config,
-            error_type=type(e).__name__,
-            error_message=str(e),
-            source_name=str(provider_name),
-            provider_name=str(provider_name),
+        _record_provider_unavailable(
+            provider_name=provider_name,
+            exception=e,
+            mngr_ctx=mngr_ctx,
+            params=params,
+            result=result,
+            results_lock=results_lock,
         )
-        error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
-        with results_lock:
-            result.errors.append(error_info)
-        if params.on_error:
-            params.on_error(error_info)
+        return
+
+    # Warn if any host names are duplicated within this provider
+    warn_on_duplicate_host_names(provider_results)
+
+    # Phase 2: immediately process hosts (fire on_agent for this provider)
+    host_futures: list[Future[None]] = []
+    with mngr_executor(parent_cg=cg, name=f"stream_hosts_{provider.name}", max_workers=32) as executor:
+        for host_ref, agent_refs in provider_results.items():
+            if not agent_refs:
+                continue
+
+            host_futures.append(
+                executor.submit(
+                    _process_host_with_error_handling,
+                    host_ref,
+                    agent_refs,
+                    provider,
+                    params,
+                    result,
+                    results_lock,
+                )
+            )
+
+    # Re-raise any thread exceptions from per-host processing (these honor
+    # error_behavior). Provider-construction/discovery failures handled above
+    # do not reach here.
+    for future in host_futures:
+        future.result()
 
 
 def _handle_listing_error(

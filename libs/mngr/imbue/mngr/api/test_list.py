@@ -76,6 +76,26 @@ def test_provider_error_info_build_for_provider() -> None:
     assert error_info.exception_type == "RuntimeError"
     assert error_info.message == "Provider failed"
     assert error_info.provider_name == provider_name
+    # Default: not a per-provider availability failure (those are the
+    # specific case where the CLI exit code stays at 0).
+    assert error_info.is_provider_unavailable is False
+
+
+def test_provider_error_info_build_for_provider_with_unavailable_flag() -> None:
+    """is_provider_unavailable=True marks per-provider availability failures.
+
+    Set by the listing pipeline whenever a provider construction/discovery
+    failure is caught and demoted to a warning so the CLI can keep exit
+    code 0 for the listing that did succeed on the other providers.
+    """
+    exception = RuntimeError("Modal token missing")
+    provider_name = ProviderInstanceName("modal")
+
+    error_info = ProviderErrorInfo.build_for_provider(
+        exception, provider_name, is_provider_unavailable=True
+    )
+
+    assert error_info.is_provider_unavailable is True
 
 
 def test_host_error_info_build_for_host() -> None:
