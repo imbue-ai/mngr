@@ -44,6 +44,7 @@ from pydantic import PrivateAttr
 from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.events import discover_event_sources
@@ -168,30 +169,6 @@ def _session_id_from_event(event: dict[str, Any]) -> str | None:
 # =============================================================================
 
 
-class _SessionAccumulator(MutableModel):
-    """Per-session running state during aggregation.
-
-    Tracks first/last event timestamps and the most recent cost reading.
-    Mutable on purpose: the aggregator updates one of these per event, then
-    freezes them into ``SessionCostRecord`` instances at the end. Using a
-    mutable scratchpad here avoids constructing N immutable copies as we
-    walk a long events file.
-    """
-
-    session_id: str
-    cost: CostSnapshot
-    first_event_at: int
-    last_event_at: int
-
-    def to_record(self) -> SessionCostRecord:
-        return SessionCostRecord(
-            session_id=self.session_id,
-            cost=self.cost,
-            first_event_at=self.first_event_at,
-            last_event_at=self.last_event_at,
-        )
-
-
 def _build_snapshot_for_source(
     source_name: str,
     events: list[dict[str, Any]],
@@ -225,7 +202,7 @@ def _build_snapshot_for_source(
     window).
     """
     cutoff = now - since_seconds
-    session_accumulators: dict[str, _SessionAccumulator] = {}
+    session_records: dict[str, SessionCostRecord] = {}
     freshest_windows_timestamp = -1
     freshest_windows: dict[str, WindowSnapshot] = {}
     max_timestamp = -1
@@ -259,9 +236,9 @@ def _build_snapshot_for_source(
         if cost is None:
             continue
 
-        existing = session_accumulators.get(session_id)
+        existing = session_records.get(session_id)
         if existing is None:
-            session_accumulators[session_id] = _SessionAccumulator(
+            session_records[session_id] = SessionCostRecord(
                 session_id=session_id,
                 cost=cost,
                 first_event_at=timestamp,
@@ -269,18 +246,23 @@ def _build_snapshot_for_source(
             )
             continue
         # Cost reading wins by timestamp; first/last bracket all observed events for this session.
-        if timestamp >= existing.last_event_at:
-            existing.cost = cost
-            existing.last_event_at = timestamp
-        if timestamp < existing.first_event_at:
-            existing.first_event_at = timestamp
+        # Building a fresh immutable record per update is cheap at our scale
+        # (events files are <1MB after thousands of renders) and keeps the
+        # session_records dict typed as the concrete SessionCostRecord that
+        # eventually feeds UsageSnapshot.sessions.
+        new_cost = cost if timestamp >= existing.last_event_at else existing.cost
+        session_records[session_id] = existing.model_copy_update(
+            to_update(existing.field_ref().cost, new_cost),
+            to_update(existing.field_ref().first_event_at, min(existing.first_event_at, timestamp)),
+            to_update(existing.field_ref().last_event_at, max(existing.last_event_at, timestamp)),
+        )
 
     if max_timestamp < 0:
         return None
 
-    in_window = [a for a in session_accumulators.values() if a.last_event_at >= cutoff]
-    in_window.sort(key=lambda a: a.last_event_at, reverse=True)
-    sessions = tuple(a.to_record() for a in in_window)
+    in_window = [r for r in session_records.values() if r.last_event_at >= cutoff]
+    in_window.sort(key=lambda r: r.last_event_at, reverse=True)
+    sessions = tuple(in_window)
 
     if not freshest_windows and not sessions:
         return None
