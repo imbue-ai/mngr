@@ -361,11 +361,14 @@ def session_render_dict(session: SessionCostRecord, now: int) -> dict[str, Any]:
 def build_source_cel_context(snapshot: UsageSnapshot, now: int) -> dict[str, Any]:
     """Build the per-source dict that ``mngr usage wait``'s ``--until`` CEL filters evaluate against.
 
-    Shape matches one entry of ``mngr usage --format json``'s ``sources``
-    array minus the snapshot-level staleness flags (those are CLI ergonomics,
-    not predicate ergonomics). Users can prototype a predicate with
-    ``mngr usage --format json | jq .sources[0]`` and paste the same field
-    paths into ``--until``.
+    Shape matches one entry of ``mngr usage --format json --detail``'s
+    ``sources`` array minus the snapshot-level staleness flags (those are
+    CLI ergonomics, not predicate ergonomics). ``--detail`` is the variant
+    that mirrors the CEL context: the default JSON omits ``sessions[]`` for
+    payload size, but the CEL context always exposes it so predicates like
+    ``sessions[0].cost.total_cost_usd > 5`` work. Users can prototype a
+    predicate with ``mngr usage --format json --detail | jq .sources[0]``
+    and paste the same field paths into ``--until``.
 
     Top-level ``cost`` is the **aggregate** across the snapshot's sessions
     (sum of each numeric field), so predicates like ``cost.total_cost_usd
