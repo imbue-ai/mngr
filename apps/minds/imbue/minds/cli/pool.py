@@ -93,10 +93,18 @@ def _run_ssh_command(
     return True
 
 
-def _get_agent_info(agent_name: str) -> dict[str, Any] | None:
-    """Query mngr list --format json and find the agent by name."""
+def _get_agent_info_by_address(address: str) -> dict[str, Any] | None:
+    """Query mngr list --format json and find the (agent, host) pair by address.
+
+    The address has the form ``<agent_name>@<host_name>``. Pool bakes use
+    a unique bake-time host name per pool host (``pool-<uuid>-stage``)
+    while every agent on those hosts shares the name ``system-services``,
+    so filtering by host name is the way to find the right row.
+    """
+    agent_name_part, _, host_name_part = address.partition("@")
+    include = 'name == "{}" && host.name == "{}"'.format(agent_name_part, host_name_part)
     result = _run_mngr_command(
-        ["list", "--format", "json", "--include", 'name == "{}"'.format(agent_name)],
+        ["list", "--format", "json", "--include", include],
         timeout=60,
     )
     if result.returncode != 0:
@@ -118,7 +126,12 @@ def _get_agent_info(agent_name: str) -> dict[str, Any] | None:
         return None
 
     for agent in agents:
-        if isinstance(agent, dict) and agent.get("name") == agent_name:
+        if not isinstance(agent, dict):
+            continue
+        if agent.get("name") != agent_name_part:
+            continue
+        host = agent.get("host")
+        if isinstance(host, dict) and host.get("name") == host_name_part:
             return agent
     return None
 
@@ -150,17 +163,32 @@ def _sync_mngr_into_template(mngr_source: Path, workspace_dir: Path) -> None:
         logger.warning("rsync failed (exit {}): {}", result.returncode, result.stderr.strip())
 
 
+_POOL_AGENT_NAME: Final[str] = "system-services"
+
+
 def _create_single_pool_host(
     workspace_dir: Path,
     version: str,
     management_public_key: str,
     database_url: str,
 ) -> bool:
-    """Create a single pool host. Returns True on success."""
+    """Create a single pool host. Returns True on success.
+
+    The agent is always named ``system-services`` -- the bake-time host
+    name is a throwaway ``pool-<uuid>-stage`` slug that the user-facing
+    ``host_name`` column overwrites at lease time. Inline labels
+    (``is_primary=true``, ``user_created=true``) come from
+    ``[create_templates.system_services]``; only ``pool_version`` (which
+    is bake-specific) is set inline here.
+    """
     suffix = uuid4().hex
-    agent_name = "pool-{}".format(suffix)
-    host_name = "{}-host".format(agent_name)
-    address = "{}@{}.vultr".format(agent_name, host_name)
+    bake_host_name = "pool-{}-stage".format(suffix)
+    agent_name = _POOL_AGENT_NAME
+    # Use the per-host disambiguator on the *address* so two concurrent
+    # pool bakes don't collide locally, but everything else uses the
+    # fixed ``system-services`` name once the agent is up.
+    bake_address_host = bake_host_name
+    address = "{}@{}.vultr".format(agent_name, bake_address_host)
 
     logger.info("Creating pool host: {}", address)
 
@@ -173,17 +201,11 @@ def _create_single_pool_host(
         "--idle-mode",
         "disabled",
         "--template",
-        "main",
+        "system_services",
         "--template",
         "vultr",
         "--env",
         "MINDS_API_KEY={}".format(api_key),
-        "--label",
-        "workspace={}".format(agent_name),
-        "--label",
-        "user_created=true",
-        "--label",
-        "is_primary=true",
         "--label",
         "pool_version={}".format(version),
     ]
@@ -201,21 +223,24 @@ def _create_single_pool_host(
         logger.error("mngr create failed: {}", create_result.stderr)
         return False
 
-    logger.info("  Created agent: {}", agent_name)
+    logger.info("  Created agent: {} (bake host {})", agent_name, bake_host_name)
 
-    # Stop the agent but keep the container running
-    stop_result = _run_mngr_command(["stop", agent_name])
+    # Stop the agent but keep the container running. Multiple pool hosts
+    # share the agent name ``system-services``, so we have to disambiguate
+    # by the host address so ``mngr stop`` resolves to the right one.
+    stop_address = "{}@{}".format(agent_name, bake_address_host)
+    stop_result = _run_mngr_command(["stop", stop_address])
     if stop_result.returncode != 0:
         logger.warning("mngr stop failed (continuing): {}", stop_result.stderr)
 
     # Ensure sshd stays running in the container
     logger.info("  Ensuring sshd is running in container")
-    _run_mngr_command(["exec", agent_name, "/usr/sbin/sshd"], timeout=30)
+    _run_mngr_command(["exec", stop_address, "/usr/sbin/sshd"], timeout=30)
 
     # Get agent info
-    agent_info = _get_agent_info(agent_name)
+    agent_info = _get_agent_info_by_address(stop_address)
     if agent_info is None:
-        logger.error("Could not find agent info for {}", agent_name)
+        logger.error("Could not find agent info for {}", stop_address)
         return False
 
     host = agent_info.get("host")
@@ -259,20 +284,32 @@ def _create_single_pool_host(
 
     # Install management key in container
     logger.info("  Installing management key in container via mngr exec")
-    _run_mngr_command(["exec", agent_name, install_cmd], timeout=60)
+    _run_mngr_command(["exec", stop_address, install_cmd], timeout=60)
 
-    # Insert into pool_hosts table
+    # Insert into pool_hosts table. ``host_name`` is the bake-time slug; the
+    # lease endpoint overwrites it with the user-chosen workspace name when
+    # the row transitions from ``available`` to ``leased``. The NOT NULL
+    # constraint requires a value here even on available rows.
     row_id = uuid4()
     conn = psycopg2.connect(database_url)
     try:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO pool_hosts "
-                "(id, vps_ip, vps_instance_id, agent_id, host_id, ssh_port, ssh_user, "
+                "(id, vps_ip, vps_instance_id, agent_id, host_id, host_name, ssh_port, ssh_user, "
                 "container_ssh_port, status, version, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s, NOW()) "
+                "VALUES (%s, %s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s, NOW()) "
                 "RETURNING id",
-                (str(row_id), vps_ip, host_id, agent_id, host_id, _CONTAINER_SSH_PORT, version),
+                (
+                    str(row_id),
+                    vps_ip,
+                    host_id,
+                    agent_id,
+                    host_id,
+                    bake_host_name,
+                    _CONTAINER_SSH_PORT,
+                    version,
+                ),
             )
             conn.commit()
     finally:

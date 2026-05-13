@@ -19,6 +19,7 @@ from imbue.mngr_imbue_cloud.data_types import AuthPolicy
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudHostNameConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 
 
@@ -43,7 +44,23 @@ def test_lease_host_503_raises_unavailable(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(httpx, "post", fake_post)
     client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
     with pytest.raises(ImbueCloudLeaseUnavailableError):
-        client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=2), "ssh-ed25519 AAAA")
+        client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=2), "ssh-ed25519 AAAA", host_name="my-workspace")
+
+
+def test_lease_host_409_raises_host_name_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"detail": "name in use"})
+
+    transport = httpx.MockTransport(handler)
+
+    def fake_post(*args, **kwargs):
+        with httpx.Client(transport=transport) as inner:
+            return inner.post(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    with pytest.raises(ImbueCloudHostNameConflictError):
+        client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=2), "ssh-ed25519 AAAA", host_name="my-workspace")
 
 
 def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -51,6 +68,7 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
         body = _json.loads(request.content)
         assert body["attributes"] == {"cpus": 2}
         assert body["ssh_public_key"] == "ssh-ed25519 AAAA"
+        assert body["host_name"] == "my-workspace"
         return httpx.Response(
             200,
             json={
@@ -61,6 +79,7 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
                 "container_ssh_port": 2222,
                 "agent_id": "agent-abc",
                 "host_id": "host-xyz",
+                "host_name": "my-workspace",
                 "attributes": {"cpus": 2},
             },
         )
@@ -73,10 +92,50 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(httpx, "post", fake_post)
     client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
-    result = client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=2), "ssh-ed25519 AAAA")
+    result = client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=2), "ssh-ed25519 AAAA", host_name="my-workspace")
     assert result.vps_ip == "10.0.0.1"
     assert result.agent_id == "agent-abc"
+    assert result.host_name == "my-workspace"
     assert result.attributes == {"cpus": 2}
+
+
+def test_rename_host_calls_patch_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The client issues a PATCH /hosts/{id}/name with the new name in the body."""
+    captured_url: list[str] = []
+    captured_body: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_url.append(str(request.url))
+        captured_body.append(_json.loads(request.content))
+        return httpx.Response(200, json={"status": "renamed", "host_name": "new-name"})
+
+    transport = httpx.MockTransport(handler)
+
+    def fake_patch(*args, **kwargs):
+        with httpx.Client(transport=transport) as inner:
+            return inner.patch(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "patch", fake_patch)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    client.rename_host(SecretStr("tok"), host_db_id="lease-1", new_host_name="new-name")
+    assert captured_url[0].endswith("/hosts/lease-1/name")
+    assert captured_body[0] == {"host_name": "new-name"}
+
+
+def test_rename_host_409_raises_host_name_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"detail": "name in use"})
+
+    transport = httpx.MockTransport(handler)
+
+    def fake_patch(*args, **kwargs):
+        with httpx.Client(transport=transport) as inner:
+            return inner.patch(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "patch", fake_patch)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    with pytest.raises(ImbueCloudHostNameConflictError):
+        client.rename_host(SecretStr("tok"), host_db_id="lease-1", new_host_name="taken")
 
 
 def test_unauthenticated_responses_raise_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,7 +167,7 @@ def test_500_lease_raises_connector_error(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(httpx, "post", fake_post)
     client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
     with pytest.raises(ImbueCloudConnectorError):
-        client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=1), "ssh-ed25519 X")
+        client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=1), "ssh-ed25519 X", host_name="x")
 
 
 # -- AuthPolicy translation --

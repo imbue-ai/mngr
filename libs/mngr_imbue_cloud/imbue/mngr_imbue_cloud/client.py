@@ -31,6 +31,7 @@ from imbue.mngr_imbue_cloud.data_types import ServiceInfo
 from imbue.mngr_imbue_cloud.data_types import TunnelInfo
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudHostNameConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudTunnelError
@@ -200,10 +201,19 @@ class ImbueCloudConnectorClient(MutableModel):
         access_token: SecretStr,
         attributes: LeaseAttributes,
         ssh_public_key: str,
+        host_name: str,
     ) -> LeaseResult:
+        """Lease a pool host and stamp the user-facing ``host_name`` onto the lease row.
+
+        Raises ``ImbueCloudHostNameConflictError`` when the caller already
+        has a leased host with that name (HTTP 409). The caller is expected
+        to surface the conflict to the user so they can pick a different
+        workspace name.
+        """
         body = {
             "attributes": attributes.to_request_dict(),
             "ssh_public_key": ssh_public_key,
+            "host_name": host_name,
         }
         response = httpx.post(
             self._url("/hosts/lease"),
@@ -217,8 +227,40 @@ class ImbueCloudConnectorClient(MutableModel):
             except ValueError:
                 detail = "No matching pool host available."
             raise ImbueCloudLeaseUnavailableError(detail)
+        if response.status_code == 409:
+            try:
+                detail = response.json().get("detail", f"Host name {host_name!r} is already in use.")
+            except ValueError:
+                detail = f"Host name {host_name!r} is already in use."
+            raise ImbueCloudHostNameConflictError(detail)
         body_json = self._check(response, ImbueCloudConnectorError)
         return LeaseResult.model_validate(body_json)
+
+    def rename_host(
+        self,
+        access_token: SecretStr,
+        host_db_id: str,
+        new_host_name: str,
+    ) -> None:
+        """Change the user-facing name on a leased host via PATCH /hosts/{id}/name.
+
+        Idempotent: setting the name to its current value is a no-op
+        success. Raises ``ImbueCloudHostNameConflictError`` on a 409
+        (the caller already has a different lease with that name).
+        """
+        response = httpx.patch(
+            self._url(f"/hosts/{host_db_id}/name"),
+            headers=self._bearer(access_token),
+            json={"host_name": new_host_name},
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code == 409:
+            try:
+                detail = response.json().get("detail", f"Host name {new_host_name!r} is already in use.")
+            except ValueError:
+                detail = f"Host name {new_host_name!r} is already in use."
+            raise ImbueCloudHostNameConflictError(detail)
+        self._check(response, ImbueCloudConnectorError)
 
     def release_host(self, access_token: SecretStr, host_db_id: str) -> bool:
         """Release a leased host. Returns True on success, False otherwise (logs warning)."""

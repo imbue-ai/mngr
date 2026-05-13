@@ -282,6 +282,14 @@ AuthResult = AdminAuth | AgentAuth
 
 class LeaseHostRequest(BaseModel):
     ssh_public_key: str = Field(description="SSH public key to authorize on the leased host")
+    host_name: str = Field(
+        description=(
+            "User-facing name for the leased host. The minds desktop client uses this as the "
+            "mngr ``HostName`` for the workspace, so it ends up surfaced in ``mngr list``, "
+            "in the workspace URL, and as a host tag. Must be unique within the caller's "
+            "currently-leased hosts."
+        ),
+    )
     attributes: dict[str, Any] = Field(
         description=(
             "Lease-attribute filter. Matches with PostgreSQL '@>' so only fields the request "
@@ -298,11 +306,16 @@ class LeaseHostResponse(BaseModel):
     container_ssh_port: int = Field(description="SSH port mapped to the Docker container")
     agent_id: str = Field(description="Pre-provisioned mngr agent ID")
     host_id: str = Field(description="Host ID in the mngr provider")
+    host_name: str = Field(description="User-facing name the lease was created with")
     attributes: dict[str, Any] = Field(description="Attributes the row was matched against")
 
 
 class ReleaseHostResponse(BaseModel):
     status: str = Field(description="Release status (e.g. 'released')")
+
+
+class RenameHostRequest(BaseModel):
+    host_name: str = Field(description="New user-facing host name; must be unique per caller")
 
 
 class LeasedHostInfo(BaseModel):
@@ -313,6 +326,7 @@ class LeasedHostInfo(BaseModel):
     container_ssh_port: int = Field(description="SSH port mapped to the Docker container")
     agent_id: str = Field(description="Pre-provisioned mngr agent ID")
     host_id: str = Field(description="Host ID in the mngr provider")
+    host_name: str = Field(description="User-facing name of the leased host")
     attributes: dict[str, Any] = Field(description="Attributes attached to the lease row")
     leased_at: str = Field(description="ISO 8601 timestamp when the host was leased")
 
@@ -1555,7 +1569,16 @@ def set_service_auth(request: Request, tunnel_name: str, service_name: str, body
 
 @web_app.post("/hosts/lease")
 def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
-    """Lease an available host from the pool, injecting the caller's SSH public key."""
+    """Lease an available host from the pool, injecting the caller's SSH public key.
+
+    The caller must supply ``host_name`` — this is the user-facing workspace
+    name the minds desktop client uses as the mngr ``HostName``. Names must
+    be unique within the caller's currently-leased hosts (a duplicate
+    returns 409 so the UI can prompt the user to pick a different one).
+    """
+    if not body.host_name.strip():
+        raise HTTPException(status_code=400, detail="host_name must not be empty")
+    requested_host_name = body.host_name.strip()
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
@@ -1564,6 +1587,24 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
         try:
             with conn:
                 with conn.cursor() as cur:
+                    # Reject a duplicate name early so the SSH key injection
+                    # work below doesn't fire for a request we already know
+                    # will fail the per-user uniqueness constraint.
+                    cur.execute(
+                        "SELECT 1 FROM pool_hosts "
+                        "WHERE status = 'leased' AND leased_to_user = %s AND host_name = %s "
+                        "LIMIT 1",
+                        (admin.username, requested_host_name),
+                    )
+                    if cur.fetchone() is not None:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                f"You already have a leased host named {requested_host_name!r}. "
+                                "Pick a different name or release the existing lease first."
+                            ),
+                        )
+
                     cur.execute(
                         "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes "
                         "FROM pool_hosts "
@@ -1596,9 +1637,10 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                         ) from exc
 
                     cur.execute(
-                        "UPDATE pool_hosts SET status = 'leased', leased_to_user = %s, leased_at = NOW() "
+                        "UPDATE pool_hosts SET status = 'leased', leased_to_user = %s, "
+                        "leased_at = NOW(), host_name = %s "
                         "WHERE id = %s",
-                        (admin.username, host_db_id),
+                        (admin.username, requested_host_name, host_db_id),
                     )
         finally:
             conn.close()
@@ -1611,8 +1653,61 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
             container_ssh_port=container_ssh_port,
             agent_id=agent_id,
             host_id=host_id,
+            host_name=requested_host_name,
             attributes=attrs_dict,
         ).model_dump()
+
+
+@web_app.patch("/hosts/{host_db_id}/name")
+def rename_host(request: Request, host_db_id: UUID, body: RenameHostRequest) -> dict[str, str]:
+    """Rename a leased host's user-facing name.
+
+    Idempotent: setting host_name to its current value is a no-op success.
+    Returns 404 when the lease doesn't exist or isn't owned by the caller.
+    Returns 409 when the caller already has a different leased host using
+    the new name.
+    """
+    if not body.host_name.strip():
+        raise HTTPException(status_code=400, detail="host_name must not be empty")
+    new_name = body.host_name.strip()
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT leased_to_user, host_name FROM pool_hosts WHERE id = %s AND status = 'leased'",
+                        (str(host_db_id),),
+                    )
+                    row = cur.fetchone()
+                    if row is None:
+                        raise HTTPException(status_code=404, detail="Leased host not found")
+                    leased_to_user, current_name = row
+                    if leased_to_user != admin.username:
+                        raise HTTPException(status_code=403, detail="You do not own this host lease")
+                    if current_name == new_name:
+                        return {"status": "renamed", "host_name": new_name}
+                    cur.execute(
+                        "SELECT 1 FROM pool_hosts "
+                        "WHERE status = 'leased' AND leased_to_user = %s AND host_name = %s AND id <> %s "
+                        "LIMIT 1",
+                        (admin.username, new_name, str(host_db_id)),
+                    )
+                    if cur.fetchone() is not None:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(f"You already have a leased host named {new_name!r}. Pick a different name."),
+                        )
+                    cur.execute(
+                        "UPDATE pool_hosts SET host_name = %s WHERE id = %s",
+                        (new_name, str(host_db_id)),
+                    )
+        finally:
+            conn.close()
+    return {"status": "renamed", "host_name": new_name}
 
 
 @web_app.post("/hosts/{host_db_id}/release")
@@ -1659,7 +1754,8 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes, leased_at "
+                    "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, "
+                    "agent_id, host_id, host_name, attributes, leased_at "
                     "FROM pool_hosts "
                     "WHERE status = 'leased' AND leased_to_user = %s",
                     (admin.username,),
@@ -1676,8 +1772,9 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
                 container_ssh_port=r[4],
                 agent_id=r[5],
                 host_id=r[6],
-                attributes=r[7] if isinstance(r[7], dict) else {},
-                leased_at=str(r[8]) if r[8] is not None else "",
+                host_name=r[7],
+                attributes=r[8] if isinstance(r[8], dict) else {},
+                leased_at=str(r[9]) if r[9] is not None else "",
             ).model_dump()
             for r in rows
         ]
