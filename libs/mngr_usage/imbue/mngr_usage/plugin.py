@@ -3,7 +3,7 @@
 Agent-agnostic: provides the ``mngr usage`` CLI command. Discovery is by
 convention -- the CLI walks ``$MNGR_HOST_DIR/agents/*/events/*/rate_limits/events.jsonl``
 matching the same pattern ``mngr transcript`` uses for ``common_transcript``
-events. Any plugin that writes ``rate_limit_snapshot`` events to those paths
+events. Any plugin that writes ``cost_snapshot`` events to those paths
 will be picked up automatically; this plugin doesn't know or care which.
 """
 

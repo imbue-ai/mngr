@@ -28,6 +28,29 @@ class UsagePluginConfig(PluginConfig):
         )
 
 
+class CostSnapshot(FrozenModel):
+    """Session-level cost snapshot supplied by the writer.
+
+    All fields optional and writer-driven; the reader treats them as
+    typed-but-passive (no derived values are computed from cost). The
+    field names match the Claude Code statusline shape so a writer can
+    pass the payload through unchanged, but the model is writer-agnostic
+    -- any usage source emitting session cost can populate the same
+    fields, and CEL predicates like ``cost.total_cost_usd > 5.0`` apply
+    uniformly across sources.
+    """
+
+    total_cost_usd: float | None = Field(default=None, description="Cumulative session cost in USD (writer-supplied).")
+    total_duration_ms: int | None = Field(
+        default=None, description="Total wall-clock duration of the session in milliseconds."
+    )
+    total_api_duration_ms: int | None = Field(
+        default=None, description="Total time spent waiting for API responses in milliseconds."
+    )
+    total_lines_added: int | None = Field(default=None, description="Lines of code added during the session.")
+    total_lines_removed: int | None = Field(default=None, description="Lines of code removed during the session.")
+
+
 class WindowSnapshot(FrozenModel):
     """A single rate-limit window's snapshot state.
 
@@ -88,3 +111,14 @@ class UsageSnapshot(FrozenModel):
         description="Per-window state, keyed by writer-chosen window names (insertion-order preserved).",
     )
     updated_at: int = Field(description="Unix timestamp this snapshot was last refreshed")
+    session_id: str | None = Field(
+        default=None,
+        description="Writer-supplied session identifier. Lets consumers correlate a cost reading to the "
+        "session it accumulated in -- meaningful because cost typically resets per session, so a delta "
+        "across snapshots is only well-defined within one session_id.",
+    )
+    cost: CostSnapshot | None = Field(
+        default=None,
+        description="Writer-supplied session cost snapshot (e.g. total_cost_usd). Present when the writer "
+        "captures session-level cost data; absent when the writer only emits per-window quota state.",
+    )

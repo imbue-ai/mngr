@@ -43,6 +43,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
 from imbue.mngr.utils.cel_utils import build_cel_context
+from imbue.mngr_usage.data_types import CostSnapshot
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
 
@@ -119,15 +120,55 @@ def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
     return windows
 
 
+def _cost_from_event(event: dict[str, Any]) -> CostSnapshot | None:
+    """Reshape an event's ``cost`` payload into a CostSnapshot, or None if absent.
+
+    Cost is writer-supplied and mirrors Claude Code's statusline cost shape;
+    unknown fields are dropped by pydantic's default behavior. A non-dict
+    ``cost`` value is treated as "no cost data" rather than a hard error,
+    matching the lenient stance we take for windows.
+    """
+    cost_payload = event.get("cost")
+    if not isinstance(cost_payload, dict):
+        return None
+    try:
+        return CostSnapshot.model_validate(cost_payload)
+    except ValidationError as e:
+        logger.debug("Skipping cost block: {}", e)
+        return None
+
+
+def _session_id_from_event(event: dict[str, Any]) -> str | None:
+    """Extract a session_id string from the event, or None if absent / unusable."""
+    session_id = event.get("session_id")
+    return session_id if isinstance(session_id, str) and session_id else None
+
+
 def snapshot_from_event(event: dict[str, Any], source_name: str) -> UsageSnapshot | None:
-    """Reshape one events.jsonl line into a UsageSnapshot, or None if unusable."""
+    """Reshape one events.jsonl line into a UsageSnapshot, or None if unusable.
+
+    A snapshot is built whenever the event contributes *any* renderable
+    content -- a window, a cost block, or a session_id. The "no windows
+    means unusable" rule that older versions of this reader applied has
+    been relaxed: cost-only events (typical for API-key auth, where
+    Claude Code never emits rate_limits) still produce a snapshot so
+    cost tracking works for those users.
+    """
     timestamp = _parse_iso_timestamp(event.get("timestamp"))
     if timestamp is None:
         return None
     windows = _windows_from_event(event)
-    if not windows:
+    cost = _cost_from_event(event)
+    session_id = _session_id_from_event(event)
+    if not windows and cost is None and session_id is None:
         return None
-    return UsageSnapshot(source_name=source_name, windows=windows, updated_at=timestamp)
+    return UsageSnapshot(
+        source_name=source_name,
+        windows=windows,
+        updated_at=timestamp,
+        session_id=session_id,
+        cost=cost,
+    )
 
 
 # =============================================================================
@@ -196,10 +237,16 @@ def build_source_cel_context(snapshot: UsageSnapshot, now: int) -> dict[str, Any
     not predicate ergonomics). Users can prototype a predicate with
     ``mngr usage --format json | jq .sources[0]`` and paste the same field
     paths into ``--until``.
+
+    ``cost`` is always present as a dict (with all-None fields when the
+    writer didn't supply cost) so predicates like ``cost.total_cost_usd >
+    5.0`` don't have to guard against the field's absence.
     """
     ctx: dict[str, Any] = {
         "source": snapshot.source_name,
         "updated_at": snapshot.updated_at,
+        "session_id": snapshot.session_id,
+        "cost": (snapshot.cost if snapshot.cost is not None else CostSnapshot()).model_dump(),
     }
     for key, window in snapshot.windows.items():
         ctx[key] = window_render_dict(window, now)

@@ -31,6 +31,7 @@ from imbue.mngr_usage.cli import _format_human_line
 from imbue.mngr_usage.cli import _format_reset_phrase
 from imbue.mngr_usage.cli import _parse_max_age
 from imbue.mngr_usage.cli import usage
+from imbue.mngr_usage.data_types import CostSnapshot
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
 
@@ -50,7 +51,7 @@ def _make_event(
     """Construct an event matching the writer's emitted shape."""
     return {
         "source": "claude/rate_limits",
-        "type": "rate_limit_snapshot",
+        "type": "cost_snapshot",
         "event_id": "evt-test123",
         "timestamp": timestamp,
         "rate_limits": {
@@ -136,13 +137,14 @@ def test_last_valid_event_returns_none_for_empty_content() -> None:
     assert last_valid_event_from_content("\n\n", "test") is None
 
 
-def test_snapshot_from_event_drops_events_without_rate_limits() -> None:
-    """An event line without a rate_limits field can't make a useful snapshot."""
+def test_snapshot_from_event_drops_events_with_nothing_renderable() -> None:
+    """An event line that has no rate_limits, no cost, and no session_id contributes
+    nothing renderable -- the snapshot is dropped."""
     event = {
         "source": "claude/rate_limits",
         "timestamp": "2026-05-08T10:00:00.000000000Z",
-        "type": "rate_limit_snapshot",
-        # no rate_limits field
+        "type": "cost_snapshot",
+        # no rate_limits, no cost, no session_id
     }
     assert snapshot_from_event(event, source_name="claude") is None
 
@@ -159,6 +161,53 @@ def test_snapshot_from_event_round_trips_window_data() -> None:
     assert snap.source_name == "claude"
     assert snap.windows["five_hour"].used_percentage == 42.5
     assert snap.windows["five_hour"].resets_at == 1778280000
+
+
+def test_snapshot_from_event_captures_session_id_and_cost() -> None:
+    """Writer-emitted session_id and cost flow through to the typed snapshot."""
+    event = {
+        **_make_event("2026-05-08T10:00:00.000000000Z"),
+        "session_id": "uuid-abc",
+        "cost": {"total_cost_usd": 0.42, "total_duration_ms": 12000, "total_api_duration_ms": 8000},
+    }
+    snap = snapshot_from_event(event, source_name="claude")
+    assert snap is not None
+    assert snap.session_id == "uuid-abc"
+    assert snap.cost is not None
+    assert snap.cost.total_cost_usd == 0.42
+    assert snap.cost.total_duration_ms == 12000
+
+
+def test_snapshot_from_event_accepts_cost_only_event() -> None:
+    """API-key (non-subscription) sessions emit cost without rate_limits. The
+    snapshot must still build so cost tracking works for those users."""
+    event = {
+        "source": "claude/rate_limits",
+        "timestamp": "2026-05-08T10:00:00.000000000Z",
+        "type": "cost_snapshot",
+        "session_id": "uuid-xyz",
+        "cost": {"total_cost_usd": 1.23},
+        "rate_limits": None,
+    }
+    snap = snapshot_from_event(event, source_name="claude")
+    assert snap is not None
+    assert snap.session_id == "uuid-xyz"
+    assert snap.cost is not None
+    assert snap.cost.total_cost_usd == 1.23
+    # No rate_limits means no windows; the snapshot still builds.
+    assert snap.windows == {}
+
+
+def test_snapshot_from_event_drops_invalid_session_id_types() -> None:
+    """A non-string session_id is treated as absent (rather than raising), to
+    survive writer drift gracefully (an int here would be a writer bug)."""
+    event = {
+        **_make_event("2026-05-08T10:00:00.000000000Z"),
+        "session_id": 12345,
+    }
+    snap = snapshot_from_event(event, source_name="claude")
+    assert snap is not None
+    assert snap.session_id is None
 
 
 # NOTE: the old filesystem-walking _gather_snapshots(host_dir) tests have been
@@ -232,6 +281,35 @@ def test_render_model_fresh() -> None:
     assert model.is_age_stale is False
     assert model.has_past_reset is False
     assert model.is_stale is False
+
+
+def test_flatten_for_template_always_includes_session_id_and_cost_keys() -> None:
+    """``session_id`` and ``cost.*`` template keys are always populated (empty string
+    when absent) so format templates referencing them don't KeyError on snapshots
+    that pre-date the writer's session_id/cost capture."""
+    snapshot_without_cost = UsageSnapshot(
+        source_name="claude",
+        updated_at=900,
+        windows={"five_hour": WindowSnapshot(used_percentage=42.0, resets_at=1500)},
+    )
+    flat = _flatten_primary_for_template(_build_render_model(snapshot_without_cost, max_age=300, now=1000), now=1000)
+    assert flat["session_id"] == ""
+    assert flat["cost.total_cost_usd"] == ""
+    assert flat["cost.total_duration_ms"] == ""
+
+
+def test_flatten_for_template_populates_cost_keys_when_present() -> None:
+    snapshot = UsageSnapshot(
+        source_name="claude",
+        updated_at=900,
+        windows={},
+        session_id="uuid-abc",
+        cost=CostSnapshot(total_cost_usd=0.42, total_duration_ms=12000),
+    )
+    flat = _flatten_primary_for_template(_build_render_model(snapshot, max_age=300, now=1000), now=1000)
+    assert flat["session_id"] == "uuid-abc"
+    assert flat["cost.total_cost_usd"] == "0.42"
+    assert flat["cost.total_duration_ms"] == "12000"
 
 
 def test_flatten_for_template_emits_only_present_windows() -> None:
@@ -309,7 +387,7 @@ def test_usage_command_human_format(
         cli_test_agent,
         {
             "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "type": "cost_snapshot",
             "event_id": "evt-1",
             # Timestamp in the future so the snapshot won't be stale-by-age in the test
             "timestamp": "2056-05-08T10:00:00.000000000Z",
@@ -338,7 +416,7 @@ def test_usage_command_json_format(
         cli_test_agent,
         {
             "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "type": "cost_snapshot",
             "event_id": "evt-1",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
             "rate_limits": {"five_hour": {"used_percentage": 12.3, "resets_at": 9_999_999_999_999}},
@@ -379,7 +457,7 @@ def test_usage_command_json_surfaces_elapsed_when_window_seconds_present(
         cli_test_agent,
         {
             "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "type": "cost_snapshot",
             "event_id": "evt-1",
             # Use a fresh ISO timestamp so the snapshot isn't age-stale.
             "timestamp": datetime.fromtimestamp(now_s, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z"),
@@ -421,7 +499,7 @@ def test_usage_command_format_template(
         cli_test_agent,
         {
             "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "type": "cost_snapshot",
             "event_id": "evt-1",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
             "rate_limits": {
@@ -485,7 +563,7 @@ def test_usage_command_picks_freshest_across_agents(
         agent_old,
         {
             "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "type": "cost_snapshot",
             "event_id": "evt-old",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
             "rate_limits": {"five_hour": {"used_percentage": 10.0, "resets_at": 9_999_999_999_999}},
@@ -496,7 +574,7 @@ def test_usage_command_picks_freshest_across_agents(
         agent_new,
         {
             "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "type": "cost_snapshot",
             "event_id": "evt-new",
             "timestamp": "2056-05-08T11:00:00.000000000Z",
             "rate_limits": {"five_hour": {"used_percentage": 99.0, "resets_at": 9_999_999_999_999}},
@@ -533,7 +611,7 @@ def test_usage_command_uses_reset_specific_warning_when_window_just_reset(
         cli_test_agent,
         {
             "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "type": "cost_snapshot",
             "event_id": "evt-fresh",
             "timestamp": now_iso,
             "rate_limits": {
@@ -564,7 +642,7 @@ def test_usage_wait_matches_when_predicate_already_true(
         cli_test_agent,
         {
             "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "type": "cost_snapshot",
             "event_id": "evt-1",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
             "rate_limits": {
@@ -596,7 +674,7 @@ def test_usage_wait_times_out_when_predicate_never_satisfied(
         cli_test_agent,
         {
             "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "type": "cost_snapshot",
             "event_id": "evt-1",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
             "rate_limits": {
@@ -692,6 +770,112 @@ def test_usage_wait_rejects_invalid_cel(
 
 
 @pytest.mark.tmux
+def test_usage_command_renders_session_cost_line_for_subscription_user(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """Subscription users get both rate_limits AND cost in the statusline payload.
+    The human output should show a session-anchored cost line between the source
+    header and the window lines."""
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/rate_limits",
+            "type": "cost_snapshot",
+            "event_id": "evt-1",
+            "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "abc12345-uuid-rest",
+            "cost": {"total_cost_usd": 0.4275, "total_duration_ms": 12000},
+            "rate_limits": {
+                "five_hour": {"used_percentage": 73.4, "resets_at": 9_999_999_999_999, "label": "5h"},
+            },
+        },
+    )
+    result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    # Session ID is truncated to 8 chars for the human view; cost is shown with 4 decimals.
+    assert "session abc12345:" in result.output
+    assert "$0.4275" in result.output
+    # The window line still renders alongside.
+    assert "5h:" in result.output
+    # The session/cost line must appear between the [source] header and the window line.
+    assert result.output.index("[claude]") < result.output.index("session abc12345:")
+    assert result.output.index("session abc12345:") < result.output.index("5h:")
+
+
+@pytest.mark.tmux
+def test_usage_command_renders_cost_only_for_api_key_user(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """API-key sessions emit cost but never rate_limits. The human output should
+    still render the session/cost line so the user sees their spend, without the
+    "no data" hint that fires when nothing renderable exists."""
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/rate_limits",
+            "type": "cost_snapshot",
+            "event_id": "evt-1",
+            "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "deadbeef-uuid-rest",
+            "cost": {"total_cost_usd": 1.23},
+            "rate_limits": None,
+        },
+    )
+    result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert "session deadbeef:" in result.output
+    assert "$1.2300" in result.output
+    # The "No usage data yet" hint must not fire -- cost IS data.
+    assert "No usage data yet" not in result.output
+
+
+@pytest.mark.tmux
+def test_usage_command_json_includes_session_id_and_cost(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """JSON output exposes session_id and the full cost block at the source level."""
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/rate_limits",
+            "type": "cost_snapshot",
+            "event_id": "evt-1",
+            "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "uuid-abc",
+            "cost": {"total_cost_usd": 0.42, "total_duration_ms": 12000, "total_api_duration_ms": 8000},
+            "rate_limits": {"five_hour": {"used_percentage": 12.3, "resets_at": 9_999_999_999_999}},
+        },
+    )
+    result = cli_runner.invoke(
+        usage, ["--format", "json", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip())
+    source = payload["sources"][0]
+    assert source["session_id"] == "uuid-abc"
+    assert source["cost"]["total_cost_usd"] == 0.42
+    assert source["cost"]["total_duration_ms"] == 12000
+    assert source["cost"]["total_api_duration_ms"] == 8000
+    # Fields the writer didn't supply are still present in the dict with None values.
+    assert source["cost"]["total_lines_added"] is None
+
+
+@pytest.mark.tmux
 def test_usage_command_human_format_multi_source(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -725,7 +909,7 @@ def test_usage_command_human_format_multi_source(
         agent_a,
         {
             "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "type": "cost_snapshot",
             "event_id": "evt-claude",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
             "rate_limits": {"five_hour": {"used_percentage": 11.0, "resets_at": 9_999_999_999_999}},
@@ -737,7 +921,7 @@ def test_usage_command_human_format_multi_source(
         agent_b,
         {
             "source": "opencode/rate_limits",
-            "type": "rate_limit_snapshot",
+            "type": "cost_snapshot",
             "event_id": "evt-opencode",
             "timestamp": "2056-05-08T11:00:00.000000000Z",
             "rate_limits": {"five_hour": {"used_percentage": 22.0, "resets_at": 9_999_999_999_999}},

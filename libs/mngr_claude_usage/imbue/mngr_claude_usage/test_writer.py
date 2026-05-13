@@ -66,6 +66,7 @@ def test_writer_emits_event_with_rate_limits(writer_path: Path, events_file: Pat
     payload = json.dumps(
         {
             "session_id": "abc",
+            "cost": {"total_cost_usd": 0.42, "total_duration_ms": 12000},
             "rate_limits": {
                 "five_hour": {"used_percentage": 73.4, "resets_at": 1777673400},
                 "seven_day": {"used_percentage": 41.0, "resets_at": 1778000000},
@@ -76,10 +77,15 @@ def test_writer_emits_event_with_rate_limits(writer_path: Path, events_file: Pat
     assert result.returncode == 0, result.stderr
     event = _read_last_event(events_file)
     assert event["source"] == "claude/rate_limits"
-    assert event["type"] == "rate_limit_snapshot"
+    assert event["type"] == "cost_snapshot"
     assert event["event_id"].startswith("evt-")
     # ISO 8601 timestamps always contain a 'T' separator
     assert "T" in event["timestamp"]
+    # session_id and cost are passed through unchanged. They let downstream
+    # consumers correlate a cost reading to the session it accumulated in.
+    assert event["session_id"] == "abc"
+    assert event["cost"]["total_cost_usd"] == 0.42
+    assert event["cost"]["total_duration_ms"] == 12000
     assert event["rate_limits"]["five_hour"]["used_percentage"] == 73.4
     assert event["rate_limits"]["five_hour"]["resets_at"] == 1777673400
     assert event["rate_limits"]["seven_day"]["used_percentage"] == 41.0
@@ -92,6 +98,29 @@ def test_writer_emits_event_with_rate_limits(writer_path: Path, events_file: Pat
     # without hardcoding per-window-class knowledge in the reader.
     assert event["rate_limits"]["five_hour"]["window_seconds"] == 18000
     assert event["rate_limits"]["seven_day"]["window_seconds"] == 604800
+
+
+def test_writer_emits_cost_only_event_for_api_key_users(writer_path: Path, events_file: Path) -> None:
+    """API-key (non-subscription) sessions never include rate_limits in the statusline
+    payload (per Claude Code docs: rate_limits only appears for Claude.ai Pro/Max
+    subscribers). But cost is always present. The writer must still emit an event
+    so cost tracking works for API-key users."""
+    payload = json.dumps(
+        {
+            "session_id": "uuid-xyz",
+            "cost": {"total_cost_usd": 1.23, "total_duration_ms": 60000},
+            # No rate_limits field at all.
+        }
+    )
+    result = _run_writer(writer_path, payload, events_file)
+    assert result.returncode == 0, result.stderr
+    event = _read_last_event(events_file)
+    assert event["type"] == "cost_snapshot"
+    assert event["session_id"] == "uuid-xyz"
+    assert event["cost"]["total_cost_usd"] == 1.23
+    # rate_limits is explicitly null (not missing) so the reader can distinguish
+    # "writer ran but no rate-limit data" from "writer never ran".
+    assert event["rate_limits"] is None
 
 
 def test_writer_omits_window_seconds_for_overage(writer_path: Path, events_file: Path) -> None:
@@ -112,18 +141,18 @@ def test_writer_omits_window_seconds_for_overage(writer_path: Path, events_file:
     assert event["rate_limits"]["overage"]["label"] == "overage"
 
 
-def test_writer_skips_when_no_rate_limits(writer_path: Path, events_file: Path) -> None:
-    """A statusline payload before the first API response has no rate_limits;
-    we should write nothing rather than emit an empty event."""
+def test_writer_skips_when_no_rate_limits_and_no_cost(writer_path: Path, events_file: Path) -> None:
+    """Earliest statusline renders may have neither rate_limits nor cost yet;
+    emitting an all-null event would just clutter the log so we skip."""
     payload = json.dumps({"session_id": "abc", "context_window": {"used_percentage": 5.0}})
     result = _run_writer(writer_path, payload, events_file)
     assert result.returncode == 0, result.stderr
     assert not events_file.exists()
 
 
-def test_writer_skips_when_rate_limits_is_null(writer_path: Path, events_file: Path) -> None:
-    """`{"rate_limits": null}` is treated as 'no data' -- skip emission."""
-    payload = json.dumps({"rate_limits": None})
+def test_writer_skips_when_rate_limits_and_cost_are_both_null(writer_path: Path, events_file: Path) -> None:
+    """Explicitly-null both fields is treated as 'no data' -- skip emission."""
+    payload = json.dumps({"rate_limits": None, "cost": None})
     result = _run_writer(writer_path, payload, events_file)
     assert result.returncode == 0, result.stderr
     assert not events_file.exists()

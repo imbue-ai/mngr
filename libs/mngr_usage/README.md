@@ -14,7 +14,7 @@ disk and renders whatever it finds.
 This package contains:
 
 - The `mngr usage` CLI command and its rendering helpers.
-- The `UsageSnapshot` and `WindowSnapshot` data types.
+- The `UsageSnapshot`, `WindowSnapshot`, and `CostSnapshot` data types.
 
 Discovery is by path convention. The CLI walks
 `<host_dir>/agents/*/events/<source>/rate_limits/events.jsonl` (the same shape
@@ -49,6 +49,9 @@ The CEL context per source mirrors one entry of `mngr usage --format json`'s
 reader-derived `seconds_until_reset`, `elapsed_seconds`, and
 `elapsed_percentage` (the last two require `window_seconds` from the
 writer; absent on variable-duration windows like Claude's overage).
+Source-level fields are exposed too: `session_id` (writer-supplied
+session UUID) and `cost.*` (e.g. `cost.total_cost_usd`), so predicates
+like `cost.total_cost_usd > 5.0` work the same as window predicates.
 
 Exit codes mirror `mngr wait`: 0 matched, 1 error, 2 timeout. Default poll
 interval is 30s; use `--interval` for tighter cadence. To restrict matching
@@ -57,12 +60,17 @@ to a specific writer, use the top-level `source` field in CEL (e.g.
 
 ## Implementing a writer plugin
 
-A writer plugin is responsible for producing `rate_limit_snapshot` events at
-the conventional path. The minimal contract is just the JSONL line shape:
+A writer plugin is responsible for producing `cost_snapshot` events at the
+conventional path. The minimal contract is just the JSONL line shape:
 
 ```jsonl
-{"source":"<your-source>/rate_limits","type":"rate_limit_snapshot","event_id":"evt-<hex>","timestamp":"<ISO 8601>","rate_limits":{"<window-key>":{"used_percentage":<float>,"resets_at":<unix-ts>}}}
+{"source":"<your-source>/rate_limits","type":"cost_snapshot","event_id":"evt-<hex>","timestamp":"<ISO 8601>","session_id":"<uuid|null>","cost":{"total_cost_usd":<float>},"rate_limits":{"<window-key>":{"used_percentage":<float>,"resets_at":<unix-ts>}}}
 ```
+
+The `session_id`, `cost`, and `rate_limits` fields are all individually
+optional; at least one must be present and non-null for the reader to keep
+the event. The `type` field is informational -- the reader doesn't validate
+it -- but `"cost_snapshot"` is the current convention.
 
 Append one line per refresh to:
 

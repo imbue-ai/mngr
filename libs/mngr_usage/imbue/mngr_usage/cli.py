@@ -37,6 +37,7 @@ from imbue.mngr_usage.api import gather_usage_snapshots
 from imbue.mngr_usage.api import wait_for_usage
 from imbue.mngr_usage.api import window_has_data
 from imbue.mngr_usage.api import window_render_dict
+from imbue.mngr_usage.data_types import CostSnapshot
 from imbue.mngr_usage.data_types import UsagePluginConfig
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
@@ -163,6 +164,8 @@ class _UsageRenderModel(FrozenModel):
     has_past_reset: bool
     snapshot_updated_at: int | None
     windows: dict[str, WindowSnapshot]
+    session_id: str | None = None
+    cost: CostSnapshot | None = None
 
     @property
     def is_stale(self) -> bool:
@@ -187,15 +190,24 @@ def _build_render_model(snapshot: UsageSnapshot, max_age: int, now: int) -> _Usa
         has_past_reset=any(snap.resets_at is not None and snap.resets_at < now for snap in snapshot.windows.values()),
         snapshot_updated_at=snapshot.updated_at,
         windows=snapshot.windows,
+        session_id=snapshot.session_id,
+        cost=snapshot.cost,
     )
 
 
 def _render_one_source_for_json(model: _UsageRenderModel, now: int) -> dict[str, Any]:
-    """JSON shape for a single source's snapshot. Window order = writer's insertion order."""
+    """JSON shape for a single source's snapshot. Window order = writer's insertion order.
+
+    Always emits ``session_id`` and ``cost`` at the source level (with None /
+    all-None values when absent) so downstream consumers can rely on the
+    keys' presence.
+    """
     out: dict[str, Any] = {
         "source": model.source_name,
         "updated_at": model.snapshot_updated_at,
         "is_stale": model.is_stale,
+        "session_id": model.session_id,
+        "cost": (model.cost if model.cost is not None else CostSnapshot()).model_dump(),
     }
     for key, snap in model.windows.items():
         out[key] = window_render_dict(snap, now)
@@ -210,36 +222,74 @@ def _flatten_primary_for_template(model: _UsageRenderModel, now: int) -> dict[st
     the writer; if a writer wants format-template support it must emit
     identifier-safe keys (Python's ``str.format`` parses them as identifiers).
     Multi-source consumers should use ``--format json``.
+
+    ``session_id`` and ``cost.*`` keys are always populated (with empty
+    strings when the writer didn't supply them) so a template like
+    ``{cost.total_cost_usd}`` works without a KeyError when cost is absent.
     """
     flat: dict[str, str] = {
         "source": model.source_name,
         "now": str(now),
         "is_stale": str(model.is_stale).lower(),
         "updated_at": "" if model.snapshot_updated_at is None else str(model.snapshot_updated_at),
+        "session_id": model.session_id or "",
     }
+    cost_for_template = model.cost if model.cost is not None else CostSnapshot()
+    for cost_field, cost_value in cost_for_template.model_dump().items():
+        flat[f"cost.{cost_field}"] = "" if cost_value is None else str(cost_value)
     for key, snap in model.windows.items():
         for sub_key, value in _window_to_template_values(snap, now).items():
             flat[f"{key}.{sub_key}"] = value
     return flat
 
 
+_SESSION_ID_DISPLAY_PREFIX_LEN = 8
+
+
+@pure
+def _format_session_cost_line(session_id: str | None, cost: CostSnapshot | None) -> str | None:
+    """Render the session/cost line that sits between the source header and the window lines.
+
+    The user view is "cost, anchored to the session it accumulated in" --
+    cost without a session_id is still useful (show the cost), session_id
+    without cost is not (there's nothing to anchor), so we suppress the
+    latter. Returns None when there's nothing to show.
+
+    Session IDs are UUIDs (~36 chars) which would dominate the line, so
+    we truncate to the first 8 chars for the human view (full UUID stays
+    in JSON / format-template surfaces).
+    """
+    if cost is None or cost.total_cost_usd is None:
+        return None
+    cost_str = f"${cost.total_cost_usd:.4f}"
+    if session_id:
+        return f"session {session_id[:_SESSION_ID_DISPLAY_PREFIX_LEN]}: {cost_str}"
+    return f"cost: {cost_str}"
+
+
 def _write_source_section(model: _UsageRenderModel, now: int, header: str) -> bool:
     """Render one source's window lines (always preceded by a ``[source]`` header).
 
     Window order is the writer's insertion order. The line label is the
-    window's ``label`` field if present, else the literal key.
-    Returns True if any window with a percentage was rendered (drives the
-    catch-all hint downstream).
+    window's ``label`` field if present, else the literal key. A session /
+    cost line (when available) is rendered between the header and the
+    windows so cost is visually grouped with the session it came from.
+    Returns True if anything renderable (cost line or any window with
+    percentage / reset) was emitted -- this gates the catch-all "no usage
+    data" hint and the per-source staleness warnings downstream. An API-key
+    session that has cost but never gets rate_limits should count as data.
     """
     write_human_line(header)
-    any_with_percentage = False
+    session_cost_line = _format_session_cost_line(model.session_id, model.cost)
+    any_renderable = session_cost_line is not None
+    if session_cost_line is not None:
+        write_human_line(session_cost_line)
     for key, snap in model.windows.items():
         if snap.used_percentage is None and snap.resets_at is None:
             continue
         write_human_line(_format_human_line(snap.label or key, snap, now))
-        if snap.used_percentage is not None:
-            any_with_percentage = True
-    return any_with_percentage
+        any_renderable = True
+    return any_renderable
 
 
 def _emit_output(
@@ -291,7 +341,7 @@ def _emit_output(
         case OutputFormat.HUMAN:
             if not snapshots_with_models:
                 return
-            any_with_percentage_anywhere = False
+            any_renderable_anywhere = False
             # Two distinct stale reasons, tracked separately so the warning text matches the cause:
             #   age_stale_sources: snapshot file hasn't been refreshed in a while.
             #   reset_stale_sources: at least one window's resets_at is in the past, so the
@@ -302,15 +352,15 @@ def _emit_output(
             for index, (_, model) in enumerate(snapshots_with_models):
                 if index > 0:
                     write_human_line("")
-                section_had_percentage = _write_source_section(model, now, f"[{model.source_name}]")
-                any_with_percentage_anywhere = any_with_percentage_anywhere or section_had_percentage
-                if not section_had_percentage or model.snapshot_updated_at is None:
+                section_had_renderable = _write_source_section(model, now, f"[{model.source_name}]")
+                any_renderable_anywhere = any_renderable_anywhere or section_had_renderable
+                if not section_had_renderable or model.snapshot_updated_at is None:
                     continue
                 if model.is_age_stale:
                     age_stale_sources.append((model.source_name, max(0, now - model.snapshot_updated_at)))
                 if model.has_past_reset:
                     reset_stale_sources.append(model.source_name)
-            if not any_with_percentage_anywhere:
+            if not any_renderable_anywhere:
                 logger.warning(_NO_DATA_HINT)
             for source_name, age_seconds in age_stale_sources:
                 logger.warning(
@@ -682,6 +732,15 @@ json``'s ``sources`` array, with these derived fields per window:
   ``window_seconds`` and ``seconds_until_reset``; absent when
   ``window_seconds`` isn't emitted.
 
+Source-level fields also exposed for predicates:
+
+- ``session_id``: writer-supplied session UUID (the session cost
+  accumulated in).
+- ``cost.total_cost_usd`` / ``cost.total_duration_ms`` / ``cost.total_api_duration_ms``
+  / ``cost.total_lines_added`` / ``cost.total_lines_removed``: session-level
+  cost data when the writer captures it (always present as a dict but
+  individual fields may be null).
+
 Exit codes:
   0 - A source matched all --until filters.
   1 - Error (invalid CEL, interrupt).
@@ -702,6 +761,10 @@ Exit codes:
         (
             "Tighter poll for short-window predicates",
             "mngr usage wait --until 'overage.is_using_overage == false' --interval 10s",
+        ),
+        (
+            "Wait for the session cost to cross a budget threshold",
+            "mngr usage wait --until 'cost.total_cost_usd > 5.0'",
         ),
     ),
     see_also=(

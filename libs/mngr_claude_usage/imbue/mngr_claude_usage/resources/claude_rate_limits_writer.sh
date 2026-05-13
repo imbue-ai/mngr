@@ -1,29 +1,44 @@
 #!/bin/bash
-# Rate-limit event writer for mngr_claude_usage.
+# Cost + rate-limit event writer for mngr_claude_usage.
 #
-# Reads a Claude Code statusline JSON object from stdin. After the first
-# successful API response of the session, that JSON includes a top-level
-# `rate_limits` field with five_hour / seven_day / overage windows
-# (Claude.ai subscriptions only). We emit one event line per render to
-# the per-agent rate-limits events file:
+# Reads a Claude Code statusline JSON object from stdin and appends one
+# event line per render to the per-agent events file:
 #
 #     $MNGR_AGENT_STATE_DIR/events/claude/rate_limits/events.jsonl
 #
-# Path can be overridden via $MNGR_RATE_LIMITS_EVENTS_PATH for testing.
+# (Path can be overridden via $MNGR_RATE_LIMITS_EVENTS_PATH for testing.
+# The directory name is `rate_limits` for historical reasons -- the file
+# now carries cost + session_id too, but the discovery path is part of
+# the contract with mngr_usage and renaming it would orphan events on
+# already-provisioned agents.)
+#
+# What's captured from each statusline payload (per Claude Code docs):
+#   - rate_limits   -- five_hour / seven_day / overage windows. Present only
+#                      for Claude.ai Pro/Max subscribers, after the first
+#                      API response of the session.
+#   - cost          -- total_cost_usd / duration / lines-changed. Computed
+#                      client-side, present for all auth modes (subscription
+#                      AND direct ANTHROPIC_API_KEY).
+#   - session_id    -- the Claude Code session UUID. Carried so cost can be
+#                      correlated back to the session it accumulated in
+#                      (cost resets per session, so a delta is meaningful
+#                      only within one session_id).
 #
 # Event envelope follows mngr's standard shape (matching common_transcript
 # and mngr/activity):
 #
-#     {"source":"claude/rate_limits","type":"rate_limit_snapshot",
-#      "event_id":"evt-<hex>","timestamp":"<ISO 8601>","rate_limits":<payload>}
+#     {"source":"claude/rate_limits","type":"cost_snapshot",
+#      "event_id":"evt-<hex>","timestamp":"<ISO 8601>",
+#      "session_id":"<uuid|null>","cost":<cost-or-null>,
+#      "rate_limits":<rate-limits-or-null>}
 #
 # Append-only, no flock: appends shorter than PIPE_BUF (~4KB on Linux)
 # are atomic w.r.t. concurrent appenders. Our event lines are well under
 # that limit, so the file is safe under concurrent writers.
 #
-# Renders that omit `rate_limits` (i.e. before the first API response
-# of the session) write nothing -- emitting an event with all-null
-# windows would just clutter the log.
+# Renders that have neither rate_limits nor cost (e.g. a payload before
+# the first API response *and* before Claude Code attached any cost data)
+# write nothing -- emitting an all-null event would just clutter the log.
 set -euo pipefail
 
 events_path="${MNGR_RATE_LIMITS_EVENTS_PATH:-}"
@@ -37,12 +52,14 @@ fi
 
 input=$(cat)
 
-# Skip emission when the payload has no rate_limits field. jq's `try` returns
-# empty for non-object input, but jq itself still exits non-zero when stdin
-# is non-JSON; `|| true` keeps the writer a no-op (rather than a hard error)
-# under pipefail so a malformed render doesn't break statusline rendering.
-rate_limits=$(printf '%s' "$input" | jq -c 'try .rate_limits // empty' 2>/dev/null || true)
-if [ -z "$rate_limits" ] || [ "$rate_limits" = "null" ]; then
+# Skip emission when the payload has neither rate_limits nor cost. jq's `try`
+# returns null for non-object input; `|| echo "no"` keeps the writer a no-op
+# (rather than a hard error under `set -euo pipefail`) when stdin isn't JSON.
+should_emit=$(printf '%s' "$input" | jq -r '
+  if ((try .rate_limits // null) != null) or ((try .cost // null) != null)
+  then "yes" else "no" end
+' 2>/dev/null || echo "no")
+if [ "$should_emit" != "yes" ]; then
   exit 0
 fi
 
@@ -72,17 +89,30 @@ timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")
 # abort the writer.
 labels='{"five_hour":"5h","seven_day":"7d","overage":"overage"}'
 window_seconds='{"five_hour":18000,"seven_day":604800}'
-event=$(printf '%s' "$rate_limits" | jq -c \
+event=$(printf '%s' "$input" | jq -c \
   --arg event_id "$event_id" \
   --arg timestamp "$timestamp" \
   --argjson labels "$labels" \
   --argjson window_seconds "$window_seconds" \
-  '{source:"claude/rate_limits",type:"rate_limit_snapshot",event_id:$event_id,timestamp:$timestamp,
-    rate_limits:(if type == "object"
-                 then . as $rl | reduce (keys_unsorted[]) as $k ({};
-                   .[$k] = ($rl[$k]
-                           + (if $labels[$k] then {label:$labels[$k]} else {} end)
-                           + (if $window_seconds[$k] then {window_seconds:$window_seconds[$k]} else {} end)))
-                 else . end)}')
+  '{
+    source: "claude/rate_limits",
+    type: "cost_snapshot",
+    event_id: $event_id,
+    timestamp: $timestamp,
+    session_id: (try .session_id // null),
+    cost: (try .cost // null),
+    rate_limits: (
+      (try .rate_limits // null) as $rl |
+      if $rl == null then null
+      elif ($rl | type) == "object" then
+        reduce ($rl | keys_unsorted[]) as $k ({};
+          .[$k] = ($rl[$k]
+                  + (if $labels[$k] then {label: $labels[$k]} else {} end)
+                  + (if $window_seconds[$k] then {window_seconds: $window_seconds[$k]} else {} end))
+        )
+      else $rl
+      end
+    )
+  }')
 
 printf '%s\n' "$event" >> "$events_path"
