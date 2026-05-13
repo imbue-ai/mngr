@@ -2078,12 +2078,14 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         claude auto-generated its own id, so the file (whose contents are
         the agent UUID written by the SessionStart hook default) and the
         actual session id on disk don't agree. The JSONL filename is the
-        ground truth for what ``claude --resume <id>`` will look for.
+        ground truth for what ``claude --resume <id>`` will look for. We
+        read it from the *source* host -- the destination filesystem is the
+        same data, but reading source-side avoids depending on rsync
+        preserving mtimes when there are multiple JSONLs.
         """
         # Carry the source's claude_session_id_history forward so the
-        # destination's history reflects the prior run. Done first because
-        # it is independent of the projects-dir rename below; we don't want
-        # to skip it if listing the projects dir fails.
+        # destination's history reflects the prior run. Independent of the
+        # projects-dir rename below.
         source_history_path = source_state_dir / "claude_session_id_history"
         if source_host.path_exists(source_history_path):
             self.host.write_text_file(
@@ -2091,64 +2093,42 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                 source_host.read_text_file(source_history_path),
             )
 
-        # Re-encode the project subdir under plugin/claude/anthropic/projects/
-        # so its name matches the destination agent's work_dir. The original
-        # name uses the source agent's work_dir encoding.
+        # Find the source's active project subdir + session id directly on
+        # source_host. Layout is plugin/claude/anthropic/projects/<encoded-work-dir>/<sid>.jsonl;
+        # the deliberately-shallow glob (``*/*.jsonl``) excludes nested
+        # subagent transcripts at ``<sid>/subagents/agent-X.jsonl``.
+        source_projects_dir = source_state_dir / "plugin" / "claude" / "anthropic" / "projects"
+        latest_on_source = source_host.execute_idempotent_command(
+            f"ls -t {shlex.quote(str(source_projects_dir))}/*/*.jsonl 2>/dev/null | head -n1",
+            timeout_seconds=5.0,
+        )
+        if not (latest_on_source.success and latest_on_source.stdout.strip()):
+            logger.debug("Clone adopt: source has no session JSONL under {}", source_projects_dir)
+            return
+        latest_path = Path(latest_on_source.stdout.strip())
+        source_project_name = latest_path.parent.name
+        adopted_session_id = latest_path.stem
+
+        # Rename the source-encoded project subdir on the destination (just
+        # rsynced) to the destination agent's encoded work_dir. Both paths
+        # live on the same destination host, so a plain ``mv`` is enough.
         dest_projects_dir = self._get_agent_dir() / "plugin" / "claude" / "anthropic" / "projects"
         dest_project_name = encode_claude_project_dir_name(self.work_dir)
-        list_result = self.host.execute_idempotent_command(
-            f"ls -1 {shlex.quote(str(dest_projects_dir))} 2>/dev/null", timeout_seconds=5.0
-        )
-        if not list_result.success:
-            logger.debug(
-                "Skipping cloned session rekey: could not list {}: {}",
-                dest_projects_dir,
-                list_result.stderr.strip(),
-            )
-            return
-        subdirs = [line.strip() for line in list_result.stdout.split("\n") if line.strip()]
-        target_dir = dest_projects_dir / dest_project_name
-        for subdir in subdirs:
-            if subdir == dest_project_name:
-                continue
-            source_subdir = dest_projects_dir / subdir
-            # Move source_subdir into target_dir, merging if target already
-            # exists (e.g. multiple source project dirs collapsing into one).
-            move_cmd = (
-                f"mkdir -p {shlex.quote(str(target_dir))} && "
-                f"if [ -d {shlex.quote(str(source_subdir))} ]; then "
-                f"  cp -a {shlex.quote(str(source_subdir))}/. {shlex.quote(str(target_dir))}/ && "
-                f"  rm -rf {shlex.quote(str(source_subdir))}; "
-                f"fi"
-            )
-            move_result = self.host.execute_idempotent_command(move_cmd, timeout_seconds=60.0)
-            if not move_result.success:
+        if source_project_name != dest_project_name:
+            source_subdir = dest_projects_dir / source_project_name
+            target_dir = dest_projects_dir / dest_project_name
+            rename_cmd = f"mv {shlex.quote(str(source_subdir))} {shlex.quote(str(target_dir))}"
+            rename_result = self.host.execute_idempotent_command(rename_cmd, timeout_seconds=10.0)
+            if not rename_result.success:
                 logger.warning(
                     "Failed to rekey cloned project subdir {} -> {}: {}",
                     source_subdir,
                     target_dir,
-                    move_result.stderr.strip(),
+                    rename_result.stderr.strip(),
                 )
+                return
 
-        # Pick the most recently modified main-session JSONL on the
-        # destination (after the rename, all sessions live under
-        # target_dir). ``ls -t .../*.jsonl`` lists by mtime, newest first;
-        # the glob ``target_dir/*.jsonl`` deliberately excludes nested
-        # subagent transcripts at ``<sid>/subagents/agent-X.jsonl``. The
-        # filename's stem is the session id ``claude --resume`` needs.
-        latest_result = self.host.execute_idempotent_command(
-            f"ls -t {shlex.quote(str(target_dir))}/*.jsonl 2>/dev/null | head -n1",
-            timeout_seconds=5.0,
-        )
-        if latest_result.success and latest_result.stdout.strip():
-            latest_jsonl = latest_result.stdout.strip()
-            adopted_session_id = Path(latest_jsonl).stem
-            self.host.write_text_file(self._get_agent_dir() / "claude_session_id", adopted_session_id)
-        else:
-            logger.debug(
-                "No session JSONL found under {} after rekey; claude_session_id left unset",
-                target_dir,
-            )
+        self.host.write_text_file(self._get_agent_dir() / "claude_session_id", adopted_session_id)
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve session files and clean up per-agent credentials and trust entries.
