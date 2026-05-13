@@ -182,13 +182,14 @@ def _create_single_pool_host(
     is bake-specific) is set inline here.
     """
     suffix = uuid4().hex
+    # The bake-time host name disambiguates concurrent bakes locally;
+    # it lives on the address used to talk to ``mngr`` (``stop``,
+    # ``exec``, etc.) until the lease endpoint overwrites the
+    # connector's ``host_name`` column with the user's chosen name.
+    # The agent itself is always named ``system-services``.
     bake_host_name = "pool-{}-stage".format(suffix)
     agent_name = _POOL_AGENT_NAME
-    # Use the per-host disambiguator on the *address* so two concurrent
-    # pool bakes don't collide locally, but everything else uses the
-    # fixed ``system-services`` name once the agent is up.
-    bake_address_host = bake_host_name
-    address = "{}@{}.vultr".format(agent_name, bake_address_host)
+    address = "{}@{}.vultr".format(agent_name, bake_host_name)
 
     logger.info("Creating pool host: {}", address)
 
@@ -228,7 +229,7 @@ def _create_single_pool_host(
     # Stop the agent but keep the container running. Multiple pool hosts
     # share the agent name ``system-services``, so we have to disambiguate
     # by the host address so ``mngr stop`` resolves to the right one.
-    stop_address = "{}@{}".format(agent_name, bake_address_host)
+    stop_address = "{}@{}".format(agent_name, bake_host_name)
     stop_result = _run_mngr_command(["stop", stop_address])
     if stop_result.returncode != 0:
         logger.warning("mngr stop failed (continuing): {}", stop_result.stderr)
