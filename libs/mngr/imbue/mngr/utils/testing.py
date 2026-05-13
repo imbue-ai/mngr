@@ -21,6 +21,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Final
 from typing import IO
+from typing import assert_never
 from uuid import uuid4
 
 import pluggy
@@ -1251,8 +1252,21 @@ def cleanup_old_modal_test_environments(
         # Then delete all volumes
         delete_modal_volumes_in_environment(env_name)
 
-        # Finally delete the environment itself
-        delete_modal_environment(env_name)
+        # Finally delete the environment itself. `delete_modal_environment`
+        # already logs at debug/warning for individual outcomes; surface
+        # FAILED at error level here so a stuck safety-net run is greppable
+        # in the cron/CI logs that drive this script.
+        outcome = delete_modal_environment(env_name)
+        match outcome:
+            case ModalCleanupOutcome.DELETED | ModalCleanupOutcome.NOT_FOUND:
+                pass
+            case ModalCleanupOutcome.FAILED:
+                logger.error(
+                    "Safety-net cleanup failed to delete Modal environment {}; leaving it for the next cleanup run.",
+                    env_name,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     return len(old_envs)
 
