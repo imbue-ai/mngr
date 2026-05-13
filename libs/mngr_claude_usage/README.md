@@ -60,14 +60,23 @@ snapshots is only meaningful within one `session_id`.
 What's **not** filtered is the case where multiple Pro/Max accounts
 contribute to the same `claude` source -- the statusline payload has no
 per-account identifier, so `mngr usage` can't tell "used 5h: 73%" from
-account A apart from "5h: 9%" from account B. The collapse-to-freshest rule
-will silently mix them.
+account A apart from "5h: 9%" from account B. The aggregation rules will
+silently mix them:
+
+- Rate-limit windows are reduced freshest-wins per source, so the displayed
+  five_hour / seven_day reading is for whichever account rendered most
+  recently -- not any specific one.
+- Cost is grouped by `session_id`, so per-session records in `sessions[]`
+  stay correct individually. But the aggregate `cost.*` (and the human
+  `total:` line) sums across every session in the recency window
+  regardless of account, and `current_session` is just whichever session
+  last rendered.
 
 This is rare in practice (one user = one Anthropic account), but if you run
 multiple Claude Code sessions logged into different Pro/Max accounts, treat
-`mngr usage` as ambiguous: the "freshest" reading is for the last-rendered
-account, not for any specific one. There's no field in the payload that would
-let us label or warn from inside the writer; the only paths to resolution are
-(a) capture auth-source from a different surface (e.g. Claude Code hooks
-expose `apiKeySource` in their input -- not implemented here) or (b) shard the
-source name per account via writer config (also not implemented).
+the aggregated `mngr usage` view as ambiguous across accounts. There's no
+field in the payload that would let us label or warn from inside the
+writer; the only paths to resolution are (a) capture auth-source from a
+different surface (e.g. Claude Code hooks expose `apiKeySource` in their
+input -- not implemented here) or (b) shard the source name per account
+via writer config (also not implemented).
