@@ -37,6 +37,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from threading import Lock
 from typing import Any
+from typing import overload
 
 from loguru import logger
 from pydantic import Field
@@ -44,7 +45,6 @@ from pydantic import PrivateAttr
 from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.events import discover_event_sources
@@ -166,64 +166,180 @@ def _session_id_from_event(event: dict[str, Any]) -> str | None:
 
 # =============================================================================
 # Per-source aggregation
+#
+# Cost-field interpretation: writers emit cost cumulatively for the Claude
+# Code process's lifetime -- ``cost.total_cost_usd`` keeps growing on every
+# render until the user quits and relaunches (verified empirically; /clear
+# does NOT reset it). The reader has to undo this cumulative encoding when
+# we want "what did THIS session contribute".
+#
+# Within one Claude Code process, cost is monotonically non-decreasing
+# across events. A downward step (cost_new < cost_prev) is the unambiguous
+# signal of a Claude Code process boundary -- only a fresh process starts
+# cost back near zero. We use this to partition each agent's event stream
+# into processes; within each process we group by session_id and compute
+# each session's "own contribution" as the delta from the prior session's
+# final cumulative reading. Sum of session contributions across all
+# processes is the true total spend.
+#
+# Why per-agent: each mngr Claude agent runs one Claude Code process at a
+# time, with its own cost timeline. Detecting cost drops across agent
+# boundaries would fire constantly (each agent's cost is independent), so
+# we keep agent identity through to the aggregator and detect boundaries
+# only within an agent's own stream.
 # =============================================================================
 
 
-def _build_snapshot_for_source(
-    source_name: str,
-    events: list[dict[str, Any]],
-    *,
-    since_seconds: int,
-    now: int,
-) -> UsageSnapshot | None:
-    """Aggregate one source's parsed events into a UsageSnapshot.
+class _AccumulatingSession(MutableModel):
+    """Scratchpad for one session being built up within one Claude Code process.
 
-    Every event must carry a non-empty ``session_id``. Events that don't
-    are dropped with a warning log (naming source and event_id) --
-    ``session_id`` is the keying field for cost aggregation, and a writer
-    can't usefully participate without supplying it. The bundled Claude
-    writer always emits it; any future writer must do the same (synthesize
-    a stable per-session identifier if the upstream tool doesn't have
-    one). This makes the contract simple: every event has a session_id,
-    plus rate_limits or cost (or both) as payload.
-
-    Single pass over the events list (caller already parsed JSON):
-    - Windows: keep the freshest event's rate_limits payload (the rate-limit
-      counter is account-level, so freshest-wins is the right reduction
-      across agents that share an account).
-    - Sessions: build a SessionCostRecord per session_id, updating its
-      ``cost`` to whichever event has the latest timestamp for that
-      session and tracking ``first_event_at`` / ``last_event_at``.
-      Filtered to ``last_event_at >= now - since_seconds`` and sorted
-      newest-first.
-
-    Returns None when no event contributes anything renderable (no
-    parseable timestamps, no windows, no cost-bearing sessions in the
-    window).
+    Tracks first/last event timestamps and the latest cumulative-cost reading
+    from the writer. The ``latest_cumulative_cost`` here is the *cumulative*
+    process-lifetime reading at this session's last event -- not the session's
+    own contribution. The own-contribution delta is computed at process
+    finalization (``_finalize_process``) when we have the prior session's
+    cumulative baseline to subtract.
     """
-    cutoff = now - since_seconds
-    session_records: dict[str, SessionCostRecord] = {}
+
+    session_id: str
+    latest_cumulative_cost: CostSnapshot
+    first_event_at: int
+    last_event_at: int
+
+
+@overload
+def _sub_optional(current: int | None, baseline: int | None) -> int | None: ...
+
+
+@overload
+def _sub_optional(current: float | None, baseline: float | None) -> float | None: ...
+
+
+def _sub_optional(current: int | float | None, baseline: int | float | None) -> int | float | None:
+    """Single-field clamped subtraction for cost-delta computation.
+
+    Treats a missing baseline as zero so the first session in a process
+    (baseline = all-None CostSnapshot) just gets its own cumulative
+    reading. A missing current field stays None (no delta to report).
+    Negative deltas are clamped to zero defensively -- they shouldn't
+    occur within a process (cost is monotonic) but if a writer ever emits
+    an out-of-order pair we'd rather show 0 than a misleading negative
+    spend.
+
+    Overloaded for ``int`` and ``float`` separately so the delta's typed
+    field signature matches the per-session field type in CostSnapshot
+    (durations/line-counts stay int; USD stays float). Mirrors the
+    pattern used by ``_sum_optional`` in data_types.
+    """
+    if current is None:
+        return None
+    delta = current - (baseline if baseline is not None else 0)
+    return delta if delta >= 0 else type(current)(0)
+
+
+@pure
+def _cost_delta(current: CostSnapshot, baseline: CostSnapshot) -> CostSnapshot:
+    """Element-wise ``current - baseline`` clamped at zero per numeric field.
+
+    See ``_sub_optional`` for per-field semantics; this is just the
+    CostSnapshot-shaped wrapper used by ``_finalize_process`` to convert
+    each session's cumulative reading into its own contribution within
+    the Claude Code process.
+    """
+    return CostSnapshot(
+        total_cost_usd=_sub_optional(current.total_cost_usd, baseline.total_cost_usd),
+        total_duration_ms=_sub_optional(current.total_duration_ms, baseline.total_duration_ms),
+        total_api_duration_ms=_sub_optional(current.total_api_duration_ms, baseline.total_api_duration_ms),
+        total_lines_added=_sub_optional(current.total_lines_added, baseline.total_lines_added),
+        total_lines_removed=_sub_optional(current.total_lines_removed, baseline.total_lines_removed),
+    )
+
+
+def _finalize_process(ordered_sessions: list[_AccumulatingSession]) -> list[SessionCostRecord]:
+    """Convert one process's accumulated sessions into SessionCostRecord instances.
+
+    Walks ``ordered_sessions`` in temporal order. For each session, the
+    record's ``cost`` is the delta between its latest cumulative reading
+    and the prior session's latest cumulative reading in the same process
+    (baseline = all-None for the first session). This is the session's
+    own contribution -- summing ``cost`` across all sessions in this
+    process recovers the process's total spend.
+    """
+    records: list[SessionCostRecord] = []
+    # All-None baseline (zero-equivalent under _sub_optional) for the first session in the process.
+    baseline = CostSnapshot()
+    for accum in ordered_sessions:
+        records.append(
+            SessionCostRecord(
+                session_id=accum.session_id,
+                cost=_cost_delta(accum.latest_cumulative_cost, baseline),
+                first_event_at=accum.first_event_at,
+                last_event_at=accum.last_event_at,
+            )
+        )
+        baseline = accum.latest_cumulative_cost
+    return records
+
+
+class _AgentWalkResult(FrozenModel):
+    """Per-agent reduction yielded by ``_walk_agent_events``."""
+
+    max_timestamp: int
+    freshest_windows_timestamp: int
+    freshest_windows: dict[str, WindowSnapshot]
+    session_records: tuple[SessionCostRecord, ...]
+
+
+def _walk_agent_events(events: list[dict[str, Any]], source_name: str) -> _AgentWalkResult:
+    """Walk one agent's events in time order, producing all the per-agent reductions.
+
+    Combines three concerns that all gate on the same "is this event valid"
+    check (parseable timestamp + non-empty session_id):
+      1. Track the freshest rate_limits payload observed (windows).
+      2. Track the max event timestamp (for snapshot freshness / staleness).
+      3. Partition events into Claude Code processes via cost-drop detection,
+         and per process group by session_id with own-contribution deltas.
+
+    Events lacking ``session_id`` are dropped with a WARNING log naming
+    source + event_id -- the bundled Claude writer always emits it, so a
+    miss means writer/reader drift worth surfacing.
+
+    Doing all three in one walk (rather than separate passes) ensures the
+    session_id requirement filters windows the same way it filters sessions:
+    a malformed event can't contribute its windows while having its cost/
+    sessions dropped, which would be a silent partial-data trap.
+    """
+    # Stable timestamp sort. File order is the natural order for a single
+    # writer's append-only emissions, but events from concurrent renders
+    # could in principle be reordered; sorting defensively guarantees
+    # in-process monotonic cost is reflected in the walk order.
+    timed: list[tuple[int, dict[str, Any]]] = []
+    for event in events:
+        ts = _parse_iso_timestamp(event.get("timestamp"))
+        if ts is None:
+            continue
+        timed.append((ts, event))
+    timed.sort(key=lambda pair: pair[0])
+
+    max_timestamp = -1
     freshest_windows_timestamp = -1
     freshest_windows: dict[str, WindowSnapshot] = {}
-    max_timestamp = -1
 
-    for event in events:
+    finalized: list[SessionCostRecord] = []
+    sessions_in_process: dict[str, _AccumulatingSession] = {}
+    ordered_in_process: list[_AccumulatingSession] = []
+    prev_cumulative_cost_usd: float | None = None
+
+    for timestamp, event in timed:
         session_id = _session_id_from_event(event)
         if session_id is None:
-            # session_id is a required field on every event; the bundled Claude
-            # writer always emits it, so a missing one means writer/reader drift
-            # or a hand-edited events file. Warn (not debug) so the user sees
-            # data getting silently dropped rather than discovering it via
-            # missing rows in `mngr usage`.
             logger.warning(
                 "Dropping event without session_id from source {} (event_id={})",
                 source_name,
                 event.get("event_id"),
             )
             continue
-        timestamp = _parse_iso_timestamp(event.get("timestamp"))
-        if timestamp is None:
-            continue
+
         if timestamp > max_timestamp:
             max_timestamp = timestamp
 
@@ -233,34 +349,96 @@ def _build_snapshot_for_source(
             freshest_windows = windows
 
         cost = _cost_from_event(event)
+
+        # Process-boundary detection: a cost-bearing event whose cumulative
+        # total_cost_usd is strictly below the prior cost-bearing event's is
+        # the unambiguous signal of a Claude Code process restart. Cost is
+        # monotonic non-decreasing within a process; only relaunches reset
+        # it. We don't gate on session_id changing too because a fresh
+        # process always rotates session_id anyway -- the cost-drop test is
+        # strictly stronger.
+        if cost is not None and cost.total_cost_usd is not None:
+            if prev_cumulative_cost_usd is not None and cost.total_cost_usd < prev_cumulative_cost_usd:
+                finalized.extend(_finalize_process(ordered_in_process))
+                sessions_in_process = {}
+                ordered_in_process = []
+            prev_cumulative_cost_usd = cost.total_cost_usd
+
         if cost is None:
+            # Rate-limits-only event (no cost). Doesn't contribute to per-
+            # session aggregation; windows were already tracked above.
             continue
 
-        existing = session_records.get(session_id)
+        existing = sessions_in_process.get(session_id)
         if existing is None:
-            session_records[session_id] = SessionCostRecord(
+            accum = _AccumulatingSession(
                 session_id=session_id,
-                cost=cost,
+                latest_cumulative_cost=cost,
                 first_event_at=timestamp,
                 last_event_at=timestamp,
             )
+            sessions_in_process[session_id] = accum
+            ordered_in_process.append(accum)
             continue
-        # Cost reading wins by timestamp; first/last bracket all observed events for this session.
-        # Building a fresh immutable record per update is cheap at our scale
-        # (events files are <1MB after thousands of renders) and keeps the
-        # session_records dict typed as the concrete SessionCostRecord that
-        # eventually feeds UsageSnapshot.sessions.
-        new_cost = cost if timestamp >= existing.last_event_at else existing.cost
-        session_records[session_id] = existing.model_copy_update(
-            to_update(existing.field_ref().cost, new_cost),
-            to_update(existing.field_ref().first_event_at, min(existing.first_event_at, timestamp)),
-            to_update(existing.field_ref().last_event_at, max(existing.last_event_at, timestamp)),
-        )
+        # Same session within the current process: refresh latest cost reading
+        # iff this event is at-or-after the previous; widen the first/last
+        # window to bracket all observed events for this session.
+        if timestamp >= existing.last_event_at:
+            existing.latest_cumulative_cost = cost
+            existing.last_event_at = timestamp
+        if timestamp < existing.first_event_at:
+            existing.first_event_at = timestamp
+
+    # End of agent's stream: finalize the final (still-open) process.
+    finalized.extend(_finalize_process(ordered_in_process))
+
+    return _AgentWalkResult(
+        max_timestamp=max_timestamp,
+        freshest_windows_timestamp=freshest_windows_timestamp,
+        freshest_windows=freshest_windows,
+        session_records=tuple(finalized),
+    )
+
+
+def _build_snapshot_for_source(
+    source_name: str,
+    agents_events: dict[str, list[dict[str, Any]]],
+    *,
+    since_seconds: int,
+    now: int,
+) -> UsageSnapshot | None:
+    """Aggregate one source's parsed events (grouped by agent) into a UsageSnapshot.
+
+    Per-agent walks (``_walk_agent_events``) do all the per-event filtering
+    (session_id required) and reduction (windows, session records). The
+    outer combine here just reduces per-agent results across agents:
+    freshest-wins for windows, max for timestamp, union for session records.
+    Sessions are then filtered to the recency window (``last_event_at >=
+    now - since_seconds``) and sorted newest-first.
+
+    Returns None when no event contributes anything renderable (no
+    parseable timestamps, no windows, no cost-bearing sessions in the
+    window).
+    """
+    cutoff = now - since_seconds
+    freshest_windows_timestamp = -1
+    freshest_windows: dict[str, WindowSnapshot] = {}
+    max_timestamp = -1
+    all_sessions: list[SessionCostRecord] = []
+
+    for _agent_id, events in agents_events.items():
+        agent_result = _walk_agent_events(events, source_name)
+        if agent_result.max_timestamp > max_timestamp:
+            max_timestamp = agent_result.max_timestamp
+        if agent_result.freshest_windows_timestamp > freshest_windows_timestamp:
+            freshest_windows_timestamp = agent_result.freshest_windows_timestamp
+            freshest_windows = agent_result.freshest_windows
+        all_sessions.extend(agent_result.session_records)
 
     if max_timestamp < 0:
         return None
 
-    in_window = [r for r in session_records.values() if r.last_event_at >= cutoff]
+    in_window = [r for r in all_sessions if r.last_event_at >= cutoff]
     in_window.sort(key=lambda r: r.last_event_at, reverse=True)
     sessions = tuple(in_window)
 
@@ -278,15 +456,22 @@ def _build_snapshot_for_source(
 
 @pure
 def aggregate_events_to_snapshots(
-    events_by_source: dict[str, list[dict[str, Any]]],
+    events_by_source: dict[str, dict[str, list[dict[str, Any]]]],
     *,
     since_seconds: int,
     now: int,
 ) -> list[UsageSnapshot]:
-    """Build a UsageSnapshot per source from already-parsed events."""
+    """Build a UsageSnapshot per source from already-parsed events.
+
+    ``events_by_source`` is keyed ``source_name -> agent_id -> events``.
+    Per-agent grouping is preserved by the caller so the aggregator can
+    detect Claude Code process boundaries via cost drops within a single
+    agent's stream (cost is per-process and would falsely appear to drop
+    every time we crossed an agent boundary if we'd merged streams).
+    """
     snapshots: list[UsageSnapshot] = []
-    for source_name, events in events_by_source.items():
-        snapshot = _build_snapshot_for_source(source_name, events, since_seconds=since_seconds, now=now)
+    for source_name, agents_events in events_by_source.items():
+        snapshot = _build_snapshot_for_source(source_name, agents_events, since_seconds=since_seconds, now=now)
         if snapshot is not None:
             snapshots.append(snapshot)
     return snapshots
@@ -437,7 +622,14 @@ def _events_per_source_for_agent(mngr_ctx: MngrContext, agent: AgentDetails) -> 
 
 
 class _RawEventsCollector(MutableModel):
-    """``list_agents`` on_agent callback that collects raw events grouped by source_name.
+    """``list_agents`` on_agent callback that collects raw events grouped by source then agent.
+
+    The two-level grouping (source_name -> agent_id -> events) preserves
+    per-agent boundaries so the aggregator can detect Claude Code process
+    restarts via cost-drop signals within a single agent's stream. If we
+    merged events across agents under one source-keyed list, every
+    agent-to-agent transition in the merged stream would falsely register
+    as a cost drop (each agent's cost timeline is independent).
 
     The ``_lock`` here is required, not defensive. ``list_agents(is_streaming=True)``
     fans out across an executor with ``max_workers=32`` per provider AND a nested
@@ -445,14 +637,14 @@ class _RawEventsCollector(MutableModel):
     ``_list_agents_streaming`` and ``_construct_discover_and_emit_for_provider``),
     and ``_collect_and_emit_details_for_host`` invokes ``on_agent`` *outside* the
     results_lock. Multiple host threads can therefore enter ``__call__`` concurrently;
-    without the lock, the ``dict.setdefault().extend`` would race.
+    without the lock, the nested ``setdefault().setdefault().extend`` would race.
 
     Class-based rather than a closure so it can hold its own lock without
     triggering the "no inline functions" ratchet.
     """
 
     mngr_ctx: MngrContext
-    events_by_source: dict[str, list[dict[str, Any]]] = {}
+    events_by_source: dict[str, dict[str, list[dict[str, Any]]]] = {}
     _lock: Lock = PrivateAttr(default_factory=Lock)
 
     model_config = {"arbitrary_types_allowed": True}
@@ -461,9 +653,10 @@ class _RawEventsCollector(MutableModel):
         per_source = _events_per_source_for_agent(self.mngr_ctx, agent)
         if not per_source:
             return
+        agent_id = str(agent.id)
         with self._lock:
             for source_name, events in per_source.items():
-                self.events_by_source.setdefault(source_name, []).extend(events)
+                self.events_by_source.setdefault(source_name, {}).setdefault(agent_id, []).extend(events)
 
 
 def gather_usage_snapshots(

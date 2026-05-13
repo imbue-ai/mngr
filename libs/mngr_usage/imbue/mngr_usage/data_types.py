@@ -107,17 +107,28 @@ class WindowSnapshot(FrozenModel):
 
 
 class SessionCostRecord(FrozenModel):
-    """One session's cost data, latest reading.
+    """One session's cost contribution and observation window.
 
-    Cost within a session is monotonically increasing (Claude Code accumulates
-    it across the session), so the latest reading IS the session total --
-    no per-event arithmetic needed. ``first_event_at`` / ``last_event_at``
-    let consumers tell how long the session has been observed and how recent
-    the data is.
+    ``cost`` is this session's **own** contribution -- the delta between
+    its final cumulative reading from the writer and the prior session's
+    final cumulative reading in the same Claude Code process. The first
+    session in a process has its full cumulative reading as ``cost``.
+    Summing ``cost`` across all sessions (in all processes, all agents)
+    in a recency window recovers the true total spend, even when /clear
+    has rotated session_id repeatedly within one process (cost is
+    process-cumulative; /clear doesn't reset it).
+
+    ``first_event_at`` / ``last_event_at`` bracket the timestamps of
+    events seen for this session and let consumers tell how recent /
+    long-running the session is.
     """
 
     session_id: str = Field(description="Writer-supplied session UUID.")
-    cost: CostSnapshot = Field(description="Latest cost reading for this session.")
+    cost: CostSnapshot = Field(
+        description="This session's own contribution. Delta from the prior session's cumulative "
+        "reading in the same Claude Code process; equals the full cumulative reading for the "
+        "first session in a process.",
+    )
     first_event_at: int = Field(description="Unix timestamp of the earliest event seen for this session.")
     last_event_at: int = Field(description="Unix timestamp of the most recent event seen for this session.")
 
@@ -190,13 +201,13 @@ class UsageSnapshot(FrozenModel):
     def cost(self) -> CostSnapshot:
         """Aggregate cost across every session in ``sessions``.
 
-        Sum of each numeric field's non-None values across sessions; all-None
-        when ``sessions`` is empty. The same field semantics as a single
-        session's cost, so CEL predicates like ``cost.total_cost_usd > 5.0``
-        work both for per-session and aggregate contexts (just at a different
-        scope). When ``sessions`` has exactly one entry the aggregate equals
-        that one session's reading -- by design; consumers that want
-        per-session data should read ``sessions`` directly.
+        Sum of each session's own contribution (each ``SessionCostRecord.cost``
+        is already a delta against the prior session in the same Claude Code
+        process), so this aggregate is the true total spend across all
+        sessions in all processes in the recency window. All-None when
+        ``sessions`` is empty. CEL predicates like ``cost.total_cost_usd >
+        5.0`` work both for per-session and aggregate contexts (same numeric
+        semantics, different scope).
         """
         return CostSnapshot(
             total_cost_usd=_sum_optional([s.cost.total_cost_usd for s in self.sessions]),

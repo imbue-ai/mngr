@@ -172,7 +172,7 @@ def _cost_event(
 def test_aggregate_drops_source_with_no_renderable_content() -> None:
     """A source whose events have no parseable timestamps yields no snapshot."""
     events = [{"source": "claude/usage", "type": "cost_snapshot"}]
-    snapshots = aggregate_events_to_snapshots({"claude": events}, since_seconds=86400, now=1_700_001_000)
+    snapshots = aggregate_events_to_snapshots({"claude": {"agent-x": events}}, since_seconds=86400, now=1_700_001_000)
     assert snapshots == []
 
 
@@ -194,7 +194,7 @@ def test_aggregate_keeps_freshest_windows_across_events() -> None:
             "rate_limits": {"five_hour": {"used_percentage": 50.0, "resets_at": 9_999_999_999}},
         },
     ]
-    snapshots = aggregate_events_to_snapshots({"claude": events}, since_seconds=86400, now=2_000_000_000)
+    snapshots = aggregate_events_to_snapshots({"claude": {"agent-x": events}}, since_seconds=86400, now=2_000_000_000)
     assert len(snapshots) == 1
     assert snapshots[0].windows["five_hour"].used_percentage == 50.0
 
@@ -218,7 +218,9 @@ def test_aggregate_drops_events_without_session_id() -> None:
     captured: list[str] = []
     sink_id = logger.add(lambda msg: captured.append(msg.record["message"]), level="WARNING", format="{message}")
     try:
-        snapshots = aggregate_events_to_snapshots({"claude": events}, since_seconds=86400, now=2_000_000_000)
+        snapshots = aggregate_events_to_snapshots(
+            {"claude": {"agent-x": events}}, since_seconds=86400, now=2_000_000_000
+        )
     finally:
         logger.remove(sink_id)
     # No session_id -> event dropped -> source has nothing renderable -> no snapshot.
@@ -230,27 +232,108 @@ def test_aggregate_drops_events_without_session_id() -> None:
     assert "claude" in warning_text
 
 
-def test_aggregate_groups_per_session_keeping_latest_cost() -> None:
-    """For each session_id, the latest cost reading wins (cost is monotonic within a session)."""
+def test_aggregate_groups_per_session_and_computes_session_contribution_delta() -> None:
+    """Within one Claude Code process, ``SessionCostRecord.cost`` is the
+    session's *own* contribution -- delta from the prior session's
+    cumulative reading in the same process. Cost is process-cumulative
+    upstream (the writer emits raw cumulative); the reader undoes that
+    encoding so consumers see what each session actually cost.
+
+    Walk:
+      - abc sees 0.10 then 0.42 (latest cumulative for abc).
+      - def sees 1.23. No cost drop between events, so all three are in
+        one process. abc's contribution = 0.42 (delta from baseline 0).
+        def's contribution = 1.23 - 0.42 = 0.81.
+      - Aggregate (sum of contributions) = 0.42 + 0.81 = 1.23, which
+        matches the final cumulative reading (true total spend).
+    """
     events = [
         _cost_event("2026-05-08T10:00:00.000000000Z", session_id="abc", cost_usd=0.10),
         _cost_event("2026-05-08T10:30:00.000000000Z", session_id="abc", cost_usd=0.42),
         _cost_event("2026-05-08T11:00:00.000000000Z", session_id="def", cost_usd=1.23),
     ]
     snapshots = aggregate_events_to_snapshots(
-        {"claude": events},
+        {"claude": {"agent-x": events}},
         since_seconds=86400 * 7,
         now=int(datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).timestamp()),
     )
     assert len(snapshots) == 1
     snap = snapshots[0]
     assert snap.session_count == 2
-    session_ids = {s.session_id for s in snap.sessions}
-    assert session_ids == {"abc", "def"}
     by_id = {s.session_id: s for s in snap.sessions}
-    # session abc's latest reading wins: 0.42 (not 0.10).
-    assert by_id["abc"].cost.total_cost_usd == 0.42
-    assert by_id["def"].cost.total_cost_usd == 1.23
+    assert by_id["abc"].cost.total_cost_usd == pytest.approx(0.42)
+    assert by_id["def"].cost.total_cost_usd == pytest.approx(0.81)
+    # Aggregate is the sum of contributions and recovers the final cumulative reading.
+    assert snap.cost.total_cost_usd == pytest.approx(1.23)
+
+
+def test_aggregate_detects_process_boundary_via_cost_drop() -> None:
+    """A downward step in cumulative cost between consecutive events from one
+    agent signals a Claude Code process restart. Each process gets its own
+    delta baseline so the second process's first session contribution starts
+    from zero, not from the prior process's high-water mark.
+
+    Walk: $5 then $0.30 from one agent. The drop is the process boundary;
+    we should NOT compute the second session's spend as $0.30 - $5 (= -$4.70,
+    nonsense). Instead each process's first session uses a zero baseline.
+    Aggregate is $5 + $0.30 = $5.30, which is the true cross-process spend
+    matching what a user would actually have been billed.
+    """
+    events = [
+        _cost_event("2026-05-08T10:00:00.000000000Z", session_id="proc1-session", cost_usd=5.00),
+        _cost_event("2026-05-08T11:00:00.000000000Z", session_id="proc2-session", cost_usd=0.30),
+    ]
+    snapshots = aggregate_events_to_snapshots(
+        {"claude": {"agent-x": events}},
+        since_seconds=86400 * 7,
+        now=int(datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).timestamp()),
+    )
+    assert len(snapshots) == 1
+    snap = snapshots[0]
+    assert snap.session_count == 2
+    by_id = {s.session_id: s for s in snap.sessions}
+    # Each session is the first (and only) in its own process; its contribution
+    # is its full cumulative reading.
+    assert by_id["proc1-session"].cost.total_cost_usd == pytest.approx(5.00)
+    assert by_id["proc2-session"].cost.total_cost_usd == pytest.approx(0.30)
+    # Aggregate is the cross-process sum -- the true total spend.
+    assert snap.cost.total_cost_usd == pytest.approx(5.30)
+
+
+def test_aggregate_isolates_process_boundary_detection_per_agent() -> None:
+    """Cost-drop process-boundary detection runs per agent. If we merged
+    streams across agents, every transition from agent-A's events to
+    agent-B's events would look like a cost drop (their cost timelines are
+    independent), spuriously splitting one agent's continuous process into
+    fragments. This test plants two agents that would falsely trip the
+    detector if streams were merged.
+    """
+    # Agent A: single process, cost grows 0.10 -> 0.50.
+    agent_a_events = [
+        _cost_event("2026-05-08T10:00:00.000000000Z", session_id="a-only-session", cost_usd=0.10),
+        _cost_event("2026-05-08T10:30:00.000000000Z", session_id="a-only-session", cost_usd=0.50),
+    ]
+    # Agent B: single process, cost grows 0.05 -> 0.20. If merged with A,
+    # the 0.50 -> 0.05 transition would look like a process boundary, but
+    # really it's a different agent's independent timeline.
+    agent_b_events = [
+        _cost_event("2026-05-08T10:45:00.000000000Z", session_id="b-only-session", cost_usd=0.05),
+        _cost_event("2026-05-08T11:00:00.000000000Z", session_id="b-only-session", cost_usd=0.20),
+    ]
+    snapshots = aggregate_events_to_snapshots(
+        {"claude": {"agent-a": agent_a_events, "agent-b": agent_b_events}},
+        since_seconds=86400 * 7,
+        now=int(datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).timestamp()),
+    )
+    assert len(snapshots) == 1
+    snap = snapshots[0]
+    assert snap.session_count == 2
+    by_id = {s.session_id: s for s in snap.sessions}
+    # Each session is the only session in its agent's process; contribution = cumulative.
+    assert by_id["a-only-session"].cost.total_cost_usd == pytest.approx(0.50)
+    assert by_id["b-only-session"].cost.total_cost_usd == pytest.approx(0.20)
+    # Aggregate sums across agents.
+    assert snap.cost.total_cost_usd == pytest.approx(0.70)
 
 
 def test_aggregate_filters_sessions_outside_recency_window() -> None:
@@ -262,7 +345,9 @@ def test_aggregate_filters_sessions_outside_recency_window() -> None:
         _cost_event(fresh_ts, session_id="recent", cost_usd=0.42),
         _cost_event(stale_ts, session_id="old", cost_usd=99.99),
     ]
-    snapshots = aggregate_events_to_snapshots({"claude": events}, since_seconds=86400, now=int(base.timestamp()))
+    snapshots = aggregate_events_to_snapshots(
+        {"claude": {"agent-x": events}}, since_seconds=86400, now=int(base.timestamp())
+    )
     assert len(snapshots) == 1
     snap = snapshots[0]
     # The stale session is filtered out of `sessions`; the fresh one remains.
@@ -280,7 +365,7 @@ def test_aggregate_sessions_sorted_newest_first() -> None:
         _cost_event("2026-05-08T12:00:00.000000000Z", session_id="new", cost_usd=0.30),
     ]
     snapshots = aggregate_events_to_snapshots(
-        {"claude": events},
+        {"claude": {"agent-x": events}},
         since_seconds=86400 * 7,
         now=int(datetime(2026, 5, 8, 13, 0, tzinfo=timezone.utc).timestamp()),
     )
@@ -294,7 +379,7 @@ def test_aggregate_returns_cost_only_snapshot_when_no_rate_limits() -> None:
         _cost_event("2026-05-08T11:00:00.000000000Z", session_id="api-key-session", cost_usd=1.23),
     ]
     snapshots = aggregate_events_to_snapshots(
-        {"claude": events},
+        {"claude": {"agent-x": events}},
         since_seconds=86400,
         now=int(datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).timestamp()),
     )
@@ -320,7 +405,7 @@ def test_aggregate_drops_event_with_non_string_session_id() -> None:
         }
     ]
     snapshots = aggregate_events_to_snapshots(
-        {"claude": events},
+        {"claude": {"agent-x": events}},
         since_seconds=86400,
         now=int(datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).timestamp()),
     )
@@ -334,7 +419,9 @@ def test_aggregate_returns_no_snapshot_when_only_sessions_outside_window_and_no_
     base = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc)
     stale_ts = (base - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
     events = [_cost_event(stale_ts, session_id="old", cost_usd=99.99)]
-    snapshots = aggregate_events_to_snapshots({"claude": events}, since_seconds=86400, now=int(base.timestamp()))
+    snapshots = aggregate_events_to_snapshots(
+        {"claude": {"agent-x": events}}, since_seconds=86400, now=int(base.timestamp())
+    )
     assert snapshots == []
 
 
