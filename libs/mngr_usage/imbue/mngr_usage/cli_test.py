@@ -50,12 +50,17 @@ def _make_event(
     used_percentage: float | None = 11.0,
     resets_at: int | None = 1778280000,
 ) -> dict:
-    """Construct an event matching the writer's emitted shape."""
+    """Construct an event matching the writer's emitted shape.
+
+    Includes a placeholder ``session_id`` since the reader contract now
+    requires every event to carry one (see ``_build_snapshot_for_source``).
+    """
     return {
         "source": "claude/usage",
         "type": "cost_snapshot",
         "event_id": "evt-test123",
         "timestamp": timestamp,
+        "session_id": "make-event-session",
         "rate_limits": {
             "five_hour": {"used_percentage": used_percentage, "resets_at": resets_at},
         },
