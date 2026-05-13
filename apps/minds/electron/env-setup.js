@@ -30,6 +30,30 @@ function runEnvSetup(onProgress) {
 
     onProgress('Setting up environment...');
 
+    // Workspace packages that we ship as freshly-built wheels with each
+    // release. Their PEP 440 version (e.g. minds-0.1.0) stays the same
+    // across releases, so without an explicit reinstall hint uv considers
+    // them already-installed and skips updating them on upgrade -- the
+    // user keeps running the OLD code in ~/.minds/.venv even after the
+    // signed .app bundle has been replaced. Forcing --reinstall-package
+    // for each one makes `uv sync` re-extract our wheels every launch,
+    // while PyPI deps stay cached. Keep this list in sync with
+    // WORKSPACE_PACKAGES in scripts/build.js and the dependencies block
+    // in electron/pyproject/pyproject.toml.
+    const WORKSPACE_PACKAGES = [
+      'minds',
+      'imbue-mngr',
+      'imbue-mngr-claude',
+      'imbue-mngr-forward',
+      'imbue-mngr-imbue-cloud',
+      'imbue-mngr-lima',
+      'imbue-mngr-modal',
+      'imbue-common',
+      'concurrency-group',
+      'resource-guards',
+      'modal-proxy',
+    ];
+
     const args = [
       'sync',
       '--project', pyprojectDir,
@@ -37,6 +61,7 @@ function runEnvSetup(onProgress) {
       // (which is inside the signed .app bundle and read-only on macOS).
       '--active',
       '--python-preference', 'only-managed',
+      ...WORKSPACE_PACKAGES.flatMap((p) => ['--reinstall-package', p]),
     ];
 
     const env = {
