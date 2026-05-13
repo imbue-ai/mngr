@@ -212,6 +212,23 @@ def _stop_modal_agent(agent_name: str, env: ModalSubprocessTestEnv) -> subproces
     )
 
 
+def _get_preserved_agent_dir(host_dir: Path, agent_name: str) -> Path:
+    """Return the unique preserved-sessions dir for ``agent_name``.
+
+    Layout: ``host_dir/plugin/mngr_claude/preserved_sessions/<agent-name>--<agent-id>/``.
+    Asserts the parent dir exists and exactly one child matches the prefix
+    so callers can assume a single unambiguous result.
+    """
+    preserved_sessions_dir = host_dir / "plugin" / "mngr_claude" / "preserved_sessions"
+    assert preserved_sessions_dir.exists(), f"Expected preserved_sessions dir at {preserved_sessions_dir}"
+    agent_dirs = [d for d in preserved_sessions_dir.iterdir() if d.is_dir() and d.name.startswith(agent_name)]
+    assert len(agent_dirs) == 1, (
+        f"Expected exactly one preserved dir for {agent_name}, "
+        f"found: {[d.name for d in preserved_sessions_dir.iterdir()]}"
+    )
+    return agent_dirs[0]
+
+
 def _assert_sessions_preserved(host_dir: Path, agent_name: str) -> None:
     """Assert that session files were preserved for the given agent under host_dir.
 
@@ -219,16 +236,7 @@ def _assert_sessions_preserved(host_dir: Path, agent_name: str) -> None:
     directory for the agent, and that directory has at least one non-empty
     session JSONL file.
     """
-    preserved_sessions_dir = host_dir / "plugin" / "mngr_claude" / "preserved_sessions"
-    assert preserved_sessions_dir.exists(), f"Expected preserved_sessions dir at {preserved_sessions_dir}"
-
-    # Find the agent's preserved directory (named <agent-name>--<agent-id>)
-    agent_dirs = [d for d in preserved_sessions_dir.iterdir() if d.is_dir() and d.name.startswith(agent_name)]
-    assert len(agent_dirs) == 1, (
-        f"Expected exactly one preserved dir for {agent_name}, "
-        f"found: {[d.name for d in preserved_sessions_dir.iterdir()]}"
-    )
-    agent_preserved_dir = agent_dirs[0]
+    agent_preserved_dir = _get_preserved_agent_dir(host_dir, agent_name)
 
     # At minimum, session JSONL files should be preserved (the projects/ directory)
     preserved_projects = agent_preserved_dir / "projects"
@@ -355,14 +363,9 @@ def test_destroy_stopped_modal_agent_preserves_sessions_from_volume(
 
 def _read_preserved_session_text(host_dir: Path, agent_name: str) -> str:
     """Return the concatenated text of all preserved session JSONLs for an agent."""
-    preserved_sessions_dir = host_dir / "plugin" / "mngr_claude" / "preserved_sessions"
-    agent_dirs = [d for d in preserved_sessions_dir.iterdir() if d.is_dir() and d.name.startswith(agent_name)]
-    assert len(agent_dirs) == 1, (
-        f"Expected exactly one preserved dir for {agent_name}, "
-        f"found: {[d.name for d in preserved_sessions_dir.iterdir()]}"
-    )
-    session_files = list((agent_dirs[0] / "projects").rglob("*.jsonl"))
-    assert len(session_files) >= 1, f"No session .jsonl files under {agent_dirs[0] / 'projects'}"
+    agent_preserved_dir = _get_preserved_agent_dir(host_dir, agent_name)
+    session_files = list((agent_preserved_dir / "projects").rglob("*.jsonl"))
+    assert len(session_files) >= 1, f"No session .jsonl files under {agent_preserved_dir / 'projects'}"
     return "\n".join(f.read_text() for f in session_files)
 
 
