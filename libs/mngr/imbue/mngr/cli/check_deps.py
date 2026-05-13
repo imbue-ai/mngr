@@ -1,5 +1,6 @@
 """Check and optionally install system dependencies for mngr."""
 
+from collections.abc import Callable
 from typing import Any
 
 import click
@@ -64,6 +65,7 @@ def _prompt_install_choice(
     missing_core: list[SystemDependency],
     need_bash: bool,
     os_name: OsName,
+    choice_reader: Callable[[str], str] = read_tty_choice,
 ) -> list[SystemDependency] | None:
     """Interactively prompt the user to choose what to install.
 
@@ -93,7 +95,7 @@ def _prompt_install_choice(
     write_human_line("  [n] Skip -- I'll install them myself")
     write_human_line("")
 
-    choice = read_tty_choice("Choice [a/c/n]: ")
+    choice = choice_reader("Choice [a/c/n]: ")
     if choice == "":
         write_human_line("No interactive terminal available. Skipping dependency installation.")
         return None

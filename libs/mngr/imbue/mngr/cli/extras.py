@@ -3,6 +3,7 @@
 import os
 import platform
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -71,9 +72,12 @@ def _completion_status() -> tuple[bool, str, Path]:
     return configured, shell_type, rc_path
 
 
-def _install_completion(auto: bool) -> bool:
+def _install_completion(
+    auto: bool,
+    status_fn: Callable[[], tuple[bool, str, Path]] = _completion_status,
+) -> bool:
     """Install shell completion. Returns True if installed (or already configured)."""
-    configured, shell_type, rc_path = _completion_status()
+    configured, shell_type, rc_path = status_fn()
 
     if configured:
         write_human_line("Shell completion already configured in {}", rc_path)
@@ -117,9 +121,12 @@ def _claude_plugin_status() -> tuple[bool, bool]:
         return True, False
 
 
-def _install_claude_plugin(auto: bool) -> bool:
+def _install_claude_plugin(
+    auto: bool,
+    status_fn: Callable[[], tuple[bool, bool]] = _claude_plugin_status,
+) -> bool:
     """Install the Claude Code review plugin. Returns True if installed (or already present)."""
-    claude_available, plugin_installed = _claude_plugin_status()
+    claude_available, plugin_installed = status_fn()
 
     if not claude_available:
         write_human_line("Claude Code is not installed -- skipping Claude Code plugin.")
