@@ -547,9 +547,7 @@ def _parse_agent_types(
         # "unknown" -- name the likely root cause so the user does not interpret
         # the error as a field typo.
         hint = _missing_agent_type_hint(type_for_lookup) if not is_agent_type_registered(type_for_lookup) else None
-        _check_unknown_fields(
-            raw_config, config_class, f"agent_types.{name}", strict=strict, silent=silent, hint=hint
-        )
+        _check_unknown_fields(raw_config, config_class, f"agent_types.{name}", strict=strict, silent=silent, hint=hint)
         normalized_config = _normalize_tuple_fields_for_construct(raw_config)
         agent_types[AgentTypeName(name)] = config_class.model_construct(**normalized_config)
 
