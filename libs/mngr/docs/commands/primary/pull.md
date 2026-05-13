@@ -33,9 +33,9 @@ mngr pull [OPTIONS] SOURCE DESTINATION
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--source` | text | Source specification: AGENT, AGENT:PATH, or PATH | None |
-| `--source-agent` | text | Source agent name or ID | None |
-| `--source-host` | text | Source host name or ID [future] | None |
+| `--source` | hosted_location | Source specification: AGENT[@HOST[.PROVIDER]][:PATH] | None |
+| `--source-agent` | agent_address | Source agent address (NAME[@HOST[.PROVIDER]]) | None |
+| `--source-host` | host_address | Source host address (HOST[.PROVIDER]) [future] | None |
 | `--source-path` | text | Path within the agent's work directory | None |
 
 ## Destination
@@ -58,9 +58,9 @@ mngr pull [OPTIONS] SOURCE DESTINATION
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--target` | text | Target specification: AGENT, AGENT@HOST, AGENT@HOST.PROVIDER:PATH, or @HOST:PATH [future] | None |
-| `--target-agent` | text | Target agent name or ID [future] | None |
-| `--target-host` | text | Target host name or ID [future] | None |
+| `--target` | hosted_location | Target specification: AGENT[@HOST[.PROVIDER]][:PATH] [future] | None |
+| `--target-agent` | agent_address | Target agent address [future] | None |
+| `--target-host` | host_address | Target host address [future] | None |
 | `--target-path` | text | Path within target to sync to [future] | None |
 
 ## Multi-source

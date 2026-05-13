@@ -203,7 +203,7 @@ def _build_agent_details_from_online_agent(
     )
 
 
-def _build_agent_details_from_offline_ref(
+def build_agent_details_from_offline_ref(
     agent_ref: DiscoveredAgent,
     host_details: HostDetails,
 ) -> AgentDetails:
@@ -213,7 +213,10 @@ def _build_agent_details_from_offline_ref(
         id=agent_ref.agent_id,
         name=agent_ref.agent_name,
         type=str(agent_ref.agent_type) if agent_ref.agent_type else "unknown",
-        command=agent_ref.command or CommandString(""),
+        # CommandString is NonEmptyStr, so we cannot fall back to empty when
+        # the discovery data lacks a command (e.g. a host we can't reach
+        # surfaced via to_offline_host with no certified data).
+        command=agent_ref.command or CommandString("(unknown)"),
         work_dir=agent_ref.work_dir or Path("/"),
         initial_branch=agent_ref.created_branch_name,
         create_time=create_time,
@@ -509,7 +512,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
 
                     # If this host is offline, or if we failed to find the agent on the online host
                     if agent_details is None:
-                        agent_details = _build_agent_details_from_offline_ref(agent_ref, host_details)
+                        agent_details = build_agent_details_from_offline_ref(agent_ref, host_details)
 
                     agent_details_list.append(agent_details)
                 except MngrError as e:
@@ -523,7 +526,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
                             host_ref.host_id,
                             e,
                         )
-                        agent_details_list.append(_build_agent_details_from_offline_ref(agent_ref, host_details))
+                        agent_details_list.append(build_agent_details_from_offline_ref(agent_ref, host_details))
 
         except HostConnectionError as e:
             self.on_connection_error(host_ref.host_id)
@@ -532,7 +535,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
             is_authentication_failure = isinstance(e, HostAuthenticationError)
             host_details, _ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
             agent_details_list = [
-                _build_agent_details_from_offline_ref(agent_ref, host_details) for agent_ref in agent_refs
+                build_agent_details_from_offline_ref(agent_ref, host_details) for agent_ref in agent_refs
             ]
 
         finally:

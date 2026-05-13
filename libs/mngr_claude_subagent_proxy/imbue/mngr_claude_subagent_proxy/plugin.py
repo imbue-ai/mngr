@@ -14,6 +14,7 @@ from pydantic import Field
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.host_dir import read_default_host_dir
+from imbue.mngr.config.plugin_registry import register_plugin_config
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -31,10 +32,22 @@ from imbue.mngr_claude_subagent_proxy._stop_hook_guard import MNGR_MANAGED_HOOK_
 from imbue.mngr_claude_subagent_proxy._stop_hook_guard import PROXY_CHILD_GUARD_PREFIX
 from imbue.mngr_claude_subagent_proxy._stop_hook_guard import guard_user_stop_hooks_against_proxy_children
 from imbue.mngr_claude_subagent_proxy._stop_hook_guard import iter_user_stop_hook_commands
+from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyMode
+from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyPluginConfig
 from imbue.mngr_claude_subagent_proxy.hooks.destroy_detached import DestroyAgentDetachedCallable
 from imbue.mngr_claude_subagent_proxy.hooks.destroy_detached import destroy_agent_detached
 
 SUBAGENT_PROXY_CHILD_AGENT_TYPE: Final[str] = "mngr-proxy-child"
+
+# Plugin-config registry key used to look up our config from MngrContext.
+# This is the key users put in their settings.toml under
+# `[plugins.claude_subagent_proxy]`, and must match what
+# register_plugin_config() below registers. Aligned with the pyproject.toml
+# entry-point key and the package directory name so the three names stay
+# in sync.
+CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME: Final[str] = "claude_subagent_proxy"
+
+register_plugin_config(CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME, SubagentProxyPluginConfig)
 
 
 class SubagentProxyChildConfig(ClaudeAgentConfig):
@@ -81,10 +94,13 @@ def register_agent_type() -> tuple[str, type[AgentInterface], type[AgentTypeConf
 
 
 _AGENT_DEFINITION: Final[str] = "mngr-proxy.agent.md"
+_MNGR_SUBAGENTS_SKILL: Final[str] = "mngr-subagents.skill.md"
 
 _SPAWN_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.spawn"
 _CLEANUP_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.cleanup"
 _REAP_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.reap"
+_DENY_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.deny"
+_GUARD_STOP_HOOKS_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.guard_stop_hooks"
 
 
 def _load_resource(filename: str) -> str:
@@ -104,11 +120,13 @@ def build_subagent_proxy_hooks_config() -> dict[str, Any]:
     - PreToolUse (Agent): spawn the mngr proxy subagent instead of Claude's
       native nested Agent loop.
     - PostToolUse (Agent): rewrite the proxy's result before Claude sees it.
-    - SessionStart: reap orphaned proxy subagents from prior sessions.
+    - SessionStart: label-driven reaper (shared with DENY mode) plus
+      PROXY-only Stop-hook guarding of the per-agent plugin cache.
     """
     spawn_cmd = _python_hook_command(_SPAWN_MODULE)
     cleanup_cmd = _python_hook_command(_CLEANUP_MODULE)
     reap_cmd = _python_hook_command(_REAP_MODULE)
+    guard_cmd = _python_hook_command(_GUARD_STOP_HOOKS_MODULE)
     return {
         "hooks": {
             "PreToolUse": [
@@ -138,6 +156,53 @@ def build_subagent_proxy_hooks_config() -> dict[str, Any]:
             "SessionStart": [
                 {
                     "hooks": [
+                        {"type": "command", "command": reap_cmd},
+                        {"type": "command", "command": guard_cmd},
+                    ],
+                }
+            ],
+        }
+    }
+
+
+def build_subagent_proxy_deny_hooks_config() -> dict[str, Any]:
+    """Build the deny-mode hooks config: PreToolUse:Agent deny + SessionStart reap.
+
+    - PreToolUse (Agent): emit a short skill-pointer ``permissionDecisionReason``
+      that directs Claude at the ``mngr-subagents`` skill (installed under
+      ``.claude/skills/`` by ``_write_mngr_subagents_skill``); the
+      ``mngr create`` / ``subagent_wait`` protocol lives in that skill,
+      not in the deny reason itself.
+    - SessionStart: same shared label-driven reaper that PROXY mode uses
+      (``hooks/reap.py``). Both spawn paths attach
+      ``mngr_claude_subagent_proxy_parent_id=${MNGR_AGENT_ID}`` to every
+      child, so the same query identifies orphans in either mode.
+
+    No PostToolUse cleanup -- the deny hook never runs ``mngr create``
+    itself, so there is no per-Task-call state on the parent to clean up.
+    No PROXY-only Stop-hook guarding -- DENY-spawned children are plain
+    claude agents and do not get the ``MNGR_CLAUDE_SUBAGENT_PROXY_CHILD``
+    env var, so the guard predicate would never fire anyway.
+    """
+    deny_cmd = _python_hook_command(_DENY_MODULE)
+    reap_cmd = _python_hook_command(_REAP_MODULE)
+    return {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Agent",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": deny_cmd,
+                            "timeout": 15,
+                        },
+                    ],
+                }
+            ],
+            "SessionStart": [
+                {
+                    "hooks": [
                         {
                             "type": "command",
                             "command": reap_cmd,
@@ -155,6 +220,55 @@ def _write_proxy_agent_definition(host: OnlineHostInterface, work_dir: Path) -> 
     host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(agents_dir))}", timeout_seconds=5.0)
     content = _load_resource(_AGENT_DEFINITION)
     host.write_text_file(agents_dir / "mngr-proxy.md", content)
+
+
+def _write_mngr_subagents_skill(host: OnlineHostInterface, work_dir: Path) -> None:
+    """Write the ``mngr-subagents`` Claude skill under the agent's .claude/skills/.
+
+    Used in DENY mode to give Claude the full context for delegating to
+    mngr-managed subagents. The deny hook's ``permissionDecisionReason``
+    is intentionally short -- a one-liner pointing at this skill -- so
+    the verbose two-command spawn-and-wait protocol is loaded on demand
+    by Claude rather than crowding every Task transcript.
+    """
+    skill_dir = work_dir / ".claude" / "skills" / "mngr-subagents"
+    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(skill_dir))}", timeout_seconds=5.0)
+    content = _load_resource(_MNGR_SUBAGENTS_SKILL)
+    host.write_text_file(skill_dir / "SKILL.md", content)
+
+
+def _merge_subagent_proxy_deny_hooks(host: OnlineHostInterface, work_dir: Path) -> None:
+    """Merge the deny-mode hooks into the agent's .claude/settings.local.json.
+
+    Deny mode installs two hooks: a PreToolUse:Agent hook that denies
+    Task calls with a short skill-pointer reason pointing at the
+    ``mngr-subagents`` skill (installed alongside, under
+    ``.claude/skills/``), plus the shared label-driven SessionStart
+    reaper (same ``hooks/reap.py`` PROXY uses; both spawn paths attach
+    the ``mngr_claude_subagent_proxy_parent_id`` label so the same
+    query identifies orphans regardless of mode). It does NOT install
+    a PostToolUse hook (the deny hook never runs ``mngr create``, so
+    there is no per-Task-call state to clean up), does NOT walk the
+    user's plugin hooks dirs to install Stop-hook guards (DENY
+    children are plain claude agents without the proxy-child env var,
+    so the guard predicate would never fire), and does NOT check the
+    project ``settings.json`` for un-guarded Stop hooks (same reason).
+    The surface is deliberately much smaller than PROXY mode.
+    """
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    existing_settings: dict[str, Any] = {}
+    try:
+        content = host.read_text_file(settings_path)
+        existing_settings = json.loads(content)
+    except FileNotFoundError:
+        pass
+
+    hooks_config = build_subagent_proxy_deny_hooks_config()
+    merged = merge_hooks_config(existing_settings, hooks_config)
+    if merged is None:
+        logger.debug("Subagent-proxy deny hook already configured in {}", settings_path)
+        return
+    host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
 
 
 def _merge_subagent_proxy_hooks(host: OnlineHostInterface, work_dir: Path) -> None:
@@ -398,6 +512,20 @@ def _check_project_settings_stop_hooks_guarded(host: OnlineHostInterface, work_d
     )
 
 
+def _resolve_plugin_mode(mngr_ctx: MngrContext | None) -> SubagentProxyMode:
+    """Resolve the plugin's mode from mngr_ctx, falling back to PROXY.
+
+    ``mngr_ctx`` is None in unit tests (which pass it explicitly to keep
+    the hookimpl signature satisfied without standing up a full MngrContext).
+    Treat that case as "use defaults" -- equivalent to a user who never
+    configured the plugin.
+    """
+    if mngr_ctx is None:
+        return SubagentProxyPluginConfig().mode
+    config = mngr_ctx.get_plugin_config(CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME, SubagentProxyPluginConfig)
+    return config.mode
+
+
 @hookimpl(trylast=True)
 def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
     """Install subagent-proxy hooks on Claude agents.
@@ -407,9 +535,28 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
     as our own spawned proxy-children, refuse to proceed if they inherit
     any Stop / SubagentStop hooks whose semantics differ between top-level
     and subagent contexts -- the user has to decide how those should apply.
+
+    Behavior depends on ``SubagentProxyPluginConfig.mode``:
+    - ``PROXY`` (default): install spawn / cleanup / SessionStart hooks,
+      write the mngr-proxy agent definition, guard project Stop hooks.
+    - ``DENY``: install the PreToolUse:Agent deny hook plus the shared
+      label-driven SessionStart reaper (same ``hooks/reap.py`` PROXY
+      uses), and write the ``mngr-subagents`` skill under
+      ``.claude/skills/``. The other PROXY-only plumbing does NOT run
+      (no PostToolUse cleanup, no Stop-hook guard, no project
+      settings.json check). The deny hook never invokes ``mngr create``
+      and does not generate per-Task wait-scripts; Claude reads the
+      skill and runs the two-command spawn-and-wait protocol itself
+      via Bash. The reaper still picks up terminal children spawned
+      that way via the shared parent-id label.
     """
-    del mngr_ctx  # unused
     if not isinstance(agent.agent_config, ClaudeAgentConfig):
+        return
+
+    mode = _resolve_plugin_mode(mngr_ctx)
+    if mode == SubagentProxyMode.DENY:
+        _merge_subagent_proxy_deny_hooks(host, agent.work_dir)
+        _write_mngr_subagents_skill(host, agent.work_dir)
         return
 
     _check_project_settings_stop_hooks_guarded(host, agent.work_dir)

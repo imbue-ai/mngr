@@ -6,8 +6,10 @@ from loguru import logger
 
 from imbue.mngr.api.push import push_files
 from imbue.mngr.api.push import push_git
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import HOSTED_LOCATION
+from imbue.mngr.cli.address_params import HOST_ADDRESS
 from imbue.mngr.cli.agent_utils import find_agent_for_command
-from imbue.mngr.cli.agent_utils import parse_agent_spec
 from imbue.mngr.cli.agent_utils import stop_agent_after_sync
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -18,6 +20,9 @@ from imbue.mngr.cli.output_helpers import output_sync_files_result
 from imbue.mngr.cli.output_helpers import output_sync_git_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import HostAddress
+from imbue.mngr.primitives import HostedLocation
 from imbue.mngr.primitives import UncommittedChangesMode
 
 
@@ -27,11 +32,11 @@ class PushCliOptions(CommonCliOptions):
     Inherits common options (output_format, quiet, verbose, etc.) from CommonCliOptions.
     """
 
-    target_pos: str | None
+    target_pos: HostedLocation | None
     source_pos: str | None
-    target: str | None
-    target_agent: str | None
-    target_host: str | None
+    target: HostedLocation | None
+    target_agent: AgentAddress | None
+    target_host: HostAddress | None
     target_path: str | None
     source: str | None
     dry_run: bool
@@ -46,12 +51,17 @@ class PushCliOptions(CommonCliOptions):
 
 
 @click.command()
-@click.argument("target_pos", default=None, required=False, metavar="TARGET")
+@click.argument("target_pos", type=HOSTED_LOCATION, default=None, required=False, metavar="TARGET")
 @click.argument("source_pos", default=None, required=False, metavar="SOURCE")
 @optgroup.group("Target Selection")
-@optgroup.option("--target", "target", help="Target specification: AGENT, AGENT:PATH, or PATH")
-@optgroup.option("--target-agent", help="Target agent name or ID")
-@optgroup.option("--target-host", help="Target host name or ID [future]")
+@optgroup.option(
+    "--target",
+    "target",
+    type=HOSTED_LOCATION,
+    help="Target specification: AGENT[@HOST[.PROVIDER]][:PATH]",
+)
+@optgroup.option("--target-agent", type=AGENT_ADDRESS, help="Target agent address (NAME[@HOST[.PROVIDER]])")
+@optgroup.option("--target-host", type=HOST_ADDRESS, help="Target host address (HOST[.PROVIDER]) [future]")
 @optgroup.option("--target-path", help="Path within the agent's work directory")
 @optgroup.group("Source")
 @optgroup.option("--source", "source", type=click.Path(exists=True), help="Local source directory [default: .]")
@@ -119,7 +129,7 @@ def push(ctx: click.Context, **kwargs) -> None:
     )
 
     # Merge positional and named arguments (named option takes precedence)
-    effective_target = opts.target if opts.target is not None else opts.target_pos
+    effective_target_loc: HostedLocation | None = opts.target if opts.target is not None else opts.target_pos
     effective_source = opts.source if opts.source is not None else opts.source_pos
 
     # Check for unsupported options
@@ -149,13 +159,27 @@ def push(ctx: click.Context, **kwargs) -> None:
                 "--rsync-only with --sync-mode=git is not yet supported; use --sync-mode=files instead"
             )
 
-    # Parse target specification
-    agent_identifier, target_path = parse_agent_spec(
-        spec=effective_target,
-        explicit_agent=opts.target_agent,
-        spec_name="Target",
-        default_subpath=opts.target_path,
-    )
+    # Build target address and sub-path from positional/named target options.
+    # The TARGET positional carries the agent (and optional :PATH); --target-agent
+    # is an alternative way to specify the agent; --target-path is an alternative
+    # way to specify the sub-path.
+    target_address: AgentAddress | None = None
+    target_subpath: Path | None = None
+    if effective_target_loc is not None:
+        if effective_target_loc.agent is None:
+            raise UserInputError("Target must include an agent name or ID")
+        target_address = AgentAddress(agent=effective_target_loc.agent, host=effective_target_loc.host)
+        target_subpath = effective_target_loc.path
+    if opts.target_agent is not None:
+        if target_address is not None and target_address != opts.target_agent:
+            raise UserInputError("Cannot specify both --target and --target-agent with different values")
+        target_address = opts.target_agent
+    if opts.target_path is not None:
+        explicit_target_path = Path(opts.target_path)
+        if target_subpath is not None and target_subpath != explicit_target_path:
+            raise UserInputError("Cannot specify both a subpath in target and --target-path")
+        target_subpath = explicit_target_path
+    target_path: str | None = str(target_subpath) if target_subpath is not None else None
 
     # Determine source path
     source_path = Path(effective_source) if effective_source else Path.cwd()
@@ -163,8 +187,7 @@ def push(ctx: click.Context, **kwargs) -> None:
     # Find the agent
     result = find_agent_for_command(
         mngr_ctx=mngr_ctx,
-        agent_identifier=agent_identifier,
-        command_usage="push <agent-id> <path>",
+        address=target_address,
         host_filter=None,
     )
     if result is None:

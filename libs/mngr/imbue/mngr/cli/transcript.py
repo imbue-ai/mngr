@@ -10,6 +10,7 @@ from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import discover_event_sources
 from imbue.mngr.api.events import read_event_content
 from imbue.mngr.api.events import resolve_events_target
+from imbue.mngr.cli.address_params import AGENT_OR_HOST_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -18,6 +19,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 
@@ -25,7 +27,7 @@ from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 class TranscriptCliOptions(CommonCliOptions):
     """Options passed from the CLI to the transcript command."""
 
-    target: str
+    target: AgentOrHostAddress
     role: tuple[str, ...]
     tail: int | None
     head: int | None
@@ -173,7 +175,7 @@ def _emit_transcript(
 
 
 @click.command(name="transcript")
-@click.argument("target")
+@click.argument("target", type=AGENT_OR_HOST_ADDRESS)
 @optgroup.group("Filtering")
 @optgroup.option(
     "--role",
@@ -208,7 +210,7 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
 
     # Resolve the target agent
     target = resolve_events_target(
-        identifier=opts.target,
+        address=opts.target,
         mngr_ctx=mngr_ctx,
     )
 

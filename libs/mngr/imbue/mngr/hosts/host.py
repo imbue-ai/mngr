@@ -34,7 +34,6 @@ from tenacity import wait_fixed
 
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.thread_utils import ObservableThread
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import info_span
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
@@ -194,6 +193,55 @@ def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
     return host_dir / "agents" / str(agent_id)
 
 
+def install_packaged_script_on_host(
+    host: OnlineHostInterface,
+    *,
+    module: Any,
+    filename: str,
+    dest: Path,
+    mode: str = "0755",
+) -> None:
+    """Read ``filename`` from a Python package's resources and write it onto ``host``.
+
+    Common per-agent provisioning pattern: a plugin ships a shell or Python
+    script as a package resource (under ``<package>/resources/``) and needs
+    to install it onto an agent's host (local or remote) so something on
+    that host can later execute it. ``host.write_file`` is host-portable
+    (works for the local filesystem, SSH'd hosts, Modal volumes, etc.) and
+    handles the executable-bit via the ``mode`` argument.
+
+    ``module`` is the package object (e.g. ``imbue.mngr_claude_usage.resources``);
+    ``filename`` is the file name inside it; ``dest`` is the absolute path on
+    the host where the script should land.
+    """
+    content = importlib.resources.files(module).joinpath(filename).read_text().encode()
+    host.write_file(dest, content, mode=mode)
+
+
+def read_json_dict_via_host(host: OnlineHostInterface, path: Path) -> dict[str, Any]:
+    """Host-aware variant of ``mngr.utils.file_utils.read_json_dict``.
+
+    Reads ``path`` via the host (works for local or remote hosts). Missing
+    file, unparseable JSON, or non-object JSON each yield ``{}`` -- the same
+    tolerance ``read_json_dict`` provides for plugin provisioning that
+    reads optional user-managed config like ``.claude/settings.json``.
+
+    Lives here rather than in ``file_utils`` because it needs
+    ``OnlineHostInterface``, which would create a circular import via
+    ``config.data_types``.
+    """
+    try:
+        content = host.read_text_file(path)
+    except FileNotFoundError:
+        return {}
+    try:
+        loaded = json.loads(content)
+    except json.JSONDecodeError as e:
+        logger.warning("Could not parse {} as JSON ({}); treating as empty.", path, e)
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def _git_command_stdout(host: OnlineHostInterface, command: str, cwd: Path) -> str | None:
     """Run a git command on a host and return its stripped stdout, or None if it failed or was empty.
 
@@ -218,17 +266,6 @@ def _is_same_machine(a: OnlineHostInterface, b: OnlineHostInterface) -> bool:
     return a.is_local and b.is_local
 
 
-class HostLocation(FrozenModel):
-    """A path on a specific host."""
-
-    host: OnlineHostInterface = Field(
-        description="The actual host where the source resides",
-    )
-    path: Path = Field(
-        description="The actual path to the source directory on the host",
-    )
-
-
 class Host(OuterHost, BaseHost, OnlineHostInterface):
     """Host implementation that proxies operations through a pyinfra connector.
 
@@ -243,18 +280,21 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     provider_instance: ProviderInstanceInterface = Field(
         frozen=True, description="The provider instance managing this host"
     )
-
-    # is_local, _ensure_connected, _close_paramiko_client, disconnect, and __del__
-    # are inherited unchanged from OuterHost.
+    host_name: HostName = Field(
+        frozen=True,
+        description=(
+            "User-facing name of the host. Stored explicitly because the SSH "
+            "connector's name may be a connection target (e.g. an IP for "
+            "local-docker hosts) rather than a HostName-shaped value."
+        ),
+    )
 
     def get_name(self) -> HostName:
-        """Return the mngr-assigned host name from certified data.
+        """Return the user-facing host name (overrides ``OuterHost.get_name``)."""
+        return self.host_name
 
-        Overrides OuterHost.get_name (which returns the connector hostname),
-        so callers get the friendly name set when the host was created
-        rather than the SSH endpoint.
-        """
-        return HostName(self.get_certified_data().host_name)
+    # is_local, _ensure_connected, _close_paramiko_client, disconnect, and
+    # __del__ are inherited unchanged from OuterHost.
 
     def model_copy_update(self, *updates: Any) -> "Host":
         """Create a copy of this Host with updated fields.
@@ -429,13 +469,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     # read_file, write_file, read_text_file, write_text_file, _get_file_mtime,
     # and get_file_mtime are inherited unchanged from OuterHost.
-
-    def _path_exists(self, path: Path) -> bool:
-        """Check if a path exists on the host."""
-        if self.is_local:
-            return path.exists()
-        result = self.execute_idempotent_command(f"test -e '{str(path)}'")
-        return result.success
 
     def _is_directory(self, path: Path) -> bool:
         """Check if a path is a directory on the host."""
@@ -638,10 +671,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             #  It just means that the host is not yet properly initialized
             #  For hosts that are currently being created, that's fine, but otherwise this should count as a busted host
             #  Annoyingly we'll need to understand the difference (by checking to see if, eg, this host is locked)
-            # NB: must not call get_name() here -- Host.get_name() reads certified data, which would recurse.
             return CertifiedHostData(
                 host_id=str(self.id),
-                host_name="unknown-host-at-" + str(self.get_connector_host_name()),
+                host_name=str(self.host_name),
                 created_at=now,
                 updated_at=now,
             )

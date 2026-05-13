@@ -24,8 +24,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.agent_registry import list_available_agent_types
-from imbue.mngr.api.agent_addr import AgentAddress
-from imbue.mngr.api.agent_addr import parse_agent_address
+from imbue.mngr.api.address_parsers import parse_hosted_location
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
@@ -33,14 +32,14 @@ from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import ResolvedSource
+from imbue.mngr.api.find import ResolvedHostedLocation
 from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import get_host_from_list_by_id
-from imbue.mngr.api.find import parse_source_string
-from imbue.mngr.api.find import resolve_source_location
+from imbue.mngr.api.find import resolve_hosted_location
 from imbue.mngr.api.gc import register_generated_source_dir
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.cli.address_params import NEW_AGENT_LOCATION
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import is_param_explicit
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -60,7 +59,6 @@ from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
@@ -74,6 +72,7 @@ from imbue.mngr.interfaces.host import AgentPermissionsOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import NewHostBuildOptions
 from imbue.mngr.interfaces.host import NewHostOptions
@@ -92,6 +91,7 @@ from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import LogLevel
+from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import Permission
 from imbue.mngr.primitives import ProviderInstanceName
@@ -132,31 +132,6 @@ class _CachedAgentHostLoader(MutableModel):
                 reset_caches=False,
             )[0]
         return self.cached_result
-
-
-@pure
-def _split_address_and_target_path(raw: str) -> tuple[str, Path | None]:
-    """Split an address string into the address part and an optional target path.
-
-    Uses the same first-colon splitting convention as parse_source_string,
-    but without the bare-path recognition (since the positional arg is always
-    an agent address, not a path).
-
-    Examples:
-      - "foo" -> ("foo", None)
-      - "foo:/tmp/work" -> ("foo", Path("/tmp/work"))
-      - "foo@host.modal:/root/work" -> ("foo@host.modal", Path("/root/work"))
-      - ":/tmp/work" -> ("", Path("/tmp/work"))
-      - ":./rel/path" -> ("", Path("./rel/path"))
-      - "foo:" -> ("foo", None)  [trailing colon with no path]
-    """
-    # Same first-colon splitting as parse_source_string
-    if ":" not in raw:
-        return raw, None
-
-    address_part, path_str = raw.split(":", 1)
-    path = Path(path_str) if path_str else None
-    return address_part, path
 
 
 @pure
@@ -203,10 +178,10 @@ def _resolve_agent_type_name(
     return type_flag
 
 
-def _resolve_or_generate_agent_name(address: AgentAddress, opts: CreateCliOptions) -> AgentName:
-    """Return the agent name from the address, or auto-generate one from --name-style."""
-    if address.agent_name is not None:
-        return address.agent_name
+def _resolve_or_generate_agent_name(address: NewAgentLocation, opts: CreateCliOptions) -> AgentName:
+    """Return the agent name from the location, or auto-generate one from --name-style."""
+    if address.name is not None:
+        return address.name
     return generate_agent_name(AgentNameStyle(opts.name_style.upper()))
 
 
@@ -275,14 +250,14 @@ def _reject_incompatible_headless_flags(
 
 
 @pure
-def _is_new_host_implied(address: AgentAddress) -> bool:
-    """True when the address implies creating a new host (NAME@.PROVIDER form)."""
-    return address.provider_name is not None and address.host_name is None
+def _is_new_host_implied(address: NewAgentLocation) -> bool:
+    """True when the location implies creating a new host (``NAME@.PROVIDER`` form)."""
+    return address.host_name is None and address.provider_name is not None
 
 
 @pure
-def _is_creating_new_host(address: AgentAddress, new_host_flag: bool) -> bool:
-    """Whether this address combined with the --new-host flag means creating a new host."""
+def _is_creating_new_host(address: NewAgentLocation, new_host_flag: bool) -> bool:
+    """Whether this location combined with the --new-host flag means creating a new host."""
     return new_host_flag or _is_new_host_implied(address)
 
 
@@ -342,7 +317,7 @@ class _CreateCommand(click.Command):
 
 
 @click.command(cls=_CreateCommand)
-@click.argument("positional_name", default=None, required=False)
+@click.argument("positional_name", type=NEW_AGENT_LOCATION, default=None, required=False)
 @click.argument("positional_agent_type", default=None, required=False)
 @click.argument("agent_args", nargs=-1, type=click.UNPROCESSED)
 @optgroup.group("Agent Options")
@@ -355,6 +330,7 @@ class _CreateCommand(click.Command):
 @optgroup.option(
     "-n",
     "--name",
+    type=NEW_AGENT_LOCATION,
     help="Agent address (alternative to positional argument, mutually exclusive) [default: auto-generated]",
 )
 @optgroup.option("--id", help="Explicit agent ID [default: auto-generated]")
@@ -599,15 +575,13 @@ def create(ctx: click.Context, **kwargs) -> None:
         else nullcontext()
     )
     with suppressor:
-        # Parse agent address from the positional argument or --name flag.
-        # Both accept agent addresses; they are equivalent but mutually exclusive.
-        # The address may include an optional :PATH suffix for the target path
-        # (e.g. "myagent:/path/to/dir" or "myagent@host.modal:/path").
-        if opts.positional_name and opts.name:
+        # Pick up the parsed agent location from the positional argument or
+        # --name flag. Both are typed as NewAgentLocation by Click; they are
+        # equivalent but mutually exclusive.
+        if opts.positional_name is not None and opts.name is not None:
             raise UserInputError("Cannot specify both a positional agent address and --name. Use one or the other.")
-        raw_address = opts.positional_name or opts.name or ""
-        address_str, target_path = _split_address_and_target_path(raw_address)
-        address = parse_agent_address(address_str)
+        address: NewAgentLocation = opts.positional_name or opts.name or NewAgentLocation()
+        target_path = address.path
 
         # Merge --provider flag into the address (alternative to .PROVIDER in the address).
         if opts.provider:
@@ -716,7 +690,7 @@ class _CreateSetup(FrozenModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    address: AgentAddress = Field(description="Parsed agent address from the positional argument")
+    address: NewAgentLocation = Field(description="Parsed agent location from the positional argument")
     target_path: Path | None = Field(
         default=None, description="Target path from :PATH in the address or --target-path"
     )
@@ -725,7 +699,7 @@ class _CreateSetup(FrozenModel):
     )
     editor_session: EditorSession | None = Field(default=None, description="Editor session for --edit-message")
     agent_and_host_loader: _CachedAgentHostLoader = Field(description="Lazy loader for agents grouped by host")
-    resolved_source: ResolvedSource = Field(description="Resolved source location and optional source agent")
+    resolved_source: ResolvedHostedLocation = Field(description="Resolved source location and optional source agent")
     auto_labels: _AutoLabels = Field(description="Auto-derived labels for the new agent")
     host_lifecycle: HostLifecycleOptions = Field(description="Host lifecycle options")
     plugin_cli_params: dict[str, Any] = Field(
@@ -751,7 +725,7 @@ def _setup_create(
     output_opts: OutputOptions,
     opts: CreateCliOptions,
     logging_config: LoggingConfig,
-    address: AgentAddress,
+    address: NewAgentLocation,
     plugin_cli_params: dict[str, Any] | None = None,
     target_path: Path | None = None,
 ) -> _CreateSetup:
@@ -830,11 +804,15 @@ def _create_agent(
             "Use a remote provider (e.g. --provider modal) for idle detection."
         )
 
-    # Compute source agent state dir from the resolved agent ID
-    source_agent_state_dir: Path | None = None
+    # Compute source agent state location from the resolved agent. The host
+    # carried alongside the path may be remote (e.g. cloning a modal agent).
+    source_agent_state_location: HostLocation | None = None
     if setup.resolved_source.agent is not None:
-        source_agent_state_dir = get_agent_state_dir_path(
-            setup.resolved_source.location.host.host_dir, setup.resolved_source.agent.agent_id
+        source_agent_state_location = HostLocation(
+            host=setup.resolved_source.location.host,
+            path=get_agent_state_dir_path(
+                setup.resolved_source.location.host.host_dir, setup.resolved_source.agent.agent_id
+            ),
         )
 
     # Parse agent options
@@ -844,7 +822,7 @@ def _create_agent(
         target_host=target_host,
         initial_message=setup.initial_message,
         source_location=setup.resolved_source.location,
-        source_agent_state_dir=source_agent_state_dir,
+        source_agent_state_location=source_agent_state_location,
         mngr_ctx=mngr_ctx,
         target_path=setup.target_path,
         resolved_agent_type=resolved_agent_type,
@@ -1149,7 +1127,7 @@ def _get_source_remote_url(source_location: HostLocation) -> str | None:
 
 
 def _parse_project_name(
-    resolved_source: ResolvedSource,
+    resolved_source: ResolvedHostedLocation,
     opts: CreateCliOptions,
     remote_url: str | None,
 ) -> str:
@@ -1261,7 +1239,7 @@ def _resolve_source_location(
     mngr_ctx: MngrContext,
     *,
     is_start_desired: bool,
-) -> ResolvedSource:
+) -> ResolvedHostedLocation:
     """Resolve the source location and optionally the source agent ID and labels."""
     if opts.source is None:
         # No --from specified: default to git root
@@ -1277,7 +1255,7 @@ def _resolve_source_location(
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
         host = provider.get_host(HostName(LOCAL_HOST_NAME))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
-        return ResolvedSource(location=HostLocation(host=online_host, path=Path(source_path)))
+        return ResolvedHostedLocation(location=HostLocation(host=online_host, path=Path(source_path)))
 
     # Git URL: clone to a managed directory and treat as a local path
     if is_git_url(opts.source):
@@ -1285,29 +1263,33 @@ def _resolve_source_location(
         host = provider.get_host(HostName(LOCAL_HOST_NAME))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
         clones_base = online_host.host_dir / "clones"
-        name_hint = pick_agent_name_hint(opts.positional_name, opts.name, parse_project_name_from_url(opts.source))
+        positional_hint = (
+            str(opts.positional_name.name) if opts.positional_name and opts.positional_name.name else None
+        )
+        name_hint_arg = str(opts.name.name) if opts.name and opts.name.name else None
+        name_hint = pick_agent_name_hint(positional_hint, name_hint_arg, parse_project_name_from_url(opts.source))
         cloned_path = clone_git_url_to_managed_dir(opts.source, clones_base, name_hint, mngr_ctx.concurrency_group)
         register_generated_source_dir(online_host, cloned_path)
-        return ResolvedSource(location=HostLocation(host=online_host, path=cloned_path))
+        return ResolvedHostedLocation(location=HostLocation(host=online_host, path=cloned_path))
 
     # Parse the --from string once
-    parsed = parse_source_string(opts.source)
+    parsed = parse_hosted_location(opts.source)
 
     # When --from is just a local path (no agent or host component),
     # resolve it locally without loading all providers. Loading all
     # providers is expensive and can fail if a provider's external service
     # (e.g. Docker daemon, Modal credentials) is unavailable.
-    if parsed.agent is None and parsed.host_name is None and parsed.provider_name is None:
-        source_path = parsed.path if parsed.path is not None else os.getcwd()
+    if parsed.agent is None and parsed.host is None:
+        source_path = str(parsed.path) if parsed.path is not None else os.getcwd()
         _check_source_does_not_contain_state_dir(Path(source_path), mngr_ctx)
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
         host = provider.get_host(HostName(LOCAL_HOST_NAME))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
-        return ResolvedSource(location=HostLocation(host=online_host, path=Path(source_path)))
+        return ResolvedHostedLocation(location=HostLocation(host=online_host, path=Path(source_path)))
 
     # Need full resolution across providers
     agents_by_host = agent_and_host_loader()
-    return resolve_source_location(
+    return resolve_hosted_location(
         parsed,
         agents_by_host,
         mngr_ctx,
@@ -1468,13 +1450,13 @@ def _resolve_transfer_mode(
 
 def _parse_agent_opts(
     opts: CreateCliOptions,
-    address: AgentAddress,
+    address: NewAgentLocation,
     target_host: DiscoveredHost | NewHostOptions | None,
     initial_message: str | None,
     source_location: HostLocation,
     mngr_ctx: MngrContext,
     resolved_agent_type: str,
-    source_agent_state_dir: Path | None = None,
+    source_agent_state_location: HostLocation | None = None,
     target_path: Path | None = None,
 ) -> tuple[CreateAgentOptions, bool]:
     # Get agent name from address (which incorporates both positional and --name),
@@ -1554,8 +1536,6 @@ def _parse_agent_opts(
     # Agent type is resolved in the create() entry point and passed in.
     resolved_agent_args = opts.agent_args
 
-    is_clone = source_agent_state_dir is not None
-
     # Parse worktree base folder
     parsed_worktree_base_folder = Path(opts.worktree_base_folder).expanduser() if opts.worktree_base_folder else None
 
@@ -1576,7 +1556,7 @@ def _parse_agent_opts(
         permissions=permissions,
         label_options=label_options,
         provisioning=provisioning,
-        source_agent_state_dir=source_agent_state_dir if is_clone else None,
+        source_agent_state_location=source_agent_state_location,
     )
     return agent_opts, has_explicit_base
 
@@ -1603,11 +1583,11 @@ def _parse_host_lifecycle_options(opts: CreateCliOptions) -> HostLifecycleOption
 
 def _parse_target_host(
     opts: CreateCliOptions,
-    address: AgentAddress,
+    address: NewAgentLocation,
     agent_and_host_loader: Callable[[], dict[DiscoveredHost, list[DiscoveredAgent]]],
     lifecycle: HostLifecycleOptions,
 ) -> DiscoveredHost | NewHostOptions | None:
-    if not address.has_host_component:
+    if address.host_name is None and address.provider_name is None:
         # No host specified in address, use local host
         return None
 
@@ -1625,6 +1605,18 @@ def _parse_target_host(
         # and use the existing localhost instead.
         if address.provider_name.lower() == LOCAL_PROVIDER_NAME:
             return None
+
+        # New hosts must be named with a (fresh) HostName, not an existing HostId.
+        new_host_name: HostName | None
+        if address.host_name is None:
+            new_host_name = None
+        elif isinstance(address.host_name, HostId):
+            raise UserInputError(
+                f"--new-host cannot be combined with a host ID ('{address.host_name}'); "
+                "specify a fresh host name instead."
+            )
+        else:
+            new_host_name = address.host_name
 
         # Parse host-level labels
         host_labels_dict: dict[str, str] = {}
@@ -1651,7 +1643,7 @@ def _parse_target_host(
         parsed_host_name_style = HostNameStyle(opts.host_name_style.upper())
         return NewHostOptions(
             provider=address.provider_name,
-            name=address.host_name,
+            name=new_host_name,
             name_style=parsed_host_name_style,
             tags=host_labels_dict,
             build=build_options,
@@ -1662,10 +1654,9 @@ def _parse_target_host(
             lifecycle=lifecycle,
         )
 
-    # Targeting an existing host
+    # Targeting an existing host. ``host_name is None`` here would imply only
+    # ``provider_name`` was set, which ``_is_new_host_implied`` catches above.
     if address.host_name is None:
-        # This shouldn't happen: has_host_component is True but host_name is None
-        # means only provider_name is set, which _is_new_host_implied catches above
         raise UserInputError("Cannot target an existing host without a host name.")
 
     agents_by_host = agent_and_host_loader()
@@ -1679,16 +1670,15 @@ def _parse_target_host(
 
 
 def _find_existing_host(
-    host_name: HostName,
+    host: HostName | HostId,
     provider_name: ProviderInstanceName | None,
     all_hosts: list[DiscoveredHost],
 ) -> DiscoveredHost | None:
     """Look up an existing host by name or ID, using provider for disambiguation."""
-    try:
-        host_id = HostId(str(host_name))
-        return get_host_from_list_by_id(host_id, all_hosts)
-    except ValueError:
-        pass
+    if isinstance(host, HostId):
+        return get_host_from_list_by_id(host, all_hosts)
+
+    host_name = host
 
     matching = [h for h in all_hosts if h.host_name == host_name]
 
