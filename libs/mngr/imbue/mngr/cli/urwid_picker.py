@@ -69,7 +69,12 @@ def run_single_select_picker(
     # SelectableIcon (not Text) is required so ListBox arrow-key navigation
     # can move focus between rows -- Text widgets aren't selectable, which
     # leaves focus stuck on the first row and Up/Down silently no-ops.
-    # cursor_position out of range hides the cursor on the row.
+    # urwid's SelectableIcon.get_cursor_coords returns None iff
+    # cursor_position > len(text), hiding the cursor. The text rendered
+    # below is `"  " + label` (length len(label) + 2), so any value
+    # strictly greater than len(label) + 2 hides the cursor; `+ 4` is
+    # used as defensive padding so a small refactor of the prefix can't
+    # silently make the cursor reappear.
     list_items = [
         AttrMap(SelectableIcon(f"  {label}", cursor_position=len(label) + 4), None, focus_map="reversed")
         for label in options
