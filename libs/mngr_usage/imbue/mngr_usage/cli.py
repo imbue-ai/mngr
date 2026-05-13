@@ -129,7 +129,7 @@ def _format_reset_phrase(resets_at: int, now: int) -> str:
 
 
 @pure
-def _format_money(value: float) -> str:
+def _format_usd(value: float) -> str:
     """Render a USD amount in a money-conventional way: ``$0.42``, ``$5.43``.
 
     Two decimals everywhere for visual stability; users who need more
@@ -205,10 +205,8 @@ def _format_cost_line(
     prefix = f"{mode_label}{mode_suffix}"
     if session_count <= 1 and latest_event_at is not None:
         age_seconds = max(0, now - latest_event_at)
-        return f"{prefix}: {_format_money(total)} ({_format_age_phrase(age_seconds)})"
-    return (
-        f"{prefix}: {_format_money(total)} across {session_count} sessions in last {_format_duration(since_seconds)}"
-    )
+        return f"{prefix}: {_format_usd(total)} ({_format_age_phrase(age_seconds)})"
+    return f"{prefix}: {_format_usd(total)} across {session_count} sessions in last {_format_duration(since_seconds)}"
 
 
 _SESSION_DETAIL_ID_PREFIX_LEN = 8
@@ -243,7 +241,7 @@ def _format_session_detail_line(session: SessionCostRecord, now: int) -> str | N
     tag = _SESSION_MODE_TAGS[session.cost_mode]
     return (
         f"  [{tag}] {session.session_id[:_SESSION_DETAIL_ID_PREFIX_LEN]}: "
-        f"{_format_money(cost_usd)} ({_format_age_phrase(age_seconds)})"
+        f"{_format_usd(cost_usd)} ({_format_age_phrase(age_seconds)})"
     )
 
 
