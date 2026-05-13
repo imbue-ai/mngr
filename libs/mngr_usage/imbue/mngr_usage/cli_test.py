@@ -1473,6 +1473,71 @@ def test_usage_command_detail_flag_emits_per_session_lines_in_human_output(
 
 
 @pytest.mark.tmux
+def test_usage_command_detail_flag_emits_sub_tag_for_subscription_sessions(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """``--detail`` per-session lines tag subscription sessions with ``[sub]``.
+
+    The ``_SESSION_MODE_TAGS`` mapping (``SUBSCRIPTION -> "sub"``,
+    ``API_KEY -> "api"``) is part of the user-visible contract: it's how
+    users distinguish auth contexts in a mixed-mode breakdown. The
+    api-tag side is covered elsewhere; this guards the subscription
+    branch against a silent regression that would swap or drop the
+    SUBSCRIPTION entry.
+    """
+    base = datetime.now(timezone.utc)
+    now_iso = base.strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    earlier_iso = (base - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    rate_limits = {"five_hour": {"used_percentage": 30.0, "resets_at": 9_999_999_999_999, "label": "5h"}}
+    # Both events carry rate_limits -> both processes are classified as
+    # subscription. Cost-drop boundary between them is fine; the mode
+    # classification of each process is independent and both land in
+    # SUBSCRIPTION here.
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-earlier-sub",
+            "timestamp": earlier_iso,
+            "session_id": "oldersubsession",
+            "cost": {"total_cost_usd": 1.00},
+            "rate_limits": rate_limits,
+        },
+    )
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-now-sub",
+            "timestamp": now_iso,
+            "session_id": "currentsubsess",
+            "cost": {"total_cost_usd": 0.30},
+            "rate_limits": rate_limits,
+        },
+    )
+    result = cli_runner.invoke(usage, ["--detail", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    # Subscription aggregate line appears (imputed callout intact).
+    assert "subscription cost (imputed): $1.30 across 2 sessions" in result.output, result.output
+    # Per-session lines render with the [sub] tag (8-char truncated session ids).
+    cost_idx = result.output.index("subscription cost (imputed): $1.30")
+    current_idx = result.output.index("[sub] currents")
+    older_idx = result.output.index("[sub] oldersub")
+    assert cost_idx < current_idx < older_idx, result.output
+    # No api cost line and no [api] tags -- this is a single-mode run.
+    assert "api cost:" not in result.output
+    assert "[api]" not in result.output
+
+
+@pytest.mark.tmux
 def test_usage_command_renders_both_cost_lines_when_both_modes_contribute(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
