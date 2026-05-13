@@ -172,10 +172,14 @@ class UsageSnapshot(FrozenModel):
       this source. Rate limits are an account-level counter (same across
       all agents for one Anthropic account), so freshest-wins is the right
       reduction.
-    - ``sessions`` is the per-(session_id) latest cost reading across all
-      events for this source, filtered to the recency window passed at
-      gather time. Cost is per-session, so we keep one record per session.
-      Ordered newest-first by ``last_event_at``.
+    - ``sessions`` is a tuple of per-session own-contribution records.
+      Each record's ``cost`` is the delta between this session's final
+      cumulative reading and the prior session's final cumulative reading
+      within the same Claude Code process (see ``SessionCostRecord``).
+      Filtered to the recency window passed at gather time and ordered
+      newest-first by ``last_event_at``. Records are keyed per (agent,
+      process); the same ``session_id`` can appear more than once when
+      /resume carries a session across a Claude Code process restart.
 
     Computed views (``cost``, ``session_count``) read off ``sessions`` and
     are recomputed each access -- cheap because the tuple is small.
