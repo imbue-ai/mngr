@@ -281,7 +281,7 @@ def is_end_turn_event(event: dict[str, Any]) -> bool:
     return True
 
 
-def extract_assistant_text(event: dict) -> str:
+def extract_assistant_text(event: dict[str, Any]) -> str:
     """Concatenate text blocks from an assistant message event."""
     message = event.get("message")
     if not isinstance(message, dict):
