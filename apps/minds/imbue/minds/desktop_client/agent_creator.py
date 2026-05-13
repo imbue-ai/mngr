@@ -872,9 +872,11 @@ class AgentCreator(MutableModel):
         via the ``imbue_cloud_<account-slug>`` provider; the plugin's
         ``ImbueCloudProvider.create_host`` runs the lease + SSH bootstrap
         and the rest of mngr's create pipeline adopts the pool host's
-        pre-baked agent under the requested name. The plugin owns the
-        SuperTokens session, so minds only needs to know which account to
-        ask for.
+        pre-baked agent *verbatim* (always named ``system-services`` -- the
+        agent is no longer renamed at adoption time). The user-supplied
+        workspace name lands on the *host* (as the connector lease's
+        ``host_name``), not on the agent. The plugin owns the SuperTokens
+        session, so minds only needs to know which account to ask for.
 
         When ``on_created`` is provided, it is called with the canonical
         ``AgentId`` once ``mngr create`` returns (immediately before the
