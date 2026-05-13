@@ -162,6 +162,38 @@ def _format_manual_credentials_message(service_display_name: str) -> str:
     return f"{service_display_name} does not support browser sign-in; manual credentials are required."
 
 
+# Substring latchkey prints when a service (currently the ``google-*``
+# family) needs a one-time ``auth browser-prepare`` to provision an
+# OAuth client in the user's own GCP project before sign-in can run.
+# Matched against the auth_browser stderr; case-insensitive contains
+# check so a future copy edit on the latchkey side (e.g. punctuation)
+# doesn't silently break the auto-prepare chain.
+_AUTH_BROWSER_NEEDS_PREPARE_MARKER: Final[str] = "requires preparation first"
+
+
+def _auth_browser_with_auto_prepare(latchkey: Latchkey, service_name: str) -> tuple[bool, str]:
+    """Run ``latchkey auth browser``, auto-running ``browser-prepare`` on first miss.
+
+    Some services (notably ``google-*``) require a one-time
+    ``auth browser-prepare`` step before ``auth browser`` works. Rather
+    than surface that as a dead-end error and a separate UI button, we
+    detect the failure and chain prepare -> retry automatically; from
+    the user's perspective the single Approve click drives both Chrome
+    windows.
+    """
+    is_success, detail = latchkey.auth_browser(service_name)
+    if is_success or _AUTH_BROWSER_NEEDS_PREPARE_MARKER not in detail.lower():
+        return is_success, detail
+    logger.info(
+        "latchkey auth browser {} reported needs-preparation; running auth browser-prepare",
+        service_name,
+    )
+    is_prepared, prepare_detail = latchkey.auth_browser_prepare(service_name)
+    if not is_prepared:
+        return False, prepare_detail
+    return latchkey.auth_browser(service_name)
+
+
 def _fallback_set_credentials_example(service_name: str) -> str:
     """Return a generic ``latchkey auth set`` invocation when latchkey didn't supply one."""
     return f'latchkey auth set {service_name} -H "Authorization: Bearer <token>"'
@@ -324,7 +356,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 service_info.name,
                 latchkey_service_info.credential_status,
             )
-            is_success, detail = self.latchkey.auth_browser(service_info.name)
+            is_success, detail = _auth_browser_with_auto_prepare(self.latchkey, service_info.name)
             if not is_success:
                 # No separate AUTH_FAILED status: a failed sign-in is
                 # surfaced as DENIED with a distinct message so the agent

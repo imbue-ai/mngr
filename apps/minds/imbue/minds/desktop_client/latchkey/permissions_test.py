@@ -309,6 +309,122 @@ def test_grant_treats_failed_browser_flow_as_deny_with_distinct_message(tmp_path
     assert len(mngr_recording) == 1
 
 
+def _make_latchkey_with_auto_prepare(
+    tmp_path: Path,
+    *,
+    credential_status: str = "missing",
+    prepare_exit: int = 0,
+    second_browser_exit: int = 0,
+) -> Latchkey:
+    """Fake latchkey CLI that simulates the prepare-then-retry chain.
+
+    Behaviour:
+
+    - ``services info``: emits the standard JSON payload.
+    - First ``auth browser``: exits 1 with the "requires preparation first"
+      stderr that real latchkey returns for unprepared ``google-*`` services.
+    - ``auth browser-prepare``: exits with ``prepare_exit``.
+    - Second ``auth browser`` (after prepare): exits with
+      ``second_browser_exit``.
+
+    All invocations are appended to ``auth_latchkey_report.jsonl`` so tests
+    can assert the exact subcommand sequence.
+    """
+    binary = tmp_path / "latchkey"
+    counter_path = tmp_path / "auth_browser_call_count"
+    auth_recording = tmp_path / "auth_latchkey_report.jsonl"
+    services_payload = json.dumps(
+        {
+            "credentialStatus": credential_status,
+            "authOptions": ["browser", "set"],
+            "setCredentialsExample": _DEFAULT_SET_EXAMPLE,
+        }
+    )
+    binary.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "argv = sys.argv[1:]\n"
+        f"counter = Path({str(counter_path)!r})\n"
+        f"recording = {str(auth_recording)!r}\n"
+        "if argv[:2] == ['services', 'info']:\n"
+        f"    print({services_payload!r})\n"
+        "    sys.exit(0)\n"
+        "elif argv[:2] == ['auth', 'browser']:\n"
+        "    with open(recording, 'a') as f:\n"
+        "        f.write(json.dumps({'argv': argv, 'env_LATCHKEY_DIRECTORY': os.environ.get('LATCHKEY_DIRECTORY', '')}) + '\\n')\n"
+        "    n = int(counter.read_text()) if counter.exists() else 0\n"
+        "    counter.write_text(str(n + 1))\n"
+        "    if n == 0:\n"
+        "        sys.stderr.write('Error: Service google-gmail requires preparation first. "
+        "Run \\'latchkey auth browser-prepare google-gmail\\' before logging in.')\n"
+        "        sys.exit(1)\n"
+        f"    sys.exit({second_browser_exit})\n"
+        "elif argv[:2] == ['auth', 'browser-prepare']:\n"
+        "    with open(recording, 'a') as f:\n"
+        "        f.write(json.dumps({'argv': argv, 'env_LATCHKEY_DIRECTORY': os.environ.get('LATCHKEY_DIRECTORY', '')}) + '\\n')\n"
+        f"    sys.exit({prepare_exit})\n"
+        "else:\n"
+        "    sys.stderr.write('unexpected argv: ' + repr(argv))\n"
+        "    sys.exit(99)\n"
+    )
+    binary.chmod(0o755)
+    return Latchkey(latchkey_binary=str(binary))
+
+
+def test_grant_auto_runs_browser_prepare_then_retries_auth_browser(tmp_path: Path) -> None:
+    """First auth_browser misses with "requires preparation"; flow auto-prepares and retries."""
+    latchkey = _make_latchkey_with_auto_prepare(tmp_path)
+    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
+    handler = LatchkeyPermissionGrantHandler(
+        data_dir=tmp_path,
+        latchkey=latchkey,
+        services_catalog={_SLACK_SERVICE_INFO.name: _SLACK_SERVICE_INFO},
+        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+    )
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    auth_recording = _read_recording(tmp_path / "auth_latchkey_report.jsonl")
+    assert [r["argv"] for r in auth_recording] == [
+        ["auth", "browser", "slack"],
+        ["auth", "browser-prepare", "slack"],
+        ["auth", "browser", "slack"],
+    ]
+
+
+def test_grant_surfaces_prepare_failure_as_denied(tmp_path: Path) -> None:
+    """If browser-prepare itself fails, the grant denies without a second auth browser."""
+    latchkey = _make_latchkey_with_auto_prepare(tmp_path, prepare_exit=1)
+    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
+    handler = LatchkeyPermissionGrantHandler(
+        data_dir=tmp_path,
+        latchkey=latchkey,
+        services_catalog={_SLACK_SERVICE_INFO.name: _SLACK_SERVICE_INFO},
+        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+    )
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    assert result.outcome == GrantOutcome.DENIED
+    auth_recording = _read_recording(tmp_path / "auth_latchkey_report.jsonl")
+    assert [r["argv"] for r in auth_recording] == [
+        ["auth", "browser", "slack"],
+        ["auth", "browser-prepare", "slack"],
+    ]
+
+
 def test_grant_rejects_empty_granted_permissions(tmp_path: Path) -> None:
     handler = _build_handler(tmp_path, credential_status="valid")
 
