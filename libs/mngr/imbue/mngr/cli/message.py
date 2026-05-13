@@ -128,7 +128,6 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
     if opts.message_file is not None:
         resolved_message_content = Path(opts.message_file).read_text()
 
-    # Get message content
     message_content = _get_message_content(
         resolved_message_content, ctx, is_interactive=mngr_ctx.is_interactive, stdin_consumed=stdin_consumed
     )
