@@ -714,7 +714,9 @@ class UsageWaitCliOptions(CommonCliOptions, AgentFilterCliOptions):
     "--since",
     default=None,
     help="Recency window for per-session cost aggregation (e.g. '24h', '7d'). Affects "
-    "`cost.*` aggregate fields in the CEL context. Default: from plugin config (24h).",
+    "every per-session surface in the CEL context: `cost.*` (aggregate across recent "
+    "sessions), `current_session.*` (latest in-window session), `sessions[]`, and "
+    "`session_count`. Default: from plugin config (24h).",
 )
 @add_agent_filter_options
 @optgroup.option(
