@@ -130,8 +130,7 @@ def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_n
     Apps are deliberately not in the deregister chain. `modal app list --json`
     is subject to the same eventually-consistent window we work around for
     envs, so we leave registered apps tracked and let `_get_leaked_modal_apps`
-    (single-shot today; forward-looking comment flags the polling pattern if
-    that proves insufficient) be the authoritative source of app liveness.
+    be the authoritative source of app liveness.
 
     Volume + env are deregistered only on DELETED/NOT_FOUND. FAILED leaves the
     resource tracked so the session-end leak detector surfaces it.
