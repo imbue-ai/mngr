@@ -21,6 +21,7 @@ from imbue.mngr.config.loader import load_config
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.main import get_or_create_plugin_manager
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CleanupAction
 from imbue.mngr.primitives import ErrorBehavior
 
@@ -29,6 +30,38 @@ from imbue.mngr.primitives import ErrorBehavior
 # have a single name to inject against. Mirrors the pattern of
 # ``DestroyAgentDetachedCallable`` in ``hooks/destroy_detached.py``.
 ListAgentsByNameCallable = Callable[[], dict[str, AgentDetails] | None]
+
+# Label set by both PROXY and DENY-mode spawning paths on every child agent:
+# PROXY's wait-script attaches it via ``mngr create --label ...`` (see
+# hooks/spawn.py), and the ``mngr-subagents`` skill instructs Claude to
+# attach it the same way for DENY-mode-spawned children. Used as the
+# server-side source of truth for "is this agent one of my children".
+PARENT_ID_LABEL: str = "mngr_claude_subagent_proxy_parent_id"
+
+_TERMINAL_STATES: frozenset[AgentLifecycleState] = frozenset({AgentLifecycleState.DONE, AgentLifecycleState.STOPPED})
+
+
+def find_terminal_children(
+    parent_id: str,
+    agents_by_name: dict[str, AgentDetails],
+) -> list[AgentDetails]:
+    """Filter the agent list to terminal children of ``parent_id``.
+
+    A child is identified by the ``mngr_claude_subagent_proxy_parent_id``
+    label matching this parent's ``MNGR_AGENT_ID``. RUNNING / WAITING
+    children are deliberately left alone (they may still be doing useful
+    work the user wants to observe or capture); only terminal children
+    (DONE / STOPPED) are reaped. Same scope and semantics across PROXY
+    and DENY modes.
+    """
+    children: list[AgentDetails] = []
+    for agent in agents_by_name.values():
+        if agent.labels.get(PARENT_ID_LABEL) != parent_id:
+            continue
+        if agent.state not in _TERMINAL_STATES:
+            continue
+        children.append(agent)
+    return children
 
 
 @contextmanager
