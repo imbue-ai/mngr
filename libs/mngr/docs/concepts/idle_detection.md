@@ -31,9 +31,12 @@ For convenience, there are several **idle modes** that bundle common configurati
 | `boot`         |            |              |     |                |               |   ✓  |               |
 | `start`        |            |              |     |                |       ✓       |   ✓  |               |
 | `run`          |            |              |     |       ✓        |       ✓       |   ✓  |       ✓       |
+| `custom`       |     —      |      —       |  —  |       —        |       —       |   —  |       —       |
 | `disabled`     |            |              |     |                |               |      |               |
 
 The "create", "boot" and "run" modes are most useful for scripting (which correspond to "time since the agent was created", "time since the host came online" and "time since the agent exited" respectively). The "start" mode is "time since the agent started" and is useful for limiting agent lifetime when scripting.
+
+The `custom` mode is selected automatically when the configured set of activity sources does not match any of the named bundles above. In that mode the active set is whatever combination of activity sources you explicitly configured.
 
 ## Trustworthiness of activity reporting
 
