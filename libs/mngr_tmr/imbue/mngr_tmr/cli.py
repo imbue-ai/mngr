@@ -27,7 +27,6 @@ from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownBackendError
-from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -125,7 +124,6 @@ class TmrCliOptions(CommonCliOptions):
     launch_delay: float
     poll_interval: float
     timeout: float
-    result_check_interval: float
     integrator_timeout: float
     output_html: str | None
     source: str | None
@@ -256,19 +254,17 @@ def _run_reintegrate(
 
     # Build agent infos from discovered agents. Output pulling uses the volume
     # API directly, so the testing agents' hosts do not need to be online.
-    agent_infos: list[TestAgentInfo] = []
-    final_details: dict[str, AgentDetails] = {}
-    for detail in matching_agents:
-        agent_infos.append(
-            TestAgentInfo(
-                test_node_id=detail.labels.get("test_node_id", str(detail.name)),
-                agent_id=detail.id,
-                agent_name=detail.name,
-                work_dir=detail.work_dir,
-                created_at=0.0,
-            )
+    agent_infos: list[TestAgentInfo] = [
+        TestAgentInfo(
+            test_node_id=detail.labels.get("test_node_id", str(detail.name)),
+            agent_id=detail.id,
+            agent_name=detail.name,
+            work_dir=detail.work_dir,
+            branch_name=detail.initial_branch,
+            created_at=0.0,
         )
-        final_details[str(detail.id)] = detail
+        for detail in matching_agents
+    ]
 
     # Compute output directory
     if opts.output_html is not None:
@@ -302,7 +298,6 @@ def _run_reintegrate(
     base_commit = get_base_commit(source_dir, cg)
     results = gather_results(
         agents=agent_infos,
-        final_details=final_details,
         timed_out_ids=set(),
         cached_results=cached_results,
     )
@@ -378,38 +373,34 @@ def _run_integrator_phase(
     integrator_deadline = time.monotonic() + opts.integrator_timeout
     integrator_branch = wait_for_integrator(
         integrator=integrator,
-        mngr_ctx=mngr_ctx,
         poll_interval_seconds=opts.poll_interval,
         host=integrator_host,
         deadline=integrator_deadline,
     )
 
-    integrator_result: IntegratorResult | None = None
-    if integrator_branch is not None:
-        is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
-        list_result = try_list_agents(mngr_ctx)
-        for agent_detail in list_result.agents if list_result is not None else []:
-            if str(agent_detail.id) == str(integrator.agent_id):
-                integrator_result = read_integrator_result(
-                    agent_detail, integrator_host, integrator_branch, output_dir, mngr_ctx.concurrency_group
-                )
-                # Only pull branches from remote providers; local worktree branches already exist
-                if is_remote:
-                    pull_agent_branch(
-                        agent_detail.id,
-                        agent_detail.name,
-                        agent_detail.initial_branch,
-                        integrator_host,
-                        config.source_dir,
-                        mngr_ctx.concurrency_group,
-                        base_commit=base_commit,
-                    )
-                break
+    if integrator_branch is None:
+        return IntegratorResult(agent_name=integrator.agent_name, branch_name=None)
 
-    if integrator_result is None:
-        integrator_result = IntegratorResult(
-            agent_name=integrator.agent_name,
-            branch_name=integrator_branch,
+    integrator_result = read_integrator_result(
+        agent_id=integrator.agent_id,
+        agent_name=integrator.agent_name,
+        host=integrator_host,
+        branch_name=integrator_branch,
+        destination_dir=output_dir,
+        cg=mngr_ctx.concurrency_group,
+    )
+
+    # Only pull branches from remote providers; local worktree branches already exist
+    is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
+    if is_remote:
+        pull_agent_branch(
+            integrator.agent_id,
+            integrator.agent_name,
+            integrator_branch,
+            integrator_host,
+            config.source_dir,
+            mngr_ctx.concurrency_group,
+            base_commit=base_commit,
         )
 
     return integrator_result
@@ -509,7 +500,7 @@ def _run_integrator_phase(
 )
 @click.option(
     "--poll-interval",
-    default=10.0,
+    default=60.0,
     show_default=True,
     type=float,
     help="Seconds between polling cycles when waiting for agents to finish",
@@ -520,13 +511,6 @@ def _run_integrator_phase(
     show_default=True,
     type=float,
     help="Maximum seconds each agent can run before being stopped (per-agent timeout)",
-)
-@click.option(
-    "--result-check-interval",
-    default=300.0,
-    show_default=True,
-    type=float,
-    help="Seconds between direct result file checks for agents whose status may be stale",
 )
 @click.option(
     "--integrator-timeout",
@@ -706,7 +690,7 @@ def _run_tmr_pipeline(
         _emit_agents_launched(len(agent_infos), output_opts)
         remaining_node_ids = []
 
-    final_details, timed_out_ids, cached_results = launch_and_poll_agents(
+    timed_out_ids, cached_results = launch_and_poll_agents(
         test_node_ids=remaining_node_ids,
         config=config,
         mngr_ctx=mngr_ctx,
@@ -715,7 +699,6 @@ def _run_tmr_pipeline(
         max_agents=opts.max_agents,
         agent_timeout_seconds=opts.timeout,
         poll_interval_seconds=opts.poll_interval,
-        result_check_interval_seconds=opts.result_check_interval,
         report_path=html_path,
         all_agents=agent_infos,
         all_hosts=agent_hosts,
@@ -731,7 +714,6 @@ def _run_tmr_pipeline(
     # downloaded and applied during per-agent finalization).
     results = gather_results(
         agents=agent_infos,
-        final_details=final_details,
         timed_out_ids=timed_out_ids,
         cached_results=cached_results,
         launch_failures=launch_failures,

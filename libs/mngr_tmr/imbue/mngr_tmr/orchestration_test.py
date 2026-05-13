@@ -1,22 +1,17 @@
 """Unit tests for test-mapreduce API functions."""
 
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import EnvVar
-from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
@@ -298,7 +293,7 @@ def test__build_current_results_pending_agents() -> None:
             created_at=0.0,
         ),
     ]
-    results = _build_current_results(agents=agents, final_details={}, timed_out_ids=set())
+    results = _build_current_results(agents=agents, timed_out_ids=set())
     assert len(results) == 2
     assert _report_section_of(results[0]) == ReportSection.RUNNING
     assert _report_section_of(results[1]) == ReportSection.RUNNING
@@ -317,7 +312,7 @@ def test__build_current_results_timed_out_agents() -> None:
             created_at=0.0,
         ),
     ]
-    results = _build_current_results(agents=agents, final_details={}, timed_out_ids={str(agent_id)})
+    results = _build_current_results(agents=agents, timed_out_ids={str(agent_id)})
     assert len(results) == 1
     assert results[0].errored is True
     assert _report_section_of(results[0]) == ReportSection.FAILED
@@ -333,7 +328,6 @@ def test__build_current_results_includes_launch_failures() -> None:
     )
     results = _build_current_results(
         agents=[],
-        final_details={},
         timed_out_ids=set(),
         launch_failures=[failure],
     )
@@ -361,7 +355,6 @@ def test__build_current_results_launch_failures_come_before_running_agents() -> 
     )
     results = _build_current_results(
         agents=[agent],
-        final_details={},
         timed_out_ids=set(),
         launch_failures=[failure],
     )
@@ -380,31 +373,11 @@ def _write_local_result(local_dir: Path, content: str) -> None:
     (test_output_dir / TESTING_AGENT_OUTCOME_FILENAME).write_text(content)
 
 
-def _write_integrator_result_in_work_dir(work_dir: Path, content: str) -> None:
-    """Write an integrator_outcome.json in the agent's .test_output directory."""
-    result_dir = work_dir / ".test_output"
-    result_dir.mkdir(parents=True, exist_ok=True)
-    (result_dir / INTEGRATOR_OUTCOME_FILENAME).write_text(content)
-
-
-def _make_agent_detail(agent_id: AgentId, host_dir: Path) -> AgentDetails:
-    """Build a minimal AgentDetails for testing result reading.
-
-    Uses model_construct to skip validation of the host field, which requires
-    a HostDetails that these tests don't need.
-    """
-    return AgentDetails.model_construct(
-        id=agent_id,
-        name=AgentName("tmr-test"),
-        type="claude",
-        command=CommandString("echo"),
-        work_dir=host_dir / "workdir",
-        initial_branch="mngr-tmr/test",
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.DONE,
-        host=None,
-    )
+def _write_integrator_result_locally(destination_dir: Path, agent_name: AgentName, content: str) -> None:
+    """Write an integrator_outcome.json into the spot where read_integrator_result reads it from."""
+    target_dir = destination_dir / str(agent_name)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / INTEGRATOR_OUTCOME_FILENAME).write_text(content)
 
 
 def test_read_local_result_parses_changes(tmp_path: Path) -> None:
@@ -451,16 +424,24 @@ def test_read_local_result_missing_file(tmp_path: Path) -> None:
     assert result is None
 
 
-def test_read_integrator_result_parses_merged_failed(localhost: OnlineHostInterface) -> None:
+def test_read_integrator_result_parses_merged_failed(localhost: OnlineHostInterface, tmp_path: Path) -> None:
     agent_id = AgentId.generate()
-    detail = _make_agent_detail(agent_id, localhost.host_dir)
-    _write_integrator_result_in_work_dir(
-        detail.work_dir,
+    agent_name = AgentName("tmr-integrator-test")
+    _write_integrator_result_locally(
+        tmp_path,
+        agent_name,
         '{"squashed_branches": ["branch-a", "branch-b"], "squashed_commit_hash": "abc1234",'
         ' "impl_priority": ["branch-d"], "impl_commit_hashes": {"branch-d": "def5678"}, "failed": ["branch-c"]}',
     )
     cg = ConcurrencyGroup(name="test")
-    result = read_integrator_result(detail, localhost, "mngr-tmr/integrated", destination_dir=None, cg=cg)
+    result = read_integrator_result(
+        agent_id=agent_id,
+        agent_name=agent_name,
+        host=localhost,
+        branch_name="mngr-tmr/integrated",
+        destination_dir=tmp_path,
+        cg=cg,
+    )
     assert result.squashed_branches == ("branch-a", "branch-b")
     assert result.squashed_commit_hash == "abc1234"
     assert result.impl_priority == ("branch-d",)
@@ -469,11 +450,18 @@ def test_read_integrator_result_parses_merged_failed(localhost: OnlineHostInterf
     assert result.branch_name == "mngr-tmr/integrated"
 
 
-def test_read_integrator_result_missing_file(localhost: OnlineHostInterface) -> None:
+def test_read_integrator_result_missing_file(localhost: OnlineHostInterface, tmp_path: Path) -> None:
     agent_id = AgentId.generate()
-    detail = _make_agent_detail(agent_id, localhost.host_dir)
+    agent_name = AgentName("tmr-integrator-test")
     cg = ConcurrencyGroup(name="test")
-    result = read_integrator_result(detail, localhost, "mngr-tmr/integrated", destination_dir=None, cg=cg)
+    result = read_integrator_result(
+        agent_id=agent_id,
+        agent_name=agent_name,
+        host=localhost,
+        branch_name="mngr-tmr/integrated",
+        destination_dir=tmp_path,
+        cg=cg,
+    )
     assert result.branch_name == "mngr-tmr/integrated"
     assert result.squashed_branches == ()
     assert result.impl_priority == ()

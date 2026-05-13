@@ -17,7 +17,6 @@ from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentId
@@ -258,19 +257,20 @@ def _get_agent_from_host(
 
 
 def _pull_integrator_outputs(
-    agent_detail: AgentDetails,
+    agent_id: AgentId,
+    agent_name: AgentName,
     host: OnlineHostInterface,
     destination_dir: Path,
     cg: ConcurrencyGroup,
 ) -> bool:
     """Pull the integrator agent's .test_output via rsync. Returns True on success."""
     try:
-        agent = _get_agent_from_host(host, agent_detail.id)
+        agent = _get_agent_from_host(host, agent_id)
     except (MngrError, HostError, AgentNotFoundOnHostError) as exc:
         logger.warning("Could not find integrator agent on host: {}", exc)
         return False
 
-    local_dest = destination_dir / str(agent_detail.name)
+    local_dest = destination_dir / str(agent_name)
     local_dest.mkdir(parents=True, exist_ok=True)
     try:
         pull_files(
@@ -290,33 +290,26 @@ def _pull_integrator_outputs(
 
 
 def read_integrator_result(
-    agent_detail: AgentDetails,
+    agent_id: AgentId,
+    agent_name: AgentName,
     host: OnlineHostInterface,
     branch_name: str | None,
-    destination_dir: Path | None,
+    destination_dir: Path,
     cg: ConcurrencyGroup,
 ) -> IntegratorResult:
     """Pull the integrator agent's .test_output and read the outcome file."""
-    empty = IntegratorResult(agent_name=agent_detail.name, branch_name=branch_name)
+    empty = IntegratorResult(agent_name=agent_name, branch_name=branch_name)
 
-    if destination_dir is not None:
-        _pull_integrator_outputs(agent_detail, host, destination_dir, cg)
-        local_result = destination_dir / str(agent_detail.name) / INTEGRATOR_OUTCOME_FILENAME
-        try:
-            data = json.loads(local_result.read_text())
-        except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
-            logger.warning("Failed to read integrator result locally: {}", exc)
-            return empty
-    else:
-        result_path = agent_detail.work_dir / ".test_output" / INTEGRATOR_OUTCOME_FILENAME
-        try:
-            data = json.loads(host.read_text_file(result_path))
-        except (HostError, OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
-            logger.warning("Failed to read integrator result: {}", exc)
-            return empty
+    _pull_integrator_outputs(agent_id, agent_name, host, destination_dir, cg)
+    local_result = destination_dir / str(agent_name) / INTEGRATOR_OUTCOME_FILENAME
+    try:
+        data = json.loads(local_result.read_text())
+    except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to read integrator result locally: {}", exc)
+        return empty
 
     return IntegratorResult(
-        agent_name=agent_detail.name,
+        agent_name=agent_name,
         squashed_branches=tuple(data.get("squashed_branches", ())),
         squashed_commit_hash=data.get("squashed_commit_hash"),
         impl_priority=tuple(data.get("impl_priority", ())),
@@ -383,7 +376,7 @@ def _create_local_branch(destination: Path, branch_name: str, base_commit: str, 
         logger.info("Branch '{}' already exists, reusing it", branch_name)
 
 
-def try_read_integrator_outcome(work_dir: Path, host: OnlineHostInterface) -> bool:
+def is_integrator_outputs_ready(work_dir: Path, host: OnlineHostInterface) -> bool:
     """Check if the integrator's outcome file exists on the remote host."""
     result_path = work_dir / ".test_output" / INTEGRATOR_OUTCOME_FILENAME
     try:
