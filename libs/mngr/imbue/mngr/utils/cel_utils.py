@@ -10,7 +10,6 @@ from loguru import logger
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.interfaces.agent import AgentInterface
 
 # Marker substring embedded in the CELEvalError message produced by
 # TolerantMapType on a missing-key access. apply_compiled_cel_filters checks
@@ -327,18 +326,3 @@ def evaluate_cel_sort_key(
     except CELEvalError as e:
         logger.trace("CEL sort key evaluation failed: {}", e)
         return None
-
-
-def agent_to_cel_context(agent: AgentInterface, host_name: str, provider_name: str) -> dict[str, Any]:
-    """Convert an agent to a CEL-friendly dict for filtering."""
-    return {
-        "id": str(agent.id),
-        "name": str(agent.name),
-        "type": str(agent.agent_type),
-        "state": agent.get_lifecycle_state().value,
-        "host": {
-            "id": str(agent.host_id),
-            "name": host_name,
-            "provider": provider_name,
-        },
-    }

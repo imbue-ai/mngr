@@ -10,6 +10,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.api.cel_context import agent_to_cel_context
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.start import send_resume_message_if_configured
 from imbue.mngr.config.data_types import MngrContext
@@ -24,7 +25,6 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.providers.base_provider import BaseProviderInstance
-from imbue.mngr.utils.cel_utils import agent_to_cel_context
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.thread_cleanup import mngr_executor
