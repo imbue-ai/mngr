@@ -494,16 +494,15 @@ def _delete_modal_volumes(volume_names: list[str]) -> None:
             pass
 
 
-# Modal endpoints disagree across a few-second window: earlier CI runs on
-# this branch had `modal env delete X` and `modal app list --env=X` both
-# returning "Environment 'X' not found" while `modal environment list --json`
-# a few seconds later returned X. Cause is unclear -- could be
-# eventually-consistent delete, eventually-consistent create across replicas,
-# or some mix. Either way, no single Modal endpoint snapshot is reliable
-# here, so a single-shot leak check can't tell a stale-listing entry from a
-# real leak. Mitigation: poll the global list until candidates converge or a
-# budget elapses; anything still listed after the budget is flagged. Budget
-# is generous vs the observed ~5 s window but bounded so a real leak can't
+# Modal's listing endpoints are eventually consistent w.r.t. deletion and
+# can disagree across a few-second window: `modal env delete X` and
+# `modal app list --env=X` can return "Environment 'X' not found" while
+# `modal environment list --json` a few seconds later still includes X.
+# No single Modal endpoint snapshot is reliable here, so a single-shot
+# leak check can't tell a stale-listing entry from a real leak.
+# Mitigation: poll the global list until candidates converge or a budget
+# elapses; anything still listed after the budget is flagged. Budget is
+# generous vs the observed ~5 s window but bounded so a real leak can't
 # stall teardown.
 _LEAK_POLL_TIMEOUT_S: Final[float] = 30.0
 _LEAK_POLL_INTERVAL_S: Final[float] = 2.0
