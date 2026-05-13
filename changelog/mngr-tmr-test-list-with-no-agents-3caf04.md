@@ -1,0 +1,1 @@
+- Fixed: e2e test `test_list_with_no_agents` no longer times out. The default 10s pytest-timeout was too short for `mngr list` to complete its first-call Modal environment creation (~14s); the test now sets `@pytest.mark.timeout(120)` to match the other modal-marked e2e tests.

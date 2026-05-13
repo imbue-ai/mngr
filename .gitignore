@@ -243,6 +243,7 @@
 
 # TMR output directories (reports + test outputs)
 **/tmr_*/
+**/tmr-*/
 
 # Active session marker file (used to detect interrupted sessions)
 **/.claude/active
@@ -314,3 +315,6 @@
 # re-fetch.
 /apps/minds/imbue/minds/desktop_client/static/tailwind.js
 **/.env.swp
+
+# tmr (test-map-reduce) orchestrator runtime output
+/tmr-report/
