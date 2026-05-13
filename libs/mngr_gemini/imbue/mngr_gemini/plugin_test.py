@@ -36,6 +36,12 @@ def test_gemini_agent_advertises_tui_ready_indicator() -> None:
     assert "Type your message" in GeminiAgent.TUI_READY_INDICATOR
 
 
+def test_gemini_agent_disables_submission_signal() -> None:
+    """Gemini lacks a UserPromptSubmit-style hook, so this hook must be off."""
+    agent = GeminiAgent.model_construct()
+    assert agent.uses_submission_signal() is False
+
+
 def test_register_agent_type_returns_gemini_class_and_config() -> None:
     name, agent_class, config_class = register_agent_type()
     assert name == "gemini"

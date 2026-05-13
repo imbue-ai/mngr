@@ -26,6 +26,18 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig]):
     # running `gemini` in a probe tmux session and capturing the pane.
     TUI_READY_INDICATOR = "Type your message"
 
+    def get_expected_process_name(self) -> str:
+        # `gemini` is a `#!/usr/bin/env node` script and (unlike `claude`) does
+        # not override `process.title`, so the running process shows up as
+        # `node` in ps/tmux. Report that so lifecycle detection finds it.
+        return "node"
+
+    def uses_submission_signal(self) -> bool:
+        # Gemini's CLI has no equivalent of claude's UserPromptSubmit hook to
+        # signal a tmux wait-for channel, so we just press Enter and trust the
+        # paste-visibility check that already ran upstream.
+        return False
+
 
 @hookimpl
 def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentTypeConfig]]:

@@ -25,3 +25,7 @@ def test_probe_subclass_get_tui_ready_indicator_reads_class_var() -> None:
 
 def test_probe_subclass_uses_paste_detection_send() -> None:
     assert InteractiveTuiAgent.uses_paste_detection_send(_ProbeTuiAgent.model_construct()) is True
+
+
+def test_probe_subclass_uses_submission_signal_by_default() -> None:
+    assert InteractiveTuiAgent.uses_submission_signal(_ProbeTuiAgent.model_construct()) is True
