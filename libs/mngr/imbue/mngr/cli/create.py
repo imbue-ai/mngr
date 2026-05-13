@@ -176,7 +176,7 @@ def _resolve_agent_type_name(
             "\n"
             "    mngr config set commands.create.type <name> --scope user\n"
             "\n"
-            "Or see `mngr create --help` for the `--type` and positional ways to set it per command." + available_hint
+            "Or see `mngr create --help` for per-command ways to set it." + available_hint
         )
     return type_flag
 
