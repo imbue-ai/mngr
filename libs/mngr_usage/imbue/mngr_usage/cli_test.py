@@ -171,7 +171,7 @@ def _cost_event(
 
 
 def test_aggregate_drops_source_with_no_renderable_content() -> None:
-    """A source whose events have no parseable timestamps yields no snapshot."""
+    """A source whose events have no timestamp field yields no snapshot."""
     events = [{"source": "claude/usage", "type": "cost_snapshot"}]
     snapshots = aggregate_events_to_snapshots({"claude": {"agent-x": events}}, since_seconds=86400, now=1_700_001_000)
     assert snapshots == []
