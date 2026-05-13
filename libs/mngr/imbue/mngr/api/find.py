@@ -278,8 +278,10 @@ def ensure_host_started(
             return online_host, False
         case HostInterface() as offline_host:
             if is_start_desired:
-                logger.info("Host is offline, starting it...", host_id=offline_host.id, provider=provider.name)
-                started_host = provider.start_host(offline_host)
+                with log_span(
+                    "Starting offline host", host_id=offline_host.id, provider=provider.name
+                ):
+                    started_host = provider.start_host(offline_host)
                 return started_host, True
             else:
                 raise UserInputError(
@@ -304,12 +306,12 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
         AgentLifecycleState.WAITING,
     ):
         if is_start_desired:
-            logger.info("Agent {} is stopped, starting it", agent.name)
-            agent.wait_for_ready_signal(
-                is_creating=False,
-                start_action=lambda: host.start_agents([agent.id]),
-                timeout=agent.get_ready_timeout_seconds(),
-            )
+            with log_span("Starting stopped agent {}", agent.name):
+                agent.wait_for_ready_signal(
+                    is_creating=False,
+                    start_action=lambda: host.start_agents([agent.id]),
+                    timeout=agent.get_ready_timeout_seconds(),
+                )
         else:
             raise UserInputError(
                 f"Agent '{agent.name}' is stopped and automatic starting is disabled. "

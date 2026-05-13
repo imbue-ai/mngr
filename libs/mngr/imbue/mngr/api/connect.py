@@ -211,8 +211,6 @@ def connect_to_agent(
     For remote agents, this function returns after the SSH session ends unless a
     post-disconnect action is triggered (in which case os.execvp replaces the process).
     """
-    logger.info("Connecting to agent...")
-
     session_name = f"{mngr_ctx.config.prefix}{agent.name}"
 
     if host.is_local:
@@ -259,7 +257,7 @@ def connect_to_agent(
             action = _determine_post_disconnect_action(exit_code, session_name)
             if action is not None:
                 executable, argv = action
-                logger.info("Running post-disconnect action: {}", argv)
+                logger.debug("Running post-disconnect action: {}", argv)
                 os.execvp(executable, argv)
                 # The exec call above replaces the process and never returns.
                 # This return is a safety net for tests that mock the exec call.

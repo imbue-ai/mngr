@@ -888,6 +888,16 @@ def _create_agent(
             mngr_ctx=mngr_ctx,
         )
 
+        # api_create has just finished starting the agent (and, for non-streaming
+        # agents with an initial message, sending it). Surface those lifecycle
+        # milestones to the user here -- api_create itself only emits debug-level
+        # log_span entries for these steps, per the api/cli logging split.
+        logger.info("Starting agent {} ...", create_result.agent.name)
+        if setup.initial_message is not None and not isinstance(
+            create_result.agent, StreamingHeadlessAgentMixin
+        ):
+            logger.info("Sending initial message...")
+
         # If --edit-message was used, wait for editor and send the message.
         # Re-acquire the host lock to prevent idle shutdown while the user edits
         # (api_create releases its lock before returning).
