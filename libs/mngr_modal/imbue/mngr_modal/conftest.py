@@ -352,6 +352,15 @@ def modal_test_session_cleanup(
     if len(environment_name) > 64:
         environment_name = environment_name[:64]
     register_modal_test_environment(environment_name)
+    # DEBUG: see `modal_session_cleanup` for the diagnostic trail this is part
+    # of. The same `worker_modal_environment_names` dump appears at four
+    # points (session-cleanup register/deregister, leak-check entry, leak-
+    # check candidate computation) so we can correlate observed leaks against
+    # what the tracking list actually contained.
+    logger.info(
+        "DIAG[session-register] worker_modal_environment_names = {}",
+        list(worker_modal_environment_names),
+    )
     yield
     delete_modal_apps_in_environment(environment_name)
     delete_modal_volumes_in_environment(environment_name)
@@ -363,7 +372,17 @@ def modal_test_session_cleanup(
     # as-success limitation and its safety net.
     match env_result:
         case ModalCleanupOutcome.DELETED | ModalCleanupOutcome.NOT_FOUND:
+            logger.info(
+                "DIAG[session-deregister-pre ] env={} worker_modal_environment_names = {}",
+                environment_name,
+                list(worker_modal_environment_names),
+            )
             deregister_modal_test_environment(environment_name)
+            logger.info(
+                "DIAG[session-deregister-post] env={} worker_modal_environment_names = {}",
+                environment_name,
+                list(worker_modal_environment_names),
+            )
         case ModalCleanupOutcome.FAILED:
             logger.error(
                 "Cleanup of Modal session environment {} failed; leaving registered "
@@ -499,6 +518,13 @@ _LEAK_POLL_INTERVAL_S = 2.0
 
 
 def _get_leaked_modal_environments() -> list[str]:
+    # DEBUG: see `modal_test_session_cleanup` for the diagnostic trail this
+    # is part of. Dumping the worker list here so we can see whether the
+    # session env was actually deregistered before this runs.
+    logger.info(
+        "DIAG[leak-check-entry] worker_modal_environment_names = {}",
+        list(worker_modal_environment_names),
+    )
     if not worker_modal_environment_names:
         return []
     # Tracks the most recent successful poll's candidate set so we can
@@ -521,7 +547,17 @@ def _get_leaked_modal_environments() -> list[str]:
                 # previously successful `last_candidates`.
                 return False
             envs = json.loads(result.stdout)
-            last_candidates = [e.get("name", "") for e in envs if e.get("name", "") in worker_modal_environment_names]
+            modal_listed = [e.get("name", "") for e in envs]
+            last_candidates = [name for name in modal_listed if name in worker_modal_environment_names]
+            # DEBUG: log the intersection so we can correlate Modal-side env
+            # presence against our tracking list.
+            tracked_in_listing = set(modal_listed) & set(worker_modal_environment_names)
+            logger.info(
+                "DIAG[leak-check-poll ] worker={} candidates={} tracked-in-listing={}",
+                list(worker_modal_environment_names),
+                last_candidates,
+                sorted(tracked_in_listing),
+            )
         except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
             logger.warning("Failed to list leaked modal environments: {}", e)
             # Transient failure -- keep polling.
