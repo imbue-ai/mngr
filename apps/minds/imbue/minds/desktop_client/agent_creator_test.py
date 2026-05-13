@@ -27,7 +27,6 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
-from imbue.minds.desktop_client.agent_creator import _make_host_name
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
@@ -69,11 +68,6 @@ def test_redact_url_credentials_strips_userinfo_for_schemed_urls() -> None:
 def test_redact_url_credentials_in_text_strips_embedded_userinfo() -> None:
     msg = "fatal: unable to access 'https://user:secret@github.com/x/y': bad"
     assert _redact_url_credentials_in_text(msg) == "fatal: unable to access 'https://github.com/x/y': bad"
-
-
-def test_make_host_name_uses_workspace_name_verbatim() -> None:
-    """The user-chosen workspace name *is* the mngr HostName -- no ``-host`` suffix."""
-    assert _make_host_name(AgentName("alpha")) == "alpha"
 
 
 def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> None:

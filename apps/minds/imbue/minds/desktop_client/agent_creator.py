@@ -340,17 +340,6 @@ def _rsync_worktree_over_clone(
 _SYSTEM_SERVICES_AGENT_NAME: Final[AgentName] = AgentName("system-services")
 
 
-def _make_host_name(workspace_name: AgentName) -> str:
-    """Return the mngr ``HostName`` for a new minds workspace.
-
-    The user-supplied workspace name *is* the host name now -- there is
-    no longer a ``-host`` suffix or any other transformation. The host's
-    name also lands on the imbue_cloud lease as ``host_name`` so it
-    shows up identically across mngr / the connector / the UI.
-    """
-    return str(workspace_name)
-
-
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
     workspace_name: AgentName,
@@ -408,18 +397,22 @@ def _build_mngr_create_command(
     :func:`imbue.mngr_latchkey.agent_setup.prepare_agent_latchkey`.
     """
     agent_name = _SYSTEM_SERVICES_AGENT_NAME
+    # The user-supplied workspace name *is* the host name -- no transformation
+    # is applied. The host's name also lands on the imbue_cloud lease as
+    # ``host_name`` so it shows up identically across mngr / the connector / the UI.
+    host_name = str(workspace_name)
     match launch_mode:
         case LaunchMode.LOCAL:
-            address = f"{agent_name}@{_make_host_name(workspace_name)}.docker"
+            address = f"{agent_name}@{host_name}.docker"
         case LaunchMode.LIMA:
-            address = f"{agent_name}@{_make_host_name(workspace_name)}.lima"
+            address = f"{agent_name}@{host_name}.lima"
         case LaunchMode.CLOUD:
-            address = f"{agent_name}@{_make_host_name(workspace_name)}.vultr"
+            address = f"{agent_name}@{host_name}.vultr"
         case LaunchMode.IMBUE_CLOUD:
             if not imbue_cloud_account:
                 raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_account")
             slug = _slugify_account(imbue_cloud_account)
-            address = f"{agent_name}@{_make_host_name(workspace_name)}.imbue_cloud_{slug}"
+            address = f"{agent_name}@{host_name}.imbue_cloud_{slug}"
         case _ as unreachable:
             assert_never(unreachable)
 
