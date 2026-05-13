@@ -1143,15 +1143,17 @@ def test_usage_command_aggregates_cost_across_agents_in_same_source(
 
 
 @pytest.mark.tmux
-def test_usage_command_emits_total_line_with_multiple_sessions(
+def test_usage_command_emits_aggregate_cost_line_with_multiple_sessions(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     local_host: Host,
     cli_test_agent: AgentInterface,
     cli_profile_dir: Path,
 ) -> None:
-    """Multiple sessions in the recency window produce both a current-session
-    line and an aggregate total line in the human output."""
+    """With multiple sessions in the recency window the human output shows a
+    single unified cost line of the form `cost: $X.YY across N sessions in
+    last <since>` -- no per-session ids in the default view (those are
+    --detail-only)."""
     base = datetime.now(timezone.utc)
     now_iso = base.strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
     earlier_iso = (base - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
