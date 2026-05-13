@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
+from typing import Any
 from typing import Final
 
 from loguru import logger
@@ -262,7 +263,7 @@ def _refresh_tail_path(state: TailState, location: AgentLocation) -> None:
 _TERMINAL_STOP_REASONS: Final[frozenset[str]] = frozenset({"end_turn", "stop_sequence", "max_tokens"})
 
 
-def is_end_turn_event(event: dict) -> bool:
+def is_end_turn_event(event: dict[str, Any]) -> bool:
     """Return True for an assistant message that finishes the turn without a tool call."""
     if event.get("type") != "assistant":
         return False
