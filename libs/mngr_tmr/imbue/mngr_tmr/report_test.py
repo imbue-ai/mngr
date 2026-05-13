@@ -13,8 +13,8 @@ from imbue.mngr_tmr.report import _build_grouped_tables
 from imbue.mngr_tmr.report import _build_toc_sidebar
 from imbue.mngr_tmr.report import _merged_status
 from imbue.mngr_tmr.report import _render_markdown
+from imbue.mngr_tmr.report import _report_section_of
 from imbue.mngr_tmr.report import generate_html_report
-from imbue.mngr_tmr.report import report_section_of
 from imbue.mngr_tmr.testing import FAILED_FIX
 from imbue.mngr_tmr.testing import SUCCEEDED_FIX
 from imbue.mngr_tmr.testing import make_test_result
@@ -23,33 +23,33 @@ from imbue.mngr_tmr.testing import make_test_result
 
 
 def test_report_section_errored() -> None:
-    assert report_section_of(make_test_result(errored=True)) == ReportSection.FAILED
+    assert _report_section_of(make_test_result(errored=True)) == ReportSection.FAILED
 
 
 def test_report_section_running() -> None:
-    assert report_section_of(make_test_result()) == ReportSection.RUNNING
+    assert _report_section_of(make_test_result()) == ReportSection.RUNNING
 
 
 def test_report_section_clean_pass() -> None:
-    assert report_section_of(make_test_result(before=True, after=True)) == ReportSection.CLEAN_PASS
+    assert _report_section_of(make_test_result(before=True, after=True)) == ReportSection.CLEAN_PASS
 
 
 def test_report_section_non_impl_fixes() -> None:
     assert (
-        report_section_of(make_test_result(changes=SUCCEEDED_FIX, before=False, after=True))
+        _report_section_of(make_test_result(changes=SUCCEEDED_FIX, before=False, after=True))
         == ReportSection.NON_IMPL_FIXES
     )
 
 
 def test_report_section_impl_fixes() -> None:
     impl_fix = {ChangeKind.FIX_IMPL: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed")}
-    assert report_section_of(make_test_result(changes=impl_fix, before=False, after=True)) == ReportSection.IMPL_FIXES
+    assert _report_section_of(make_test_result(changes=impl_fix, before=False, after=True)) == ReportSection.IMPL_FIXES
 
 
 def test_report_section_blocked_all_changes_blocked() -> None:
     blocked_changes = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.BLOCKED, summary_markdown="blocked")}
     assert (
-        report_section_of(make_test_result(changes=blocked_changes, before=False, after=False))
+        _report_section_of(make_test_result(changes=blocked_changes, before=False, after=False))
         == ReportSection.BLOCKED
     )
 
@@ -57,13 +57,13 @@ def test_report_section_blocked_all_changes_blocked() -> None:
 def test_report_section_failed_changes_are_non_impl() -> None:
     """FAILED (not BLOCKED) changes route to NON_IMPL_FIXES, not BLOCKED."""
     assert (
-        report_section_of(make_test_result(changes=FAILED_FIX, before=False, after=False))
+        _report_section_of(make_test_result(changes=FAILED_FIX, before=False, after=False))
         == ReportSection.NON_IMPL_FIXES
     )
 
 
 def test_report_section_blocked_no_changes_tests_failing() -> None:
-    assert report_section_of(make_test_result(before=False, after=False)) == ReportSection.BLOCKED
+    assert _report_section_of(make_test_result(before=False, after=False)) == ReportSection.BLOCKED
 
 
 # --- render_markdown tests ---

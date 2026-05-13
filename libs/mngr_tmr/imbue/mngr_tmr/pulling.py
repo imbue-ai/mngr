@@ -75,7 +75,7 @@ def _parse_result_json(raw: str) -> TestResult:
     )
 
 
-def read_local_result(local_dir: Path, agent_name: AgentName) -> TestResult | None:
+def _read_local_result(local_dir: Path, agent_name: AgentName) -> TestResult | None:
     """Read and parse the testing agent outcome from a locally-extracted output directory."""
     result_path = local_dir / _EXTRACTED_TEST_OUTPUT_DIR / TESTING_AGENT_OUTCOME_FILENAME
     try:
@@ -210,7 +210,7 @@ def pull_agent_outputs(
         if bundle_path.is_file():
             _apply_branch_bundle(source_dir, bundle_path, branch_name, agent_name, cg)
 
-    return read_local_result(local_dest, agent_name)
+    return _read_local_result(local_dest, agent_name)
 
 
 def finalize_agent(
@@ -259,7 +259,7 @@ def _get_agent_from_host(
     raise AgentNotFoundOnHostError(agent_id, host.id)
 
 
-def pull_integrator_outputs(
+def _pull_integrator_outputs(
     agent_detail: AgentDetails,
     host: OnlineHostInterface,
     destination_dir: Path,
@@ -302,7 +302,7 @@ def read_integrator_result(
     empty = IntegratorResult(agent_name=agent_detail.name, branch_name=branch_name)
 
     if destination_dir is not None:
-        pull_integrator_outputs(agent_detail, host, destination_dir, cg)
+        _pull_integrator_outputs(agent_detail, host, destination_dir, cg)
         local_result = destination_dir / str(agent_detail.name) / INTEGRATOR_OUTCOME_FILENAME
         try:
             data = json.loads(local_result.read_text())

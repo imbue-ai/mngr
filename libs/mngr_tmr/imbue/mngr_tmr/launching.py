@@ -50,7 +50,7 @@ _AGENT_CREATION_TIMEOUT_SECONDS = 600.0
 _HOST_CODE_DIR = Path("/code")
 
 
-def make_test_agent_identity(test_node_id: str) -> tuple[AgentName, str]:
+def _make_test_agent_identity(test_node_id: str) -> tuple[AgentName, str]:
     """Generate (agent_name, branch_name) for a test agent.
 
     Both share a fresh random short_id so they identify the same launch
@@ -96,7 +96,7 @@ def _build_host_environment(config: TmrLaunchConfig) -> HostEnvironmentOptions:
     return HostEnvironmentOptions(authorized_keys=config.additional_authorized_keys)
 
 
-def build_agent_options(
+def _build_agent_options(
     agent_name: AgentName,
     branch_name: str,
     config: TmrLaunchConfig,
@@ -175,7 +175,7 @@ def _create_tmr_agent(
 
     if is_snapshotter:
         source_location = HostLocation(host=config.source_host, path=config.source_dir)
-        agent_options = build_agent_options(
+        agent_options = _build_agent_options(
             agent_name,
             branch_name,
             config,
@@ -184,7 +184,7 @@ def _create_tmr_agent(
         )
     elif existing_host is not None and config.snapshot is not None:
         source_location = HostLocation(host=existing_host, path=_HOST_CODE_DIR)
-        agent_options = build_agent_options(
+        agent_options = _build_agent_options(
             agent_name,
             branch_name,
             config,
@@ -193,7 +193,7 @@ def _create_tmr_agent(
         )
     else:
         source_location = HostLocation(host=config.source_host, path=config.source_dir)
-        agent_options = build_agent_options(agent_name, branch_name, config, initial_message=initial_message)
+        agent_options = _build_agent_options(agent_name, branch_name, config, initial_message=initial_message)
 
     return api_create(
         source_location=source_location,
@@ -203,7 +203,7 @@ def _create_tmr_agent(
     )
 
 
-def launch_test_agent(
+def _launch_test_agent(
     test_node_id: str,
     agent_name: AgentName,
     branch_name: str,
@@ -378,11 +378,11 @@ def launch_all_test_agents(
                 time.sleep(launch_delay_seconds)
             existing_host = host_pool[i % len(host_pool)] if host_pool else None
             h_name = HostName(f"{run_name}-host-{i}") if not is_local and not host_pool else None
-            agent_name, branch_name = make_test_agent_identity(test_node_id)
+            agent_name, branch_name = _make_test_agent_identity(test_node_id)
             futures.append(
                 (
                     executor.submit(
-                        launch_test_agent,
+                        _launch_test_agent,
                         test_node_id,
                         agent_name,
                         branch_name,
@@ -410,7 +410,7 @@ def launch_all_test_agents(
     return agents, agent_hosts, launch_config.snapshot
 
 
-def launch_with_timeout(
+def _launch_with_timeout(
     test_node_id: str,
     agent_name: AgentName,
     branch_name: str,
@@ -422,7 +422,7 @@ def launch_with_timeout(
     """Launch a test agent with a timeout. Raises TimeoutError if creation takes too long."""
     with ConcurrencyGroupExecutor(mngr_ctx.concurrency_group, name="launch-agent", max_workers=1) as executor:
         future = executor.submit(
-            launch_test_agent, test_node_id, agent_name, branch_name, config, mngr_ctx, pytest_flags, prompt_suffix
+            _launch_test_agent, test_node_id, agent_name, branch_name, config, mngr_ctx, pytest_flags, prompt_suffix
         )
         return future.result(timeout=_AGENT_CREATION_TIMEOUT_SECONDS)
 
@@ -449,9 +449,9 @@ def launch_agents_up_to_limit(
     """
     while remaining_tests and (max_agents <= 0 or len(pending_ids) < max_agents):
         test_node_id = remaining_tests.pop(0)
-        agent_name, branch_name = make_test_agent_identity(test_node_id)
+        agent_name, branch_name = _make_test_agent_identity(test_node_id)
         try:
-            info, host = launch_with_timeout(
+            info, host = _launch_with_timeout(
                 test_node_id, agent_name, branch_name, config, mngr_ctx, pytest_flags, prompt_suffix
             )
         except TimeoutError:

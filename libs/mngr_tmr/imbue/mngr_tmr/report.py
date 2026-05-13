@@ -55,7 +55,7 @@ _md = MarkdownIt()
 _NON_IMPL_CHANGE_KINDS = frozenset({ChangeKind.FIX_TEST, ChangeKind.IMPROVE_TEST, ChangeKind.FIX_TUTORIAL})
 
 
-def report_section_of(result: TestMapReduceResult) -> ReportSection:
+def _report_section_of(result: TestMapReduceResult) -> ReportSection:
     """Derive a report section from a result for report grouping/coloring.
 
     ``errored=True`` indicates an infrastructure failure (launch failed,
@@ -88,7 +88,7 @@ def generate_html_report(
     """Generate an HTML report summarizing test-mapreduce results."""
     counts: dict[ReportSection, int] = {}
     for r in results:
-        sec = report_section_of(r)
+        sec = _report_section_of(r)
         counts[sec] = counts.get(sec, 0) + 1
 
     agent_artifact_runs: dict[str, list[tuple[str, str, Path]]] = {}
@@ -202,7 +202,7 @@ def _build_grouped_tables(
     agent_artifact_runs = agent_artifact_runs or {}
     grouped: dict[ReportSection, list[TestMapReduceResult]] = {}
     for r in results:
-        sec = report_section_of(r)
+        sec = _report_section_of(r)
         grouped.setdefault(sec, []).append(r)
 
     sections = ""

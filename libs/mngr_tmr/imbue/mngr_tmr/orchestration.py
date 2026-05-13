@@ -1,12 +1,7 @@
-"""Core orchestration for the test-mapreduce plugin.
+"""Polling and result-collection orchestration for the test-mapreduce plugin.
 
-Implements the map-reduce pattern: collect tests via pytest, launch an agent per
-test, poll for completion, gather results, and pull code changes.
-
-Sub-modules:
-- utils: shared helpers (FD diagnostics, template resolution, test collection)
-- launching: agent/host creation and launching
-- pulling: result/artifact pulling and branch management
+Drives the main map-reduce loop: poll launched agents, finalize them when
+they finish, and assemble per-test result records for the report.
 """
 
 import time
@@ -15,39 +10,22 @@ from pathlib import Path
 
 from loguru import logger
 
-from imbue.mngr.api.list import ListResult
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
-from imbue.mngr_tmr.data_types import Change
-from imbue.mngr_tmr.data_types import ChangeKind
-from imbue.mngr_tmr.data_types import ChangeStatus
 from imbue.mngr_tmr.data_types import TestAgentInfo
 from imbue.mngr_tmr.data_types import TestMapReduceResult
 from imbue.mngr_tmr.data_types import TestResult
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
 from imbue.mngr_tmr.launching import launch_agents_up_to_limit
-
-# Re-export public API used by cli.py and tests
-from imbue.mngr_tmr.launching import launch_all_test_agents as launch_all_test_agents
-from imbue.mngr_tmr.launching import launch_integrator_agent as launch_integrator_agent
-from imbue.mngr_tmr.launching import launch_test_agent as launch_test_agent
 from imbue.mngr_tmr.launching import stop_agent_on_host
-from imbue.mngr_tmr.mngr_cli import CliError
-from imbue.mngr_tmr.mngr_cli import list_agents as cli_list_agents
+from imbue.mngr_tmr.mngr_cli import try_list_agents
 from imbue.mngr_tmr.pulling import finalize_agent
 from imbue.mngr_tmr.pulling import is_agent_outputs_ready
-from imbue.mngr_tmr.pulling import pull_agent_branch as pull_agent_branch
-from imbue.mngr_tmr.pulling import pull_agent_outputs as pull_agent_outputs
-from imbue.mngr_tmr.pulling import read_integrator_result as read_integrator_result
 from imbue.mngr_tmr.pulling import try_read_integrator_outcome
 from imbue.mngr_tmr.report import generate_html_report
-from imbue.mngr_tmr.utils import CollectTestsError as CollectTestsError
-from imbue.mngr_tmr.utils import collect_tests as collect_tests
-from imbue.mngr_tmr.utils import get_base_commit as get_base_commit
-from imbue.mngr_tmr.utils import resolve_templates as resolve_templates
 
 _TERMINAL_STATES = frozenset(
     {
@@ -58,40 +36,6 @@ _TERMINAL_STATES = frozenset(
 )
 
 _MISSING_AGENT_MAX_ROUNDS = 30
-
-
-def try_list_agents(mngr_ctx: MngrContext) -> ListResult | None:
-    """List agents via the ``mngr list`` CLI, returning None on failure or timeout."""
-    try:
-        return cli_list_agents(mngr_ctx.concurrency_group)
-    except (CliError, OSError) as exc:
-        logger.warning("mngr list failed: {}", exc)
-        return None
-
-
-def _should_pull(
-    errored: bool,
-    changes: dict[ChangeKind, Change],
-    tests_passing_before: bool | None,
-    tests_passing_after: bool | None,
-) -> bool:
-    """Core logic: should we pull an agent's changes?
-
-    Pull when: not errored, at least one succeeded change, and tests are at
-    least as good as before (if they were passing, they must still be passing).
-    """
-    if errored:
-        return False
-    if not any(c.status == ChangeStatus.SUCCEEDED for c in changes.values()):
-        return False
-    if tests_passing_before is True and tests_passing_after is not True:
-        return False
-    return True
-
-
-def should_pull_changes(result: TestMapReduceResult) -> bool:
-    """Determine whether an agent's changes should be pulled (from a TestMapReduceResult)."""
-    return _should_pull(result.errored, result.changes, result.tests_passing_before, result.tests_passing_after)
 
 
 def launch_and_poll_agents(
@@ -161,7 +105,7 @@ def launch_and_poll_agents(
             last_result_check[aid] = agent_id_to_info[aid].created_at
 
     if report_path is not None:
-        current_results = build_current_results(all_agents, final_details, timed_out_ids, all_hosts, launch_failures)
+        current_results = _build_current_results(all_agents, final_details, timed_out_ids, all_hosts, launch_failures)
         generate_html_report(current_results, report_path, test_artifacts_dir=artifact_output_dir)
 
     while pending_ids or remaining_tests:
@@ -191,7 +135,7 @@ def launch_and_poll_agents(
                 last_result_check[aid] = agent_id_to_info[aid].created_at
 
         if timed_out_this_round and report_path is not None:
-            current_results = build_current_results(
+            current_results = _build_current_results(
                 all_agents, final_details, timed_out_ids, all_hosts, launch_failures
             )
             generate_html_report(current_results, report_path, test_artifacts_dir=artifact_output_dir)
@@ -288,7 +232,7 @@ def launch_and_poll_agents(
                     changed = True
 
         if (changed or timed_out_this_round) and report_path is not None:
-            current_results = build_current_results(
+            current_results = _build_current_results(
                 all_agents, final_details, timed_out_ids, all_hosts, launch_failures
             )
             generate_html_report(current_results, report_path, test_artifacts_dir=artifact_output_dir)
@@ -417,7 +361,7 @@ def gather_results(
     return [*launch_failures, *results]
 
 
-def build_current_results(
+def _build_current_results(
     agents: list[TestAgentInfo],
     final_details: dict[str, AgentDetails],
     timed_out_ids: set[str],

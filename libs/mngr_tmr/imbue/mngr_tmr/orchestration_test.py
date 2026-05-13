@@ -20,11 +20,6 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
-from imbue.mngr_tmr.api import CollectTestsError
-from imbue.mngr_tmr.api import build_current_results
-from imbue.mngr_tmr.api import collect_tests
-from imbue.mngr_tmr.api import read_integrator_result
-from imbue.mngr_tmr.api import should_pull_changes
 from imbue.mngr_tmr.data_types import Change
 from imbue.mngr_tmr.data_types import ChangeKind
 from imbue.mngr_tmr.data_types import ChangeStatus
@@ -32,18 +27,23 @@ from imbue.mngr_tmr.data_types import ReportSection
 from imbue.mngr_tmr.data_types import TestAgentInfo
 from imbue.mngr_tmr.data_types import TestMapReduceResult
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
-from imbue.mngr_tmr.launching import build_agent_options as _build_agent_options
+from imbue.mngr_tmr.launching import _build_agent_options
+from imbue.mngr_tmr.orchestration import _build_current_results
 from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
-from imbue.mngr_tmr.pulling import read_local_result as _read_local_result
-from imbue.mngr_tmr.report import report_section_of
+from imbue.mngr_tmr.pulling import _read_local_result
+from imbue.mngr_tmr.pulling import read_integrator_result
+from imbue.mngr_tmr.report import _report_section_of
 from imbue.mngr_tmr.testing import BLOCKED_FIX
 from imbue.mngr_tmr.testing import FAILED_FIX
 from imbue.mngr_tmr.testing import SUCCEEDED_FIX
 from imbue.mngr_tmr.testing import make_test_result
+from imbue.mngr_tmr.utils import CollectTestsError
+from imbue.mngr_tmr.utils import collect_tests
 from imbue.mngr_tmr.utils import sanitize_test_name_for_agent
 from imbue.mngr_tmr.utils import short_random_id
+from imbue.mngr_tmr.utils import should_pull_changes
 from imbue.mngr_tmr.utils import transfer_mode_for_provider
 
 
@@ -280,7 +280,7 @@ def test_should_not_pull_improvement_that_breaks_tests() -> None:
     assert should_pull_changes(make_test_result(changes=improved, before=True, after=False)) is False
 
 
-def test_build_current_results_pending_agents() -> None:
+def test__build_current_results_pending_agents() -> None:
     """Agents not in final_details should appear as PENDING."""
     agents = [
         TestAgentInfo(
@@ -298,14 +298,14 @@ def test_build_current_results_pending_agents() -> None:
             created_at=0.0,
         ),
     ]
-    results = build_current_results(agents=agents, final_details={}, timed_out_ids=set(), hosts={})
+    results = _build_current_results(agents=agents, final_details={}, timed_out_ids=set(), hosts={})
     assert len(results) == 2
-    assert report_section_of(results[0]) == ReportSection.RUNNING
-    assert report_section_of(results[1]) == ReportSection.RUNNING
+    assert _report_section_of(results[0]) == ReportSection.RUNNING
+    assert _report_section_of(results[1]) == ReportSection.RUNNING
     assert "still running" in results[0].summary_markdown
 
 
-def test_build_current_results_timed_out_agents() -> None:
+def test__build_current_results_timed_out_agents() -> None:
     """Timed-out agents should appear as ERRORED."""
     agent_id = AgentId.generate()
     agents = [
@@ -317,13 +317,13 @@ def test_build_current_results_timed_out_agents() -> None:
             created_at=0.0,
         ),
     ]
-    results = build_current_results(agents=agents, final_details={}, timed_out_ids={str(agent_id)}, hosts={})
+    results = _build_current_results(agents=agents, final_details={}, timed_out_ids={str(agent_id)}, hosts={})
     assert len(results) == 1
     assert results[0].errored is True
-    assert report_section_of(results[0]) == ReportSection.FAILED
+    assert _report_section_of(results[0]) == ReportSection.FAILED
 
 
-def test_build_current_results_includes_launch_failures() -> None:
+def test__build_current_results_includes_launch_failures() -> None:
     """Agents that failed to launch should appear in the results as ERRORED."""
     failure = TestMapReduceResult(
         test_node_id="tests/test_a.py::test_one",
@@ -331,7 +331,7 @@ def test_build_current_results_includes_launch_failures() -> None:
         errored=True,
         summary_markdown="Failed to launch agent: boom",
     )
-    results = build_current_results(
+    results = _build_current_results(
         agents=[],
         final_details={},
         timed_out_ids=set(),
@@ -342,10 +342,10 @@ def test_build_current_results_includes_launch_failures() -> None:
     assert results[0].test_node_id == "tests/test_a.py::test_one"
     assert results[0].errored is True
     assert "Failed to launch agent: boom" in results[0].summary_markdown
-    assert report_section_of(results[0]) == ReportSection.FAILED
+    assert _report_section_of(results[0]) == ReportSection.FAILED
 
 
-def test_build_current_results_launch_failures_come_before_running_agents() -> None:
+def test__build_current_results_launch_failures_come_before_running_agents() -> None:
     """Launch failures should be ordered before live-agent results in the report."""
     failure = TestMapReduceResult(
         test_node_id="tests/test_failed.py::test_one",
@@ -360,7 +360,7 @@ def test_build_current_results_launch_failures_come_before_running_agents() -> N
         work_dir=Path("/tmp/work"),
         created_at=0.0,
     )
-    results = build_current_results(
+    results = _build_current_results(
         agents=[agent],
         final_details={},
         timed_out_ids=set(),
