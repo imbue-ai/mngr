@@ -1,12 +1,18 @@
-"""ImbueCloudProvider: discover, destroy, delete leased pool hosts.
+"""ImbueCloudProvider: lease, discover, destroy, delete leased pool hosts.
 
-Lease creation is intentionally NOT done as part of `mngr create --provider
-imbue_cloud_<account>`. Users go through `mngr imbue_cloud claim` (which is
-the analogue of today's minds LEASED flow consolidated into the plugin).
-That command produces a lease, registers the host with the connector, and
-runs the rename + label + env-injection sequence in 2 SSH round trips.
+Lease creation runs inline as part of `mngr create --provider
+imbue_cloud_<account> --new-host` (see ``create_host`` below): the provider
+calls the connector's /hosts/lease endpoint with the user-chosen workspace
+name as ``host_name``, waits for the leased container's sshd, and returns
+an ``ImbueCloudHost`` that the rest of mngr's create pipeline adopts the
+pre-baked agent on. The agent itself is kept verbatim from the bake -- no
+rename, no label patching, no env-injection round-trip. ``mngr imbue_cloud
+claim`` is still available as an out-of-band claim flow for callers that
+don't want the inline lease.
 
-This provider's responsibilities are then:
+This provider's responsibilities are:
+- `create_host` -- lease a pool host that matches the requested attributes.
+- `rename_host` -- update the user-facing ``host_name`` on the lease.
 - `discover_hosts` -- list this account's leased hosts via the connector.
 - `get_host` -- build a Host pointing at the leased VPS:container_ssh_port.
 - `destroy_host` -- stop the docker container on the VPS via SSH; lease and
