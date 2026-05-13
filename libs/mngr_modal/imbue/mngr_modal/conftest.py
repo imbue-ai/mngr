@@ -541,9 +541,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     but unused; we read `session.exitstatus` instead so the check follows
     the canonical session-state accessor.
     """
-    # `del` to satisfy ruff ARG001; can't rename `exitstatus` because pytest
-    # discovers hook parameters by name, and a trailing `# noqa` would trip
-    # the PREVENT_TRAILING_COMMENTS ratchet.
+    # exitstatus is unused; del to satisfy ruff ARG001.
     del exitstatus
     errors: list[str] = []
     leaked_apps = _get_leaked_modal_apps()
