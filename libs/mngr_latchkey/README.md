@@ -16,13 +16,13 @@ via the standard entry-point mechanism and exposes three subcommands:
 ```
 mngr latchkey forward            # long-running supervisor: gateway + reverse tunnels
 mngr latchkey create-agent-env   # emit LATCHKEY_* env vars + opaque permissions handle as JSON
-mngr latchkey link-permissions   # swing the opaque handle's symlink to the canonical agent path
+mngr latchkey link-permissions   # swing the opaque handle's symlink to the canonical host path
 ```
 
 `mngr latchkey forward` spawns the shared gateway eagerly on startup
 and stops it on `SIGINT`/`SIGTERM` (coupled lifetime). Any in-flight
 agents lose their gateway endpoint until the next `mngr latchkey
-forward` is started; the per-agent permissions files survive across
+forward` is started; the per-host permissions files survive across
 restarts.
 
 ### Wiring a new agent using the CLI interface
@@ -32,16 +32,19 @@ restarts.
 export MNGR_LATCHKEY_DIRECTORY=~/.minds/latchkey
 mngr latchkey forward
 
-# In another terminal, per agent:
+# In another terminal, per host:
 export MNGR_LATCHKEY_DIRECTORY=~/.minds/latchkey
 mngr latchkey create-agent-env > /tmp/lk.json
 OPAQUE_PATH=$(jq -r .opaque_permissions_path /tmp/lk.json)
-ENV_ARGS=$(jq -r '.env | to_entries[] | "--env \(.key)=\(.value)"' /tmp/lk.json)
+HOST_ENV_ARGS=$(jq -r '.env | to_entries[] | "--host-env \(.key)=\(.value)"' /tmp/lk.json)
 
-# Substitute your preferred mngr create invocation here.
-AGENT_ID=$(mngr create my-template $ENV_ARGS --format json | jq -r .agent_id)
+# Substitute your preferred mngr create invocation here. The latchkey
+# env is passed via --host-env so every agent on the new host inherits
+# the same gateway wiring.
+CREATED=$(mngr create my-template $HOST_ENV_ARGS --format json)
+HOST_ID=$(echo "$CREATED" | jq -r .host_id)
 
-mngr latchkey link-permissions --agent-id "$AGENT_ID" --opaque-path "$OPAQUE_PATH"
+mngr latchkey link-permissions --host-id "$HOST_ID" --opaque-path "$OPAQUE_PATH"
 ```
 
 ### Settings
@@ -89,7 +92,7 @@ remains importable for embedders such as the minds desktop client.
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.agent_setup import (
     prepare_agent_latchkey,
-    finalize_agent_permissions,
+    finalize_host_permissions,
 )
 from imbue.mngr_latchkey.discovery import (
     LatchkeyDiscoveryHandler,
@@ -103,15 +106,15 @@ latchkey = Latchkey(
 )
 latchkey.initialize()
 
-# (a) Pre-create env vars + opaque permissions handle for a new agent.
+# (a) Pre-create env vars + opaque permissions handle for a new host.
 setup = prepare_agent_latchkey(latchkey, is_tunneled=True)
 # setup.env: LATCHKEY_GATEWAY[_PASSWORD,_PERMISSIONS_OVERRIDE,_DISABLE_COUNTING]
-# setup.opaque_permissions_path: pass to finalize_agent_permissions later
+# setup.opaque_permissions_path: pass to finalize_host_permissions later
 
-# ... mngr create returns the canonical agent id ...
+# ... mngr create returns the canonical host id ...
 
-# (b) Point the opaque handle at the canonical agent permissions path.
-finalize_agent_permissions(latchkey, setup.opaque_permissions_path, agent_id)
+# (b) Point the opaque handle at the canonical host permissions path.
+finalize_host_permissions(latchkey, setup.opaque_permissions_path, host_id)
 # Raises LatchkeyStoreError on failure -- callers decide whether to abort
 # or just surface a warning.
 

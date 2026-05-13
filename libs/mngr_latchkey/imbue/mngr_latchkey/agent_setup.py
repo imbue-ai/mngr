@@ -9,11 +9,11 @@ The lifecycle for a new agent has three latchkey-aware steps:
    ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE``,
    ``LATCHKEY_DISABLE_COUNTING``). See :func:`prepare_agent_latchkey`.
 
-2. *After* ``mngr create`` returns the canonical agent id: replace the
-   opaque handle with a symlink to the canonical agent-keyed
+2. *After* ``mngr create`` returns the canonical host id: replace the
+   opaque handle with a symlink to the canonical host-keyed
    ``latchkey_permissions.json`` so the desktop's permission-grant flow
    writes to the canonical path while the gateway reads through the
-   symlink. See :func:`finalize_agent_permissions`.
+   symlink. See :func:`finalize_host_permissions`.
 
 3. (Out of scope here.) When the agent is later discovered, the
    :class:`LatchkeyDiscoveryHandler` ensures the shared gateway is up
@@ -39,12 +39,12 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
-from imbue.mngr_latchkey.store import link_opaque_permissions_to_agent
+from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
 from imbue.mngr_latchkey.store import save_permissions
 
@@ -64,10 +64,11 @@ class AgentLatchkeySetup(FrozenModel):
 
     The caller is expected to:
 
-    * Inject every ``env`` entry into the agent's environment (typically
-      via ``mngr create --env KEY=VALUE`` flags).
+    * Inject every ``env`` entry into the agent's *host* environment
+      (typically via ``mngr create --host-env KEY=VALUE`` flags so every
+      agent that ever runs on the host inherits the same wiring).
     * Pass ``opaque_permissions_path`` back to
-      :func:`finalize_agent_permissions` once the canonical agent id is
+      :func:`finalize_host_permissions` once the canonical host id is
       known (skipped when ``opaque_permissions_path`` is ``None``, which
       happens only in the no-``Latchkey`` degraded mode).
     """
@@ -87,10 +88,10 @@ class AgentLatchkeySetup(FrozenModel):
     opaque_permissions_path: Path | None = Field(
         default=None,
         description=(
-            "Path to the agent's freshly-allocated opaque permissions handle "
+            "Path to the freshly-allocated opaque permissions handle "
             "(``<plugin_data_dir>/permissions/<uuid>.json``), materialized "
             "with deny-all baseline rules. Pass to "
-            ":func:`finalize_agent_permissions` once the canonical agent id "
+            ":func:`finalize_host_permissions` once the canonical host id "
             "is known. ``None`` when no ``Latchkey`` was supplied; otherwise "
             "always set on a successful return."
         ),
@@ -174,12 +175,12 @@ def prepare_agent_latchkey(
     return AgentLatchkeySetup(env=env, opaque_permissions_path=opaque_path)
 
 
-def finalize_agent_permissions(
+def finalize_host_permissions(
     latchkey: Latchkey,
     opaque_permissions_path: Path | None,
-    agent_id: AgentId,
+    host_id: HostId,
 ) -> None:
-    """Replace the opaque permissions handle with a symlink to the canonical agent path.
+    """Replace the opaque permissions handle with a symlink to the canonical host path.
 
     No-op when ``opaque_permissions_path`` is ``None`` -- that's the
     sentinel :func:`prepare_agent_latchkey` returns in the
@@ -192,9 +193,9 @@ def finalize_agent_permissions(
     against the deny-all baseline file the JWT references directly
     (the opaque file itself, which already exists), but subsequent
     UI-driven permission grants will not take effect because the UI
-    writes to the canonical agent-keyed path that this function would
+    writes to the canonical host-keyed path that this function would
     have linked.
     """
     if opaque_permissions_path is None:
         return
-    link_opaque_permissions_to_agent(latchkey.plugin_data_dir, opaque_permissions_path, agent_id)
+    link_opaque_permissions_to_host(latchkey.plugin_data_dir, opaque_permissions_path, host_id)
