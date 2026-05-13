@@ -891,7 +891,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         now = datetime.now(timezone.utc)
         certified_host_data = CertifiedHostData(
             host_id=str(host_id),
-            host_name=lease.host_name,
+            host_name=_resolve_lease_host_name(lease),
             created_at=now,
             updated_at=now,
         )
