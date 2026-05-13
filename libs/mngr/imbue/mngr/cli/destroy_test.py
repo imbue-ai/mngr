@@ -90,11 +90,13 @@ def test_destroy_cli_options_can_be_instantiated() -> None:
 # =============================================================================
 # --force vs --yes flag matrix
 #
-# The four cases below cover the (running x flag) matrix for the two policy
-# predicates that gate destruction. The agent-running outcomes are encoded by
-# ``_bypasses_running_check``; both predicates are evaluated before any host
-# interaction happens, so testing them directly is equivalent to checking the
-# behavior of ``mngr destroy`` against (stopped/running) x (--yes/--force).
+# The three cases below cover the distinct (force x yes) predicate inputs:
+# (F,T), (T,F), and (F,F). The (T,T) case is functionally identical to (T,F)
+# because ``_should_skip_confirmation = force or yes`` and
+# ``_bypasses_running_check = force``. Each case asserts both predicates, so
+# the predicate values fully determine destroy's behavior against running
+# vs stopped agents (the gate ``agent.is_running() and not
+# _bypasses_running_check(opts)`` is decided entirely by the predicate).
 # =============================================================================
 
 
@@ -110,21 +112,6 @@ def test_force_skips_confirmation_for_stopped_agent() -> None:
     opts = _make_opts(force=True, yes=False)
     assert _should_skip_confirmation(opts) is True
     assert _bypasses_running_check(opts) is True
-
-
-def test_yes_refuses_running_agent() -> None:
-    """``--yes`` alone does NOT permit destroying a running agent."""
-    opts = _make_opts(force=False, yes=True)
-    # Same gate as ``agent.is_running() and not _bypasses_running_check(opts)`` --
-    # with a running agent and --yes, the inner expression is True -> refuse.
-    assert _bypasses_running_check(opts) is False
-
-
-def test_force_permits_running_agent_and_skips_prompt() -> None:
-    """``--force`` permits destroying a running agent AND skips the prompt (unchanged behavior)."""
-    opts = _make_opts(force=True, yes=False)
-    assert _bypasses_running_check(opts) is True
-    assert _should_skip_confirmation(opts) is True
 
 
 def test_no_flags_prompts_and_keeps_running_check() -> None:
