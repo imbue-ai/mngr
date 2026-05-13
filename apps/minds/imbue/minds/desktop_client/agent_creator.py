@@ -129,7 +129,12 @@ class AgentCreationInfo(FrozenModel):
 
 
 def extract_repo_name(git_url: str) -> str:
-    """Extract a short name from a git URL or path for use as agent name.
+    """Extract a short name from a git URL or path for use as the workspace / host name.
+
+    The returned value becomes the mngr ``HostName`` (and, for imbue_cloud,
+    the connector lease's ``host_name``) when the user didn't type a
+    workspace name in the create form. The created agent itself is always
+    named ``system-services`` and never derived from the repo.
 
     Strips .git suffix and trailing slashes, then takes the last path component.
     Non-alphanumeric characters (except hyphens and underscores) are replaced
