@@ -6,17 +6,23 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import MalformedPermissionsConfigError
+from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
+from imbue.mngr_latchkey.store import delete_gateway_info
+from imbue.mngr_latchkey.store import ensure_admin_permissions_file
 from imbue.mngr_latchkey.store import gateway_log_path
 from imbue.mngr_latchkey.store import granted_permissions_for_scope
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
+from imbue.mngr_latchkey.store import load_gateway_info
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
 from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_host
+from imbue.mngr_latchkey.store import save_gateway_info
 from imbue.mngr_latchkey.store import save_permissions
 from imbue.mngr_latchkey.store import set_permissions_for_scope
 
@@ -458,3 +464,54 @@ def test_load_permissions_propagates_os_errors(tmp_path: Path) -> None:
             load_permissions(path)
     finally:
         path.chmod(0o600)
+
+
+# -- Admin permissions ---------------------------------------------------------
+
+
+def test_ensure_admin_permissions_file_materializes_wildcard(tmp_path: Path) -> None:
+    """The admin permissions file is created with a wildcard ``{"any": ["any"]}`` rule."""
+    path = ensure_admin_permissions_file(tmp_path)
+    assert path == admin_permissions_path(tmp_path)
+    assert path.is_file()
+    on_disk = json.loads(path.read_text())
+    assert on_disk == {"rules": [{"any": ["any"]}]}
+
+
+def test_ensure_admin_permissions_file_is_idempotent(tmp_path: Path) -> None:
+    """A pre-existing admin permissions file is left untouched."""
+    path = admin_permissions_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    custom = '{"rules": [{"slack-api": ["any"]}]}'
+    path.write_text(custom)
+    ensure_admin_permissions_file(tmp_path)
+    assert path.read_text() == custom
+
+
+# -- Gateway info --------------------------------------------------------------
+
+
+def test_save_then_load_gateway_info_round_trip(tmp_path: Path) -> None:
+    info = LatchkeyGatewayInfo(url="http://127.0.0.1:12345", password="hunter2")
+    save_gateway_info(tmp_path, info)
+    loaded = load_gateway_info(tmp_path)
+    assert loaded == info
+
+
+def test_load_gateway_info_returns_none_when_absent(tmp_path: Path) -> None:
+    assert load_gateway_info(tmp_path) is None
+
+
+def test_delete_gateway_info_is_idempotent(tmp_path: Path) -> None:
+    # First call must be a no-op (no record on disk yet).
+    delete_gateway_info(tmp_path)
+    save_gateway_info(tmp_path, LatchkeyGatewayInfo(url="http://127.0.0.1:1", password="p"))
+    delete_gateway_info(tmp_path)
+    assert load_gateway_info(tmp_path) is None
+
+
+def test_save_gateway_info_writes_mode_0600(tmp_path: Path) -> None:
+    """The password is sensitive; the file must not be world-readable."""
+    save_gateway_info(tmp_path, LatchkeyGatewayInfo(url="http://x", password="p"))
+    file_mode = stat.S_IMODE(os.stat(tmp_path / "latchkey_gateway.json").st_mode)
+    assert file_mode == 0o600

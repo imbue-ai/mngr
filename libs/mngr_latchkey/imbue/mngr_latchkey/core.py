@@ -26,6 +26,7 @@ import threading
 import time
 from collections.abc import Mapping
 from enum import auto
+from importlib import resources
 from pathlib import Path
 from typing import Final
 from typing import IO
@@ -47,6 +48,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import default_permissions_path
+from imbue.mngr_latchkey.store import ensure_admin_permissions_file
 from imbue.mngr_latchkey.store import ensure_browser_log_path
 from imbue.mngr_latchkey.store import gateway_log_path
 from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
@@ -79,8 +81,10 @@ _CREATE_JWT_TIMEOUT_SECONDS: Final[float] = 15.0
 _VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 5.0
 
 # Minimum version of the upstream ``latchkey`` CLI this package will
-# operate against.
-LATCHKEY_MIN_VERSION: Final[str] = "2.8.0"
+# operate against. 2.9.0 is the first release that ships the gateway
+# extension loader this package depends on (see ``extensions/`` for the
+# .mjs files it materializes into ``LATCHKEY_DIRECTORY/extensions/``).
+LATCHKEY_MIN_VERSION: Final[str] = "2.9.0"
 
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
@@ -98,6 +102,19 @@ AGENT_SIDE_LATCHKEY_PORT: Final[int] = 1989
 # Latchkey encryption key, so it survives desktop-client restarts without
 # us having to persist it in plaintext.
 _GATEWAY_PASSWORD_SENTINEL_PATH: Final[str] = "/__minds_gateway_password__/sentinel"
+
+# Env-var name read by the bundled permissions extension to clamp the
+# set of files it will read or write. We pin it to the plugin data dir
+# so the extension can edit per-host ``latchkey_permissions.json`` files
+# under ``<plugin_data_dir>/hosts/<host_id>/`` and the admin permissions
+# file at the data-dir root, but cannot reach anything else on disk.
+_ENV_EXTENSION_PERMISSIONS_ROOT: Final[str] = "LATCHKEY_EXTENSION_PERMISSIONS_ROOT"
+
+# Subdirectory of ``LATCHKEY_DIRECTORY`` from which the upstream
+# ``latchkey gateway`` (>= 2.9.0) loads ``.mjs`` extension files. This
+# package drops its bundled ``permissions.mjs`` and
+# ``permission_requests.mjs`` files there at gateway-spawn time.
+_GATEWAY_EXTENSIONS_SUBDIR: Final[str] = "extensions"
 
 
 class LatchkeyError(Exception):
@@ -307,6 +324,7 @@ def _build_gateway_env(
     latchkey_directory: Path,
     permissions_config_path: Path,
     listen_password: str,
+    extension_permissions_root: Path,
 ) -> dict[str, str]:
     """Build the env dict for the ``latchkey gateway`` subprocess.
 
@@ -314,7 +332,9 @@ def _build_gateway_env(
     used to set up. The gateway reads its listen host/port + permissions
     config path + listen password from these env vars (the upstream
     ``latchkey`` CLI exposes them as the documented gateway-config
-    surface).
+    surface). ``extension_permissions_root`` is consumed by the bundled
+    ``permissions.mjs`` extension to clamp the set of files it will
+    read or write.
     """
     latchkey_directory.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
@@ -323,7 +343,30 @@ def _build_gateway_env(
     env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
     env["LATCHKEY_PERMISSIONS_CONFIG"] = str(permissions_config_path)
     env["LATCHKEY_GATEWAY_LISTEN_PASSWORD"] = listen_password
+    env[_ENV_EXTENSION_PERMISSIONS_ROOT] = str(extension_permissions_root)
     return env
+
+
+def _materialize_bundled_extensions(latchkey_directory: Path) -> Path:
+    """Copy this package's bundled gateway extensions into ``LATCHKEY_DIRECTORY/extensions/``.
+
+    The upstream ``latchkey gateway`` (>= 2.9.0) auto-loads every
+    ``.mjs`` file in this directory at startup. We rewrite the bundled
+    files unconditionally on every spawn so a package upgrade always
+    wins over a stale on-disk copy. The directory is created with
+    ``mode=0o700`` because it shares the same trust boundary as the
+    rest of ``LATCHKEY_DIRECTORY``.
+    """
+    extensions_dir = latchkey_directory / _GATEWAY_EXTENSIONS_SUBDIR
+    extensions_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    source_package = resources.files("imbue.mngr_latchkey.extensions")
+    for entry in source_package.iterdir():
+        name = entry.name
+        if not name.endswith(".mjs"):
+            continue
+        destination = extensions_dir / name
+        destination.write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")
+    return extensions_dir
 
 
 class _GatewayLogWriter(MutableModel):
@@ -396,6 +439,7 @@ class Latchkey(MutableModel):
     _gateway_port: int | None = PrivateAttr(default=None)
     _gateway_process: RunningProcess | None = PrivateAttr(default=None)
     _gateway_password: str | None = PrivateAttr(default=None)
+    _admin_jwt: str | None = PrivateAttr(default=None)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     # Held *only* across the slow spawn path so two concurrent
     # ``start_gateway`` callers cannot both decide to spawn a fresh
@@ -575,6 +619,38 @@ class Latchkey(MutableModel):
         with self._lock:
             self._gateway_password = password
         return password
+
+    def create_admin_permissions_jwt(self) -> str:
+        """Mint (and cache) the JWT for the admin permissions file.
+
+        Materializes the admin permissions file at
+        :func:`admin_permissions_path` if it does not already exist
+        (idempotent) and returns a JWT pointing at it. The returned
+        token is what callers send in the
+        ``X-Latchkey-Gateway-Permissions-Override`` header when they
+        want to reach the gateway's bundled ``permissions`` /
+        ``permission-requests`` extensions with admin-level
+        permissions.
+
+        Cached on the :class:`Latchkey` instance after the first
+        successful mint -- subsequent calls return the same string
+        without shelling out again.
+
+        Raises:
+            LatchkeyJwtMintError: if ``latchkey gateway create-jwt``
+                fails (e.g. no encryption key configured).
+            LatchkeyStoreError: if the admin permissions file cannot be
+                materialized on disk.
+        """
+        with self._lock:
+            cached = self._admin_jwt
+        if cached is not None:
+            return cached
+        admin_path = ensure_admin_permissions_file(self.plugin_data_dir)
+        jwt = self.create_permissions_override_jwt(admin_path)
+        with self._lock:
+            self._admin_jwt = jwt
+        return jwt
 
     def create_permissions_override_jwt(self, permissions_path: Path) -> str:
         """Mint an HS256 JWT that points the gateway at ``permissions_path``.
@@ -825,6 +901,11 @@ class Latchkey(MutableModel):
         except LatchkeyJwtMintError as e:
             raise LatchkeyError(f"Failed to derive gateway password: {e}") from e
 
+        # Drop the bundled gateway extensions into LATCHKEY_DIRECTORY so
+        # ``latchkey gateway`` picks them up at startup. Always rewrites
+        # so a package upgrade overrides any stale on-disk copy.
+        _materialize_bundled_extensions(self.latchkey_directory)
+
         port = _allocate_free_port(self.listen_host)
         log_path = gateway_log_path(plugin_dir)
         env = _build_gateway_env(
@@ -833,6 +914,7 @@ class Latchkey(MutableModel):
             latchkey_directory=self.latchkey_directory,
             permissions_config_path=default_perms,
             listen_password=password,
+            extension_permissions_root=plugin_dir,
         )
 
         with log_span(

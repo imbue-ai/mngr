@@ -25,6 +25,7 @@ from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_browser_log_path
 
@@ -278,6 +279,123 @@ def test_start_gateway_materializes_deny_all_default_permissions(tmp_path: Path)
         assert _wait_for_listening("127.0.0.1", manager.gateway_port)
         assert perms_path.is_file()
         assert json.loads(perms_path.read_text()) == {"rules": []}
+        manager.stop_gateway()
+
+
+def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
+    """The gateway spawn step must materialize the bundled .mjs files under LATCHKEY_DIRECTORY/extensions/."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    extensions_dir = tmp_path / "extensions"
+    assert not extensions_dir.exists()
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        manager.start_gateway(cg)
+        assert _wait_for_listening("127.0.0.1", manager.gateway_port)
+        mjs_files = sorted(p.name for p in extensions_dir.iterdir() if p.suffix == ".mjs")
+        assert mjs_files == ["permission_requests.mjs", "permissions.mjs"]
+        # The destination files must be non-empty -- ``importlib.resources``
+        # silently produces empty reads if the wheel does not actually
+        # ship the .mjs payloads.
+        for name in mjs_files:
+            assert (extensions_dir / name).read_text().startswith("/**")
+        manager.stop_gateway()
+
+
+def test_start_gateway_overwrites_existing_extensions(tmp_path: Path) -> None:
+    """Stale extension content from a prior install must be overwritten on every spawn."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    extensions_dir = tmp_path / "extensions"
+    extensions_dir.mkdir(parents=True, exist_ok=True)
+    stale_file = extensions_dir / "permissions.mjs"
+    stale_file.write_text("// stale\n")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        manager.start_gateway(cg)
+        assert _wait_for_listening("127.0.0.1", manager.gateway_port)
+        assert stale_file.read_text() != "// stale\n"
+        manager.stop_gateway()
+
+
+def test_create_admin_permissions_jwt_materializes_admin_file(tmp_path: Path) -> None:
+    """Calling ``create_admin_permissions_jwt`` materializes the admin file with wildcard rules."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    admin_path = admin_permissions_path(manager.plugin_data_dir)
+    assert not admin_path.exists()
+    jwt = manager.create_admin_permissions_jwt()
+    assert jwt == f"fake-jwt-for:{admin_path}"
+    on_disk = json.loads(admin_path.read_text())
+    assert on_disk == {"rules": [{"any": ["any"]}]}
+
+
+def test_create_admin_permissions_jwt_caches_token(tmp_path: Path) -> None:
+    """Repeated calls return the cached JWT without re-shelling out."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    first = manager.create_admin_permissions_jwt()
+    # Replace the fake binary's create-jwt output mid-run so a second
+    # shell-out would be observable; the cache must absorb the call.
+    fake_binary.write_text(fake_binary.read_text().replace("fake-jwt-for:", "DIFFERENT:"))
+    second = manager.create_admin_permissions_jwt()
+    assert first == second
+
+
+def test_create_admin_permissions_jwt_preserves_existing_admin_file(tmp_path: Path) -> None:
+    """A pre-existing admin permissions file is not overwritten -- the user's edits survive."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    admin_path = admin_permissions_path(manager.plugin_data_dir)
+    admin_path.parent.mkdir(parents=True, exist_ok=True)
+    custom = '{"rules": [{"custom-scope": ["custom-perm"]}]}'
+    admin_path.write_text(custom)
+    manager.create_admin_permissions_jwt()
+    assert admin_path.read_text() == custom
+
+
+def test_start_gateway_sets_extension_permissions_root_env_var(tmp_path: Path) -> None:
+    """The spawned gateway must see LATCHKEY_EXTENSION_PERMISSIONS_ROOT pointing at the plugin data dir."""
+    script = tmp_path / "latchkey"
+    env_dump_path = tmp_path / "env_dump"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, socket, signal, sys\n"
+        'if sys.argv[1] == "--version":\n'
+        "    print('2.9.0')\n"
+        "    sys.exit(0)\n"
+        'if sys.argv[1] == "ensure-browser":\n'
+        "    sys.exit(0)\n"
+        'if sys.argv[1:3] == ["gateway", "create-jwt"]:\n'
+        "    print('fake-jwt')\n"
+        "    sys.exit(0)\n"
+        "with open(" + repr(str(env_dump_path)) + ", 'w') as fh:\n"
+        "    fh.write(os.environ.get('LATCHKEY_EXTENSION_PERMISSIONS_ROOT', ''))\n"
+        "host = os.environ['LATCHKEY_GATEWAY_LISTEN_HOST']\n"
+        "port = int(os.environ['LATCHKEY_GATEWAY_LISTEN_PORT'])\n"
+        "sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+        "sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        "sock.bind((host, port))\n"
+        "sock.listen(128)\n"
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+        "signal.pause()\n"
+    )
+    script.chmod(0o755)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
+    manager.initialize()
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        manager.start_gateway(cg)
+        assert _wait_for_listening("127.0.0.1", manager.gateway_port)
+        # The child process writes the env value to env_dump_path as
+        # one of its first acts; poll briefly for the file.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not env_dump_path.is_file():
+            threading.Event().wait(timeout=_POLL_INTERVAL_SECONDS)
+        assert env_dump_path.is_file()
+        assert env_dump_path.read_text() == str(manager.plugin_data_dir)
         manager.stop_gateway()
 
 

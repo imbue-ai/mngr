@@ -63,9 +63,11 @@ from imbue.mngr.primitives import HostId
 PLUGIN_DATA_SUBDIR_NAME: Final[str] = "mngr_latchkey"
 
 _GATEWAY_LOG_FILENAME: Final[str] = "latchkey_gateway.log"
+_GATEWAY_INFO_FILENAME: Final[str] = "latchkey_gateway.json"
 _FORWARD_RECORD_FILENAME: Final[str] = "latchkey_forward.json"
 _FORWARD_LOG_FILENAME: Final[str] = "latchkey_forward.log"
 _DEFAULT_PERMISSIONS_FILENAME: Final[str] = "latchkey_default_permissions.json"
+_ADMIN_PERMISSIONS_FILENAME: Final[str] = "latchkey_admin_permissions.json"
 _PERMISSIONS_FILENAME: Final[str] = "latchkey_permissions.json"
 _HOSTS_DIR_NAME: Final[str] = "hosts"
 _OPAQUE_PERMISSIONS_DIR_NAME: Final[str] = "permissions"
@@ -86,6 +88,70 @@ def plugin_data_dir(latchkey_directory: Path) -> Path:
 def gateway_log_path(data_dir: Path) -> Path:
     """Return the log file path for the shared gateway subprocess."""
     return data_dir / _GATEWAY_LOG_FILENAME
+
+
+class LatchkeyGatewayInfo(FrozenModel):
+    """On-disk record describing a running shared ``latchkey gateway``.
+
+    Written by the ``mngr latchkey forward`` supervisor process when it
+    spawns the gateway, deleted on shutdown. Other in-process consumers
+    (notably the minds desktop client) read it to learn where the
+    gateway is listening and what password / admin JWT they need to
+    talk to its extension endpoints.
+
+    The password derivation is purely a function of the user's latchkey
+    encryption key (see :meth:`Latchkey.derive_gateway_password`), so
+    persisting it here is a convenience for non-spawning readers; a
+    sibling process that wanted to could derive the same value itself
+    by running ``latchkey gateway create-jwt --no-validate``.
+    """
+
+    url: str = Field(description="Base URL the gateway is listening on (``http://host:port``).")
+    password: str = Field(description="Password the gateway accepts in ``Authorization: Bearer <password>``.")
+
+
+def gateway_info_path(data_dir: Path) -> Path:
+    """Return the path to the on-disk shared gateway record."""
+    return data_dir / _GATEWAY_INFO_FILENAME
+
+
+def save_gateway_info(data_dir: Path, info: LatchkeyGatewayInfo) -> None:
+    """Write the gateway record atomically, overwriting any existing one."""
+    path = gateway_info_path(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(info.model_dump_json(indent=2))
+    tmp_path.chmod(0o600)
+    os.replace(tmp_path, path)
+    logger.debug("Saved latchkey gateway info at {}", path)
+
+
+def load_gateway_info(data_dir: Path) -> LatchkeyGatewayInfo | None:
+    """Read the gateway record, or ``None`` if missing or malformed."""
+    path = gateway_info_path(data_dir)
+    if not path.is_file():
+        return None
+    try:
+        raw = path.read_text()
+    except OSError as e:
+        logger.warning("Failed to read latchkey gateway info at {}: {}", path, e)
+        return None
+    try:
+        return LatchkeyGatewayInfo.model_validate_json(raw)
+    except ValueError as e:
+        logger.warning("Malformed latchkey gateway info at {}: {}", path, e)
+        return None
+
+
+def delete_gateway_info(data_dir: Path) -> None:
+    """Remove the stored gateway record (no-op if absent)."""
+    path = gateway_info_path(data_dir)
+    if path.is_file():
+        try:
+            path.unlink()
+            logger.debug("Deleted latchkey gateway info at {}", path)
+        except OSError as e:
+            logger.warning("Failed to delete latchkey gateway info at {}: {}", path, e)
 
 
 # -- Forward supervisor info ---------------------------------------------------
@@ -205,6 +271,40 @@ def default_permissions_path(data_dir: Path) -> Path:
     that escapes the JWT mechanism cannot reach any service.
     """
     return data_dir / _DEFAULT_PERMISSIONS_FILENAME
+
+
+def admin_permissions_path(data_dir: Path) -> Path:
+    """Return the path to the admin permissions file used by the management UI.
+
+    Holds a single ``{\"any\": [\"any\"]}`` rule -- a wildcard grant that
+    lets the admin client reach every service (including the gateway's
+    own ``latchkey-self.invalid`` extension endpoints) through the
+    shared gateway. The corresponding JWT, minted at startup by
+    :meth:`Latchkey.create_admin_permissions_jwt`, is what the minds
+    desktop client passes in ``X-Latchkey-Gateway-Permissions-Override``
+    when it talks to the ``permissions`` / ``permission-requests``
+    extensions.
+
+    Materialized on demand by :func:`ensure_admin_permissions_file`; the
+    file is intentionally NOT a per-host file so a single admin JWT is
+    enough for the desktop client to manage every host's permissions.
+    """
+    return data_dir / _ADMIN_PERMISSIONS_FILENAME
+
+
+def ensure_admin_permissions_file(data_dir: Path) -> Path:
+    """Materialize the admin permissions file if missing and return its path.
+
+    Idempotent: a pre-existing file is left untouched so that any
+    hand-edited overrides survive across restarts. The newly-created
+    file always holds the wildcard ``{\"any\": [\"any\"]}`` rule.
+    """
+    path = admin_permissions_path(data_dir)
+    if path.is_file():
+        return path
+    admin_config = LatchkeyPermissionsConfig(rules=({"any": ["any"]},))
+    save_permissions(path, admin_config)
+    return path
 
 
 def opaque_permissions_dir(data_dir: Path) -> Path:

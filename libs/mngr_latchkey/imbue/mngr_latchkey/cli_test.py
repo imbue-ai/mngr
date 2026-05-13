@@ -252,6 +252,43 @@ def test_create_agent_env_exits_nonzero_when_binary_missing(
     assert "LATCHKEY_GATEWAY" not in result.output
 
 
+# -- admin-jwt --------------------------------------------------------------
+
+
+def test_admin_jwt_prints_jwt_and_creates_admin_file(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    latchkey_root: Path,
+    fake_latchkey_binary: Path,
+    clean_latchkey_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``admin-jwt`` materializes the wildcard admin permissions file and prints the JWT."""
+    del clean_latchkey_env
+    monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
+    monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    result = cli_runner.invoke(
+        latchkey,
+        ["admin-jwt"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    output = result.output.strip()
+    assert output.startswith("fake-jwt-for:")
+    # The path embedded in the (fake) JWT must be the admin permissions
+    # path under ``plugin_data_dir``.
+    pdd = plugin_data_dir(latchkey_root)
+    admin_path = pdd / "latchkey_admin_permissions.json"
+    assert admin_path.is_file()
+    assert output == f"fake-jwt-for:{admin_path}"
+    on_disk = json.loads(admin_path.read_text())
+    assert on_disk == {"rules": [{"any": ["any"]}]}
+
+
 # -- link-permissions -------------------------------------------------------
 
 
@@ -368,16 +405,17 @@ def test_link_permissions_rejects_missing_opaque_path(
 
 
 def test_group_exposes_three_subcommands() -> None:
-    """The ``mngr latchkey`` group exposes exactly the three subcommands the spec promises."""
+    """The ``mngr latchkey`` group exposes the documented subcommands."""
     assert set(latchkey.commands.keys()) == {
         "create-agent-env",
         "link-permissions",
         "forward",
+        "admin-jwt",
     }
 
 
 def test_help_text_lists_subcommands(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(latchkey, ["--help"], catch_exceptions=False)
     assert result.exit_code == 0
-    for subcommand in ("create-agent-env", "link-permissions", "forward"):
+    for subcommand in ("create-agent-env", "link-permissions", "forward", "admin-jwt"):
         assert subcommand in result.output

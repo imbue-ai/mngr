@@ -39,6 +39,7 @@ from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_final_json
+from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import HostId
@@ -53,7 +54,10 @@ from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
 from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
 from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import delete_gateway_info
+from imbue.mngr_latchkey.store import save_gateway_info
 
 # Env-var overrides for the two resolved settings; documented in the
 # CLI help and in the spec.
@@ -78,6 +82,10 @@ class _LatchkeyCommonCliOptions(CommonCliOptions):
 
 class _CreateAgentEnvCliOptions(_LatchkeyCommonCliOptions):
     """Backing options object for ``mngr latchkey create-agent-env``."""
+
+
+class _AdminJwtCliOptions(_LatchkeyCommonCliOptions):
+    """Backing options object for ``mngr latchkey admin-jwt``."""
 
 
 class _LinkPermissionsCliOptions(_LatchkeyCommonCliOptions):
@@ -388,6 +396,20 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
         raise click.ClickException(f"Failed to start shared Latchkey gateway: {e}") from e
     logger.info("Started shared Latchkey gateway at {}", latchkey.gateway_url)
 
+    # Publish the gateway URL + password to disk so other in-process
+    # consumers (notably the minds desktop client) can find it. The
+    # record is unconditionally deleted in the shutdown ``finally``
+    # block below so a future ``forward`` invocation never reads stale
+    # contact info for a gateway that died with us.
+    try:
+        gateway_info = LatchkeyGatewayInfo(
+            url=latchkey.gateway_url,
+            password=latchkey.derive_gateway_password(),
+        )
+    except LatchkeyError as e:
+        raise click.ClickException(f"Failed to derive gateway password for info record: {e}") from e
+    save_gateway_info(latchkey.plugin_data_dir, gateway_info)
+
     tunnel_manager = SSHTunnelManager()
     tunnel_manager.start_reverse_tunnel_health_check()
 
@@ -422,6 +444,7 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
             latchkey.stop_gateway()
         except LatchkeyError as e:
             logger.warning("Failed to stop shared Latchkey gateway during shutdown: {}", e)
+        delete_gateway_info(latchkey.plugin_data_dir)
 
 
 class _ShutdownSignalHandler(FrozenModel):
@@ -519,9 +542,65 @@ def latchkey(ctx: click.Context) -> None:
     del ctx
 
 
+# =============================================================================
+# Subcommand: admin-jwt
+# =============================================================================
+
+
+@click.command(name="admin-jwt")
+@add_common_options
+@click.pass_context
+def _admin_jwt_command(ctx: click.Context, **kwargs: Any) -> None:
+    """Print a JWT that grants the bearer wildcard access to the gateway."""
+    del kwargs
+    mngr_ctx, _output_opts, opts = setup_command_context(
+        ctx=ctx,
+        command_name="latchkey.admin-jwt",
+        command_class=_AdminJwtCliOptions,
+        is_format_template_supported=False,
+    )
+
+    latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
+
+    try:
+        jwt = latchkey.create_admin_permissions_jwt()
+    except (LatchkeyError, LatchkeyStoreError) as e:
+        raise click.ClickException(f"Failed to mint admin JWT: {e}") from e
+
+    # Emit on stdout via the project-standard helper for user-facing
+    # output.
+    write_human_line(jwt)
+
+
+_add_common_latchkey_options(_admin_jwt_command)
+
+CommandHelpMetadata(
+    key="latchkey.admin-jwt",
+    one_line_description="Mint a wildcard ``permissions-override`` JWT for the shared gateway",
+    synopsis="mngr latchkey admin-jwt [OPTIONS]",
+    description="""Materializes the admin permissions file at
+``<plugin_data_dir>/latchkey_admin_permissions.json`` (idempotent --
+an existing file is reused as-is) and mints a JWT signed for that
+path via ``latchkey gateway create-jwt --no-validate``. The JWT is
+printed on stdout as a single line.
+
+The returned token unlocks every service and every extension
+endpoint reachable through the gateway, so treat it like a root
+credential and pass it as the
+``X-Latchkey-Gateway-Permissions-Override`` header to gateway
+requests that need wildcard access (e.g. the minds desktop client
+streaming pending permission requests from the
+``permission-requests`` extension).""",
+    examples=(("Capture into a shell variable", "ADMIN_JWT=$(mngr latchkey admin-jwt)"),),
+).register()
+
+add_pager_help_option(_admin_jwt_command)
+
+
 latchkey.add_command(_create_agent_env_command)
 latchkey.add_command(_link_permissions_command)
 latchkey.add_command(_forward_command)
+latchkey.add_command(_admin_jwt_command)
 
 
 CommandHelpMetadata(
