@@ -572,7 +572,7 @@ already configured, so re-running this subcommand only prompts for the
 gaps.
 
 Currently this just covers the default agent type for `mngr create`.
-With an interactive terminal, presents a numbered picker of every
+With an interactive terminal, presents an interactive picker of every
 available agent type plus an option to keep no default; writes the
 selection to `[commands.create] type` in your user-scope settings.toml.
 

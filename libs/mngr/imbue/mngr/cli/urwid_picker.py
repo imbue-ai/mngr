@@ -57,7 +57,7 @@ def run_single_select_picker(
     header_text: str,
     initial_focus: int = 0,
 ) -> int | None:
-    """Show a numbered single-select urwid picker.
+    """Show a single-select urwid picker.
 
     Returns the index of the selected option, or None if the user
     cancelled (q / Ctrl+C). Caller is responsible for ensuring an
