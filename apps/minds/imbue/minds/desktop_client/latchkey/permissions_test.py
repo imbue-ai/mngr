@@ -615,6 +615,24 @@ def test_render_request_page_omits_browser_notice_when_browser_auth_unsupported(
     assert "Granting permission" in html
 
 
+def test_render_request_page_notes_grants_are_shared_per_host(tmp_path: Path) -> None:
+    """Dialog must tell the user the grant applies to every agent on the host.
+
+    Latchkey state (gateway URL, password, JWT, permissions config) is
+    keyed per-host, so every agent that runs on this workspace's host
+    inherits the same grants. The dialog surfaces that scope so the user
+    isn't surprised by it.
+    """
+    handler = _build_handler(tmp_path, credential_status="valid")
+
+    html = _render_dialog_html(handler)
+
+    # Short bracket note next to the workspace link.
+    assert "grants apply to every agent on this host" in html
+    # Reinforced in the form body so users who skim past the header still see it.
+    assert "shared across every agent running on this workspace's host" in html
+
+
 # -- LatchkeyPermissionGrantHandler.deny --
 
 
