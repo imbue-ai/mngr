@@ -51,10 +51,13 @@ class CostSnapshot(FrozenModel):
     uniformly across sources.
 
     Note: a ``CostSnapshot`` plays two roles in this model. At
-    ``SessionCostRecord.cost`` it represents one session's latest reading.
+    ``SessionCostRecord.cost`` it represents one session's own-contribution
+    delta (the cumulative reading at this session's last event minus the
+    prior session's cumulative reading in the same Claude Code process).
     At ``UsageSnapshot.cost`` (a computed property) it's the sum of those
-    per-session readings across the snapshot's sessions tuple. The same
-    type works for both because each numeric field has well-defined sum
+    per-session contributions across the snapshot's sessions tuple,
+    recovering the true total spend in the recency window. The same type
+    works for both because each numeric field has well-defined sum
     semantics.
     """
 
