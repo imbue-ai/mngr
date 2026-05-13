@@ -37,6 +37,7 @@ _RSYNC_EXCLUDES: Final[tuple[str, ...]] = (
     ".external_worktrees",
 )
 _SSH_COMMAND_TIMEOUT_SECONDS: Final[int] = 60
+_POOL_AGENT_NAME: Final[str] = "system-services"
 
 
 def _run_mngr_command(
@@ -161,9 +162,6 @@ def _sync_mngr_into_template(mngr_source: Path, workspace_dir: Path) -> None:
         )
     if result.returncode != 0:
         logger.warning("rsync failed (exit {}): {}", result.returncode, result.stderr.strip())
-
-
-_POOL_AGENT_NAME: Final[str] = "system-services"
 
 
 def _create_single_pool_host(
