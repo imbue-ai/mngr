@@ -71,7 +71,6 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
 
     grant_outcome: GrantOutcome = Field(default=GrantOutcome.GRANTED)
     grant_message: str = Field(default="granted")
-    grant_set_credentials_example: str | None = Field(default=None)
     deny_message: str = Field(default="denied")
     grant_calls: list[dict[str, object]] = Field(default_factory=list)
     deny_calls: list[dict[str, object]] = Field(default_factory=list)
@@ -91,15 +90,6 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
                 "granted_permissions": tuple(granted_permissions),
             }
         )
-        # NEEDS_MANUAL_CREDENTIALS keeps the request pending and writes
-        # no response event; the other outcomes resolve it.
-        if self.grant_outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS:
-            return GrantResult(
-                outcome=self.grant_outcome,
-                message=self.grant_message,
-                response_event=None,
-                set_credentials_example=self.grant_set_credentials_example,
-            )
         status = RequestStatus.GRANTED if self.grant_outcome == GrantOutcome.GRANTED else RequestStatus.DENIED
         response_event = create_request_response_event(
             request_event_id=request_event_id,
@@ -112,7 +102,6 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
             outcome=self.grant_outcome,
             message=self.grant_message,
             response_event=response_event,
-            set_credentials_example=None,
         )
 
     def deny(
@@ -151,7 +140,6 @@ def _make_recording_handler(
     tmp_path: Path,
     grant_outcome: GrantOutcome = GrantOutcome.GRANTED,
     grant_message: str = "granted",
-    grant_set_credentials_example: str | None = None,
 ) -> _RecordingHandler:
     """Build a ``_RecordingHandler`` with stub probes that won't be exercised in routing tests."""
     return _RecordingHandler(
@@ -161,7 +149,6 @@ def _make_recording_handler(
         mngr_message_sender=MngrMessageSender(mngr_binary="/nonexistent"),
         grant_outcome=grant_outcome,
         grant_message=grant_message,
-        grant_set_credentials_example=grant_set_credentials_example,
     )
 
 
@@ -287,39 +274,6 @@ def test_post_permission_grant_with_failed_signin_returns_denied_outcome(tmp_pat
     # with a distinct message so the agent can tell the user what happened.
     assert payload["outcome"] == "DENIED"
     assert "user cancelled" in payload["message"]
-
-
-def test_post_permission_grant_with_manual_credentials_keeps_request_pending(tmp_path: Path) -> None:
-    """NEEDS_MANUAL_CREDENTIALS must echo the example command and not resolve the inbox."""
-    agent_id = AgentId()
-    request = create_latchkey_permission_request_event(
-        agent_id=str(agent_id),
-        service_name="slack",
-        rationale="reason",
-    )
-    inbox = RequestInbox().add_request(request)
-    expected_example = 'latchkey auth set slack -H "Authorization: Bearer xoxb-..."'
-    handler = _make_recording_handler(
-        tmp_path,
-        grant_outcome=GrantOutcome.NEEDS_MANUAL_CREDENTIALS,
-        grant_message="Slack does not support browser sign-in.",
-        grant_set_credentials_example=expected_example,
-    )
-    client = _build_authenticated_client(tmp_path, handler, inbox)
-
-    response = client.post(
-        f"/requests/{request.event_id}/grant",
-        data={"permissions": ["slack-read-all"]},
-    )
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["outcome"] == "NEEDS_MANUAL_CREDENTIALS"
-    assert payload["set_credentials_example"] == expected_example
-    # The request must remain pending so the user can click Approve again
-    # after running the suggested command.
-    final_inbox = _get_app_request_inbox(client)
-    assert final_inbox.get_pending_count() == 1
 
 
 def test_post_permission_deny_calls_handler_and_resolves_inbox(tmp_path: Path) -> None:

@@ -21,7 +21,6 @@ the latchkey-specific work lives here.
 import asyncio
 import html as html_module
 import json
-import shlex
 from collections.abc import Mapping
 from collections.abc import Sequence
 from enum import auto
@@ -74,32 +73,14 @@ class GrantOutcome(UpperCaseStrEnum):
 
     GRANTED = auto()
     DENIED = auto()
-    NEEDS_MANUAL_CREDENTIALS = auto()
 
 
 class GrantResult(FrozenModel):
     """Outcome of ``LatchkeyPermissionGrantHandler.grant``."""
 
     outcome: GrantOutcome = Field(description="Which branch the grant flow took.")
-    message: str = Field(
-        description=(
-            "Plain-text user/agent-facing message. For ``GRANTED``/``DENIED`` it has "
-            "already been delivered to the agent via ``mngr message``; for "
-            "``NEEDS_MANUAL_CREDENTIALS`` it is shown only to the user."
-        ),
-    )
-    response_event: RequestResponseEvent | None = Field(
-        description=(
-            "The freshly-appended response event when the request was resolved. "
-            "``None`` for ``NEEDS_MANUAL_CREDENTIALS`` because the request stays pending."
-        ),
-    )
-    set_credentials_example: str | None = Field(
-        description=(
-            "Suggested ``latchkey auth set`` invocation to show the user. Only set "
-            "when ``outcome == NEEDS_MANUAL_CREDENTIALS``."
-        ),
-    )
+    message: str = Field(description="Plain-text user/agent-facing message; delivered via ``mngr message``.")
+    response_event: RequestResponseEvent = Field(description="The freshly-appended response event.")
 
 
 class LatchkeyPermissionFlowError(Exception):
@@ -148,68 +129,6 @@ def _format_granted_message(service_display_name: str, granted: Sequence[str]) -
 
 def _format_denied_message(service_display_name: str) -> str:
     return f"Your permission request for {service_display_name} was denied. Do not retry the blocked call."
-
-
-def _format_auth_failed_message(service_display_name: str, detail: str) -> str:
-    suffix = f" Reason: {detail}" if detail else ""
-    return (
-        f"Your permission request for {service_display_name} could not be completed because the user's "
-        f"sign-in flow did not finish.{suffix} Do not retry yet; report this to the user."
-    )
-
-
-def _format_manual_credentials_message(service_display_name: str) -> str:
-    return f"{service_display_name} does not support browser sign-in; manual credentials are required."
-
-
-# Substring latchkey prints when a service (currently the ``google-*``
-# family) needs a one-time ``auth browser-prepare`` to provision an
-# OAuth client in the user's own GCP project before sign-in can run.
-# Matched against the auth_browser stderr; case-insensitive contains
-# check so a future copy edit on the latchkey side (e.g. punctuation)
-# doesn't silently break the auto-prepare chain.
-_AUTH_BROWSER_NEEDS_PREPARE_MARKER: Final[str] = "requires preparation first"
-
-
-def _auth_browser_with_auto_prepare(latchkey: Latchkey, service_name: str) -> tuple[bool, str]:
-    """Run ``latchkey auth browser``, auto-running ``browser-prepare`` on first miss.
-
-    Some services (notably ``google-*``) require a one-time
-    ``auth browser-prepare`` step before ``auth browser`` works. Rather
-    than surface that as a dead-end error and a separate UI button, we
-    detect the failure and chain prepare -> retry automatically; from
-    the user's perspective the single Approve click drives both Chrome
-    windows.
-    """
-    is_success, detail = latchkey.auth_browser(service_name)
-    if is_success or _AUTH_BROWSER_NEEDS_PREPARE_MARKER not in detail.lower():
-        return is_success, detail
-    logger.info(
-        "latchkey auth browser {} reported needs-preparation; running auth browser-prepare",
-        service_name,
-    )
-    is_prepared, prepare_detail = latchkey.auth_browser_prepare(service_name)
-    if not is_prepared:
-        return False, prepare_detail
-    return latchkey.auth_browser(service_name)
-
-
-def _fallback_set_credentials_example(service_name: str) -> str:
-    """Return a generic ``latchkey auth set`` invocation when latchkey didn't supply one."""
-    return f'latchkey auth set {service_name} -H "Authorization: Bearer <token>"'
-
-
-def _prepend_latchkey_directory(command: str, latchkey_directory: Path | None) -> str:
-    """Prefix ``command`` with ``LATCHKEY_DIRECTORY=<dir>`` so the credential
-    written by the user lands in the same store the desktop client uses.
-
-    No-op when the desktop client doesn't pin a custom directory (then the
-    user's terminal will inherit latchkey's own default, matching what the
-    desktop client also does).
-    """
-    if latchkey_directory is None:
-        return command
-    return f"LATCHKEY_DIRECTORY={shlex.quote(str(latchkey_directory))} {command}"
 
 
 def _json_error(message: str, status_code: int) -> Response:
@@ -264,22 +183,13 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
     * A ``GRANTED`` response event has been appended for ``request_event_id``.
     * ``mngr message`` has been attempted (failures logged).
 
-    When ``grant`` returns ``GrantOutcome.DENIED`` (failed browser sign-in):
-
-    * ``latchkey_permissions.json`` is unchanged.
-    * A ``DENIED`` response event has been appended (the agent is told the
-      reason via the message, not via a distinct status).
-    * ``mngr message`` has been attempted.
-
-    When ``grant`` returns ``GrantOutcome.NEEDS_MANUAL_CREDENTIALS`` (the
-    service has no valid credentials and latchkey doesn't expose a browser
-    flow for it):
-
-    * ``latchkey_permissions.json`` is unchanged.
-    * No response event has been written; the request stays pending so the
-      user can run the suggested ``latchkey auth set`` command and click
-      Approve again.
-    * No ``mngr message`` has been sent.
+    Credential acquisition (``latchkey auth browser`` / ``browser-prepare``)
+    is no longer driven from here. The agent inside the VM runs those
+    commands itself via the gateway's ``/latchkey/`` RPC -- which is gated
+    by the gateway password only, not by per-scope permissions -- so the
+    host opens the sign-in Chrome window on demand when the agent next
+    hits a 401. Doing it eagerly here would duplicate that work and
+    couple us to latchkey's CLI error copy.
 
     ``deny`` writes a ``DENIED`` response and notifies; nothing else.
     """
@@ -323,58 +233,13 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 f"Granted permissions not in catalog for service '{service_info.name}': {invalid}",
             )
 
-        latchkey_service_info = self.latchkey.services_info(service_info.name)
-        if latchkey_service_info.credential_status != CredentialStatus.VALID:
-            # If latchkey advertises a browser flow (or returned no
-            # ``authOptions`` at all and we don't actually know), keep the
-            # legacy behaviour and run it. Otherwise refuse the grant and
-            # ask the user to set credentials manually -- the request
-            # stays pending so a follow-up Approve click re-checks status.
-            is_browser_supported = (
-                LATCHKEY_AUTH_OPTION_BROWSER in latchkey_service_info.auth_options
-                or not latchkey_service_info.auth_options
-            )
-            if not is_browser_supported:
-                logger.info(
-                    "Credentials for {} reported as {}; latchkey does not advertise a browser flow, "
-                    "asking user to run 'latchkey auth set'",
-                    service_info.name,
-                    latchkey_service_info.credential_status,
-                )
-                return GrantResult(
-                    outcome=GrantOutcome.NEEDS_MANUAL_CREDENTIALS,
-                    message=_format_manual_credentials_message(service_info.display_name),
-                    response_event=None,
-                    set_credentials_example=_prepend_latchkey_directory(
-                        latchkey_service_info.set_credentials_example
-                        or _fallback_set_credentials_example(service_info.name),
-                        self.latchkey.latchkey_directory,
-                    ),
-                )
-            logger.info(
-                "Credentials for {} reported as {}; running latchkey auth browser",
-                service_info.name,
-                latchkey_service_info.credential_status,
-            )
-            is_success, detail = _auth_browser_with_auto_prepare(self.latchkey, service_info.name)
-            if not is_success:
-                # No separate AUTH_FAILED status: a failed sign-in is
-                # surfaced as DENIED with a distinct message so the agent
-                # can tell the user something went wrong.
-                message = _format_auth_failed_message(service_info.display_name, detail)
-                response_event = self._write_response_and_notify(
-                    request_event_id=request_event_id,
-                    agent_id=agent_id,
-                    service_info=service_info,
-                    status=RequestStatus.DENIED,
-                    message=message,
-                )
-                return GrantResult(
-                    outcome=GrantOutcome.DENIED,
-                    message=message,
-                    response_event=response_event,
-                    set_credentials_example=None,
-                )
+        # The dialog grants scope only. Credential acquisition (latchkey
+        # ``auth browser`` / ``browser-prepare``) is driven by the agent
+        # itself via the gateway when it next hits a 401: the gateway's
+        # ``/latchkey/`` RPC accepts ``auth`` forwards gated only by the
+        # gateway password, so the agent can pop the host's sign-in
+        # Chrome window when needed. Doing it here would duplicate work
+        # and couple us to latchkey's CLI error copy.
 
         # Apply the grant to latchkey_permissions.json before writing the response
         # event so the agent can never observe a GRANTED response without
@@ -397,7 +262,6 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             outcome=GrantOutcome.GRANTED,
             message=granted_message,
             response_event=response_event,
-            set_credentials_example=None,
         )
 
     def deny(
@@ -461,14 +325,10 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         ws_name = _resolve_workspace_name(backend_resolver, parsed_id, fallback=req_event.agent_id)
         pre_checked = self._initial_checked_permissions(parsed_id, service_info)
 
-        # Match ``grant()``: ``latchkey auth browser`` runs only when
-        # credentials are not VALID AND the service either advertises a
-        # browser flow or returns no auth options at all (legacy fallback).
-        # Computed up front so the dialog's progress notice tells the
-        # truth about whether to expect a browser pop-up. If the status
-        # changes between render and submit (rare), the user may see a
-        # slightly inaccurate notice for one cycle; the actual outcome
-        # is unaffected.
+        # Probe credential status so the dialog can tell the user whether
+        # to expect a Chrome sign-in window. The window itself is opened
+        # by the agent via the gateway after Approve (not by us); we just
+        # check whether creds already exist so the dialog copy is honest.
         latchkey_service_info = self.latchkey.services_info(service_info.name)
         will_open_browser = latchkey_service_info.credential_status != CredentialStatus.VALID and (
             LATCHKEY_AUTH_OPTION_BROWSER in latchkey_service_info.auth_options
@@ -528,17 +388,13 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         # The grant call may have appended a response event to
         # ~/.minds/events/requests/events.jsonl; mirror it into the
         # in-memory inbox so the requests panel reflects the resolution
-        # without needing a desktop-client restart. The manual-credentials
-        # branch leaves the request pending, so there is nothing to mirror.
-        if grant_result.response_event is not None:
-            self._mirror_response_into_inbox(request, grant_result.response_event)
+        # without needing a desktop-client restart.
+        self._mirror_response_into_inbox(request, grant_result.response_event)
 
         response_payload: dict[str, str] = {
             "outcome": str(grant_result.outcome),
             "message": grant_result.message,
         }
-        if grant_result.set_credentials_example is not None:
-            response_payload["set_credentials_example"] = grant_result.set_credentials_example
         return Response(
             content=json.dumps(response_payload),
             media_type="application/json",

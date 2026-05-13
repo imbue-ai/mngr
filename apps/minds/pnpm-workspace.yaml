@@ -30,3 +30,5 @@ allowBuilds:
 # We use `hoisted` (not `isolated`) because we don't need pnpm's per-package
 # isolation here and the cost is just disk space.
 nodeLinker: hoisted
+patchedDependencies:
+  latchkey@2.10.1: patches/latchkey@2.10.1.patch
