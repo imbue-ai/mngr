@@ -1405,6 +1405,37 @@ def _get_pool_db_connection() -> Any:
     return psycopg2.connect(database_url)
 
 
+def _raise_host_name_conflict(
+    name: str, *, include_release_hint: bool, from_exc: BaseException | None = None
+) -> NoReturn:
+    """Raise the 409 HTTPException for a duplicate ``host_name``.
+
+    Both ``lease_host`` and ``rename_host`` need to emit a 409 in two
+    places each: the upfront duplicate-name SELECT, and the catch
+    around the UPDATE that hits the partial unique index. Centralising
+    the exception construction here keeps the user-visible wording and
+    status code consistent across all four sites.
+
+    ``include_release_hint`` controls the rename-friendly wording: lease
+    suggests releasing the existing lease (because the user is asking
+    for a fresh host), rename only suggests picking a different name
+    (the existing lease is what they are trying to mutate).
+
+    ``from_exc`` is the original ``psycopg2.errors.UniqueViolation`` (or
+    similar) that triggered the conflict, for the UPDATE-catch paths.
+    Pass ``None`` for the upfront-SELECT paths where there is no
+    underlying exception to chain.
+    """
+    if include_release_hint:
+        detail = (
+            f"You already have a leased host named {name!r}. "
+            "Pick a different name or release the existing lease first."
+        )
+    else:
+        detail = f"You already have a leased host named {name!r}. Pick a different name."
+    raise HTTPException(status_code=409, detail=detail) from from_exc
+
+
 def _append_authorized_key(
     host: str,
     port: int,
@@ -1597,13 +1628,7 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                         (admin.username, requested_host_name),
                     )
                     if cur.fetchone() is not None:
-                        raise HTTPException(
-                            status_code=409,
-                            detail=(
-                                f"You already have a leased host named {requested_host_name!r}. "
-                                "Pick a different name or release the existing lease first."
-                            ),
-                        )
+                        _raise_host_name_conflict(requested_host_name, include_release_hint=True)
 
                     cur.execute(
                         "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes "
@@ -1652,13 +1677,7 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                             (admin.username, requested_host_name, host_db_id),
                         )
                     except psycopg2.errors.UniqueViolation as exc:
-                        raise HTTPException(
-                            status_code=409,
-                            detail=(
-                                f"You already have a leased host named {requested_host_name!r}. "
-                                "Pick a different name or release the existing lease first."
-                            ),
-                        ) from exc
+                        _raise_host_name_conflict(requested_host_name, include_release_hint=True, from_exc=exc)
         finally:
             conn.close()
         attrs_dict = attributes if isinstance(attributes, dict) else {}
@@ -1714,10 +1733,7 @@ def rename_host(request: Request, host_db_id: UUID, body: RenameHostRequest) -> 
                         (admin.username, new_name, str(host_db_id)),
                     )
                     if cur.fetchone() is not None:
-                        raise HTTPException(
-                            status_code=409,
-                            detail=(f"You already have a leased host named {new_name!r}. Pick a different name."),
-                        )
+                        _raise_host_name_conflict(new_name, include_release_hint=False)
                     # Same race-window protection as ``lease_host``: the
                     # pre-check narrows the conflict window but does not
                     # close it. The partial unique index from migration 002
@@ -1729,10 +1745,7 @@ def rename_host(request: Request, host_db_id: UUID, body: RenameHostRequest) -> 
                             (new_name, str(host_db_id)),
                         )
                     except psycopg2.errors.UniqueViolation as exc:
-                        raise HTTPException(
-                            status_code=409,
-                            detail=(f"You already have a leased host named {new_name!r}. Pick a different name."),
-                        ) from exc
+                        _raise_host_name_conflict(new_name, include_release_hint=False, from_exc=exc)
         finally:
             conn.close()
     return {"status": "renamed", "host_name": new_name}
