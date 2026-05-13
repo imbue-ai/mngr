@@ -17,9 +17,9 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId

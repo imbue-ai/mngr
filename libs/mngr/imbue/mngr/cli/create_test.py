@@ -39,9 +39,9 @@ from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
@@ -774,18 +774,30 @@ def test_split_cli_args_empty() -> None:
 
 
 def test_resolve_agent_type_name_type_flag_wins() -> None:
-    """--type flag takes precedence over positional."""
-    assert _resolve_agent_type_name("headless_command", "claude") == "headless_command"
+    """Explicit --type flag takes precedence over positional."""
+    assert _resolve_agent_type_name("headless_command", True, "claude") == "headless_command"
 
 
 def test_resolve_agent_type_name_positional_fallback() -> None:
-    """Positional arg used when --type is None."""
-    assert _resolve_agent_type_name(None, "headless_claude") == "headless_claude"
+    """Positional arg used when --type is not explicit."""
+    assert _resolve_agent_type_name("claude", False, "headless_claude") == "headless_claude"
 
 
-def test_resolve_agent_type_name_all_none() -> None:
-    """All None returns None (default to claude)."""
-    assert _resolve_agent_type_name(None, None) is None
+def test_resolve_agent_type_name_default() -> None:
+    """No positional and no explicit --type returns the --type default."""
+    assert _resolve_agent_type_name("claude", False, None) == "claude"
+
+
+def test_resolve_agent_type_name_positional_beats_config_supplied_type() -> None:
+    """A positional agent type beats a config/template-supplied --type value.
+
+    Config defaults applied via apply_config_defaults / apply_create_template
+    update opts.type but do NOT change the click parameter source, so
+    is_type_explicit stays False. The positional argument is therefore the
+    only command-line signal and wins, matching the general "CLI > config"
+    precedence used elsewhere in the create flow.
+    """
+    assert _resolve_agent_type_name("from_config", False, "from_positional") == "from_positional"
 
 
 # =============================================================================
@@ -1252,6 +1264,7 @@ def test_parse_agent_opts_includes_labels(
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
+        resolved_agent_type="claude",
     )
 
     assert result.label_options.labels == {"project": "mngr", "env": "prod"}
@@ -1278,6 +1291,7 @@ def test_parse_agent_opts_label_invalid_format_raises(
             initial_message=None,
             source_location=source_location,
             mngr_ctx=temp_mngr_ctx,
+            resolved_agent_type="claude",
         )
 
 
@@ -1298,6 +1312,7 @@ def test_parse_agent_opts_empty_labels_by_default(
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
+        resolved_agent_type="claude",
     )
 
     assert result.label_options.labels == {}
@@ -1324,6 +1339,7 @@ def test_parse_agent_opts_with_agent_id(
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
+        resolved_agent_type="claude",
     )
 
     assert result.agent_id == explicit_id
@@ -1346,6 +1362,7 @@ def test_parse_agent_opts_agent_id_none_by_default(
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
+        resolved_agent_type="claude",
     )
 
     assert result.agent_id is None
@@ -1372,6 +1389,7 @@ def test_parse_agent_opts_matching_type_and_positional_ok(
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
+        resolved_agent_type="claude",
     )
 
     assert result.agent_type is not None
