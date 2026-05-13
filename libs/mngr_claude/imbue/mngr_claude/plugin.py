@@ -2000,17 +2000,34 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Adopt sessions when --adopt-session is used.
+        """Adopt a session so the agent's claude resumes existing context.
 
-        For each specified session, searches the user's Claude config directory
-        by ID (or reads a .jsonl path directly), copies the containing project
-        directory into the per-agent config dir, and writes the last session ID
-        so --resume picks it up.
+        Two mutually-exclusive sources of an adoption directive:
+        * ``--adopt-session`` (one or more session ids / .jsonl paths) --
+          handled by ``_adopt_explicit_sessions``.
+        * cloning via ``--from <agent>`` -- handled by
+          ``_adopt_cloned_session`` against the source agent's state dir,
+          which has already been rsynced over by
+          ``_transfer_source_plugin_data`` in ``provision()``.
+
+        Both paths converge on positioning the adopted session's JSONL
+        under the destination's encoded project dir and then finalizing
+        with ``_finalize_adopted_session``.
         """
         adopt_session_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
-        if not adopt_session_args:
-            return
+        if adopt_session_args:
+            self._adopt_explicit_sessions(host, adopt_session_args)
+        elif options.source_agent_state_location is not None:
+            self._adopt_cloned_session(host, options.source_agent_state_location)
 
+    def _adopt_explicit_sessions(
+        self,
+        host: OnlineHostInterface,
+        adopt_session_args: tuple[str, ...],
+    ) -> None:
+        """Position sessions named on the command line under the destination's
+        encoded project dir and finalize. Used by ``--adopt-session``.
+        """
         config_dir = self.get_claude_config_dir()
         copied_project_dirs: set[str] = set()
         # Claude Code organizes sessions by encoded working directory path.
@@ -2055,13 +2072,15 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         host.write_text_file(self._get_agent_dir() / "claude_session_id", adopted_session_id)
 
     def _transfer_source_plugin_data(self, source_agent_state_location: HostLocation) -> None:
-        """Copy the source agent's plugin/ directory into this agent's state
+        """Rsync the source agent's plugin/ directory into this agent's state
         directory. Runs before _setup_per_agent_config_dir, which overwrites
         identity-specific config files with fresh values for the new agent.
+        Subsequent rewiring (project-dir rename, sessions-index drop,
+        claude_session_id) happens later in ``on_after_provisioning`` via
+        ``_adopt_cloned_session``.
         """
         source_host = source_agent_state_location.host
-        source_state_dir = source_agent_state_location.path
-        source_plugin_dir = source_state_dir / "plugin"
+        source_plugin_dir = source_agent_state_location.path / "plugin"
         dest_plugin_dir = self._get_agent_dir() / "plugin"
 
         if not source_host.path_exists(source_plugin_dir):
@@ -2070,8 +2089,6 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         with log_span("Transferring source plugin data"):
             self.host.copy_directory(source_host, source_plugin_dir, dest_plugin_dir)
-
-        self._adopt_cloned_session(source_host, source_state_dir)
 
     def _resolve_work_dir_on_host(self) -> Path:
         """Return ``self.work_dir`` resolved through symlinks as the destination
@@ -2087,36 +2104,41 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             return Path(result.stdout.strip())
         return self.work_dir
 
-    def _adopt_cloned_session(self, source_host: OnlineHostInterface, source_state_dir: Path) -> None:
-        """Rewire the transferred plugin/ so ``claude --resume`` finds the source's session.
+    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> None:
+        """Rewire the rsynced plugin/ so ``claude --resume`` finds the source's session.
 
-        The plugin/ copy preserves session JSONL files but leaves them filed
-        under the *source* agent's encoded work_dir. Claude on the destination
-        searches ``projects/<encoded-current-work-dir>/<session>.jsonl``, so
-        without renaming the project subdir on the destination, the JSONL is
-        invisible and Claude starts a fresh session. Similarly, the active
-        session id has to be written to ``<state_dir>/claude_session_id`` so
-        the startup command's ``claude --resume "$MAIN_CLAUDE_SESSION_ID"``
-        targets the source's session.
+        ``_transfer_source_plugin_data`` (called from ``provision()``) has
+        already rsynced the source's ``plugin/`` onto the destination, with
+        session JSONLs filed under the *source* agent's encoded work_dir.
+        Claude on the destination searches
+        ``projects/<encoded-current-work-dir>/<session>.jsonl``, so without
+        renaming the project subdir, the JSONL is invisible and claude
+        starts a fresh session.
+
+        Reads the source's active project subdir + session id from the
+        source host (so we can bail early without a second remote
+        round-trip if the source has nothing to adopt), then on the
+        destination: carries ``claude_session_id_history`` forward,
+        renames the project subdir to the destination's encoded work_dir,
+        and hands off to ``_finalize_adopted_session`` for the shared
+        index-drop + ``claude_session_id`` write.
 
         The session id is derived from the source's JSONL filename rather
-        than from the source's ``claude_session_id`` file: when the source
-        ran ``claude -p``, claude's ``--session-id`` flag was ignored and
-        claude auto-generated its own id, so the file (whose contents are
-        the agent UUID written by the SessionStart hook default) and the
-        actual session id on disk don't agree. The JSONL filename is the
-        ground truth for what ``claude --resume <id>`` will look for. We
-        read it from the *source* host -- the destination filesystem is the
-        same data, but reading source-side means we can pick the active
-        session and bail (with no destination-side rename) without a second
-        remote round-trip after rsync.
+        than the source's ``claude_session_id`` file: when the source ran
+        ``claude -p``, claude's ``--session-id`` flag was ignored and
+        claude auto-generated its own id, so that file (whose contents
+        default to the agent UUID written by the SessionStart hook) and
+        the actual session id on disk don't agree. The JSONL filename is
+        the ground truth.
         """
+        source_host = source_location.host
+        source_state_dir = source_location.path
+
         # Carry the source's claude_session_id_history forward so the
-        # destination's history reflects the prior run. Independent of the
-        # projects-dir rename below.
+        # destination's history reflects the prior run.
         source_history_path = source_state_dir / "claude_session_id_history"
         if source_host.path_exists(source_history_path):
-            self.host.write_text_file(
+            host.write_text_file(
                 self._get_agent_dir() / "claude_session_id_history",
                 source_host.read_text_file(source_history_path),
             )
@@ -2168,12 +2190,11 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         # path puts the JSONL where claude won't find it, and
         # ``claude --resume`` exits with "No conversation found...".
         dest_projects_dir = self._get_agent_dir() / "plugin" / "claude" / "anthropic" / "projects"
-        canonical_work_dir = self._resolve_work_dir_on_host()
-        dest_project_name = encode_claude_project_dir_name(canonical_work_dir)
+        dest_project_name = encode_claude_project_dir_name(self._resolve_work_dir_on_host())
         if source_project_name != dest_project_name:
             source_subdir = dest_projects_dir / source_project_name
             target_dir = dest_projects_dir / dest_project_name
-            if self.host.path_exists(target_dir):
+            if host.path_exists(target_dir):
                 logger.warning(
                     "Refusing to rekey cloned project subdir {} -> {}: target dir already exists. "
                     "Cloned agent will not resume the source's session.",
@@ -2182,7 +2203,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                 )
                 return
             rename_cmd = f"mv {shlex.quote(str(source_subdir))} {shlex.quote(str(target_dir))}"
-            rename_result = self.host.execute_idempotent_command(rename_cmd, timeout_seconds=10.0)
+            rename_result = host.execute_idempotent_command(rename_cmd, timeout_seconds=10.0)
             if not rename_result.success:
                 logger.warning(
                     "Failed to rekey cloned project subdir {} -> {}: {}",
@@ -2197,7 +2218,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         # "No conversation found with session ID: <sid>" even when the JSONL
         # is at the right path -- claude consults the index for session
         # lookup, and the rsynced one points at the source's project paths.
-        self._finalize_adopted_session(self.host, dest_projects_dir / dest_project_name, adopted_session_id)
+        self._finalize_adopted_session(host, dest_projects_dir / dest_project_name, adopted_session_id)
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve session files and clean up per-agent credentials and trust entries.

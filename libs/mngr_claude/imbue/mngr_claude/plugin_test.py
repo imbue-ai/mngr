@@ -3146,15 +3146,31 @@ def test_on_after_provisioning_adopts_session_from_jsonl_path(
 
 
 # =============================================================================
-# _transfer_source_plugin_data Tests
+# Clone session-adoption tests
+#
+# Drive both halves of the clone flow as it runs in production:
+# (1) ``_transfer_source_plugin_data`` rsyncs source plugin/ over;
+# (2) ``_adopt_cloned_session`` (later, from on_after_provisioning) renames
+#     the project subdir, drops the stale sessions-index, writes
+#     claude_session_id.
 # =============================================================================
 
 
+def _run_clone_adoption(agent: ClaudeAgent, host: OnlineHostInterface, source_dir: Path) -> None:
+    """Drive both clone steps in order against the test agent/host."""
+    location = HostLocation(host=host, path=source_dir)
+    agent._transfer_source_plugin_data(location)
+    agent._adopt_cloned_session(host, location)
+
+
 @pytest.mark.rsync
-def test_transfer_source_plugin_data_copies_plugin_dir(
+def test_clone_adoption_copies_plugin_dir(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_transfer_source_plugin_data should copy the plugin/ directory via rsync."""
+    """Top-of-state files (e.g. ``.claude.json``) under plugin/ are preserved
+    as-is, and the agent's state dir's own ``data.json`` is untouched (only
+    plugin/ is rsynced).
+    """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
     dest_dir = agent._get_agent_dir()
@@ -3168,33 +3184,31 @@ def test_transfer_source_plugin_data_copies_plugin_dir(
     plugin_dir = source_dir / "plugin" / "claude" / "anthropic"
     plugin_dir.mkdir(parents=True)
     (plugin_dir / ".claude.json").write_text('{"trust": true}')
-    # The source's project subdir is named after the source agent's work_dir
-    # encoding. After clone it should be re-keyed to the *destination* agent's
-    # encoding (see test_transfer_source_plugin_data_rekeys_project_dir).
     source_project_subdir = "source-encoded-work-dir"
     projects_dir = plugin_dir / "projects" / source_project_subdir
     projects_dir.mkdir(parents=True)
     (projects_dir / "session.jsonl").write_text('{"type":"message"}\n')
 
-    agent._transfer_source_plugin_data(HostLocation(host=host, path=source_dir))
+    _run_clone_adoption(agent, host, source_dir)
 
-    # data.json should be untouched (only plugin/ is copied)
+    # data.json (outside plugin/) untouched.
     assert json.loads((dest_dir / "data.json").read_text())["id"] == "new-agent"
-
-    # Plugin files should have been copied (non-project data preserved as-is)
+    # Plugin files under plugin/ are preserved as-is.
     assert (dest_dir / "plugin" / "claude" / "anthropic" / ".claude.json").exists()
     # The session JSONL ended up under the destination's encoded work_dir,
     # not the source's -- verified more directly in
-    # test_transfer_source_plugin_data_rekeys_project_dir below.
+    # test_clone_adoption_rekeys_project_dir below.
     dest_project_name = encode_claude_project_dir_name(agent.work_dir)
     assert (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / dest_project_name / "session.jsonl").exists()
     assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / source_project_subdir).exists()
 
 
-def test_transfer_source_plugin_data_skips_when_no_plugin_dir(
+def test_clone_adoption_skips_when_no_plugin_dir(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_transfer_source_plugin_data should skip gracefully when source has no plugin/ dir."""
+    """The rsync step is a no-op when the source has no plugin/ dir, and the
+    subsequent adopt step bails (logs a warning) without raising.
+    """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
     dest_dir = agent._get_agent_dir()
@@ -3204,14 +3218,14 @@ def test_transfer_source_plugin_data_skips_when_no_plugin_dir(
     source_dir.mkdir()
 
     # Should not raise
-    agent._transfer_source_plugin_data(HostLocation(host=host, path=source_dir))
+    _run_clone_adoption(agent, host, source_dir)
 
 
 @pytest.mark.rsync
-def test_transfer_source_plugin_data_rekeys_project_dir(
+def test_clone_adoption_rekeys_project_dir(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """After clone, the project subdir under plugin/claude/anthropic/projects/
+    """After clone adoption, the project subdir under plugin/claude/anthropic/projects/
     should be renamed from the source agent's encoded work_dir to the
     destination agent's, so ``claude --resume`` on the destination finds the
     session JSONL. The destination's ``claude_session_id`` should be set to
@@ -3230,7 +3244,7 @@ def test_transfer_source_plugin_data_rekeys_project_dir(
     session_id = "11111111-2222-3333-4444-555555555555"
     (src_project / f"{session_id}.jsonl").write_text('{"type":"message"}\n')
 
-    agent._transfer_source_plugin_data(HostLocation(host=host, path=source_dir))
+    _run_clone_adoption(agent, host, source_dir)
 
     dest_project_name = encode_claude_project_dir_name(agent.work_dir)
     rekeyed = dest_dir / "plugin" / "claude" / "anthropic" / "projects" / dest_project_name
@@ -3245,7 +3259,7 @@ def test_transfer_source_plugin_data_rekeys_project_dir(
 
 
 @pytest.mark.rsync
-def test_transfer_source_plugin_data_uses_jsonl_filename_not_source_session_id_file(
+def test_clone_adoption_uses_jsonl_filename_not_source_session_id_file(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """``claude_session_id`` on the destination must be the *actual* session
@@ -3274,7 +3288,7 @@ def test_transfer_source_plugin_data_uses_jsonl_filename_not_source_session_id_f
     (source_dir / "claude_session_id").write_text(f"{stale_agent_uuid}\n")
     (source_dir / "claude_session_id_history").write_text(f"{stale_agent_uuid} startup\n")
 
-    agent._transfer_source_plugin_data(HostLocation(host=host, path=source_dir))
+    _run_clone_adoption(agent, host, source_dir)
 
     # Destination's claude_session_id must be the JSONL filename's stem,
     # not the source's claude_session_id contents.
