@@ -344,9 +344,9 @@ def test_clone_local_claude_agent_to_modal_rekeys_for_resume(
 
     Two distinct regressions this guards against:
 
-    1. **Cross-host rsync** -- the original bug from #1598. The plugin/
-       rsync ran on the destination Modal sandbox looking for the source
-       plugin dir there and aborted with
+    1. **Cross-host rsync** -- the plugin/ rsync runs on the destination
+       host. If the source host is not passed through, rsync looks for
+       the source plugin dir on the destination and aborts with
        ``rsync: change_dir ".../plugin" failed: No such file or directory``.
 
     2. **Session rekeying** -- session JSONLs are filed under the source's
