@@ -427,9 +427,9 @@ def _emit_output(
       it so a `--format '...'` consumer gets a single predictable stdout line
       (with empty substitutions) and no stderr noise.
     - At least one source exists but no source produced any renderable section
-      (no current-session line, no total line, no populated window line): fires
-      only under HUMAN, since the JSON/JSONL surfaces still emit a structured
-      "empty enough" payload that downstream consumers can detect themselves.
+      (no cost line, no populated window line): fires only under HUMAN, since
+      the JSON/JSONL surfaces still emit a structured "empty enough" payload
+      that downstream consumers can detect themselves.
     """
     if format_template is not None:
         # Format templates always reference the primary (freshest) source's
