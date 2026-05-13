@@ -74,10 +74,14 @@ conventional path. The minimal contract is just the JSONL line shape:
 {"source":"<your-source>/usage","type":"cost_snapshot","event_id":"evt-<hex>","timestamp":"<ISO 8601>","session_id":"<uuid|null>","cost":{"total_cost_usd":<float>},"rate_limits":{"<window-key>":{"used_percentage":<float>,"resets_at":<unix-ts>}}}
 ```
 
-The `session_id`, `cost`, and `rate_limits` fields are all individually
-optional; at least one must be present and non-null for the reader to keep
-the event. The `type` field is informational -- the reader doesn't validate
-it -- but `"cost_snapshot"` is the current convention.
+The `session_id`, `cost`, and `rate_limits` fields are individually
+optional, but for an event to actually contribute anything renderable it
+must carry either `rate_limits` (which becomes the source's windows) or
+both `session_id` and `cost` (which become one entry in the source's
+per-session aggregation). An event with only one of `session_id` / `cost`
+is parsed but contributes nothing. The `type` field is informational --
+the reader doesn't validate it -- but `"cost_snapshot"` is the current
+convention.
 
 Append one line per refresh to:
 
