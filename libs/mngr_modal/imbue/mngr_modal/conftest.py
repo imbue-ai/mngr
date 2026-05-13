@@ -585,8 +585,12 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     still-registered env, fails, and only then lets the deregister run.
     The hook bypasses fixture-ordering entirely.
 
-    Failure mode: sets `session.exitstatus` to TESTS_FAILED and writes a
-    loud error to stderr/loguru. Does not raise -- raising from
+    Failure mode: writes a loud error to stderr/loguru and, if the session
+    was otherwise passing (`exitstatus == 0`), sets `session.exitstatus`
+    to TESTS_FAILED. If the session was already failing for a more-specific
+    reason (any non-zero exitstatus, e.g. INTERRUPTED/INTERNAL_ERROR),
+    preserve it -- those codes carry strictly more diagnostic information
+    than TESTS_FAILED. Does not raise -- raising from
     `pytest_sessionfinish` is silently dropped by pytest.
     """
     del exitstatus
