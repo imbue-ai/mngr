@@ -432,6 +432,11 @@ def _reset_modal_app_registry() -> Generator[None, None, None]:
     ModalProviderBackend.reset_app_registry()
 
 
+# If this ever starts firing on apps that have actually been deleted, the
+# same eventually-consistent-listing pattern as
+# `_get_leaked_modal_environments` is likely the cause -- adopt the same
+# polling approach (re-list until the candidate set converges or the budget
+# is exhausted) here.
 def _get_leaked_modal_apps() -> list[tuple[str, str]]:
     if not worker_modal_app_names:
         return []
