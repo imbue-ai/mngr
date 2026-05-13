@@ -3235,41 +3235,6 @@ def _build_modal_secrets_from_env(
 
 
 @pure
-def _substitute_dockerfile_build_args(dockerfile_contents: str, build_args: Sequence[str]) -> str:
-    """Substitute Docker build arg defaults in Dockerfile contents.
-
-    Parses KEY=VALUE pairs from build_args and replaces the default values of
-    matching ARG instructions in the Dockerfile. For example, if build_args
-    contains 'CLAUDE_CODE_VERSION=2.1.50', then 'ARG CLAUDE_CODE_VERSION=""'
-    becomes 'ARG CLAUDE_CODE_VERSION="2.1.50"'.
-
-    Raises MngrError if a build arg is not in KEY=VALUE format or if the ARG
-    is not found in the Dockerfile.
-    """
-    result = dockerfile_contents
-    for arg_spec in build_args:
-        if "=" not in arg_spec:
-            raise MngrError(f"Docker build arg must be in KEY=VALUE format, got: {arg_spec}")
-        key, value = arg_spec.split("=", 1)
-        # Replace ARG <key>=<anything> or ARG <key> (no default) with ARG <key>="<value>"
-        # Use a lambda replacement to avoid re.sub interpreting backslash sequences in value.
-        # Bind value via default arg to avoid B023 (closure over loop variable).
-        new_result = re.sub(
-            rf"^(ARG\s+{re.escape(key)})\b.*$",
-            lambda m, v=value: f'{m.group(1)}="{v}"',
-            result,
-            flags=re.MULTILINE,
-        )
-        if new_result == result:
-            raise MngrError(
-                f"Docker build arg {key!r} not found as an ARG instruction in the Dockerfile. "
-                "Ensure the Dockerfile contains a matching ARG instruction."
-            )
-        result = new_result
-    return result
-
-
-@pure
 def _is_multistage_dockerfile(dockerfile_contents: str) -> bool:
     """Return True if the Dockerfile contains more than one FROM instruction.
 
@@ -3291,8 +3256,7 @@ def _parse_docker_build_args(
 
     Returns the parsed dict. Raises ``MngrError`` if any spec is not
     ``KEY=VALUE`` form, or if a key has no matching ``ARG`` instruction in the
-    Dockerfile (mirrors the validation that ``_substitute_dockerfile_build_args``
-    performs as a side effect of substitution).
+    Dockerfile.
     """
     parsed: dict[str, str] = {}
     for arg_spec in build_args:
@@ -3306,6 +3270,34 @@ def _parse_docker_build_args(
             )
         parsed[key] = value
     return parsed
+
+
+@pure
+def _substitute_dockerfile_build_args(dockerfile_contents: str, build_args: Sequence[str]) -> str:
+    """Substitute Docker build arg defaults in Dockerfile contents.
+
+    Parses KEY=VALUE pairs from build_args (via :func:`_parse_docker_build_args`,
+    which also validates that each KEY has a matching ARG in the Dockerfile)
+    and replaces the default values of those ARG instructions. For example,
+    if build_args contains 'CLAUDE_CODE_VERSION=2.1.50', then
+    'ARG CLAUDE_CODE_VERSION=""' becomes 'ARG CLAUDE_CODE_VERSION="2.1.50"'.
+
+    Raises MngrError if a build arg is not in KEY=VALUE format or if the ARG
+    is not found in the Dockerfile.
+    """
+    parsed = _parse_docker_build_args(dockerfile_contents, build_args)
+    result = dockerfile_contents
+    for key, value in parsed.items():
+        # Replace ARG <key>=<anything> or ARG <key> (no default) with ARG <key>="<value>"
+        # Use a lambda replacement to avoid re.sub interpreting backslash sequences in value.
+        # Bind value via default arg to avoid B023 (closure over loop variable).
+        result = re.sub(
+            rf"^(ARG\s+{re.escape(key)})\b.*$",
+            lambda m, v=value: f'{m.group(1)}="{v}"',
+            result,
+            flags=re.MULTILINE,
+        )
+    return result
 
 
 # FIXME: this code that breaks dockefiles up into layers really only needs to chunk the layer when we run into a COPY or RUN command (or when we're finished parsing the commands from the file).
