@@ -370,8 +370,3 @@ def normalize_inject_args(
         "mngr_prefix": _ensure_no_quote_chars(mngr_prefix, "MNGR_PREFIX") if mngr_prefix else None,
         "extra_env": cleaned_extra or None,
     }
-
-
-def host_label_for_agent(agent_name: AgentName) -> str:
-    """Default host name suffix for an agent (matches today's minds convention)."""
-    return f"{agent_name}-host"
