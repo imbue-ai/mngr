@@ -126,7 +126,7 @@ def _provision_statusline_shim(host: OnlineHostInterface, state_dir: Path, work_
 
 @hookimpl
 def on_before_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
-    """Provision the rate-limit statusline shim for Claude agents on any host.
+    """Provision the usage statusline shim for Claude agents on any host.
 
     Steps:
     1. Capture the user's pre-existing ``statusLine.command`` (if any) into
