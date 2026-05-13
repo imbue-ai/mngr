@@ -622,8 +622,13 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         logger.error(message)
         # Force the test session to fail. Raising from pytest_sessionfinish
         # is silently swallowed; setting exitstatus on the session is the
-        # documented way to signal failure from this hook.
-        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        # documented way to signal failure from this hook. Only overwrite
+        # a successful status: a non-zero status (INTERRUPTED=2,
+        # INTERNAL_ERROR=3, USAGE_ERROR=4, NO_TESTS_COLLECTED=5) carries
+        # strictly more diagnostic information than TESTS_FAILED=1, so
+        # downgrading would hide the real reason CI failed.
+        if session.exitstatus == 0:
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 # =============================================================================
