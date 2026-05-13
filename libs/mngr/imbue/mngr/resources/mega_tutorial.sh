@@ -16,8 +16,8 @@ set -euo pipefail
 # running this command launches your default agent immediately *in a new worktree*
 mngr create
 # the defaults are the following: agent=your configured default (stored under `[commands.create] type`
-# in user settings; `scripts/install.sh` suggests a `mngr config set commands.create.type ...` command
-# at the end and lists installed agent-type plugins, but does NOT write the setting for you),
+# in user settings; `scripts/install.sh` interactively prompts you to pick one as part of
+# `mngr extras -i`, and you can re-run `mngr extras config` later to pick or change it),
 # provider=local, project=current dir
 
 # you can run the agent in-place (directly in your source directory) without any transfer:
