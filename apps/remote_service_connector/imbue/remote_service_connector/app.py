@@ -1571,7 +1571,7 @@ def set_service_auth(request: Request, tunnel_name: str, service_name: str, body
 def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
     """Lease an available host from the pool, injecting the caller's SSH public key.
 
-    The caller must supply ``host_name`` — this is the user-facing workspace
+    The caller must supply ``host_name`` -- this is the user-facing workspace
     name the minds desktop client uses as the mngr ``HostName``. Names must
     be unique within the caller's currently-leased hosts (a duplicate
     returns 409 so the UI can prompt the user to pick a different one).
