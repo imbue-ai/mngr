@@ -1050,8 +1050,12 @@ class FakePoolBackend:
     ) -> FakePoolRow:
         """Add an available host to the in-memory pool.
 
-        Available rows have no ``host_name`` yet -- the column is set
-        by the lease endpoint from the caller's request body.
+        In production, available rows carry the bake-time ``host_name``
+        slug (e.g. ``pool-<uuid>-stage``) that the pool baker inserts;
+        the lease endpoint overwrites it with the caller's chosen
+        workspace name at lease time. This fake leaves ``host_name``
+        as ``None`` for simplicity because no test currently exercises
+        the bake-time slug on an available row.
         """
         row = _make_pool_row(
             host_id=host_id,
