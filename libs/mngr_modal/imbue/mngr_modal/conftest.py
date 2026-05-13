@@ -186,36 +186,40 @@ def _apply_cleanup_outcome(
             assert_never(unreachable)
 
 
-def _delete_modal_volume_via_sdk(volume_name: str, environment_name: str) -> ModalCleanupOutcome:
-    """Delete a Modal volume via the SDK and classify the outcome.
+def _classify_modal_sdk_delete(delete_fn: Callable[[], None], resource_description: str) -> ModalCleanupOutcome:
+    """Run an SDK delete callable and classify the outcome as a `ModalCleanupOutcome`.
 
+    Shared scaffold for `_delete_modal_volume_via_sdk` and
+    `_delete_modal_environment_via_sdk`: success -> DELETED,
+    `modal.exception.NotFoundError` -> NOT_FOUND (debug-logged),
+    `(modal.exception.Error, OSError)` -> FAILED (warning-logged).
     See `imbue.mngr.utils.testing.ModalCleanupOutcome` for the contract.
     """
     try:
-        modal.Volume.objects.delete(volume_name, environment_name=environment_name)
+        delete_fn()
         return ModalCleanupOutcome.DELETED
     except modal.exception.NotFoundError:
-        logger.debug("Modal volume {} in env {} already gone", volume_name, environment_name)
+        logger.debug("Modal {} already gone", resource_description)
         return ModalCleanupOutcome.NOT_FOUND
     except (modal.exception.Error, OSError) as e:
-        logger.warning("Failed to delete Modal volume {} in env {}: {}", volume_name, environment_name, e)
+        logger.warning("Failed to delete Modal {}: {}", resource_description, e)
         return ModalCleanupOutcome.FAILED
+
+
+def _delete_modal_volume_via_sdk(volume_name: str, environment_name: str) -> ModalCleanupOutcome:
+    """Delete a Modal volume via the SDK and classify the outcome."""
+    return _classify_modal_sdk_delete(
+        lambda: modal.Volume.objects.delete(volume_name, environment_name=environment_name),
+        f"volume {volume_name} in env {environment_name}",
+    )
 
 
 def _delete_modal_environment_via_sdk(environment_name: str) -> ModalCleanupOutcome:
-    """Delete a Modal environment via the SDK and classify the outcome.
-
-    See `imbue.mngr.utils.testing.ModalCleanupOutcome` for the contract.
-    """
-    try:
-        delete_environment(environment_name)
-        return ModalCleanupOutcome.DELETED
-    except modal.exception.NotFoundError:
-        logger.debug("Modal environment {} already gone", environment_name)
-        return ModalCleanupOutcome.NOT_FOUND
-    except (modal.exception.Error, OSError) as e:
-        logger.warning("Failed to delete Modal environment {}: {}", environment_name, e)
-        return ModalCleanupOutcome.FAILED
+    """Delete a Modal environment via the SDK and classify the outcome."""
+    return _classify_modal_sdk_delete(
+        lambda: delete_environment(environment_name),
+        f"environment {environment_name}",
+    )
 
 
 @pytest.fixture
