@@ -1798,88 +1798,100 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         ctx = ProvisioningContext(is_unattended=not host.is_local, copy_project_config_from=copy_project_config_from)
 
         # Create the config directory (0700: contains credentials and session data)
-        host.execute_idempotent_command(f"mkdir -p -m 0700 {shlex.quote(str(config_dir))}", timeout_seconds=5.0)
+        with log_span("setup_per_agent_config_dir.mkdir_and_version_warn"):
+            host.execute_idempotent_command(
+                f"mkdir -p -m 0700 {shlex.quote(str(config_dir))}", timeout_seconds=5.0
+            )
 
-        # Warn about version consistency when syncing local files to remote
-        if not host.is_local and (
-            config.sync_home_settings or config.sync_claude_json or config.sync_claude_credentials
-        ):
-            _warn_about_version_consistency(config, mngr_ctx.concurrency_group)
+            # Warn about version consistency when syncing local files to remote
+            if not host.is_local and (
+                config.sync_home_settings or config.sync_claude_json or config.sync_claude_credentials
+            ):
+                _warn_about_version_consistency(config, mngr_ctx.concurrency_group)
 
         # Resolve work_dir on remote hosts (e.g. Modal symlinks /mngr/ -> /__modal/volumes/)
         work_dir = self.work_dir
         if not host.is_local:
-            realpath_result = host.execute_idempotent_command(
-                f"realpath {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0
-            )
-            if realpath_result.success and realpath_result.stdout.strip():
-                work_dir = Path(realpath_result.stdout.strip())
+            with log_span("setup_per_agent_config_dir.resolve_remote_work_dir"):
+                realpath_result = host.execute_idempotent_command(
+                    f"realpath {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0
+                )
+                if realpath_result.success and realpath_result.stdout.strip():
+                    work_dir = Path(realpath_result.stdout.strip())
 
         # 1. Generate all file contents
-        claude_json_data = _build_claude_json(
-            work_dir=work_dir,
-            config=config,
-            ctx=ctx,
-            sync_local=config.sync_claude_json,
-            version=config.version,
-        )
-        # Pass host + options so approval finds keys arriving via --env, --pass-env,
-        # --pass-host-env, --host-env, and --host-env-file -- not just os.environ. The
-        # LOCAL/Docker minds path lands its ANTHROPIC_API_KEY only on the host's env
-        # file (via --host-env-file <repo>/.env), so without these arguments the
-        # approval missed the key and claude blocked on the custom-key TUI prompt.
-        approve_api_key_for_claude(claude_json_data, host=host, options=options)
+        with log_span("setup_per_agent_config_dir.build_claude_json"):
+            claude_json_data = _build_claude_json(
+                work_dir=work_dir,
+                config=config,
+                ctx=ctx,
+                sync_local=config.sync_claude_json,
+                version=config.version,
+            )
+            # Pass host + options so approval finds keys arriving via --env, --pass-env,
+            # --pass-host-env, --host-env, and --host-env-file -- not just os.environ. The
+            # LOCAL/Docker minds path lands its ANTHROPIC_API_KEY only on the host's env
+            # file (via --host-env-file <repo>/.env), so without these arguments the
+            # approval missed the key and claude blocked on the custom-key TUI prompt.
+            approve_api_key_for_claude(claude_json_data, host=host, options=options)
 
-        settings_json = _build_settings_json(source_claude_dir, config, ctx, sync_local=config.sync_home_settings)
+        with log_span("setup_per_agent_config_dir.build_settings_json"):
+            settings_json = _build_settings_json(source_claude_dir, config, ctx, sync_local=config.sync_home_settings)
 
-        generated_files: dict[Path, str] = {
-            Path("settings.json"): settings_json,
-            Path(".claude.json"): json.dumps(claude_json_data, indent=2) + "\n",
-        }
-        if config.sync_home_settings and not host.is_local:
-            # Rewrite plugin paths for remote hosts where ~/.claude/ doesn't exist.
-            # Local hosts don't need rewriting: the original absolute paths under
-            # ~/.claude/ are directly accessible, and _sync_user_resources already
-            # provides the file (via symlink or copy).
-            installed_plugins = _generate_installed_plugins_content(source_claude_dir, config_dir)
-            if installed_plugins:
-                generated_files[_INSTALLED_PLUGINS_RELATIVE_PATH] = installed_plugins
-        if config.sync_home_settings:
-            # Rewrite marketplace installLocation for both local and remote hosts.
-            # Claude Code expects installLocation to point inside $CLAUDE_CONFIG_DIR.
-            # Without rewriting, the paths point to ~/.claude/plugins/marketplaces/
-            # which Claude Code treats as "corrupted", silently skipping marketplace
-            # refreshes and leaving the plugin cache stale.
-            known_marketplaces = _generate_known_marketplaces_content(source_claude_dir, config_dir)
-            if known_marketplaces:
-                generated_files[_KNOWN_MARKETPLACES_RELATIVE_PATH] = known_marketplaces
+            generated_files: dict[Path, str] = {
+                Path("settings.json"): settings_json,
+                Path(".claude.json"): json.dumps(claude_json_data, indent=2) + "\n",
+            }
+            if config.sync_home_settings and not host.is_local:
+                # Rewrite plugin paths for remote hosts where ~/.claude/ doesn't exist.
+                # Local hosts don't need rewriting: the original absolute paths under
+                # ~/.claude/ are directly accessible, and _sync_user_resources already
+                # provides the file (via symlink or copy).
+                installed_plugins = _generate_installed_plugins_content(source_claude_dir, config_dir)
+                if installed_plugins:
+                    generated_files[_INSTALLED_PLUGINS_RELATIVE_PATH] = installed_plugins
+            if config.sync_home_settings:
+                # Rewrite marketplace installLocation for both local and remote hosts.
+                # Claude Code expects installLocation to point inside $CLAUDE_CONFIG_DIR.
+                # Without rewriting, the paths point to ~/.claude/plugins/marketplaces/
+                # which Claude Code treats as "corrupted", silently skipping marketplace
+                # refreshes and leaving the plugin cache stale.
+                known_marketplaces = _generate_known_marketplaces_content(source_claude_dir, config_dir)
+                if known_marketplaces:
+                    generated_files[_KNOWN_MARKETPLACES_RELATIVE_PATH] = known_marketplaces
 
         # Remote credentials: read locally, include in generated files for staging
         if not host.is_local and config.sync_claude_credentials:
-            credentials = _read_credentials_content(source_claude_dir, config, mngr_ctx.concurrency_group)
-            if credentials:
-                generated_files[Path(".credentials.json")] = credentials
+            with log_span("setup_per_agent_config_dir.read_remote_credentials"):
+                credentials = _read_credentials_content(source_claude_dir, config, mngr_ctx.concurrency_group)
+                if credentials:
+                    generated_files[Path(".credentials.json")] = credentials
 
         # Remote API key: merge from keychain if not already in .claude.json
         if not host.is_local:
-            _merge_keychain_api_key(claude_json_data, config, mngr_ctx.concurrency_group)
-            # Re-serialize after potential keychain merge
-            generated_files[Path(".claude.json")] = json.dumps(claude_json_data, indent=2) + "\n"
+            with log_span("setup_per_agent_config_dir.merge_keychain_api_key"):
+                _merge_keychain_api_key(claude_json_data, config, mngr_ctx.concurrency_group)
+                # Re-serialize after potential keychain merge
+                generated_files[Path(".claude.json")] = json.dumps(claude_json_data, indent=2) + "\n"
 
         # 2. Transfer directories and set up local credentials
         if config.sync_home_settings:
             if host.is_local:
-                _sync_user_resources(host, config_dir, symlink=config.symlink_user_resources)
+                with log_span("setup_per_agent_config_dir.sync_user_resources"):
+                    _sync_user_resources(host, config_dir, symlink=config.symlink_user_resources)
             else:
-                _rsync_claude_home_directories(host, _get_local_host(mngr_ctx), source_claude_dir, config_dir)
+                with log_span("setup_per_agent_config_dir.rsync_claude_home_directories"):
+                    _rsync_claude_home_directories(host, _get_local_host(mngr_ctx), source_claude_dir, config_dir)
         if host.is_local:
-            if config.convert_macos_credentials and is_macos():
-                _provision_keychain_credentials(config_dir, mngr_ctx.concurrency_group)
-            else:
-                _provision_local_credentials(host, config_dir, symlink=config.sync_credentials_on_login)
+            with log_span("setup_per_agent_config_dir.provision_local_credentials"):
+                if config.convert_macos_credentials and is_macos():
+                    _provision_keychain_credentials(config_dir, mngr_ctx.concurrency_group)
+                else:
+                    _provision_local_credentials(host, config_dir, symlink=config.sync_credentials_on_login)
 
         # 3. Write generated files to config_dir
-        _write_generated_files(host, config_dir, generated_files, mngr_ctx)
+        with log_span("setup_per_agent_config_dir.write_generated_files"):
+            _write_generated_files(host, config_dir, generated_files, mngr_ctx)
 
     def provision(
         self,
