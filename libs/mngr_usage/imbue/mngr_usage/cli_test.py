@@ -1657,7 +1657,7 @@ def test_usage_command_detail_flag_emits_sub_tag_for_subscription_sessions(
 ) -> None:
     """``--detail`` per-session lines tag subscription sessions with ``[sub]``.
 
-    The ``_SESSION_MODE_TAGS`` mapping (``SUBSCRIPTION -> "sub"``,
+    The ``_session_mode_tag`` mapping (``SUBSCRIPTION -> "sub"``,
     ``API_KEY -> "api"``) is part of the user-visible contract: it's how
     users distinguish auth contexts in a mixed-mode breakdown. The
     api-tag side is covered elsewhere; this guards the subscription
