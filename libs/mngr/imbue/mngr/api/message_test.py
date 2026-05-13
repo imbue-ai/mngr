@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.api.cel_context import agent_to_cel_context
 from imbue.mngr.api.create import CreateAgentOptions
 from imbue.mngr.api.message import MessageResult
 from imbue.mngr.api.message import send_message_to_agents
@@ -17,7 +18,6 @@ from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr.api.cel_context import agent_to_cel_context
 
 
 def test_message_result_initializes_with_empty_lists() -> None:
