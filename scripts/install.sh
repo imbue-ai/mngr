@@ -9,13 +9,11 @@
 #   1. Installs uv (https://docs.astral.sh/uv/) if not already present
 #   2. Installs mngr via: uv tool install imbue-mngr
 #   3. Runs: mngr dependencies -i  (interactively install system deps)
-#   4. Runs: mngr extras -i        (optional: plugins, shell completion, etc.)
-#   5. Suggests a `mngr config set commands.create.type ...` command to set
-#      the default agent type for `mngr create` (does NOT write it for you)
+#   4. Runs: mngr extras -i        (optional: plugins, shell completion,
+#                                   Claude Code plugin, default agent type)
 #
 # Steps 1-2 run automatically. Steps 3-4 prompt before installing anything.
-# Step 5 only prints a suggested command -- nothing is written without your
-# action. Safe to re-run: skips anything already installed or configured.
+# Safe to re-run: skips anything already installed or configured.
 # Source: https://github.com/imbue-ai/mngr
 #
 set -euo pipefail
@@ -78,25 +76,6 @@ mngr dependencies -i || warn "Some dependencies could not be installed. Run 'mng
 # ── Step 4: Optional extras (plugins, shell completion, Claude Code plugin) ──
 
 mngr extras -i || warn "Some extras could not be installed. Run 'mngr extras' to see status."
-
-# ── Step 5: Default agent type for `mngr create` ─────────────────────────────
-
-# `mngr create` requires an agent type (via positional, --type, or
-# [commands.create] type in user settings). If the user has not set one
-# yet, suggest the right `mngr config set` command and list the
-# installed agent-type plugins they can pick from.
-if ! mngr config get commands.create.type --scope user >/dev/null 2>&1; then
-    info "To set a default agent type for 'mngr create', run:"
-    info "    mngr config set commands.create.type <name> --scope user"
-    # Print the "Available agent types:" header only on success so that the
-    # failure path doesn't leave a dangling header above the warning.
-    if AGENT_TYPES_OUTPUT="$(mngr plugin list --kind agent-type --active --format '{name}' 2>/dev/null)"; then
-        info "Available agent types:"
-        printf '%s\n' "$AGENT_TYPES_OUTPUT" | sed 's/^/    /'
-    else
-        warn "Could not list agent-type plugins. Run 'mngr plugin list --kind agent-type' to investigate."
-    fi
-fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 
