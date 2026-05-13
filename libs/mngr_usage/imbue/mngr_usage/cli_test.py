@@ -989,7 +989,7 @@ def test_usage_command_renders_cost_only_for_api_key_user(
 
 
 @pytest.mark.tmux
-def test_usage_command_json_includes_session_id_and_cost(
+def test_usage_command_json_default_is_summary_only(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     local_host: Host,
