@@ -400,6 +400,14 @@ def _build_mngr_create_command(
     ``latchkey_env`` is the latchkey wiring (gateway URL, password, JWT,
     disable-counting flag) computed by
     :func:`imbue.mngr_latchkey.agent_setup.prepare_agent_latchkey`.
+
+    Note on the ``workspace_name: AgentName`` type: the minds-internal
+    ``AgentName`` is a ``NonEmptyStr`` representing "user-typed name from
+    the create form". Historically that was the agent name; after the
+    primary-chat removal it is the host name. We keep the type label
+    rather than introduce a new minds primitive to avoid churn in the
+    callers that thread the value through. See
+    :class:`imbue.minds.primitives.AgentName` for the full story.
     """
     agent_name = _SYSTEM_SERVICES_AGENT_NAME
     # The user-supplied workspace name *is* the host name -- no transformation

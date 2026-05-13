@@ -64,7 +64,16 @@ class AIProvider(UpperCaseStrEnum):
 
 
 class AgentName(NonEmptyStr):
-    """User-chosen name for an agent."""
+    """User-chosen name typed into the minds create form.
+
+    Historically this was the agent name. After the primary-chat removal
+    the value is used as the mngr ``HostName`` (and, for imbue_cloud, the
+    connector lease's ``host_name``) -- the agent on a minds workspace is
+    always ``system-services`` and is never named after this string. The
+    class is kept under the ``AgentName`` name only because it's already
+    threaded through several minds modules; semantically it is now the
+    workspace / host name.
+    """
 
     ...
 
