@@ -2124,11 +2124,26 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         # Rename the source-encoded project subdir on the destination (just
         # rsynced) to the destination agent's encoded work_dir. Both paths
         # live on the same destination host, so a plain ``mv`` is enough.
+        # Refuse to clobber a pre-existing target: in normal usage the
+        # destination's plugin/ is freshly populated entirely from the
+        # source's rsync, so the target can only pre-exist if the source
+        # had a project subdir whose encoded name coincidentally matched
+        # the destination's work_dir (e.g., source visited multiple cwds).
+        # That collision is unexpected enough that silent clobber would
+        # likely lose data we don't realize is there.
         dest_projects_dir = self._get_agent_dir() / "plugin" / "claude" / "anthropic" / "projects"
         dest_project_name = encode_claude_project_dir_name(self.work_dir)
         if source_project_name != dest_project_name:
             source_subdir = dest_projects_dir / source_project_name
             target_dir = dest_projects_dir / dest_project_name
+            if self.host.path_exists(target_dir):
+                logger.warning(
+                    "Refusing to rekey cloned project subdir {} -> {}: target dir already exists. "
+                    "Cloned agent will not resume the source's session.",
+                    source_subdir,
+                    target_dir,
+                )
+                return
             rename_cmd = f"mv {shlex.quote(str(source_subdir))} {shlex.quote(str(target_dir))}"
             rename_result = self.host.execute_idempotent_command(rename_cmd, timeout_seconds=10.0)
             if not rename_result.success:
