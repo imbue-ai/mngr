@@ -75,19 +75,19 @@ from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
-from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
-from imbue.mngr_latchkey.store import load_gateway_info
+from imbue.mngr_latchkey.store import LatchkeyForwardInfo
+from imbue.mngr_latchkey.store import load_forward_info
 
 _DEFAULT_MNGR_FORWARD_PORT: Final[int] = 8421
 _AUTH_ERROR_TYPE: Final[str] = "ImbueCloudAuthError"
 
 # How long minds is willing to wait for ``mngr latchkey forward`` to
-# publish its gateway info record after a fresh spawn. Long enough to
-# tolerate a cold gateway-binary start on a slow box but short enough
-# to keep ``minds run`` from blocking forever if the supervisor never
-# becomes ready.
-_GATEWAY_INFO_WAIT_SECONDS: Final[float] = 30.0
-_GATEWAY_INFO_POLL_INTERVAL_SECONDS: Final[float] = 0.2
+# bind its gateway port and stamp the port onto its on-disk supervisor
+# record. Long enough to tolerate a cold gateway-binary start on a
+# slow box but short enough to keep ``minds run`` from blocking
+# forever if the supervisor never becomes ready.
+_GATEWAY_PORT_WAIT_SECONDS: Final[float] = 30.0
+_GATEWAY_PORT_POLL_INTERVAL_SECONDS: Final[float] = 0.2
 
 
 @click.command()
@@ -169,18 +169,25 @@ def run(
     start_grandparent_death_watcher(root_concurrency_group)
 
     # Block startup until the supervised ``mngr latchkey forward``
-    # publishes the gateway record. Without it we cannot mint the admin
-    # JWT (we would not know what to point the URL at) nor consume
-    # permission requests, so failing fast here is preferable to coming
-    # up in a half-wired state.
-    gateway_info = _wait_for_gateway_info(latchkey)
+    # binds its gateway port. Without it we cannot mint the admin JWT
+    # (we would not know what to point the URL at) nor consume
+    # permission requests, so failing fast here is preferable to
+    # coming up in a half-wired state. The password is derived
+    # in-process from the user's latchkey encryption key -- it is
+    # never persisted on disk -- so we do not have to wait for it.
+    forward_info = _wait_for_gateway_port(latchkey)
     try:
         admin_jwt = latchkey.create_admin_permissions_jwt()
+        gateway_password = latchkey.derive_gateway_password()
     except LatchkeyError as e:
-        raise click.ClickException(f"Failed to mint admin latchkey JWT: {e}") from e
+        raise click.ClickException(f"Failed to wire up latchkey gateway client: {e}") from e
+    # _wait_for_gateway_port returns only after the supervisor has
+    # stamped a non-None gateway_port; re-assert here so the type
+    # checker can narrow.
+    assert forward_info.gateway_port is not None
     gateway_client = LatchkeyGatewayClient(
-        base_url=gateway_info.url,
-        password=gateway_info.password,
+        base_url=f"http://{latchkey.listen_host}:{forward_info.gateway_port}",
+        password=gateway_password,
         admin_jwt=admin_jwt,
     )
 
@@ -320,36 +327,37 @@ def run(
         consumer.terminate()
 
 
-def _wait_for_gateway_info(latchkey: Latchkey) -> LatchkeyGatewayInfo:
-    """Block until the supervised ``mngr latchkey forward`` publishes its gateway record.
+def _wait_for_gateway_port(latchkey: Latchkey) -> LatchkeyForwardInfo:
+    """Block until the supervised ``mngr latchkey forward`` stamps its bound gateway port.
 
-    The supervisor writes
-    ``<plugin_data_dir>/latchkey_gateway.json`` immediately after it
-    binds the gateway port. We poll the file until it appears (or the
-    timeout expires) so subsequent minds startup steps can mint the
-    admin JWT against the published URL / password without racing the
+    The supervisor writes its ``LatchkeyForwardInfo`` record with
+    ``gateway_port=None`` at spawn time and updates the record in place
+    once it has bound the shared ``latchkey gateway`` subprocess to a
+    free TCP port. We poll the record until the port becomes non-None
+    (or the timeout expires) so subsequent minds startup steps can
+    build the gateway URL deterministically without racing the
     supervisor's own startup.
     """
     plugin_dir = latchkey.plugin_data_dir
     deadline = threading.Event()
-    timer = threading.Timer(_GATEWAY_INFO_WAIT_SECONDS, deadline.set)
+    timer = threading.Timer(_GATEWAY_PORT_WAIT_SECONDS, deadline.set)
     timer.daemon = True
     timer.start()
     try:
         while not deadline.is_set():
-            info = load_gateway_info(plugin_dir)
-            if info is not None:
+            info = load_forward_info(plugin_dir)
+            if info is not None and info.gateway_port is not None:
                 return info
             # Use the same event as the deadline so we wake up promptly
             # when the timer fires; the wait returns True iff the
             # deadline was reached during the sleep.
-            if deadline.wait(timeout=_GATEWAY_INFO_POLL_INTERVAL_SECONDS):
+            if deadline.wait(timeout=_GATEWAY_PORT_POLL_INTERVAL_SECONDS):
                 break
     finally:
         timer.cancel()
     raise click.ClickException(
-        f"Timed out after {_GATEWAY_INFO_WAIT_SECONDS:.1f}s waiting for ``mngr latchkey forward`` to publish "
-        f"its gateway info record at {plugin_dir}; is the supervisor stuck?",
+        f"Timed out after {_GATEWAY_PORT_WAIT_SECONDS:.1f}s waiting for ``mngr latchkey forward`` to stamp "
+        f"its bound gateway port onto {plugin_dir}; is the supervisor stuck?",
     )
 
 

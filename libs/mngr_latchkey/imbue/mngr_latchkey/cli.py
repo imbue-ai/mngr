@@ -54,10 +54,9 @@ from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
 from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
-from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
 from imbue.mngr_latchkey.store import LatchkeyStoreError
-from imbue.mngr_latchkey.store import delete_gateway_info
-from imbue.mngr_latchkey.store import save_gateway_info
+from imbue.mngr_latchkey.store import load_forward_info
+from imbue.mngr_latchkey.store import update_forward_info_gateway_port
 
 # Env-var overrides for the two resolved settings; documented in the
 # CLI help and in the spec.
@@ -86,6 +85,10 @@ class _CreateAgentEnvCliOptions(_LatchkeyCommonCliOptions):
 
 class _AdminJwtCliOptions(_LatchkeyCommonCliOptions):
     """Backing options object for ``mngr latchkey admin-jwt``."""
+
+
+class _GatewayInfoCliOptions(_LatchkeyCommonCliOptions):
+    """Backing options object for ``mngr latchkey gateway-info``."""
 
 
 class _LinkPermissionsCliOptions(_LatchkeyCommonCliOptions):
@@ -396,19 +399,13 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
         raise click.ClickException(f"Failed to start shared Latchkey gateway: {e}") from e
     logger.info("Started shared Latchkey gateway at {}", latchkey.gateway_url)
 
-    # Publish the gateway URL + password to disk so other in-process
-    # consumers (notably the minds desktop client) can find it. The
-    # record is unconditionally deleted in the shutdown ``finally``
-    # block below so a future ``forward`` invocation never reads stale
-    # contact info for a gateway that died with us.
-    try:
-        gateway_info = LatchkeyGatewayInfo(
-            url=latchkey.gateway_url,
-            password=latchkey.derive_gateway_password(),
-        )
-    except LatchkeyError as e:
-        raise click.ClickException(f"Failed to derive gateway password for info record: {e}") from e
-    save_gateway_info(latchkey.plugin_data_dir, gateway_info)
+    # Stamp the freshly-bound gateway port onto the on-disk supervisor
+    # record so other in-process consumers (notably the minds desktop
+    # client) can discover where the gateway is listening. The
+    # password is intentionally NOT persisted -- consumers derive it
+    # on demand via :meth:`Latchkey.derive_gateway_password` (a pure
+    # function of the user's latchkey encryption key).
+    update_forward_info_gateway_port(latchkey.plugin_data_dir, latchkey.gateway_port)
 
     tunnel_manager = SSHTunnelManager()
     tunnel_manager.start_reverse_tunnel_health_check()
@@ -444,7 +441,6 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
             latchkey.stop_gateway()
         except LatchkeyError as e:
             logger.warning("Failed to stop shared Latchkey gateway during shutdown: {}", e)
-        delete_gateway_info(latchkey.plugin_data_dir)
 
 
 class _ShutdownSignalHandler(FrozenModel):
@@ -597,10 +593,94 @@ streaming pending permission requests from the
 add_pager_help_option(_admin_jwt_command)
 
 
+# =============================================================================
+# Subcommand: gateway-info
+# =============================================================================
+
+
+@click.command(name="gateway-info")
+@add_common_options
+@click.pass_context
+def _gateway_info_command(ctx: click.Context, **kwargs: Any) -> None:
+    """Print the running shared gateway's URL + password as a single JSON object."""
+    del kwargs
+    mngr_ctx, _output_opts, opts = setup_command_context(
+        ctx=ctx,
+        command_name="latchkey.gateway-info",
+        command_class=_GatewayInfoCliOptions,
+        is_format_template_supported=False,
+    )
+
+    latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
+
+    info = load_forward_info(latchkey.plugin_data_dir)
+    if info is None:
+        raise click.ClickException(
+            "No ``mngr latchkey forward`` supervisor is running for this latchkey directory; "
+            "start one with ``mngr latchkey forward`` before asking for its gateway info.",
+        )
+    if info.gateway_port is None:
+        raise click.ClickException(
+            "The supervisor record exists but the gateway has not finished binding its listen "
+            "port yet; retry in a moment.",
+        )
+
+    try:
+        password = latchkey.derive_gateway_password()
+    except LatchkeyError as e:
+        raise click.ClickException(f"Failed to derive gateway password: {e}") from e
+
+    emit_final_json(
+        {
+            "url": f"http://{latchkey.listen_host}:{info.gateway_port}",
+            "password": password,
+        },
+    )
+
+
+_add_common_latchkey_options(_gateway_info_command)
+
+CommandHelpMetadata(
+    key="latchkey.gateway-info",
+    one_line_description="Print the running shared gateway's URL + password as JSON",
+    synopsis="mngr latchkey gateway-info [OPTIONS]",
+    description="""Reads the supervised ``mngr latchkey forward`` record
+to discover the bound gateway port and derives the gateway password
+locally (via ``latchkey gateway create-jwt`` against a sentinel path,
+the same way :meth:`Latchkey.derive_gateway_password` does in
+Python). Emits a single JSON object on stdout:
+
+```
+{
+  "url": "http://127.0.0.1:32867",
+  "password": "<sha256-of-derived-jwt>"
+}
+```
+
+Fails with a non-zero exit when no supervisor is running for the
+active latchkey directory, or when the supervisor has not yet
+stamped its bound gateway port onto its on-disk record (i.e. the
+supervisor is still in its startup window).
+
+The password is intentionally NOT persisted on disk; this command
+is the supported way to retrieve it without writing your own
+Python integration.""",
+    examples=(
+        (
+            "Capture into shell variables",
+            'eval "$(mngr latchkey gateway-info | jq -r \'@text "GATEWAY_URL=\\(.url); GATEWAY_PASSWORD=\\(.password)"\')"',
+        ),
+    ),
+).register()
+
+add_pager_help_option(_gateway_info_command)
+
+
 latchkey.add_command(_create_agent_env_command)
 latchkey.add_command(_link_permissions_command)
 latchkey.add_command(_forward_command)
 latchkey.add_command(_admin_jwt_command)
+latchkey.add_command(_gateway_info_command)
 
 
 CommandHelpMetadata(

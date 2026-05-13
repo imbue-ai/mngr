@@ -41,19 +41,23 @@ latchkey forward` spawns the shared gateway.
   full access to the gateway's extension endpoints.
 - New `mngr latchkey admin-jwt` CLI subcommand wraps the above and
   prints the JWT on stdout for shell-driven workflows.
-- New on-disk `LatchkeyGatewayInfo` record at
-  `<plugin_data_dir>/latchkey_gateway.json`, written by `mngr
-  latchkey forward` immediately after the gateway binds its port and
-  deleted on shutdown. Lets non-spawning processes (the minds
-  desktop client) discover the gateway URL + listen password without
-  having to mint either themselves.
+- New `mngr latchkey gateway-info` CLI subcommand that prints the
+  shared gateway's URL + password as a single JSON object on stdout.
+  The bound gateway port is stamped onto the existing
+  `LatchkeyForwardInfo` record (`gateway_port` field) so non-spawning
+  processes can discover where the gateway is listening; the
+  password is intentionally **never** persisted on disk and is
+  derived locally by every consumer via
+  :meth:`Latchkey.derive_gateway_password` (a pure function of the
+  user's latchkey encryption key).
 
 ### Minds desktop client
 
-- `cli/run.py` now blocks on `_wait_for_gateway_info` before the
-  FastAPI app is built, mints an admin JWT, and constructs a
-  `LatchkeyGatewayClient` shared by every code path that talks to
-  the gateway extensions.
+- `cli/run.py` now blocks on `_wait_for_gateway_port` (which polls
+  `LatchkeyForwardInfo.gateway_port` for a non-None value) before the
+  FastAPI app is built, then derives the gateway password and mints
+  the admin JWT in-process and constructs a `LatchkeyGatewayClient`
+  shared by every code path that talks to the gateway extensions.
 - New `PermissionRequestsConsumer` daemon thread streams
   `GET /permission-requests?follow=true` and feeds each pending
   request into the existing `RequestInbox`. The legacy

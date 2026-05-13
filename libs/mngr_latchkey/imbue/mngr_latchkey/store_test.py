@@ -1,38 +1,40 @@
 import json
 import os
 import stat
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pytest
 
 from imbue.mngr.primitives import HostId
-from imbue.mngr_latchkey.store import LatchkeyGatewayInfo
+from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import MalformedPermissionsConfigError
 from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
-from imbue.mngr_latchkey.store import delete_gateway_info
 from imbue.mngr_latchkey.store import ensure_admin_permissions_file
 from imbue.mngr_latchkey.store import gateway_log_path
 from imbue.mngr_latchkey.store import granted_permissions_for_scope
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
-from imbue.mngr_latchkey.store import load_gateway_info
+from imbue.mngr_latchkey.store import load_forward_info
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
 from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_host
-from imbue.mngr_latchkey.store import save_gateway_info
+from imbue.mngr_latchkey.store import save_forward_info
 from imbue.mngr_latchkey.store import save_permissions
 from imbue.mngr_latchkey.store import set_permissions_for_scope
+from imbue.mngr_latchkey.store import update_forward_info_gateway_port
 
-# Gateway info save/load/delete tests went away when the on-disk
-# gateway record did -- gateway lifetime is now fully owned by the
-# single ``mngr latchkey forward`` subprocess the supervisor
-# guarantees, and cross-process adoption is no longer attempted.
-# ``LatchkeyGatewayInfo`` itself remains as an in-memory return-type
-# for the spawn path. Forward-supervisor record helpers are tested in
-# ``forward_supervisor_test.py`` instead.
+# Gateway-record save/load/delete tests went away when the on-disk
+# gateway record did. The supervisor's bound gateway port is now
+# stamped onto the existing ``LatchkeyForwardInfo`` record via
+# ``update_forward_info_gateway_port``; the password is never
+# persisted (callers derive it via ``Latchkey.derive_gateway_password``).
+# Forward-supervisor record helpers are tested in
+# ``forward_supervisor_test.py`` and below.
 
 
 def test_gateway_log_path_is_top_level(tmp_path: Path) -> None:
@@ -488,30 +490,36 @@ def test_ensure_admin_permissions_file_is_idempotent(tmp_path: Path) -> None:
     assert path.read_text() == custom
 
 
-# -- Gateway info --------------------------------------------------------------
+# -- Forward-info gateway-port stamping ----------------------------------------
 
 
-def test_save_then_load_gateway_info_round_trip(tmp_path: Path) -> None:
-    info = LatchkeyGatewayInfo(url="http://127.0.0.1:12345", password="hunter2")
-    save_gateway_info(tmp_path, info)
-    loaded = load_gateway_info(tmp_path)
-    assert loaded == info
+def _make_forward_info(pid: int = 4242, gateway_port: int | None = None) -> LatchkeyForwardInfo:
+    return LatchkeyForwardInfo(
+        pid=pid,
+        started_at=datetime.now(timezone.utc),
+        gateway_port=gateway_port,
+    )
 
 
-def test_load_gateway_info_returns_none_when_absent(tmp_path: Path) -> None:
-    assert load_gateway_info(tmp_path) is None
+def test_forward_info_defaults_gateway_port_to_none() -> None:
+    """Records written before the gateway binds carry an absent port."""
+    info = LatchkeyForwardInfo(pid=1, started_at=datetime.now(timezone.utc))
+    assert info.gateway_port is None
 
 
-def test_delete_gateway_info_is_idempotent(tmp_path: Path) -> None:
-    # First call must be a no-op (no record on disk yet).
-    delete_gateway_info(tmp_path)
-    save_gateway_info(tmp_path, LatchkeyGatewayInfo(url="http://127.0.0.1:1", password="p"))
-    delete_gateway_info(tmp_path)
-    assert load_gateway_info(tmp_path) is None
+def test_update_forward_info_gateway_port_stamps_existing_record(tmp_path: Path) -> None:
+    """Stamping the bound port preserves pid/started_at on the existing record."""
+    original = _make_forward_info(pid=4242)
+    save_forward_info(tmp_path, original)
+    update_forward_info_gateway_port(tmp_path, gateway_port=32867)
+    updated = load_forward_info(tmp_path)
+    assert updated is not None
+    assert updated.pid == 4242
+    assert updated.started_at == original.started_at
+    assert updated.gateway_port == 32867
 
 
-def test_save_gateway_info_writes_mode_0600(tmp_path: Path) -> None:
-    """The password is sensitive; the file must not be world-readable."""
-    save_gateway_info(tmp_path, LatchkeyGatewayInfo(url="http://x", password="p"))
-    file_mode = stat.S_IMODE(os.stat(tmp_path / "latchkey_gateway.json").st_mode)
-    assert file_mode == 0o600
+def test_update_forward_info_gateway_port_is_a_no_op_when_record_absent(tmp_path: Path) -> None:
+    """Missing record => no-op + a warning log; never raises."""
+    update_forward_info_gateway_port(tmp_path, gateway_port=32867)
+    assert load_forward_info(tmp_path) is None

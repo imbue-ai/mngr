@@ -63,7 +63,6 @@ from imbue.mngr.primitives import HostId
 PLUGIN_DATA_SUBDIR_NAME: Final[str] = "mngr_latchkey"
 
 _GATEWAY_LOG_FILENAME: Final[str] = "latchkey_gateway.log"
-_GATEWAY_INFO_FILENAME: Final[str] = "latchkey_gateway.json"
 _FORWARD_RECORD_FILENAME: Final[str] = "latchkey_forward.json"
 _FORWARD_LOG_FILENAME: Final[str] = "latchkey_forward.log"
 _DEFAULT_PERMISSIONS_FILENAME: Final[str] = "latchkey_default_permissions.json"
@@ -90,78 +89,32 @@ def gateway_log_path(data_dir: Path) -> Path:
     return data_dir / _GATEWAY_LOG_FILENAME
 
 
-class LatchkeyGatewayInfo(FrozenModel):
-    """On-disk record describing a running shared ``latchkey gateway``.
-
-    Written by the ``mngr latchkey forward`` supervisor process when it
-    spawns the gateway, deleted on shutdown. Other in-process consumers
-    (notably the minds desktop client) read it to learn where the
-    gateway is listening and what password / admin JWT they need to
-    talk to its extension endpoints.
-
-    The password derivation is purely a function of the user's latchkey
-    encryption key (see :meth:`Latchkey.derive_gateway_password`), so
-    persisting it here is a convenience for non-spawning readers; a
-    sibling process that wanted to could derive the same value itself
-    by running ``latchkey gateway create-jwt --no-validate``.
-    """
-
-    url: str = Field(description="Base URL the gateway is listening on (``http://host:port``).")
-    password: str = Field(description="Password the gateway accepts in ``Authorization: Bearer <password>``.")
-
-
-def gateway_info_path(data_dir: Path) -> Path:
-    """Return the path to the on-disk shared gateway record."""
-    return data_dir / _GATEWAY_INFO_FILENAME
-
-
-def save_gateway_info(data_dir: Path, info: LatchkeyGatewayInfo) -> None:
-    """Write the gateway record atomically, overwriting any existing one."""
-    path = gateway_info_path(data_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(info.model_dump_json(indent=2))
-    tmp_path.chmod(0o600)
-    os.replace(tmp_path, path)
-    logger.debug("Saved latchkey gateway info at {}", path)
-
-
-def load_gateway_info(data_dir: Path) -> LatchkeyGatewayInfo | None:
-    """Read the gateway record, or ``None`` if missing or malformed."""
-    path = gateway_info_path(data_dir)
-    if not path.is_file():
-        return None
-    try:
-        raw = path.read_text()
-    except OSError as e:
-        logger.warning("Failed to read latchkey gateway info at {}: {}", path, e)
-        return None
-    try:
-        return LatchkeyGatewayInfo.model_validate_json(raw)
-    except ValueError as e:
-        logger.warning("Malformed latchkey gateway info at {}: {}", path, e)
-        return None
-
-
-def delete_gateway_info(data_dir: Path) -> None:
-    """Remove the stored gateway record (no-op if absent)."""
-    path = gateway_info_path(data_dir)
-    if path.is_file():
-        try:
-            path.unlink()
-            logger.debug("Deleted latchkey gateway info at {}", path)
-        except OSError as e:
-            logger.warning("Failed to delete latchkey gateway info at {}: {}", path, e)
-
-
 # -- Forward supervisor info ---------------------------------------------------
 
 
 class LatchkeyForwardInfo(FrozenModel):
-    """Metadata identifying a running detached ``mngr latchkey forward`` supervisor."""
+    """Metadata identifying a running detached ``mngr latchkey forward`` supervisor.
+
+    ``gateway_port`` is initially ``None`` (the embedder writes the
+    record before the supervisor has finished starting up) and gets
+    populated by the supervisor itself once it has spawned and
+    port-bound the shared ``latchkey gateway`` subprocess. Consumers
+    that want to talk to the gateway must poll for a non-``None``
+    value.
+    """
 
     pid: int = Field(description="PID of the ``mngr latchkey forward`` process")
     started_at: datetime = Field(description="UTC timestamp when the supervisor was started")
+    gateway_port: int | None = Field(
+        default=None,
+        description=(
+            "TCP port the shared ``latchkey gateway`` subprocess is listening on, or ``None`` "
+            "while the gateway is still coming up. Pair with ``listen_host`` (always 127.0.0.1 "
+            "today) to form the gateway URL. Consumers also need the password, which is "
+            "deterministically derived from the user's latchkey encryption key via "
+            ":meth:`Latchkey.derive_gateway_password` -- it is intentionally NOT stored on disk."
+        ),
+    )
 
 
 def forward_info_path(data_dir: Path) -> Path:
@@ -175,6 +128,34 @@ def save_forward_info(data_dir: Path, info: LatchkeyForwardInfo) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(info.model_dump_json(indent=2))
     logger.debug("Saved mngr latchkey forward info at {}", path)
+
+
+def update_forward_info_gateway_port(data_dir: Path, gateway_port: int) -> None:
+    """Stamp the bound gateway port onto the existing forward record.
+
+    Called by the ``mngr latchkey forward`` subcommand immediately
+    after its child :class:`Latchkey` reports a successfully-bound
+    gateway port. The record is preserved verbatim except for the
+    ``gateway_port`` field so the embedder's view of the supervisor
+    PID / started_at is not silently overwritten.
+
+    Silently no-ops when no record exists -- this can only happen if
+    something else has deleted the file between the supervisor's own
+    spawn and the gateway bind, in which case we have bigger
+    problems than a missing port stamp.
+    """
+    existing = load_forward_info(data_dir)
+    if existing is None:
+        logger.warning(
+            "No forward info record at {} to stamp gateway_port={} onto",
+            forward_info_path(data_dir),
+            gateway_port,
+        )
+        return
+    save_forward_info(
+        data_dir,
+        existing.model_copy_update(to_update(existing.field_ref().gateway_port, gateway_port)),
+    )
 
 
 def load_forward_info(data_dir: Path) -> LatchkeyForwardInfo | None:
