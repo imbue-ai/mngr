@@ -298,7 +298,7 @@ def test__build_current_results_pending_agents() -> None:
             created_at=0.0,
         ),
     ]
-    results = _build_current_results(agents=agents, final_details={}, timed_out_ids=set(), hosts={})
+    results = _build_current_results(agents=agents, final_details={}, timed_out_ids=set())
     assert len(results) == 2
     assert _report_section_of(results[0]) == ReportSection.RUNNING
     assert _report_section_of(results[1]) == ReportSection.RUNNING
@@ -317,7 +317,7 @@ def test__build_current_results_timed_out_agents() -> None:
             created_at=0.0,
         ),
     ]
-    results = _build_current_results(agents=agents, final_details={}, timed_out_ids={str(agent_id)}, hosts={})
+    results = _build_current_results(agents=agents, final_details={}, timed_out_ids={str(agent_id)})
     assert len(results) == 1
     assert results[0].errored is True
     assert _report_section_of(results[0]) == ReportSection.FAILED
@@ -335,7 +335,6 @@ def test__build_current_results_includes_launch_failures() -> None:
         agents=[],
         final_details={},
         timed_out_ids=set(),
-        hosts={},
         launch_failures=[failure],
     )
     assert len(results) == 1
@@ -364,7 +363,6 @@ def test__build_current_results_launch_failures_come_before_running_agents() -> 
         agents=[agent],
         final_details={},
         timed_out_ids=set(),
-        hosts={},
         launch_failures=[failure],
     )
     assert len(results) == 2

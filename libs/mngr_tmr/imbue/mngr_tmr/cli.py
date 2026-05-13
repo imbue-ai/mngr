@@ -11,8 +11,6 @@ from typing import assert_never
 import click
 from loguru import logger
 
-from imbue.mngr.api.find import ensure_host_started
-from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import CommonCliOptions
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -34,7 +32,6 @@ from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderBackendName
@@ -254,37 +251,24 @@ def _run_reintegrate(
             write_human_line("No agents found for run name '{}'. Nothing to reintegrate.", run_name)
         return
 
-    # Get local host (needed for local agent host mapping and integrator config)
+    # Get local host (needed by the integrator config built later).
     source_host = get_local_host(mngr_ctx)
 
-    # Build agent infos and hosts from discovered agents
+    # Build agent infos from discovered agents. Output pulling uses the volume
+    # API directly, so the testing agents' hosts do not need to be online.
     agent_infos: list[TestAgentInfo] = []
-    agent_hosts: dict[str, OnlineHostInterface] = {}
     final_details: dict[str, AgentDetails] = {}
-
     for detail in matching_agents:
-        agent_id_str = str(detail.id)
-        info = TestAgentInfo(
-            test_node_id=detail.labels.get("test_node_id", str(detail.name)),
-            agent_id=detail.id,
-            agent_name=detail.name,
-            work_dir=detail.work_dir,
-            created_at=0.0,
+        agent_infos.append(
+            TestAgentInfo(
+                test_node_id=detail.labels.get("test_node_id", str(detail.name)),
+                agent_id=detail.id,
+                agent_name=detail.name,
+                work_dir=detail.work_dir,
+                created_at=0.0,
+            )
         )
-        agent_infos.append(info)
-        final_details[agent_id_str] = detail
-        if detail.host is not None:
-            is_local = detail.host.provider_name == LOCAL_PROVIDER_NAME
-            if is_local:
-                agent_hosts[agent_id_str] = source_host
-            else:
-                try:
-                    host_provider = get_provider_instance(detail.host.provider_name, mngr_ctx)
-                    host_ref = host_provider.get_host(HostName(detail.host.name))
-                    host, _ = ensure_host_started(host_ref, is_start_desired=True, provider=host_provider)
-                    agent_hosts[agent_id_str] = host
-                except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
-                    logger.warning("Could not connect to host for agent '{}': {}", detail.name, exc)
+        final_details[str(detail.id)] = detail
 
     # Compute output directory
     if opts.output_html is not None:
@@ -320,7 +304,6 @@ def _run_reintegrate(
         agents=agent_infos,
         final_details=final_details,
         timed_out_ids=set(),
-        hosts=agent_hosts,
         cached_results=cached_results,
     )
 
@@ -750,7 +733,6 @@ def _run_tmr_pipeline(
         agents=agent_infos,
         final_details=final_details,
         timed_out_ids=timed_out_ids,
-        hosts=agent_hosts,
         cached_results=cached_results,
         launch_failures=launch_failures,
     )

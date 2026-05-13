@@ -105,7 +105,7 @@ def launch_and_poll_agents(
             last_result_check[aid] = agent_id_to_info[aid].created_at
 
     if report_path is not None:
-        current_results = _build_current_results(all_agents, final_details, timed_out_ids, all_hosts, launch_failures)
+        current_results = _build_current_results(all_agents, final_details, timed_out_ids, launch_failures)
         generate_html_report(current_results, report_path, test_artifacts_dir=artifact_output_dir)
 
     while pending_ids or remaining_tests:
@@ -135,9 +135,7 @@ def launch_and_poll_agents(
                 last_result_check[aid] = agent_id_to_info[aid].created_at
 
         if timed_out_this_round and report_path is not None:
-            current_results = _build_current_results(
-                all_agents, final_details, timed_out_ids, all_hosts, launch_failures
-            )
+            current_results = _build_current_results(all_agents, final_details, timed_out_ids, launch_failures)
             generate_html_report(current_results, report_path, test_artifacts_dir=artifact_output_dir)
 
         if not pending_ids and not remaining_tests:
@@ -232,9 +230,7 @@ def launch_and_poll_agents(
                     changed = True
 
         if (changed or timed_out_this_round) and report_path is not None:
-            current_results = _build_current_results(
-                all_agents, final_details, timed_out_ids, all_hosts, launch_failures
-            )
+            current_results = _build_current_results(all_agents, final_details, timed_out_ids, launch_failures)
             generate_html_report(current_results, report_path, test_artifacts_dir=artifact_output_dir)
 
         if pending_ids or remaining_tests:
@@ -247,7 +243,6 @@ def _collect_agent_results(
     agents: list[TestAgentInfo],
     final_details: dict[str, AgentDetails],
     timed_out_ids: set[str],
-    hosts: dict[str, OnlineHostInterface],
     missing_detail_errored: bool,
     missing_detail_summary: str,
     cached_results: dict[str, TestResult] | None = None,
@@ -337,7 +332,6 @@ def gather_results(
     agents: list[TestAgentInfo],
     final_details: dict[str, AgentDetails],
     timed_out_ids: set[str],
-    hosts: dict[str, OnlineHostInterface],
     cached_results: dict[str, TestResult] | None = None,
     launch_failures: Sequence[TestMapReduceResult] = (),
 ) -> list[TestMapReduceResult]:
@@ -352,7 +346,6 @@ def gather_results(
         agents=agents,
         final_details=final_details,
         timed_out_ids=timed_out_ids,
-        hosts=hosts,
         missing_detail_errored=True,
         missing_detail_summary="Agent details not found after polling",
         cached_results=cached_results,
@@ -365,7 +358,6 @@ def _build_current_results(
     agents: list[TestAgentInfo],
     final_details: dict[str, AgentDetails],
     timed_out_ids: set[str],
-    hosts: dict[str, OnlineHostInterface],
     launch_failures: Sequence[TestMapReduceResult] = (),
 ) -> list[TestMapReduceResult]:
     """Build current results without pulling branches, for intermediate reports.
@@ -379,7 +371,6 @@ def _build_current_results(
             agents=agents,
             final_details=final_details,
             timed_out_ids=timed_out_ids,
-            hosts=hosts,
             missing_detail_errored=False,
             missing_detail_summary="Agent is still running...",
         ),
