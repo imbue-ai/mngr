@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -146,29 +147,40 @@ def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_n
     ModalProviderBackend.close_app(app_name)
 
     # Delete the volume using Modal SDK (must be done before environment deletion).
-    volume_result = _delete_modal_volume_via_sdk(volume_name, environment_name)
-    match volume_result:
-        case ModalCleanupOutcome.DELETED | ModalCleanupOutcome.NOT_FOUND:
-            deregister_modal_test_volume(volume_name)
-        case ModalCleanupOutcome.FAILED:
-            logger.error(
-                "Cleanup of Modal volume {} in environment {} failed; leaving registered "
-                "so session-end leak detector surfaces it.",
-                volume_name,
-                environment_name,
-            )
-        case _ as unreachable:
-            assert_never(unreachable)
-
+    _apply_cleanup_outcome(
+        outcome=_delete_modal_volume_via_sdk(volume_name, environment_name),
+        deregister=lambda: deregister_modal_test_volume(volume_name),
+        resource_description=f"volume {volume_name} in environment {environment_name}",
+    )
     # Delete the environment using Modal SDK.
-    env_result = _delete_modal_environment_via_sdk(environment_name)
-    match env_result:
+    _apply_cleanup_outcome(
+        outcome=_delete_modal_environment_via_sdk(environment_name),
+        deregister=lambda: deregister_modal_test_environment(environment_name),
+        resource_description=f"environment {environment_name}",
+    )
+
+
+def _apply_cleanup_outcome(
+    outcome: ModalCleanupOutcome,
+    deregister: Callable[[], None],
+    resource_description: str,
+) -> None:
+    """Dispatch a `ModalCleanupOutcome` to the standard policy.
+
+    DELETED|NOT_FOUND -> call `deregister()` (resource is gone, drop it from
+    the leak-tracking lists). FAILED -> log a `logger.error` naming the
+    resource and explaining that it stays registered so the session-end
+    leak detector surfaces it. The `_` arm uses `assert_never` so adding
+    a new outcome enum value forces every caller's policy to be revisited
+    here in one place.
+    """
+    match outcome:
         case ModalCleanupOutcome.DELETED | ModalCleanupOutcome.NOT_FOUND:
-            deregister_modal_test_environment(environment_name)
+            deregister()
         case ModalCleanupOutcome.FAILED:
             logger.error(
-                "Cleanup of Modal environment {} failed; leaving registered so session-end leak detector surfaces it.",
-                environment_name,
+                "Cleanup of Modal {} failed; leaving registered so session-end leak detector surfaces it.",
+                resource_description,
             )
         case _ as unreachable:
             assert_never(unreachable)
@@ -368,23 +380,16 @@ def modal_test_session_cleanup(
     yield
     delete_modal_apps_in_environment(environment_name)
     delete_modal_volumes_in_environment(environment_name)
-    env_result = delete_modal_environment(environment_name)
     # Deregister only on DELETED/NOT_FOUND (synchronous response is
     # authoritative; global env list lags). FAILED leaves the env tracked
     # so the polling check at session end can still surface it. See
     # `_cleanup_modal_test_resources` docstring for the NOT_FOUND-treated-
     # as-success limitation and its safety net.
-    match env_result:
-        case ModalCleanupOutcome.DELETED | ModalCleanupOutcome.NOT_FOUND:
-            deregister_modal_test_environment(environment_name)
-        case ModalCleanupOutcome.FAILED:
-            logger.error(
-                "Cleanup of Modal session environment {} failed; leaving registered "
-                "so session-end leak detector surfaces it.",
-                environment_name,
-            )
-        case _ as unreachable:
-            assert_never(unreachable)
+    _apply_cleanup_outcome(
+        outcome=delete_modal_environment(environment_name),
+        deregister=lambda: deregister_modal_test_environment(environment_name),
+        resource_description=f"session environment {environment_name}",
+    )
 
 
 @pytest.fixture
