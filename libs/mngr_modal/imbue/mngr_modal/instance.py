@@ -869,8 +869,8 @@ class ModalProviderInstance(BaseProviderInstance):
                 )
             else:
                 # Substitute docker build args into ARG defaults
-                if docker_build_args:
-                    dockerfile_contents = _substitute_dockerfile_build_args(dockerfile_contents, docker_build_args)
+                # (no-op when docker_build_args is empty)
+                dockerfile_contents = _substitute_dockerfile_build_args(dockerfile_contents, docker_build_args)
                 image = _build_image_from_dockerfile_contents(
                     dockerfile_contents,
                     modal_interface=modal_interface,
