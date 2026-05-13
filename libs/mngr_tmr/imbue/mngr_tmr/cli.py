@@ -118,14 +118,14 @@ class TmrCliOptions(CommonCliOptions):
     prompt_suffix: str | None
     use_snapshot: bool
     snapshot: str | None
-    max_parallel: int
+    max_parallel_launch: int
     agents_per_host: int
-    max_agents: int
+    max_parallel_agents: int
     launch_delay: float
     poll_interval: float
     timeout: float
     integrator_timeout: float
-    output_html: str | None
+    output_dir: str | None
     source: str | None
     reintegrate: str | None
     additional_authorized_keys: tuple[str, ...]
@@ -267,12 +267,8 @@ def _run_reintegrate(
     ]
 
     # Compute output directory
-    if opts.output_html is not None:
-        html_path = Path(opts.output_html)
-        output_dir = html_path.parent
-    else:
-        output_dir = Path(f"tmr_{run_name}_reintegrate")
-        html_path = output_dir / "index.html"
+    output_dir = Path(opts.output_dir) if opts.output_dir is not None else Path(f"tmr_{run_name}_reintegrate")
+    html_path = output_dir / "index.html"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Pull outputs (artifacts + outcome + branch bundle) for each agent via
@@ -471,8 +467,8 @@ def _run_integrator_phase(
     help="Use an existing snapshot/image ID for all agents (skips building; implies --use-snapshot behavior)",
 )
 @click.option(
-    "--max-parallel",
-    default=4,
+    "--max-parallel-launch",
+    default=10,
     show_default=True,
     type=int,
     help="Maximum number of agents to launch concurrently (launch-time parallelism)",
@@ -485,7 +481,7 @@ def _run_integrator_phase(
     help="Number of agents sharing each remote host (ignored for local provider)",
 )
 @click.option(
-    "--max-agents",
+    "--max-parallel-agents",
     default=0,
     show_default=True,
     type=int,
@@ -521,10 +517,11 @@ def _run_integrator_phase(
     help="Maximum seconds to wait for the integrator agent to merge fix branches",
 )
 @click.option(
-    "--output-html",
+    "--output-dir",
     default=None,
     type=click.Path(),
-    help="Path for the HTML report [default: tmr_<timestamp>/index.html]",
+    help="Directory for the run's outputs (HTML report at index.html, per-agent artifacts) "
+    "[default: tmr_<timestamp>/]",
 )
 @click.option(
     "--source",
@@ -653,24 +650,20 @@ def _run_tmr_pipeline(
 ) -> None:
     """Run the main TMR pipeline (launch, poll, gather, integrate, report)."""
     # Step 6: Compute output directory and html_path before launching
-    if opts.output_html is not None:
-        html_path = Path(opts.output_html)
-        output_dir = html_path.parent
-    else:
-        output_dir = Path(f"tmr_{timestamp}")
-        html_path = output_dir / "index.html"
+    output_dir = Path(opts.output_dir) if opts.output_dir is not None else Path(f"tmr_{timestamp}")
+    html_path = output_dir / "index.html"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Step 7: Launch and poll agents
-    # When max_agents > 0, agents are launched incrementally as earlier ones finish.
+    # When max_parallel_agents > 0, agents are launched incrementally as earlier ones finish.
     # Otherwise, all agents are launched up front and then polled via the same function.
-    use_batched = opts.max_agents > 0 and opts.max_agents < len(test_node_ids)
+    use_batched = opts.max_parallel_agents > 0 and opts.max_parallel_agents < len(test_node_ids)
 
     launch_failures: list[TestMapReduceResult] = []
 
     if use_batched:
         if opts.use_snapshot and output_opts.output_format == OutputFormat.HUMAN:
-            write_human_line("WARNING: --use-snapshot is not supported with --max-agents and will be ignored")
+            write_human_line("WARNING: --use-snapshot is not supported with --max-parallel-agents and will be ignored")
         agent_infos: list[TestAgentInfo] = []
         agent_hosts: dict[str, OnlineHostInterface] = {}
         remaining_node_ids = test_node_ids
@@ -684,7 +677,7 @@ def _run_tmr_pipeline(
             launch_failures=launch_failures,
             prompt_suffix=opts.prompt_suffix or "",
             use_snapshot=opts.use_snapshot and provided_snapshot is None,
-            max_parallel=opts.max_parallel,
+            max_parallel=opts.max_parallel_launch,
             launch_delay_seconds=opts.launch_delay,
             agents_per_host=opts.agents_per_host,
             run_name=e2e_run_prefix,
@@ -698,7 +691,7 @@ def _run_tmr_pipeline(
         mngr_ctx=mngr_ctx,
         pytest_flags=testing_flags,
         prompt_suffix=opts.prompt_suffix or "",
-        max_agents=opts.max_agents,
+        max_agents=opts.max_parallel_agents,
         agent_timeout_seconds=opts.timeout,
         poll_interval_seconds=opts.poll_interval,
         report_path=html_path,
@@ -812,7 +805,7 @@ Use --use-snapshot with remote providers to build and provision one host first,
 snapshot it, then launch all remaining agents from the snapshot (much faster).
 Use --env to pass environment variables and --label to tag all agents.
 Use --prompt-suffix to append custom instructions to the agent prompt.
-Use --max-agents to limit how many agents run simultaneously (0 = no limit).
+Use --max-parallel-agents to limit how many agents run simultaneously (0 = no limit).
 
 Each agent writes its result to .test_output/testing_agent_outcome.json (in its work directory)
 with a structured JSON containing: changes (list of kind/status/summary), errored flag,
@@ -824,9 +817,9 @@ tests_passing_before/after booleans, and a markdown summary.""",
         ("Use Docker provider", "mngr tmr --provider docker tests/"),
         ("Modal with snapshot", "mngr tmr --provider modal --use-snapshot tests/"),
         ("Pass env vars and labels", "mngr tmr --env API_KEY=xxx --label batch=run1"),
-        ("Limit to 4 concurrent agents", "mngr tmr --max-agents 4 tests/"),
+        ("Limit to 4 concurrent agents", "mngr tmr --max-parallel-agents 4 tests/"),
         ("Custom poll interval", "mngr tmr --poll-interval 30"),
-        ("Specify output location", "mngr tmr --output-html report.html"),
+        ("Specify output location", "mngr tmr --output-dir reports/run-1"),
     ),
     see_also=(
         ("create", "Create a new agent"),
