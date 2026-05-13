@@ -472,16 +472,17 @@ class DirectModalInterface(ModalInterface):
         *,
         context_dir: Path | None = None,
         secrets: Sequence[SecretInterface] = (),
-        build_args: Mapping[str, str] = {},
+        build_args: Mapping[str, str] | None = None,
     ) -> ImageInterface:
         modal_secrets = [_unwrap_secret(s) for s in secrets]
         expanded_context_dir = context_dir.expanduser() if context_dir is not None else None
+        modal_build_args = dict(build_args) if build_args is not None else {}
         return DirectImage.model_construct(
             image=modal.Image.from_dockerfile(
                 path,
                 context_dir=expanded_context_dir,
                 secrets=modal_secrets,
-                build_args=dict(build_args),
+                build_args=modal_build_args,
             )
         )
 

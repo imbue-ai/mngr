@@ -268,7 +268,7 @@ class ModalInterface(MutableModel, ABC):
         *,
         context_dir: Path | None = None,
         secrets: Sequence[SecretInterface] = (),
-        build_args: Mapping[str, str] = {},
+        build_args: Mapping[str, str] | None = None,
     ) -> ImageInterface:
         """Build an image from a Dockerfile path (mirrors modal.Image.from_dockerfile).
 
