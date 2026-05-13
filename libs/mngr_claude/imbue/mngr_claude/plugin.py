@@ -2015,14 +2015,17 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         copied_project_dirs: set[str] = set()
         # Claude Code organizes sessions by encoded working directory path.
         # Place adopted sessions under the project dir matching this agent's
-        # work_dir so that `claude --resume` can find them.
-        dest_project_name = encode_claude_project_dir_name(self.work_dir)
+        # work_dir so that `claude --resume` can find them. Encode the
+        # realpath-resolved work_dir -- on remote hosts (e.g. Modal) the
+        # mount point ``/mngr/projects/agent-X`` is a symlink onto the
+        # canonical volume path that claude actually uses as cwd.
+        dest_project_name = encode_claude_project_dir_name(self._resolve_work_dir_on_host())
+        dest_project_dir = config_dir / "projects" / dest_project_name
 
         for arg in adopt_session_args:
             session_id, source_project_dir = _resolve_adopt_session(arg)
             # Deduplicate project dir copies (multiple sessions may be in the same project)
             if source_project_dir.name not in copied_project_dirs:
-                dest_project_dir = config_dir / "projects" / dest_project_name
                 with log_span("Adopting session {}", session_id):
                     host.copy_directory(host, source_project_dir, dest_project_dir)
                 copied_project_dirs.add(source_project_dir.name)
@@ -2030,16 +2033,26 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         assert last_session_id is not None, "adopt_session_args was non-empty but no session ID was set"
 
-        # Remove the sessions-index.json copied from the source project dir.
-        # It contains stale entries pointing to the source paths and project,
-        # and its presence prevents Claude Code from discovering the adopted
-        # session files. Claude Code rebuilds the index on next startup.
-        dest_project_dir = config_dir / "projects" / dest_project_name
-        stale_index = dest_project_dir / "sessions-index.json"
-        host.execute_idempotent_command(f"rm -f {shlex.quote(str(stale_index))}")
-
-        host.write_text_file(self._get_agent_dir() / "claude_session_id", last_session_id)
+        self._finalize_adopted_session(host, dest_project_dir, last_session_id)
         logger.info("Adopted {} session(s), active session: {}", len(adopt_session_args), last_session_id)
+
+    def _finalize_adopted_session(
+        self,
+        host: OnlineHostInterface,
+        adopted_project_dir: Path,
+        adopted_session_id: str,
+    ) -> None:
+        """Common cleanup after positioning an adopted session's JSONL under
+        the destination's project dir: drop the stale sessions-index.json
+        (its entries point at the source's project paths and would prevent
+        Claude Code from discovering the adopted session -- claude rebuilds
+        it on next startup) and write the session id to ``claude_session_id``
+        so the startup ``claude --resume "$MAIN_CLAUDE_SESSION_ID"`` targets
+        it. Used by both ``--adopt-session`` and the clone flow.
+        """
+        stale_index = adopted_project_dir / "sessions-index.json"
+        host.execute_idempotent_command(f"rm -f {shlex.quote(str(stale_index))}", timeout_seconds=5.0)
+        host.write_text_file(self._get_agent_dir() / "claude_session_id", adopted_session_id)
 
     def _transfer_source_plugin_data(self, source_agent_state_location: HostLocation) -> None:
         """Copy the source agent's plugin/ directory into this agent's state
@@ -2179,18 +2192,12 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                 )
                 return
 
-        # Remove the rsynced sessions-index.json -- its entries point at the
-        # source's project paths and would prevent Claude Code from
-        # discovering the adopted session. Claude Code rebuilds the index on
-        # next startup. Same trick ``on_after_provisioning`` uses for the
-        # ``--adopt-session`` flow; without it ``claude --resume <sid>``
-        # exits with "No conversation found with session ID: <sid>" even
-        # when the JSONL is at the right path.
-        target_dir = dest_projects_dir / dest_project_name
-        stale_index = target_dir / "sessions-index.json"
-        self.host.execute_idempotent_command(f"rm -f {shlex.quote(str(stale_index))}", timeout_seconds=5.0)
-
-        self.host.write_text_file(self._get_agent_dir() / "claude_session_id", adopted_session_id)
+        # Drop the rsynced sessions-index.json and write claude_session_id.
+        # Without removing the index, ``claude --resume <sid>`` exits with
+        # "No conversation found with session ID: <sid>" even when the JSONL
+        # is at the right path -- claude consults the index for session
+        # lookup, and the rsynced one points at the source's project paths.
+        self._finalize_adopted_session(self.host, dest_projects_dir / dest_project_name, adopted_session_id)
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve session files and clean up per-agent credentials and trust entries.
