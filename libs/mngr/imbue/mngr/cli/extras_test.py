@@ -322,6 +322,12 @@ def test_extras_default_type_subcommand(cli_runner: CliRunner) -> None:
     assert result.exit_code == 0
 
 
+def test_extras_default_type_yes_flag(cli_runner: CliRunner) -> None:
+    """The 'extras default-type -y' subcommand runs non-interactively."""
+    result = cli_runner.invoke(extras, ["default-type", "-y"])
+    assert result.exit_code == 0
+
+
 def test_extras_interactive_includes_default_type(cli_runner: CliRunner) -> None:
     """Running 'mngr extras -i' walks through the default-type prompt."""
     result = cli_runner.invoke(extras, ["-i"])

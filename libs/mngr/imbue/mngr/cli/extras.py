@@ -452,21 +452,27 @@ def extras_claude_plugin(ctx: click.Context, **kwargs: Any) -> None:
 
 
 @extras.command(name="default-type")
+@click.option(
+    "-y",
+    "--yes",
+    is_flag=True,
+    help="Skip the picker; just print the suggested `mngr config set` command",
+)
 @add_common_options
 @click.pass_context
 def extras_default_type(ctx: click.Context, **kwargs: Any) -> None:
-    # Mirrors the other extras subcommands: with a TTY, prompt the user
-    # to pick a default agent type; without one (the read_tty_choice
-    # fallback), fall back to printing the suggested `mngr config set`
-    # command and the available agent type list.
-    _install_default_agent_type(auto=False)
+    # Mirrors the other extras subcommands: with `-y` or no interactive
+    # terminal, print the suggested `mngr config set` command and the
+    # list of available agent types -- never write anything. With a TTY
+    # and no `-y`, show a numbered picker and write the user's choice.
+    _install_default_agent_type(auto=kwargs["yes"])
 
 
 # Help metadata
 
 CommandHelpMetadata(
     key="extras",
-    one_line_description="Install optional extras (plugins, completion, Claude Code plugin)",
+    one_line_description="Install optional extras (plugins, completion, Claude plugin, default agent type)",
     synopsis="mngr extras [OPTIONS] [COMMAND]",
     description="""Manage optional extras that enhance mngr. With no subcommand, shows
 the status of all extras. Use -i to walk through each extra interactively.
@@ -532,7 +538,7 @@ Requires Claude Code to be installed. Use -y to skip the confirmation prompt."""
 CommandHelpMetadata(
     key="extras.default-type",
     one_line_description="Pick a default agent type for `mngr create`",
-    synopsis="mngr extras default-type",
+    synopsis="mngr extras default-type [-y]",
     description="""Set the default agent type used by `mngr create` when no type is
 provided on the command line.
 
@@ -540,10 +546,13 @@ With an interactive terminal, presents a numbered picker of every
 available agent type plus an option to keep no default. The selection
 is written to `[commands.create] type` in your user-scope settings.toml.
 
-Without an interactive terminal, prints the suggested
+With `-y` or without an interactive terminal, prints the suggested
 `mngr config set commands.create.type <name> --scope user` command and
 the list of available agent types -- writes nothing.""",
-    examples=(("Pick a default agent type", "mngr extras default-type"),),
+    examples=(
+        ("Pick a default agent type", "mngr extras default-type"),
+        ("Print the suggested config command without prompting", "mngr extras default-type -y"),
+    ),
     see_also=(
         ("config set", "Write a config value directly"),
         ("plugin list", "List discovered plugins, including agent types"),
