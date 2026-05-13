@@ -327,8 +327,9 @@ def _install_default_agent_type(
 
     Returns True if a default is set after this call (already-set or
     newly-set), False otherwise. With ``auto=True`` or no interactive
-    terminal, only prints status and the suggested ``mngr config set``
-    command -- never writes anything.
+    terminal, never writes anything: if a default is already set, only
+    prints the "already set" status; otherwise prints the suggested
+    ``mngr config set`` command and the available agent types.
     """
     current, available = status_fn()
 
