@@ -965,7 +965,7 @@ def test_usage_command_renders_cost_only_for_api_key_user(
     cli_profile_dir: Path,
 ) -> None:
     """API-key sessions emit cost but never rate_limits. The human output should
-    still render the session/cost line so the user sees their spend, without the
+    still render the cost line so the user sees their spend, without the
     "no data" hint that fires when nothing renderable exists."""
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
     _plant_event_for_agent(
