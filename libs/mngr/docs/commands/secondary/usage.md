@@ -32,8 +32,18 @@ Per-source aggregation:
   the prior session's cumulative reading in the same process). Records
   are summed across all (agent, process, session) tuples within the
   ``--since`` recency window (default 24h).
+- Cost is split by auth mode: ``subscription_cost`` aggregates sessions
+  whose Claude Code process was on a Claude.ai Pro/Max subscription
+  (numbers are imputed by Claude Code), and ``api_cost`` aggregates
+  sessions whose process was on a direct ANTHROPIC_API_KEY (numbers are
+  real billable spend). Mode is detected per process from whether any
+  event in it carried a ``rate_limits`` payload (subscription auth) or
+  not (api-key auth). The two are never lumped into a single ``cost``
+  field -- conflating imputed estimates with real spend would be
+  misleading.
 - The JSON output's ``sessions[]`` array is ordered newest-first; consumers
-  that want a specific session's reading can index ``sessions[0]``.
+  that want a specific session's reading can index ``sessions[0]``. Each
+  session carries a ``cost_mode`` field ("SUBSCRIPTION" or "API_KEY").
 
 **Usage:**
 
@@ -80,8 +90,8 @@ mngr usage [OPTIONS] COMMAND [ARGS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--max-age` | text | Stale-warning threshold (e.g. '300', '5m', '2h'). Default: from plugin config. | None |
-| `--since` | text | Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose last event is older are dropped from `sessions[]` and from the aggregate `cost.*` computed off them. Default: from plugin config (24h). | None |
-| `--detail` | boolean | Expand summary view: show per-session breakdown lines under each source's cost line (human), and include the `sessions[]` array under each source (JSON). Default omits the per-session breakdown for terseness; the aggregate cost line and window lines are unchanged. | `False` |
+| `--since` | text | Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose last event is older are dropped from `sessions[]` and from the per-mode aggregates (`subscription_cost.*` / `api_cost.*`) computed off them. Default: from plugin config (24h). | None |
+| `--detail` | boolean | Expand summary view: show per-session breakdown lines under each source's cost lines (human, tagged with `[sub]` or `[api]`), and include the `sessions[]` array under each source (JSON, each session carrying `cost_mode`). Default omits the per-session breakdown for terseness; the per-mode cost lines and window lines are unchanged. | `False` |
 
 ## mngr usage wait
 
@@ -107,15 +117,19 @@ json``'s ``sources`` array. Window fields (under each window key, e.g.
 
 Source-level fields:
 
-- ``cost.total_cost_usd`` / ``cost.total_duration_ms`` / ... : aggregate
-  across the recency window (sum across all sessions in the last
-  ``--since`` duration). When ``session_count == 1`` the aggregate equals
-  that one session's reading by design -- use ``--since`` to tighten if
-  you want a tighter view, or read ``sessions[0]`` for the explicit
-  per-session record.
-- ``session_count``: number of recent sessions contributing to the cost
-  aggregate.
-- ``sessions``: list of session-cost records, newest-first.
+- ``subscription_cost.total_cost_usd`` / ``subscription_cost.total_duration_ms`` / ... :
+  aggregate across the recency window of sessions whose Claude Code process
+  was on a Claude.ai Pro/Max subscription. Cost is **imputed** by Claude Code
+  (what the usage would have cost on the metered API) and is informational --
+  the user actually pays a flat subscription. Never lumped with ``api_cost``.
+- ``api_cost.total_cost_usd`` / ``api_cost.total_duration_ms`` / ... :
+  aggregate across the recency window of sessions whose Claude Code process
+  was on a direct ANTHROPIC_API_KEY. Cost is **real** billable spend.
+- ``subscription_session_count`` / ``api_session_count``: number of sessions
+  in each mode contributing to the corresponding aggregate. ``session_count``
+  is the total across both modes.
+- ``sessions``: list of session-cost records, newest-first. Each entry
+  carries a ``cost_mode`` ("SUBSCRIPTION" or "API_KEY") tag.
 
 Exit codes:
   0 - A source matched all --until filters.
@@ -141,7 +155,7 @@ mngr usage wait [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--timeout` | text | Maximum time to wait (e.g. '30s', '5m', '1h'). Default: wait forever. | None |
 | `--interval` | text | Poll interval (e.g. '15s', '1m'). The usage snapshot is rebuilt every interval. Default of 30s suits multi-hour windows; tighten for short-window predicates. | `30s` |
-| `--since` | text | Recency window for per-session cost aggregation (e.g. '24h', '7d'). Affects the per-session surfaces in the CEL context: `cost.*` (aggregate across recent sessions), `sessions[]`, and `session_count`. Default: from plugin config (24h). | None |
+| `--since` | text | Recency window for per-session cost aggregation (e.g. '24h', '7d'). Affects the per-session surfaces in the CEL context: `subscription_cost.*` / `api_cost.*` (per-mode aggregates), `sessions[]`, and the `*_session_count` fields. Default: from plugin config (24h). | None |
 
 ## Filtering
 
@@ -203,16 +217,16 @@ $ mngr usage wait --until 'seven_day.used_percentage < 30' --timeout 1h
 $ mngr usage wait --until 'overage.is_using_overage == false' --interval 10s
 ```
 
-**Wait until cumulative spend over the last 24h crosses $20**
+**Wait until cumulative real API spend over the last 24h crosses $20**
 
 ```bash
-$ mngr usage wait --until 'cost.total_cost_usd > 20.0'
+$ mngr usage wait --until 'api_cost.total_cost_usd > 20.0'
 ```
 
-**Aggregate cost over the last week instead of 24h**
+**Cap real spend in the last week (subscription cost is imputed and ignored here)**
 
 ```bash
-$ mngr usage wait --until 'cost.total_cost_usd > 100.0' --since 7d
+$ mngr usage wait --until 'api_cost.total_cost_usd > 100.0' --since 7d
 ```
 
 ## Examples
@@ -247,7 +261,7 @@ $ mngr usage --since 7d
 $ mngr usage --max-age 60
 ```
 
-**Per-session breakdown (human + JSON)**
+**Per-session breakdown (human + JSON, mode-tagged)**
 
 ```bash
 $ mngr usage --detail
@@ -259,8 +273,8 @@ $ mngr usage --detail
 $ mngr usage --format json
 ```
 
-**Custom format template (aggregate cost only)**
+**Custom format template (real API spend only)**
 
 ```bash
-$ mngr usage --format '{cost.total_cost_usd} across {session_count} sessions'
+$ mngr usage --format '{api_cost.total_cost_usd} across {api_session_count} sessions'
 ```

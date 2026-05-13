@@ -1,11 +1,38 @@
 from __future__ import annotations
 
+from enum import auto
 from typing import overload
 
 from pydantic import Field
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import PluginConfig
+
+
+class CostMode(UpperCaseStrEnum):
+    """How the writer's ``cost.total_cost_usd`` reading was computed.
+
+    - ``SUBSCRIPTION``: the agent's Claude Code process was running under
+      a Claude.ai Pro/Max subscription. Cost is **imputed** by Claude
+      Code (what the same usage would have cost on the metered API); the
+      user actually pays a flat subscription, so this number is
+      informational rather than billable.
+    - ``API_KEY``: the process was running with a direct
+      ``ANTHROPIC_API_KEY``. Cost is the **real** API spend that will
+      appear on the bill.
+
+    The reader detects mode per Claude Code process: a process is
+    classified ``SUBSCRIPTION`` if **any** event in it carries a
+    non-empty ``rate_limits`` payload (rate_limits is emitted only for
+    subscription auth, after the first API response); otherwise it's
+    ``API_KEY``. Mixing the two aggregates would conflate imputed
+    estimates with real spend, so ``UsageSnapshot`` keeps them in
+    separate ``subscription_cost`` and ``api_cost`` fields.
+    """
+
+    SUBSCRIPTION = auto()
+    API_KEY = auto()
 
 
 class UsagePluginConfig(PluginConfig):
@@ -47,18 +74,18 @@ class CostSnapshot(FrozenModel):
     field names match the Claude Code statusline shape so a writer can
     pass the payload through unchanged, but the model is writer-agnostic
     -- any usage source emitting session cost can populate the same
-    fields, and CEL predicates like ``cost.total_cost_usd > 5.0`` apply
-    uniformly across sources.
+    fields, and CEL predicates like ``api_cost.total_cost_usd > 5.0``
+    apply uniformly across sources.
 
     Note: a ``CostSnapshot`` plays two roles in this model. At
     ``SessionCostRecord.cost`` it represents one session's own-contribution
     delta (the cumulative reading at this session's last event minus the
     prior session's cumulative reading in the same Claude Code process).
-    At ``UsageSnapshot.cost`` (a computed property) it's the sum of those
-    per-session contributions across the snapshot's sessions tuple,
-    recovering the true total spend in the recency window. The same type
-    works for both because each numeric field has well-defined sum
-    semantics.
+    At ``UsageSnapshot.subscription_cost`` / ``UsageSnapshot.api_cost``
+    (computed properties) it's the sum of per-session contributions
+    across the sessions of one [[cost-mode]] in the recency window,
+    recovering the true mode-scoped total spend. The same type works for
+    both because each numeric field has well-defined sum semantics.
     """
 
     total_cost_usd: float | None = Field(default=None, description="Cumulative session cost in USD (writer-supplied).")
@@ -117,9 +144,17 @@ class SessionCostRecord(FrozenModel):
     final cumulative reading in the same Claude Code process. The first
     session in a process has its full cumulative reading as ``cost``.
     Summing ``cost`` across all sessions (in all processes, all agents)
-    in a recency window recovers the true total spend, even when /clear
-    has rotated session_id repeatedly within one process (cost is
-    process-cumulative; /clear doesn't reset it).
+    of the same [[cost-mode]] in a recency window recovers the true
+    total spend for that mode, even when /clear has rotated session_id
+    repeatedly within one process (cost is process-cumulative; /clear
+    doesn't reset it).
+
+    ``cost_mode`` carries the auth context: ``SUBSCRIPTION`` if the
+    Claude Code process this session ran in was on a Claude.ai Pro/Max
+    subscription (cost is imputed, not billed), or ``API_KEY`` if it
+    was on a direct ``ANTHROPIC_API_KEY`` (cost is real). Consumers MUST
+    keep these separated: see ``UsageSnapshot.subscription_cost`` and
+    ``UsageSnapshot.api_cost`` for the aggregate split.
 
     ``first_event_at`` / ``last_event_at`` bracket the timestamps of
     events seen for this session and let consumers tell how recent /
@@ -131,6 +166,12 @@ class SessionCostRecord(FrozenModel):
         description="This session's own contribution. Delta from the prior session's cumulative "
         "reading in the same Claude Code process; equals the full cumulative reading for the "
         "first session in a process.",
+    )
+    cost_mode: CostMode = Field(
+        description="``SUBSCRIPTION`` if the Claude Code process this session ran in had a "
+        "rate_limits payload (Claude.ai Pro/Max subscription; cost is imputed), else ``API_KEY`` "
+        "(direct ANTHROPIC_API_KEY; cost is real). Determines which aggregate this session feeds "
+        "into on UsageSnapshot."
     )
     first_event_at: int = Field(description="Unix timestamp of the earliest event seen for this session.")
     last_event_at: int = Field(description="Unix timestamp of the most recent event seen for this session.")
@@ -161,6 +202,24 @@ def _sum_optional(values: list[int | None] | list[float | None]) -> int | float 
     return sum(present) if present else None
 
 
+def _aggregate_cost(records: tuple[SessionCostRecord, ...]) -> CostSnapshot:
+    """Sum each numeric field across ``records``'s ``cost`` snapshots.
+
+    Field-wise ``_sum_optional`` so a single missing field on one session
+    doesn't drag the whole aggregate to None. Returns an all-None
+    ``CostSnapshot`` when ``records`` is empty -- ``model_dump`` of that
+    still produces a dict with every key set to None, which keeps the JSON
+    / template surfaces stable for consumers.
+    """
+    return CostSnapshot(
+        total_cost_usd=_sum_optional([s.cost.total_cost_usd for s in records]),
+        total_duration_ms=_sum_optional([s.cost.total_duration_ms for s in records]),
+        total_api_duration_ms=_sum_optional([s.cost.total_api_duration_ms for s in records]),
+        total_lines_added=_sum_optional([s.cost.total_lines_added for s in records]),
+        total_lines_removed=_sum_optional([s.cost.total_lines_removed for s in records]),
+    )
+
+
 class UsageSnapshot(FrozenModel):
     """A complete usage snapshot derived from one writer's source.
 
@@ -181,8 +240,18 @@ class UsageSnapshot(FrozenModel):
       process); the same ``session_id`` can appear more than once when
       /resume carries a session across a Claude Code process restart.
 
-    Computed views (``cost``, ``session_count``) read off ``sessions`` and
-    are recomputed each access -- cheap because the tuple is small.
+    Cost is split by [[cost-mode]]: ``subscription_cost`` aggregates
+    sessions whose Claude Code process was on a Claude.ai subscription
+    (imputed numbers), and ``api_cost`` aggregates sessions whose process
+    was on a direct API key (real spend). Lumping the two together would
+    conflate informational estimates with billable spend, so we never
+    surface a single combined ``cost`` -- consumers should pick the mode
+    they care about (or both, if comparing).
+
+    Computed views (``subscription_cost``, ``api_cost``,
+    ``subscription_session_count``, ``api_session_count``,
+    ``session_count``) read off ``sessions`` and are recomputed each
+    access -- cheap because the tuple is small.
     """
 
     source_name: str = Field(description="Writer-chosen source identifier")
@@ -196,7 +265,9 @@ class UsageSnapshot(FrozenModel):
     )
     sessions: tuple[SessionCostRecord, ...] = Field(
         default=(),
-        description="Per-session cost records within the recency window, ordered newest-first by last_event_at.",
+        description="Per-session cost records within the recency window, ordered newest-first by last_event_at. "
+        "Each record carries a ``cost_mode`` tag so subscription (imputed) and api_key (real) sessions stay "
+        "distinguishable downstream.",
     )
     since_seconds: int = Field(
         default=0,
@@ -205,25 +276,47 @@ class UsageSnapshot(FrozenModel):
     )
 
     @property
-    def cost(self) -> CostSnapshot:
-        """Aggregate cost across every session in ``sessions``.
+    def subscription_sessions(self) -> tuple[SessionCostRecord, ...]:
+        """Sessions whose Claude Code process was on a subscription. Cost here is imputed by Claude Code."""
+        return tuple(s for s in self.sessions if s.cost_mode == CostMode.SUBSCRIPTION)
 
-        Sum of each session's own contribution (each ``SessionCostRecord.cost``
-        is already a delta against the prior session in the same Claude Code
-        process), so this aggregate is the true total spend across all
-        sessions in all processes in the recency window. All-None when
-        ``sessions`` is empty. CEL predicates like ``cost.total_cost_usd >
-        5.0`` work both for per-session and aggregate contexts (same numeric
-        semantics, different scope).
+    @property
+    def api_sessions(self) -> tuple[SessionCostRecord, ...]:
+        """Sessions whose Claude Code process was on a direct API key. Cost here is real billable spend."""
+        return tuple(s for s in self.sessions if s.cost_mode == CostMode.API_KEY)
+
+    @property
+    def subscription_cost(self) -> CostSnapshot:
+        """Aggregate cost across subscription-mode sessions only.
+
+        Subscription cost is **imputed** by Claude Code (what the usage
+        would have cost on the metered API). Users actually pay a flat
+        subscription, so this is informational. Kept separate from
+        ``api_cost`` so consumers don't conflate estimates with billable
+        spend. All-None when there are no subscription sessions.
         """
-        return CostSnapshot(
-            total_cost_usd=_sum_optional([s.cost.total_cost_usd for s in self.sessions]),
-            total_duration_ms=_sum_optional([s.cost.total_duration_ms for s in self.sessions]),
-            total_api_duration_ms=_sum_optional([s.cost.total_api_duration_ms for s in self.sessions]),
-            total_lines_added=_sum_optional([s.cost.total_lines_added for s in self.sessions]),
-            total_lines_removed=_sum_optional([s.cost.total_lines_removed for s in self.sessions]),
-        )
+        return _aggregate_cost(self.subscription_sessions)
+
+    @property
+    def api_cost(self) -> CostSnapshot:
+        """Aggregate cost across api_key-mode sessions only.
+
+        API-key cost is **real**: it tracks what the user's
+        ``ANTHROPIC_API_KEY`` will actually be billed. Kept separate from
+        ``subscription_cost`` so consumers don't accidentally sum imputed
+        and real costs. All-None when there are no api_key sessions.
+        """
+        return _aggregate_cost(self.api_sessions)
 
     @property
     def session_count(self) -> int:
+        """Total session count across both modes."""
         return len(self.sessions)
+
+    @property
+    def subscription_session_count(self) -> int:
+        return len(self.subscription_sessions)
+
+    @property
+    def api_session_count(self) -> int:
+        return len(self.api_sessions)

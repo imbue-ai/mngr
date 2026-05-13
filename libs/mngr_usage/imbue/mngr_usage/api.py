@@ -23,8 +23,13 @@ Aggregation shape (per source):
   agent's stream is partitioned into Claude Code processes via cost-drop
   detection, and within each process every session_id gets a record
   whose ``cost`` is its delta from the prior session's cumulative reading.
-  Summing those deltas across all sessions recovers the true total spend
-  (see the per-source aggregation block comment below for details).
+  Each record is also tagged with a ``cost_mode``: ``SUBSCRIPTION`` if
+  the Claude Code process emitted a non-empty ``rate_limits`` payload at
+  any point (Claude.ai Pro/Max auth -- cost is imputed), otherwise
+  ``API_KEY`` (direct ANTHROPIC_API_KEY -- cost is real). Aggregates
+  on ``UsageSnapshot`` are split by mode (``subscription_cost`` vs
+  ``api_cost``) so imputed estimates never get lumped together with
+  billable spend.
 
 The reader scans every event line in each agent's events file (not just
 the last) so per-session aggregation across the recency window is
@@ -61,6 +66,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
 from imbue.mngr.utils.cel_utils import build_cel_context
+from imbue.mngr_usage.data_types import CostMode
 from imbue.mngr_usage.data_types import CostSnapshot
 from imbue.mngr_usage.data_types import SessionCostRecord
 from imbue.mngr_usage.data_types import UsageSnapshot
@@ -259,7 +265,11 @@ def _cost_delta(current: CostSnapshot, baseline: CostSnapshot) -> CostSnapshot:
     )
 
 
-def _finalize_process(ordered_sessions: list[_AccumulatingSession]) -> list[SessionCostRecord]:
+def _finalize_process(
+    ordered_sessions: list[_AccumulatingSession],
+    *,
+    cost_mode: CostMode,
+) -> list[SessionCostRecord]:
     """Convert one process's accumulated sessions into SessionCostRecord instances.
 
     Walks ``ordered_sessions`` in temporal order. For each session, the
@@ -268,6 +278,10 @@ def _finalize_process(ordered_sessions: list[_AccumulatingSession]) -> list[Sess
     (baseline = all-None for the first session). This is the session's
     own contribution -- summing ``cost`` across all sessions in this
     process recovers the process's total spend.
+
+    Every record from this process gets the same ``cost_mode`` (auth
+    context doesn't change mid-process; a /quit + relaunch under a
+    different auth is a new process and gets classified independently).
     """
     records: list[SessionCostRecord] = []
     # All-None baseline (zero-equivalent under _sub_optional) for the first session in the process.
@@ -277,6 +291,7 @@ def _finalize_process(ordered_sessions: list[_AccumulatingSession]) -> list[Sess
             SessionCostRecord(
                 session_id=accum.session_id,
                 cost=_cost_delta(accum.latest_cumulative_cost, baseline),
+                cost_mode=cost_mode,
                 first_event_at=accum.first_event_at,
                 last_event_at=accum.last_event_at,
             )
@@ -294,21 +309,41 @@ class _AgentWalkResult(FrozenModel):
     session_records: tuple[SessionCostRecord, ...]
 
 
+def _classify_process(has_rate_limits: bool) -> CostMode:
+    """Map per-process rate_limits presence to a ``CostMode``.
+
+    ``rate_limits`` is emitted only by Claude.ai Pro/Max subscription
+    auth (after the first API response of the session). If any event in
+    the process carried a non-empty rate_limits payload, the process
+    was on subscription auth and its cost is imputed. Otherwise it was
+    on a direct API key and its cost is real billable spend.
+
+    Edge case: a subscription process that quits before any API response
+    has neither rate_limits nor cost-bearing events, so it produces no
+    session records and the misclassification is moot. Once an API
+    response lands, rate_limits appears and the process is classified
+    correctly thereafter.
+    """
+    return CostMode.SUBSCRIPTION if has_rate_limits else CostMode.API_KEY
+
+
 def _walk_agent_events(events: list[dict[str, Any]], source_name: str) -> _AgentWalkResult:
     """Walk one agent's events in time order, producing all the per-agent reductions.
 
-    Combines three concerns that all gate on the same "is this event valid"
+    Combines four concerns that all gate on the same "is this event valid"
     check (parseable timestamp + non-empty session_id):
       1. Track the freshest rate_limits payload observed (windows).
       2. Track the max event timestamp (for snapshot freshness / staleness).
       3. Partition events into Claude Code processes via cost-drop detection,
          and per process group by session_id with own-contribution deltas.
+      4. Classify each process as ``subscription`` or ``api_key`` based on
+         whether any of its events carried a non-empty rate_limits payload.
 
     Events lacking ``session_id`` are dropped with a WARNING log naming
     source + event_id -- the bundled Claude writer always emits it, so a
     miss means writer/reader drift worth surfacing.
 
-    Doing all three in one walk (rather than separate passes) ensures the
+    Doing all four in one walk (rather than separate passes) ensures the
     session_id requirement filters windows the same way it filters sessions:
     a malformed event can't contribute its windows while having its cost/
     sessions dropped, which would be a silent partial-data trap.
@@ -333,6 +368,12 @@ def _walk_agent_events(events: list[dict[str, Any]], source_name: str) -> _Agent
     sessions_in_process: dict[str, _AccumulatingSession] = {}
     ordered_in_process: list[_AccumulatingSession] = []
     prev_cumulative_cost_usd: float | None = None
+    # Per-process rate_limits presence. Any event in the current process
+    # carrying a non-empty windows dict flips this to True; the process is
+    # then classified as ``subscription`` at finalization time. Reset on
+    # every process boundary so each Claude Code process gets its own
+    # auth-mode classification independently.
+    current_process_has_rate_limits = False
 
     for timestamp, event in timed:
         session_id = _session_id_from_event(event)
@@ -363,14 +404,28 @@ def _walk_agent_events(events: list[dict[str, Any]], source_name: str) -> _Agent
         # strictly stronger.
         if cost is not None and cost.total_cost_usd is not None:
             if prev_cumulative_cost_usd is not None and cost.total_cost_usd < prev_cumulative_cost_usd:
-                finalized.extend(_finalize_process(ordered_in_process))
+                finalized.extend(
+                    _finalize_process(
+                        ordered_in_process,
+                        cost_mode=_classify_process(current_process_has_rate_limits),
+                    )
+                )
                 sessions_in_process = {}
                 ordered_in_process = []
+                current_process_has_rate_limits = False
             prev_cumulative_cost_usd = cost.total_cost_usd
+
+        # Mark the (new or continuing) process as subscription if THIS event
+        # carries a rate_limits payload. Done after the boundary check so a
+        # subscription event that itself triggered a process restart is
+        # attributed to the *new* process (its rate_limits belongs there).
+        if windows:
+            current_process_has_rate_limits = True
 
         if cost is None:
             # Rate-limits-only event (no cost). Doesn't contribute to per-
-            # session aggregation; windows were already tracked above.
+            # session aggregation; windows + mode classification were
+            # tracked above.
             continue
 
         existing = sessions_in_process.get(session_id)
@@ -394,7 +449,12 @@ def _walk_agent_events(events: list[dict[str, Any]], source_name: str) -> _Agent
             existing.first_event_at = timestamp
 
     # End of agent's stream: finalize the final (still-open) process.
-    finalized.extend(_finalize_process(ordered_in_process))
+    finalized.extend(
+        _finalize_process(
+            ordered_in_process,
+            cost_mode=_classify_process(current_process_has_rate_limits),
+        )
+    )
 
     return _AgentWalkResult(
         max_timestamp=max_timestamp,
@@ -537,10 +597,15 @@ def window_render_dict(snap: WindowSnapshot, now: int) -> dict[str, Any]:
 
 
 def session_render_dict(session: SessionCostRecord, now: int) -> dict[str, Any]:
-    """Render one session record as a dict for JSON / CEL surfaces."""
+    """Render one session record as a dict for JSON / CEL surfaces.
+
+    Includes ``cost_mode`` so consumers can group / filter sessions by
+    auth context (subscription vs api_key) without re-deriving it.
+    """
     return {
         "session_id": session.session_id,
         "cost": session.cost.model_dump(),
+        "cost_mode": session.cost_mode,
         "first_event_at": session.first_event_at,
         "last_event_at": session.last_event_at,
         "age_seconds": max(0, now - session.last_event_at),
@@ -559,19 +624,23 @@ def build_source_cel_context(snapshot: UsageSnapshot, now: int) -> dict[str, Any
     predicate with ``mngr usage --format json --detail | jq .sources[0]``
     and paste the same field paths into ``--until``.
 
-    Top-level ``cost`` is the **aggregate** across the snapshot's sessions
-    (sum of each numeric field), so predicates like ``cost.total_cost_usd
-    > 5.0`` mean 'I've spent more than $5 across recent sessions'. When
-    ``sessions`` has exactly one entry the aggregate equals that one
-    session's reading -- by design; consumers that need to dig into a
-    specific session should index ``sessions`` (e.g. ``sessions[0].
-    cost.total_cost_usd`` for the most recent one).
+    Cost is split by [[cost-mode]] -- ``subscription_cost`` (imputed by
+    Claude Code under a Pro/Max subscription) and ``api_cost`` (real
+    spend under a direct ANTHROPIC_API_KEY). There is intentionally no
+    combined ``cost`` field: summing imputed and real numbers would be
+    misleading. Pick the mode you actually care about, e.g.
+    ``api_cost.total_cost_usd > 5.0`` (alert when real billable spend
+    crosses $5) or ``subscription_cost.total_cost_usd > 50.0`` (estimate
+    you've gotten >$50 of value out of your subscription this window).
     """
     ctx: dict[str, Any] = {
         "source": snapshot.source_name,
         "updated_at": snapshot.updated_at,
         "since_seconds": snapshot.since_seconds,
-        "cost": snapshot.cost.model_dump(),
+        "subscription_cost": snapshot.subscription_cost.model_dump(),
+        "subscription_session_count": snapshot.subscription_session_count,
+        "api_cost": snapshot.api_cost.model_dump(),
+        "api_session_count": snapshot.api_session_count,
         "session_count": snapshot.session_count,
         "sessions": [session_render_dict(s, now) for s in snapshot.sessions],
     }

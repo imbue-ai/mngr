@@ -38,6 +38,7 @@ from imbue.mngr_usage.api import session_render_dict
 from imbue.mngr_usage.api import wait_for_usage
 from imbue.mngr_usage.api import window_has_data
 from imbue.mngr_usage.api import window_render_dict
+from imbue.mngr_usage.data_types import CostMode
 from imbue.mngr_usage.data_types import CostSnapshot
 from imbue.mngr_usage.data_types import SessionCostRecord
 from imbue.mngr_usage.data_types import UsagePluginConfig
@@ -161,40 +162,71 @@ def _format_human_line(window_label: str, window: WindowSnapshot, now: int) -> s
 
 @pure
 def _format_cost_line(
+    *,
+    mode_label: str,
+    mode_suffix: str,
     aggregate_cost: CostSnapshot,
     session_count: int,
     since_seconds: int,
     latest_event_at: int | None,
     now: int,
 ) -> str | None:
-    """Render the single cost line under each source header.
+    """Render one cost line under each source header for a single [[cost-mode]].
+
+    ``mode_label`` is the human-display tag for this mode's cost (e.g.
+    ``"subscription cost"`` or ``"api cost"``); ``mode_suffix`` is a
+    parenthetical (e.g. ``" (imputed)"``) appended only when the mode's
+    semantics deserve a callout. The combination yields lines like:
+
+      subscription cost (imputed): $0.42 (2m ago)            (N == 1)
+      subscription cost (imputed): $5.43 across 3 sessions in last 24h
+      api cost: $0.42 (2m ago)
+      api cost: $5.43 across 3 sessions in last 24h
 
     Two shapes:
-    - One session: ``cost: $0.42 (2m ago)``. The aggregate is the only
+    - One session: ``... $0.42 (2m ago)``. The aggregate is the only
       session, so we show its cost with an age annotation from
       ``latest_event_at``.
-    - Multiple sessions: ``cost: $5.43 across 4 sessions in last 24h``.
+    - Multiple sessions: ``... $5.43 across N sessions in last <since>``.
       The age annotation would be ambiguous (which session?) so we drop
       it in favor of the breakdown.
 
-    Returns None when the aggregate has no ``total_cost_usd`` (no usable
-    cost data) -- the caller skips the line entirely.
+    Returns None when this mode's aggregate has no ``total_cost_usd``
+    (no usable cost data in this mode for the window) -- the caller
+    skips the line entirely. Allows the human renderer to show only the
+    mode(s) that actually contributed.
     """
     total = aggregate_cost.total_cost_usd
     if total is None:
         return None
+    prefix = f"{mode_label}{mode_suffix}"
     if session_count <= 1 and latest_event_at is not None:
         age_seconds = max(0, now - latest_event_at)
-        return f"cost: {_format_money(total)} ({_format_age_phrase(age_seconds)})"
-    return f"cost: {_format_money(total)} across {session_count} sessions in last {_format_duration(since_seconds)}"
+        return f"{prefix}: {_format_money(total)} ({_format_age_phrase(age_seconds)})"
+    return (
+        f"{prefix}: {_format_money(total)} across {session_count} sessions in last {_format_duration(since_seconds)}"
+    )
 
 
 _SESSION_DETAIL_ID_PREFIX_LEN = 8
 
 
+_SESSION_MODE_TAGS: dict[CostMode, str] = {CostMode.SUBSCRIPTION: "sub", CostMode.API_KEY: "api"}
+"""Compact one-token mode tags for ``--detail`` per-session lines.
+
+Long-form labels live on the cost-line ("subscription cost (imputed)", "api cost"),
+so per-session lines just need a short tag that distinguishes them at a glance.
+"""
+
+
 @pure
 def _format_session_detail_line(session: SessionCostRecord, now: int) -> str | None:
-    """Render one indented per-session line for ``--detail`` view: ``  abc12345: $0.42 (2m ago)``.
+    """Render one indented per-session line for ``--detail`` view.
+
+    Format: ``  [<tag>] abc12345: $0.42 (2m ago)`` where ``<tag>`` is
+    ``sub`` for subscription sessions or ``api`` for api_key sessions.
+    The tag keeps each line self-describing in mixed-mode breakdowns
+    without bloating to the full mode label.
 
     Returns None when the session has no ``total_cost_usd`` (treat as no
     data; the breakdown for this session is dropped from the display).
@@ -205,8 +237,9 @@ def _format_session_detail_line(session: SessionCostRecord, now: int) -> str | N
     if cost_usd is None:
         return None
     age_seconds = max(0, now - session.last_event_at)
+    tag = _SESSION_MODE_TAGS[session.cost_mode]
     return (
-        f"  {session.session_id[:_SESSION_DETAIL_ID_PREFIX_LEN]}: "
+        f"  [{tag}] {session.session_id[:_SESSION_DETAIL_ID_PREFIX_LEN]}: "
         f"{_format_money(cost_usd)} ({_format_age_phrase(age_seconds)})"
     )
 
@@ -255,6 +288,12 @@ class _UsageRenderModel(FrozenModel):
     window -- see ``SessionCostRecord`` for the full shape). The render
     model just adds CLI-only concerns: staleness flags and the ``now``
     baseline for age phrases.
+
+    Cost is held as two separate aggregates -- ``subscription_cost``
+    (imputed by Claude Code) and ``api_cost`` (real billable spend) --
+    matching ``UsageSnapshot``'s split. The renderer emits a separate
+    line per non-empty mode rather than a single combined line so the
+    user can tell at a glance which spend is real and which is informational.
     """
 
     source_name: str
@@ -264,7 +303,8 @@ class _UsageRenderModel(FrozenModel):
     snapshot_updated_at: int | None
     windows: dict[str, WindowSnapshot]
     sessions: tuple[SessionCostRecord, ...] = ()
-    aggregate_cost: CostSnapshot = CostSnapshot()
+    subscription_cost: CostSnapshot = CostSnapshot()
+    api_cost: CostSnapshot = CostSnapshot()
     since_seconds: int = 0
 
     @property
@@ -273,13 +313,36 @@ class _UsageRenderModel(FrozenModel):
         return self.is_age_stale or self.has_past_reset
 
     @property
-    def latest_event_at(self) -> int | None:
-        """Timestamp of the most recent session's last event, or None when no sessions."""
-        return self.sessions[0].last_event_at if self.sessions else None
+    def subscription_sessions(self) -> tuple[SessionCostRecord, ...]:
+        return tuple(s for s in self.sessions if s.cost_mode == CostMode.SUBSCRIPTION)
+
+    @property
+    def api_sessions(self) -> tuple[SessionCostRecord, ...]:
+        return tuple(s for s in self.sessions if s.cost_mode == CostMode.API_KEY)
 
     @property
     def session_count(self) -> int:
         return len(self.sessions)
+
+    @property
+    def subscription_session_count(self) -> int:
+        return len(self.subscription_sessions)
+
+    @property
+    def api_session_count(self) -> int:
+        return len(self.api_sessions)
+
+    @property
+    def latest_subscription_event_at(self) -> int | None:
+        """Timestamp of the freshest subscription session's last event, or None."""
+        subs = self.subscription_sessions
+        return subs[0].last_event_at if subs else None
+
+    @property
+    def latest_api_event_at(self) -> int | None:
+        """Timestamp of the freshest api_key session's last event, or None."""
+        apis = self.api_sessions
+        return apis[0].last_event_at if apis else None
 
 
 def _build_render_model(snapshot: UsageSnapshot, max_age: int, now: int) -> _UsageRenderModel:
@@ -300,7 +363,8 @@ def _build_render_model(snapshot: UsageSnapshot, max_age: int, now: int) -> _Usa
         snapshot_updated_at=snapshot.updated_at,
         windows=snapshot.windows,
         sessions=snapshot.sessions,
-        aggregate_cost=snapshot.cost,
+        subscription_cost=snapshot.subscription_cost,
+        api_cost=snapshot.api_cost,
         since_seconds=snapshot.since_seconds,
     )
 
@@ -308,11 +372,18 @@ def _build_render_model(snapshot: UsageSnapshot, max_age: int, now: int) -> _Usa
 def _render_one_source_for_json(model: _UsageRenderModel, now: int, detail: bool) -> dict[str, Any]:
     """JSON shape for a single source's snapshot.
 
-    ``cost`` is the aggregate across all sessions in the recency window.
+    Cost is split into ``subscription_cost`` (imputed under a Claude.ai
+    subscription) and ``api_cost`` (real spend under a direct API key)
+    so consumers don't have to sum imputed and real numbers. There is
+    intentionally no combined ``cost`` field; predicates that want one
+    or the other must say which (e.g. ``api_cost.total_cost_usd > 5``).
+
     With ``detail=True`` the full per-session breakdown is included as
-    ``sessions[]`` (newest first); without ``detail`` the key is omitted
-    entirely so the default JSON stays small. ``session_count`` is always
-    present so consumers can tell how many sessions backed the aggregate.
+    ``sessions[]`` (newest first, each carrying ``cost_mode``); without
+    ``detail`` the key is omitted so the default JSON stays small.
+    ``session_count`` is always present (total) along with
+    ``subscription_session_count`` and ``api_session_count`` so consumers
+    can tell at a glance how many sessions backed each aggregate.
     """
     out: dict[str, Any] = {
         "source": model.source_name,
@@ -320,7 +391,10 @@ def _render_one_source_for_json(model: _UsageRenderModel, now: int, detail: bool
         "is_stale": model.is_stale,
         "since_seconds": model.since_seconds,
         "session_count": model.session_count,
-        "cost": model.aggregate_cost.model_dump(),
+        "subscription_session_count": model.subscription_session_count,
+        "api_session_count": model.api_session_count,
+        "subscription_cost": model.subscription_cost.model_dump(),
+        "api_cost": model.api_cost.model_dump(),
     }
     if detail:
         out["sessions"] = [session_render_dict(s, now) for s in model.sessions]
@@ -338,10 +412,12 @@ def _flatten_primary_for_template(model: _UsageRenderModel, now: int) -> dict[st
     identifier-safe keys (Python's ``str.format`` parses them as
     identifiers). Multi-source consumers should use ``--format json``.
 
-    ``cost.*`` is the aggregate across the recency window (sum of each
-    field across sessions). For per-session breakdown, use ``--format
-    json`` -- the format-template surface intentionally doesn't expose
-    list-indexed paths.
+    Cost is exposed split by [[cost-mode]]: ``subscription_cost.*``
+    (imputed) and ``api_cost.*`` (real). Each numeric field is always
+    populated (empty string when absent) so templates referencing them
+    don't KeyError on snapshots lacking that mode. For per-session
+    breakdown, use ``--format json`` -- the format-template surface
+    intentionally doesn't expose list-indexed paths.
     """
     flat: dict[str, str] = {
         "source": model.source_name,
@@ -350,9 +426,13 @@ def _flatten_primary_for_template(model: _UsageRenderModel, now: int) -> dict[st
         "updated_at": "" if model.snapshot_updated_at is None else str(model.snapshot_updated_at),
         "since_seconds": str(model.since_seconds),
         "session_count": str(model.session_count),
+        "subscription_session_count": str(model.subscription_session_count),
+        "api_session_count": str(model.api_session_count),
     }
-    for cost_field, cost_value in model.aggregate_cost.model_dump().items():
-        flat[f"cost.{cost_field}"] = _stringify_for_template(cost_value)
+    for cost_field, cost_value in model.subscription_cost.model_dump().items():
+        flat[f"subscription_cost.{cost_field}"] = _stringify_for_template(cost_value)
+    for cost_field, cost_value in model.api_cost.model_dump().items():
+        flat[f"api_cost.{cost_field}"] = _stringify_for_template(cost_value)
     for key, snap in model.windows.items():
         for sub_key, value in _window_to_template_values(snap, now).items():
             flat[f"{key}.{sub_key}"] = value
@@ -360,23 +440,31 @@ def _flatten_primary_for_template(model: _UsageRenderModel, now: int) -> dict[st
 
 
 def _write_source_section(model: _UsageRenderModel, now: int, header: str, detail: bool) -> bool:
-    """Render one source's section: header, single cost line, optional per-session breakdown, window lines.
+    """Render one source's section: header, per-mode cost lines, optional per-session breakdown, window lines.
 
-    Default layout::
+    Default layout (subscription + api both contribute -- rare; usually one mode)::
 
       [source]
-      cost: $0.42 (2m ago)                              when N == 1
-      cost: $5.43 across N sessions in last <since>     when N > 1
+      subscription cost (imputed): $0.42 (2m ago)               when N == 1
+      subscription cost (imputed): $5.43 across N sessions in last <since>
+      api cost: $0.42 (2m ago)
+      api cost: $1.23 across N sessions in last <since>
       <window-label>: <pct>% used, <reset-phrase>       one per populated window
 
-    With ``detail=True`` and N > 1, indented per-session lines are inserted
-    between the cost line and the window lines (newest first, matching
-    ``sessions[]`` order). For N == 1 the cost line already names the only
-    session's reading so the breakdown is suppressed to avoid duplication.
+    A cost line is emitted per [[cost-mode]] only if that mode contributed
+    cost in the window. So an API-key-only user sees a single ``api cost``
+    line; a subscription-only user sees a single ``subscription cost
+    (imputed)`` line; both render under the rare case where one agent
+    swaps auth mode within the window.
 
-    The cost line is skipped when the aggregate has no ``total_cost_usd``
-    (i.e. no usable cost data anywhere). Per-session lines are skipped
-    individually when that session has no usable cost.
+    With ``detail=True`` and at least two sessions across both modes,
+    indented per-session lines are inserted between the cost lines and
+    the window lines (newest first, matching ``sessions[]`` order). For
+    a single session the cost line already names that session's reading
+    so the breakdown is suppressed to avoid duplication.
+
+    Per-session lines are skipped individually when that session has no
+    usable cost.
 
     Returns True if anything renderable was emitted -- this gates the
     catch-all "no usage data" hint and the per-source staleness warnings
@@ -385,15 +473,31 @@ def _write_source_section(model: _UsageRenderModel, now: int, header: str, detai
     """
     write_human_line(header)
     any_renderable = False
-    cost_line = _format_cost_line(
-        model.aggregate_cost,
-        model.session_count,
-        model.since_seconds,
-        model.latest_event_at,
-        now,
+    # Subscription line first (imputed cost is informational; rendering it
+    # before real spend keeps the eye-line "more important info further down").
+    subscription_line = _format_cost_line(
+        mode_label="subscription cost",
+        mode_suffix=" (imputed)",
+        aggregate_cost=model.subscription_cost,
+        session_count=model.subscription_session_count,
+        since_seconds=model.since_seconds,
+        latest_event_at=model.latest_subscription_event_at,
+        now=now,
     )
-    if cost_line is not None:
-        write_human_line(cost_line)
+    if subscription_line is not None:
+        write_human_line(subscription_line)
+        any_renderable = True
+    api_line = _format_cost_line(
+        mode_label="api cost",
+        mode_suffix="",
+        aggregate_cost=model.api_cost,
+        session_count=model.api_session_count,
+        since_seconds=model.since_seconds,
+        latest_event_at=model.latest_api_event_at,
+        now=now,
+    )
+    if api_line is not None:
+        write_human_line(api_line)
         any_renderable = True
     if detail and model.session_count > 1:
         for session in model.sessions:
@@ -446,7 +550,8 @@ def _emit_output(
                 snapshot_updated_at=None,
                 windows={},
                 sessions=(),
-                aggregate_cost=CostSnapshot(),
+                subscription_cost=CostSnapshot(),
+                api_cost=CostSnapshot(),
                 since_seconds=since_seconds,
             )
             line = render_format_template(format_template, _flatten_primary_for_template(empty, now))
@@ -562,16 +667,17 @@ def _reject_group_options_when_subcommand_invoked(ctx: click.Context) -> None:
     "--since",
     default=None,
     help="Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose "
-    "last event is older are dropped from `sessions[]` and from the aggregate `cost.*` "
-    "computed off them. Default: from plugin config (24h).",
+    "last event is older are dropped from `sessions[]` and from the per-mode aggregates "
+    "(`subscription_cost.*` / `api_cost.*`) computed off them. Default: from plugin config (24h).",
 )
 @click.option(
     "--detail",
     is_flag=True,
     default=False,
-    help="Expand summary view: show per-session breakdown lines under each source's cost line "
-    "(human), and include the `sessions[]` array under each source (JSON). Default omits the "
-    "per-session breakdown for terseness; the aggregate cost line and window lines are unchanged.",
+    help="Expand summary view: show per-session breakdown lines under each source's cost lines "
+    "(human, tagged with `[sub]` or `[api]`), and include the `sessions[]` array under each "
+    "source (JSON, each session carrying `cost_mode`). Default omits the per-session breakdown "
+    "for terseness; the per-mode cost lines and window lines are unchanged.",
 )
 @add_agent_filter_options
 @optgroup.option(
@@ -587,9 +693,11 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
     Enumerates agents via ``list_agents`` (same machinery, filters, and speed
     profile as ``mngr list``), reads each agent's ``events/<source>/
     usage/events.jsonl`` via the events API (so remote agents work the
-    same as local), and renders one section per source: an aggregate cost
-    line (plus per-session breakdown when ``--detail`` is passed) followed
-    by one line per populated rate-limit window.
+    same as local), and renders one section per source: per-mode cost
+    lines (``subscription cost (imputed)`` and/or ``api cost``, depending
+    on which auth contexts the events came from), plus per-session
+    breakdown when ``--detail`` is passed, followed by one line per
+    populated rate-limit window.
 
     When invoked without a subcommand, prints the current snapshot. Use
     ``mngr usage wait`` to block until a CEL predicate matches.
@@ -664,19 +772,29 @@ Per-source aggregation:
   the prior session's cumulative reading in the same process). Records
   are summed across all (agent, process, session) tuples within the
   ``--since`` recency window (default 24h).
+- Cost is split by auth mode: ``subscription_cost`` aggregates sessions
+  whose Claude Code process was on a Claude.ai Pro/Max subscription
+  (numbers are imputed by Claude Code), and ``api_cost`` aggregates
+  sessions whose process was on a direct ANTHROPIC_API_KEY (numbers are
+  real billable spend). Mode is detected per process from whether any
+  event in it carried a ``rate_limits`` payload (subscription auth) or
+  not (api-key auth). The two are never lumped into a single ``cost``
+  field -- conflating imputed estimates with real spend would be
+  misleading.
 - The JSON output's ``sessions[]`` array is ordered newest-first; consumers
-  that want a specific session's reading can index ``sessions[0]``.""",
+  that want a specific session's reading can index ``sessions[0]``. Each
+  session carries a ``cost_mode`` field ("SUBSCRIPTION" or "API_KEY").""",
     examples=(
         ("Show current usage", "mngr usage"),
         ("Local agents only", "mngr usage --local"),
         ("Specific providers", "mngr usage --provider local --provider modal"),
         ("Aggregate cost across the last week", "mngr usage --since 7d"),
         ("Treat the snapshot as stale after 60s (warning only)", "mngr usage --max-age 60"),
-        ("Per-session breakdown (human + JSON)", "mngr usage --detail"),
+        ("Per-session breakdown (human + JSON, mode-tagged)", "mngr usage --detail"),
         ("Machine-readable output", "mngr usage --format json"),
         (
-            "Custom format template (aggregate cost only)",
-            "mngr usage --format '{cost.total_cost_usd} across {session_count} sessions'",
+            "Custom format template (real API spend only)",
+            "mngr usage --format '{api_cost.total_cost_usd} across {api_session_count} sessions'",
         ),
     ),
 ).register()
@@ -741,8 +859,9 @@ class UsageWaitCliOptions(CommonCliOptions, AgentFilterCliOptions):
     "--since",
     default=None,
     help="Recency window for per-session cost aggregation (e.g. '24h', '7d'). Affects the "
-    "per-session surfaces in the CEL context: `cost.*` (aggregate across recent sessions), "
-    "`sessions[]`, and `session_count`. Default: from plugin config (24h).",
+    "per-session surfaces in the CEL context: `subscription_cost.*` / `api_cost.*` "
+    "(per-mode aggregates), `sessions[]`, and the `*_session_count` fields. "
+    "Default: from plugin config (24h).",
 )
 @add_agent_filter_options
 @optgroup.option(
@@ -908,15 +1027,19 @@ json``'s ``sources`` array. Window fields (under each window key, e.g.
 
 Source-level fields:
 
-- ``cost.total_cost_usd`` / ``cost.total_duration_ms`` / ... : aggregate
-  across the recency window (sum across all sessions in the last
-  ``--since`` duration). When ``session_count == 1`` the aggregate equals
-  that one session's reading by design -- use ``--since`` to tighten if
-  you want a tighter view, or read ``sessions[0]`` for the explicit
-  per-session record.
-- ``session_count``: number of recent sessions contributing to the cost
-  aggregate.
-- ``sessions``: list of session-cost records, newest-first.
+- ``subscription_cost.total_cost_usd`` / ``subscription_cost.total_duration_ms`` / ... :
+  aggregate across the recency window of sessions whose Claude Code process
+  was on a Claude.ai Pro/Max subscription. Cost is **imputed** by Claude Code
+  (what the usage would have cost on the metered API) and is informational --
+  the user actually pays a flat subscription. Never lumped with ``api_cost``.
+- ``api_cost.total_cost_usd`` / ``api_cost.total_duration_ms`` / ... :
+  aggregate across the recency window of sessions whose Claude Code process
+  was on a direct ANTHROPIC_API_KEY. Cost is **real** billable spend.
+- ``subscription_session_count`` / ``api_session_count``: number of sessions
+  in each mode contributing to the corresponding aggregate. ``session_count``
+  is the total across both modes.
+- ``sessions``: list of session-cost records, newest-first. Each entry
+  carries a ``cost_mode`` ("SUBSCRIPTION" or "API_KEY") tag.
 
 Exit codes:
   0 - A source matched all --until filters.
@@ -940,12 +1063,12 @@ Exit codes:
             "mngr usage wait --until 'overage.is_using_overage == false' --interval 10s",
         ),
         (
-            "Wait until cumulative spend over the last 24h crosses $20",
-            "mngr usage wait --until 'cost.total_cost_usd > 20.0'",
+            "Wait until cumulative real API spend over the last 24h crosses $20",
+            "mngr usage wait --until 'api_cost.total_cost_usd > 20.0'",
         ),
         (
-            "Aggregate cost over the last week instead of 24h",
-            "mngr usage wait --until 'cost.total_cost_usd > 100.0' --since 7d",
+            "Cap real spend in the last week (subscription cost is imputed and ignored here)",
+            "mngr usage wait --until 'api_cost.total_cost_usd > 100.0' --since 7d",
         ),
     ),
     see_also=(

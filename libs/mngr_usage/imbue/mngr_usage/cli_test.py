@@ -32,6 +32,7 @@ from imbue.mngr_usage.cli import _format_human_line
 from imbue.mngr_usage.cli import _format_reset_phrase
 from imbue.mngr_usage.cli import _parse_optional_duration
 from imbue.mngr_usage.cli import usage
+from imbue.mngr_usage.data_types import CostMode
 from imbue.mngr_usage.data_types import CostSnapshot
 from imbue.mngr_usage.data_types import SessionCostRecord
 from imbue.mngr_usage.data_types import UsageSnapshot
@@ -246,6 +247,10 @@ def test_aggregate_groups_per_session_and_computes_session_contribution_delta() 
         def's contribution = 1.23 - 0.42 = 0.81.
       - Aggregate (sum of contributions) = 0.42 + 0.81 = 1.23, which
         matches the final cumulative reading (true total spend).
+
+    No rate_limits in any event -> mode classified as ``api_key`` (real
+    billable spend), so the aggregate lands in ``api_cost`` rather than
+    ``subscription_cost``.
     """
     events = [
         _cost_event("2026-05-08T10:00:00.000000000Z", session_id="abc", cost_usd=0.10),
@@ -262,9 +267,15 @@ def test_aggregate_groups_per_session_and_computes_session_contribution_delta() 
     assert snap.session_count == 2
     by_id = {s.session_id: s for s in snap.sessions}
     assert by_id["abc"].cost.total_cost_usd == pytest.approx(0.42)
+    assert by_id["abc"].cost_mode == CostMode.API_KEY
     assert by_id["def"].cost.total_cost_usd == pytest.approx(0.81)
+    assert by_id["def"].cost_mode == CostMode.API_KEY
     # Aggregate is the sum of contributions and recovers the final cumulative reading.
-    assert snap.cost.total_cost_usd == pytest.approx(1.23)
+    assert snap.api_cost.total_cost_usd == pytest.approx(1.23)
+    # No subscription sessions -> the subscription aggregate has no usable cost data.
+    assert snap.subscription_cost.total_cost_usd is None
+    assert snap.api_session_count == 2
+    assert snap.subscription_session_count == 0
 
 
 def test_aggregate_detects_process_boundary_via_cost_drop() -> None:
@@ -296,8 +307,9 @@ def test_aggregate_detects_process_boundary_via_cost_drop() -> None:
     # is its full cumulative reading.
     assert by_id["proc1-session"].cost.total_cost_usd == pytest.approx(5.00)
     assert by_id["proc2-session"].cost.total_cost_usd == pytest.approx(0.30)
-    # Aggregate is the cross-process sum -- the true total spend.
-    assert snap.cost.total_cost_usd == pytest.approx(5.30)
+    # Aggregate is the cross-process sum -- the true total spend. No rate_limits
+    # in either process -> both classified as api_key.
+    assert snap.api_cost.total_cost_usd == pytest.approx(5.30)
 
 
 def test_aggregate_isolates_process_boundary_detection_per_agent() -> None:
@@ -332,8 +344,8 @@ def test_aggregate_isolates_process_boundary_detection_per_agent() -> None:
     # Each session is the only session in its agent's process; contribution = cumulative.
     assert by_id["a-only-session"].cost.total_cost_usd == pytest.approx(0.50)
     assert by_id["b-only-session"].cost.total_cost_usd == pytest.approx(0.20)
-    # Aggregate sums across agents.
-    assert snap.cost.total_cost_usd == pytest.approx(0.70)
+    # Aggregate sums across agents (both api_key mode since no rate_limits planted).
+    assert snap.api_cost.total_cost_usd == pytest.approx(0.70)
 
 
 def test_aggregate_filters_sessions_outside_recency_window() -> None:
@@ -353,8 +365,9 @@ def test_aggregate_filters_sessions_outside_recency_window() -> None:
     # The stale session is filtered out of `sessions`; the fresh one remains.
     assert snap.session_count == 1
     assert snap.sessions[0].session_id == "recent"
-    # And the aggregate reflects only the in-window session.
-    assert snap.cost.total_cost_usd == 0.42
+    # And the aggregate reflects only the in-window session (api_key mode since
+    # no rate_limits planted).
+    assert snap.api_cost.total_cost_usd == 0.42
 
 
 def test_aggregate_sessions_sorted_newest_first() -> None:
@@ -374,7 +387,9 @@ def test_aggregate_sessions_sorted_newest_first() -> None:
 
 
 def test_aggregate_returns_cost_only_snapshot_when_no_rate_limits() -> None:
-    """API-key sessions emit cost without rate_limits; the snapshot is still built."""
+    """API-key sessions emit cost without rate_limits; the snapshot is still
+    built and the session is classified as ``api_key`` (real billable spend).
+    """
     events = [
         _cost_event("2026-05-08T11:00:00.000000000Z", session_id="api-key-session", cost_usd=1.23),
     ]
@@ -388,6 +403,75 @@ def test_aggregate_returns_cost_only_snapshot_when_no_rate_limits() -> None:
     assert snap.windows == {}
     assert snap.session_count == 1
     assert snap.sessions[0].cost.total_cost_usd == 1.23
+    assert snap.sessions[0].cost_mode == CostMode.API_KEY
+    # Real billable spend lands in api_cost; subscription_cost has no contributors.
+    assert snap.api_cost.total_cost_usd == 1.23
+    assert snap.subscription_cost.total_cost_usd is None
+
+
+def test_aggregate_classifies_process_with_rate_limits_as_subscription() -> None:
+    """A process is classified ``subscription`` when ANY of its events carry a
+    non-empty rate_limits payload. Cost in that mode is **imputed** by Claude
+    Code (subscription users don't actually pay per token), so the aggregate
+    lands in ``subscription_cost`` and stays out of ``api_cost``.
+    """
+    rate_limits = {"five_hour": {"used_percentage": 11.0, "resets_at": 9_999_999_999}}
+    events = [
+        # First event: cost-only (no rate_limits yet -- typical for the brief window
+        # before the first API response of a subscription session).
+        _cost_event("2026-05-08T10:00:00.000000000Z", session_id="sub-sess", cost_usd=0.10),
+        # Second event in the same process: rate_limits appears -> process is subscription.
+        _cost_event("2026-05-08T10:30:00.000000000Z", session_id="sub-sess", cost_usd=0.42, rate_limits=rate_limits),
+    ]
+    snapshots = aggregate_events_to_snapshots(
+        {"claude": {"agent-x": events}},
+        since_seconds=86400,
+        now=int(datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).timestamp()),
+    )
+    assert len(snapshots) == 1
+    snap = snapshots[0]
+    assert snap.session_count == 1
+    assert snap.sessions[0].cost_mode == CostMode.SUBSCRIPTION
+    # Imputed spend lands in subscription_cost; api_cost has no contributors.
+    assert snap.subscription_cost.total_cost_usd == pytest.approx(0.42)
+    assert snap.api_cost.total_cost_usd is None
+
+
+def test_aggregate_classifies_different_processes_independently_when_auth_swaps() -> None:
+    """Each Claude Code process is classified independently from its own events.
+    A cost-drop boundary marks a new process; if the new process has no
+    rate_limits while the old one did, the two get different ``cost_mode``
+    tags and feed different aggregates.
+
+    Scenario: subscription session (rate_limits present), user quits + relaunches
+    Claude Code with ANTHROPIC_API_KEY (rate_limits gone, cost resets near zero).
+    """
+    rate_limits = {"five_hour": {"used_percentage": 50.0, "resets_at": 9_999_999_999}}
+    events = [
+        # Process 1: subscription (rate_limits present), cumulative cost climbs to $5.
+        _cost_event(
+            "2026-05-08T10:00:00.000000000Z", session_id="sub-process", cost_usd=5.00, rate_limits=rate_limits
+        ),
+        # Process 2: api_key (no rate_limits). Cost drop from 5.00 to 0.30 marks the
+        # process boundary; this new process has no rate_limits anywhere.
+        _cost_event("2026-05-08T11:00:00.000000000Z", session_id="api-process", cost_usd=0.30),
+    ]
+    snapshots = aggregate_events_to_snapshots(
+        {"claude": {"agent-x": events}},
+        since_seconds=86400,
+        now=int(datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).timestamp()),
+    )
+    assert len(snapshots) == 1
+    snap = snapshots[0]
+    by_id = {s.session_id: s for s in snap.sessions}
+    assert by_id["sub-process"].cost_mode == CostMode.SUBSCRIPTION
+    assert by_id["api-process"].cost_mode == CostMode.API_KEY
+    # The two aggregates remain distinct -- imputed subscription cost never gets
+    # lumped with real api spend.
+    assert snap.subscription_cost.total_cost_usd == pytest.approx(5.00)
+    assert snap.api_cost.total_cost_usd == pytest.approx(0.30)
+    assert snap.subscription_session_count == 1
+    assert snap.api_session_count == 1
 
 
 def test_aggregate_drops_event_with_non_string_session_id() -> None:
@@ -468,27 +552,34 @@ def test_render_model_fresh() -> None:
     assert model.is_stale is False
 
 
-def test_flatten_for_template_always_includes_cost_keys() -> None:
-    """``cost.*`` template keys are always populated (empty string when absent)
-    so format templates referencing them don't KeyError on snapshots that
-    pre-date session/cost capture. The format-template surface intentionally
-    doesn't expose per-session paths -- callers wanting that should use
-    ``--format json`` and index ``sessions[]``."""
+def test_flatten_for_template_always_includes_per_mode_cost_keys() -> None:
+    """``subscription_cost.*`` and ``api_cost.*`` template keys are always populated
+    (empty string when absent) so format templates referencing them don't KeyError
+    on snapshots that pre-date session/cost capture. The format-template surface
+    intentionally doesn't expose per-session paths -- callers wanting that should
+    use ``--format json`` and index ``sessions[]``."""
     snapshot_without_cost = UsageSnapshot(
         source_name="claude",
         updated_at=900,
         windows={"five_hour": WindowSnapshot(used_percentage=42.0, resets_at=1500)},
     )
     flat = _flatten_primary_for_template(_build_render_model(snapshot_without_cost, max_age=300, now=1000), now=1000)
-    assert flat["cost.total_cost_usd"] == ""
-    assert flat["cost.total_duration_ms"] == ""
+    assert flat["subscription_cost.total_cost_usd"] == ""
+    assert flat["subscription_cost.total_duration_ms"] == ""
+    assert flat["api_cost.total_cost_usd"] == ""
+    assert flat["api_cost.total_duration_ms"] == ""
     assert flat["session_count"] == "0"
+    assert flat["subscription_session_count"] == "0"
+    assert flat["api_session_count"] == "0"
+    # No combined `cost.*` key -- subscription and api stay distinct.
+    assert "cost.total_cost_usd" not in flat
     # Per-session paths are intentionally not exposed in the format-template surface.
     assert "current_session.session_id" not in flat
     assert "sessions" not in flat
 
 
-def test_flatten_for_template_populates_cost_when_present() -> None:
+def test_flatten_for_template_populates_api_cost_when_session_is_api_mode() -> None:
+    """A single api-key session populates ``api_cost.*`` and leaves ``subscription_cost.*`` empty."""
     snapshot = UsageSnapshot(
         source_name="claude",
         updated_at=900,
@@ -497,6 +588,7 @@ def test_flatten_for_template_populates_cost_when_present() -> None:
             SessionCostRecord(
                 session_id="uuid-abc",
                 cost=CostSnapshot(total_cost_usd=0.42, total_duration_ms=12000),
+                cost_mode=CostMode.API_KEY,
                 first_event_at=900,
                 last_event_at=950,
             ),
@@ -504,28 +596,43 @@ def test_flatten_for_template_populates_cost_when_present() -> None:
         since_seconds=86400,
     )
     flat = _flatten_primary_for_template(_build_render_model(snapshot, max_age=300, now=1000), now=1000)
-    # Top-level cost is the aggregate; with one session it equals the session's reading.
-    assert flat["cost.total_cost_usd"] == "0.42"
-    assert flat["cost.total_duration_ms"] == "12000"
+    # api_cost reflects the session's reading; subscription_cost stays empty.
+    assert flat["api_cost.total_cost_usd"] == "0.42"
+    assert flat["api_cost.total_duration_ms"] == "12000"
+    assert flat["subscription_cost.total_cost_usd"] == ""
     assert flat["session_count"] == "1"
+    assert flat["api_session_count"] == "1"
+    assert flat["subscription_session_count"] == "0"
 
 
-def test_flatten_for_template_aggregates_cost_across_sessions() -> None:
-    """Aggregate cost = sum of latest cost per session, exposed as ``cost.*``."""
+def test_flatten_for_template_aggregates_only_within_each_mode() -> None:
+    """Per-mode aggregates only sum sessions of that mode. Two api sessions
+    feed ``api_cost.*``; one subscription session feeds ``subscription_cost.*``;
+    nothing is conflated.
+    """
     snapshot = UsageSnapshot(
         source_name="claude",
         updated_at=2000,
         windows={},
         sessions=(
             SessionCostRecord(
-                session_id="def",
-                cost=CostSnapshot(total_cost_usd=1.0),
-                first_event_at=1500,
+                session_id="sub-x",
+                cost=CostSnapshot(total_cost_usd=0.10),
+                cost_mode=CostMode.SUBSCRIPTION,
+                first_event_at=1800,
                 last_event_at=2000,
             ),
             SessionCostRecord(
-                session_id="abc",
+                session_id="api-newer",
+                cost=CostSnapshot(total_cost_usd=1.0),
+                cost_mode=CostMode.API_KEY,
+                first_event_at=1500,
+                last_event_at=1900,
+            ),
+            SessionCostRecord(
+                session_id="api-older",
                 cost=CostSnapshot(total_cost_usd=0.42),
+                cost_mode=CostMode.API_KEY,
                 first_event_at=1000,
                 last_event_at=1500,
             ),
@@ -533,8 +640,12 @@ def test_flatten_for_template_aggregates_cost_across_sessions() -> None:
         since_seconds=86400,
     )
     flat = _flatten_primary_for_template(_build_render_model(snapshot, max_age=300, now=2000), now=2000)
-    assert flat["cost.total_cost_usd"] == "1.42"
-    assert flat["session_count"] == "2"
+    # api_cost sums only api_key sessions; subscription_cost only subscription.
+    assert flat["api_cost.total_cost_usd"] == "1.42"
+    assert flat["subscription_cost.total_cost_usd"] == "0.1"
+    assert flat["session_count"] == "3"
+    assert flat["api_session_count"] == "2"
+    assert flat["subscription_session_count"] == "1"
 
 
 def test_flatten_for_template_emits_only_present_windows() -> None:
@@ -1005,17 +1116,19 @@ def test_usage_wait_rejects_invalid_cel(
 
 
 @pytest.mark.tmux
-def test_usage_command_renders_cost_line_for_subscription_user(
+def test_usage_command_renders_subscription_cost_line_for_subscription_user(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     local_host: Host,
     cli_test_agent: AgentInterface,
     cli_profile_dir: Path,
 ) -> None:
-    """Subscription users get both rate_limits AND cost. With one session the
-    human output renders a single 'cost: $X.YY (<age>)' line between the source
-    header and the window lines -- no per-session id in the human view (it's
-    available via JSON's sessions[] for callers who need it)."""
+    """Subscription users get rate_limits + cost. The presence of rate_limits
+    classifies the process as subscription, and the human output renders the
+    cost on a 'subscription cost (imputed)' line (calling out that the value
+    is imputed by Claude Code, not real billable spend). No 'api cost' line
+    appears since no api-key session contributed.
+    """
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
     _plant_event_for_agent(
         local_host,
@@ -1034,26 +1147,30 @@ def test_usage_command_renders_cost_line_for_subscription_user(
     )
     result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
-    # Cost is shown with 2 decimals.
-    assert "cost: $0.43" in result.output
+    # Subscription cost line with the imputed callout; 2-decimal money format.
+    assert "subscription cost (imputed): $0.43" in result.output
+    # No api-key line since no api-key session contributed.
+    assert "api cost:" not in result.output
     # The window line still renders alongside.
     assert "5h:" in result.output
     # The cost line must appear between the [source] header and the window line.
-    cost_idx = result.output.index("cost: $0.43")
+    cost_idx = result.output.index("subscription cost (imputed): $0.43")
     assert result.output.index("[claude]") < cost_idx < result.output.index("5h:")
 
 
 @pytest.mark.tmux
-def test_usage_command_renders_cost_only_for_api_key_user(
+def test_usage_command_renders_api_cost_line_for_api_key_user(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     local_host: Host,
     cli_test_agent: AgentInterface,
     cli_profile_dir: Path,
 ) -> None:
-    """API-key sessions emit cost but never rate_limits. The human output should
-    still render the cost line so the user sees their spend, without the
-    "no data" hint that fires when nothing renderable exists."""
+    """API-key sessions emit cost but never rate_limits. The absence of
+    rate_limits classifies the process as api_key, so the human output
+    renders an 'api cost' line (real billable spend, no 'imputed' callout).
+    No subscription line appears.
+    """
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
     _plant_event_for_agent(
         local_host,
@@ -1070,7 +1187,9 @@ def test_usage_command_renders_cost_only_for_api_key_user(
     )
     result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
-    assert "cost: $1.23" in result.output
+    assert "api cost: $1.23" in result.output
+    # No subscription line should appear -- the user is on a direct API key.
+    assert "subscription cost" not in result.output
     # The "No usage data yet" hint must not fire -- cost IS data.
     assert "No usage data yet" not in result.output
 
@@ -1083,10 +1202,14 @@ def test_usage_command_json_default_is_summary_only(
     cli_test_agent: AgentInterface,
     cli_profile_dir: Path,
 ) -> None:
-    """Default JSON output is summary-only: aggregate ``cost``, ``session_count``,
-    and the windows. ``sessions[]`` is omitted unless ``--detail`` is passed,
-    keeping the common-case payload small."""
+    """Default JSON output is summary-only: per-mode aggregates
+    (``subscription_cost`` and ``api_cost``), ``session_count`` (total) plus
+    per-mode counts, and the windows. ``sessions[]`` is omitted unless
+    ``--detail`` is passed, keeping the common-case payload small. There is
+    no combined ``cost`` key -- subscription and api cost stay distinct.
+    """
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    # rate_limits present alongside cost -> classified as subscription.
     _plant_event_for_agent(
         local_host,
         cli_test_agent,
@@ -1106,14 +1229,19 @@ def test_usage_command_json_default_is_summary_only(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output.strip())
     source = payload["sources"][0]
-    # Top-level cost is the aggregate; with one session it equals that session's reading.
-    assert source["cost"]["total_cost_usd"] == 0.42
-    assert source["cost"]["total_duration_ms"] == 12000
-    assert source["cost"]["total_api_duration_ms"] == 8000
-    # Fields the writer didn't supply are still present in the dict with None values
-    # (sum of [None] yields None).
-    assert source["cost"]["total_lines_added"] is None
+    # Subscription aggregate carries the session's reading; api aggregate is all-None.
+    assert source["subscription_cost"]["total_cost_usd"] == 0.42
+    assert source["subscription_cost"]["total_duration_ms"] == 12000
+    assert source["subscription_cost"]["total_api_duration_ms"] == 8000
+    # Fields the writer didn't supply are still present in the dict with None values.
+    assert source["subscription_cost"]["total_lines_added"] is None
+    assert source["api_cost"]["total_cost_usd"] is None
+    # Counts are split by mode; total session_count is the sum.
     assert source["session_count"] == 1
+    assert source["subscription_session_count"] == 1
+    assert source["api_session_count"] == 0
+    # No combined `cost` key -- callers must pick a mode explicitly.
+    assert "cost" not in source
     # Summary-only by default: no per-session breakdown unless --detail is set.
     assert "sessions" not in source
     assert "current_session" not in source
@@ -1154,6 +1282,9 @@ def test_usage_command_detail_flag_includes_sessions_in_json(
     assert len(source["sessions"]) == 1
     assert source["sessions"][0]["session_id"] == "uuid-abc"
     assert source["sessions"][0]["cost"]["total_cost_usd"] == 0.42
+    # cost_mode is exposed so consumers can filter sessions[] by auth context.
+    # No rate_limits planted -> classified as api_key.
+    assert source["sessions"][0]["cost_mode"] == CostMode.API_KEY
 
 
 @pytest.mark.tmux
@@ -1164,10 +1295,11 @@ def test_usage_command_aggregates_cost_across_agents_in_same_source(
     tmp_path: Path,
     cli_profile_dir: Path,
 ) -> None:
-    """Two Claude agents on different sessions both contribute to ``claude``'s
-    aggregate cost. With ``--detail`` the JSON output exposes both session
-    records under ``sessions[]`` and the aggregate ``cost.total_cost_usd``
-    sums across them."""
+    """Two Claude agents on different api-key sessions both contribute to
+    ``claude``'s aggregate api spend. With ``--detail`` the JSON output exposes
+    both session records under ``sessions[]`` and ``api_cost.total_cost_usd``
+    sums across them. No rate_limits in either event -> both api_key mode.
+    """
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
     agent_a_dir = tmp_path / "agent-a"
     agent_a_dir.mkdir()
@@ -1223,25 +1355,32 @@ def test_usage_command_aggregates_cost_across_agents_in_same_source(
     payload = json.loads(result.output.strip())
     source = payload["sources"][0]
     assert source["session_count"] == 2
-    # Aggregate cost is the sum across all sessions in the recency window.
-    assert source["cost"]["total_cost_usd"] == pytest.approx(1.70)
+    assert source["api_session_count"] == 2
+    assert source["subscription_session_count"] == 0
+    # api_cost is the sum across all api-mode sessions in the recency window;
+    # subscription_cost has no contributors.
+    assert source["api_cost"]["total_cost_usd"] == pytest.approx(1.70)
+    assert source["subscription_cost"]["total_cost_usd"] is None
     # With --detail, both session_ids appear under sessions[].
     session_ids = {s["session_id"] for s in source["sessions"]}
     assert session_ids == {"session-aaaa-uuid", "session-bbbb-uuid"}
+    # Both sessions are api_key mode.
+    assert all(s["cost_mode"] == CostMode.API_KEY for s in source["sessions"])
 
 
 @pytest.mark.tmux
-def test_usage_command_emits_aggregate_cost_line_with_multiple_sessions(
+def test_usage_command_emits_aggregate_api_cost_line_with_multiple_sessions(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     local_host: Host,
     cli_test_agent: AgentInterface,
     cli_profile_dir: Path,
 ) -> None:
-    """With multiple sessions in the recency window the human output shows a
-    single unified cost line of the form `cost: $X.YY across N sessions in
-    last <since>` -- no per-session ids in the default view (those are
-    --detail-only)."""
+    """With multiple api-key sessions in the recency window, the human output
+    shows a single 'api cost: $X.YY across N sessions in last <since>' line
+    -- no per-session ids in the default view (those are --detail-only).
+    Both events lack rate_limits, so both classify as api_key mode.
+    """
     base = datetime.now(timezone.utc)
     now_iso = base.strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
     earlier_iso = (base - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
@@ -1271,8 +1410,10 @@ def test_usage_command_emits_aggregate_cost_line_with_multiple_sessions(
     )
     result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
-    # With multiple sessions, the cost line shows the aggregate with a session count.
-    assert "cost: $1.30 across 2 sessions" in result.output
+    # With multiple api-mode sessions, the api line shows the aggregate with a session count.
+    assert "api cost: $1.30 across 2 sessions" in result.output
+    # No subscription line should appear -- neither event had rate_limits.
+    assert "subscription cost" not in result.output
     # No per-session id appears in the default human view -- those are --detail-only.
     # 8-char truncation of the planted session ids: "currentsession" -> "currents",
     # "olderseessionid" -> "oldersee". Asserting the exact truncated prefixes
@@ -1321,14 +1462,84 @@ def test_usage_command_detail_flag_emits_per_session_lines_in_human_output(
     )
     result = cli_runner.invoke(usage, ["--detail", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
-    # Cost line still shows the aggregate.
-    assert "cost: $1.30 across 2 sessions" in result.output, result.output
-    # Per-session lines appear (newest-first, indented). 8-char prefixes:
-    # "currentsession" -> "currents"; "olderseessionid" -> "oldersee".
-    cost_idx = result.output.index("cost: $1.30")
-    current_idx = result.output.index("currents:")
-    older_idx = result.output.index("oldersee:")
+    # api cost line still shows the aggregate.
+    assert "api cost: $1.30 across 2 sessions" in result.output, result.output
+    # Per-session lines appear (newest-first, indented) with [api] tags. 8-char
+    # prefixes: "currentsession" -> "currents"; "olderseessionid" -> "oldersee".
+    cost_idx = result.output.index("api cost: $1.30")
+    current_idx = result.output.index("[api] currents:")
+    older_idx = result.output.index("[api] oldersee:")
     assert cost_idx < current_idx < older_idx, result.output
+
+
+@pytest.mark.tmux
+def test_usage_command_renders_both_cost_lines_when_both_modes_contribute(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    tmp_path: Path,
+    cli_profile_dir: Path,
+) -> None:
+    """When one agent contributes subscription cost and another contributes api
+    cost in the same recency window, both lines render. Subscription line
+    appears first (imputed info is contextual), then the api line (real
+    billable spend). The two aggregates stay distinct -- never lumped.
+    """
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    sub_dir = tmp_path / "agent-sub"
+    sub_dir.mkdir()
+    sub_agent = local_host.create_agent_state(
+        work_dir_path=sub_dir,
+        options=CreateAgentOptions(
+            name=AgentName("usage-sub"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 9999"),
+        ),
+    )
+    api_dir = tmp_path / "agent-api"
+    api_dir.mkdir()
+    api_agent = local_host.create_agent_state(
+        work_dir_path=api_dir,
+        options=CreateAgentOptions(
+            name=AgentName("usage-api"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 9999"),
+        ),
+    )
+    _plant_event_for_agent(
+        local_host,
+        sub_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-sub",
+            "timestamp": now_iso,
+            "session_id": "subscription-session-uuid",
+            "cost": {"total_cost_usd": 0.50},
+            "rate_limits": {"five_hour": {"used_percentage": 30.0, "resets_at": 9_999_999_999_999, "label": "5h"}},
+        },
+    )
+    _plant_event_for_agent(
+        local_host,
+        api_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-api",
+            "timestamp": now_iso,
+            "session_id": "api-key-session-uuid",
+            "cost": {"total_cost_usd": 1.25},
+        },
+    )
+    result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    # Both cost lines render.
+    assert "subscription cost (imputed): $0.50" in result.output
+    assert "api cost: $1.25" in result.output
+    # Subscription line appears before the api line.
+    sub_idx = result.output.index("subscription cost (imputed): $0.50")
+    api_idx = result.output.index("api cost: $1.25")
+    assert sub_idx < api_idx, result.output
 
 
 @pytest.mark.tmux
@@ -1379,7 +1590,9 @@ def test_usage_command_excludes_stale_session_via_since(
     payload = json.loads(result.output.strip())
     source = payload["sources"][0]
     assert source["session_count"] == 1
-    assert source["cost"]["total_cost_usd"] == pytest.approx(0.50)
+    # No rate_limits planted -> api_key mode.
+    assert source["api_cost"]["total_cost_usd"] == pytest.approx(0.50)
+    assert source["subscription_cost"]["total_cost_usd"] is None
 
 
 @pytest.mark.tmux
