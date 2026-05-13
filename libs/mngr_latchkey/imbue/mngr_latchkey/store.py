@@ -13,23 +13,24 @@ Two kinds of state live there:
   drop the existing supervisor. Stored at
   ``{plugin_data_dir}/latchkey_forward.json``.
 * ``LatchkeyPermissionsConfig`` -- the contents of latchkey's permissions
-  config for an agent, in detent's rule format. Stored on disk per-agent
-  as ``{plugin_data_dir}/agents/{agent_id}/latchkey_permissions.json``.
+  config, in detent's rule format. Stored on disk per-host as
+  ``{plugin_data_dir}/hosts/{host_id}/latchkey_permissions.json`` so
+  every agent running on the same host shares one permissions file.
   The shared gateway consults this file via the
   ``X-Latchkey-Gateway-Permissions-Override`` header injected through
   the JWT minted at agent-creation time. Rewritten whenever the user
   grants or revokes permissions. Only the subset of detent's file
   schema that we actually produce is modeled.
 
-The gateway never reads the per-agent file directly via its agent-id
+The gateway never reads the per-host file directly via its host-id
 path. Instead, an opaque ``{plugin_data_dir}/permissions/<uuid>.json``
 file is created at agent-creation time (with empty rules), the JWT is
 minted for *that* path, and after ``mngr create`` returns the canonical
-agent id we replace the opaque file with a symlink pointing at the
-canonical agent-keyed path. This indirection lets us mint and inject the
-JWT before the agent id is known (no flaky post-create ``mngr
+host id we replace the opaque file with a symlink pointing at the
+canonical host-keyed path. This indirection lets us mint and inject the
+JWT before the host id is known (no flaky post-create ``mngr
 provision`` step) while keeping the canonical permissions file at the
-agent-id path that ``LatchkeyPermissionGrantHandler`` already writes to.
+host-id path that ``LatchkeyPermissionGrantHandler`` already writes to.
 
 Both share the same atomic-write pattern (write to ``.tmp``, chmod,
 rename) where applicable.
@@ -52,7 +53,7 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
-from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 
 # Sub-directory under the user's ``latchkey_directory`` that holds every
 # file written by this plugin (gateway record, default permissions,
@@ -66,7 +67,7 @@ _FORWARD_RECORD_FILENAME: Final[str] = "latchkey_forward.json"
 _FORWARD_LOG_FILENAME: Final[str] = "latchkey_forward.log"
 _DEFAULT_PERMISSIONS_FILENAME: Final[str] = "latchkey_default_permissions.json"
 _PERMISSIONS_FILENAME: Final[str] = "latchkey_permissions.json"
-_AGENTS_DIR_NAME: Final[str] = "agents"
+_HOSTS_DIR_NAME: Final[str] = "hosts"
 _OPAQUE_PERMISSIONS_DIR_NAME: Final[str] = "permissions"
 
 
@@ -185,9 +186,14 @@ class LatchkeyPermissionsConfig(FrozenModel):
     )
 
 
-def permissions_path_for_agent(data_dir: Path, agent_id: AgentId) -> Path:
-    """Return the path to the per-agent permissions file."""
-    return data_dir / _AGENTS_DIR_NAME / str(agent_id) / _PERMISSIONS_FILENAME
+def permissions_path_for_host(data_dir: Path, host_id: HostId) -> Path:
+    """Return the path to the per-host permissions file.
+
+    Every agent on the same host shares one permissions file: latchkey
+    access is granted at the host level so all agents minds spawns on a
+    host inherit the same gateway credentials and the same permissions.
+    """
+    return data_dir / _HOSTS_DIR_NAME / str(host_id) / _PERMISSIONS_FILENAME
 
 
 def default_permissions_path(data_dir: Path) -> Path:
@@ -239,18 +245,18 @@ def new_opaque_permissions_path(data_dir: Path) -> Path:
     )
 
 
-def link_opaque_permissions_to_agent(
+def link_opaque_permissions_to_host(
     data_dir: Path,
     opaque_path: Path,
-    agent_id: AgentId,
+    host_id: HostId,
 ) -> None:
-    """Replace ``opaque_path`` with a symlink to the agent's canonical permissions file.
+    """Replace ``opaque_path`` with a symlink to the host's canonical permissions file.
 
-    Called once after ``mngr create`` returns the canonical agent id.
+    Called once after ``mngr create`` returns the canonical host id.
     The opaque file was created with deny-all baseline rules at
     create time; this function moves those baseline rules into the
-    canonical ``permissions_path_for_agent`` location (or discards them
-    if a previous incarnation of the same agent already had a permissions
+    canonical ``permissions_path_for_host`` location (or discards them
+    if a previous incarnation of the same host already had a permissions
     file there) and replaces the opaque path with a symlink to the
     canonical path so the JWT minted for the opaque path keeps resolving.
 
@@ -259,31 +265,31 @@ def link_opaque_permissions_to_agent(
 
     Raises ``LatchkeyStoreError`` if the linking fails.
     """
-    agent_path = permissions_path_for_agent(data_dir, agent_id)
-    agent_path.parent.mkdir(parents=True, exist_ok=True)
+    host_path = permissions_path_for_host(data_dir, host_id)
+    host_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        if agent_path.is_file() and not agent_path.is_symlink():
-            # Re-creation case: a previous incarnation of this agent
-            # already had a permissions file with prior grants. Keep
-            # them and discard the freshly-created baseline.
+        if host_path.is_file() and not host_path.is_symlink():
+            # Re-use case: another agent on the same host already has a
+            # permissions file with prior grants. Keep them and discard
+            # the freshly-created baseline.
             opaque_path.unlink()
         else:
-            # First creation for this agent_id: promote the baseline to
+            # First creation for this host_id: promote the baseline to
             # the canonical location.
-            os.replace(opaque_path, agent_path)
+            os.replace(opaque_path, host_path)
         # Recreate ``opaque_path`` as a symlink. ``os.replace`` requires
         # both paths to exist on the same filesystem, but that is
-        # guaranteed here: opaque_path and agent_path both live under
+        # guaranteed here: opaque_path and host_path both live under
         # ``data_dir``.
-        absolute_target = agent_path.resolve()
+        absolute_target = host_path.resolve()
         tmp_link = opaque_path.with_name(opaque_path.name + ".linktmp")
         if tmp_link.exists() or tmp_link.is_symlink():
             tmp_link.unlink()
         tmp_link.symlink_to(absolute_target)
         os.replace(tmp_link, opaque_path)
     except OSError as e:
-        raise LatchkeyStoreError(f"Failed to link opaque permissions handle {opaque_path} to {agent_path}: {e}") from e
-    logger.debug("Linked opaque latchkey permissions handle {} -> {}", opaque_path, agent_path)
+        raise LatchkeyStoreError(f"Failed to link opaque permissions handle {opaque_path} to {host_path}: {e}") from e
+    logger.debug("Linked opaque latchkey permissions handle {} -> {}", opaque_path, host_path)
 
 
 def load_permissions(path: Path) -> LatchkeyPermissionsConfig:

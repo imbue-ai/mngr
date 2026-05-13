@@ -6,8 +6,8 @@ Three subcommands wire the standalone-CLI workflow:
   :func:`prepare_agent_latchkey` and emits the resulting env vars +
   opaque permissions handle path as a single JSON object on stdout.
 * ``link-permissions`` -- one-shot. Wraps
-  :func:`finalize_agent_permissions` to swing the opaque handle's
-  symlink to the canonical agent-keyed permissions path.
+  :func:`finalize_host_permissions` to swing the opaque handle's
+  symlink to the canonical host-keyed permissions path.
 * ``forward`` -- long-running. Drives ``mngr observe`` and wires every
   discovered agent into :class:`LatchkeyDiscoveryHandler` /
   :class:`LatchkeyDestructionHandler`. Stops the shared gateway on
@@ -41,9 +41,9 @@ from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
-from imbue.mngr_latchkey.agent_setup import finalize_agent_permissions
+from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.config import LatchkeyPluginConfig
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
@@ -83,7 +83,7 @@ class _CreateAgentEnvCliOptions(_LatchkeyCommonCliOptions):
 class _LinkPermissionsCliOptions(_LatchkeyCommonCliOptions):
     """Backing options object for ``mngr latchkey link-permissions``."""
 
-    agent_id: str
+    host_id: str
     opaque_path: str
 
 
@@ -253,9 +253,10 @@ in tunneled mode and emits its result as a single JSON object on stdout:
 }
 ```
 
-Pipe the ``env`` values into ``mngr create --env KEY=VALUE``,
-then call ``mngr latchkey link-permissions`` with the
-``opaque_permissions_path`` and the canonical agent id once
+Pipe the ``env`` values into ``mngr create --host-env KEY=VALUE``
+so every agent on the host inherits the same gateway wiring, then
+call ``mngr latchkey link-permissions`` with the
+``opaque_permissions_path`` and the canonical host id once
 ``mngr create`` returns it. The gateway URL is always the constant
 agent-side loopback URL (``http://127.0.0.1:1989``); there is no
 on-host (DEV) mode -- a running ``mngr latchkey forward`` is
@@ -264,7 +265,7 @@ gateway on the desktop.""",
     examples=(
         (
             "Wire env vars into mngr create",
-            'eval "$(mngr latchkey create-agent-env | jq -r \'.env | to_entries[] | "--env \\(.key)=\\(.value)"\')"',
+            'eval "$(mngr latchkey create-agent-env | jq -r \'.env | to_entries[] | "--host-env \\(.key)=\\(.value)"\')"',
         ),
     ),
 ).register()
@@ -279,10 +280,10 @@ add_pager_help_option(_create_agent_env_command)
 
 @click.command(name="link-permissions")
 @click.option(
-    "--agent-id",
-    "agent_id",
+    "--host-id",
+    "host_id",
     required=True,
-    help="Canonical agent ID returned by ``mngr create``.",
+    help="Canonical host ID returned by ``mngr create``.",
 )
 @click.option(
     "--opaque-path",
@@ -294,7 +295,7 @@ add_pager_help_option(_create_agent_env_command)
 @add_common_options
 @click.pass_context
 def _link_permissions_command(ctx: click.Context, **kwargs: Any) -> None:
-    """Replace the opaque permissions handle with a symlink to the canonical agent path."""
+    """Replace the opaque permissions handle with a symlink to the canonical host path."""
     del kwargs
     mngr_ctx, _output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -306,35 +307,35 @@ def _link_permissions_command(ctx: click.Context, **kwargs: Any) -> None:
     latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
 
     try:
-        agent_id = AgentId(opts.agent_id)
+        host_id = HostId(opts.host_id)
     except ValueError as e:
-        raise click.UsageError(f"--agent-id is not a valid agent ID: {e}") from e
+        raise click.UsageError(f"--host-id is not a valid host ID: {e}") from e
 
     opaque_path = Path(opts.opaque_path).expanduser()
     if not opaque_path.exists() and not opaque_path.is_symlink():
         raise click.UsageError(f"--opaque-path does not exist: {opaque_path}")
 
     try:
-        finalize_agent_permissions(latchkey, opaque_path, agent_id)
+        finalize_host_permissions(latchkey, opaque_path, host_id)
     except LatchkeyStoreError as e:
-        raise click.ClickException(f"finalize_agent_permissions failed: {e}") from e
+        raise click.ClickException(f"finalize_host_permissions failed: {e}") from e
 
-    logger.info("Linked opaque latchkey permissions handle {} to agent {}", opaque_path, agent_id)
+    logger.info("Linked opaque latchkey permissions handle {} to host {}", opaque_path, host_id)
 
 
 _add_common_latchkey_options(_link_permissions_command)
 
 CommandHelpMetadata(
     key="latchkey.link-permissions",
-    one_line_description="Link an opaque permissions handle to a canonical agent ID",
-    synopsis="mngr latchkey link-permissions --agent-id ID --opaque-path PATH [OPTIONS]",
-    description="""Wraps :func:`imbue.mngr_latchkey.agent_setup.finalize_agent_permissions`.
-Idempotent: re-running for the same agent preserves prior grants and
+    one_line_description="Link an opaque permissions handle to a canonical host ID",
+    synopsis="mngr latchkey link-permissions --host-id ID --opaque-path PATH [OPTIONS]",
+    description="""Wraps :func:`imbue.mngr_latchkey.agent_setup.finalize_host_permissions`.
+Idempotent: re-running for the same host preserves prior grants and
 discards the freshly-created baseline.""",
     examples=(
         (
-            "Finalize permissions for a freshly-created agent",
-            "mngr latchkey link-permissions --agent-id $AGENT_ID --opaque-path /path/from/create-agent-env.json",
+            "Finalize permissions for a freshly-created host",
+            "mngr latchkey link-permissions --host-id $HOST_ID --opaque-path /path/from/create-agent-env.json",
         ),
     ),
 ).register()
@@ -530,7 +531,7 @@ CommandHelpMetadata(
     description="""Wires the shared Latchkey gateway and per-agent permissions
 without requiring the minds desktop app. Run ``mngr latchkey forward``
 once at startup, then call ``mngr latchkey create-agent-env`` /
-``mngr latchkey link-permissions`` per agent.
+``mngr latchkey link-permissions`` per host.
 
 Settings:
 
