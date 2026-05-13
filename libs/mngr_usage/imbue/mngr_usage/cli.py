@@ -186,13 +186,18 @@ def _format_cost_line(
       api cost: $0.42 (2m ago)
       api cost: $5.43 across 3 sessions in last 1d
 
-    Two shapes:
-    - One session: ``... $0.42 (2m ago)``. The aggregate is the only
-      session, so we show its cost with an age annotation from
-      ``latest_event_at``.
-    - Multiple sessions: ``... $5.43 across N sessions in last <since>``.
-      The age annotation would be ambiguous (which session?) so we drop
-      it in favor of the breakdown.
+    Shape selection:
+    - One session AND ``latest_event_at`` is not None:
+      ``... $0.42 (2m ago)``. The aggregate is the only session, so we
+      show its cost with an age annotation from ``latest_event_at``.
+    - Otherwise (multiple sessions, OR a single session whose
+      ``latest_event_at`` is unknown):
+      ``... $5.43 across N sessions in last <since>``. The age annotation
+      would be ambiguous or absent, so we drop it in favor of the
+      breakdown. The defensive single-session fallback renders as
+      ``... $X.YY across 1 sessions in last <since>`` -- the noun stays
+      plural for simplicity since this only fires when ``latest_event_at``
+      isn't available, which is itself a defensive case.
 
     Returns None when this mode's aggregate has no ``total_cost_usd``
     (no usable cost data in this mode for the window) -- the caller
