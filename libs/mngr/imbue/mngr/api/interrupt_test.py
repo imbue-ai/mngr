@@ -89,7 +89,6 @@ def test_interrupt_agents_sends_resume_message_after_restart(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
     local_provider: LocalProviderInstance,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """interrupt_agents must send the configured resume_message after the restart.
 
@@ -136,13 +135,13 @@ def test_interrupt_agents_sends_resume_message_after_restart(
         real_send(self, message)
 
     try:
-        monkeypatch.setattr(BaseAgent, "send_message", tracked_send)
-        with patch.object(Host, "stop_agents", tracked_stop):
-            with patch.object(Host, "start_agents", tracked_start):
-                result = interrupt_agents(
-                    mngr_ctx=temp_mngr_ctx,
-                    include_filters=('name == "resume-msg-test"',),
-                )
+        with patch.object(BaseAgent, "send_message", tracked_send):
+            with patch.object(Host, "stop_agents", tracked_stop):
+                with patch.object(Host, "start_agents", tracked_start):
+                    result = interrupt_agents(
+                        mngr_ctx=temp_mngr_ctx,
+                        include_filters=('name == "resume-msg-test"',),
+                    )
     finally:
         host.destroy_agent(agent)
 
@@ -157,7 +156,6 @@ def test_interrupt_agents_records_failure_when_start_fails(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
     local_provider: LocalProviderInstance,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When host.start_agents raises, the agent must be recorded in failed_agents.
 
@@ -184,15 +182,14 @@ def test_interrupt_agents_records_failure_when_start_fails(
         raise AgentStartError("start-fail-test", "simulated start failure")
 
     try:
-        monkeypatch.setattr(Host, "start_agents", exploding_start)
-        result = interrupt_agents(
-            mngr_ctx=temp_mngr_ctx,
-            include_filters=('name == "start-fail-test"',),
-            error_behavior=ErrorBehavior.CONTINUE,
-            on_error=lambda name, err: error_agents.append((name, err)),
-        )
+        with patch.object(Host, "start_agents", exploding_start):
+            result = interrupt_agents(
+                mngr_ctx=temp_mngr_ctx,
+                include_filters=('name == "start-fail-test"',),
+                error_behavior=ErrorBehavior.CONTINUE,
+                on_error=lambda name, err: error_agents.append((name, err)),
+            )
     finally:
-        monkeypatch.undo()
         host.destroy_agent(agent)
 
     assert result.successful_agents == []
