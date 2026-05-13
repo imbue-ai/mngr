@@ -5,7 +5,7 @@
 - The minds create-project form's `Name` field currently feeds the *agent* name; the host then derives from it as `<agent-name>-host`. Going forward, that field feeds the *host name directly* and the agent name becomes a hardcoded constant.
 - Every minds-created agent is named `system-services`. There is one agent per host, so the agent name carries no information for the user; the workspace is identified entirely by its host.
 - The host name is the literal string the user typed in the form, validated by mngr's existing `HostName` regex. Invalid input re-renders the form with an inline error; the JSON API returns a 400 with the same message.
-- The `mngr_imbue_cloud` connector grows a required `host_name` field on lease + listing payloads so the leased pool agent's workspace identity is durable across the connector boundary (and a rename can land later without further schema work). One-shot deploy; no backwards-compat for legacy clients or pre-existing pool rows.
+- The `remote_service_connector` (in `apps/remote_service_connector/`) grows a required `host_name` field on lease + listing payloads so the leased pool agent's workspace identity is durable across the connector boundary (and a rename can land later without further schema work). One-shot deploy; no backwards-compat for legacy clients or pre-existing pool rows.
 - On imbue_cloud lease-adoption we stop rewriting the pre-baked agent's name. We still merge in minds-supplied labels (including `workspace=<host_name>`) and still patch claude config + env for the new API key. Host rename itself is out of scope for this PR — the data model is the deliverable.
 
 ## Expected Behavior
@@ -43,10 +43,10 @@
     - In `ImbueCloudHost.create_agent_state`, stop rewriting `data.json:name`. Still merge in `options.label_options.labels` (which now contains `workspace=<host_name>`) and overwrite `data.json:created_branch_name` to `mngr/<host_name>`. Delete the line `merged_labels["workspace"] = str(new_name)` — it duplicates a label minds already passes and was tied to the now-removed agent-rename behavior.
     - In `_build_host_details_from_raw` and `discover_hosts(_and_agents)`, use the lease's `host_name` instead of the lease's `host_id` as the friendly host name.
     - Delete `host_label_for_agent`.
-- **remote_service_connector (server-side, external repo)**
-    - Add a non-null `host_name` column to the pool DB; backfill existing rows with `host_name = host_id` at deploy time.
-    - Require `host_name` on the `/hosts/lease` request body; validate it server-side with mngr's `HostName` regex; reject non-conforming names with a clear 400.
-    - Include `host_name` in `/hosts` listing responses.
+- **remote_service_connector (apps/remote_service_connector)**
+    - New SQL migration `apps/remote_service_connector/migrations/002_host_name.sql` adding a non-null `host_name TEXT` column to `pool_hosts`, backfilling existing rows with `host_name = host_id`, and adding an index for lookups.
+    - `LeaseHostRequest` in `app.py` gains a required `host_name: str` field; validate it against mngr's `HostName` regex inline (re-define the pattern locally — the connector should not import from `imbue.mngr`); reject non-conforming names with a 400.
+    - `LeaseHostResponse` and the `/hosts` listing entries (`LeasedHostInfo` shape) include `host_name`; the `INSERT` / `UPDATE` in `lease_host` and the `SELECT` in `list_leased_hosts` are extended accordingly.
 - **forever-claude-template**
     - Drop `MINDS_WORKSPACE_NAME` from `[commands.create].pass_env` in `.mngr/settings.toml`; no in-agent code reads it.
 - **mngr core (libs/mngr)** — *no changes required*. The `default_branch_name(agent_name)` helper stays untouched; minds-driven branch naming is achieved entirely via the `--branch` flag.
