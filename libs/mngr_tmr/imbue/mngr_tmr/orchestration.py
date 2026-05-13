@@ -65,7 +65,9 @@ def launch_and_poll_agents(
     cached_results: dict[str, TestResult] = {}
 
     for info in all_agents:
-        pending_ids.add(str(info.agent_id))
+        agent_id_str = str(info.agent_id)
+        agent_id_to_info[agent_id_str] = info
+        pending_ids.add(agent_id_str)
 
     launch_kwargs: dict = {
         "remaining_tests": remaining_tests,
