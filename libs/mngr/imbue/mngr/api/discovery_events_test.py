@@ -40,7 +40,9 @@ from imbue.mngr.api.discovery_events import make_full_discovery_snapshot_event
 from imbue.mngr.api.discovery_events import make_host_discovery_event
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifiers
+from imbue.mngr.api.discovery_events import run_discovery_stream
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
+from imbue.mngr.api.observe import get_default_events_base_dir
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import DiscoverySchemaChangedError
@@ -1146,3 +1148,93 @@ def test_rotate_discovery_events_cleans_up_old_rotated_files(tmp_path: Path) -> 
     rotated = sorted(f for f in tmp_path.iterdir() if f.name.startswith("events.jsonl."))
     # With max_rotated_count=1, only the newest file should remain
     assert len(rotated) == 1
+
+
+# === run_discovery_stream events_base_dir Tests ===
+
+
+class _StopAfterFirstLine(Exception):
+    """Sentinel raised by tests' on_line callbacks to halt run_discovery_stream during Phase 1.
+
+    Phase 1 is synchronous and runs before the tail thread starts, so raising
+    from on_line propagates straight back to the caller without leaking threads.
+    """
+
+
+def _write_two_snapshots_to(events_path: Path) -> FullDiscoverySnapshotEvent:
+    """Pre-populate ``events_path`` with two DISCOVERY_FULL snapshots, return the latest.
+
+    Two snapshots are needed because ``find_latest_full_snapshot_offset`` returns 0
+    both when no snapshot exists and when one exists at byte 0; ``run_discovery_stream``
+    only enters Phase 1's cached-snapshot read when the offset is strictly > 0.
+    """
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    first = make_full_discovery_snapshot_event(agents=(), hosts=())
+    latest = make_full_discovery_snapshot_event(
+        agents=(make_test_discovered_agent(),),
+        hosts=(make_test_discovered_host(),),
+    )
+    with open(events_path, "w") as f:
+        f.write(json.dumps(first.model_dump(mode="json"), separators=(",", ":")) + "\n")
+        f.write(json.dumps(latest.model_dump(mode="json"), separators=(",", ":")) + "\n")
+    return latest
+
+
+def test_run_discovery_stream_reads_from_override_events_base_dir(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """With events_base_dir override, run_discovery_stream reads the cached snapshot from that path."""
+    override_dir = tmp_path / "override_events"
+    override_events_path = override_dir / "events" / "mngr" / "discovery" / "events.jsonl"
+    latest = _write_two_snapshots_to(override_events_path)
+
+    captured: list[str] = []
+
+    def on_line(line: str) -> None:
+        captured.append(line)
+        raise _StopAfterFirstLine
+
+    with pytest.raises(_StopAfterFirstLine):
+        run_discovery_stream(
+            mngr_ctx=temp_mngr_ctx,
+            events_base_dir=override_dir,
+            on_line=on_line,
+        )
+
+    # The first line emitted by Phase 1 should be the latest DISCOVERY_FULL from
+    # the override location (proving the override was applied to the read path).
+    assert len(captured) == 1
+    received = json.loads(captured[0])
+    assert received["type"] == DiscoveryEventType.DISCOVERY_FULL
+    assert received["event_id"] == str(latest.event_id)
+
+
+def test_run_discovery_stream_uses_default_events_base_dir_when_none(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """Without events_base_dir, run_discovery_stream falls back to get_default_events_base_dir."""
+    default_dir = get_default_events_base_dir(temp_mngr_ctx.config)
+    default_events_path = default_dir / "events" / "mngr" / "discovery" / "events.jsonl"
+    latest_default = _write_two_snapshots_to(default_events_path)
+
+    # Also pre-populate a different, off-path location so we can confirm it was NOT read.
+    off_path_dir = tmp_path / "off_path_events"
+    off_path_events_path = off_path_dir / "events" / "mngr" / "discovery" / "events.jsonl"
+    latest_off_path = _write_two_snapshots_to(off_path_events_path)
+
+    captured: list[str] = []
+
+    def on_line(line: str) -> None:
+        captured.append(line)
+        raise _StopAfterFirstLine
+
+    with pytest.raises(_StopAfterFirstLine):
+        run_discovery_stream(
+            mngr_ctx=temp_mngr_ctx,
+            on_line=on_line,
+        )
+
+    assert len(captured) == 1
+    received = json.loads(captured[0])
+    assert received["event_id"] == str(latest_default.event_id)
+    assert received["event_id"] != str(latest_off_path.event_id)
