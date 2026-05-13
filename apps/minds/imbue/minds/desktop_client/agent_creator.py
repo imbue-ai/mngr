@@ -757,8 +757,10 @@ class AgentCreator(MutableModel):
         description=(
             "Wrapper around `mngr imbue_cloud …`. Used by IMBUE_CLOUD-mode creations to mint "
             "a LiteLLM virtual key before the standard ``mngr create`` invocation, and by "
-            "destruction to release the lease. The lease + SSH bootstrap + agent rename "
-            "themselves run inside the plugin's ``ImbueCloudProvider.create_host``, so minds "
+            "destruction to release the lease. The lease + SSH bootstrap themselves run "
+            "inside the plugin's ``ImbueCloudProvider.create_host``, which forwards the "
+            "user-chosen workspace name to the connector as the lease's ``host_name`` "
+            "(the pre-baked agent itself is adopted verbatim, never renamed), so minds "
             "no longer maintains its own SuperTokens session, host pool, or LiteLLM key code. "
             "Other launch modes do not consult this client."
         ),
