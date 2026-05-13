@@ -25,8 +25,13 @@
 #
 #     {"source":"claude/usage","type":"cost_snapshot",
 #      "event_id":"evt-<hex>","timestamp":"<ISO 8601>",
-#      "session_id":"<uuid|null>","cost":<cost-or-null>,
+#      "session_id":"<uuid>","cost":<cost-or-null>,
 #      "rate_limits":<rate-limits-or-null>}
+#
+# session_id is contractually a non-empty string -- the reader drops events
+# whose session_id is null/missing with a WARNING. The jq below falls back
+# to null defensively if the upstream Claude Code payload ever omits it,
+# but that's writer/upstream drift, not a canonical wire value.
 #
 # Append-only, no flock: appends shorter than PIPE_BUF (~4KB on Linux)
 # are atomic w.r.t. concurrent appenders. Our event lines are well under
