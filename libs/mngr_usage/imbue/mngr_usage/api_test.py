@@ -1,11 +1,12 @@
 """Unit tests for ``mngr_usage.api`` -- the reader pipeline + wait primitive.
 
-Pipeline tests (gather_usage_snapshots, _SnapshotCollector) are covered
-end-to-end in ``cli_test.py`` through the planted-events fixtures. The
-tests here focus on the bits the wait subcommand depends on directly:
-``derive_elapsed`` arithmetic, ``window_render_dict`` /
-``build_source_cel_context`` shape (which is the CEL surface), and the
-``wait_for_usage`` polling loop with injected clock/poll/sleep.
+Pipeline tests (``gather_usage_snapshots``, ``_RawEventsCollector``,
+``aggregate_events_to_snapshots``) are covered end-to-end in
+``cli_test.py`` through the planted-events fixtures. The tests here focus
+on the bits the wait subcommand depends on directly: ``derive_elapsed``
+arithmetic, ``window_render_dict`` / ``build_source_cel_context`` shape
+(which is the CEL surface), and the ``wait_for_usage`` polling loop with
+injected clock/poll/sleep.
 """
 
 from __future__ import annotations
