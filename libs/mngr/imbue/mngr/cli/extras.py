@@ -472,7 +472,7 @@ def extras_default_type(ctx: click.Context, **kwargs: Any) -> None:
 
 CommandHelpMetadata(
     key="extras",
-    one_line_description="Install optional extras (plugins, completion, Claude plugin, default agent type)",
+    one_line_description="Install optional extras (plugins, completion, Claude Code plugin, default agent type)",
     synopsis="mngr extras [OPTIONS] [COMMAND]",
     description="""Manage optional extras that enhance mngr. With no subcommand, shows
 the status of all extras. Use -i to walk through each extra interactively.
