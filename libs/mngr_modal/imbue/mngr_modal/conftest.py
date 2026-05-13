@@ -186,7 +186,7 @@ def _apply_cleanup_outcome(
             assert_never(unreachable)
 
 
-def _classify_modal_sdk_delete(delete_fn: Callable[[], None], resource_description: str) -> ModalCleanupOutcome:
+def _classify_modal_sdk_delete(delete_fn: Callable[[], object], resource_description: str) -> ModalCleanupOutcome:
     """Run an SDK delete callable and classify the outcome as a `ModalCleanupOutcome`.
 
     Shared scaffold for `_delete_modal_volume_via_sdk` and
@@ -194,6 +194,10 @@ def _classify_modal_sdk_delete(delete_fn: Callable[[], None], resource_descripti
     `modal.exception.NotFoundError` -> NOT_FOUND (debug-logged),
     `(modal.exception.Error, OSError)` -> FAILED (warning-logged).
     See `imbue.mngr.utils.testing.ModalCleanupOutcome` for the contract.
+
+    `delete_fn` is typed `Callable[[], object]` because the SDK wrappers
+    passed in (e.g. `modal.Volume.objects.delete`) are not declared as
+    returning `None`; the return value is intentionally discarded here.
     """
     try:
         delete_fn()
