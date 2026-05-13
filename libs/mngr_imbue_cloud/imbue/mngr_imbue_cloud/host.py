@@ -232,11 +232,15 @@ class ImbueCloudHost(Host):
 
         When the pre-baked agent's ``data.json`` is still on disk, the
         container has all the packages and file transfers the FCT template
-        installed and we only need to (a) write the agent env file (so
-        ``MNGR_AGENT_NAME`` / ``--env`` overrides land) and (b) patch the
-        claude config when ``ANTHROPIC_API_KEY`` is set anywhere in env
-        (the LiteLLM key flows through ``--pass-host-env`` for minds, so
-        we have to look at host env, not just agent env).
+        installed and we only need to write the agent env file so
+        ``MNGR_AGENT_NAME`` / ``--env`` overrides land.
+
+        The pre-baked agent is the system-services bootstrap process (a
+        ``command``-type agent), so there is no per-agent claude config to
+        patch here -- ``ANTHROPIC_API_KEY`` lives on host env and is
+        inherited by the *assistant* chat agent that bootstrap creates from
+        inside the container, where mngr_claude's standard provisioning
+        handles the claude config setup.
 
         When the pre-baked agent state has been wiped (``mngr destroy``
         on a previous lease cycle, etc.), fall through to mngr's standard
@@ -248,12 +252,6 @@ class ImbueCloudHost(Host):
             return
         agent_env = self._collect_agent_env_vars(agent, options)
         self._write_agent_env_file(agent, agent_env)
-        anthropic_api_key = agent_env.get("ANTHROPIC_API_KEY") or self.get_env_vars().get("ANTHROPIC_API_KEY")
-        if anthropic_api_key:
-            patch_command = _build_patch_claude_config_command(anthropic_api_key, agent.id)
-            result = self.execute_idempotent_command(patch_command)
-            if not result.success:
-                raise RuntimeError(f"Failed to patch claude config on imbue_cloud host {self.id}: {result.stderr}")
 
 
 def build_combined_inject_command(
