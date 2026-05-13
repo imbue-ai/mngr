@@ -1809,9 +1809,8 @@ def test_parse_docker_build_args_returns_override_not_dockerfile_default() -> No
     from build_args verbatim, ready for Modal to apply natively."""
     dockerfile = 'FROM python:3.11\nARG VERSION="1.0.0"\n'
     result = _parse_docker_build_args(dockerfile, ("VERSION=2.0.0",))
-    # The returned value is the override, not the Dockerfile default.
+    # The returned value is the override, not the Dockerfile default ("1.0.0").
     assert result == {"VERSION": "2.0.0"}
-    assert result["VERSION"] != "1.0.0"
 
 
 # =============================================================================
