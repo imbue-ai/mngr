@@ -63,6 +63,7 @@ SECONDARY_COMMANDS = {
     "help",
     "imbue_cloud",
     "kanpan",
+    "latchkey",
     "label",
     "limit",
     "message",
@@ -74,6 +75,7 @@ SECONDARY_COMMANDS = {
     "tmr",
     "transcript",
     "tutor",
+    "usage",
     "wait",
     "notify",
 }

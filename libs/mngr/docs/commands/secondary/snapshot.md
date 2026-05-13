@@ -76,8 +76,8 @@ mngr snapshot create [OPTIONS] [IDENTIFIERS]...
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--agent` | text | Agent name or ID to snapshot (can be specified multiple times) | None |
-| `--host` | text | Host ID or name to snapshot directly (can be specified multiple times) | None |
+| `--agent` | agent_address | Agent address (NAME[@HOST[.PROVIDER]]) to snapshot (can be specified multiple times) | None |
+| `--host` | host_address | Host address (HOST[.PROVIDER]) to snapshot directly (can be specified multiple times) | None |
 
 ## Snapshot Options
 
@@ -255,7 +255,7 @@ mngr snapshot destroy [OPTIONS] [AGENTS]...
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--agent` | text | Agent name or ID whose snapshots to destroy (can be specified multiple times) | None |
+| `--agent` | agent_address | Agent address (NAME[@HOST[.PROVIDER]]) whose snapshots to destroy (can be specified multiple times) | None |
 | `--snapshot` | text | Snapshot ID to destroy (can be specified multiple times) | None |
 | `--all-snapshots` | boolean | Destroy all snapshots for the specified agent(s) | `False` |
 

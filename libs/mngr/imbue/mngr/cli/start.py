@@ -6,16 +6,19 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.find import ensure_host_started
+from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.api.start import send_resume_message_if_configured
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import HOST_ADDRESS
+from imbue.mngr.cli.address_params import parse_agent_addresses_or_raise
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -28,7 +31,9 @@ from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 
@@ -37,11 +42,11 @@ class StartCliOptions(CommonCliOptions):
     """Options passed from the CLI to the start command."""
 
     agents: tuple[str, ...]
-    agent_list: tuple[str, ...]
+    agent_list: tuple[AgentAddress, ...]
     connect: bool
     connect_command: str | None
     # Planned features (not yet implemented)
-    host: tuple[str, ...]
+    host: tuple[HostAddress, ...]
 
 
 def _output(message: str, output_opts: OutputOptions) -> None:
@@ -75,11 +80,13 @@ def _output_result(started_agents: Sequence[str], output_opts: OutputOptions) ->
 @optgroup.option(
     "--agent",
     "agent_list",
+    type=AGENT_ADDRESS,
     multiple=True,
-    help="Agent name or ID to start (can be specified multiple times)",
+    help="Agent address (NAME[@HOST[.PROVIDER]]) to start (can be specified multiple times)",
 )
 @optgroup.option(
     "--host",
+    type=HOST_ADDRESS,
     multiple=True,
     help="Host(s) to start all stopped agents on [repeatable] [future]",
 )
@@ -108,19 +115,21 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
         raise NotImplementedError("--host is not implemented yet")
 
     # Validate input
-    agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
+    agent_addresses: list[AgentAddress] = parse_agent_addresses_or_raise(expand_stdin_placeholder(opts.agents)) + list(
+        opts.agent_list
+    )
 
-    if not agent_identifiers:
+    if not agent_addresses:
         if STDIN_PLACEHOLDER not in opts.agents:
             raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
         return
 
-    if opts.connect and len(agent_identifiers) > 1:
+    if opts.connect and len(agent_addresses) > 1:
         raise click.UsageError("--connect can only be used with a single agent")
 
     # Find agents to start (STOPPED agents)
-    agents_to_start = find_agents_by_addresses(
-        raw_identifiers=agent_identifiers,
+    agents_to_start = find_all_agents(
+        addresses=agent_addresses,
         filter_all=False,
         target_state=AgentLifecycleState.STOPPED,
         mngr_ctx=mngr_ctx,

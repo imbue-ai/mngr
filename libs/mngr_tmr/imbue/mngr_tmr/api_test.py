@@ -168,6 +168,18 @@ def test_build_agent_options_sets_agent_name() -> None:
     assert opts.name == AgentName("tmr-my-test-abc123")
 
 
+def test_build_agent_options_target_path_pins_work_dir() -> None:
+    opts = _build_agent_options(AgentName("test"), "branch", _make_config("modal"), target_path=Path("/code"))
+    assert opts.target_path == Path("/code")
+
+
+def test_build_agent_options_transfer_mode_override_wins() -> None:
+    opts = _build_agent_options(
+        AgentName("test"), "branch", _make_config("modal"), transfer_mode=TransferMode.GIT_WORKTREE
+    )
+    assert opts.transfer_mode == TransferMode.GIT_WORKTREE
+
+
 def test_build_agent_prompt_contains_test_id() -> None:
     prompt = build_test_agent_prompt("tests/test_foo.py::test_bar", ())
     assert "tests/test_foo.py::test_bar" in prompt

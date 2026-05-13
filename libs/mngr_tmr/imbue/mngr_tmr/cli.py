@@ -27,6 +27,7 @@ from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import UnknownBackendError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
@@ -35,9 +36,11 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.providers.registry import get_config_class
 from imbue.mngr_tmr.api import collect_tests
 from imbue.mngr_tmr.api import gather_results
 from imbue.mngr_tmr.api import get_base_commit
@@ -59,6 +62,48 @@ from imbue.mngr_tmr.report import generate_html_report
 
 _DEFAULT_TIMEOUT_SECONDS = 3600.0
 _DEFAULT_INTEGRATOR_TIMEOUT_SECONDS = 3600.0
+
+_MODAL_BACKEND_NAME = "modal"
+
+
+def _disable_modal_initial_snapshot(mngr_ctx: MngrContext, provider_names: tuple[str, ...]) -> None:
+    """Override modal-backed provider configs to skip the per-agent initial snapshot.
+
+    Modal's on_agent_created hook normally creates a 60-90s filesystem
+    snapshot after each agent is created so the host can be restarted
+    after a hard kill. TMR creates the snapshot it actually needs
+    explicitly via ``provider.create_snapshot`` on the dedicated
+    snapshotter, and every other host TMR creates is ephemeral, so the
+    safety-net snapshot is dead weight that runs once *per agent*
+    (multiplying the cost on pooled hosts). Disable it for any modal
+    provider TMR is about to use, preserving the rest of the user's
+    config.
+
+    Must be called before any ``get_provider_instance`` call for these
+    names, since provider instances cache their config at construction.
+    """
+    seen: set[ProviderInstanceName] = set()
+    for raw_name in provider_names:
+        instance_name = ProviderInstanceName(raw_name)
+        if instance_name in seen:
+            continue
+        seen.add(instance_name)
+        existing = mngr_ctx.config.providers.get(instance_name)
+        if existing is None:
+            # Default-resolved provider: the instance name doubles as the
+            # backend name. Only patch when that backend is modal.
+            if raw_name != _MODAL_BACKEND_NAME:
+                continue
+            try:
+                config_class = get_config_class(ProviderBackendName(raw_name))
+            except UnknownBackendError:
+                continue
+            existing = config_class(backend=ProviderBackendName(raw_name))
+        if str(existing.backend) != _MODAL_BACKEND_NAME:
+            continue
+        mngr_ctx.config.providers[instance_name] = existing.model_copy_update(
+            ("is_snapshotted_after_create", False),
+        )
 
 
 class TmrCliOptions(CommonCliOptions):
@@ -88,6 +133,7 @@ class TmrCliOptions(CommonCliOptions):
     output_html: str | None
     source: str | None
     reintegrate: str | None
+    additional_authorized_keys: tuple[str, ...]
 
 
 _MIN_FD_LIMIT = 4096
@@ -299,6 +345,7 @@ def _run_reintegrate(
         env_options=env_options,
         label_options=label_options,
         templates=integrator_templates,
+        additional_authorized_keys=opts.additional_authorized_keys,
     )
     integrator_result = _run_integrator_phase(
         results, integrator_config, mngr_ctx, opts, output_dir, base_commit=base_commit
@@ -521,6 +568,13 @@ def _run_integrator_phase(
     help="Re-read outcomes from a previous TMR run (by run name), re-run integrator, and regenerate report. "
     "Skips test collection and agent launching.",
 )
+@click.option(
+    "--additional-authorized-host",
+    "additional_authorized_keys",
+    multiple=True,
+    help="SSH public key line to install in authorized_keys on each agent host "
+    "(test agents, integrator, host pool, and snapshotter), allowing inbound SSH [repeatable]",
+)
 @add_common_options
 @click.pass_context
 def tmr(ctx: click.Context, **kwargs: object) -> None:
@@ -534,6 +588,8 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     # Each agent process (tmux + claude) opens many files, and list_agents
     # enumerates all hosts which can push the system near the FD limit.
     _raise_fd_limit()
+
+    _disable_modal_initial_snapshot(mngr_ctx, (opts.provider, opts.integrator_provider))
 
     source_dir = Path(opts.source) if opts.source is not None else Path.cwd()
 
@@ -584,6 +640,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         label_options=label_options,
         snapshot=provided_snapshot,
         templates=opts.agent_template,
+        additional_authorized_keys=opts.additional_authorized_keys,
     )
 
     try:
@@ -717,6 +774,7 @@ def _run_tmr_pipeline(
         env_options=env_options,
         label_options=label_options,
         templates=integrator_templates,
+        additional_authorized_keys=opts.additional_authorized_keys,
     )
     integrator_result = _run_integrator_phase(
         results, integrator_config, mngr_ctx, opts, output_dir, base_commit=base_commit

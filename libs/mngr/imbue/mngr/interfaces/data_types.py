@@ -24,11 +24,14 @@ from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.mngr.errors import InvalidRelativePathError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import ActivitySource
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
@@ -467,6 +470,11 @@ class HostDetails(FrozenModel):
         description="Reason for failure if the host failed during creation",
     )
 
+    @computed_field
+    @cached_property
+    def address(self) -> HostAddress:
+        return HostAddress(host=HostName(self.name), provider=self.provider_name)
+
 
 class AgentDetails(FrozenModel):
     """Full agent information collected by connecting to the host.
@@ -513,6 +521,11 @@ class AgentDetails(FrozenModel):
     host: HostDetails = Field(description="Host information")
 
     plugin: dict[str, Any] = Field(default_factory=dict, description="Plugin-specific fields")
+
+    @computed_field
+    @cached_property
+    def address(self) -> AgentAddress:
+        return AgentAddress(agent=self.id, host=self.host.address)
 
 
 class RelativePath(PurePosixPath):
