@@ -136,10 +136,16 @@ def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
 def _cost_from_event(event: dict[str, Any]) -> CostSnapshot | None:
     """Reshape an event's ``cost`` payload into a CostSnapshot, or None if absent.
 
-    Cost is writer-supplied and mirrors Claude Code's statusline cost shape;
-    unknown fields are dropped by pydantic's default behavior. A non-dict
-    ``cost`` value is treated as "no cost data" rather than a hard error,
-    matching the lenient stance we take for windows.
+    Cost is writer-supplied and mirrors Claude Code's statusline cost shape.
+    ``CostSnapshot`` inherits ``FrozenModel``'s ``extra="forbid"``, so any
+    unknown field in the payload raises ``ValidationError``; we catch it and
+    return None, dropping the whole cost block rather than just the unknown
+    field. Writer/reader are assumed lockstep (same monorepo) -- surfaces
+    drift rather than masking it, mirroring the stance ``_windows_from_event``
+    takes for window dicts.
+
+    A non-dict ``cost`` value is treated as "no cost data" rather than a
+    hard error.
     """
     cost_payload = event.get("cost")
     if not isinstance(cost_payload, dict):
