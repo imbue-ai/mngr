@@ -27,7 +27,8 @@ Per-source aggregation:
 - Cost is per-session and resets when a new session starts, so we keep one
   record per ``session_id`` and aggregate across sessions within the
   ``--since`` recency window (default 24h).
-- ``current_session`` is the most-recently-updated session in that window.
+- The JSON output's ``sessions[]`` array is ordered newest-first; consumers
+  that want a specific session's reading can index ``sessions[0]``.
 
 **Usage:**
 
@@ -74,7 +75,8 @@ mngr usage [OPTIONS] COMMAND [ARGS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--max-age` | text | Stale-warning threshold (e.g. '300', '5m', '2h'). Default: from plugin config. | None |
-| `--since` | text | Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose last event is older are dropped from all per-session surfaces (sessions[], current_session, session_count) and from the aggregate cost computed off them. Default: from plugin config (24h). | None |
+| `--since` | text | Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose last event is older are dropped from `sessions[]` and from the aggregate `cost.*` computed off them. Default: from plugin config (24h). | None |
+| `--detail` | boolean | Expand summary view: show per-session breakdown lines under each source's cost line (human), and include the `sessions[]` array under each source (JSON). Default omits the per-session breakdown for terseness; the aggregate cost line and window lines are unchanged. | `False` |
 
 ## mngr usage wait
 
@@ -102,13 +104,13 @@ Source-level fields:
 
 - ``cost.total_cost_usd`` / ``cost.total_duration_ms`` / ... : aggregate
   across the recency window (sum across all sessions in the last
-  ``--since`` duration).
-- ``current_session.session_id``: most recently-active session's UUID.
-- ``current_session.cost.total_cost_usd`` / ... : the current session's
-  cost reading (for "wait until *this session* crosses $5").
+  ``--since`` duration). When ``session_count == 1`` the aggregate equals
+  that one session's reading by design -- use ``--since`` to tighten if
+  you want a tighter view, or read ``sessions[0]`` for the explicit
+  per-session record.
 - ``session_count``: number of recent sessions contributing to the cost
   aggregate.
-- ``sessions``: full list of session-cost records in the recency window.
+- ``sessions``: list of session-cost records, newest-first.
 
 Exit codes:
   0 - A source matched all --until filters.
@@ -134,7 +136,7 @@ mngr usage wait [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--timeout` | text | Maximum time to wait (e.g. '30s', '5m', '1h'). Default: wait forever. | None |
 | `--interval` | text | Poll interval (e.g. '15s', '1m'). The usage snapshot is rebuilt every interval. Default of 30s suits multi-hour windows; tighten for short-window predicates. | `30s` |
-| `--since` | text | Recency window for per-session cost aggregation (e.g. '24h', '7d'). Affects every per-session surface in the CEL context: `cost.*` (aggregate across recent sessions), `current_session.*` (latest in-window session), `sessions[]`, and `session_count`. Default: from plugin config (24h). | None |
+| `--since` | text | Recency window for per-session cost aggregation (e.g. '24h', '7d'). Affects the per-session surfaces in the CEL context: `cost.*` (aggregate across recent sessions), `sessions[]`, and `session_count`. Default: from plugin config (24h). | None |
 
 ## Filtering
 
@@ -202,12 +204,6 @@ $ mngr usage wait --until 'overage.is_using_overage == false' --interval 10s
 $ mngr usage wait --until 'cost.total_cost_usd > 20.0'
 ```
 
-**Wait until the current session crosses $5**
-
-```bash
-$ mngr usage wait --until 'current_session.cost.total_cost_usd > 5.0'
-```
-
 **Aggregate cost over the last week instead of 24h**
 
 ```bash
@@ -246,14 +242,20 @@ $ mngr usage --since 7d
 $ mngr usage --max-age 60
 ```
 
+**Per-session breakdown (human + JSON)**
+
+```bash
+$ mngr usage --detail
+```
+
 **Machine-readable output**
 
 ```bash
 $ mngr usage --format json
 ```
 
-**Custom format template (aggregate cost + current session)**
+**Custom format template (aggregate cost only)**
 
 ```bash
-$ mngr usage --format '{cost.total_cost_usd} ({current_session.session_id})'
+$ mngr usage --format '{cost.total_cost_usd} across {session_count} sessions'
 ```
