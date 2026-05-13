@@ -2103,13 +2103,26 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         host sees it. On Modal, ``/mngr/projects/agent-<uuid>`` is a bind mount
         / symlink onto ``/__modal/volumes/<vol-id>/projects/agent-<uuid>``;
         claude uses the canonical form for its cwd and per-project storage.
-        Falls back to the unresolved path when ``readlink -f`` fails.
+        Falls back to the unresolved path when ``readlink -f`` fails -- and
+        logs a warning, because on a remote host where the canonical path
+        differs from ``self.work_dir`` (Modal especially), this fallback
+        means the cloned agent will silently start a fresh claude session
+        instead of resuming the source's. A surfaced warning lets that
+        regression be diagnosed from the logs.
         """
         result = self.host.execute_idempotent_command(
             f"readlink -f {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0
         )
         if result.success and result.stdout.strip():
             return Path(result.stdout.strip())
+        logger.warning(
+            "readlink -f {} failed (success={}, stderr={!r}); falling back to unresolved path. "
+            "On hosts where work_dir is a symlink (e.g. Modal), claude --resume on a clone may "
+            "fail to find the rsynced session JSONL.",
+            self.work_dir,
+            result.success,
+            result.stderr.strip(),
+        )
         return self.work_dir
 
     def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> None:
