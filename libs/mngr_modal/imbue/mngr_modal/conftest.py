@@ -529,7 +529,13 @@ def _get_leaked_modal_environments() -> list[str]:
             )
             if result.returncode != 0:
                 # Transient failure -- keep polling. Don't overwrite a
-                # previously successful `last_candidates`.
+                # previously successful `last_candidates`. Log the stderr
+                # so a timed-out poll loop leaves diagnostic breadcrumbs.
+                logger.warning(
+                    "`modal environment list --json` returned non-zero ({}): {}",
+                    result.returncode,
+                    (result.stderr or result.stdout).strip(),
+                )
                 return False
             envs = json.loads(result.stdout)
             modal_listed = [e.get("name", "") for e in envs]
