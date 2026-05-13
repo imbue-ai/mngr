@@ -139,21 +139,6 @@ def _clone_agent_to_modal(
     )
 
 
-def _exec_on_modal_agent(
-    agent_name: str,
-    command: str,
-    env: ModalSubprocessTestEnv,
-) -> subprocess.CompletedProcess[str]:
-    """Run a shell command on a Modal-hosted agent's host."""
-    return subprocess.run(
-        ["uv", "run", "mngr", "exec", agent_name, command],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        env=env.env,
-    )
-
-
 def _send_message_to_agent(
     agent_name: str,
     message: str,
