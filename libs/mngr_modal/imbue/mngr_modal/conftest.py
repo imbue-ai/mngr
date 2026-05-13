@@ -463,6 +463,9 @@ def _stop_modal_apps(apps: list[tuple[str, str]]) -> None:
             pass
 
 
+# Same caveat as `_get_leaked_modal_apps`: if false positives appear on
+# volumes due to Modal's eventually-consistent global listing, apply the
+# `_get_leaked_modal_environments` polling pattern here.
 def _get_leaked_modal_volumes() -> list[str]:
     if not worker_modal_volume_names:
         return []
