@@ -857,9 +857,9 @@ class ModalProviderInstance(BaseProviderInstance):
             if _is_multistage_dockerfile(dockerfile_contents):
                 # Modal's incremental dockerfile_commands cannot honor `COPY --from=<stage>`,
                 # so multistage Dockerfiles go through modal.Image.from_dockerfile directly.
-                # Build args are applied natively by Modal rather than via regex pre-substitution,
-                # which means the user's on-disk Dockerfile already outlives the eager .build()
-                # call below and we don't need a temp file.
+                # Build args are applied natively by Modal, so no regex pre-substitution is
+                # required and the user's on-disk Dockerfile can be passed in as-is (no temp
+                # file needed, unlike the single-stage path).
                 build_args_dict = _parse_docker_build_args(dockerfile_contents, docker_build_args)
                 image = modal_interface.image_from_dockerfile(
                     dockerfile,
