@@ -412,8 +412,14 @@ def _emit_output(
     so it (a) lands on stderr and doesn't pollute machine-readable output,
     (b) matches the existing stale-cache warning's channel, and (c) carries
     actionable info regardless of which output format the caller chose.
-    Two no-data cases trigger it: zero sources (no events files anywhere)
-    and "every source's events lack used_percentage AND lack cost".
+
+    The hint fires for two distinct no-data conditions:
+    - Zero sources (no events files anywhere): fires for every output format
+      (HUMAN, JSON/JSONL, format-template).
+    - At least one source exists but no source produced any renderable section
+      (no current-session line, no total line, no populated window line): fires
+      only under HUMAN, since the JSON/JSONL surfaces still emit a structured
+      "empty enough" payload that downstream consumers can detect themselves.
     """
     if format_template is not None:
         # Format templates always reference the primary (freshest) source's
