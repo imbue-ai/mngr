@@ -945,10 +945,16 @@ class ImbueCloudProvider(BaseProviderInstance):
         ``account`` is extracted from ``build_args``; remaining keys are
         parsed into ``LeaseAttributes`` and sent to the connector, which
         finds an available pool host whose ``attributes`` JSONB row
-        matches. The returned ``ImbueCloudHost`` carries the pre-baked
-        agent id so the rest of mngr's create pipeline (agent state, env
-        injection, agent start) can adopt the existing agent under the
-        caller's chosen name.
+        matches. The caller-supplied ``name`` is forwarded to the
+        connector as the lease's ``host_name`` so the user-facing
+        workspace name is stamped onto the lease row authoritatively.
+        The returned ``ImbueCloudHost`` carries the pre-baked agent id
+        so the rest of mngr's create pipeline (agent state, env
+        injection, agent start) adopts the pool's pre-baked agent
+        *verbatim* -- its baked name (``system-services``) and command
+        are kept, only the caller's ``--label`` flags are merged in on
+        top of the bake's defaults. The canonical agent id stays the
+        bake's id rather than being regenerated.
         """
         if snapshot is not None:
             raise SnapshotsNotSupportedError(self.name)
