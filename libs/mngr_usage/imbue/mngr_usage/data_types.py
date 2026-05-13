@@ -163,9 +163,8 @@ class UsageSnapshot(FrozenModel):
       gather time. Cost is per-session, so we keep one record per session.
       Ordered newest-first by ``last_event_at``.
 
-    Computed views (``cost``, ``current_session``, ``session_count``) read
-    off ``sessions`` and are recomputed each access -- cheap because the
-    tuple is small.
+    Computed views (``cost``, ``session_count``) read off ``sessions`` and
+    are recomputed each access -- cheap because the tuple is small.
     """
 
     source_name: str = Field(description="Writer-chosen source identifier")
