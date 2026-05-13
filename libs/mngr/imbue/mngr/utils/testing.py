@@ -1245,6 +1245,12 @@ def cleanup_old_modal_test_environments(
     error level so a stuck safety-net run is greppable in the cron/CI logs that
     drive this script (DELETED and NOT_FOUND are silent successes).
 
+    Warning vs error rationale: `modal environment delete` cascades and "deletes
+    all apps in the selected environment" (per Modal CLI docs), so individual
+    app/volume delete failures are best-effort and not real leaks as long as the
+    env-level delete succeeds. Reserving error level for the env-level FAILED
+    keeps cron/CI logs free of false-positive noise.
+
     Returns the number of environments that were processed (attempted deletion).
     """
     max_age = timedelta(hours=max_age_hours)
