@@ -1799,9 +1799,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         # Create the config directory (0700: contains credentials and session data)
         with log_span("setup_per_agent_config_dir.mkdir_and_version_warn"):
-            host.execute_idempotent_command(
-                f"mkdir -p -m 0700 {shlex.quote(str(config_dir))}", timeout_seconds=5.0
-            )
+            host.execute_idempotent_command(f"mkdir -p -m 0700 {shlex.quote(str(config_dir))}", timeout_seconds=5.0)
 
             # Warn about version consistency when syncing local files to remote
             if not host.is_local and (
