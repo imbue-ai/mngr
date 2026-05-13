@@ -215,7 +215,9 @@ def test_extras_no_args_shows_status(cli_runner: CliRunner) -> None:
 
 def test_extras_interactive_mode(cli_runner: CliRunner) -> None:
     """Running 'mngr extras -i' walks through all extras interactively."""
-    # In test environment, read_tty_choice returns "" so all prompts are skipped
+    # In the test environment, has_interactive_terminal() returns False
+    # (no /dev/tty), so each _install_* short-circuits before reaching the
+    # urwid picker.
     result = cli_runner.invoke(extras, ["-i"])
     assert result.exit_code == 0
     assert "Plugins" in result.output
