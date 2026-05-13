@@ -37,24 +37,22 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.registry import get_config_class
-from imbue.mngr_tmr.data_types import IntegratorResult
+from imbue.mngr_tmr.data_types import AgentKind
+from imbue.mngr_tmr.data_types import AgentMetadata
 from imbue.mngr_tmr.data_types import TestAgentInfo
-from imbue.mngr_tmr.data_types import TestMapReduceResult
-from imbue.mngr_tmr.data_types import TestResult
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
 from imbue.mngr_tmr.launching import launch_all_test_agents
 from imbue.mngr_tmr.launching import launch_integrator_agent
 from imbue.mngr_tmr.mngr_cli import try_list_agents
-from imbue.mngr_tmr.orchestration import gather_results
 from imbue.mngr_tmr.orchestration import launch_and_poll_agents
 from imbue.mngr_tmr.orchestration import wait_for_integrator
 from imbue.mngr_tmr.pulling import pull_agent_branch
 from imbue.mngr_tmr.pulling import pull_agent_outputs
-from imbue.mngr_tmr.pulling import read_integrator_result
+from imbue.mngr_tmr.pulling import pull_integrator_outputs
 from imbue.mngr_tmr.report import generate_html_report
+from imbue.mngr_tmr.report import list_pullable_branches
 from imbue.mngr_tmr.utils import collect_tests
 from imbue.mngr_tmr.utils import get_base_commit
-from imbue.mngr_tmr.utils import should_pull_changes
 
 _DEFAULT_TIMEOUT_SECONDS = 3600.0
 _DEFAULT_INTEGRATOR_TIMEOUT_SECONDS = 3600.0
@@ -252,32 +250,28 @@ def _run_reintegrate(
     # Get local host (needed by the integrator config built later).
     source_host = get_local_host(mngr_ctx)
 
-    # Build agent infos from discovered agents. Output pulling uses the volume
-    # API directly, so the testing agents' hosts do not need to be online.
-    agent_infos: list[TestAgentInfo] = [
-        TestAgentInfo(
-            test_node_id=detail.labels.get("test_node_id", str(detail.name)),
-            agent_id=detail.id,
+    # Build per-agent metadata from discovered agents. Output pulling uses
+    # the volume API directly, so the testing agents' hosts do not need to
+    # be online.
+    test_agent_metadata: list[AgentMetadata] = [
+        AgentMetadata(
+            kind=AgentKind.TESTING_AGENT,
             agent_name=detail.name,
-            work_dir=detail.work_dir,
+            test_node_id=detail.labels.get("test_node_id", str(detail.name)),
             branch_name=detail.initial_branch,
-            created_at=0.0,
         )
         for detail in matching_agents
     ]
 
     # Compute output directory
     output_dir = Path(opts.output_dir) if opts.output_dir is not None else Path(f"tmr_{run_name}_reintegrate")
-    html_path = output_dir / "index.html"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Pull outputs (artifacts + outcome + branch bundle) for each agent via
     # the volume API. The host does not need to be online for this step.
-    cached_results: dict[str, TestResult] = {}
     cg = mngr_ctx.concurrency_group
     for detail in matching_agents:
-        agent_id_str = str(detail.id)
-        result = pull_agent_outputs(
+        pull_agent_outputs(
             mngr_ctx=mngr_ctx,
             provider_name=detail.host.provider_name,
             host_id=detail.host.id,
@@ -288,21 +282,13 @@ def _run_reintegrate(
             source_dir=source_dir,
             cg=cg,
         )
-        if result is not None:
-            cached_results[agent_id_str] = result
 
     base_commit = get_base_commit(source_dir, cg)
-    results = gather_results(
-        agents=agent_infos,
-        timed_out_ids=set(),
-        cached_results=cached_results,
-    )
 
     # Write pre-integrator report
     generate_html_report(
-        results,
-        html_path,
-        test_artifacts_dir=output_dir,
+        test_agent_metadata,
+        output_dir,
         run_commands=_build_run_commands(run_name),
     )
 
@@ -324,36 +310,38 @@ def _run_reintegrate(
         templates=integrator_templates,
         additional_authorized_keys=opts.additional_authorized_keys,
     )
-    integrator_result = _run_integrator_phase(
-        results, integrator_config, mngr_ctx, opts, output_dir, base_commit=base_commit
+    integrator_meta = _run_integrator_phase(
+        test_agent_metadata, integrator_config, mngr_ctx, opts, output_dir, base_commit=base_commit
     )
-    integrated_branch = integrator_result.branch_name if integrator_result is not None else None
+    integrated_branch = integrator_meta.branch_name if integrator_meta is not None else None
     generate_html_report(
-        results,
-        html_path,
-        integrator=integrator_result,
-        test_artifacts_dir=output_dir,
+        test_agent_metadata,
+        output_dir,
+        integrator_metadata=integrator_meta,
         run_commands=_build_run_commands(run_name, integrated_branch),
     )
-    _emit_report_path(html_path, output_opts)
+    _emit_report_path(output_dir / "index.html", output_opts)
     _emit_integrator_branch(integrated_branch, output_opts)
     _print_run_commands(run_name, output_opts, integrated_branch)
 
 
 def _run_integrator_phase(
-    results: list[TestMapReduceResult],
+    test_agent_metadata: list[AgentMetadata],
     config: TmrLaunchConfig,
     mngr_ctx: MngrContext,
     opts: TmrCliOptions,
     output_dir: Path,
     base_commit: str | None = None,
-) -> IntegratorResult | None:
+) -> AgentMetadata | None:
     """Launch an integrator agent to cherry-pick all fix branches into a linear stack.
 
     All pullable branches are integrated. Test/doc/tutorial commits are squashed
     into one commit; FIX_IMPL commits are kept separate and stacked by priority.
+    Returns the integrator's metadata (kind=INTEGRATOR) with branch_name set
+    when a branch was produced; the report reads the integrator outcome JSON
+    from disk.
     """
-    fix_branches = [r.branch_name for r in results if should_pull_changes(r) and r.branch_name is not None]
+    fix_branches = list_pullable_branches(test_agent_metadata, output_dir)
     if not fix_branches:
         return None
 
@@ -376,15 +364,21 @@ def _run_integrator_phase(
     )
 
     if integrator_branch is None:
-        return IntegratorResult(agent_name=integrator.agent_name, branch_name=None)
+        return AgentMetadata(
+            kind=AgentKind.INTEGRATOR,
+            agent_name=integrator.agent_name,
+            branch_name=None,
+            error_summary="Integrator timed out before producing a branch.",
+        )
 
-    integrator_result = read_integrator_result(
-        agent_id=integrator.agent_id,
-        agent_name=integrator.agent_name,
-        host=integrator_host,
-        branch_name=integrator_branch,
-        destination_dir=output_dir,
-        cg=mngr_ctx.concurrency_group,
+    # Pull the integrator's outputs into output_dir so the reporter can parse
+    # the integrator outcome JSON from disk.
+    pull_integrator_outputs(
+        integrator.agent_id,
+        integrator.agent_name,
+        integrator_host,
+        output_dir,
+        mngr_ctx.concurrency_group,
     )
 
     # Only pull branches from remote providers; local worktree branches already exist
@@ -400,7 +394,11 @@ def _run_integrator_phase(
             base_commit=base_commit,
         )
 
-    return integrator_result
+    return AgentMetadata(
+        kind=AgentKind.INTEGRATOR,
+        agent_name=integrator.agent_name,
+        branch_name=integrator_branch,
+    )
 
 
 @click.command("tmr", cls=_TmrCommand, context_settings={"ignore_unknown_options": True})
@@ -648,10 +646,9 @@ def _run_tmr_pipeline(
     provided_snapshot: SnapshotName | None,
     env_options: AgentEnvironmentOptions,
 ) -> None:
-    """Run the main TMR pipeline (launch, poll, gather, integrate, report)."""
-    # Step 6: Compute output directory and html_path before launching
+    """Run the main TMR pipeline (launch, poll, integrate, report)."""
+    # Step 6: Compute output directory before launching
     output_dir = Path(opts.output_dir) if opts.output_dir is not None else Path(f"tmr_{timestamp}")
-    html_path = output_dir / "index.html"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Step 7: Launch and poll agents
@@ -659,7 +656,7 @@ def _run_tmr_pipeline(
     # Otherwise, all agents are launched up front and then polled via the same function.
     use_batched = opts.max_parallel_agents > 0 and opts.max_parallel_agents < len(test_node_ids)
 
-    launch_failures: list[TestMapReduceResult] = []
+    launch_failures: list[AgentMetadata] = []
 
     if use_batched:
         if opts.use_snapshot and output_opts.output_format == OutputFormat.HUMAN:
@@ -685,7 +682,7 @@ def _run_tmr_pipeline(
         _emit_agents_launched(len(agent_infos), output_opts)
         remaining_node_ids = []
 
-    timed_out_ids, cached_results = launch_and_poll_agents(
+    test_agent_metadata = launch_and_poll_agents(
         test_node_ids=remaining_node_ids,
         config=config,
         mngr_ctx=mngr_ctx,
@@ -694,30 +691,22 @@ def _run_tmr_pipeline(
         max_agents=opts.max_parallel_agents,
         agent_timeout_seconds=opts.timeout,
         poll_interval_seconds=opts.poll_interval,
-        report_path=html_path,
+        output_dir=output_dir,
         all_agents=agent_infos,
         all_hosts=agent_hosts,
         launch_failures=launch_failures,
-        artifact_output_dir=output_dir,
         source_dir=source_dir,
     )
 
     if use_batched:
         _emit_agents_launched(len(agent_infos), output_opts)
 
-    # Step 8: Gather final results (artifacts and branch bundles were already
-    # downloaded and applied during per-agent finalization).
-    results = gather_results(
-        agents=agent_infos,
-        timed_out_ids=timed_out_ids,
-        cached_results=cached_results,
-        launch_failures=launch_failures,
-    )
+    # Step 8: Write the post-polling report (pre-integrator). Artifacts and
+    # branch bundles were already downloaded during per-agent finalization;
+    # the reporter parses outcome JSON from disk.
+    generate_html_report(test_agent_metadata, output_dir)
 
-    # Step 9: Write report with final results (artifacts already pulled during polling)
-    generate_html_report(results, html_path, test_artifacts_dir=output_dir)
-
-    # Step 10: Build integrator config (defaults to local provider) and integrate
+    # Step 9: Build integrator config (defaults to local provider) and integrate
     integrator_agent_type = opts.integrator_type if opts.integrator_type is not None else opts.agent_type
     integrator_templates = opts.integrator_template if opts.integrator_template else opts.agent_template
     integrator_config = TmrLaunchConfig(
@@ -731,18 +720,17 @@ def _run_tmr_pipeline(
         templates=integrator_templates,
         additional_authorized_keys=opts.additional_authorized_keys,
     )
-    integrator_result = _run_integrator_phase(
-        results, integrator_config, mngr_ctx, opts, output_dir, base_commit=base_commit
+    integrator_meta = _run_integrator_phase(
+        test_agent_metadata, integrator_config, mngr_ctx, opts, output_dir, base_commit=base_commit
     )
-    integrated_branch = integrator_result.branch_name if integrator_result is not None else None
+    integrated_branch = integrator_meta.branch_name if integrator_meta is not None else None
     generate_html_report(
-        results,
-        html_path,
-        integrator=integrator_result,
-        test_artifacts_dir=output_dir,
+        test_agent_metadata,
+        output_dir,
+        integrator_metadata=integrator_meta,
         run_commands=_build_run_commands(e2e_run_prefix, integrated_branch),
     )
-    _emit_report_path(html_path, output_opts)
+    _emit_report_path(output_dir / "index.html", output_opts)
     _emit_integrator_branch(integrated_branch, output_opts)
 
     _print_run_commands(e2e_run_prefix, output_opts, integrated_branch)

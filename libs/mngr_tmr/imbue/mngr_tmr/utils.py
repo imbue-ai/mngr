@@ -13,22 +13,22 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr_tmr.data_types import ChangeStatus
-from imbue.mngr_tmr.data_types import TestMapReduceResult
+from imbue.mngr_tmr.data_types import TestResult
 
 _SHORT_ID_LENGTH = 6
 
 
-def should_pull_changes(result: TestMapReduceResult) -> bool:
-    """Decide whether an agent's changes should be kept.
+def should_pull_changes_from_outcome(outcome: TestResult) -> bool:
+    """Decide whether an agent's changes should be kept based on its parsed outcome.
 
     Pull when: not errored, at least one SUCCEEDED change, and tests are at
     least as good as before (if they were passing, they must still be passing).
     """
-    if result.errored:
+    if outcome.errored:
         return False
-    if not any(c.status == ChangeStatus.SUCCEEDED for c in result.changes.values()):
+    if not any(c.status == ChangeStatus.SUCCEEDED for c in outcome.changes.values()):
         return False
-    if result.tests_passing_before is True and result.tests_passing_after is not True:
+    if outcome.tests_passing_before is True and outcome.tests_passing_after is not True:
         return False
     return True
 

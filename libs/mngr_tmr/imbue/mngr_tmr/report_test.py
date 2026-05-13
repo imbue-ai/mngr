@@ -3,6 +3,8 @@
 from pathlib import Path
 
 from imbue.mngr.primitives import AgentName
+from imbue.mngr_tmr.data_types import AgentKind
+from imbue.mngr_tmr.data_types import AgentMetadata
 from imbue.mngr_tmr.data_types import Change
 from imbue.mngr_tmr.data_types import ChangeKind
 from imbue.mngr_tmr.data_types import ChangeStatus
@@ -17,7 +19,9 @@ from imbue.mngr_tmr.report import _report_section_of
 from imbue.mngr_tmr.report import generate_html_report
 from imbue.mngr_tmr.testing import FAILED_FIX
 from imbue.mngr_tmr.testing import SUCCEEDED_FIX
+from imbue.mngr_tmr.testing import make_metadata_and_outcome
 from imbue.mngr_tmr.testing import make_test_result
+from imbue.mngr_tmr.testing import write_integrator_outcome
 
 # --- report_section_of tests ---
 
@@ -267,29 +271,31 @@ def test_build_grouped_tables_impl_priority_sorting() -> None:
 
 
 def test_generate_html_report(tmp_path: Path) -> None:
-    results = [
-        TestMapReduceResult(
+    output_dir = tmp_path / "out"
+    agents = [
+        make_metadata_and_outcome(
+            output_dir,
+            "tmr-test-pass",
             test_node_id="tests/test_a.py::test_pass",
-            agent_name=AgentName("tmr-test-pass"),
             tests_passing_before=True,
             tests_passing_after=True,
             summary_markdown="Passed immediately",
         ),
-        TestMapReduceResult(
+        make_metadata_and_outcome(
+            output_dir,
+            "tmr-test-fixed",
             test_node_id="tests/test_b.py::test_fixed",
-            agent_name=AgentName("tmr-test-fixed"),
+            branch_name="mngr-tmr/test-fixed",
             changes=SUCCEEDED_FIX,
             tests_passing_before=False,
             tests_passing_after=True,
             summary_markdown="Fixed missing import",
-            branch_name="mngr-tmr/test-fixed",
         ),
     ]
-    output_path = tmp_path / "report.html"
-    result_path = generate_html_report(results, output_path)
-    assert result_path == output_path
-    assert output_path.exists()
-    content = output_path.read_text()
+    result_path = generate_html_report(agents, output_dir)
+    assert result_path == output_dir / "index.html"
+    assert result_path.exists()
+    content = result_path.read_text()
     assert "Test Map-Reduce Report" in content
     assert "Clean pass" in content
     assert "Non-implementation fixes" in content
@@ -306,27 +312,33 @@ def test_generate_html_report_groups_clean_pass_before_running(tmp_path: Path) -
     assert "Clean pass" in tables_html
 
 
-def test_generate_html_report_creates_parent_dirs(tmp_path: Path) -> None:
-    output_path = tmp_path / "subdir" / "nested" / "report.html"
-    results = [make_test_result(before=True, after=True)]
-    generate_html_report(results, output_path)
-    assert output_path.exists()
+def test_generate_html_report_creates_output_dir(tmp_path: Path) -> None:
+    output_dir = tmp_path / "subdir" / "nested"
+    agents = [make_metadata_and_outcome(output_dir, "a", tests_passing_before=True, tests_passing_after=True)]
+    generate_html_report(agents, output_dir)
+    assert (output_dir / "index.html").exists()
 
 
 def test_generate_html_report_all_report_sections(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
     impl_fix = {ChangeKind.FIX_IMPL: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed impl")}
     blocked_changes = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.BLOCKED, summary_markdown="blocked")}
-    results = [
-        make_test_result(),
-        make_test_result(changes=SUCCEEDED_FIX, before=False, after=True),
-        make_test_result(changes=impl_fix, before=False, after=True),
-        make_test_result(changes=blocked_changes, before=False, after=False),
-        make_test_result(errored=True),
-        make_test_result(before=True, after=True),
+    agents = [
+        make_metadata_and_outcome(output_dir, "running-agent", write_outcome=False),
+        make_metadata_and_outcome(
+            output_dir, "non-impl", changes=SUCCEEDED_FIX, tests_passing_before=False, tests_passing_after=True
+        ),
+        make_metadata_and_outcome(
+            output_dir, "impl-fix", changes=impl_fix, tests_passing_before=False, tests_passing_after=True
+        ),
+        make_metadata_and_outcome(
+            output_dir, "blocked", changes=blocked_changes, tests_passing_before=False, tests_passing_after=False
+        ),
+        make_metadata_and_outcome(output_dir, "failed", error_summary="boom"),
+        make_metadata_and_outcome(output_dir, "clean", tests_passing_before=True, tests_passing_after=True),
     ]
-    output_path = tmp_path / "all_sections.html"
-    generate_html_report(results, output_path)
-    content = output_path.read_text()
+    result_path = generate_html_report(agents, output_dir)
+    content = result_path.read_text()
     for sec in ReportSection:
         label = {
             ReportSection.NON_IMPL_FIXES: "Non-implementation fixes",
@@ -339,61 +351,81 @@ def test_generate_html_report_all_report_sections(tmp_path: Path) -> None:
         assert label in content
 
 
-def test_generate_html_report_empty_results(tmp_path: Path) -> None:
-    output_path = tmp_path / "empty.html"
-    generate_html_report([], output_path)
-    assert "0 test(s)" in output_path.read_text()
+def test_generate_html_report_empty_agents(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result_path = generate_html_report([], output_dir)
+    assert "0 test(s)" in result_path.read_text()
 
 
 def test_generate_html_report_with_integrator(tmp_path: Path) -> None:
-    results = [make_test_result(changes=SUCCEEDED_FIX, before=False, after=True)]
-    integrator = IntegratorResult(
+    output_dir = tmp_path / "out"
+    agents = [
+        make_metadata_and_outcome(
+            output_dir,
+            "agent-a",
+            branch_name="mngr-tmr/a",
+            changes=SUCCEEDED_FIX,
+            tests_passing_before=False,
+            tests_passing_after=True,
+        ),
+    ]
+    integrator_meta = AgentMetadata(
+        kind=AgentKind.INTEGRATOR,
         agent_name=AgentName("tmr-integrator-abc123"),
-        squashed_branches=("mngr-tmr/a",),
         branch_name="mngr-tmr/integrated-abc123",
     )
-    output_path = tmp_path / "integrator.html"
-    generate_html_report(results, output_path, integrator=integrator)
-    content = output_path.read_text()
+    write_integrator_outcome(
+        output_dir,
+        integrator_meta.agent_name,
+        {"squashed_branches": ["mngr-tmr/a"], "squashed_commit_hash": "abc", "impl_priority": [], "failed": []},
+    )
+    result_path = generate_html_report(agents, output_dir, integrator_metadata=integrator_meta)
+    content = result_path.read_text()
     assert "Test Map-Reduce Report" in content
     assert "Merged?" in content
 
 
 def test_generate_html_report_integrator_with_failures(tmp_path: Path) -> None:
-    results = [make_test_result(before=True, after=True)]
-    integrator = IntegratorResult(
-        squashed_branches=("mngr-tmr/a",),
-        failed=("mngr-tmr/b",),
+    output_dir = tmp_path / "out"
+    agents = [make_metadata_and_outcome(output_dir, "a", tests_passing_before=True, tests_passing_after=True)]
+    integrator_meta = AgentMetadata(
+        kind=AgentKind.INTEGRATOR,
+        agent_name=AgentName("tmr-integrator-abc123"),
         branch_name="mngr-tmr/integrated-abc123",
     )
-    output_path = tmp_path / "integrator_partial.html"
-    generate_html_report(results, output_path, integrator=integrator)
-    assert output_path.exists()
+    write_integrator_outcome(
+        output_dir,
+        integrator_meta.agent_name,
+        {"squashed_branches": ["mngr-tmr/a"], "failed": ["mngr-tmr/b"]},
+    )
+    result_path = generate_html_report(agents, output_dir, integrator_metadata=integrator_meta)
+    assert result_path.exists()
 
 
 def test_generate_html_report_without_integrator(tmp_path: Path) -> None:
-    results = [make_test_result(before=True, after=True)]
-    output_path = tmp_path / "no_integrator.html"
-    generate_html_report(results, output_path)
-    content = output_path.read_text()
-    assert "Test Map-Reduce Report" in content
+    output_dir = tmp_path / "out"
+    agents = [make_metadata_and_outcome(output_dir, "a", tests_passing_before=True, tests_passing_after=True)]
+    result_path = generate_html_report(agents, output_dir)
+    assert "Test Map-Reduce Report" in result_path.read_text()
 
 
 def test_generate_html_report_html_escaped(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
     xss_branch = "<script>alert('xss')</script>"
-    results = [
-        TestMapReduceResult(
+    agents = [
+        make_metadata_and_outcome(
+            output_dir,
+            "xss-agent",
             test_node_id="t::xss",
-            agent_name=AgentName("xss-agent"),
+            branch_name=xss_branch,
             changes=SUCCEEDED_FIX,
             tests_passing_before=False,
             tests_passing_after=True,
             summary_markdown="<img onerror=alert(1)>",
-            branch_name=xss_branch,
         )
     ]
-    output_path = tmp_path / "escape.html"
-    generate_html_report(results, output_path)
-    content = output_path.read_text()
+    result_path = generate_html_report(agents, output_dir)
+    content = result_path.read_text()
     assert "<script>alert" not in content
     assert "&lt;script&gt;" in content

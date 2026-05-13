@@ -8,8 +8,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
-from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -18,27 +16,19 @@ from imbue.mngr.primitives import TransferMode
 from imbue.mngr_tmr.data_types import Change
 from imbue.mngr_tmr.data_types import ChangeKind
 from imbue.mngr_tmr.data_types import ChangeStatus
-from imbue.mngr_tmr.data_types import ReportSection
-from imbue.mngr_tmr.data_types import TestAgentInfo
-from imbue.mngr_tmr.data_types import TestMapReduceResult
+from imbue.mngr_tmr.data_types import TestResult
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
 from imbue.mngr_tmr.launching import _build_agent_options
-from imbue.mngr_tmr.orchestration import _build_current_results
-from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
-from imbue.mngr_tmr.pulling import _read_local_result
-from imbue.mngr_tmr.pulling import read_integrator_result
-from imbue.mngr_tmr.report import _report_section_of
 from imbue.mngr_tmr.testing import BLOCKED_FIX
 from imbue.mngr_tmr.testing import FAILED_FIX
 from imbue.mngr_tmr.testing import SUCCEEDED_FIX
-from imbue.mngr_tmr.testing import make_test_result
 from imbue.mngr_tmr.utils import CollectTestsError
 from imbue.mngr_tmr.utils import collect_tests
 from imbue.mngr_tmr.utils import sanitize_test_name_for_agent
 from imbue.mngr_tmr.utils import short_random_id
-from imbue.mngr_tmr.utils import should_pull_changes
+from imbue.mngr_tmr.utils import should_pull_changes_from_outcome
 from imbue.mngr_tmr.utils import transfer_mode_for_provider
 
 
@@ -236,235 +226,56 @@ def test_collect_tests_bad_file_raises(tmp_path: Path, cg: ConcurrencyGroup) -> 
         collect_tests(pytest_args=("non_existent_test_file.py",), source_dir=tmp_path, cg=cg)
 
 
-# --- should_pull_changes tests ---
-# Uses shared helpers from testing: make_test_result, SUCCEEDED_FIX, FAILED_FIX, BLOCKED_FIX
+# --- should_pull_changes_from_outcome tests ---
+
+
+def _outcome(
+    changes: dict[ChangeKind, Change] | None = None,
+    errored: bool = False,
+    before: bool | None = None,
+    after: bool | None = None,
+) -> TestResult:
+    return TestResult(
+        changes=changes if changes is not None else {},
+        errored=errored,
+        tests_passing_before=before,
+        tests_passing_after=after,
+    )
 
 
 def test_should_pull_succeeded_fix_with_tests_passing() -> None:
-    assert should_pull_changes(make_test_result(changes=SUCCEEDED_FIX, before=False, after=True)) is True
+    assert should_pull_changes_from_outcome(_outcome(changes=SUCCEEDED_FIX, before=False, after=True)) is True
 
 
 def test_should_pull_succeeded_fix_tests_were_failing_still_failing() -> None:
-    assert should_pull_changes(make_test_result(changes=SUCCEEDED_FIX, before=False, after=False)) is True
+    assert should_pull_changes_from_outcome(_outcome(changes=SUCCEEDED_FIX, before=False, after=False)) is True
 
 
 def test_should_not_pull_when_errored() -> None:
     assert (
-        should_pull_changes(make_test_result(changes=SUCCEEDED_FIX, errored=True, before=False, after=True)) is False
+        should_pull_changes_from_outcome(_outcome(changes=SUCCEEDED_FIX, errored=True, before=False, after=True))
+        is False
     )
 
 
 def test_should_not_pull_when_no_succeeded_changes() -> None:
-    assert should_pull_changes(make_test_result(changes=FAILED_FIX, before=False, after=False)) is False
-    assert should_pull_changes(make_test_result(changes=BLOCKED_FIX, before=False, after=False)) is False
+    assert should_pull_changes_from_outcome(_outcome(changes=FAILED_FIX, before=False, after=False)) is False
+    assert should_pull_changes_from_outcome(_outcome(changes=BLOCKED_FIX, before=False, after=False)) is False
 
 
 def test_should_not_pull_when_no_changes() -> None:
-    assert should_pull_changes(make_test_result(before=True, after=True)) is False
+    assert should_pull_changes_from_outcome(_outcome(before=True, after=True)) is False
 
 
 def test_should_not_pull_when_regression() -> None:
-    assert should_pull_changes(make_test_result(changes=SUCCEEDED_FIX, before=True, after=False)) is False
+    assert should_pull_changes_from_outcome(_outcome(changes=SUCCEEDED_FIX, before=True, after=False)) is False
 
 
 def test_should_pull_improvement_tests_still_passing() -> None:
     improved = {ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="improved")}
-    assert should_pull_changes(make_test_result(changes=improved, before=True, after=True)) is True
+    assert should_pull_changes_from_outcome(_outcome(changes=improved, before=True, after=True)) is True
 
 
 def test_should_not_pull_improvement_that_breaks_tests() -> None:
     improved = {ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="improved")}
-    assert should_pull_changes(make_test_result(changes=improved, before=True, after=False)) is False
-
-
-def test__build_current_results_pending_agents() -> None:
-    """Agents not in final_details should appear as PENDING."""
-    agents = [
-        TestAgentInfo(
-            test_node_id="tests/test_a.py::test_one",
-            agent_id=AgentId.generate(),
-            agent_name=AgentName("tmr-test-one-abc123"),
-            work_dir=Path("/tmp/work"),
-            created_at=0.0,
-        ),
-        TestAgentInfo(
-            test_node_id="tests/test_b.py::test_two",
-            agent_id=AgentId.generate(),
-            agent_name=AgentName("tmr-test-two-def456"),
-            work_dir=Path("/tmp/work"),
-            created_at=0.0,
-        ),
-    ]
-    results = _build_current_results(agents=agents, timed_out_ids=set())
-    assert len(results) == 2
-    assert _report_section_of(results[0]) == ReportSection.RUNNING
-    assert _report_section_of(results[1]) == ReportSection.RUNNING
-    assert "still running" in results[0].summary_markdown
-
-
-def test__build_current_results_timed_out_agents() -> None:
-    """Timed-out agents should appear as ERRORED."""
-    agent_id = AgentId.generate()
-    agents = [
-        TestAgentInfo(
-            test_node_id="tests/test_a.py::test_one",
-            agent_id=agent_id,
-            agent_name=AgentName("tmr-test-one-abc123"),
-            work_dir=Path("/tmp/work"),
-            created_at=0.0,
-        ),
-    ]
-    results = _build_current_results(agents=agents, timed_out_ids={str(agent_id)})
-    assert len(results) == 1
-    assert results[0].errored is True
-    assert _report_section_of(results[0]) == ReportSection.FAILED
-
-
-def test__build_current_results_includes_launch_failures() -> None:
-    """Agents that failed to launch should appear in the results as ERRORED."""
-    failure = TestMapReduceResult(
-        test_node_id="tests/test_a.py::test_one",
-        agent_name=AgentName("tmr-test-one-launch-failed"),
-        errored=True,
-        summary_markdown="Failed to launch agent: boom",
-    )
-    results = _build_current_results(
-        agents=[],
-        timed_out_ids=set(),
-        launch_failures=[failure],
-    )
-    assert len(results) == 1
-    assert results[0].test_node_id == "tests/test_a.py::test_one"
-    assert results[0].errored is True
-    assert "Failed to launch agent: boom" in results[0].summary_markdown
-    assert _report_section_of(results[0]) == ReportSection.FAILED
-
-
-def test__build_current_results_launch_failures_come_before_running_agents() -> None:
-    """Launch failures should be ordered before live-agent results in the report."""
-    failure = TestMapReduceResult(
-        test_node_id="tests/test_failed.py::test_one",
-        agent_name=AgentName("tmr-test-one-launch-failed"),
-        errored=True,
-        summary_markdown="Failed to launch agent: boom",
-    )
-    agent = TestAgentInfo(
-        test_node_id="tests/test_running.py::test_two",
-        agent_id=AgentId.generate(),
-        agent_name=AgentName("tmr-test-two-abc123"),
-        work_dir=Path("/tmp/work"),
-        created_at=0.0,
-    )
-    results = _build_current_results(
-        agents=[agent],
-        timed_out_ids=set(),
-        launch_failures=[failure],
-    )
-    assert len(results) == 2
-    assert results[0].test_node_id == "tests/test_failed.py::test_one"
-    assert results[1].test_node_id == "tests/test_running.py::test_two"
-
-
-# --- _read_local_result / read_integrator_result tests ---
-
-
-def _write_local_result(local_dir: Path, content: str) -> None:
-    """Write a testing_agent_outcome.json under the local agent's extracted test_output dir."""
-    test_output_dir = local_dir / "test_output"
-    test_output_dir.mkdir(parents=True, exist_ok=True)
-    (test_output_dir / TESTING_AGENT_OUTCOME_FILENAME).write_text(content)
-
-
-def _write_integrator_result_locally(destination_dir: Path, agent_name: AgentName, content: str) -> None:
-    """Write an integrator_outcome.json into the spot where read_integrator_result reads it from."""
-    target_dir = destination_dir / str(agent_name)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    (target_dir / INTEGRATOR_OUTCOME_FILENAME).write_text(content)
-
-
-def test_read_local_result_parses_changes(tmp_path: Path) -> None:
-    local_dir = tmp_path / "agent-output"
-    _write_local_result(
-        local_dir,
-        '{"changes": {"FIX_TEST": {"status": "SUCCEEDED", "summary_markdown": "Fixed it"}},'
-        ' "errored": false, "tests_passing_before": false, "tests_passing_after": true,'
-        ' "summary_markdown": "All good"}',
-    )
-    result = _read_local_result(local_dir, AgentName("tmr-test"))
-    assert result is not None
-    assert ChangeKind.FIX_TEST in result.changes
-    assert result.changes[ChangeKind.FIX_TEST].status == ChangeStatus.SUCCEEDED
-    assert result.tests_passing_before is False
-    assert result.tests_passing_after is True
-    assert result.summary_markdown == "All good"
-
-
-def test_read_local_result_empty_changes(tmp_path: Path) -> None:
-    local_dir = tmp_path / "agent-output"
-    _write_local_result(
-        local_dir,
-        '{"changes": {}, "errored": false, "tests_passing_before": true,'
-        ' "tests_passing_after": true, "summary_markdown": "Clean pass"}',
-    )
-    result = _read_local_result(local_dir, AgentName("tmr-test"))
-    assert result is not None
-    assert result.changes == {}
-    assert result.errored is False
-
-
-def test_read_local_result_invalid_json(tmp_path: Path) -> None:
-    local_dir = tmp_path / "agent-output"
-    _write_local_result(local_dir, "not json")
-    result = _read_local_result(local_dir, AgentName("tmr-test"))
-    assert result is None
-
-
-def test_read_local_result_missing_file(tmp_path: Path) -> None:
-    local_dir = tmp_path / "agent-output"
-    local_dir.mkdir(parents=True, exist_ok=True)
-    result = _read_local_result(local_dir, AgentName("tmr-test"))
-    assert result is None
-
-
-def test_read_integrator_result_parses_merged_failed(localhost: OnlineHostInterface, tmp_path: Path) -> None:
-    agent_id = AgentId.generate()
-    agent_name = AgentName("tmr-integrator-test")
-    _write_integrator_result_locally(
-        tmp_path,
-        agent_name,
-        '{"squashed_branches": ["branch-a", "branch-b"], "squashed_commit_hash": "abc1234",'
-        ' "impl_priority": ["branch-d"], "impl_commit_hashes": {"branch-d": "def5678"}, "failed": ["branch-c"]}',
-    )
-    cg = ConcurrencyGroup(name="test")
-    result = read_integrator_result(
-        agent_id=agent_id,
-        agent_name=agent_name,
-        host=localhost,
-        branch_name="mngr-tmr/integrated",
-        destination_dir=tmp_path,
-        cg=cg,
-    )
-    assert result.squashed_branches == ("branch-a", "branch-b")
-    assert result.squashed_commit_hash == "abc1234"
-    assert result.impl_priority == ("branch-d",)
-    assert result.impl_commit_hashes == {"branch-d": "def5678"}
-    assert result.failed == ("branch-c",)
-    assert result.branch_name == "mngr-tmr/integrated"
-
-
-def test_read_integrator_result_missing_file(localhost: OnlineHostInterface, tmp_path: Path) -> None:
-    agent_id = AgentId.generate()
-    agent_name = AgentName("tmr-integrator-test")
-    cg = ConcurrencyGroup(name="test")
-    result = read_integrator_result(
-        agent_id=agent_id,
-        agent_name=agent_name,
-        host=localhost,
-        branch_name="mngr-tmr/integrated",
-        destination_dir=tmp_path,
-        cg=cg,
-    )
-    assert result.branch_name == "mngr-tmr/integrated"
-    assert result.squashed_branches == ()
-    assert result.impl_priority == ()
-    assert result.failed == ()
+    assert should_pull_changes_from_outcome(_outcome(changes=improved, before=True, after=False)) is False

@@ -1,7 +1,12 @@
-"""Result and artifact pulling for the test-mapreduce plugin."""
+"""Result and artifact pulling for the test-mapreduce plugin.
+
+Pulls the agent's outputs archive (test agents) or rsyncs ``.test_output``
+(integrator) onto local disk and applies any branch bundle. Outcome JSON
+parsing lives in ``report.py``; the orchestration code that calls this
+module treats the extracted contents as an opaque blob.
+"""
 
 import io
-import json
 import tarfile
 from pathlib import Path
 
@@ -24,64 +29,13 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UncommittedChangesMode
-from imbue.mngr_tmr.data_types import Change
-from imbue.mngr_tmr.data_types import ChangeKind
-from imbue.mngr_tmr.data_types import ChangeStatus
-from imbue.mngr_tmr.data_types import IntegratorResult
-from imbue.mngr_tmr.data_types import TestResult
-from imbue.mngr_tmr.data_types import TestRunInfo
 from imbue.mngr_tmr.launching import stop_agent_on_host
 from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import PLUGIN_NAME
-from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 
 _OUTPUTS_ARCHIVE_NAME = "outputs.tar.gz"
 _OUTPUTS_ARCHIVE_SUBPATH = f"plugin/{PLUGIN_NAME}/{_OUTPUTS_ARCHIVE_NAME}"
-_EXTRACTED_TEST_OUTPUT_DIR = "test_output"
 _BRANCH_BUNDLE_NAME = "branch.bundle"
-
-
-def _parse_result_json(raw: str) -> TestResult:
-    """Parse an outcome JSON string into a TestResult.
-
-    Raises json.JSONDecodeError, KeyError, or ValueError on invalid data.
-    """
-    data = json.loads(raw)
-    raw_changes = data.get("changes", {})
-    changes: dict[ChangeKind, Change] = {
-        ChangeKind(kind_str): Change(
-            status=ChangeStatus(entry["status"]),
-            summary_markdown=entry.get("summary_markdown", entry.get("summary", "")),
-        )
-        for kind_str, entry in raw_changes.items()
-    }
-    raw_runs = data.get("test_runs", [])
-    test_runs = tuple(
-        TestRunInfo(
-            run_name=run_entry.get("run_name", ""),
-            description_markdown=run_entry.get("description_markdown", ""),
-        )
-        for run_entry in raw_runs
-    )
-    return TestResult(
-        changes=changes,
-        errored=data.get("errored", False),
-        tests_passing_before=data.get("tests_passing_before"),
-        tests_passing_after=data.get("tests_passing_after"),
-        summary_markdown=data.get("summary_markdown", ""),
-        test_runs=test_runs,
-    )
-
-
-def _read_local_result(local_dir: Path, agent_name: AgentName) -> TestResult | None:
-    """Read and parse the testing agent outcome from a locally-extracted output directory."""
-    result_path = local_dir / _EXTRACTED_TEST_OUTPUT_DIR / TESTING_AGENT_OUTCOME_FILENAME
-    try:
-        raw = result_path.read_text()
-        return _parse_result_json(raw)
-    except (FileNotFoundError, OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
-        logger.warning("Failed to read local result for agent '{}': {}", agent_name, exc)
-        return None
 
 
 def _get_agent_volume(
@@ -168,14 +122,15 @@ def pull_agent_outputs(
     destination_dir: Path,
     source_dir: Path | None,
     cg: ConcurrencyGroup,
-) -> TestResult | None:
+) -> bool:
     """Download and extract the outputs archive for a single testing agent.
 
     Reads ``outputs.tar.gz`` from the agent's state volume, extracts it
     under ``destination_dir/<agent_name>/``, and (if a ``branch.bundle`` is
     present and ``source_dir`` is given) fetches the bundled branch into
-    the local repo. Returns the parsed outcome read from the extracted
-    ``test_output/`` directory, or None on any failure.
+    the local repo. Returns True on success, False on any failure. The
+    extracted contents are treated as opaque here -- the reporter parses
+    the outcome JSON on demand.
     """
     agent_volume = _get_agent_volume(mngr_ctx, provider_name, host_id, agent_id)
     if agent_volume is None:
@@ -184,13 +139,13 @@ def pull_agent_outputs(
             agent_name,
             provider_name,
         )
-        return None
+        return False
 
     try:
         archive_bytes = agent_volume.read_file(_OUTPUTS_ARCHIVE_SUBPATH)
     except (MngrError, OSError) as exc:
         logger.warning("Failed to read outputs archive for agent '{}': {}", agent_name, exc)
-        return None
+        return False
 
     local_dest = destination_dir / str(agent_name)
     local_dest.mkdir(parents=True, exist_ok=True)
@@ -199,7 +154,7 @@ def pull_agent_outputs(
             tar.extractall(local_dest, filter="data")
     except (tarfile.TarError, OSError) as exc:
         logger.warning("Failed to extract outputs archive for agent '{}': {}", agent_name, exc)
-        return None
+        return False
     logger.info("Extracted outputs archive for agent '{}' to {}", agent_name, local_dest)
 
     if source_dir is not None and branch_name is not None:
@@ -207,7 +162,7 @@ def pull_agent_outputs(
         if bundle_path.is_file():
             _apply_branch_bundle(source_dir, bundle_path, branch_name, agent_name, cg)
 
-    return _read_local_result(local_dest, agent_name)
+    return True
 
 
 def finalize_agent(
@@ -221,11 +176,11 @@ def finalize_agent(
     source_dir: Path | None,
     cg: ConcurrencyGroup,
     should_stop: bool,
-) -> TestResult | None:
-    """Pull outputs and read result from a finished agent, then optionally stop it."""
-    result: TestResult | None = None
+) -> bool:
+    """Pull outputs from a finished agent, then optionally stop it. Returns pull success."""
+    pulled = True
     if artifact_output_dir is not None:
-        result = pull_agent_outputs(
+        pulled = pull_agent_outputs(
             mngr_ctx=mngr_ctx,
             provider_name=provider_name,
             host_id=host.id,
@@ -238,7 +193,7 @@ def finalize_agent(
         )
     if should_stop:
         stop_agent_on_host(host, agent_id, agent_name)
-    return result
+    return pulled
 
 
 def _get_agent_from_host(
@@ -256,14 +211,19 @@ def _get_agent_from_host(
     raise AgentNotFoundOnHostError(agent_id, host.id)
 
 
-def _pull_integrator_outputs(
+def pull_integrator_outputs(
     agent_id: AgentId,
     agent_name: AgentName,
     host: OnlineHostInterface,
     destination_dir: Path,
     cg: ConcurrencyGroup,
 ) -> bool:
-    """Pull the integrator agent's .test_output via rsync. Returns True on success."""
+    """Pull the integrator agent's .test_output via rsync. Returns True on success.
+
+    Contents land directly under ``destination_dir/<agent_name>/`` (no
+    ``test_output/`` subdir, because rsync flattens the trailing-slashed
+    source). The reporter parses the outcome JSON from that location.
+    """
     try:
         agent = _get_agent_from_host(host, agent_id)
     except (MngrError, HostError, AgentNotFoundOnHostError) as exc:
@@ -287,36 +247,6 @@ def _pull_integrator_outputs(
     except (MngrError, HostError, OSError) as exc:
         logger.warning("Failed to pull integrator outputs: {}", exc)
         return False
-
-
-def read_integrator_result(
-    agent_id: AgentId,
-    agent_name: AgentName,
-    host: OnlineHostInterface,
-    branch_name: str | None,
-    destination_dir: Path,
-    cg: ConcurrencyGroup,
-) -> IntegratorResult:
-    """Pull the integrator agent's .test_output and read the outcome file."""
-    empty = IntegratorResult(agent_name=agent_name, branch_name=branch_name)
-
-    _pull_integrator_outputs(agent_id, agent_name, host, destination_dir, cg)
-    local_result = destination_dir / str(agent_name) / INTEGRATOR_OUTCOME_FILENAME
-    try:
-        data = json.loads(local_result.read_text())
-    except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
-        logger.warning("Failed to read integrator result locally: {}", exc)
-        return empty
-
-    return IntegratorResult(
-        agent_name=agent_name,
-        squashed_branches=tuple(data.get("squashed_branches", ())),
-        squashed_commit_hash=data.get("squashed_commit_hash"),
-        impl_priority=tuple(data.get("impl_priority", ())),
-        impl_commit_hashes=data.get("impl_commit_hashes", {}),
-        failed=tuple(data.get("failed", ())),
-        branch_name=branch_name,
-    )
 
 
 def pull_agent_branch(

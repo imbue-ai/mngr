@@ -31,8 +31,9 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr_tmr.data_types import AgentKind
+from imbue.mngr_tmr.data_types import AgentMetadata
 from imbue.mngr_tmr.data_types import TestAgentInfo
-from imbue.mngr_tmr.data_types import TestMapReduceResult
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
 from imbue.mngr_tmr.prompts import build_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
@@ -64,8 +65,10 @@ def _make_test_agent_identity(test_node_id: str) -> tuple[AgentName, str]:
     return AgentName(f"tmr-{name_suffix}-{short_id}"), f"mngr-tmr/{name_suffix}-{short_id}"
 
 
-def _make_launch_failure_result(test_node_id: str, agent_name: AgentName, error: object) -> TestMapReduceResult:
-    """Build a TestMapReduceResult marking that an agent failed to launch.
+def _make_launch_failure_metadata(
+    test_node_id: str, agent_name: AgentName, branch_name: str, error: object
+) -> AgentMetadata:
+    """Build an AgentMetadata marking that an agent failed to launch.
 
     Used so launch failures still appear in the HTML report (as errored
     entries in the FAILED section) instead of silently disappearing.
@@ -73,11 +76,12 @@ def _make_launch_failure_result(test_node_id: str, agent_name: AgentName, error:
     attempt, so the report row matches the host/tmux session if the
     user retained it for debugging.
     """
-    return TestMapReduceResult(
-        test_node_id=test_node_id,
+    return AgentMetadata(
+        kind=AgentKind.TESTING_AGENT,
         agent_name=agent_name,
-        errored=True,
-        summary_markdown=f"Failed to launch agent: {error}",
+        test_node_id=test_node_id,
+        branch_name=branch_name,
+        error_summary=f"Failed to launch agent: {error}",
     )
 
 
@@ -326,7 +330,7 @@ def launch_all_test_agents(
     config: TmrLaunchConfig,
     mngr_ctx: MngrContext,
     pytest_flags: tuple[str, ...],
-    launch_failures: list[TestMapReduceResult],
+    launch_failures: list[AgentMetadata],
     prompt_suffix: str = "",
     use_snapshot: bool = False,
     max_parallel: int = 4,
@@ -373,7 +377,7 @@ def launch_all_test_agents(
         name="tmr_launch",
         max_workers=max_parallel,
     ) as executor:
-        futures: list[tuple[Future[tuple[TestAgentInfo, OnlineHostInterface]], str, AgentName]] = []
+        futures: list[tuple[Future[tuple[TestAgentInfo, OnlineHostInterface]], str, AgentName, str]] = []
         for i, test_node_id in enumerate(test_node_ids):
             if i > 0 and launch_delay_seconds > 0:
                 time.sleep(launch_delay_seconds)
@@ -396,16 +400,17 @@ def launch_all_test_agents(
                     ),
                     test_node_id,
                     agent_name,
+                    branch_name,
                 )
             )
-        for future, test_node_id, agent_name in futures:
+        for future, test_node_id, agent_name, branch_name in futures:
             try:
                 info, host = future.result()
                 agents.append(info)
                 agent_hosts[str(info.agent_id)] = host
             except (MngrError, HostError, AgentError, OSError, BaseExceptionGroup) as exc:
                 logger.warning("Failed to launch agent for {}: {}", test_node_id, exc)
-                launch_failures.append(_make_launch_failure_result(test_node_id, agent_name, exc))
+                launch_failures.append(_make_launch_failure_metadata(test_node_id, agent_name, branch_name, exc))
 
     logger.info("Launched {} agent(s)", len(agents))
     return agents, agent_hosts, launch_config.snapshot
@@ -439,7 +444,7 @@ def launch_agents_up_to_limit(
     all_agents: list[TestAgentInfo],
     all_hosts: dict[str, OnlineHostInterface],
     agent_id_to_info: dict[str, TestAgentInfo],
-    launch_failures: list[TestMapReduceResult],
+    launch_failures: list[AgentMetadata],
 ) -> None:
     """Launch agents from remaining_tests until we hit max_agents running.
 
@@ -458,14 +463,17 @@ def launch_agents_up_to_limit(
         except TimeoutError:
             logger.warning("Agent creation timed out after {}s for {}", _AGENT_CREATION_TIMEOUT_SECONDS, test_node_id)
             launch_failures.append(
-                _make_launch_failure_result(
-                    test_node_id, agent_name, f"creation timed out after {_AGENT_CREATION_TIMEOUT_SECONDS}s"
+                _make_launch_failure_metadata(
+                    test_node_id,
+                    agent_name,
+                    branch_name,
+                    f"creation timed out after {_AGENT_CREATION_TIMEOUT_SECONDS}s",
                 )
             )
             continue
         except (MngrError, HostError, AgentError, OSError, BaseExceptionGroup) as exc:
             logger.warning("Failed to launch agent for {}: {}", test_node_id, exc)
-            launch_failures.append(_make_launch_failure_result(test_node_id, agent_name, exc))
+            launch_failures.append(_make_launch_failure_metadata(test_node_id, agent_name, branch_name, exc))
             continue
         all_agents.append(info)
         all_hosts[str(info.agent_id)] = host
