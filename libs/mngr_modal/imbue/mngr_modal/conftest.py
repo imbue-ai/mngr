@@ -183,6 +183,7 @@ def _delete_modal_volume_via_sdk(volume_name: str, environment_name: str) -> Mod
         modal.Volume.objects.delete(volume_name, environment_name=environment_name)
         return ModalCleanupOutcome.DELETED
     except modal.exception.NotFoundError:
+        logger.debug("Modal volume {} in env {} already gone", volume_name, environment_name)
         return ModalCleanupOutcome.NOT_FOUND
     except (modal.exception.Error, OSError) as e:
         logger.warning("Failed to delete Modal volume {} in env {}: {}", volume_name, environment_name, e)
@@ -198,6 +199,7 @@ def _delete_modal_environment_via_sdk(environment_name: str) -> ModalCleanupOutc
         delete_environment(environment_name)
         return ModalCleanupOutcome.DELETED
     except modal.exception.NotFoundError:
+        logger.debug("Modal environment {} already gone", environment_name)
         return ModalCleanupOutcome.NOT_FOUND
     except (modal.exception.Error, OSError) as e:
         logger.warning("Failed to delete Modal environment {}: {}", environment_name, e)
