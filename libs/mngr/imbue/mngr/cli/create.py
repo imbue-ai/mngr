@@ -169,11 +169,14 @@ def _resolve_agent_type_name(
         return positional_agent_type
     if type_flag is None:
         available_hint = (
-            f" Available agent types: {', '.join(available_agent_types)}." if available_agent_types else ""
+            f"\nAvailable agent types: {', '.join(available_agent_types)}." if available_agent_types else ""
         )
         raise UserInputError(
-            "No agent type provided. Pass --type <name>, give a positional AGENT_TYPE, "
-            "or set a default with: mngr config set commands.create.type <name> --scope user." + available_hint
+            "No agent type provided. Set a default with:\n"
+            "\n"
+            "    mngr config set commands.create.type <name> --scope user\n"
+            "\n"
+            "See `mngr create --help` for other ways to provide an agent type." + available_hint
         )
     return type_flag
 
