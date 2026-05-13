@@ -1187,8 +1187,11 @@ def test_usage_command_emits_aggregate_cost_line_with_multiple_sessions(
     # With multiple sessions, the cost line shows the aggregate with a session count.
     assert "cost: $1.30 across 2 sessions" in result.output
     # No per-session id appears in the default human view -- those are --detail-only.
+    # 8-char truncation of the planted session ids: "currentsession" -> "currents",
+    # "olderseessionid" -> "oldersee". Asserting the exact truncated prefixes
+    # so a regression that surfaces either session line is caught.
     assert "currents" not in result.output
-    assert "olderses" not in result.output
+    assert "oldersee" not in result.output
 
 
 @pytest.mark.tmux
