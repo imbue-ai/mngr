@@ -1869,6 +1869,40 @@ def test_rename_host_idempotent_when_name_unchanged(monkeypatch: pytest.MonkeyPa
     assert backend.pool_rows[0].host_name == "same-name"
 
 
+def test_rename_host_returns_404_when_lease_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PATCH /hosts/{id}/name returns 404 when no leased row matches the given id."""
+    client, _backend = _make_pool_test_client(monkeypatch)
+    resp = client.patch(
+        "/hosts/00000000-0000-0000-0000-000000000099/name",
+        json={"host_name": "new-name"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 404
+
+
+def test_rename_host_rejects_empty_host_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PATCH /hosts/{id}/name returns 400 when host_name is empty or whitespace.
+
+    Mirrors test_lease_host_rejects_empty_host_name so both endpoints share
+    the same input validation contract.
+    """
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000042"),
+        version="v0.1.0",
+        leased_to_user=_ADMIN_STUB_USERNAME,
+        host_name="old-name",
+    )
+    resp = client.patch(
+        "/hosts/00000000-0000-0000-0000-000000000042/name",
+        json={"host_name": "   "},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 400
+    # The row must not have been touched on a 400.
+    assert backend.pool_rows[0].host_name == "old-name"
+
+
 def test_release_host_succeeds_for_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     """POST /hosts/{id}/release succeeds when the caller owns the lease."""
     client, backend = _make_pool_test_client(monkeypatch)
