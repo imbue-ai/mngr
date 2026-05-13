@@ -869,6 +869,36 @@ def test_usage_command_no_data_when_no_events(
     assert "No usage data yet" in result.output
 
 
+def test_usage_command_format_template_with_no_events_emits_empty_stdout(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    cli_profile_dir: Path,
+) -> None:
+    """`mngr usage --format '<template>'` with no agents emits no substituted line.
+
+    The no-sources path under a format template returns without writing anything
+    to stdout (no synthesized empty-substituted line, no no-data warning),
+    letting a `--format '...'` consumer detect the no-data case by an empty
+    output. The substituted template (anchored on a unique sentinel) must not
+    appear, and the no-data warning must not fire either -- under format
+    templates we keep stderr quiet so machine consumers see a clean empty
+    stream.
+    """
+    result = cli_runner.invoke(
+        usage,
+        ["--format", "SENTINEL:{five_hour.used_percentage}"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    # No substituted template line reached stdout (regression guard against
+    # the previously-synthesized empty render model).
+    assert "SENTINEL:" not in result.output
+    # And the no-data warning is suppressed under format templates so the
+    # caller's combined output is genuinely empty.
+    assert "No usage data yet" not in result.output
+
+
 @pytest.mark.tmux
 def test_usage_command_picks_freshest_across_agents(
     cli_runner: CliRunner,
