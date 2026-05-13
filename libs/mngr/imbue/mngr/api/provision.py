@@ -1,8 +1,6 @@
 import tempfile
 from pathlib import Path
 
-from loguru import logger
-
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.config.data_types import MngrContext
@@ -98,8 +96,6 @@ def provision_agent(
         if is_restart_needed:
             with log_span("Restarting agent {} after provisioning", agent.name):
                 host.start_agents([agent.id])
-
-    logger.info("Provisioned agent: {}", agent.name)
 
     # Emit discovery events for re-provisioned agent
     emit_discovery_events_for_host(mngr_ctx.config, host)

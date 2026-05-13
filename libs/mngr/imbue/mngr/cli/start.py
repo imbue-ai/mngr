@@ -26,6 +26,7 @@ from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
+from imbue.mngr.cli.output_helpers import notify_host_starting
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
@@ -186,7 +187,9 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
         host = provider.get_host(HostId(host_id_str))
 
         # Ensure host is started (always start since this is the start command)
-        online_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
+        online_host, _ = ensure_host_started(
+            host, is_start_desired=True, provider=provider, notify_starting=notify_host_starting
+        )
 
         # Start each agent on this host
         agent_ids_to_start = [match.agent_id for match in agent_list]

@@ -50,6 +50,8 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
+from imbue.mngr.cli.output_helpers import notify_agent_starting
+from imbue.mngr.cli.output_helpers import notify_host_starting
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
@@ -892,6 +894,15 @@ def _create_agent(
             mngr_ctx=mngr_ctx,
         )
 
+        # api_create has just finished starting the agent (and, for non-streaming
+        # agents with an initial message, sending it). Surface those lifecycle
+        # milestones to the user here -- api_create itself only emits debug-level
+        # log_span entries for these steps, per the api/cli logging split. Past
+        # tense because by this point the action has already completed.
+        logger.info("Started agent {}", create_result.agent.name)
+        if setup.initial_message is not None and not isinstance(create_result.agent, StreamingHeadlessAgentMixin):
+            logger.info("Sent initial message")
+
         # If --edit-message was used, wait for editor and send the message.
         # Re-acquire the host lock to prevent idle shutdown while the user edits
         # (api_create releases its lock before returning).
@@ -1149,7 +1160,12 @@ def _try_reuse_existing_agent(
     host = provider.get_host(host_ref.host_id)
 
     # Ensure the host is started
-    online_host, _was_started = ensure_host_started(host, is_start_desired=True, provider=provider)
+    online_host, _was_started = ensure_host_started(
+        host,
+        is_start_desired=True,
+        provider=provider,
+        notify_starting=notify_host_starting,
+    )
 
     # Find the agent interface on the online host
     agent: AgentInterface | None = None
@@ -1165,7 +1181,7 @@ def _try_reuse_existing_agent(
         return None
 
     # Ensure the agent is started (reusing shared logic from find.py)
-    ensure_agent_started(agent, online_host, is_start_desired=True)
+    ensure_agent_started(agent, online_host, is_start_desired=True, notify_starting=notify_agent_starting)
 
     return agent, online_host
 
@@ -1209,14 +1225,18 @@ def _resolve_source_location(
         _check_source_does_not_contain_state_dir(Path(source_path), mngr_ctx)
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
         host = provider.get_host(HostName(LOCAL_HOST_NAME))
-        online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
+        online_host, _ = ensure_host_started(
+            host, is_start_desired=is_start_desired, provider=provider, notify_starting=notify_host_starting
+        )
         return ResolvedHostedLocation(location=HostLocation(host=online_host, path=Path(source_path)))
 
     # Git URL: clone to a managed directory and treat as a local path
     if is_git_url(opts.source):
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
         host = provider.get_host(HostName(LOCAL_HOST_NAME))
-        online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
+        online_host, _ = ensure_host_started(
+            host, is_start_desired=is_start_desired, provider=provider, notify_starting=notify_host_starting
+        )
         clones_base = online_host.host_dir / "clones"
         positional_hint = (
             str(opts.positional_name.name) if opts.positional_name and opts.positional_name.name else None
@@ -1239,7 +1259,9 @@ def _resolve_source_location(
         _check_source_does_not_contain_state_dir(Path(source_path), mngr_ctx)
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
         host = provider.get_host(HostName(LOCAL_HOST_NAME))
-        online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
+        online_host, _ = ensure_host_started(
+            host, is_start_desired=is_start_desired, provider=provider, notify_starting=notify_host_starting
+        )
         return ResolvedHostedLocation(location=HostLocation(host=online_host, path=Path(source_path)))
 
     # Need full resolution across providers
@@ -1249,6 +1271,7 @@ def _resolve_source_location(
         agents_by_host,
         mngr_ctx,
         is_start_desired=is_start_desired,
+        notify_host_starting=notify_host_starting,
     )
 
 
@@ -1263,11 +1286,15 @@ def _resolve_target_host(
         # No host specified, use the local provider's default host
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
         host = provider.get_host(HostName(LOCAL_HOST_NAME))
-        resolved_target_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
+        resolved_target_host, _ = ensure_host_started(
+            host, is_start_desired=is_start_desired, provider=provider, notify_starting=notify_host_starting
+        )
     elif isinstance(target_host, DiscoveredHost):
         provider = get_provider_instance(target_host.provider_name, mngr_ctx)
         host = provider.get_host(target_host.host_id)
-        resolved_target_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
+        resolved_target_host, _ = ensure_host_started(
+            host, is_start_desired=is_start_desired, provider=provider, notify_starting=notify_host_starting
+        )
     else:
         resolved_target_host = target_host
     return resolved_target_host

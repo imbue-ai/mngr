@@ -189,7 +189,7 @@ def test_create_with_message(e2e: E2eSession) -> None:
     )
     expect(create_result).to_succeed()
     # Verify the create output confirms the message was sent
-    expect(create_result.stderr).to_contain("Sending initial message")
+    expect(create_result.stderr).to_contain("Sent initial message")
 
     # Verify the agent was created
     list_result = e2e.run("mngr list --format json", comment="Verify agent created with initial message")

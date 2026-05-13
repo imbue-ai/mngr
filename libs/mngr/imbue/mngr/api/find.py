@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -180,12 +181,16 @@ def resolve_hosted_location(
     mngr_ctx: MngrContext,
     *,
     is_start_desired: bool = True,
+    notify_host_starting: Callable[[], None] | None = None,
 ) -> ResolvedHostedLocation:
     """Resolve a :class:`HostedLocation` to a concrete host, path, and optional agent.
 
     Resolves agent/host references against the discovered hosts and agents.
     If the resolved host is offline, it will be started if ``is_start_desired``
     is True (the default); otherwise raises :class:`UserInputError`.
+
+    ``notify_host_starting`` is forwarded to :func:`ensure_host_started` so the
+    cli can surface the user-visible "Host is offline, starting it..." line.
     """
     logger.trace(
         "Resolving hosted location: agent={} host={} path={}",
@@ -217,7 +222,10 @@ def resolve_hosted_location(
 
     if not isinstance(host_interface, OnlineHostInterface):
         online_host, _was_started = ensure_host_started(
-            host_interface, is_start_desired=is_start_desired, provider=provider
+            host_interface,
+            is_start_desired=is_start_desired,
+            provider=provider,
+            notify_starting=notify_host_starting,
         )
     else:
         online_host = host_interface
@@ -263,7 +271,10 @@ def get_unique_host_from_list_by_name(
 
 
 def ensure_host_started(
-    host: HostInterface, is_start_desired: bool, provider: BaseProviderInstance
+    host: HostInterface,
+    is_start_desired: bool,
+    provider: BaseProviderInstance,
+    notify_starting: Callable[[], None] | None = None,
 ) -> tuple[Host, bool]:
     """Ensure the host is online and started.
 
@@ -272,14 +283,21 @@ def ensure_host_started(
     If offline and start is not desired, raises UserInputError.
 
     Also returns a boolean indicating whether the host was started.
+
+    ``notify_starting`` is invoked once, before the start call, only when the
+    host is actually offline and we're about to start it. The cli passes a
+    callback that emits the user-visible "Host is offline, starting it..."
+    info line; api callers that don't want user-visible logging pass nothing.
     """
     match host:
         case Host() as online_host:
             return online_host, False
         case HostInterface() as offline_host:
             if is_start_desired:
-                logger.info("Host is offline, starting it...", host_id=offline_host.id, provider=provider.name)
-                started_host = provider.start_host(offline_host)
+                if notify_starting is not None:
+                    notify_starting()
+                with log_span("Starting offline host", host_id=offline_host.id, provider=provider.name):
+                    started_host = provider.start_host(offline_host)
                 return started_host, True
             else:
                 raise UserInputError(
@@ -290,11 +308,21 @@ def ensure_host_started(
             assert_never(unreachable)
 
 
-def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_start_desired: bool) -> None:
+def ensure_agent_started(
+    agent: AgentInterface,
+    host: OnlineHostInterface,
+    is_start_desired: bool,
+    notify_starting: Callable[[AgentName], None] | None = None,
+) -> None:
     """Ensure an agent is started, starting it if needed and desired.
 
     If the agent is stopped and is_start_desired is True, starts the agent.
     If the agent is stopped and is_start_desired is False, raises UserInputError.
+
+    ``notify_starting`` is invoked once with the agent's name, before the start
+    call, only when the agent is actually stopped and we're about to start it.
+    Same contract as on :func:`ensure_host_started`; the cli passes a callback
+    that emits the user-visible "Agent X is stopped, starting it" info line.
     """
     lifecycle_state = agent.get_lifecycle_state()
     if lifecycle_state not in (
@@ -304,12 +332,14 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
         AgentLifecycleState.WAITING,
     ):
         if is_start_desired:
-            logger.info("Agent {} is stopped, starting it", agent.name)
-            agent.wait_for_ready_signal(
-                is_creating=False,
-                start_action=lambda: host.start_agents([agent.id]),
-                timeout=agent.get_ready_timeout_seconds(),
-            )
+            if notify_starting is not None:
+                notify_starting(agent.name)
+            with log_span("Starting stopped agent {}", agent.name):
+                agent.wait_for_ready_signal(
+                    is_creating=False,
+                    start_action=lambda: host.start_agents([agent.id]),
+                    timeout=agent.get_ready_timeout_seconds(),
+                )
         else:
             raise UserInputError(
                 f"Agent '{agent.name}' is stopped and automatic starting is disabled. "
@@ -323,6 +353,8 @@ def materialize_agent(
     mngr_ctx: MngrContext,
     is_start_desired: bool = False,
     skip_agent_state_check: bool = False,
+    notify_host_starting: Callable[[], None] | None = None,
+    notify_agent_starting: Callable[[AgentName], None] | None = None,
 ) -> tuple[AgentInterface, OnlineHostInterface]:
     """Materialize discovered refs into live :class:`AgentInterface` and :class:`OnlineHostInterface`.
 
@@ -335,14 +367,29 @@ def materialize_agent(
     ``is_start_desired`` is False. Raises :class:`RuntimeError` if the agent
     was present at discovery time but is no longer on the live host
     (a stale-cache / inconsistency case).
+
+    ``notify_host_starting`` / ``notify_agent_starting`` are forwarded to the
+    underlying :func:`ensure_host_started` / :func:`ensure_agent_started` so
+    the cli can surface user-visible "starting..." lines before each
+    potentially-slow start operation.
     """
     provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
     host = provider.get_host(host_ref.host_id)
-    online_host, _was_started = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
+    online_host, _was_started = ensure_host_started(
+        host,
+        is_start_desired=is_start_desired,
+        provider=provider,
+        notify_starting=notify_host_starting,
+    )
     for live_agent in online_host.get_agents():
         if live_agent.id == agent_ref.agent_id:
             if not skip_agent_state_check:
-                ensure_agent_started(live_agent, online_host, is_start_desired=is_start_desired)
+                ensure_agent_started(
+                    live_agent,
+                    online_host,
+                    is_start_desired=is_start_desired,
+                    notify_starting=notify_agent_starting,
+                )
             return live_agent, online_host
     raise RuntimeError(
         f"Agent '{agent_ref.agent_name}' (ID: {agent_ref.agent_id}) was found during discovery but is "
@@ -576,6 +623,8 @@ def find_one_agent(
     mngr_ctx: MngrContext,
     is_start_desired: bool = False,
     skip_agent_state_check: bool = False,
+    notify_host_starting: Callable[[], None] | None = None,
+    notify_agent_starting: Callable[[AgentName], None] | None = None,
 ) -> tuple[AgentInterface, OnlineHostInterface]:
     """Find an agent by :class:`AgentAddress` and return live interfaces.
 
@@ -586,6 +635,10 @@ def find_one_agent(
     Raises :class:`UserInputError` if the host constraint matches no hosts.
     Raises :class:`AgentNotFoundError` / :class:`UserInputError` if the
     agent cannot be resolved (see :func:`filter_one_agent`).
+
+    ``notify_host_starting`` / ``notify_agent_starting`` are forwarded to
+    :func:`materialize_agent` so the cli can surface the user-visible
+    "starting..." lines before each potentially-slow start operation.
     """
     agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
     if not agents_by_host and address.host is not None:
@@ -598,4 +651,6 @@ def find_one_agent(
         mngr_ctx,
         is_start_desired=is_start_desired,
         skip_agent_state_check=skip_agent_state_check,
+        notify_host_starting=notify_host_starting,
+        notify_agent_starting=notify_agent_starting,
     )

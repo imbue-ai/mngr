@@ -18,6 +18,7 @@ from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.label import parse_label_string
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
+from imbue.mngr.cli.output_helpers import notify_host_starting
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
@@ -120,7 +121,13 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
     # name-conflict check below.
     agents_by_host, _ = discover_by_address(opts.current, mngr_ctx)
     host_ref, agent_ref = filter_one_agent(opts.current.agent, None, agents_by_host)
-    agent, host = materialize_agent(host_ref, agent_ref, mngr_ctx, skip_agent_state_check=True)
+    agent, host = materialize_agent(
+        host_ref,
+        agent_ref,
+        mngr_ctx,
+        skip_agent_state_check=True,
+        notify_host_starting=notify_host_starting,
+    )
 
     old_name = str(agent.name)
 

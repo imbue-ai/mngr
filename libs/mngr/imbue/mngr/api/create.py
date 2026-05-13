@@ -233,24 +233,24 @@ def create(
             if isinstance(agent, StreamingHeadlessAgentMixin):
                 if initial_message is not None:
                     agent.stage_initial_message(initial_message)
-                logger.info("Starting agent {} ...", agent.name)
-                host.start_agents([agent.id])
+                with log_span("Starting agent {}", agent.name):
+                    host.start_agents([agent.id])
             elif initial_message is not None:
                 # Start agent with signal-based readiness detection
                 # Raises AgentStartError if the agent doesn't signal readiness in time
-                logger.info("Starting agent {} ...", agent.name)
                 timeout = agent_options.ready_timeout_seconds
-                agent.wait_for_ready_signal(
-                    is_creating=True,
-                    start_action=lambda: host.start_agents([agent.id]),
-                    timeout=timeout,
-                )
-                logger.info("Sending initial message...")
-                agent.send_message(initial_message)
+                with log_span("Starting agent {}", agent.name):
+                    agent.wait_for_ready_signal(
+                        is_creating=True,
+                        start_action=lambda: host.start_agents([agent.id]),
+                        timeout=timeout,
+                    )
+                with log_span("Sending initial message"):
+                    agent.send_message(initial_message)
             else:
                 # No initial message - just start the agent
-                logger.info("Starting agent {} ...", agent.name)
-                host.start_agents([agent.id])
+                with log_span("Starting agent {}", agent.name):
+                    host.start_agents([agent.id])
 
             # Build and return the result
             result = CreateAgentResult(agent=agent, host=host)

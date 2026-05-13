@@ -7,6 +7,8 @@ from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.cli.connect import select_agent_interactively
 from imbue.mngr.cli.output_helpers import emit_info
+from imbue.mngr.cli.output_helpers import notify_agent_starting
+from imbue.mngr.cli.output_helpers import notify_host_starting
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -68,6 +70,8 @@ def select_agent_interactively_with_host(
         mngr_ctx,
         is_start_desired=is_start_desired,
         skip_agent_state_check=skip_agent_state_check,
+        notify_host_starting=notify_host_starting,
+        notify_agent_starting=notify_agent_starting,
     )
 
 
@@ -101,6 +105,8 @@ def find_agent_for_command(
             mngr_ctx,
             is_start_desired=is_start_desired,
             skip_agent_state_check=skip_agent_state_check,
+            notify_host_starting=notify_host_starting,
+            notify_agent_starting=notify_agent_starting,
         )
 
     if not mngr_ctx.is_interactive:

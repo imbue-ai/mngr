@@ -30,6 +30,8 @@ from imbue.mngr.cli.filter_opts import add_agent_filter_options
 from imbue.mngr.cli.filter_opts import build_agent_filter_cel
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
+from imbue.mngr.cli.output_helpers import notify_agent_starting
+from imbue.mngr.cli.output_helpers import notify_host_starting
 from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
@@ -392,6 +394,8 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
             opts.agent,
             mngr_ctx,
             is_start_desired=opts.start,
+            notify_host_starting=notify_host_starting,
+            notify_agent_starting=notify_agent_starting,
         )
     elif not mngr_ctx.is_interactive:
         # Default to most recently created agent when running non-interactively
@@ -415,6 +419,8 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
             most_recent.address,
             mngr_ctx,
             is_start_desired=opts.start,
+            notify_host_starting=notify_host_starting,
+            notify_agent_starting=notify_agent_starting,
         )
     else:
         include_filters, exclude_filters = build_agent_filter_cel(
@@ -438,6 +444,8 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
             selected.address,
             mngr_ctx,
             is_start_desired=opts.start,
+            notify_host_starting=notify_host_starting,
+            notify_agent_starting=notify_agent_starting,
         )
 
     # Build connection options

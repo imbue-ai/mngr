@@ -11,9 +11,29 @@ from loguru import logger
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.sync import SyncFilesResult
 from imbue.mngr.api.sync import SyncGitResult
+from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import SyncMode
+
+
+def notify_host_starting() -> None:
+    """Emit the user-visible "host is offline, starting it..." info line.
+
+    Passed as a callback to api functions (``ensure_host_started`` and the
+    helpers that forward through it: ``materialize_agent``, ``find_one_agent``,
+    ``resolve_hosted_location``) so the api stays at debug+log_span while the
+    cli still surfaces the lifecycle marker before the slow start operation.
+    """
+    logger.info("Host is offline, starting it...")
+
+
+def notify_agent_starting(agent_name: AgentName) -> None:
+    """Emit the user-visible "Agent X is stopped, starting it" info line.
+
+    Counterpart to :func:`notify_host_starting` for the agent-start path.
+    """
+    logger.info("Agent {} is stopped, starting it", agent_name)
 
 
 def _write_json_line(data: Mapping[str, Any]) -> None:

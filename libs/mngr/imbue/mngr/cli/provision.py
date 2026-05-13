@@ -186,6 +186,8 @@ def provision(ctx: click.Context, **kwargs: Any) -> None:
         is_restart=opts.restart,
     )
 
+    logger.info("Provisioned agent: {}", agent.name)
+
     # Output result
     _output_result(str(agent.name), output_opts)
 
