@@ -2060,6 +2060,20 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         self._adopt_cloned_session(source_host, source_state_dir)
 
+    def _resolve_work_dir_on_host(self) -> Path:
+        """Return ``self.work_dir`` resolved through symlinks as the destination
+        host sees it. On Modal, ``/mngr/projects/agent-<uuid>`` is a bind mount
+        / symlink onto ``/__modal/volumes/<vol-id>/projects/agent-<uuid>``;
+        claude uses the canonical form for its cwd and per-project storage.
+        Falls back to the unresolved path when ``readlink -f`` fails.
+        """
+        result = self.host.execute_idempotent_command(
+            f"readlink -f {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0
+        )
+        if result.success and result.stdout.strip():
+            return Path(result.stdout.strip())
+        return self.work_dir
+
     def _adopt_cloned_session(self, source_host: OnlineHostInterface, source_state_dir: Path) -> None:
         """Rewire the transferred plugin/ so ``claude --resume`` finds the source's session.
 
@@ -2131,8 +2145,18 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         # the destination's work_dir (e.g., source visited multiple cwds).
         # That collision is unexpected enough that silent clobber would
         # likely lose data we don't realize is there.
+        #
+        # Encode the *canonical* (realpath-resolved) work_dir, not
+        # ``self.work_dir`` directly: on remote hosts (e.g. Modal),
+        # mngr's mount point ``/mngr/projects/agent-<uuid>`` is a symlink
+        # to ``/__modal/volumes/<vol-id>/projects/agent-<uuid>``. claude
+        # resolves the symlink for its cwd and searches
+        # ``projects/<encoded-canonical>/`` -- so encoding the unresolved
+        # path puts the JSONL where claude won't find it, and
+        # ``claude --resume`` exits with "No conversation found...".
         dest_projects_dir = self._get_agent_dir() / "plugin" / "claude" / "anthropic" / "projects"
-        dest_project_name = encode_claude_project_dir_name(self.work_dir)
+        canonical_work_dir = self._resolve_work_dir_on_host()
+        dest_project_name = encode_claude_project_dir_name(canonical_work_dir)
         if source_project_name != dest_project_name:
             source_subdir = dest_projects_dir / source_project_name
             target_dir = dest_projects_dir / dest_project_name
@@ -2154,6 +2178,17 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                     rename_result.stderr.strip(),
                 )
                 return
+
+        # Remove the rsynced sessions-index.json -- its entries point at the
+        # source's project paths and would prevent Claude Code from
+        # discovering the adopted session. Claude Code rebuilds the index on
+        # next startup. Same trick ``on_after_provisioning`` uses for the
+        # ``--adopt-session`` flow; without it ``claude --resume <sid>``
+        # exits with "No conversation found with session ID: <sid>" even
+        # when the JSONL is at the right path.
+        target_dir = dest_projects_dir / dest_project_name
+        stale_index = target_dir / "sessions-index.json"
+        self.host.execute_idempotent_command(f"rm -f {shlex.quote(str(stale_index))}", timeout_seconds=5.0)
 
         self.host.write_text_file(self._get_agent_dir() / "claude_session_id", adopted_session_id)
 
