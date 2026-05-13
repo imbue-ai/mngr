@@ -14,6 +14,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_forward.auth import FileAuthStore
 from imbue.mngr_forward.cookie import create_session_cookie
 from imbue.mngr_forward.cookie import create_subdomain_auth_token
@@ -23,7 +24,9 @@ from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_forward.primitives import OneTimeCode
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.server import _is_loopback_url
+from imbue.mngr_forward.server import _resolver_miss_last_warn_at
 from imbue.mngr_forward.server import _sanitize_next_url
+from imbue.mngr_forward.server import _warn_resolver_miss
 from imbue.mngr_forward.server import create_forward_app
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 
@@ -501,3 +504,87 @@ def test_subdomain_forward_returns_retry_page_on_backend_connect_error(tmp_path:
     assert 'http-equiv="refresh"' in html_response.text
     # Non-HTML callers get a plain 503 they can interpret programmatically.
     assert json_response.status_code == 503
+
+
+# -- _warn_resolver_miss --------------------------------------------------
+#
+# Use the project's `capture_loguru` context manager (libs/mngr/.../testing.py)
+# instead of pytest's standard `caplog`: loguru's sink isn't wired into stdlib
+# logging by default, and `capture_loguru` also implicitly opts out of the
+# autouse "no unexpected loguru warnings" check.
+
+
+def _reset_warn_miss_cache() -> None:
+    """Drop throttle entries so tests don't see each other's bookkeeping."""
+    _resolver_miss_last_warn_at.clear()
+
+
+def test_warn_resolver_miss_says_agent_not_in_known_set() -> None:
+    """If the agent isn't in the resolver's known set, the warning should say so explicitly.
+
+    This is the "host-side discovery hasn't seen this agent yet" case -- distinct from
+    the "agent known but no service URL" case below.
+    """
+    _reset_warn_miss_cache()
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    agent_id = AgentId()
+
+    with capture_loguru("WARNING") as log:
+        _warn_resolver_miss(agent_id, resolver)
+
+    output = log.getvalue()
+    assert "not in resolver's known set" in output, output
+    assert str(agent_id) in output, output
+
+
+def test_warn_resolver_miss_says_agent_known_but_no_service() -> None:
+    """If the agent IS in the known set but the service URL is missing, say so distinctly.
+
+    This is the "VM-side app-watcher didn't publish the URL" case -- the diagnostic
+    points the reader at the right side of the host/VM boundary.
+    """
+    _reset_warn_miss_cache()
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    agent_id = AgentId()
+    resolver.add_known_agent(agent_id)
+    # Intentionally do NOT call resolver.update_services -- the service URL stays missing.
+
+    with capture_loguru("WARNING") as log:
+        _warn_resolver_miss(agent_id, resolver)
+
+    output = log.getvalue()
+    assert "agent IS known but the requested service URL is missing" in output, output
+
+
+def test_warn_resolver_miss_throttles_per_agent() -> None:
+    """Three back-to-back misses for the same agent should produce ONE warning, not three.
+
+    The 503 retry-page refreshes every 1s; without throttling the log would flood.
+    """
+    _reset_warn_miss_cache()
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    agent_id = AgentId()
+
+    with capture_loguru("WARNING") as log:
+        _warn_resolver_miss(agent_id, resolver)
+        _warn_resolver_miss(agent_id, resolver)
+        _warn_resolver_miss(agent_id, resolver)
+
+    output = log.getvalue()
+    assert output.count(str(agent_id)) == 1, output
+
+
+def test_warn_resolver_miss_throttle_is_per_agent_not_global() -> None:
+    """Different agents should each get their own warning, even within the throttle window."""
+    _reset_warn_miss_cache()
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    agent_a = AgentId()
+    agent_b = AgentId()
+
+    with capture_loguru("WARNING") as log:
+        _warn_resolver_miss(agent_a, resolver)
+        _warn_resolver_miss(agent_b, resolver)
+
+    output = log.getvalue()
+    assert str(agent_a) in output, output
+    assert str(agent_b) in output, output
