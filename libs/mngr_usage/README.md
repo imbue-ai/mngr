@@ -71,7 +71,7 @@ A writer plugin is responsible for producing `cost_snapshot` events at the
 conventional path. The minimal contract is just the JSONL line shape:
 
 ```jsonl
-{"source":"<your-source>/usage","type":"cost_snapshot","event_id":"evt-<hex>","timestamp":"<ISO 8601>","session_id":"<uuid|null>","cost":{"total_cost_usd":<float>},"rate_limits":{"<window-key>":{"used_percentage":<float>,"resets_at":<unix-ts>}}}
+{"source":"<your-source>/usage","type":"cost_snapshot","event_id":"evt-<hex>","timestamp":"<ISO 8601>","session_id":"<uuid>","cost":{"total_cost_usd":<float>},"rate_limits":{"<window-key>":{"used_percentage":<float>,"resets_at":<unix-ts>}}}
 ```
 
 Every event must carry a `session_id` (non-empty string) plus at least one
