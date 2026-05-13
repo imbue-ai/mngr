@@ -374,9 +374,7 @@ def _record_provider_unavailable(
         source_name=str(provider_name),
         provider_name=str(provider_name),
     )
-    error_info = ProviderErrorInfo.build_for_provider(
-        exception, provider_name, is_provider_unavailable=True
-    )
+    error_info = ProviderErrorInfo.build_for_provider(exception, provider_name, is_provider_unavailable=True)
     with results_lock:
         result.errors.append(error_info)
     if params.on_error:

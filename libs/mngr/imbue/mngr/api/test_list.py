@@ -91,9 +91,7 @@ def test_provider_error_info_build_for_provider_with_unavailable_flag() -> None:
     exception = RuntimeError("Modal token missing")
     provider_name = ProviderInstanceName("modal")
 
-    error_info = ProviderErrorInfo.build_for_provider(
-        exception, provider_name, is_provider_unavailable=True
-    )
+    error_info = ProviderErrorInfo.build_for_provider(exception, provider_name, is_provider_unavailable=True)
 
     assert error_info.is_provider_unavailable is True
 
