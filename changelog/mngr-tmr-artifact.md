@@ -14,3 +14,9 @@ parsed Python objects as `AgentDetails.address` / `HostDetails.address`,
 and removing it from the wire format lets the output round-trip cleanly
 through `AgentDetails.model_validate_json` (which previously rejected the
 extra key).
+
+`Volume`: gains a `path_exists(path)` method implemented across all
+providers (local, Docker, Modal) and the `ScopedVolume` wrapper. Callers
+no longer need to fall back to `listdir` and catch
+provider-specific not-found errors to probe for a single file's
+existence.

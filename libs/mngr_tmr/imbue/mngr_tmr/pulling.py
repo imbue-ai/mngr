@@ -38,7 +38,6 @@ from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 
 _OUTPUTS_ARCHIVE_NAME = "outputs.tar.gz"
 _OUTPUTS_ARCHIVE_SUBPATH = f"plugin/{PLUGIN_NAME}/{_OUTPUTS_ARCHIVE_NAME}"
-_OUTPUTS_ARCHIVE_PARENT_SUBPATH = f"plugin/{PLUGIN_NAME}"
 _EXTRACTED_TEST_OUTPUT_DIR = "test_output"
 _BRANCH_BUNDLE_NAME = "branch.bundle"
 
@@ -116,18 +115,17 @@ def is_agent_outputs_ready(
 ) -> bool:
     """Check whether the agent has finished writing its outputs archive.
 
-    Listing the archive's parent directory rather than reading the archive
-    itself keeps the existence check cheap; the partially-written .tmp file
-    is filtered out by matching the final name exactly.
+    Matches the final archive name exactly so the partially-written ``.tmp``
+    file (which the agent renames on completion) is not mistaken for the
+    finished output.
     """
     agent_volume = _get_agent_volume(mngr_ctx, provider_name, host_id, agent_id)
     if agent_volume is None:
         return False
     try:
-        entries = agent_volume.listdir(_OUTPUTS_ARCHIVE_PARENT_SUBPATH)
+        return agent_volume.path_exists(_OUTPUTS_ARCHIVE_SUBPATH)
     except (MngrError, OSError):
         return False
-    return any(Path(entry.path).name == _OUTPUTS_ARCHIVE_NAME for entry in entries)
 
 
 def _apply_branch_bundle(
