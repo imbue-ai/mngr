@@ -31,7 +31,9 @@ from imbue.mngr_usage.cli import _format_cost_line
 from imbue.mngr_usage.cli import _format_duration
 from imbue.mngr_usage.cli import _format_human_line
 from imbue.mngr_usage.cli import _format_reset_phrase
+from imbue.mngr_usage.cli import _format_session_detail_line
 from imbue.mngr_usage.cli import _parse_optional_duration
+from imbue.mngr_usage.cli import _session_mode_tag
 from imbue.mngr_usage.cli import usage
 from imbue.mngr_usage.data_types import CostMode
 from imbue.mngr_usage.data_types import CostSnapshot
@@ -196,6 +198,49 @@ def test_format_cost_line_uses_multi_session_shape_when_latest_event_unknown() -
         now=2000,
     )
     assert line == "api cost: $0.50 across 1 sessions in last 1h"
+
+
+def test_session_mode_tag_maps_each_variant() -> None:
+    """``_session_mode_tag`` exhaustively maps every ``CostMode`` to its
+    short ``--detail`` tag. The mapping is part of the user-visible contract:
+    ``SUBSCRIPTION`` -> ``"sub"``, ``API_KEY`` -> ``"api"``. Swapping or
+    dropping either entry would silently mis-label sessions in mixed-mode
+    breakdowns.
+    """
+    assert _session_mode_tag(CostMode.SUBSCRIPTION) == "sub"
+    assert _session_mode_tag(CostMode.API_KEY) == "api"
+
+
+def test_format_session_detail_line_returns_none_when_session_has_no_cost() -> None:
+    """A session with no usable cost reading drops out of the ``--detail``
+    breakdown -- the helper returns None so the caller skips writing the
+    line entirely (matching ``_format_cost_line``'s None-drop contract).
+    """
+    session = SessionCostRecord(
+        session_id="abcdef12-uuid-rest",
+        cost=CostSnapshot(),
+        cost_mode=CostMode.API_KEY,
+        first_event_at=1000,
+        last_event_at=1500,
+    )
+    assert _format_session_detail_line(session, now=2000) is None
+
+
+def test_format_session_detail_line_renders_tag_truncated_id_and_age() -> None:
+    """Rendered line matches the documented format:
+    ``  [<tag>] <8-char id prefix>: $X.YY (<age phrase>)``. Session id longer
+    than ``_SESSION_DETAIL_ID_PREFIX_LEN`` is truncated; the mode tag comes
+    from ``_session_mode_tag``; cost is two-decimal USD.
+    """
+    session = SessionCostRecord(
+        session_id="deadbeef-uuid-rest",
+        cost=CostSnapshot(total_cost_usd=0.42),
+        cost_mode=CostMode.SUBSCRIPTION,
+        first_event_at=1800,
+        last_event_at=1880,
+    )
+    line = _format_session_detail_line(session, now=2000)
+    assert line == "  [sub] deadbeef: $0.42 (2m ago)"
 
 
 # =============================================================================
