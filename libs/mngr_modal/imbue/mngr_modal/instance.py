@@ -3336,14 +3336,15 @@ def _build_image_from_dockerfile_contents(
     Secrets are passed to dockerfile_commands and are available during RUN commands
     via --mount=type=secret,id=<env_var_name>.
     """
-    assert not _is_multistage_dockerfile(dockerfile_contents), (
-        "Multistage Dockerfiles must be built via ModalInterface.image_from_dockerfile, not this helper"
-    )
     # DockerfileParser writes to a file, so use a temp directory to avoid conflicts
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpfile = Path(tmpdir) / "Dockerfile"
         dfp = DockerfileParser(str(tmpfile))
         dfp.content = dockerfile_contents
+
+        assert not dfp.is_multistage, (
+            "Multistage Dockerfiles must be built via ModalInterface.image_from_dockerfile, not this helper"
+        )
 
         last_from_index = None
         for i, instr in enumerate(dfp.structure):
