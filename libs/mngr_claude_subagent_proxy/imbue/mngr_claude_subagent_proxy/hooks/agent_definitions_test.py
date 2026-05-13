@@ -267,6 +267,34 @@ def test_unsafe_subagent_type_rejected(subagent_type: str, fake_home: Path, tmp_
     assert result is None
 
 
+@pytest.mark.parametrize(
+    "subagent_type",
+    [
+        pytest.param(":", id="bare_colon"),
+        pytest.param("foo:", id="trailing_colon_empty_agent"),
+        pytest.param(":bar", id="leading_colon_empty_plugin"),
+    ],
+)
+def test_malformed_namespaced_subagent_type_returns_none(subagent_type: str, fake_home: Path, tmp_path: Path) -> None:
+    """Plugin-namespaced types with an empty ``plugin_name`` or
+    ``agent_name`` segment (subagent_type starts or ends with ``:``,
+    or is just ``:``) must resolve to None rather than silently
+    constructing a path with an empty segment that can never match.
+
+    Pins the empty-segment contract independently of the broader
+    path-traversal validation; documents that a typo'd Task call
+    like ``Task(subagent_type=":")`` surfaces as a logged warning
+    plus unresolved (not a crash, not a no-op match).
+    """
+    # ``fake_home`` is declared so ``HOME`` is rooted in ``tmp_path``; the body
+    # doesn't reference it directly.
+    del fake_home
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    assert resolve_agent_definition(subagent_type, work_dir) is None
+
+
 def test_first_marketplace_wins_when_multiple_have_same_plugin_agent(fake_home: Path, tmp_path: Path) -> None:
     """If two marketplaces both ship ``<plugin>/agents/<agent>.md``, the
     first (sorted by name) wins. Stable precedence is required so the
