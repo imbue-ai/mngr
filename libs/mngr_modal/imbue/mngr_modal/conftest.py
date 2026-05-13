@@ -355,11 +355,12 @@ def modal_test_session_cleanup(
     # this is the opposite of what `modal_session_cleanup`'s docstring
     # claimed about autouse session-scoped fixtures running cleanup "after"
     # non-autouse ones.
-    modal_session_cleanup: None,  # noqa: ARG001 -- ordering dependency
+    modal_session_cleanup: None,
     modal_test_session_env_name: str,
     modal_test_session_user_id: UserId,
 ) -> Generator[None, None, None]:
     """Session-scoped fixture that cleans up the Modal environment at session end."""
+    del modal_session_cleanup
     prefix = f"{modal_test_session_env_name}-"
     environment_name = f"{prefix}{modal_test_session_user_id}"
     if len(environment_name) > 64:
