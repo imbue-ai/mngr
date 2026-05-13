@@ -127,10 +127,28 @@ class DestroyCliOptions(CommonCliOptions):
     agents: tuple[str, ...]
     agent_list: tuple[AgentAddress, ...]
     force: bool
+    yes: bool
     gc: bool
     remove_created_branch: bool
     allow_worktree_removal: bool
     sessions: tuple[str, ...]
+
+
+def _should_skip_confirmation(opts: DestroyCliOptions) -> bool:
+    """Whether the interactive confirmation prompt should be skipped.
+
+    --force implies --yes (already decided to push through), so either flag
+    causes the prompt to be skipped.
+    """
+    return opts.force or opts.yes
+
+
+def _bypasses_running_check(opts: DestroyCliOptions) -> bool:
+    """Whether the running-agent safety check should be bypassed.
+
+    Only --force bypasses this check; --yes alone keeps it in place.
+    """
+    return opts.force
 
 
 @click.command(name="destroy")
@@ -155,7 +173,13 @@ class DestroyCliOptions(CommonCliOptions):
     "-f",
     "--force",
     is_flag=True,
-    help="Skip confirmation prompts and force destroy running agents",
+    help="Bypass safety checks: destroy running agents and ignore missing-agent errors. Implies --yes.",
+)
+@optgroup.option(
+    "-y",
+    "--yes",
+    is_flag=True,
+    help="Skip the confirmation prompt. Does NOT bypass the running-agent safety check (use --force for that).",
 )
 @optgroup.option(
     "--gc/--no-gc",
@@ -225,8 +249,8 @@ def destroy(ctx: click.Context, **kwargs) -> None:
         _output("No agents found to destroy", output_opts)
         return
 
-    # Confirm destruction if not forced
-    if not opts.force:
+    # Confirm destruction unless --yes or --force was passed
+    if not _should_skip_confirmation(opts):
         _confirm_destruction(targets)
 
     # Destroy all targets (online agents + offline hosts) in parallel
@@ -411,7 +435,7 @@ def _destroy_single_online_agent(
     """Destroy a single agent on an online host. Thread-safe."""
     agent_display = f"{agent.name}@{host.get_name()}"
     try:
-        if agent.is_running() and not opts.force:
+        if agent.is_running() and not _bypasses_running_check(opts):
             _output(
                 f"Agent {agent_display} is running. Use --force to destroy running agents.",
                 output_opts,
@@ -612,7 +636,7 @@ def _run_post_destroy_gc(
 CommandHelpMetadata(
     key="destroy",
     one_line_description="Destroy agent(s) and clean up resources",
-    synopsis="mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal]",
+    synopsis="mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-y|--yes] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal]",
     description="""When the last agent on a host is destroyed, the host itself is also destroyed
 (including containers, volumes, snapshots, and any remote infrastructure).
 
@@ -620,7 +644,8 @@ Use with caution! This operation is irreversible.
 
 By default, running agents cannot be destroyed. Use --force to stop and destroy
 running agents. The command will prompt for confirmation before destroying
-agents unless --force is specified.
+agents; pass --yes to skip the prompt without bypassing other safety checks,
+or --force which both bypasses checks and skips the prompt.
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
