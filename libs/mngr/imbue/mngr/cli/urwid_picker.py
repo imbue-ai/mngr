@@ -18,6 +18,7 @@ from urwid.widget.listbox import ListBox
 from urwid.widget.listbox import SimpleFocusListWalker
 from urwid.widget.pile import Pile
 from urwid.widget.text import Text
+from urwid.widget.wimp import SelectableIcon
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
@@ -65,7 +66,14 @@ def run_single_select_picker(
     if not options:
         return None
 
-    list_items = [AttrMap(Text(f"  {label}"), None, focus_map="reversed") for label in options]
+    # SelectableIcon (not Text) is required so ListBox arrow-key navigation
+    # can move focus between rows -- Text widgets aren't selectable, which
+    # leaves focus stuck on the first row and Up/Down silently no-ops.
+    # cursor_position out of range hides the cursor on the row.
+    list_items = [
+        AttrMap(SelectableIcon(f"  {label}", cursor_position=len(label) + 4), None, focus_map="reversed")
+        for label in options
+    ]
     list_walker: SimpleFocusListWalker[AttrMap] = SimpleFocusListWalker(list_items)
     listbox = ListBox(list_walker)
     if 0 <= initial_focus < len(options):
