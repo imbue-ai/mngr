@@ -52,7 +52,7 @@ def _make_event(
 ) -> dict:
     """Construct an event matching the writer's emitted shape.
 
-    Includes a placeholder ``session_id`` since the reader contract now
+    Includes a placeholder ``session_id`` since the reader contract
     requires every event to carry one (see ``_build_snapshot_for_source``).
     """
     return {
