@@ -1,0 +1,171 @@
+"""Integration tests for claude_rate_limits_writer.sh.
+
+Exercises the bash writer directly via subprocess to ensure it appends
+properly-shaped JSONL events to the per-agent rate-limits events file.
+"""
+
+from __future__ import annotations
+
+import importlib.resources
+import json
+import os
+import shutil
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import pytest
+
+from imbue.mngr_claude_usage import resources as _resources
+
+WRITER_SCRIPT_NAME = "claude_rate_limits_writer.sh"
+
+
+@pytest.fixture
+def writer_path(tmp_path: Path) -> Path:
+    """Stage the writer script onto disk with execute bit, ready for subprocess."""
+    src = importlib.resources.files(_resources).joinpath(WRITER_SCRIPT_NAME)
+    dst = tmp_path / WRITER_SCRIPT_NAME
+    dst.write_bytes(src.read_bytes())
+    dst.chmod(0o755)
+    return dst
+
+
+@pytest.fixture
+def events_file(tmp_path: Path) -> Path:
+    return tmp_path / "events" / "claude" / "rate_limits" / "events.jsonl"
+
+
+def _has_jq() -> bool:
+    return shutil.which("jq") is not None
+
+
+pytestmark = pytest.mark.skipif(not _has_jq(), reason="jq not installed; required by claude_rate_limits_writer.sh")
+
+
+def _run_writer(writer_path: Path, stdin: str, events_file: Path) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "MNGR_RATE_LIMITS_EVENTS_PATH": str(events_file)}
+    return subprocess.run(
+        [str(writer_path)],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=15,
+    )
+
+
+def _read_last_event(events_file: Path) -> dict:
+    """Helper: read the last well-formed JSON line."""
+    lines = [line for line in events_file.read_text().splitlines() if line.strip()]
+    return json.loads(lines[-1])
+
+
+def test_writer_emits_event_with_rate_limits(writer_path: Path, events_file: Path) -> None:
+    """When stdin has a rate_limits field, append one event line in canonical shape."""
+    payload = json.dumps(
+        {
+            "session_id": "abc",
+            "rate_limits": {
+                "five_hour": {"used_percentage": 73.4, "resets_at": 1777673400},
+                "seven_day": {"used_percentage": 41.0, "resets_at": 1778000000},
+            },
+        }
+    )
+    result = _run_writer(writer_path, payload, events_file)
+    assert result.returncode == 0, result.stderr
+    event = _read_last_event(events_file)
+    assert event["source"] == "claude/rate_limits"
+    assert event["type"] == "rate_limit_snapshot"
+    assert event["event_id"].startswith("evt-")
+    # ISO 8601 timestamps always contain a 'T' separator
+    assert "T" in event["timestamp"]
+    assert event["rate_limits"]["five_hour"]["used_percentage"] == 73.4
+    assert event["rate_limits"]["five_hour"]["resets_at"] == 1777673400
+    assert event["rate_limits"]["seven_day"]["used_percentage"] == 41.0
+    # Writer decorates Claude Code's window keys with short human-display labels
+    # (5h / 7d / overage) so mngr_usage's per-line prefix is compact. Without
+    # these, the renderer would fall back to the literal key (`five_hour: ...`).
+    assert event["rate_limits"]["five_hour"]["label"] == "5h"
+    assert event["rate_limits"]["seven_day"]["label"] == "7d"
+
+
+def test_writer_skips_when_no_rate_limits(writer_path: Path, events_file: Path) -> None:
+    """A statusline payload before the first API response has no rate_limits;
+    we should write nothing rather than emit an empty event."""
+    payload = json.dumps({"session_id": "abc", "context_window": {"used_percentage": 5.0}})
+    result = _run_writer(writer_path, payload, events_file)
+    assert result.returncode == 0, result.stderr
+    assert not events_file.exists()
+
+
+def test_writer_skips_when_rate_limits_is_null(writer_path: Path, events_file: Path) -> None:
+    """`{"rate_limits": null}` is treated as 'no data' -- skip emission."""
+    payload = json.dumps({"rate_limits": None})
+    result = _run_writer(writer_path, payload, events_file)
+    assert result.returncode == 0, result.stderr
+    assert not events_file.exists()
+
+
+def test_writer_skips_on_garbage_input(writer_path: Path, events_file: Path) -> None:
+    """Non-JSON input shouldn't crash the writer (and shouldn't emit a malformed event)."""
+    result = _run_writer(writer_path, "this is not json", events_file)
+    assert result.returncode == 0, result.stderr
+    assert not events_file.exists()
+
+
+def test_writer_passes_through_non_object_rate_limits(writer_path: Path, events_file: Path) -> None:
+    """If the statusline schema ever sends a non-object `rate_limits` (string,
+    array, etc.), the writer must not crash under `set -euo pipefail`. The
+    value is written through unchanged so the CLI reader's isinstance(dict)
+    check can filter it downstream."""
+    payload = json.dumps({"rate_limits": "unexpected"})
+    result = _run_writer(writer_path, payload, events_file)
+    assert result.returncode == 0, result.stderr
+    event = _read_last_event(events_file)
+    assert event["rate_limits"] == "unexpected"
+
+
+def test_writer_appends_one_event_per_render(writer_path: Path, events_file: Path) -> None:
+    """Successive renders accumulate as separate event lines."""
+    for pct in (10.0, 20.0, 30.0):
+        payload = json.dumps({"rate_limits": {"five_hour": {"used_percentage": pct, "resets_at": 1700000000}}})
+        result = _run_writer(writer_path, payload, events_file)
+        assert result.returncode == 0, result.stderr
+    lines = [line for line in events_file.read_text().splitlines() if line.strip()]
+    assert len(lines) == 3
+    assert json.loads(lines[-1])["rate_limits"]["five_hour"]["used_percentage"] == 30.0
+
+
+def test_writer_handles_concurrent_appends(writer_path: Path, events_file: Path) -> None:
+    """Concurrent renders must end with a parsable events file -- short lines are
+    atomic on append, so we don't need flock; we just check no torn JSON."""
+    payloads = [
+        json.dumps({"rate_limits": {"five_hour": {"used_percentage": float(i), "resets_at": 1700000000 + i}}})
+        for i in range(20)
+    ]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(_run_writer, writer_path, payload, events_file) for payload in payloads]
+        for f in futures:
+            r = f.result()
+            assert r.returncode == 0, r.stderr
+    lines = [line for line in events_file.read_text().splitlines() if line.strip()]
+    assert len(lines) == 20
+    for line in lines:
+        # All lines must be parseable -- no torn output from the concurrent appends.
+        json.loads(line)
+
+
+def test_writer_errors_when_no_path_resolution_possible(writer_path: Path, tmp_path: Path) -> None:
+    """If neither MNGR_RATE_LIMITS_EVENTS_PATH nor MNGR_AGENT_STATE_DIR is set, exit 64."""
+    env = {k: v for k, v in os.environ.items() if k not in ("MNGR_RATE_LIMITS_EVENTS_PATH", "MNGR_AGENT_STATE_DIR")}
+    result = subprocess.run(
+        [str(writer_path)],
+        input='{"rate_limits": {}}',
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=15,
+    )
+    assert result.returncode == 64
+    assert "MNGR_AGENT_STATE_DIR" in result.stderr
