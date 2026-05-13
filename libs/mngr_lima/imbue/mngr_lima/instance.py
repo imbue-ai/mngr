@@ -738,6 +738,11 @@ sudo poweroff
         if tags_path.exists():
             tags_path.unlink(missing_ok=True)
 
+        # Delete the per-host pre-injected sshd keypair directory.
+        host_keys_dir = self._keys_dir / "hosts" / str(host_id)
+        if host_keys_dir.exists():
+            shutil.rmtree(host_keys_dir, ignore_errors=True)
+
         self._evict_cached_host(host_id)
 
     def on_connection_error(self, host_id: HostId) -> None:
