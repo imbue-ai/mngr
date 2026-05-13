@@ -1,0 +1,1 @@
+- Style: progressively apply mechanical, low-risk style fixes across `libs/mngr/` and the `libs/mngr_*/` plugins -- magic numbers hoisted to named constants, `time.time()` swapped for `time.monotonic()` in interval measurements, f-string adoption, dead-import removal, and other patterns called out in `style_guide.md`. Behaviour unchanged.
