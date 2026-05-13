@@ -1146,6 +1146,70 @@ def test_usage_wait_rejects_invalid_cel(
 
 
 @pytest.mark.tmux
+def test_usage_wait_applies_since_to_cost_aggregate(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """`mngr usage wait --since` tightens the recency window applied to each
+    poll's cost aggregation, mirroring `mngr usage --since`. A predicate that
+    succeeds iff a stale high-cost session is dropped from `api_cost` proves
+    the flag reached `gather_usage_snapshots` (it would time out otherwise).
+    """
+    base = datetime.now(timezone.utc)
+    now_iso = base.strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    stale_iso = (base - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-stale",
+            "timestamp": stale_iso,
+            "session_id": "wait-since-stale-session",
+            "cost": {"total_cost_usd": 99.0},
+        },
+    )
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-fresh",
+            "timestamp": now_iso,
+            "session_id": "wait-since-fresh-session",
+            "cost": {"total_cost_usd": 0.50},
+        },
+    )
+    # With `--since 1h` only the fresh $0.50 session contributes to `api_cost`,
+    # so `api_cost.total_cost_usd < 1.0` matches on the first poll. Without
+    # `--since 1h` the default 24h window would include the stale $99 session
+    # and the predicate would be false.
+    result = cli_runner.invoke(
+        usage,
+        [
+            "wait",
+            "--until",
+            "api_cost.total_cost_usd < 1.0",
+            "--since",
+            "1h",
+            "--interval",
+            "1s",
+            "--timeout",
+            "5s",
+        ],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert "Matched on source" in result.output or "matched" in result.output.lower()
+
+
+@pytest.mark.tmux
 def test_usage_command_renders_subscription_cost_line_for_subscription_user(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
