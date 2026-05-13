@@ -72,10 +72,10 @@ timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")
 # remain functional.
 #
 # window_seconds gives mngr_usage enough info to derive elapsed_percentage
-# (= 1 - seconds_until_reset / window_seconds) without baking window-class
-# knowledge into the reader. Overage has no fixed window length so it's
-# omitted; the reader treats missing window_seconds as "no derived
-# elapsed metrics for this window."
+# (= (1 - seconds_until_reset / window_seconds) * 100) without baking
+# window-class knowledge into the reader. Overage has no fixed window
+# length so it's omitted; the reader treats missing window_seconds as
+# "no derived elapsed metrics for this window."
 #
 # The `type == "object"` guard handles unexpected `rate_limits` shapes
 # (e.g. a string or array, if the statusline schema ever changes): the
