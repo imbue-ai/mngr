@@ -550,7 +550,9 @@ def _reject_group_options_when_subcommand_invoked(ctx: click.Context) -> None:
     "--since",
     default=None,
     help="Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose "
-    "last event is older are excluded from the rendered total. Default: from plugin config (24h).",
+    "last event is older are dropped from all per-session surfaces (sessions[], "
+    "current_session, session_count) and from the aggregate cost computed off them. "
+    "Default: from plugin config (24h).",
 )
 @add_agent_filter_options
 @optgroup.option(
