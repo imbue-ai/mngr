@@ -423,7 +423,7 @@ class _WaitRuntime:
     target_missing_since: float | None = None
 
 
-def is_api_error_event(event: dict) -> bool:
+def is_api_error_event(event: dict[str, Any]) -> bool:
     """Return True if the event is an assistant message Claude Code marked
     as an API error (e.g. rate limit, transient API failure).
 
