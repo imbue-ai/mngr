@@ -110,6 +110,7 @@ def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: Ou
         is_work_dirs=True,
         is_logs=True,
         is_build_cache=True,
+        is_orphaned_resources=True,
     )
 
     # Call the API
@@ -137,6 +138,10 @@ def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: Ou
         _emit_destroyed("log", log, output_opts.output_format, opts.dry_run)
     for cache in result.build_cache_destroyed:
         _emit_destroyed("build_cache", cache, output_opts.output_format, opts.dry_run)
+    for container in result.containers_destroyed:
+        _emit_destroyed("orphaned_container", container, output_opts.output_format, opts.dry_run)
+    for image in result.images_destroyed:
+        _emit_destroyed("orphaned_image", image, output_opts.output_format, opts.dry_run)
 
     # Emit final summary
     _emit_final_summary(result=result, output_format=output_opts.output_format, dry_run=opts.dry_run)
@@ -149,6 +154,7 @@ _RESOURCE_TYPE_MESSAGES: dict[str, str] = {
     "volumes": "Cleaning volumes...",
     "logs": "Cleaning logs...",
     "build_cache": "Cleaning build cache...",
+    "orphaned_resources": "Cleaning orphaned containers and images...",
 }
 
 
@@ -176,6 +182,11 @@ def _format_destroyed_message(resource_type: str, resource: Any, dry_run: bool) 
         return f"{action} log: {resource.path}"
     if resource_type == "build_cache":
         return f"{action} build cache: {resource.path}"
+    if resource_type == "orphaned_container":
+        return f"{action} orphaned container: {resource.container_name}"
+    if resource_type == "orphaned_image":
+        tag_label = resource.tags[0] if resource.tags else resource.image_id
+        return f"{action} orphaned image: {tag_label}"
     return f"{action} {resource_type}: {resource}"
 
 
@@ -219,6 +230,8 @@ def _emit_json_summary(result: GcResult, dry_run: bool) -> None:
         "volumes_destroyed": [v.model_dump(mode="json") for v in result.volumes_destroyed],
         "logs_destroyed": [log.model_dump(mode="json") for log in result.logs_destroyed],
         "build_cache_destroyed": [cache.model_dump(mode="json") for cache in result.build_cache_destroyed],
+        "containers_destroyed": [c.model_dump(mode="json") for c in result.containers_destroyed],
+        "images_destroyed": [img.model_dump(mode="json") for img in result.images_destroyed],
         "errors": result.errors,
         "dry_run": dry_run,
     }
@@ -274,6 +287,17 @@ def _emit_human_summary(result: GcResult, dry_run: bool) -> None:
         )
         total_count += len(result.build_cache_destroyed)
 
+    if result.containers_destroyed:
+        write_human_line("\nOrphaned containers: {}", len(result.containers_destroyed))
+        total_count += len(result.containers_destroyed)
+
+    if result.images_destroyed:
+        images_size_bytes = sum(img.size_bytes for img in result.images_destroyed)
+        write_human_line(
+            "\nOrphaned images: {} (freed {})", len(result.images_destroyed), format_size(images_size_bytes)
+        )
+        total_count += len(result.images_destroyed)
+
     if total_count == 0:
         write_human_line("\nNo resources found to destroy")
     else:
@@ -293,8 +317,14 @@ def _emit_jsonl_summary(result: GcResult, dry_run: bool) -> None:
     volumes_size_bytes = sum(v.size_bytes for v in result.volumes_destroyed)
     logs_size_bytes = sum(log.size_bytes for log in result.logs_destroyed)
     build_cache_size_bytes = sum(cache.size_bytes for cache in result.build_cache_destroyed)
+    images_size_bytes = sum(img.size_bytes for img in result.images_destroyed)
     total_size_bytes = (
-        work_dirs_size_bytes + snapshots_size_bytes + volumes_size_bytes + logs_size_bytes + build_cache_size_bytes
+        work_dirs_size_bytes
+        + snapshots_size_bytes
+        + volumes_size_bytes
+        + logs_size_bytes
+        + build_cache_size_bytes
+        + images_size_bytes
     )
     total_count = (
         len(result.work_dirs_destroyed)
@@ -304,6 +334,8 @@ def _emit_jsonl_summary(result: GcResult, dry_run: bool) -> None:
         + len(result.volumes_destroyed)
         + len(result.logs_destroyed)
         + len(result.build_cache_destroyed)
+        + len(result.containers_destroyed)
+        + len(result.images_destroyed)
     )
 
     event = {
@@ -317,6 +349,8 @@ def _emit_jsonl_summary(result: GcResult, dry_run: bool) -> None:
         "volumes_count": len(result.volumes_destroyed),
         "logs_count": len(result.logs_destroyed),
         "build_cache_count": len(result.build_cache_destroyed),
+        "containers_count": len(result.containers_destroyed),
+        "images_count": len(result.images_destroyed),
         "errors_count": len(result.errors),
         "errors": result.errors,
         "dry_run": dry_run,

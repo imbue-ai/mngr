@@ -431,6 +431,30 @@ class BuildCacheInfo(FrozenModel):
     created_at: datetime = Field(description="When the cache entry was created")
 
 
+class OrphanedContainerInfo(FrozenModel):
+    """Information about an orphaned provider container that no longer matches any mngr host."""
+
+    container_id: str = Field(description="Provider-assigned container identifier")
+    container_name: str = Field(description="Container name as known to the provider")
+    host_id: HostId | None = Field(
+        default=None,
+        description="Host identifier parsed from container labels, or None if the container had no host label",
+    )
+    provider_name: ProviderInstanceName = Field(description="Provider instance that owns the container")
+    created_at: datetime = Field(description="When the container was created")
+
+
+class OrphanedImageInfo(FrozenModel):
+    """Information about an orphaned provider image that no longer matches any mngr host."""
+
+    image_id: str = Field(description="Provider-assigned image identifier")
+    tags: tuple[str, ...] = Field(default_factory=tuple, description="All tags currently associated with the image")
+    host_id: HostId = Field(description="Host identifier encoded in the image tag")
+    provider_name: ProviderInstanceName = Field(description="Provider instance that owns the image")
+    created_at: datetime = Field(description="When the image was created")
+    size_bytes: SizeBytes = Field(default=SizeBytes(0), description="Size in bytes")
+
+
 class HostDetails(FrozenModel):
     """Full host information collected by connecting to the host.
 

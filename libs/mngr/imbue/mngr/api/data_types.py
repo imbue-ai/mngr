@@ -7,6 +7,8 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import BuildCacheInfo
 from imbue.mngr.interfaces.data_types import LogFileInfo
+from imbue.mngr.interfaces.data_types import OrphanedContainerInfo
+from imbue.mngr.interfaces.data_types import OrphanedImageInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.data_types import WorkDirInfo
@@ -60,6 +62,10 @@ class GcResourceTypes(FrozenModel):
     is_work_dirs: bool = Field(default=False, description="Clean orphaned work directories")
     is_logs: bool = Field(default=False, description="Clean old log files")
     is_build_cache: bool = Field(default=False, description="Clean build cache entries")
+    is_orphaned_resources: bool = Field(
+        default=False,
+        description="Clean provider containers and images that no longer correspond to any mngr host",
+    )
 
 
 class GcResult(MutableModel):
@@ -103,6 +109,14 @@ class GcResult(MutableModel):
     build_cache_destroyed: list[BuildCacheInfo] = Field(
         default_factory=list,
         description="Build cache entries that were destroyed",
+    )
+    containers_destroyed: list[OrphanedContainerInfo] = Field(
+        default_factory=list,
+        description="Provider containers that were removed because they no longer corresponded to any mngr host",
+    )
+    images_destroyed: list[OrphanedImageInfo] = Field(
+        default_factory=list,
+        description="Provider images that were removed because they no longer corresponded to any mngr host",
     )
     errors: list[str] = Field(
         default_factory=list,

@@ -3,6 +3,7 @@ import os
 import tempfile
 from contextlib import contextmanager
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from functools import cached_property
 from pathlib import Path
@@ -43,7 +44,10 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
+from imbue.mngr.interfaces.data_types import OrphanedContainerInfo
+from imbue.mngr.interfaces.data_types import OrphanedImageInfo
 from imbue.mngr.interfaces.data_types import PyinfraConnector
+from imbue.mngr.interfaces.data_types import SizeBytes
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeFileType
@@ -125,6 +129,11 @@ HOST_VOLUME_MOUNT_PATH: Final[str] = STATE_VOLUME_MOUNT_PATH
 CONTAINER_SSH_PORT: Final[int] = 22
 SSH_CONNECT_TIMEOUT: Final[float] = 60
 
+# Prefix used when tagging the per-host build image. Tags look like
+# ``mngr-build-host-<uuid>:latest``; the ``host-<uuid>`` portion is the
+# string form of the HostId, which lets orphan GC map images back to hosts.
+BUILD_IMAGE_TAG_PREFIX: Final[str] = "mngr-build-"
+
 
 def build_container_labels(
     host_id: HostId,
@@ -161,6 +170,38 @@ def parse_container_labels(
         user_tags = {}
 
     return host_id, host_name, provider_name, user_tags
+
+
+def parse_build_image_host_id(tag: str) -> HostId | None:
+    """Extract the HostId encoded in an mngr build image tag.
+
+    Build image tags have the form ``mngr-build-host-<uuid>[:tag]``. The
+    ``host-<uuid>`` portion is the string form of the HostId. Returns
+    ``None`` for any tag that doesn't follow this convention (snapshots,
+    user-supplied images, etc.).
+    """
+    repo = tag.split(":", 1)[0]
+    if not repo.startswith(BUILD_IMAGE_TAG_PREFIX):
+        return None
+    remainder = repo[len(BUILD_IMAGE_TAG_PREFIX) :]
+    if not remainder.startswith("host-"):
+        return None
+    return HostId(remainder)
+
+
+def _parse_docker_timestamp(value: str | None) -> datetime | None:
+    """Parse a Docker-formatted ISO timestamp ("...Z" or with offset) into a UTC datetime."""
+    if not value:
+        return None
+    # Docker often emits trailing-Z timestamps that fromisoformat() rejects on Python <3.11.
+    normalized = value.replace("Z", "+00:00") if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _get_ssh_host_from_docker_config(docker_host_url: str) -> str:
@@ -933,11 +974,11 @@ kill -TERM 1
         try:
             if build_args:
                 # Build image from user-provided build args / Dockerfile
-                build_tag = f"mngr-build-{host_id}"
+                build_tag = f"{BUILD_IMAGE_TAG_PREFIX}{host_id}"
                 image_name = self._build_image(build_args, build_tag)
             elif is_using_default:
                 # Build from the mngr default Dockerfile so packages are pre-installed
-                build_tag = f"mngr-build-{host_id}"
+                build_tag = f"{BUILD_IMAGE_TAG_PREFIX}{host_id}"
                 image_name = self._build_default_image(build_tag)
             else:
                 # User specified an image (via --image or config default_image); pull it
@@ -1847,6 +1888,143 @@ kill -TERM 1
     # =========================================================================
     # Lifecycle Methods
     # =========================================================================
+
+    def gc_orphaned_resources(
+        self,
+        known_host_ids: set[HostId],
+        dry_run: bool,
+    ) -> tuple[list[OrphanedContainerInfo], list[OrphanedImageInfo]]:
+        """Reap mngr-* containers and ``mngr-build-host-*`` images that no longer
+        belong to a known host.
+
+        Reuses ``get_min_online_host_age_seconds()`` as the grace window
+        intentionally: a container/image younger than that has either just
+        been created by a real ``create_host`` flow that hasn't written its
+        host record yet, or by a flow that ``gc_machines`` would have refused
+        to touch for the same reason. Sharing the knob keeps both gates moving
+        together.
+        """
+        try:
+            client = self._docker_client
+        except ProviderUnavailableError as e:
+            logger.debug("Skipped orphan Docker GC for {} (daemon unavailable): {}", self.name, e)
+            return [], []
+
+        known_host_id_strs = {str(h) for h in known_host_ids}
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.get_min_online_host_age_seconds())
+        prefix = self.mngr_ctx.config.prefix
+
+        orphan_containers: list[OrphanedContainerInfo] = []
+        orphan_images: list[OrphanedImageInfo] = []
+
+        # We intentionally do NOT reuse ``_list_containers``: that helper
+        # filters strictly by ``LABEL_PROVIDER``, but interrupted creates can
+        # leave behind containers with the mngr name prefix and *no* provider
+        # label. We want to reap those too, so we list everything and filter
+        # inline (provider-label match OR label-less debris under our prefix).
+        try:
+            all_containers = client.containers.list(all=True)
+        except docker.errors.DockerException as e:
+            logger.warning("Cannot list Docker containers for orphan GC ({}): {}", self.name, e)
+            all_containers = []
+
+        for container in all_containers:
+            name = container.name or ""
+            if not name.startswith(prefix):
+                continue
+            labels = container.labels or {}
+            provider_label = labels.get(LABEL_PROVIDER)
+            # Only touch containers owned by this provider, or untagged debris
+            # whose name still uses our prefix (e.g. interrupted creates).
+            if provider_label is not None and provider_label != str(self.name):
+                continue
+
+            host_id_label = labels.get(LABEL_HOST_ID)
+            if host_id_label is not None and host_id_label in known_host_id_strs:
+                continue
+
+            created_at = _parse_docker_timestamp(container.attrs.get("Created"))
+            if created_at is not None and created_at > cutoff:
+                logger.trace(
+                    "Skipped orphan container {} ({}): created at {} (within grace window)",
+                    name,
+                    container.short_id,
+                    created_at,
+                )
+                continue
+
+            host_id_value = HostId(host_id_label) if host_id_label else None
+            info = OrphanedContainerInfo(
+                container_id=str(container.id),
+                container_name=name,
+                host_id=host_id_value,
+                provider_name=self.name,
+                created_at=created_at if created_at is not None else datetime.now(timezone.utc),
+            )
+            if not dry_run:
+                # ``force=True`` SIGKILLs running containers without firing the
+                # normal ``on_before_host_destroy`` / ``emit_host_destroyed``
+                # hooks. That's intentional here: there is no live host record
+                # for these containers, so nothing meaningful would receive the
+                # event anyway.
+                try:
+                    container.remove(force=True)
+                except docker.errors.DockerException as e:
+                    logger.warning("Failed to remove orphan container {} ({}): {}", name, container.short_id, e)
+                    continue
+                if host_id_value is not None:
+                    self._container_cache_by_id.pop(host_id_value, None)
+                logger.info("Removed orphan Docker container: {} ({})", name, container.short_id)
+            orphan_containers.append(info)
+
+        try:
+            all_images = client.images.list()
+        except docker.errors.DockerException as e:
+            logger.warning("Cannot list Docker images for orphan GC ({}): {}", self.name, e)
+            all_images = []
+
+        for image in all_images:
+            tags = tuple(image.tags or ())
+            host_id_for_image: HostId | None = None
+            for tag in tags:
+                parsed = parse_build_image_host_id(tag)
+                if parsed is not None:
+                    host_id_for_image = parsed
+                    break
+            if host_id_for_image is None:
+                continue
+            if str(host_id_for_image) in known_host_id_strs:
+                continue
+
+            created_at = _parse_docker_timestamp(image.attrs.get("Created"))
+            if created_at is not None and created_at > cutoff:
+                logger.trace(
+                    "Skipped orphan image {} ({}): created at {} (within grace window)",
+                    tags,
+                    image.short_id,
+                    created_at,
+                )
+                continue
+
+            size = SizeBytes(int(image.attrs.get("Size", 0) or 0))
+            info_image = OrphanedImageInfo(
+                image_id=str(image.id),
+                tags=tags,
+                host_id=host_id_for_image,
+                provider_name=self.name,
+                created_at=created_at if created_at is not None else datetime.now(timezone.utc),
+                size_bytes=size,
+            )
+            if not dry_run:
+                try:
+                    client.images.remove(image.id, force=True)
+                except docker.errors.DockerException as e:
+                    logger.warning("Failed to remove orphan image {} ({}): {}", tags, image.short_id, e)
+                    continue
+                logger.info("Removed orphan Docker image: {} ({})", tags, image.short_id)
+            orphan_images.append(info_image)
+
+        return orphan_containers, orphan_images
 
     def close(self) -> None:
         """Clean up the Docker client connection."""
