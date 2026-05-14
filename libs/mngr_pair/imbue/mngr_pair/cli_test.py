@@ -17,14 +17,17 @@ def test_pair_cli_options_has_all_fields() -> None:
     """Test that PairCliOptions has all required fields."""
     assert hasattr(PairCliOptions, "__annotations__")
     annotations = PairCliOptions.__annotations__
+    assert "source_pos" in annotations
     assert "source" in annotations
-    assert "source_agent" in annotations
-    assert "source_host" in annotations
     assert "sync_direction" in annotations
     assert "conflict" in annotations
     assert "exclude" in annotations
     assert "require_git" in annotations
     assert "uncommitted_changes" in annotations
+    # The granular source flags have been replaced by the single HostedLocation source.
+    assert "source_agent" not in annotations
+    assert "source_host" not in annotations
+    assert "source_path" not in annotations
 
 
 def test_pair_command_is_registered() -> None:
@@ -38,14 +41,16 @@ def test_pair_command_help_shows_options() -> None:
     runner = CliRunner()
     result = runner.invoke(pair, ["--help"])
     assert result.exit_code == 0
-    assert "--source" in result.output or "-s" in result.output
-    assert "--source-agent" in result.output
-    assert "--source-host" in result.output
+    assert "--source" in result.output
     assert "--sync-direction" in result.output
     assert "--conflict" in result.output
     assert "--exclude" in result.output
     assert "--require-git" in result.output or "--no-require-git" in result.output
     assert "--uncommitted-changes" in result.output
+    # The granular source flags have been replaced by the single HostedLocation source.
+    assert "--source-agent" not in result.output
+    assert "--source-host" not in result.output
+    assert "--source-path" not in result.output
 
 
 def test_pair_sync_direction_choices() -> None:

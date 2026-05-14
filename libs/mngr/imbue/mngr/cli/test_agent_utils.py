@@ -94,7 +94,6 @@ def test_find_agent_for_command_with_stopped_agent_and_skip_agent_state_check(
     result = find_agent_for_command(
         mngr_ctx=temp_mngr_ctx,
         address=AgentAddress(agent=AgentName(agent_name)),
-        host_filter=None,
         is_start_desired=True,
         skip_agent_state_check=True,
     )
@@ -130,5 +129,4 @@ def test_find_agent_for_command_raises_for_stopped_agent_without_skip(
         find_agent_for_command(
             mngr_ctx=temp_mngr_ctx,
             address=AgentAddress(agent=AgentName(agent_name)),
-            host_filter=None,
         )

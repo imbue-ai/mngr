@@ -37,9 +37,6 @@ mngr pair [OPTIONS] SOURCE
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--source` | hosted_location | Source specification: AGENT[@HOST[.PROVIDER]][:PATH] | None |
-| `--source-agent` | agent_address | Source agent address (NAME[@HOST[.PROVIDER]]) | None |
-| `--source-host` | host_address | Source host address (HOST[.PROVIDER]) | None |
-| `--source-path` | text | Path within the agent's work directory | None |
 
 ## Target
 
@@ -117,14 +114,14 @@ $ mngr pair my-agent --sync-direction=forward
 $ mngr pair my-agent --conflict=source
 ```
 
-**Filter to specific host**
+**Pair an agent on a specific host**
 
 ```bash
-$ mngr pair my-agent --source-host localhost
+$ mngr pair my-agent@localhost
 ```
 
-**Use --source-agent flag**
+**Pair a subdirectory of the agent**
 
 ```bash
-$ mngr pair --source-agent my-agent --target ./local-copy
+$ mngr pair my-agent:subdir
 ```

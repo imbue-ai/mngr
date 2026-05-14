@@ -643,9 +643,6 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
     "pair": frozenset(
         {
             "--require-git",
-            "--source-agent",
-            "--source-host",
-            "--source-path",
             "--uncommitted-changes",
         }
     ),

@@ -6,17 +6,16 @@ from click.testing import CliRunner
 from imbue.mngr_pair.cli import pair
 
 
-def test_pair_source_and_source_agent_conflict(
+def test_pair_positional_and_named_source_conflict(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that providing both --source and --source-agent shows error."""
+    """Providing different values for SOURCE and --source is an error."""
     result = cli_runner.invoke(
         pair,
-        ["agent-name", "--source", "/some/path", "--source-agent", "other-agent"],
+        ["agent-name", "--source", "other-agent"],
         obj=plugin_manager,
     )
-    # Should fail because you can't provide both
     assert result.exit_code != 0
     assert "cannot" in result.output.lower() or "error" in result.output.lower()
 
@@ -25,7 +24,7 @@ def test_pair_source_as_path_raises_error(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that using --source with a path correctly requires the path to exist."""
+    """Using --source with a path correctly requires the path to exist."""
     result = cli_runner.invoke(
         pair,
         ["agent-name", "--source", "/nonexistent/path/12345"],
@@ -39,7 +38,7 @@ def test_pair_nonexistent_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that pairing with nonexistent agent shows appropriate error."""
+    """Pairing with a nonexistent agent shows an appropriate error."""
     result = cli_runner.invoke(
         pair,
         ["nonexistent-agent-12345"],
@@ -49,47 +48,43 @@ def test_pair_nonexistent_agent(
     assert result.exit_code != 0
 
 
-def test_pair_source_host_nonexistent_host(
+def test_pair_nonexistent_agent_on_specific_host(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that --source-host with nonexistent host shows appropriate error."""
+    """`AGENT@HOST` syntax pins the host and fails with a nonexistent agent."""
     result = cli_runner.invoke(
         pair,
-        ["some-agent", "--source-host", "nonexistent-host-12345"],
-        obj=plugin_manager,
-    )
-    # Should fail because host doesn't exist
-    assert result.exit_code != 0
-    assert "no host found" in result.output.lower() or "error" in result.output.lower()
-
-
-def test_pair_source_host_with_local_host(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that --source-host with 'localhost' (local host) works for filtering."""
-    result = cli_runner.invoke(
-        pair,
-        ["nonexistent-agent", "--source-host", "localhost"],
-        obj=plugin_manager,
-    )
-    # Should fail because the agent doesn't exist on the local host
-    # But NOT because the host doesn't exist
-    assert result.exit_code != 0
-    # The error should be about the agent, not the host
-    assert "no agent found" in result.output.lower() or "error" in result.output.lower()
-
-
-def test_pair_source_host_agent_not_on_specified_host(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that --source-host shows error when agent doesn't exist on that host."""
-    result = cli_runner.invoke(
-        pair,
-        ["some-agent", "--source-host", "localhost"],
+        ["some-agent@localhost"],
         obj=plugin_manager,
     )
     # Should fail because agent doesn't exist on the specified host
     assert result.exit_code != 0
+
+
+def test_pair_host_only_source_is_rejected(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`@HOST` (no agent) is incomplete and must be rejected with a clear message."""
+    result = cli_runner.invoke(
+        pair,
+        ["@localhost"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code != 0
+    assert "agent" in result.output.lower()
+
+
+def test_pair_host_with_path_but_no_agent_is_rejected(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`@HOST:PATH` (no agent) is rejected: pair syncs through an agent."""
+    result = cli_runner.invoke(
+        pair,
+        ["@localhost:/tmp"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code != 0
+    assert "agent" in result.output.lower()

@@ -151,7 +151,6 @@ def provision(ctx: click.Context, **kwargs: Any) -> None:
     result = find_agent_for_command(
         mngr_ctx=mngr_ctx,
         address=address,
-        host_filter=None,
         is_start_desired=True,
         skip_agent_state_check=True,
     )

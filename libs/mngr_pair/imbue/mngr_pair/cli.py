@@ -5,9 +5,7 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import HOSTED_LOCATION
-from imbue.mngr.cli.address_params import HOST_ADDRESS
 from imbue.mngr.cli.agent_utils import find_agent_for_command
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -22,7 +20,6 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import ConflictMode
-from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostedLocation
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import SyncDirection
@@ -36,9 +33,6 @@ class PairCliOptions(CommonCliOptions):
 
     source_pos: HostedLocation | None
     source: HostedLocation | None
-    source_agent: AgentAddress | None
-    source_host: HostAddress | None
-    source_path: str | None
     target: str | None
     require_git: bool
     sync_direction: str
@@ -88,9 +82,6 @@ def _emit_pair_stopped(output_opts: OutputOptions) -> None:
     type=HOSTED_LOCATION,
     help="Source specification: AGENT[@HOST[.PROVIDER]][:PATH]",
 )
-@optgroup.option("--source-agent", type=AGENT_ADDRESS, help="Source agent address (NAME[@HOST[.PROVIDER]])")
-@optgroup.option("--source-host", type=HOST_ADDRESS, help="Source host address (HOST[.PROVIDER])")
-@optgroup.option("--source-path", help="Path within the agent's work directory")
 @optgroup.group("Target")
 @optgroup.option(
     "--target",
@@ -147,24 +138,22 @@ def pair(ctx: click.Context, **kwargs) -> None:
     )
 
     # Merge positional and named arguments (named option takes precedence)
+    if opts.source is not None and opts.source_pos is not None and opts.source != opts.source_pos:
+        raise UserInputError("Cannot specify both SOURCE and --source with different values")
     effective_source_loc: HostedLocation | None = opts.source if opts.source is not None else opts.source_pos
 
-    # Build source agent address and sub-path
     source_address: AgentAddress | None = None
     source_subpath: Path | None = None
     if effective_source_loc is not None:
+        # Pair syncs through an agent, so a host without an agent is incomplete.
+        if effective_source_loc.agent is None and effective_source_loc.host is not None:
+            raise UserInputError(
+                "Source must include an agent name or ID; "
+                "specifying only a host (@HOST[:PATH]) is not supported for `mngr pair`"
+            )
         if effective_source_loc.agent is not None:
             source_address = AgentAddress(agent=effective_source_loc.agent, host=effective_source_loc.host)
         source_subpath = effective_source_loc.path
-    if opts.source_agent is not None:
-        if source_address is not None and source_address != opts.source_agent:
-            raise UserInputError("Cannot specify both --source and --source-agent with different values")
-        source_address = opts.source_agent
-    if opts.source_path is not None:
-        explicit_source_path = Path(opts.source_path)
-        if source_subpath is not None and source_subpath != explicit_source_path:
-            raise UserInputError("Cannot specify both a subpath in source and --source-path")
-        source_subpath = explicit_source_path
 
     # Determine target path
     if opts.target is not None:
@@ -178,7 +167,6 @@ def pair(ctx: click.Context, **kwargs) -> None:
     result = find_agent_for_command(
         mngr_ctx=mngr_ctx,
         address=source_address,
-        host_filter=opts.source_host,
     )
     if result is None:
         logger.info("No agent selected")
@@ -252,8 +240,8 @@ During rapid concurrent edits, changes will be debounced to avoid partial writes
         ("Pair to specific local directory", "mngr pair my-agent --target ./local-dir"),
         ("One-way sync (source to target)", "mngr pair my-agent --sync-direction=forward"),
         ("Prefer source on conflicts", "mngr pair my-agent --conflict=source"),
-        ("Filter to specific host", "mngr pair my-agent --source-host localhost"),
-        ("Use --source-agent flag", "mngr pair --source-agent my-agent --target ./local-copy"),
+        ("Pair an agent on a specific host", "mngr pair my-agent@localhost"),
+        ("Pair a subdirectory of the agent", "mngr pair my-agent:subdir"),
     ),
     see_also=(
         ("push", "Push files or git commits to an agent"),

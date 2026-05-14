@@ -74,7 +74,6 @@ def select_agent_interactively_with_host(
 def find_agent_for_command(
     mngr_ctx: MngrContext,
     address: AgentAddress | None,
-    host_filter: HostAddress | None,
     is_start_desired: bool = False,
     skip_agent_state_check: bool = False,
     agent_filter: Callable[[AgentDetails], bool] | None = None,
@@ -82,20 +81,11 @@ def find_agent_for_command(
 ) -> tuple[AgentInterface, OnlineHostInterface] | None:
     """Find an agent by address, or interactively if no address is given.
 
-    The optional ``host_filter`` is an additional :class:`HostAddress`
-    constraint applied on top of the address (e.g. from a ``--host`` flag).
-    It is merged into the address; if the address already pins a different
-    host, this raises :class:`UserInputError`.
-
     Returns ``(agent, host)``, or ``None`` if the user cancelled interactive
     selection. Raises :class:`UserInputError` if no address is given and the
     session is not interactive.
     """
     if address is not None:
-        if host_filter is not None:
-            if address.host is not None and address.host != host_filter:
-                raise UserInputError(f"Address host ({address.host}) conflicts with --host filter ({host_filter}).")
-            address = AgentAddress(agent=address.agent, host=host_filter)
         return find_one_agent(
             address,
             mngr_ctx,
