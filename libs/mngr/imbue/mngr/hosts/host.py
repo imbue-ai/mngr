@@ -1024,9 +1024,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 raise
             logger.warning(
                 "Agent {} has type '{}' which is no longer registered; "
-                "loading as orphan fallback so existing commands keep working.",
+                "loading with fallback class {} so existing commands keep working.",
                 data.get("name"),
                 agent_type,
+                orphan_class.__name__,
             )
             resolved_class = orphan_class
             resolved_config = AgentTypeConfig()
