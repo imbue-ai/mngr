@@ -25,12 +25,19 @@ def iter_user_prompts(
     Each line must be a JSON object of the form
     ``{"type": "user", "message": {"role": "user", "content": <string>}}``;
     any other shape (content blocks, control_request, malformed JSON, etc.)
-    raises :class:`InvalidStreamJsonInputError`.
+    raises :class:`InvalidStreamJsonInputError`. A non-empty positional
+    prompt is rejected in this mode because every user turn must come from
+    stdin as a JSON line; silently dropping it would hide a user error.
     """
     match input_format:
         case InputFormat.TEXT:
             yield _resolve_text_prompt(positional, stdin, is_stdin_a_tty)
         case InputFormat.STREAM_JSON:
+            if positional is not None and positional != "":
+                raise InvalidStreamJsonInputError(
+                    "a positional prompt cannot be combined with --input-format=stream-json; "
+                    "all user turns must be supplied as JSON lines on stdin"
+                )
             yield from _iter_stream_json_prompts(stdin)
 
 

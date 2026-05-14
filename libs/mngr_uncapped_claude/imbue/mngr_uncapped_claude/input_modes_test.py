@@ -95,3 +95,18 @@ def test_stream_json_top_level_array_rejected() -> None:
     stdin = io.StringIO("[]\n")
     with pytest.raises(InvalidStreamJsonInputError, match="JSON object"):
         _collect(iter_user_prompts(InputFormat.STREAM_JSON, None, stdin, is_stdin_a_tty=False))
+
+
+def test_stream_json_positional_prompt_rejected() -> None:
+    stdin = io.StringIO('{"type":"user","message":{"role":"user","content":"hi"}}\n')
+    with pytest.raises(InvalidStreamJsonInputError, match="positional prompt"):
+        _collect(iter_user_prompts(InputFormat.STREAM_JSON, "stray-positional", stdin, is_stdin_a_tty=False))
+
+
+def test_stream_json_empty_positional_allowed() -> None:
+    # The empty-string positional is the canonical "no positional" representation
+    # used elsewhere; it should be treated the same as None and not trigger the
+    # incompatible-combination guard.
+    stdin = io.StringIO('{"type":"user","message":{"role":"user","content":"hi"}}\n')
+    prompts = _collect(iter_user_prompts(InputFormat.STREAM_JSON, "", stdin, is_stdin_a_tty=False))
+    assert prompts == ["hi"]
