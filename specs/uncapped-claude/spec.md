@@ -21,7 +21,7 @@ You'll probably need to experiment a little bit with claude -p in order to see t
 * Uses internal Python APIs (`api_create`, `send_message_to_agents`, `read_event_content`); never shells out to `mngr`.
 * Spawns a regular `claude` agent type via `mngr create --no-connect --transfer none --message <first-prompt>` (auto-generated agent name with `uncapped-` prefix AND `created-by=uncapped-claude` label, local host, current cwd). For follow-up turns in stream-json input mode, uses `mngr message`. Each turn's reply is harvested from `mngr transcript --format jsonl`.
 * The agent is ephemeral: destroyed on exit (success, failure, or signal).
-* End-of-turn detection: `mngr_wait`'s `wait_for_state` polling for `state=WAITING`.
+* End-of-turn detection: inline polling of `agent.get_lifecycle_state()` waiting for `WAITING` (premature `STOPPED`/`DONE` returns `EXIT_CLAUDE_ERROR=1`).
 * Sets `mngr_claude`'s existing unattended config vars (`auto_dismiss_dialogs=True`, `auto_allow_permissions=True`, etc.) via `mngr create -S` settings overrides; no new permission semantics introduced. `sync_home_settings` stays at its default (`True`) so the spawned agent inherits `~/.claude/` (skills, plugins, MCP, hooks) — matches `claude -p` semantics.
 * Working directory: user's cwd, in-place; implies `--no-ensure-clean` so a dirty tree is OK.
 * `session_preserve_on_destroy` stays at its default (`True`); per-invocation session files remain on disk for debugging.
@@ -43,7 +43,7 @@ You'll probably need to experiment a little bit with claude -p in order to see t
 * Signals: SIGINT and SIGTERM are trapped; the agent is destroyed before the signal is re-raised so the shell sees the conventional `128+signum` exit code.
 * Exit code: 0 on a successful turn (transcript shows `assistant` reply, no `is_error` event); 1 on a claude/api error (transcript or stream-json result carries `is_error=true`); 2 on mngr-side failures (agent failed to start, transcript unreadable, invalid args, missing prompt, etc.).
 * Pre-flight: none. `mngr create` is responsible for its own failure modes (no claude binary, no auth, etc.); those surface as exit 2.
-* Plugin packaging: `libs/mngr_uncapped_claude/imbue/mngr_uncapped_claude/` mirroring `mngr_wait`'s layout. PyPI name `imbue-mngr-uncapped-claude`. Hard deps on `imbue-mngr`, `imbue-mngr-claude`, and `imbue-mngr-wait`.
+* Plugin packaging: `libs/mngr_uncapped_claude/imbue/mngr_uncapped_claude/` mirroring `mngr_wait`'s layout. PyPI name `imbue-mngr-uncapped-claude`. Hard deps on `imbue-mngr` and `imbue-mngr-claude`.
 * CLI surface: just `mngr uncapped-claude` (no alias). Standard `CommandHelpMetadata` entry so it shows up in `mngr --help` and `mngr ask`.
 
 ## Overview
@@ -80,7 +80,7 @@ You'll probably need to experiment a little bit with claude -p in order to see t
 ### Package layout
 
 - `libs/mngr_uncapped_claude/`
-  - `pyproject.toml` — pypi name `imbue-mngr-uncapped-claude`, entry point `mngr_uncapped_claude = "imbue.mngr_uncapped_claude.plugin"`, deps on `imbue-mngr`, `imbue-mngr-claude`, `imbue-mngr-wait`.
+  - `pyproject.toml` — pypi name `imbue-mngr-uncapped-claude`, entry point `mngr_uncapped_claude = "imbue.mngr_uncapped_claude.plugin"`, deps on `imbue-mngr` and `imbue-mngr-claude`.
   - `README.md` — short description plus a usage example.
   - `conftest.py` — empty (matches `mngr_wait`).
   - `imbue/mngr_uncapped_claude/`
@@ -91,12 +91,10 @@ You'll probably need to experiment a little bit with claude -p in order to see t
     - `input_modes.py` — pure helpers for reading the next user-turn prompt from text/stream-json sources.
     - `output_modes.py` — pure helpers that convert common-transcript events into text/json/stream-json output bytes.
     - `orchestrator.py` — the per-invocation lifecycle: create agent, deliver turns, harvest replies, emit output, destroy on exit.
-    - `data_types.py` — `UncappedClaudeOptions`, `RawClaudeArgs`, `InputFormat`/`OutputFormat` enums, `ResultEnvelope`.
-    - `primitives.py` — small typed wrappers (`SimulatedFlag`, `RejectedFlag`, etc.) if needed; otherwise omit.
+    - `data_types.py` — `ArgPartition`, `InputFormat`/`OutputFormat` enums, `ResultMeta`.
+    - `errors.py` — `UnsupportedClaudeFlagError`, `InvalidStreamJsonInputError`, `MissingPromptError`.
     - `test_ratchets.py` — copied from `mngr_wait` scaffold.
-    - `cli_test.py`, `arg_partition_test.py`, `input_modes_test.py`, `output_modes_test.py`, `orchestrator_test.py` — pure unit tests.
-    - `test_uncapped_claude.py` — integration test using the mock claude agent.
-    - `test_uncapped_claude_release.py` — `@pytest.mark.release` test against the real `claude` binary.
+    - `arg_partition_test.py`, `input_modes_test.py`, `output_modes_test.py`, `orchestrator_test.py` — pure unit tests.
 
 ### Key code paths and signatures
 
@@ -132,7 +130,7 @@ You'll probably need to experiment a little bit with claude -p in order to see t
     3. Build `CreateAgentOptions` for an `AgentTypeName("claude")` agent with: `agent_args = partition.pass_through_agent_args`; `initial_message = first_prompt`; settings overrides (see below); auto-generated name `uncapped-<coolname>` and label `created-by=uncapped-claude`; `target_path = Path.cwd()`; transfer mode `NONE`; `--no-connect` semantics (no connection options).
     4. Call `api_create(...)` and remember the returned agent.
     5. For each subsequent prompt (stream-json input mode only), call `send_message_to_agents(message_content=prompt, include_filters=(f"id == \"{agent_id}\"",), error_behavior=ABORT, ...)`. The first prompt is delivered via `initial_message` and skipped here.
-    6. After each prompt is delivered, call `wait_for_end_of_turn(agent_id, ...)` which uses `mngr_wait.wait_for_state(target_states=frozenset({AgentLifecycleState.WAITING.value}), interval_seconds=0.1, timeout_seconds=None)`. The transcript-tail polling happens in parallel: a background thread polls `read_event_content(target, "claude/common_transcript/events.jsonl")`, splits new lines, and pushes them through `output_modes.stream_output(...)`.
+    6. After each prompt is delivered, poll `agent.get_lifecycle_state()` every `_POLL_INTERVAL_SECONDS` until it reaches `WAITING` (or terminates as `STOPPED`/`DONE`, which is treated as a claude-side failure). Each poll iteration also drains new events from `read_event_content(target, "claude/common_transcript/events.jsonl")` and pushes them through `StreamingOutputWriter.emit_events(...)`.
     7. On stdin EOF (text mode: always after one turn; stream-json mode: after the iterator drains), finalize output with the result envelope, destroy the agent, and return 0/1.
     8. Map any `MngrError` / `UserInputError` / `BaseException` to the appropriate exit code in a top-level try/except.
   - `def destroy_run(run: UncappedRun, mngr_ctx: MngrContext) -> None` — best-effort destroy; logs and swallows errors so signal cleanup never raises.
@@ -162,7 +160,7 @@ You'll probably need to experiment a little bit with claude -p in order to see t
 ### Plugin discovery / registration
 
 - The plugin is loaded by mngr's existing plugin auto-discovery via the `mngr` pluggy hook namespace; no explicit enabling step required after `pip install`.
-- The `imbue-mngr-claude` and `imbue-mngr-wait` deps in `pyproject.toml` guarantee `mngr_claude` and `mngr_wait` are also resolvable; no runtime checks added.
+- The `imbue-mngr-claude` dep in `pyproject.toml` guarantees `mngr_claude` is also resolvable; no runtime checks added.
 
 ### Documentation
 
