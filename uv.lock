@@ -2102,7 +2102,6 @@ name = "imbue-mngr-uncapped-claude"
 version = "0.1.0"
 source = { editable = "libs/mngr_uncapped_claude" }
 dependencies = [
-    { name = "click-option-group" },
     { name = "imbue-mngr" },
     { name = "imbue-mngr-claude" },
     { name = "imbue-mngr-wait" },
@@ -2110,7 +2109,6 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "imbue-mngr-claude", editable = "libs/mngr_claude" },
     { name = "imbue-mngr-wait", editable = "libs/mngr_wait" },
