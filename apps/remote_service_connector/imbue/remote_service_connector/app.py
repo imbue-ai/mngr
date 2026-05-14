@@ -216,6 +216,14 @@ class TunnelComponentTooLongError(ValueError):
         super().__init__(f"{component_name} '{value}' exceeds maximum length of {max_length}")
 
 
+class InvalidHostNameError(ValueError):
+    """Raised when a host_name fails the SafeName regex on the lease request."""
+
+    def __init__(self, value: object) -> None:
+        self.value = value
+        super().__init__(f"host_name must be alphanumeric (with dashes/underscores allowed in the middle): {value!r}")
+
+
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
@@ -297,7 +305,7 @@ def _validate_host_name(value: str) -> str:
     """
     stripped = value.strip() if isinstance(value, str) else value
     if not isinstance(stripped, str) or not _HOST_NAME_RE.match(stripped):
-        raise ValueError(f"host_name must be alphanumeric (with dashes/underscores allowed in the middle): {value!r}")
+        raise InvalidHostNameError(value)
     return stripped
 
 
