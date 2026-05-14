@@ -385,7 +385,7 @@ jobs:
         run: uv sync --all-packages
 
       - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code@2.1.116
+        run: npm install -g @anthropic-ai/claude-code@2.1.141
 
       - name: Run Docker release tests
         run: PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 600 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and release'
@@ -423,7 +423,7 @@ jobs:
         run: brew install tmux unison
 
       - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code@2.1.116
+        run: npm install -g @anthropic-ai/claude-code@2.1.141
 
       - name: Configure Docker Hub mirror
         if: runner.os == 'Linux'
