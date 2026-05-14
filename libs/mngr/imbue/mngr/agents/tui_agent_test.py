@@ -53,11 +53,12 @@ class _PollingProbeAgent(InteractiveTuiAgent[AgentTypeConfig]):
 
     Overrides only the two methods the poll-based no-signal Enter path touches:
     ``_send_enter_keystroke`` (records the shell command instead of running it)
-    and ``_capture_pane_content`` (returns text containing the indicator unless
-    ``always_missing_indicator`` is set, which simulates a swallowed Enter).
+    and ``_capture_pane_content`` (returns text containing the cleared indicator
+    unless ``always_missing_indicator`` is set, which simulates a swallowed Enter).
     """
 
     TUI_READY_INDICATOR = "probe-banner"
+    TUI_INPUT_CLEARED_INDICATOR = "probe-cleared"
     captured_commands: list[str] = pydantic.Field(default_factory=list)
     pane_capture_count: int = pydantic.Field(default=0)
     always_missing_indicator: bool = pydantic.Field(default=False)
@@ -72,7 +73,13 @@ class _PollingProbeAgent(InteractiveTuiAgent[AgentTypeConfig]):
         self.pane_capture_count += 1
         if self.always_missing_indicator:
             return "user typed message but Enter was swallowed"
-        return "input row cleared -- probe-banner ready"
+        return "input row cleared -- probe-cleared visible"
+
+
+class _PollingProbeAgentNoClearedIndicator(_PollingProbeAgent):
+    """Variant with TUI_INPUT_CLEARED_INDICATOR=None: exercises the fire-and-forget fallback."""
+
+    TUI_INPUT_CLEARED_INDICATOR = None
 
 
 def _make_polling_probe(probe_class: type[_PollingProbeAgent]) -> _PollingProbeAgent:
@@ -85,7 +92,7 @@ def _make_polling_probe(probe_class: type[_PollingProbeAgent]) -> _PollingProbeA
 
 
 def test_send_enter_and_poll_for_input_ready_returns_when_indicator_appears() -> None:
-    """The poll-based no-signal path returns success when the ready indicator reappears."""
+    """When TUI_INPUT_CLEARED_INDICATOR is set and visible, the path returns on the first Enter."""
     agent = _make_polling_probe(_PollingProbeAgent)
     agent._send_enter_and_poll_for_input_ready("probe-target")
 
@@ -95,7 +102,7 @@ def test_send_enter_and_poll_for_input_ready_returns_when_indicator_appears() ->
 
 @pytest.mark.allow_warnings
 def test_send_enter_and_poll_for_input_ready_retries_when_indicator_missing() -> None:
-    """If the indicator never reappears, the Enter keystroke is retried before raising.
+    """If the cleared indicator never reappears, the Enter keystroke is retried before raising.
 
     Marked allow_warnings because the final timeout path intentionally logs a
     captured pane snapshot via logger.error before raising SendMessageError.
@@ -106,6 +113,15 @@ def test_send_enter_and_poll_for_input_ready_retries_when_indicator_missing() ->
     with pytest.raises(SendMessageError, match="Timeout waiting for TUI input prompt to clear"):
         agent._send_enter_and_poll_for_input_ready("probe-target")
     assert agent.captured_commands == ["tmux send-keys -t 'probe-target' Enter"] * 3
+
+
+def test_send_enter_and_poll_for_input_ready_falls_back_when_no_cleared_indicator() -> None:
+    """When TUI_INPUT_CLEARED_INDICATOR is None, the path sends a single Enter and does not poll."""
+    agent = _make_polling_probe(_PollingProbeAgentNoClearedIndicator)
+    agent._send_enter_and_poll_for_input_ready("probe-target")
+
+    assert agent.captured_commands == ["tmux send-keys -t 'probe-target' Enter"]
+    assert agent.pane_capture_count == 0
 
 
 # =========================================================================

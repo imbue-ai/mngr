@@ -31,12 +31,16 @@ class GeminiAgentConfig(AgentTypeConfig):
 class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig]):
     """Agent implementation for Google's Gemini CLI."""
 
-    # Substring that appears in the gemini TUI's input row once the prompt is
-    # fully rendered and ready to accept input. Discovered empirically by
-    # running `gemini` in a probe tmux session and capturing the pane. Also
-    # used by the no-submission-signal Enter path to detect when the input
-    # has cleared after submitting.
-    TUI_READY_INDICATOR = "Type your message"
+    # Stable banner string in gemini's header that persists for the lifetime
+    # of the session; polled at startup to confirm the TUI is rendered.
+    TUI_READY_INDICATOR = "Gemini CLI"
+
+    # Dynamic placeholder in gemini's input row: shown when the input is
+    # empty, hidden the moment text occupies the input, and reappears once
+    # Enter is consumed and the input clears. InteractiveTuiAgent's
+    # no-submission-signal Enter path polls this to detect successful
+    # submission and retry on swallowed keystrokes.
+    TUI_INPUT_CLEARED_INDICATOR = "Type your message"
 
     def get_expected_process_name(self) -> str:
         # `gemini` is a `#!/usr/bin/env node` script and (unlike `claude`) does
@@ -47,7 +51,7 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig]):
     def uses_submission_signal(self) -> bool:
         # Gemini's CLI has no equivalent of claude's UserPromptSubmit hook to
         # signal a tmux wait-for channel; InteractiveTuiAgent falls back to
-        # polling the TUI_READY_INDICATOR for input-prompt clear instead.
+        # polling TUI_INPUT_CLEARED_INDICATOR for the input row to clear.
         return False
 
 

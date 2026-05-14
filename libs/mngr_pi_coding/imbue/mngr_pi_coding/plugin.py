@@ -107,9 +107,13 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
     """Agent implementation for the pi coding agent with TUI handling."""
 
     # Pi displays "pi v" followed by the version in its startup banner; this
-    # substring also persists in scrollback so the post-Enter poll resolves
-    # immediately (pi has no submission hook, but the prior paste-visibility
-    # check already confirms the message landed).
+    # substring stays in the visible pane for the lifetime of the session,
+    # so it serves as the startup ready indicator. Pi has no reliable
+    # input-cleared indicator (no placeholder that disappears during typing),
+    # so TUI_INPUT_CLEARED_INDICATOR is left at the InteractiveTuiAgent
+    # default of None -- the no-submission-signal Enter path falls back to
+    # a single fire-and-forget keystroke. The earlier paste-visibility check
+    # is what gives us confidence the message landed.
     TUI_READY_INDICATOR = "pi v"
 
     def get_pi_config_dir(self) -> Path:

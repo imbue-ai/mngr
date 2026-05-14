@@ -45,7 +45,13 @@ def test_gemini_agent_subclasses_interactive_tui_agent() -> None:
 
 
 def test_gemini_agent_advertises_tui_ready_indicator() -> None:
-    assert "Type your message" in GeminiAgent.TUI_READY_INDICATOR
+    """Ready indicator is the stable header banner, not the dynamic placeholder."""
+    assert GeminiAgent.TUI_READY_INDICATOR == "Gemini CLI"
+
+
+def test_gemini_agent_advertises_input_cleared_indicator() -> None:
+    """Input-cleared indicator is the dynamic placeholder used for post-Enter confirmation."""
+    assert GeminiAgent.TUI_INPUT_CLEARED_INDICATOR == "Type your message"
 
 
 def test_gemini_agent_disables_submission_signal() -> None:

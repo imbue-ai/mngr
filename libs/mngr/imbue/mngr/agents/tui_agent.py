@@ -64,17 +64,31 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
     Owns the full TUI input pipeline: TUI-ready check on startup,
     paste-detection synchronisation on send, and dispatch between a
     hook-driven submission signal (claude) and a poll-based confirmation
-    (gemini, pi) after Enter is pressed.
+    (gemini) after Enter is pressed.
 
-    Subclasses set ``TUI_READY_INDICATOR`` to a stable substring that appears
-    in the pane once the TUI has finished initializing and is ready to accept
-    input. Interactive coding TUIs (Claude Code, Gemini CLI, pi) have complex
+    Two TUI indicators serve distinct purposes:
+
+    * ``TUI_READY_INDICATOR`` -- a *stable* substring that appears in the
+      pane once the TUI is rendered and ready to accept input. Polled at
+      startup by ``wait_for_ready_signal``. Any persistent banner string
+      works (e.g. the agent's name in the header).
+    * ``TUI_INPUT_CLEARED_INDICATOR`` -- an *optional, dynamic* substring
+      that **disappears** while the user's text is in the input row and
+      **reappears** once Enter is consumed and the input clears (typically
+      a placeholder string like "Type your message"). Polled after Enter
+      in the no-submission-signal path to confirm the submission landed
+      and retry on swallowed keystrokes. ``None`` (the default) disables
+      post-Enter confirmation -- the no-signal path then degrades to a
+      single fire-and-forget Enter.
+
+    Interactive coding TUIs (Claude Code, Gemini CLI, pi) have complex
     input handlers that can misinterpret Enter as a literal newline when it
     arrives too quickly after the message text, so we wait for the paste to
     render before submitting.
     """
 
     TUI_READY_INDICATOR: ClassVar[str]
+    TUI_INPUT_CLEARED_INDICATOR: ClassVar[str | None] = None
 
     enter_submission_timeout_seconds: float = Field(
         default=_DEFAULT_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS,
@@ -83,6 +97,15 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
 
     def get_tui_ready_indicator(self) -> str:
         return self.TUI_READY_INDICATOR
+
+    def get_tui_input_cleared_indicator(self) -> str | None:
+        """Return a substring that appears in the pane only when the input row is empty.
+
+        Used by the no-submission-signal Enter path to confirm submission
+        and retry on swallowed keystrokes. Return None to disable the poll
+        (the no-signal path then degrades to a single best-effort Enter).
+        """
+        return self.TUI_INPUT_CLEARED_INDICATOR
 
     def uses_submission_signal(self) -> bool:
         """Whether to wait for a tmux wait-for submission signal after pressing Enter.
@@ -230,47 +253,46 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
         )
 
     def _send_enter_and_poll_for_input_ready(self, tmux_target: str) -> None:
-        """Send Enter and poll for the TUI ready indicator to be visible.
+        """Send Enter and (optionally) poll for the input-cleared indicator.
 
         Used by agents that lack a UserPromptSubmit-style hook. The
         paste-visibility check in ``_send_message_with_paste_detection`` already
-        confirmed the message reached the input field, so this path mainly
-        guards against the Enter keystroke being swallowed.
+        confirmed the message reached the input field; this path mainly guards
+        against the Enter keystroke being swallowed.
 
-        ``get_tui_ready_indicator()`` plays two different roles depending on
-        the subclass, and either is sufficient for the poll to resolve:
+        When ``get_tui_input_cleared_indicator()`` returns a string, the path
+        is a true submission confirmation: the indicator (typically an input
+        placeholder like ``Type your message``) is hidden while the user's
+        text occupies the input row and reappears once Enter is consumed and
+        the input clears. Interactive TUIs occasionally swallow Enter on
+        fresh sessions when it arrives before the pasted text has been
+        absorbed -- we retry the keystroke up to
+        ``_SEND_ENTER_NO_SIGNAL_MAX_ATTEMPTS`` times before raising
+        SendMessageError.
 
-        * Gemini-style: the indicator is an input-row placeholder (e.g.
-          ``Type your message``) that is hidden while the user's text is
-          present in the input field and reappears once Enter is processed
-          and the input clears. The poll waits for it to reappear.
-        * Pi-style: the indicator is a persistent banner (e.g. ``pi v``)
-          that stays visible the entire time. The poll resolves immediately,
-          so the path is effectively fire-and-forget after Enter -- the
-          earlier paste-visibility check is what gave us confidence the
-          message landed.
-
-        Interactive TUIs occasionally swallow Enter on fresh sessions when it
-        arrives before the pasted text has been absorbed -- we retry the
-        keystroke up to ``_SEND_ENTER_NO_SIGNAL_MAX_ATTEMPTS`` times before
-        raising SendMessageError. The retry is only meaningful for the
-        gemini-style case where the indicator's visibility actually tracks
-        Enter being processed.
+        When ``get_tui_input_cleared_indicator()`` returns ``None`` (the
+        default), the path degrades to a single fire-and-forget Enter --
+        appropriate for agents whose TUI exposes no reliable input-cleared
+        signal; those agents accept best-effort submission.
         """
-        indicator = self.get_tui_ready_indicator()
+        cleared_indicator = self.get_tui_input_cleared_indicator()
+        if cleared_indicator is None:
+            self._send_enter_keystroke(tmux_target)
+            return
+
         for attempt in range(_SEND_ENTER_NO_SIGNAL_MAX_ATTEMPTS):
             self._send_enter_keystroke(tmux_target)
             if poll_until(
-                lambda: self._check_pane_contains(tmux_target, indicator),
+                lambda: self._check_pane_contains(tmux_target, cleared_indicator),
                 timeout=_SEND_ENTER_NO_SIGNAL_PER_ATTEMPT_TIMEOUT_SECONDS,
                 poll_interval=0.05,
             ):
                 logger.trace("Input prompt cleared after Enter attempt {}", attempt + 1)
                 return
             logger.debug(
-                "Enter attempt {} did not produce TUI ready indicator {!r}; retrying",
+                "Enter attempt {} did not produce TUI input-cleared indicator {!r}; retrying",
                 attempt + 1,
-                indicator,
+                cleared_indicator,
             )
 
         pane_content = self._capture_pane_content(tmux_target)
