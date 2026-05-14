@@ -10,7 +10,7 @@
 - Flag is local-only. Setting it for a non-local host raises a clear error before provisioning. `CLAUDE_CONFIG_DIR` must be set in the parent process env; mngr raises a clear error if it is not.
 - `ORIGINAL_CLAUDE_CONFIG_DIR` is not relevant in this mode and is not set on the agent. `CLAUDE_CONFIG_DIR` is also not explicitly set by mngr on the agent — the agent inherits the parent shell's value (which our pre-check guarantees is non-empty).
 - Hook scripts in `work_dir/.claude/settings.local.json` and background scripts under `$MNGR_AGENT_STATE_DIR/commands/` are unchanged. Those are per-worktree / per-agent state, not Claude config dir state, so the readiness/permissions/transcript machinery keeps working.
-- All config fields that are conceptually incompatible with shared-mode (sync, override, keychain conversion, auto-dismissal) raise a config-validation error if set to a non-default value while `use_env_config_dir=True`. This refuses to silently ignore user intent.
+- Other config fields that conceptually overlap with shared-mode behavior (the `sync_*` family, `override_settings_folder`, `settings_overrides`, `convert_macos_credentials`, `auto_dismiss_dialogs`) are simply ignored when `use_env_config_dir=True`. No validation error is raised. The user takes responsibility for the combinations they pick.
 
 ## Expected Behavior
 
@@ -29,12 +29,8 @@
 - macOS keychain provisioning and cleanup are skipped: Claude Code's keychain label hash uses the shared `CLAUDE_CONFIG_DIR`, which already matches the user's normal `claude` invocations, so no per-agent label exists to populate or delete.
 - Trust handling is delegated to the user. mngr does not call `add_claude_trust_for_path`, `auto_dismiss_claude_dialogs`, `acknowledge_cost_threshold`, `dismiss_effort_callout`, `complete_onboarding`, `accept_bypass_permissions`, or `remove_claude_trust_for_path`. If the user has not pre-trusted the work_dir or pre-dismissed onboarding, Claude's TUI will block at startup; this is documented as the user's responsibility.
 - The "custom API key" approval dialog (`approve_api_key_for_claude`) is **not** called in shared mode (it writes per-agent .claude.json data we no longer produce). If `ANTHROPIC_API_KEY` is supplied via `--env`/`--pass-env`/host env and does not match the user's `primaryApiKey` or `customApiKeyResponses.approved` list in `~/.claude.json`, Claude will challenge in the TUI and deadlock `wait_for_ready_signal`. This is flagged in **Open Questions** below; the spec recommends a preflight warning but no automatic fix.
-- Configuration validation errors fire *at config-load time* (Pydantic model validator), not deep inside provisioning, so users see the conflict before host creation:
-  - `sync_home_settings=False`, `sync_claude_json=False`, `sync_repo_settings=False`, `sync_claude_credentials=False`, `symlink_user_resources=False`, `convert_macos_credentials=False`, `sync_credentials_on_login=False`, `auto_dismiss_dialogs=True`, `override_settings_folder is not None`, `settings_overrides != {}` — any non-default raises `UserInputError` when paired with `use_env_config_dir=True`.
-  - `auto_allow_permissions` is **allowed** in shared mode (writes only to `work_dir/.claude/settings.local.json`, which is per-worktree and gitignored).
-  - `preserve_sessions_on_destroy` is **allowed** in shared mode (writes only to local `host_dir`).
-  - `check_installation` and `version` are **allowed** unchanged.
-- The host-must-be-local check fires in `on_before_provisioning` (after host is online, before provisioning work). Error message names the flag and tells the user it is local-only.
+- Other config fields are silently ignored when they no longer apply (the `sync_*` family, `override_settings_folder`, `settings_overrides`, `convert_macos_credentials`, `auto_dismiss_dialogs`). `auto_allow_permissions`, `preserve_sessions_on_destroy`, `check_installation`, and `version` continue to work as today since they don't touch the user's config dir.
+- The only hard-error checks are: host-must-be-local (fires in `on_before_provisioning`, message names the flag) and `$CLAUDE_CONFIG_DIR` must be non-empty in the parent process env.
 - `claude_config.get_claude_config_dir()` (the standalone function) is unchanged: still reads `CLAUDE_CONFIG_DIR` or falls back to `~/.claude` (per decision 1b).
 - `ClaudeAgent.get_claude_config_dir()` (the instance method) checks the flag: when `True`, it returns the value of `CLAUDE_CONFIG_DIR` (raising a clear error if unset); when `False`, returns the per-agent path as today.
 - `claude_config.get_user_claude_config_dir()` and `find_user_claude_config()` are unchanged. They are not called from shared-mode code paths (callers either branch on the flag or only run in the default mode).
@@ -56,7 +52,7 @@ Packaged as a single PR. Branch: `mngr/single-claude-data-dir`.
 
 ### `libs/mngr_claude/imbue/mngr_claude/plugin.py`
 
-#### `ClaudeAgentConfig` (new field + validator)
+#### `ClaudeAgentConfig` (new field)
 
 - Add field:
   ```python
@@ -70,9 +66,7 @@ Packaged as a single PR. Branch: `mngr/single-claude-data-dir`.
       ),
   )
   ```
-- Add a `@model_validator(mode="after")` that raises `UserInputError` if `use_env_config_dir=True` is combined with any of: `sync_home_settings=False`, `sync_claude_json=False`, `sync_repo_settings=False`, `sync_claude_credentials=False`, `symlink_user_resources=False`, `convert_macos_credentials=False`, `sync_credentials_on_login=False`, `auto_dismiss_dialogs=True`, `override_settings_folder is not None`, or non-empty `settings_overrides`. Error names every conflicting field in one message.
-
-Note: the conflicting fields above include `False` values for fields that *default to True* because, in shared mode, those toggles have no effect — explicitly setting them indicates the user expects behavior that shared mode cannot provide. The validator's message documents this.
+- No model validator. Other `sync_*` / `override_*` / `settings_overrides` / `auto_dismiss_dialogs` fields are silently ignored at provisioning time when `use_env_config_dir=True` (because the code paths that read them are skipped). Documenting this in the field's description is sufficient.
 
 #### `ClaudeAgent.get_claude_config_dir`
 
@@ -121,7 +115,7 @@ Note: the conflicting fields above include `False` values for fields that *defau
 ### `libs/mngr_claude/imbue/mngr_claude/headless_claude_agent.py`, `code_guardian_agent.py`, `fixme_fairy_agent.py`, `skill_agent.py`
 
 - No code change. They inherit `ClaudeAgentConfig`'s new field and `ClaudeAgent`'s updated `provision`/`get_claude_config_dir`/`modify_env_vars` automatically.
-- One caveat: `HeadlessClaudeAgent` runs `claude -p ...` non-interactively; the same rules apply (user must have pre-trusted + pre-dismissed dialogs). The default `auto_dismiss_dialogs=True` that headless mode typically wants is now mutually exclusive with the new flag — the validator will refuse the combination, which is the right outcome.
+- One caveat: `HeadlessClaudeAgent` runs `claude -p ...` non-interactively; the same rules apply (user must have pre-trusted + pre-dismissed dialogs). `auto_dismiss_dialogs=True` is silently ignored in shared mode, so headless + shared-mode users must ensure dialogs are already dismissed in `~/.claude.json` themselves.
 
 ### Tests
 
@@ -129,8 +123,6 @@ Note: the conflicting fields above include `False` values for fields that *defau
   - `test_resolve_shared_claude_config_dir_returns_env_value` — set `CLAUDE_CONFIG_DIR`, assert the helper returns its `Path`.
   - `test_resolve_shared_claude_config_dir_raises_when_unset` — unset env, assert `UserInputError`.
 - New unit tests in `libs/mngr_claude/imbue/mngr_claude/plugin_test.py`:
-  - `test_claude_agent_config_rejects_use_env_config_dir_with_conflicting_fields` — parametrized over each conflicting field, asserts `UserInputError` (or pydantic `ValidationError` if we use a `@model_validator`).
-  - `test_claude_agent_config_allows_use_env_config_dir_with_compatible_fields` — `use_env_config_dir=True, auto_allow_permissions=True, preserve_sessions_on_destroy=True, version="2.1.50"` validates successfully.
   - `test_claude_agent_get_claude_config_dir_uses_env_in_shared_mode` — instantiate agent with flag on, monkeypatch env, assert `get_claude_config_dir()` returns the env value.
   - `test_claude_agent_modify_env_vars_omits_claude_config_dir_in_shared_mode` — assert `CLAUDE_CONFIG_DIR` and `ORIGINAL_CLAUDE_CONFIG_DIR` are not in the resulting dict; `MNGR_EMIT_COMMON_TRANSCRIPT` still present when configured.
 - New integration test (offload-only, `test_*.py` style) in `libs/mngr_claude/imbue/mngr_claude/test_shared_config_dir.py`:
@@ -151,9 +143,8 @@ Phase order is chosen so each phase ends in a working, releasable state.
 ### Phase 1 — Config plumbing only
 
 - Add the `use_env_config_dir` field on `ClaudeAgentConfig`.
-- Add the model validator that rejects conflicting field combinations.
 - Add `resolve_shared_claude_config_dir` in `claude_config.py`.
-- All unit tests for the field, validator, and helper.
+- Unit tests for the field default and the helper.
 - No behavior change yet — agents with the flag set don't yet provision differently. (Will fail at runtime because we haven't updated provision/modify_env_vars/get_claude_config_dir; this is internal-only and won't ship a release boundary until Phase 2.)
 
 ### Phase 2 — Wire flag into agent runtime
@@ -175,7 +166,6 @@ Phase order is chosen so each phase ends in a working, releasable state.
 
 ### Unit tests (run via `just test-quick libs/mngr_claude`)
 
-- Cover every validation path on `ClaudeAgentConfig`: the matrix of `use_env_config_dir=True` × each conflicting field, both at-default and non-default, asserting accept/reject.
 - Cover `resolve_shared_claude_config_dir`: set / unset / empty-string env var.
 - Cover `ClaudeAgent.get_claude_config_dir` and `modify_env_vars` directly with a minimally-constructed agent (use existing `temp_mngr_ctx` / `temp_host_dir` fixtures from `libs/mngr/imbue/mngr/utils/testing.py`).
 
@@ -198,7 +188,6 @@ Phase order is chosen so each phase ends in a working, releasable state.
 ### Ratchets
 
 - No new ratchet rules needed. The existing `PREVENT_HARDCODED_CLAUDE_DIR` ratchet keeps callers off of `Path.home() / ".claude"`.
-- The validator-rejected combinations are *runtime* checks, not regex ratchets, because they depend on field values not source text.
 
 ## Open Questions
 
@@ -210,6 +199,6 @@ These are flagged for the user to decide before or during implementation; the sp
 
 - **Plugin-level default**: Currently the flag lives on `ClaudeAgentConfig` (per decision 1a) — to opt all claude agent types into shared mode, the user must set it on each type. Should we *also* expose this as a plugin-level config in mngr's TOML (`[plugin.mngr_claude]`) that becomes the field's default? Out of scope for v1; raise later if a real workflow demands it.
 
-- **`HeadlessClaudeAgentConfig.auto_dismiss_dialogs` default**: Headless mode currently typically wants `auto_dismiss_dialogs=True`. The new validator will refuse `use_env_config_dir=True` with `auto_dismiss_dialogs=True`. If we expect headless + shared-mode to be a common combo, we may want to tweak headless's default or relax the validator for headless specifically. Spec leaves this strict for v1.
+- **`HeadlessClaudeAgentConfig.auto_dismiss_dialogs` default**: Headless mode typically wants `auto_dismiss_dialogs=True`. In shared mode this field is silently ignored, so headless + shared-mode users must ensure dialogs are pre-dismissed in `~/.claude.json`. If we expect that combo to be common, we may want to surface a warning at provisioning time. Out of scope for v1.
 
 - **Flag naming**: `use_env_config_dir` is descriptive but slightly oblique. Alternatives: `share_user_config_dir`, `use_user_claude_config_dir`, `shared_config_dir`. Spec keeps `use_env_config_dir` per the user's original request.
