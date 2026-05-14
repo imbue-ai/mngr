@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from pydantic import Field
 
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.agents.tui_utils import send_enter_and_poll_for_cleared_indicator
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.primitives import CommandString
@@ -37,10 +40,10 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig]):
 
     # Dynamic placeholder in gemini's input row: shown when the input is
     # empty, hidden the moment text occupies the input, and reappears once
-    # Enter is consumed and the input clears. InteractiveTuiAgent's
-    # no-submission-signal Enter path polls this to detect successful
-    # submission and retry on swallowed keystrokes.
-    TUI_INPUT_CLEARED_INDICATOR = "Type your message"
+    # Enter is consumed and the input clears. The poll-and-retry strategy
+    # below uses this to detect successful submission and retry on swallowed
+    # keystrokes.
+    INPUT_CLEARED_INDICATOR: ClassVar[str] = "Type your message"
 
     def get_expected_process_name(self) -> str:
         # `gemini` is a `#!/usr/bin/env node` script and (unlike `claude`) does
@@ -48,11 +51,15 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig]):
         # `node` in ps/tmux. Report that so lifecycle detection finds it.
         return "node"
 
-    def uses_submission_signal(self) -> bool:
-        # Gemini's CLI has no equivalent of claude's UserPromptSubmit hook to
-        # signal a tmux wait-for channel; InteractiveTuiAgent falls back to
-        # polling TUI_INPUT_CLEARED_INDICATOR for the input row to clear.
-        return False
+    def _send_enter_and_validate(self, tmux_target: str) -> None:
+        # Gemini has no UserPromptSubmit-style hook, so confirm submission by
+        # polling for the input-row placeholder to reappear once Enter clears
+        # the typed text.
+        send_enter_and_poll_for_cleared_indicator(
+            self,
+            tmux_target,
+            cleared_indicator=self.INPUT_CLEARED_INDICATOR,
+        )
 
 
 @hookimpl

@@ -9,6 +9,7 @@ from pydantic import Field
 
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.agents.tui_utils import send_enter_best_effort
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import PluginMngrError
@@ -108,13 +109,15 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
 
     # Pi displays "pi v" followed by the version in its startup banner; this
     # substring stays in the visible pane for the lifetime of the session,
-    # so it serves as the startup ready indicator. Pi has no reliable
-    # input-cleared indicator (no placeholder that disappears during typing),
-    # so TUI_INPUT_CLEARED_INDICATOR is left at the InteractiveTuiAgent
-    # default of None -- the no-submission-signal Enter path falls back to
-    # a single fire-and-forget keystroke. The earlier paste-visibility check
-    # is what gives us confidence the message landed.
+    # so it serves as the startup ready indicator.
     TUI_READY_INDICATOR = "pi v"
+
+    def _send_enter_and_validate(self, tmux_target: str) -> None:
+        # Pi has no UserPromptSubmit hook and no input-row placeholder that
+        # disappears during typing, so submission can't be confirmed
+        # post-Enter. The earlier paste-visibility check is what gives us
+        # confidence the message landed.
+        send_enter_best_effort(self, tmux_target)
 
     def get_pi_config_dir(self) -> Path:
         """Return the per-agent pi config directory path.

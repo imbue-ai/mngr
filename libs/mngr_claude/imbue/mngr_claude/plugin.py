@@ -34,6 +34,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -1333,6 +1334,24 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
     """Agent implementation for Claude with session resumption support."""
 
     TUI_READY_INDICATOR = "Claude Code"
+
+    # Path template (read by tui_utils._get_last_queue_timestamp on the host
+    # via a bash command-prefix) for the transcript log used as a fallback
+    # when the UserPromptSubmit hook misfires. Claude-specific.
+    _QUEUE_LOG_PATH_TEMPLATE = "$MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"
+
+    def _send_enter_and_validate(self, tmux_target: str) -> None:
+        # Claude wires a UserPromptSubmit hook that fires `tmux wait-for -S`
+        # on the per-session channel; wait for it. If the hook misfires
+        # (occasionally happens while another message is being processed),
+        # fall back to checking the transcript log for a fresh enqueue.
+        send_enter_via_tmux_wait_for_hook(
+            self,
+            tmux_target,
+            wait_channel=f"mngr-submit-{self.session_name}",
+            timeout_seconds=self.enter_submission_timeout_seconds,
+            queue_log_path_template=self._QUEUE_LOG_PATH_TEMPLATE,
+        )
 
     @classmethod
     def preflight_check(

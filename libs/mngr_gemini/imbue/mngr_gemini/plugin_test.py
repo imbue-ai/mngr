@@ -45,19 +45,18 @@ def test_gemini_agent_subclasses_interactive_tui_agent() -> None:
 
 
 def test_gemini_agent_advertises_tui_ready_indicator() -> None:
-    """Ready indicator is the stable header banner, not the dynamic placeholder."""
+    """Ready indicator is the stable header banner."""
     assert GeminiAgent.TUI_READY_INDICATOR == "Gemini CLI"
 
 
-def test_gemini_agent_advertises_input_cleared_indicator() -> None:
-    """Input-cleared indicator is the dynamic placeholder used for post-Enter confirmation."""
-    assert GeminiAgent.TUI_INPUT_CLEARED_INDICATOR == "Type your message"
+def test_gemini_agent_uses_input_cleared_placeholder_for_submission_confirmation() -> None:
+    """The poll-and-retry strategy is configured with the input-row placeholder."""
+    assert GeminiAgent.INPUT_CLEARED_INDICATOR == "Type your message"
 
 
-def test_gemini_agent_disables_submission_signal() -> None:
-    """Gemini lacks a UserPromptSubmit-style hook, so this hook must be off."""
-    agent = GeminiAgent.model_construct()
-    assert agent.uses_submission_signal() is False
+def test_gemini_agent_implements_send_enter_and_validate() -> None:
+    """GeminiAgent fills in the abstract method by picking a strategy."""
+    assert "_send_enter_and_validate" not in GeminiAgent.__abstractmethods__
 
 
 def test_register_agent_type_returns_gemini_class_and_config() -> None:

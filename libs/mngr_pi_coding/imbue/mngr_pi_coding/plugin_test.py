@@ -144,9 +144,9 @@ def test_tui_ready_indicator_is_pi_v() -> None:
     assert PiCodingAgent.TUI_READY_INDICATOR == "pi v"
 
 
-def test_uses_submission_signal_is_false(pi_agent: PiCodingAgent) -> None:
-    """Pi has no UserPromptSubmit hook so falls into the poll-based no-signal path."""
-    assert pi_agent.uses_submission_signal() is False
+def test_pi_agent_implements_send_enter_and_validate() -> None:
+    """PiCodingAgent fills in the abstract method by picking the best-effort strategy."""
+    assert "_send_enter_and_validate" not in PiCodingAgent.__abstractmethods__
 
 
 def test_get_expected_process_name_returns_pi(pi_agent: PiCodingAgent) -> None:

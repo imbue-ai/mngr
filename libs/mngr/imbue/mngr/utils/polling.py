@@ -65,3 +65,30 @@ def wait_for(
     """
     if not poll_until(condition, timeout, poll_interval):
         raise TimeoutError(error_message)
+
+
+def retry_action_with_poll(
+    action: Callable[[], None],
+    condition: Callable[[], bool],
+    *,
+    max_attempts: int,
+    per_attempt_timeout: float,
+    poll_interval: float = 0.1,
+) -> bool:
+    """Invoke ``action`` then poll ``condition``; retry on timeout up to ``max_attempts``.
+
+    Useful when the action's effect is observable but not guaranteed -- e.g.
+    sending a key that may be swallowed by a TUI mid-paste. After each
+    invocation we poll the condition for ``per_attempt_timeout`` seconds; if
+    it becomes True we return immediately, otherwise we re-invoke the action
+    and poll again.
+
+    Returns True if the condition was met within ``max_attempts`` rounds,
+    False otherwise. Total worst-case wall time is
+    ``max_attempts * per_attempt_timeout`` plus the cost of each action call.
+    """
+    for _ in range(max_attempts):
+        action()
+        if poll_until(condition, timeout=per_attempt_timeout, poll_interval=poll_interval):
+            return True
+    return False
