@@ -469,9 +469,12 @@ def _pluralize_entry(count: int) -> str:
 def _print_on_demand_consolidation_command() -> None:
     """Print the one-liner that triggers an on-demand consolidation run.
 
-    Kept verbatim from ``setup_changelog_agent.sh``'s header so the user
-    can copy-paste it directly. Uses the shared constants and helper so
-    the disable-plugin list stays in sync with the deploy script.
+    Equivalent to the example invocation in ``setup_changelog_agent.sh``'s
+    header so the user can copy-paste it directly. Uses the shared
+    constants and helper so the disable-plugin list stays in sync with
+    the deploy script. The deploy script's header inlines that list as
+    ``$DISABLE_PLUGIN_ARGS``; this helper expands it onto its own line
+    because the resolved value is long.
     """
     disable_args = " ".join(changelog_disable_plugin_args())
     print(f"  env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME={CHANGELOG_MNGR_ROOT_NAME} \\")
