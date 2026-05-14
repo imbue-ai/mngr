@@ -24,6 +24,8 @@ surfaced as a non-zero exit (no ``--allow-degraded`` mode).
 import os
 import signal
 import threading
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -55,8 +57,11 @@ from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
 from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
 from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import delete_forward_info
 from imbue.mngr_latchkey.store import load_forward_info
+from imbue.mngr_latchkey.store import save_forward_info
 from imbue.mngr_latchkey.store import update_forward_info_gateway_port
 
 # Env-var overrides for the two resolved settings; documented in the
@@ -389,6 +394,19 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     # in a terminal and closes it).
     latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
 
+    # Publish our own supervisor record (with our PID + a placeholder
+    # ``gateway_port=None``) before doing anything else. This makes
+    # the command self-contained: it works whether spawned by
+    # :class:`LatchkeyForwardSupervisor` (which writes an equivalent
+    # record beforehand -- we overwrite it harmlessly) or invoked
+    # directly from a shell (no embedder => no other writer).
+    # ``update_forward_info_gateway_port`` later patches in the bound
+    # port on the same record.
+    save_forward_info(
+        latchkey.plugin_data_dir,
+        LatchkeyForwardInfo(pid=os.getpid(), started_at=datetime.now(timezone.utc)),
+    )
+
     # Eagerly ensure the gateway is up so users see startup failures
     # immediately, not on the first agent discovery. The discovery
     # handler will idempotently re-ensure on every fire. The gateway
@@ -404,12 +422,6 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
         gateway_port,
     )
 
-    # Stamp the freshly-bound gateway port onto the on-disk supervisor
-    # record so other in-process consumers (notably the minds desktop
-    # client) can discover where the gateway is listening. The
-    # password is intentionally NOT persisted -- consumers derive it
-    # on demand via :meth:`Latchkey.derive_gateway_password` (a pure
-    # function of the user's latchkey encryption key).
     try:
         update_forward_info_gateway_port(latchkey.plugin_data_dir, gateway_port)
     except LatchkeyStoreError as e:
@@ -449,6 +461,7 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
             latchkey.stop_gateway()
         except LatchkeyError as e:
             logger.warning("Failed to stop shared Latchkey gateway during shutdown: {}", e)
+        delete_forward_info(latchkey.plugin_data_dir)
 
 
 class _ShutdownSignalHandler(FrozenModel):
