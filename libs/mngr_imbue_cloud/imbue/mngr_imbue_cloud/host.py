@@ -2,21 +2,25 @@
 
 Subclasses mngr's ``Host`` so the standard ``mngr create --provider
 imbue_cloud_<account> --new-host`` pipeline can adopt a pool host's
-pre-baked agent under the caller's chosen name when one exists, and
-fall back to mngr's standard create flow when it doesn't (e.g. after
-``mngr destroy`` has wiped the previous agent's state on the leased
-container). Adoption is purely an optimization that skips a slow
-file-transfer + provisioning round when we can.
+pre-baked agent when one exists, and fall back to mngr's standard
+create flow when it doesn't (e.g. after ``mngr destroy`` has wiped the
+previous agent's state on the leased container). Adoption is purely an
+optimization that skips a slow file-transfer + provisioning round when
+we can. The workspace identity lives on the *host name*; the adopted
+agent keeps the bake's name (a constant such as ``system-services``)
+verbatim.
 
 Overrides:
 
 - ``set_env_vars`` always merges into the pre-baked ``/mngr/env``
   (clobbering would lose ``MNGR_HOST_DIR``/``MNGR_PREFIX``/etc. that
   the pool baking wrote).
-- ``create_agent_state`` always pins ``options.agent_id`` to
-  ``pre_baked_agent_id`` so the lease's canonical id stays stable
-  across destroy/recreate cycles, regardless of whether on-disk state
-  survives. The parent's ``data.json`` write then runs as usual.
+- ``create_agent_state`` preserves the bake's name and patches the
+  on-disk ``data.json`` in place when the pre-baked agent state is
+  present. It rejects an ``options.agent_id`` that mismatches
+  ``pre_baked_agent_id`` (the lease dictates the id) and, in the
+  fallback path where ``data.json`` is missing, pins ``options.agent_id``
+  to the pre-baked id before delegating to ``super()``.
 - ``create_agent_work_dir`` and ``provision_agent`` short-circuit to a
   no-transfer + minimal-provision path *only* when the pre-baked
   agent's ``data.json`` is still on disk; otherwise they delegate to
@@ -63,8 +67,11 @@ def _parse_create_time(value: Any) -> datetime:
 class ImbueCloudHost(Host):
     """A leased pool host.
 
-    The pre-baked agent's id is captured at lease time so ``create_agent_state``
-    can adopt that agent under the caller's name instead of generating a new id.
+    The pre-baked agent's id is captured at lease time so
+    ``create_agent_state`` can adopt that agent (keeping the bake's name
+    and id) instead of generating a fresh ``data.json``. The workspace
+    identity is carried by the host name; the agent name is whatever the
+    bake wrote (typically a constant such as ``system-services``).
     """
 
     pre_baked_agent_id: AgentId | None = Field(
