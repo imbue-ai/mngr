@@ -230,10 +230,10 @@ def render_creating_page(
     off the form. The template's status-poll URL still includes this id
     so SSE/log-streaming endpoints can find the right ``log_queue``.
 
-    The launch mode is read off ``info.launch_mode`` -- the worker
-    thread records it at ``start_creation`` time, so the
-    ``AgentCreationInfo`` snapshot is the single source of truth for
-    caption resolution (consistent with the SSE status events).
+    The launch mode is read off ``info.launch_mode`` --
+    ``AgentCreator.start_creation`` records it before spawning the worker
+    thread, so the ``AgentCreationInfo`` snapshot is the single source of
+    truth for caption resolution (consistent with the SSE status events).
     """
     status_text = status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode)
     template = JINJA_ENV.get_template("creating.html")
