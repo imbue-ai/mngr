@@ -1,0 +1,1 @@
+Fix `tmux send-keys -l` invocations to use the `--` end-of-options separator so agent commands and messages that start with `-` (e.g. `--model gemma`, `--help`) are no longer misparsed by tmux as flags.

@@ -2847,7 +2847,9 @@ def _build_start_agent_shell_command(
             f" -c {shlex.quote(str(agent.work_dir))}"
             f" {shlex.quote(env_shell_cmd)}"
         )
-        steps.append(f"tmux send-keys -t {shlex.quote(window_target)} -l {shlex.quote(str(named_cmd.command))}")
+        # Use `--` end-of-options separator so commands starting with `-`
+        # (e.g. "--model foo") aren't parsed as tmux flags.
+        steps.append(f"tmux send-keys -t {shlex.quote(window_target)} -l -- {shlex.quote(str(named_cmd.command))}")
         steps.append(f"tmux send-keys -t {shlex.quote(window_target)} Enter")
 
     # If we created additional windows, select the first window (the main agent)
@@ -2859,7 +2861,9 @@ def _build_start_agent_shell_command(
     # Target window :0 explicitly so this works even after additional windows
     # have been created (which changes the active window).
     agent_window = shlex.quote(session_name + ":0")
-    steps.append(f"tmux send-keys -t {agent_window} -l {shlex.quote(command)}")
+    # Use `--` end-of-options separator so commands starting with `-`
+    # (e.g. "--model foo") aren't parsed as tmux flags.
+    steps.append(f"tmux send-keys -t {agent_window} -l -- {shlex.quote(command)}")
     steps.append(f"tmux send-keys -t {agent_window} Enter")
 
     # Record START activity for idle detection by writing JSON to the activity file

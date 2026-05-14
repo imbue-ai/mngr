@@ -1067,6 +1067,19 @@ def test_send_tmux_literal_keys_short_message_uses_send_keys(
     assert len(stub.written_files) == 0
 
 
+def test_send_tmux_literal_keys_short_message_uses_end_of_options_separator(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Short messages must use `--` so messages starting with `-` aren't parsed as tmux flags."""
+    stub = _StubHost()
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    agent._send_tmux_literal_keys("mngr-test:0", "--help")
+
+    assert len(stub.executed_commands) == 1
+    assert " -l -- " in stub.executed_commands[0]
+
+
 def test_send_tmux_literal_keys_long_message_uses_load_buffer(
     temp_mngr_ctx: MngrContext,
 ) -> None:

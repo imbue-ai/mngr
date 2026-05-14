@@ -743,6 +743,36 @@ def test_build_start_agent_shell_command_includes_additional_windows(
     assert "htop" in result
 
 
+def test_build_start_agent_shell_command_send_keys_uses_end_of_options_separator(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """`tmux send-keys -l` calls must use `--` so dash-prefixed commands aren't parsed as flags."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    additional_commands = [
+        NamedCommand(command=CommandString("--model gemma"), window_name="dash-cmd"),
+    ]
+    result = _build_start_agent_shell_command(
+        agent=agent,
+        session_name=f"mngr-{agent.name}",
+        command="--flag-leading-command",
+        additional_commands=additional_commands,
+        env_shell_cmd="bash -c 'true'",
+        tmux_config_path=Path("/tmp/tmux.conf"),
+        unset_vars=[],
+        host_dir=temp_host_dir,
+    )
+
+    # Every `tmux send-keys -l` invocation must include `--` before the literal
+    # payload (so a dash-prefixed payload isn't parsed as a tmux flag). The
+    # `send-keys ... Enter` calls use a key name, not -l, and are not affected.
+    send_keys_l_lines = [line for line in result.split(" && ") if "send-keys" in line and " -l " in line]
+    assert send_keys_l_lines, "expected at least one `tmux send-keys -l` invocation"
+    for line in send_keys_l_lines:
+        assert " -l -- " in line, f"missing `--` end-of-options separator in: {line}"
+
+
 def test_build_start_agent_shell_command_no_select_window_without_additional_commands(
     local_provider: LocalProviderInstance,
     temp_host_dir: Path,
