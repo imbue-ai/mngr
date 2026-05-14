@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import importlib.resources
-from collections.abc import Mapping
 from typing import ClassVar
+from typing import Mapping
 
 from pydantic import Field
 
