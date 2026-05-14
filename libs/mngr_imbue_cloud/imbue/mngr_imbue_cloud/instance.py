@@ -833,7 +833,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         for entry in leased:
             if isinstance(host, HostId) and entry.host_id == str(host):
                 return self._build_host_object(entry)
-            if isinstance(host, HostName) and entry.host_id == str(host):
+            if isinstance(host, HostName) and entry.host_name == str(host):
                 return self._build_host_object(entry)
         raise HostNotFoundError(host)
 
