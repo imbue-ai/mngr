@@ -10,7 +10,6 @@ the ``vault`` CLI.
 """
 
 import json
-import sys
 from typing import Final
 
 import click
@@ -49,6 +48,7 @@ from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.errors import MindError
 from imbue.minds.primitives import OutputFormat
+from imbue.minds.utils.output import write_stdout_line
 
 _DEV_TIER: Final[str] = "dev"
 
@@ -176,11 +176,11 @@ def _emit_json(payload: object, *, output_format: OutputFormat) -> None:
     Used by every ``minds env`` subcommand for the non-HUMAN output paths.
     """
     if output_format is OutputFormat.JSON:
-        sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
+        write_stdout_line(json.dumps(payload, indent=2, default=str))
     elif output_format is OutputFormat.JSONL:
-        sys.stdout.write(json.dumps(payload, default=str) + "\n")
+        write_stdout_line(json.dumps(payload, default=str))
     else:
-        sys.stdout.write(str(payload) + "\n")
+        write_stdout_line(str(payload))
 
 
 def _emit_create_result(result: CreatedDevEnv, *, output_format: OutputFormat) -> None:
@@ -269,9 +269,9 @@ def env_list(ctx: click.Context) -> None:
     ]
     if output_format is OutputFormat.JSONL:
         for entry in payload:
-            sys.stdout.write(json.dumps(entry, default=str) + "\n")
+            write_stdout_line(json.dumps(entry, default=str))
     else:
-        sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
+        write_stdout_line(json.dumps(payload, indent=2, default=str))
 
 
 @env.command("destroy")

@@ -100,7 +100,8 @@ def test_list_dev_env_files_returns_sorted(_isolated_home: Path) -> None:
 def test_invalid_dev_env_name_raises() -> None:
     with pytest.raises(InvalidDevEnvNameError):
         DevEnvName("UPPERCASE-NOT-OK")
+    # Single character is below the 2-char minimum in the pattern.
     with pytest.raises(InvalidDevEnvNameError):
-        DevEnvName("a")  # too short
+        DevEnvName("a")
     with pytest.raises(InvalidDevEnvNameError):
         DevEnvName("-leading-hyphen")

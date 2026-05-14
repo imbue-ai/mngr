@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
+from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.config.data_types import DeployEnvConfig
 from imbue.minds.config.data_types import DeploySecretsConfig
 from imbue.minds.envs.local_store import read_dev_env_file
@@ -10,8 +11,11 @@ from imbue.minds.envs.primitives import DevEnvAlreadyExistsError
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.primitives import DevEnvProvisioningError
+from imbue.minds.envs.providers.modal_env import ModalEnvProviderError
 from imbue.minds.envs.providers.neon_db import NeonDatabaseRecord
+from imbue.minds.envs.providers.neon_db import NeonProviderError
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
+from imbue.minds.envs.providers.supertokens_app import SuperTokensProviderError
 from imbue.minds.envs.providers.vultr_tags import VultrInstanceSummary
 from imbue.minds.envs.provisioning import ProviderCredentials
 from imbue.minds.envs.provisioning import Providers
@@ -30,10 +34,10 @@ def _isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 def _deploy_config() -> DeployEnvConfig:
     return DeployEnvConfig(
-        modal_workspace="dev-workspace",
-        modal_env="main",
-        vault_path_prefix="secrets/kv/minds/dev",
-        cloudflare_domain="dev.example.com",
+        modal_workspace=NonEmptyStr("dev-workspace"),
+        modal_env=NonEmptyStr("main"),
+        vault_path_prefix=NonEmptyStr("secrets/kv/minds/dev"),
+        cloudflare_domain=NonEmptyStr("dev.example.com"),
         secrets=DeploySecretsConfig(services=(ServiceName("cloudflare"),)),
     )
 
@@ -64,17 +68,17 @@ def _build_fake_providers(
     def create_modal_env(name):
         call_log["calls"].append(("create_modal_env", str(name)))
         if fail_step == "modal_env":
-            raise RuntimeError("modal create boom")
+            raise ModalEnvProviderError("modal create boom")
 
     def delete_modal_env(name):
         call_log["calls"].append(("delete_modal_env", str(name)))
         if "modal_env" in fail_delete:
-            raise RuntimeError("modal delete boom")
+            raise ModalEnvProviderError("modal delete boom")
 
     def create_neon_db(name, project_id, api_token):
         call_log["calls"].append(("create_neon_db", str(name)))
         if fail_step == "neon_db":
-            raise RuntimeError("neon create boom")
+            raise NeonProviderError("neon create boom")
         return NeonDatabaseRecord(
             project_id=project_id,
             branch_id="branch-1",
@@ -86,12 +90,12 @@ def _build_fake_providers(
     def delete_neon_db(name, project_id, api_token):
         call_log["calls"].append(("delete_neon_db", str(name)))
         if "neon_db" in fail_delete:
-            raise RuntimeError("neon delete boom")
+            raise NeonProviderError("neon delete boom")
 
     def create_supertokens_app(name, core_base_url, api_key):
         call_log["calls"].append(("create_supertokens_app", str(name)))
         if fail_step == "supertokens_app":
-            raise RuntimeError("supertokens create boom")
+            raise SuperTokensProviderError("supertokens create boom")
         return SuperTokensAppRecord(
             app_id=str(name),
             connection_uri=f"{core_base_url}/appid-{name}",
@@ -101,7 +105,7 @@ def _build_fake_providers(
     def delete_supertokens_app(name, core_base_url, api_key):
         call_log["calls"].append(("delete_supertokens_app", str(name)))
         if "supertokens_app" in fail_delete:
-            raise RuntimeError("supertokens delete boom")
+            raise SuperTokensProviderError("supertokens delete boom")
 
     def list_vultr_instances(name, api_key):
         call_log["calls"].append(("list_vultr_instances", str(name)))
