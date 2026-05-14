@@ -12,7 +12,6 @@ from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import PluginMngrError
-from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -141,12 +140,13 @@ def test_pi_coding_agent_config_merge_with_override() -> None:
 # =============================================================================
 
 
-def test_uses_paste_detection_returns_true(pi_agent: PiCodingAgent) -> None:
-    assert pi_agent.uses_paste_detection_send() is True
+def test_tui_ready_indicator_is_pi_v() -> None:
+    assert PiCodingAgent.TUI_READY_INDICATOR == "pi v"
 
 
-def test_get_tui_ready_indicator_returns_pi_v(pi_agent: PiCodingAgent) -> None:
-    assert pi_agent.get_tui_ready_indicator() == "pi v"
+def test_pi_agent_implements_send_enter_and_validate() -> None:
+    """PiCodingAgent fills in the abstract method by picking the best-effort strategy."""
+    assert "_send_enter_and_validate" not in PiCodingAgent.__abstractmethods__
 
 
 def test_get_expected_process_name_returns_pi(pi_agent: PiCodingAgent) -> None:
@@ -171,28 +171,6 @@ def test_modify_env_vars_sets_pi_dir(pi_agent: PiCodingAgent, tmp_path: Path) ->
 def test_get_pi_config_dir(pi_agent: PiCodingAgent) -> None:
     config_dir = pi_agent.get_pi_config_dir()
     assert str(config_dir).endswith("plugin/pi_coding")
-
-
-def test_send_enter_and_wait_sends_enter(tmp_path: Path) -> None:
-    agent = PiCodingAgent.__new__(PiCodingAgent)
-    host = _stub_host(tmp_path, command_results={"tmux send-keys": CommandResult(stdout="", stderr="", success=True)})
-    object.__setattr__(agent, "host", host)
-    object.__setattr__(agent, "name", AgentName("test"))
-
-    agent._send_enter_and_wait("mngr-test:0")
-
-
-def test_send_enter_and_wait_raises_on_failure(tmp_path: Path) -> None:
-    agent = PiCodingAgent.__new__(PiCodingAgent)
-    host = _stub_host(
-        tmp_path,
-        command_results={"tmux send-keys": CommandResult(stdout="", stderr="session not found", success=False)},
-    )
-    object.__setattr__(agent, "host", host)
-    object.__setattr__(agent, "name", AgentName("test"))
-
-    with pytest.raises(SendMessageError):
-        agent._send_enter_and_wait("mngr-test:0")
 
 
 def test_get_provision_file_transfers_returns_empty(pi_agent: PiCodingAgent, tmp_path: Path) -> None:

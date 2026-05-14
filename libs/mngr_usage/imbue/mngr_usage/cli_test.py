@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from typing import Any
 import pluggy
 import pytest
 from click.testing import CliRunner
+from loguru import logger
 
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.errors import UserInputError
@@ -21,16 +23,21 @@ from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
-from imbue.mngr_usage.api import collapse_by_source
-from imbue.mngr_usage.api import last_valid_event_from_content
-from imbue.mngr_usage.api import snapshot_from_event
+from imbue.mngr_usage.api import aggregate_events_to_snapshots
+from imbue.mngr_usage.api import parse_events_from_content
 from imbue.mngr_usage.cli import _build_render_model
 from imbue.mngr_usage.cli import _flatten_primary_for_template
+from imbue.mngr_usage.cli import _format_cost_line
 from imbue.mngr_usage.cli import _format_duration
 from imbue.mngr_usage.cli import _format_human_line
 from imbue.mngr_usage.cli import _format_reset_phrase
-from imbue.mngr_usage.cli import _parse_max_age
+from imbue.mngr_usage.cli import _format_session_detail_line
+from imbue.mngr_usage.cli import _parse_optional_duration
+from imbue.mngr_usage.cli import _session_mode_tag
 from imbue.mngr_usage.cli import usage
+from imbue.mngr_usage.data_types import CostMode
+from imbue.mngr_usage.data_types import CostSnapshot
+from imbue.mngr_usage.data_types import SessionCostRecord
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
 
@@ -47,12 +54,17 @@ def _make_event(
     used_percentage: float | None = 11.0,
     resets_at: int | None = 1778280000,
 ) -> dict:
-    """Construct an event matching the writer's emitted shape."""
+    """Construct an event matching the writer's emitted shape.
+
+    Includes a placeholder ``session_id`` since the reader contract
+    requires every event to carry one (see ``_build_snapshot_for_source``).
+    """
     return {
-        "source": "claude/rate_limits",
-        "type": "rate_limit_snapshot",
+        "source": "claude/usage",
+        "type": "cost_snapshot",
         "event_id": "evt-test123",
         "timestamp": timestamp,
+        "session_id": "make-event-session",
         "rate_limits": {
             "five_hour": {"used_percentage": used_percentage, "resets_at": resets_at},
         },
@@ -64,19 +76,19 @@ def _make_event(
 # =============================================================================
 
 
-def test_parse_max_age_accepts_units() -> None:
-    assert _parse_max_age("300") == 300
-    assert _parse_max_age("60s") == 60
-    assert _parse_max_age("5m") == 300
-    assert _parse_max_age("2h") == 7200
-    assert _parse_max_age("1d") == 86400
-    assert _parse_max_age(None) is None
-    assert _parse_max_age("") is None
+def test_parse_optional_duration_accepts_units() -> None:
+    assert _parse_optional_duration("300") == 300
+    assert _parse_optional_duration("60s") == 60
+    assert _parse_optional_duration("5m") == 300
+    assert _parse_optional_duration("2h") == 7200
+    assert _parse_optional_duration("1d") == 86400
+    assert _parse_optional_duration(None) is None
+    assert _parse_optional_duration("") is None
 
 
-def test_parse_max_age_rejects_bad_input() -> None:
+def test_parse_optional_duration_rejects_bad_input() -> None:
     with pytest.raises(UserInputError):
-        _parse_max_age("forever")
+        _parse_optional_duration("forever")
 
 
 def test_format_duration_hits_each_branch() -> None:
@@ -108,13 +120,124 @@ def test_format_human_line_no_data_drops_reset_suffix() -> None:
     assert _format_human_line("5h", snap, now=1000) == "5h: no data"
 
 
+def test_format_cost_line_returns_none_when_aggregate_has_no_cost() -> None:
+    """Sessions exist but writer never emitted a USD cost field -> caller drops the line.
+
+    Real call sites guarantee ``session_count >= 1`` and a real
+    ``latest_event_at`` (gated in ``_write_source_section``); this test
+    pins the ``total_cost_usd is None`` early-return that fires when the
+    writer left out cost data despite having sessions of the mode.
+    """
+    assert (
+        _format_cost_line(
+            mode_label="api cost",
+            mode_suffix="",
+            aggregate_cost=CostSnapshot(),
+            session_count=1,
+            since_seconds=86400,
+            latest_event_at=2000,
+            now=2000,
+        )
+        is None
+    )
+
+
+def test_format_cost_line_single_session_shape_uses_age_phrase() -> None:
+    """One session in the aggregate -> render the age phrase (not the session count).
+
+    Both empty and non-empty ``mode_suffix`` are exercised here: subscription
+    appends ` (imputed)` after the label; api appends nothing.
+    """
+    sub_line = _format_cost_line(
+        mode_label="subscription cost",
+        mode_suffix=" (imputed)",
+        aggregate_cost=CostSnapshot(total_cost_usd=0.4275),
+        session_count=1,
+        since_seconds=86400,
+        latest_event_at=1880,
+        now=2000,
+    )
+    assert sub_line == "subscription cost (imputed): $0.43 (2m ago)"
+    api_line = _format_cost_line(
+        mode_label="api cost",
+        mode_suffix="",
+        aggregate_cost=CostSnapshot(total_cost_usd=1.23),
+        session_count=1,
+        since_seconds=86400,
+        latest_event_at=2000,
+        now=2000,
+    )
+    assert api_line == "api cost: $1.23 (just now)"
+
+
+def test_format_cost_line_multi_session_shape_uses_since_suffix() -> None:
+    """Multiple sessions -> render the session count + ``in last <since>`` suffix.
+
+    Drops the age annotation because it would be ambiguous (which session?).
+    """
+    line = _format_cost_line(
+        mode_label="api cost",
+        mode_suffix="",
+        aggregate_cost=CostSnapshot(total_cost_usd=5.43),
+        session_count=3,
+        since_seconds=86400,
+        latest_event_at=2000,
+        now=2000,
+    )
+    assert line == "api cost: $5.43 across 3 sessions in last 1d"
+
+
+def test_session_mode_tag_maps_each_variant() -> None:
+    """``_session_mode_tag`` exhaustively maps every ``CostMode`` to its
+    short ``--detail`` tag. The mapping is part of the user-visible contract:
+    ``SUBSCRIPTION`` -> ``"sub"``, ``API_KEY`` -> ``"api"``. Swapping or
+    dropping either entry would silently mis-label sessions in mixed-mode
+    breakdowns.
+    """
+    assert _session_mode_tag(CostMode.SUBSCRIPTION) == "sub"
+    assert _session_mode_tag(CostMode.API_KEY) == "api"
+
+
+def test_format_session_detail_line_returns_none_when_session_has_no_cost() -> None:
+    """A session with no usable cost reading drops out of the ``--detail``
+    breakdown -- the helper returns None so the caller skips writing the
+    line entirely (matching ``_format_cost_line``'s None-drop contract).
+    """
+    session = SessionCostRecord(
+        session_id="abcdef12-uuid-rest",
+        cost=CostSnapshot(),
+        cost_mode=CostMode.API_KEY,
+        first_event_at=1000,
+        last_event_at=1500,
+    )
+    assert _format_session_detail_line(session, now=2000) is None
+
+
+def test_format_session_detail_line_renders_tag_truncated_id_and_age() -> None:
+    """Rendered line matches the documented format:
+    ``  [<tag>] <8-char id prefix>: $X.YY (<age phrase>)``. Session id longer
+    than ``_SESSION_DETAIL_ID_PREFIX_LEN`` is truncated; the mode tag comes
+    from ``_session_mode_tag``; cost is two-decimal USD.
+    """
+    session = SessionCostRecord(
+        session_id="deadbeef-uuid-rest",
+        cost=CostSnapshot(total_cost_usd=0.42),
+        cost_mode=CostMode.SUBSCRIPTION,
+        first_event_at=1800,
+        last_event_at=1880,
+    )
+    line = _format_session_detail_line(session, now=2000)
+    assert line == "  [sub] deadbeef: $0.42 (2m ago)"
+
+
 # =============================================================================
 # Event reading + snapshot building
 # =============================================================================
 
 
-def test_last_valid_event_picks_last_valid_line() -> None:
-    """A truncated/garbage trailing line is skipped; the previous valid line wins."""
+def test_parse_events_from_content_returns_all_valid_lines() -> None:
+    """Every well-formed JSON line is returned. A truncated trailing line is
+    skipped with a warning rather than failing the whole parse."""
     content = (
         json.dumps(_make_event("2026-05-08T10:00:00.000000000Z"))
         + "\n"
@@ -122,78 +245,386 @@ def test_last_valid_event_picks_last_valid_line() -> None:
         + "\n"
         + "{not valid json"
     )
-    event = last_valid_event_from_content(content, "test")
-    assert event is not None
-    assert event["timestamp"] == "2026-05-08T11:00:00.000000000Z"
+    events = parse_events_from_content(content, "test")
+    assert len(events) == 2
+    assert events[0]["timestamp"] == "2026-05-08T10:00:00.000000000Z"
+    assert events[1]["timestamp"] == "2026-05-08T11:00:00.000000000Z"
 
 
-def test_last_valid_event_returns_none_when_no_valid_lines() -> None:
-    assert last_valid_event_from_content("garbage\nstill garbage\n", "test") is None
+def test_parse_events_from_content_returns_empty_for_empty_or_garbage() -> None:
+    assert parse_events_from_content("", "test") == []
+    assert parse_events_from_content("\n\n", "test") == []
+    assert parse_events_from_content("garbage\nstill garbage\n", "test") == []
 
 
-def test_last_valid_event_returns_none_for_empty_content() -> None:
-    assert last_valid_event_from_content("", "test") is None
-    assert last_valid_event_from_content("\n\n", "test") is None
+# =============================================================================
+# Aggregation pipeline
+# =============================================================================
 
 
-def test_snapshot_from_event_drops_events_without_rate_limits() -> None:
-    """An event line without a rate_limits field can't make a useful snapshot."""
+def _cost_event(
+    timestamp_iso: str,
+    *,
+    session_id: str,
+    cost_usd: float,
+    rate_limits: dict | None = None,
+) -> dict:
+    """Construct a cost-bearing event for aggregation tests."""
     event = {
-        "source": "claude/rate_limits",
-        "timestamp": "2026-05-08T10:00:00.000000000Z",
-        "type": "rate_limit_snapshot",
-        # no rate_limits field
+        "source": "claude/usage",
+        "type": "cost_snapshot",
+        "event_id": f"evt-{session_id}-{timestamp_iso}",
+        "timestamp": timestamp_iso,
+        "session_id": session_id,
+        "cost": {"total_cost_usd": cost_usd, "total_duration_ms": 1000},
     }
-    assert snapshot_from_event(event, source_name="claude") is None
+    if rate_limits is not None:
+        event["rate_limits"] = rate_limits
+    return event
 
 
-def test_snapshot_from_event_drops_unparseable_timestamps() -> None:
-    event = _make_event("not-a-timestamp")
-    assert snapshot_from_event(event, source_name="claude") is None
+def test_aggregate_drops_source_with_no_renderable_content() -> None:
+    """A source whose events have no timestamp field yields no snapshot."""
+    events = [{"source": "claude/usage", "type": "cost_snapshot"}]
+    snapshots = aggregate_events_to_snapshots({"claude": {"agent-x": events}}, since_seconds=86400, now=1_700_001_000)
+    assert snapshots == []
 
 
-def test_snapshot_from_event_round_trips_window_data() -> None:
-    event = _make_event("2026-05-08T10:00:00.000000000Z", used_percentage=42.5, resets_at=1778280000)
-    snap = snapshot_from_event(event, source_name="claude")
-    assert snap is not None
-    assert snap.source_name == "claude"
-    assert snap.windows["five_hour"].used_percentage == 42.5
-    assert snap.windows["five_hour"].resets_at == 1778280000
+def test_aggregate_keeps_freshest_windows_across_events() -> None:
+    """Windows track an account-level counter; the freshest event's rate_limits wins."""
+    events = [
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "timestamp": "2026-05-08T10:00:00.000000000Z",
+            "session_id": "session-x",
+            "rate_limits": {"five_hour": {"used_percentage": 10.0, "resets_at": 9_999_999_999}},
+        },
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "timestamp": "2026-05-08T11:00:00.000000000Z",
+            "session_id": "session-x",
+            "rate_limits": {"five_hour": {"used_percentage": 50.0, "resets_at": 9_999_999_999}},
+        },
+    ]
+    snapshots = aggregate_events_to_snapshots({"claude": {"agent-x": events}}, since_seconds=86400, now=2_000_000_000)
+    assert len(snapshots) == 1
+    assert snapshots[0].windows["five_hour"].used_percentage == 50.0
 
 
-# NOTE: the old filesystem-walking _gather_snapshots(host_dir) tests have been
-# removed. The walker now uses list_agents + the events API; per-agent reads
-# are exercised end-to-end via the test_usage_command_* tests below, which
-# plant events files into a real local agent's state dir.
+def test_aggregate_drops_events_without_session_id() -> None:
+    """The reader requires session_id on every event. Events that lack it
+    (writer bug or upstream-payload drift) are dropped entirely -- they
+    don't contribute windows or cost -- and the reader emits a WARNING so
+    the user notices the data loss instead of silently missing rows in
+    ``mngr usage``. With the bundled Claude writer this case doesn't occur
+    because Claude Code always emits session_id."""
+    events = [
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-orphan",
+            "timestamp": "2026-05-08T11:00:00.000000000Z",
+            "rate_limits": {"five_hour": {"used_percentage": 10.0, "resets_at": 9_999_999_999}},
+        }
+    ]
+    captured: list[str] = []
+    sink_id = logger.add(lambda msg: captured.append(msg.record["message"]), level="WARNING", format="{message}")
+    try:
+        snapshots = aggregate_events_to_snapshots(
+            {"claude": {"agent-x": events}}, since_seconds=86400, now=2_000_000_000
+        )
+    finally:
+        logger.remove(sink_id)
+    # No session_id -> event dropped -> source has nothing renderable -> no snapshot.
+    assert snapshots == []
+    # And the user is warned about the dropped event so the data loss is visible.
+    warning_text = " ".join(captured)
+    assert "session_id" in warning_text
+    assert "evt-orphan" in warning_text
+    assert "claude" in warning_text
+
+
+def test_aggregate_groups_per_session_and_computes_session_contribution_delta() -> None:
+    """Within one Claude Code process, ``SessionCostRecord.cost`` is the
+    session's *own* contribution -- delta from the prior session's
+    cumulative reading in the same process. Cost is process-cumulative
+    upstream (the writer emits raw cumulative); the reader undoes that
+    encoding so consumers see what each session actually cost.
+
+    Walk:
+      - abc sees 0.10 then 0.42 (latest cumulative for abc).
+      - def sees 1.23. No cost drop between events, so all three are in
+        one process. abc's contribution = 0.42 (delta from baseline 0).
+        def's contribution = 1.23 - 0.42 = 0.81.
+      - Aggregate (sum of contributions) = 0.42 + 0.81 = 1.23, which
+        matches the final cumulative reading (true total spend).
+
+    No rate_limits in any event -> mode classified as ``api_key`` (real
+    billable spend), so the aggregate lands in ``api_cost`` rather than
+    ``subscription_cost``.
+    """
+    events = [
+        _cost_event("2026-05-08T10:00:00.000000000Z", session_id="abc", cost_usd=0.10),
+        _cost_event("2026-05-08T10:30:00.000000000Z", session_id="abc", cost_usd=0.42),
+        _cost_event("2026-05-08T11:00:00.000000000Z", session_id="def", cost_usd=1.23),
+    ]
+    snapshots = aggregate_events_to_snapshots(
+        {"claude": {"agent-x": events}},
+        since_seconds=86400 * 7,
+        now=int(datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).timestamp()),
+    )
+    assert len(snapshots) == 1
+    snap = snapshots[0]
+    assert snap.session_count == 2
+    by_id = {s.session_id: s for s in snap.sessions}
+    assert by_id["abc"].cost.total_cost_usd == pytest.approx(0.42)
+    assert by_id["abc"].cost_mode == CostMode.API_KEY
+    assert by_id["def"].cost.total_cost_usd == pytest.approx(0.81)
+    assert by_id["def"].cost_mode == CostMode.API_KEY
+    # Aggregate is the sum of contributions and recovers the final cumulative reading.
+    assert snap.api_cost.total_cost_usd == pytest.approx(1.23)
+    # No subscription sessions -> the subscription aggregate has no usable cost data.
+    assert snap.subscription_cost.total_cost_usd is None
+    assert snap.api_session_count == 2
+    assert snap.subscription_session_count == 0
+
+
+def test_aggregate_detects_process_boundary_via_cost_drop() -> None:
+    """A downward step in cumulative cost between consecutive events from one
+    agent signals a Claude Code process restart. Each process gets its own
+    delta baseline so the second process's first session contribution starts
+    from zero, not from the prior process's high-water mark.
+
+    Walk: $5 then $0.30 from one agent. The drop is the process boundary;
+    we should NOT compute the second session's spend as $0.30 - $5 (= -$4.70,
+    nonsense). Instead each process's first session uses a zero baseline.
+    Aggregate is $5 + $0.30 = $5.30, which is the true cross-process spend
+    matching what a user would actually have been billed.
+    """
+    events = [
+        _cost_event("2026-05-08T10:00:00.000000000Z", session_id="proc1-session", cost_usd=5.00),
+        _cost_event("2026-05-08T11:00:00.000000000Z", session_id="proc2-session", cost_usd=0.30),
+    ]
+    snapshots = aggregate_events_to_snapshots(
+        {"claude": {"agent-x": events}},
+        since_seconds=86400 * 7,
+        now=int(datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).timestamp()),
+    )
+    assert len(snapshots) == 1
+    snap = snapshots[0]
+    assert snap.session_count == 2
+    by_id = {s.session_id: s for s in snap.sessions}
+    # Each session is the first (and only) in its own process; its contribution
+    # is its full cumulative reading.
+    assert by_id["proc1-session"].cost.total_cost_usd == pytest.approx(5.00)
+    assert by_id["proc2-session"].cost.total_cost_usd == pytest.approx(0.30)
+    # Aggregate is the cross-process sum -- the true total spend. No rate_limits
+    # in either process -> both classified as api_key.
+    assert snap.api_cost.total_cost_usd == pytest.approx(5.30)
+
+
+def test_aggregate_isolates_process_boundary_detection_per_agent() -> None:
+    """Cost-drop process-boundary detection runs per agent. If we merged
+    streams across agents, every transition from agent-A's events to
+    agent-B's events would look like a cost drop (their cost timelines are
+    independent), spuriously splitting one agent's continuous process into
+    fragments. This test plants two agents that would falsely trip the
+    detector if streams were merged.
+    """
+    # Agent A: single process, cost grows 0.10 -> 0.50.
+    agent_a_events = [
+        _cost_event("2026-05-08T10:00:00.000000000Z", session_id="a-only-session", cost_usd=0.10),
+        _cost_event("2026-05-08T10:30:00.000000000Z", session_id="a-only-session", cost_usd=0.50),
+    ]
+    # Agent B: single process, cost grows 0.05 -> 0.20. If merged with A,
+    # the 0.50 -> 0.05 transition would look like a process boundary, but
+    # really it's a different agent's independent timeline.
+    agent_b_events = [
+        _cost_event("2026-05-08T10:45:00.000000000Z", session_id="b-only-session", cost_usd=0.05),
+        _cost_event("2026-05-08T11:00:00.000000000Z", session_id="b-only-session", cost_usd=0.20),
+    ]
+    snapshots = aggregate_events_to_snapshots(
+        {"claude": {"agent-a": agent_a_events, "agent-b": agent_b_events}},
+        since_seconds=86400 * 7,
+        now=int(datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).timestamp()),
+    )
+    assert len(snapshots) == 1
+    snap = snapshots[0]
+    assert snap.session_count == 2
+    by_id = {s.session_id: s for s in snap.sessions}
+    # Each session is the only session in its agent's process; contribution = cumulative.
+    assert by_id["a-only-session"].cost.total_cost_usd == pytest.approx(0.50)
+    assert by_id["b-only-session"].cost.total_cost_usd == pytest.approx(0.20)
+    # Aggregate sums across agents (both api_key mode since no rate_limits planted).
+    assert snap.api_cost.total_cost_usd == pytest.approx(0.70)
+
+
+def test_aggregate_filters_sessions_outside_recency_window() -> None:
+    """Sessions whose last event is older than ``since_seconds`` are excluded."""
+    base = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc)
+    fresh_ts = (base - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    stale_ts = (base - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    events = [
+        _cost_event(fresh_ts, session_id="recent", cost_usd=0.42),
+        _cost_event(stale_ts, session_id="old", cost_usd=99.99),
+    ]
+    snapshots = aggregate_events_to_snapshots(
+        {"claude": {"agent-x": events}}, since_seconds=86400, now=int(base.timestamp())
+    )
+    assert len(snapshots) == 1
+    snap = snapshots[0]
+    # The stale session is filtered out of `sessions`; the fresh one remains.
+    assert snap.session_count == 1
+    assert snap.sessions[0].session_id == "recent"
+    # And the aggregate reflects only the in-window session (api_key mode since
+    # no rate_limits planted).
+    assert snap.api_cost.total_cost_usd == 0.42
+
+
+def test_aggregate_sessions_sorted_newest_first() -> None:
+    """``sessions`` is ordered by last_event_at descending so the newest is sessions[0]."""
+    events = [
+        _cost_event("2026-05-08T10:00:00.000000000Z", session_id="old", cost_usd=0.10),
+        _cost_event("2026-05-08T11:00:00.000000000Z", session_id="mid", cost_usd=0.20),
+        _cost_event("2026-05-08T12:00:00.000000000Z", session_id="new", cost_usd=0.30),
+    ]
+    snapshots = aggregate_events_to_snapshots(
+        {"claude": {"agent-x": events}},
+        since_seconds=86400 * 7,
+        now=int(datetime(2026, 5, 8, 13, 0, tzinfo=timezone.utc).timestamp()),
+    )
+    assert [s.session_id for s in snapshots[0].sessions] == ["new", "mid", "old"]
+    assert snapshots[0].sessions[0].session_id == "new"
+
+
+def test_aggregate_returns_cost_only_snapshot_when_no_rate_limits() -> None:
+    """API-key sessions emit cost without rate_limits; the snapshot is still
+    built and the session is classified as ``api_key`` (real billable spend).
+    """
+    events = [
+        _cost_event("2026-05-08T11:00:00.000000000Z", session_id="api-key-session", cost_usd=1.23),
+    ]
+    snapshots = aggregate_events_to_snapshots(
+        {"claude": {"agent-x": events}},
+        since_seconds=86400,
+        now=int(datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).timestamp()),
+    )
+    assert len(snapshots) == 1
+    snap = snapshots[0]
+    assert snap.windows == {}
+    assert snap.session_count == 1
+    assert snap.sessions[0].cost.total_cost_usd == 1.23
+    assert snap.sessions[0].cost_mode == CostMode.API_KEY
+    # Real billable spend lands in api_cost; subscription_cost has no contributors.
+    assert snap.api_cost.total_cost_usd == 1.23
+    assert snap.subscription_cost.total_cost_usd is None
+
+
+def test_aggregate_classifies_process_with_rate_limits_as_subscription() -> None:
+    """A process is classified ``subscription`` when ANY of its events carry a
+    non-empty rate_limits payload. Cost in that mode is **imputed** by Claude
+    Code (subscription users don't actually pay per token), so the aggregate
+    lands in ``subscription_cost`` and stays out of ``api_cost``.
+    """
+    rate_limits = {"five_hour": {"used_percentage": 11.0, "resets_at": 9_999_999_999}}
+    events = [
+        # First event: cost-only (no rate_limits yet -- typical for the brief window
+        # before the first API response of a subscription session).
+        _cost_event("2026-05-08T10:00:00.000000000Z", session_id="sub-sess", cost_usd=0.10),
+        # Second event in the same process: rate_limits appears -> process is subscription.
+        _cost_event("2026-05-08T10:30:00.000000000Z", session_id="sub-sess", cost_usd=0.42, rate_limits=rate_limits),
+    ]
+    snapshots = aggregate_events_to_snapshots(
+        {"claude": {"agent-x": events}},
+        since_seconds=86400,
+        now=int(datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).timestamp()),
+    )
+    assert len(snapshots) == 1
+    snap = snapshots[0]
+    assert snap.session_count == 1
+    assert snap.sessions[0].cost_mode == CostMode.SUBSCRIPTION
+    # Imputed spend lands in subscription_cost; api_cost has no contributors.
+    assert snap.subscription_cost.total_cost_usd == pytest.approx(0.42)
+    assert snap.api_cost.total_cost_usd is None
+
+
+def test_aggregate_classifies_different_processes_independently_when_auth_swaps() -> None:
+    """Each Claude Code process is classified independently from its own events.
+    A cost-drop boundary marks a new process; if the new process has no
+    rate_limits while the old one did, the two get different ``cost_mode``
+    tags and feed different aggregates.
+
+    Scenario: subscription session (rate_limits present), user quits + relaunches
+    Claude Code with ANTHROPIC_API_KEY (rate_limits gone, cost resets near zero).
+    """
+    rate_limits = {"five_hour": {"used_percentage": 50.0, "resets_at": 9_999_999_999}}
+    events = [
+        # Process 1: subscription (rate_limits present), cumulative cost climbs to $5.
+        _cost_event(
+            "2026-05-08T10:00:00.000000000Z", session_id="sub-process", cost_usd=5.00, rate_limits=rate_limits
+        ),
+        # Process 2: api_key (no rate_limits). Cost drop from 5.00 to 0.30 marks the
+        # process boundary; this new process has no rate_limits anywhere.
+        _cost_event("2026-05-08T11:00:00.000000000Z", session_id="api-process", cost_usd=0.30),
+    ]
+    snapshots = aggregate_events_to_snapshots(
+        {"claude": {"agent-x": events}},
+        since_seconds=86400,
+        now=int(datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).timestamp()),
+    )
+    assert len(snapshots) == 1
+    snap = snapshots[0]
+    by_id = {s.session_id: s for s in snap.sessions}
+    assert by_id["sub-process"].cost_mode == CostMode.SUBSCRIPTION
+    assert by_id["api-process"].cost_mode == CostMode.API_KEY
+    # The two aggregates remain distinct -- imputed subscription cost never gets
+    # lumped with real api spend.
+    assert snap.subscription_cost.total_cost_usd == pytest.approx(5.00)
+    assert snap.api_cost.total_cost_usd == pytest.approx(0.30)
+    assert snap.subscription_session_count == 1
+    assert snap.api_session_count == 1
+
+
+def test_aggregate_drops_event_with_non_string_session_id() -> None:
+    """A non-string session_id is treated as absent (writer bug); the entire
+    event is dropped -- including its rate_limits payload -- because the
+    reader requires session_id to be a valid string on every event."""
+    events = [
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "timestamp": "2026-05-08T11:00:00.000000000Z",
+            "session_id": 12345,
+            "cost": {"total_cost_usd": 5.0},
+            "rate_limits": {"five_hour": {"used_percentage": 10.0, "resets_at": 9_999_999_999}},
+        }
+    ]
+    snapshots = aggregate_events_to_snapshots(
+        {"claude": {"agent-x": events}},
+        since_seconds=86400,
+        now=int(datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).timestamp()),
+    )
+    # No usable events for the source -> no snapshot.
+    assert snapshots == []
+
+
+def test_aggregate_returns_no_snapshot_when_only_sessions_outside_window_and_no_windows() -> None:
+    """A source whose only events are out-of-window cost events and no rate_limits
+    contributes nothing renderable -- the snapshot is dropped."""
+    base = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc)
+    stale_ts = (base - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    events = [_cost_event(stale_ts, session_id="old", cost_usd=99.99)]
+    snapshots = aggregate_events_to_snapshots(
+        {"claude": {"agent-x": events}}, since_seconds=86400, now=int(base.timestamp())
+    )
+    assert snapshots == []
 
 
 # =============================================================================
 # Snapshot picking + render model
 # =============================================================================
-
-
-def _snap(name: str = "x", at: int = 1000, percentage: float | None = 50.0) -> UsageSnapshot:
-    return UsageSnapshot(
-        source_name=name,
-        updated_at=at,
-        windows={"five_hour": WindowSnapshot(used_percentage=percentage, resets_at=at + 3600)},
-    )
-
-
-def test_collapse_by_source_picks_freshest_per_source() -> None:
-    """Multiple agents writing to the same source should collapse to the freshest."""
-    older_claude = _snap(name="claude", at=1000, percentage=10.0)
-    newer_claude = _snap(name="claude", at=2000, percentage=20.0)
-    only_opencode = _snap(name="opencode", at=1500, percentage=30.0)
-    result = collapse_by_source([older_claude, newer_claude, only_opencode])
-    assert {s.source_name for s in result} == {"claude", "opencode"}
-    claude_snap = next(s for s in result if s.source_name == "claude")
-    assert claude_snap.updated_at == 2000
-    assert claude_snap.windows["five_hour"].used_percentage == 20.0
-
-
-def test_collapse_by_source_returns_empty_for_empty_input() -> None:
-    assert collapse_by_source([]) == []
 
 
 def test_render_model_marks_past_reset_as_stale() -> None:
@@ -232,6 +663,102 @@ def test_render_model_fresh() -> None:
     assert model.is_age_stale is False
     assert model.has_past_reset is False
     assert model.is_stale is False
+
+
+def test_flatten_for_template_always_includes_per_mode_cost_keys() -> None:
+    """``subscription_cost.*`` and ``api_cost.*`` template keys are always populated
+    (empty string when absent) so format templates referencing them don't KeyError
+    on snapshots that pre-date session/cost capture. The format-template surface
+    intentionally doesn't expose per-session paths -- callers wanting that should
+    use ``--format json`` and index ``sessions[]``."""
+    snapshot_without_cost = UsageSnapshot(
+        source_name="claude",
+        updated_at=900,
+        windows={"five_hour": WindowSnapshot(used_percentage=42.0, resets_at=1500)},
+    )
+    flat = _flatten_primary_for_template(_build_render_model(snapshot_without_cost, max_age=300, now=1000), now=1000)
+    assert flat["subscription_cost.total_cost_usd"] == ""
+    assert flat["subscription_cost.total_duration_ms"] == ""
+    assert flat["api_cost.total_cost_usd"] == ""
+    assert flat["api_cost.total_duration_ms"] == ""
+    assert flat["session_count"] == "0"
+    assert flat["subscription_session_count"] == "0"
+    assert flat["api_session_count"] == "0"
+    # No combined `cost.*` key -- subscription and api stay distinct.
+    assert "cost.total_cost_usd" not in flat
+    # Per-session paths are intentionally not exposed in the format-template surface.
+    assert "current_session.session_id" not in flat
+    assert "sessions" not in flat
+
+
+def test_flatten_for_template_populates_api_cost_when_session_is_api_mode() -> None:
+    """A single api-key session populates ``api_cost.*`` and leaves ``subscription_cost.*`` empty."""
+    snapshot = UsageSnapshot(
+        source_name="claude",
+        updated_at=900,
+        windows={},
+        sessions=(
+            SessionCostRecord(
+                session_id="uuid-abc",
+                cost=CostSnapshot(total_cost_usd=0.42, total_duration_ms=12000),
+                cost_mode=CostMode.API_KEY,
+                first_event_at=900,
+                last_event_at=950,
+            ),
+        ),
+        since_seconds=86400,
+    )
+    flat = _flatten_primary_for_template(_build_render_model(snapshot, max_age=300, now=1000), now=1000)
+    # api_cost reflects the session's reading; subscription_cost stays empty.
+    assert flat["api_cost.total_cost_usd"] == "0.42"
+    assert flat["api_cost.total_duration_ms"] == "12000"
+    assert flat["subscription_cost.total_cost_usd"] == ""
+    assert flat["session_count"] == "1"
+    assert flat["api_session_count"] == "1"
+    assert flat["subscription_session_count"] == "0"
+
+
+def test_flatten_for_template_aggregates_only_within_each_mode() -> None:
+    """Per-mode aggregates only sum sessions of that mode. Two api sessions
+    feed ``api_cost.*``; one subscription session feeds ``subscription_cost.*``;
+    nothing is conflated.
+    """
+    snapshot = UsageSnapshot(
+        source_name="claude",
+        updated_at=2000,
+        windows={},
+        sessions=(
+            SessionCostRecord(
+                session_id="sub-x",
+                cost=CostSnapshot(total_cost_usd=0.10),
+                cost_mode=CostMode.SUBSCRIPTION,
+                first_event_at=1800,
+                last_event_at=2000,
+            ),
+            SessionCostRecord(
+                session_id="api-newer",
+                cost=CostSnapshot(total_cost_usd=1.0),
+                cost_mode=CostMode.API_KEY,
+                first_event_at=1500,
+                last_event_at=1900,
+            ),
+            SessionCostRecord(
+                session_id="api-older",
+                cost=CostSnapshot(total_cost_usd=0.42),
+                cost_mode=CostMode.API_KEY,
+                first_event_at=1000,
+                last_event_at=1500,
+            ),
+        ),
+        since_seconds=86400,
+    )
+    flat = _flatten_primary_for_template(_build_render_model(snapshot, max_age=300, now=2000), now=2000)
+    # api_cost sums only api_key sessions; subscription_cost only subscription.
+    assert flat["api_cost.total_cost_usd"] == "1.42"
+    assert flat["subscription_cost.total_cost_usd"] == "0.1"
+    assert flat["session_count"] == "3"
+    assert flat["api_session_count"] == "2"
+    assert flat["subscription_session_count"] == "1"
 
 
 def test_flatten_for_template_emits_only_present_windows() -> None:
@@ -292,7 +819,7 @@ def _plant_event_for_agent(
 ) -> None:
     """Plant an event into the agent's events file at the conventional path."""
     state_dir = get_agent_state_dir_path(local_host.host_dir, agent.id)
-    events_file = state_dir / "events" / source / "rate_limits" / "events.jsonl"
+    events_file = state_dir / "events" / source / "usage" / "events.jsonl"
     _write_event(events_file, event)
 
 
@@ -308,11 +835,12 @@ def test_usage_command_human_format(
         local_host,
         cli_test_agent,
         {
-            "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "source": "claude/usage",
+            "type": "cost_snapshot",
             "event_id": "evt-1",
             # Timestamp in the future so the snapshot won't be stale-by-age in the test
             "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "human-format-session",
             "rate_limits": {
                 "five_hour": {"used_percentage": 73.4, "resets_at": 9_999_999_999_999, "label": "5h"},
             },
@@ -337,10 +865,11 @@ def test_usage_command_json_format(
         local_host,
         cli_test_agent,
         {
-            "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "source": "claude/usage",
+            "type": "cost_snapshot",
             "event_id": "evt-1",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "json-format-session",
             "rate_limits": {"five_hour": {"used_percentage": 12.3, "resets_at": 9_999_999_999_999}},
         },
     )
@@ -378,11 +907,12 @@ def test_usage_command_json_surfaces_elapsed_when_window_seconds_present(
         local_host,
         cli_test_agent,
         {
-            "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "source": "claude/usage",
+            "type": "cost_snapshot",
             "event_id": "evt-1",
             # Use a fresh ISO timestamp so the snapshot isn't age-stale.
             "timestamp": datetime.fromtimestamp(now_s, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z"),
+            "session_id": "elapsed-window-session",
             "rate_limits": {
                 "five_hour": {
                     "used_percentage": 12.3,
@@ -420,10 +950,11 @@ def test_usage_command_format_template(
         local_host,
         cli_test_agent,
         {
-            "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "source": "claude/usage",
+            "type": "cost_snapshot",
             "event_id": "evt-1",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "format-template-session",
             "rate_limits": {
                 "five_hour": {"used_percentage": 88.0, "resets_at": 9_999_999_999_999},
                 "seven_day": {"used_percentage": 44.0, "resets_at": 9_999_999_999_999},
@@ -449,6 +980,36 @@ def test_usage_command_no_data_when_no_events(
     result = cli_runner.invoke(usage, [], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
     assert "No usage data yet" in result.output
+
+
+def test_usage_command_format_template_with_no_events_emits_empty_stdout(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    cli_profile_dir: Path,
+) -> None:
+    """`mngr usage --format '<template>'` with no agents emits no substituted line.
+
+    The no-sources path under a format template returns without writing anything
+    to stdout (no synthesized empty-substituted line, no no-data warning),
+    letting a `--format '...'` consumer detect the no-data case by an empty
+    output. The substituted template (anchored on a unique sentinel) must not
+    appear, and the no-data warning must not fire either -- under format
+    templates we keep stderr quiet so machine consumers see a clean empty
+    stream.
+    """
+    result = cli_runner.invoke(
+        usage,
+        ["--format", "SENTINEL:{five_hour.used_percentage}"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    # No substituted template line reached stdout (regression guard against
+    # the previously-synthesized empty render model).
+    assert "SENTINEL:" not in result.output
+    # And the no-data warning is suppressed under format templates so the
+    # caller's combined output is genuinely empty.
+    assert "No usage data yet" not in result.output
 
 
 @pytest.mark.tmux
@@ -484,10 +1045,11 @@ def test_usage_command_picks_freshest_across_agents(
         local_host,
         agent_old,
         {
-            "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "source": "claude/usage",
+            "type": "cost_snapshot",
             "event_id": "evt-old",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "freshest-test-session-old",
             "rate_limits": {"five_hour": {"used_percentage": 10.0, "resets_at": 9_999_999_999_999}},
         },
     )
@@ -495,10 +1057,11 @@ def test_usage_command_picks_freshest_across_agents(
         local_host,
         agent_new,
         {
-            "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "source": "claude/usage",
+            "type": "cost_snapshot",
             "event_id": "evt-new",
             "timestamp": "2056-05-08T11:00:00.000000000Z",
+            "session_id": "freshest-test-session-new",
             "rate_limits": {"five_hour": {"used_percentage": 99.0, "resets_at": 9_999_999_999_999}},
         },
     )
@@ -508,8 +1071,9 @@ def test_usage_command_picks_freshest_across_agents(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output.strip())
     # Both events share source_name="claude" since they live under .../events/claude/...
-    # collapse_by_source keeps only the freshest per source, so we see exactly one
-    # entry and its data is the newer event's.
+    # The aggregator groups events from all agents under one source and keeps the
+    # freshest event's rate_limits as the snapshot's windows, so we see exactly
+    # one entry and its data is the newer event's.
     assert len(payload["sources"]) == 1
     assert payload["sources"][0]["source"] == "claude"
     assert payload["sources"][0]["five_hour"]["used_percentage"] == 99.0
@@ -532,10 +1096,11 @@ def test_usage_command_uses_reset_specific_warning_when_window_just_reset(
         local_host,
         cli_test_agent,
         {
-            "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "source": "claude/usage",
+            "type": "cost_snapshot",
             "event_id": "evt-fresh",
             "timestamp": now_iso,
+            "session_id": "reset-warning-session",
             "rate_limits": {
                 "five_hour": {"used_percentage": 37.0, "resets_at": 1000, "label": "5h"},
             },
@@ -563,10 +1128,11 @@ def test_usage_wait_matches_when_predicate_already_true(
         local_host,
         cli_test_agent,
         {
-            "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "source": "claude/usage",
+            "type": "cost_snapshot",
             "event_id": "evt-1",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "wait-matches-session",
             "rate_limits": {
                 "five_hour": {"used_percentage": 12.0, "resets_at": 9_999_999_999_999, "window_seconds": 18000},
             },
@@ -595,10 +1161,11 @@ def test_usage_wait_times_out_when_predicate_never_satisfied(
         local_host,
         cli_test_agent,
         {
-            "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "source": "claude/usage",
+            "type": "cost_snapshot",
             "event_id": "evt-1",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "wait-timeout-session",
             "rate_limits": {
                 "five_hour": {"used_percentage": 90.0, "resets_at": 9_999_999_999_999, "window_seconds": 18000},
             },
@@ -692,6 +1259,615 @@ def test_usage_wait_rejects_invalid_cel(
 
 
 @pytest.mark.tmux
+def test_usage_wait_applies_since_to_cost_aggregate(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """`mngr usage wait --since` tightens the recency window applied to each
+    poll's cost aggregation, mirroring `mngr usage --since`. A predicate that
+    succeeds iff a stale high-cost session is dropped from `api_cost` proves
+    the flag reached `gather_usage_snapshots` (it would time out otherwise).
+    """
+    base = datetime.now(timezone.utc)
+    now_iso = base.strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    stale_iso = (base - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-stale",
+            "timestamp": stale_iso,
+            "session_id": "wait-since-stale-session",
+            "cost": {"total_cost_usd": 99.0},
+        },
+    )
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-fresh",
+            "timestamp": now_iso,
+            "session_id": "wait-since-fresh-session",
+            "cost": {"total_cost_usd": 0.50},
+        },
+    )
+    # With `--since 1h` only the fresh $0.50 session contributes to `api_cost`,
+    # so `api_cost.total_cost_usd < 1.0` matches on the first poll. Without
+    # `--since 1h` the default 24h window would include the stale $99 session
+    # and the predicate would be false.
+    result = cli_runner.invoke(
+        usage,
+        [
+            "wait",
+            "--until",
+            "api_cost.total_cost_usd < 1.0",
+            "--since",
+            "1h",
+            "--interval",
+            "1s",
+            "--timeout",
+            "5s",
+        ],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert "Matched on source" in result.output or "matched" in result.output.lower()
+
+
+@pytest.mark.tmux
+def test_usage_command_renders_subscription_cost_line_for_subscription_user(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """Subscription users get rate_limits + cost. The presence of rate_limits
+    classifies the process as subscription, and the human output renders the
+    cost on a 'subscription cost (imputed)' line (calling out that the value
+    is imputed by Claude Code, not real billable spend). No 'api cost' line
+    appears since no api-key session contributed.
+    """
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-1",
+            "timestamp": now_iso,
+            "session_id": "abc12345-uuid-rest",
+            "cost": {"total_cost_usd": 0.4275, "total_duration_ms": 12000},
+            "rate_limits": {
+                "five_hour": {"used_percentage": 73.4, "resets_at": 9_999_999_999_999, "label": "5h"},
+            },
+        },
+    )
+    result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    # Subscription cost line with the imputed callout; 2-decimal money format.
+    assert "subscription cost (imputed): $0.43" in result.output
+    # No api-key line since no api-key session contributed.
+    assert "api cost:" not in result.output
+    # The window line still renders alongside.
+    assert "5h:" in result.output
+    # The cost line must appear between the [source] header and the window line.
+    cost_idx = result.output.index("subscription cost (imputed): $0.43")
+    assert result.output.index("[claude]") < cost_idx < result.output.index("5h:")
+
+
+@pytest.mark.tmux
+def test_usage_command_renders_api_cost_line_for_api_key_user(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """API-key sessions emit cost but never rate_limits. The absence of
+    rate_limits classifies the process as api_key, so the human output
+    renders an 'api cost' line (real billable spend, no 'imputed' callout).
+    No subscription line appears.
+    """
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-1",
+            "timestamp": now_iso,
+            "session_id": "deadbeef-uuid-rest",
+            "cost": {"total_cost_usd": 1.23},
+            "rate_limits": None,
+        },
+    )
+    result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert "api cost: $1.23" in result.output
+    # No subscription line should appear -- the user is on a direct API key.
+    assert "subscription cost" not in result.output
+    # The "No usage data yet" hint must not fire -- cost IS data.
+    assert "No usage data yet" not in result.output
+
+
+@pytest.mark.tmux
+def test_usage_command_json_default_is_summary_only(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """Default JSON output is summary-only: per-mode aggregates
+    (``subscription_cost`` and ``api_cost``), ``session_count`` (total) plus
+    per-mode counts, and the windows. ``sessions[]`` is omitted unless
+    ``--detail`` is passed, keeping the common-case payload small. There is
+    no combined ``cost`` key -- subscription and api cost stay distinct.
+    """
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    # rate_limits present alongside cost -> classified as subscription.
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-1",
+            "timestamp": now_iso,
+            "session_id": "uuid-abc",
+            "cost": {"total_cost_usd": 0.42, "total_duration_ms": 12000, "total_api_duration_ms": 8000},
+            "rate_limits": {"five_hour": {"used_percentage": 12.3, "resets_at": 9_999_999_999_999}},
+        },
+    )
+    result = cli_runner.invoke(
+        usage, ["--format", "json", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip())
+    source = payload["sources"][0]
+    # Subscription aggregate carries the session's reading; api aggregate is all-None.
+    assert source["subscription_cost"]["total_cost_usd"] == 0.42
+    assert source["subscription_cost"]["total_duration_ms"] == 12000
+    assert source["subscription_cost"]["total_api_duration_ms"] == 8000
+    # Fields the writer didn't supply are still present in the dict with None values.
+    assert source["subscription_cost"]["total_lines_added"] is None
+    assert source["api_cost"]["total_cost_usd"] is None
+    # Counts are split by mode; total session_count is the sum.
+    assert source["session_count"] == 1
+    assert source["subscription_session_count"] == 1
+    assert source["api_session_count"] == 0
+    # No combined `cost` key -- callers must pick a mode explicitly.
+    assert "cost" not in source
+    # Summary-only by default: no per-session breakdown unless --detail is set.
+    assert "sessions" not in source
+    assert "current_session" not in source
+
+
+@pytest.mark.tmux
+def test_usage_command_detail_flag_includes_sessions_in_json(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """``--detail`` adds ``sessions[]`` (newest-first) to each source in the JSON output."""
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-1",
+            "timestamp": now_iso,
+            "session_id": "uuid-abc",
+            "cost": {"total_cost_usd": 0.42},
+        },
+    )
+    result = cli_runner.invoke(
+        usage,
+        ["--format", "json", "--max-age", "300", "--detail"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip())
+    source = payload["sources"][0]
+    assert source["session_count"] == 1
+    assert len(source["sessions"]) == 1
+    assert source["sessions"][0]["session_id"] == "uuid-abc"
+    assert source["sessions"][0]["cost"]["total_cost_usd"] == 0.42
+    # cost_mode is exposed so consumers can filter sessions[] by auth context.
+    # No rate_limits planted -> classified as api_key.
+    assert source["sessions"][0]["cost_mode"] == CostMode.API_KEY
+
+
+@pytest.mark.tmux
+def test_usage_command_aggregates_cost_across_agents_in_same_source(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    tmp_path: Path,
+    cli_profile_dir: Path,
+) -> None:
+    """Two Claude agents on different api-key sessions both contribute to
+    ``claude``'s aggregate api spend. With ``--detail`` the JSON output exposes
+    both session records under ``sessions[]`` and ``api_cost.total_cost_usd``
+    sums across them. No rate_limits in either event -> both api_key mode.
+    """
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    agent_a_dir = tmp_path / "agent-a"
+    agent_a_dir.mkdir()
+    agent_a = local_host.create_agent_state(
+        work_dir_path=agent_a_dir,
+        options=CreateAgentOptions(
+            name=AgentName("usage-agg-a"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 9999"),
+        ),
+    )
+    agent_b_dir = tmp_path / "agent-b"
+    agent_b_dir.mkdir()
+    agent_b = local_host.create_agent_state(
+        work_dir_path=agent_b_dir,
+        options=CreateAgentOptions(
+            name=AgentName("usage-agg-b"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 9999"),
+        ),
+    )
+    _plant_event_for_agent(
+        local_host,
+        agent_a,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-a",
+            "timestamp": now_iso,
+            "session_id": "session-aaaa-uuid",
+            "cost": {"total_cost_usd": 0.50},
+        },
+    )
+    _plant_event_for_agent(
+        local_host,
+        agent_b,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-b",
+            "timestamp": now_iso,
+            "session_id": "session-bbbb-uuid",
+            "cost": {"total_cost_usd": 1.20},
+        },
+    )
+    result = cli_runner.invoke(
+        usage,
+        ["--format", "json", "--max-age", "300", "--detail"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip())
+    source = payload["sources"][0]
+    assert source["session_count"] == 2
+    assert source["api_session_count"] == 2
+    assert source["subscription_session_count"] == 0
+    # api_cost is the sum across all api-mode sessions in the recency window;
+    # subscription_cost has no contributors.
+    assert source["api_cost"]["total_cost_usd"] == pytest.approx(1.70)
+    assert source["subscription_cost"]["total_cost_usd"] is None
+    # With --detail, both session_ids appear under sessions[].
+    session_ids = {s["session_id"] for s in source["sessions"]}
+    assert session_ids == {"session-aaaa-uuid", "session-bbbb-uuid"}
+    # Both sessions are api_key mode.
+    assert all(s["cost_mode"] == CostMode.API_KEY for s in source["sessions"])
+
+
+@pytest.mark.tmux
+def test_usage_command_emits_aggregate_api_cost_line_with_multiple_sessions(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """With multiple api-key sessions in the recency window, the human output
+    shows a single 'api cost: $X.YY across N sessions in last <since>' line
+    -- no per-session ids in the default view (those are --detail-only).
+    Both events lack rate_limits, so both classify as api_key mode.
+    """
+    base = datetime.now(timezone.utc)
+    now_iso = base.strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    earlier_iso = (base - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-earlier",
+            "timestamp": earlier_iso,
+            "session_id": "olderseessionid",
+            "cost": {"total_cost_usd": 1.00},
+        },
+    )
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-now",
+            "timestamp": now_iso,
+            "session_id": "currentsession",
+            "cost": {"total_cost_usd": 0.30},
+        },
+    )
+    result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    # With multiple api-mode sessions, the api line shows the aggregate with a session count.
+    assert "api cost: $1.30 across 2 sessions" in result.output
+    # No subscription line should appear -- neither event had rate_limits.
+    assert "subscription cost" not in result.output
+    # No per-session id appears in the default human view -- those are --detail-only.
+    # 8-char truncation of the planted session ids: "currentsession" -> "currents",
+    # "olderseessionid" -> "oldersee". Asserting the exact truncated prefixes
+    # so a regression that surfaces either session line is caught.
+    assert "currents" not in result.output
+    assert "oldersee" not in result.output
+
+
+@pytest.mark.tmux
+def test_usage_command_detail_flag_emits_per_session_lines_in_human_output(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """``--detail`` adds indented per-session lines between the cost line and the
+    window lines, newest-first. Suppressed when there's only one session (the
+    cost line already names that session's reading)."""
+    base = datetime.now(timezone.utc)
+    now_iso = base.strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    earlier_iso = (base - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-earlier",
+            "timestamp": earlier_iso,
+            "session_id": "olderseessionid",
+            "cost": {"total_cost_usd": 1.00},
+        },
+    )
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-now",
+            "timestamp": now_iso,
+            "session_id": "currentsession",
+            "cost": {"total_cost_usd": 0.30},
+        },
+    )
+    result = cli_runner.invoke(usage, ["--detail", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    # api cost line still shows the aggregate.
+    assert "api cost: $1.30 across 2 sessions" in result.output, result.output
+    # Per-session lines appear (newest-first, indented) with [api] tags. 8-char
+    # prefixes: "currentsession" -> "currents"; "olderseessionid" -> "oldersee".
+    cost_idx = result.output.index("api cost: $1.30")
+    current_idx = result.output.index("[api] currents:")
+    older_idx = result.output.index("[api] oldersee:")
+    assert cost_idx < current_idx < older_idx, result.output
+
+
+@pytest.mark.tmux
+def test_usage_command_detail_flag_emits_sub_tag_for_subscription_sessions(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """``--detail`` per-session lines tag subscription sessions with ``[sub]``.
+
+    The ``_session_mode_tag`` mapping (``SUBSCRIPTION -> "sub"``,
+    ``API_KEY -> "api"``) is part of the user-visible contract: it's how
+    users distinguish auth contexts in a mixed-mode breakdown. The
+    api-tag side is covered elsewhere; this guards the subscription
+    branch against a silent regression that would swap or drop the
+    SUBSCRIPTION entry.
+    """
+    base = datetime.now(timezone.utc)
+    now_iso = base.strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    earlier_iso = (base - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    rate_limits = {"five_hour": {"used_percentage": 30.0, "resets_at": 9_999_999_999_999, "label": "5h"}}
+    # Both events carry rate_limits -> both processes are classified as
+    # subscription. Cost-drop boundary between them is fine; the mode
+    # classification of each process is independent and both land in
+    # SUBSCRIPTION here.
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-earlier-sub",
+            "timestamp": earlier_iso,
+            "session_id": "oldersubsession",
+            "cost": {"total_cost_usd": 1.00},
+            "rate_limits": rate_limits,
+        },
+    )
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-now-sub",
+            "timestamp": now_iso,
+            "session_id": "currentsubsess",
+            "cost": {"total_cost_usd": 0.30},
+            "rate_limits": rate_limits,
+        },
+    )
+    result = cli_runner.invoke(usage, ["--detail", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    # Subscription aggregate line appears (imputed callout intact).
+    assert "subscription cost (imputed): $1.30 across 2 sessions" in result.output, result.output
+    # Per-session lines render with the [sub] tag (8-char truncated session ids).
+    cost_idx = result.output.index("subscription cost (imputed): $1.30")
+    current_idx = result.output.index("[sub] currents")
+    older_idx = result.output.index("[sub] oldersub")
+    assert cost_idx < current_idx < older_idx, result.output
+    # No api cost line and no [api] tags -- this is a single-mode run.
+    assert "api cost:" not in result.output
+    assert "[api]" not in result.output
+
+
+@pytest.mark.tmux
+def test_usage_command_renders_both_cost_lines_when_both_modes_contribute(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    tmp_path: Path,
+    cli_profile_dir: Path,
+) -> None:
+    """When one agent contributes subscription cost and another contributes api
+    cost in the same recency window, both lines render. Subscription line
+    appears first (imputed info is contextual), then the api line (real
+    billable spend). The two aggregates stay distinct -- never lumped.
+    """
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    sub_dir = tmp_path / "agent-sub"
+    sub_dir.mkdir()
+    sub_agent = local_host.create_agent_state(
+        work_dir_path=sub_dir,
+        options=CreateAgentOptions(
+            name=AgentName("usage-sub"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 9999"),
+        ),
+    )
+    api_dir = tmp_path / "agent-api"
+    api_dir.mkdir()
+    api_agent = local_host.create_agent_state(
+        work_dir_path=api_dir,
+        options=CreateAgentOptions(
+            name=AgentName("usage-api"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 9999"),
+        ),
+    )
+    _plant_event_for_agent(
+        local_host,
+        sub_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-sub",
+            "timestamp": now_iso,
+            "session_id": "subscription-session-uuid",
+            "cost": {"total_cost_usd": 0.50},
+            "rate_limits": {"five_hour": {"used_percentage": 30.0, "resets_at": 9_999_999_999_999, "label": "5h"}},
+        },
+    )
+    _plant_event_for_agent(
+        local_host,
+        api_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-api",
+            "timestamp": now_iso,
+            "session_id": "api-key-session-uuid",
+            "cost": {"total_cost_usd": 1.25},
+        },
+    )
+    result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    # Both cost lines render.
+    assert "subscription cost (imputed): $0.50" in result.output
+    assert "api cost: $1.25" in result.output
+    # Subscription line appears before the api line.
+    sub_idx = result.output.index("subscription cost (imputed): $0.50")
+    api_idx = result.output.index("api cost: $1.25")
+    assert sub_idx < api_idx, result.output
+
+
+@pytest.mark.tmux
+def test_usage_command_excludes_stale_session_via_since(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """--since tightens the recency window; a session whose last event is older
+    than --since is excluded from the aggregate."""
+    base = datetime.now(timezone.utc)
+    now_iso = base.strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    stale_iso = (base - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-stale",
+            "timestamp": stale_iso,
+            "session_id": "should-be-excluded",
+            "cost": {"total_cost_usd": 99.0},
+        },
+    )
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-fresh",
+            "timestamp": now_iso,
+            "session_id": "in-window",
+            "cost": {"total_cost_usd": 0.50},
+        },
+    )
+    # --since 1h drops the 3h-old session.
+    result = cli_runner.invoke(
+        usage,
+        ["--format", "json", "--max-age", "300", "--since", "1h"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip())
+    source = payload["sources"][0]
+    assert source["session_count"] == 1
+    # No rate_limits planted -> api_key mode.
+    assert source["api_cost"]["total_cost_usd"] == pytest.approx(0.50)
+    assert source["subscription_cost"]["total_cost_usd"] is None
+
+
+@pytest.mark.tmux
 def test_usage_command_human_format_multi_source(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -724,10 +1900,11 @@ def test_usage_command_human_format_multi_source(
         local_host,
         agent_a,
         {
-            "source": "claude/rate_limits",
-            "type": "rate_limit_snapshot",
+            "source": "claude/usage",
+            "type": "cost_snapshot",
             "event_id": "evt-claude",
             "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "multi-source-claude-session",
             "rate_limits": {"five_hour": {"used_percentage": 11.0, "resets_at": 9_999_999_999_999}},
         },
         source="claude",
@@ -736,10 +1913,11 @@ def test_usage_command_human_format_multi_source(
         local_host,
         agent_b,
         {
-            "source": "opencode/rate_limits",
-            "type": "rate_limit_snapshot",
+            "source": "opencode/usage",
+            "type": "cost_snapshot",
             "event_id": "evt-opencode",
             "timestamp": "2056-05-08T11:00:00.000000000Z",
+            "session_id": "multi-source-opencode-session",
             "rate_limits": {"five_hour": {"used_percentage": 22.0, "resets_at": 9_999_999_999_999}},
         },
         source="opencode",

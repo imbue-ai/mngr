@@ -470,7 +470,6 @@ class HostDetails(FrozenModel):
         description="Reason for failure if the host failed during creation",
     )
 
-    @computed_field
     @cached_property
     def address(self) -> HostAddress:
         return HostAddress(host=HostName(self.name), provider=self.provider_name)
@@ -522,7 +521,6 @@ class AgentDetails(FrozenModel):
 
     plugin: dict[str, Any] = Field(default_factory=dict, description="Plugin-specific fields")
 
-    @computed_field
     @cached_property
     def address(self) -> AgentAddress:
         return AgentAddress(agent=self.id, host=self.host.address)

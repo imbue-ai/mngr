@@ -21,6 +21,7 @@ The following agent types require installing an external plugin:
 | Type | Command | Description | Plugin |
 |------|---------|-------------|--------|
 | `opencode` | `opencode` | [OpenCode](https://github.com/sst/opencode) - An open-source AI coding assistant. | `imbue-mngr-opencode` |
+| `gemini` | `gemini` | [Gemini CLI](https://geminicli.com) - Google's coding agent. | `imbue-mngr-gemini` |
 
 ## Using Agent Types
 

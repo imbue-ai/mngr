@@ -15,7 +15,7 @@ import pytest
 
 
 @pytest.fixture
-def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+def clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> pytest.MonkeyPatch:
     """Clear subagent-proxy env vars so individual tests set only what they need.
 
     Covers the union of vars referenced by any subagent-proxy unit test:
@@ -24,6 +24,18 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     label-driven destroy filter), ``MNGR_SUBAGENT_DEPTH`` /
     ``MNGR_MAX_SUBAGENT_DEPTH`` (depth-limit guard), and
     ``MNGR_SUBAGENT_REAP_BACKGROUND`` (reap hook background-worker switch).
+
+    Also reroutes ``$HOME`` into a per-test ``tmp_path`` so the
+    typed-subagent agent-definition resolver (which goes through
+    ``get_user_claude_config_dir()``: ``$ORIGINAL_CLAUDE_CONFIG_DIR``
+    then ``$CLAUDE_CONFIG_DIR`` then ``Path.home() / ".claude"``)
+    cannot accidentally read the developer's real ``~/.claude/agents/``
+    or installed marketplace plugins. The autouse
+    ``setup_test_mngr_env`` fixture (via ``isolate_home``) already
+    clears the two config-dir vars, so overriding ``HOME`` here is
+    enough to redirect the lookup. Tests that exercise typed-subagent
+    paths can drop files under the fake home; tests that don't get a
+    deterministic empty home that resolves nothing.
     """
     for name in (
         "MNGR_AGENT_STATE_DIR",
@@ -34,6 +46,9 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
         "MNGR_SUBAGENT_REAP_BACKGROUND",
     ):
         monkeypatch.delenv(name, raising=False)
+    fake_home = tmp_path / "fake_home_default"
+    fake_home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(fake_home))
     return monkeypatch
 
 
