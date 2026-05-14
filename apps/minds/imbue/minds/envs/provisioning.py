@@ -272,16 +272,27 @@ def destroy_dev_env(
 
     Order is the reverse of create: SuperTokens, Neon, Modal, then any
     Vultr instances tagged with this dev env. Finally the local TOML file
-    is removed. ``keep_agents`` is reserved for the eventual ``mngr destroy``
-    integration; the bare provisioning path does not own running agents.
+    is removed.
+
+    ``keep_agents`` is a forward-compatible knob for the eventual
+    ``mngr destroy`` integration. Today the provisioning path does not
+    own running workspace agents, so the flag is effectively a no-op:
+    running agents are left alone whether it is passed or not. When
+    ``keep_agents=False`` (the value implying "tear down everything"),
+    a warning is logged so the operator knows manual ``mngr destroy``
+    is still required for any agents bound to this env.
 
     Raises :class:`DevEnvNotFoundError` if no local file exists -- the
     operator is asked to confirm the name they meant.
     """
     if not dev_env_file(name, root_name=root_name).is_file():
         raise DevEnvNotFoundError(f"No local file for dev env {name!r}; nothing to destroy.")
-    # Placeholder for the eventual `mngr destroy` integration; not yet wired in.
-    _ = keep_agents
+    if not keep_agents:
+        logger.warning(
+            "minds env destroy {!r}: workspace-agent teardown is not yet implemented. "
+            "Run `mngr destroy <agent>` manually for any agents bound to this env.",
+            str(name),
+        )
 
     instances = providers.list_vultr_instances(name, credentials.vultr_api_key)
     if instances:

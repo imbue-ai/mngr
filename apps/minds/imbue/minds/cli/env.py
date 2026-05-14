@@ -295,7 +295,12 @@ def env_list(ctx: click.Context) -> None:
     "--keep-agents",
     is_flag=True,
     default=False,
-    help="Reserved -- do not destroy running workspace agents bound to this env.",
+    help=(
+        "Forward-compatible flag for the eventual `mngr destroy` integration. "
+        "Agent teardown is not yet implemented; running workspace agents are "
+        "left alone today regardless of this flag (a warning is logged when "
+        "the flag is omitted)."
+    ),
 )
 @click.pass_context
 def env_destroy(ctx: click.Context, name: str, keep_agents: bool) -> None:
