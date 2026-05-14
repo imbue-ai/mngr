@@ -16,16 +16,16 @@ from scripts.release import _gate_release_on_pending_changelog_entries  # noqa: 
 from scripts.release import _pluralize_entry  # noqa: E402
 
 
-def test_pluralize_entry_singular() -> None:
-    assert _pluralize_entry(1) == "entry"
-
-
-def test_pluralize_entry_plural_zero() -> None:
-    assert _pluralize_entry(0) == "entries"
-
-
-def test_pluralize_entry_plural_multiple() -> None:
-    assert _pluralize_entry(5) == "entries"
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    [
+        (0, "entries"),
+        (1, "entry"),
+        (5, "entries"),
+    ],
+)
+def test_pluralize_entry(count: int, expected: str) -> None:
+    assert _pluralize_entry(count) == expected
 
 
 def test_gate_returns_true_when_no_pending_entries(capsys: pytest.CaptureFixture[str]) -> None:
