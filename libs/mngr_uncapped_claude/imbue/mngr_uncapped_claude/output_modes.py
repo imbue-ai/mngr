@@ -209,6 +209,14 @@ class StreamingOutputWriter(MutableModel):
     output_format: OutputFormat = Field(description="The chosen output format")
     session_id: str = Field(description="Session identifier used in envelopes")
     stdout: Any = Field(description="Where output is written (file-like object with write()/flush())")
+    replay_user_messages: bool = Field(
+        default=False,
+        description=(
+            "If False (claude -p default), suppress stream-json output for user_message transcript "
+            "events so the user's own prompts are not echoed back. Tool-result events are still "
+            "emitted because they carry assistant feedback, not the user's input."
+        ),
+    )
     is_init_written: bool = Field(default=False, description="Whether the system/init envelope was emitted")
     seen_event_ids: set[str] = Field(default_factory=set, description="Event IDs already processed")
     assistant_text_parts: list[str] = Field(
@@ -254,6 +262,13 @@ class StreamingOutputWriter(MutableModel):
                 assert_never(unreachable)
 
     def _write_stream_json_event(self, event: dict[str, Any]) -> None:
+        if not self.replay_user_messages and event.get("type") == "user_message":
+            # Match claude -p's default behavior: do not echo the user's own
+            # prompts back into the stream-json output unless explicitly opted
+            # in via --replay-user-messages. Tool-result events (which also
+            # synthesize claude `user` envelopes) are not gated here because
+            # they convey assistant tool feedback, not user input.
+            return
         line = transcript_event_to_stream_json(event, self.session_id)
         if line is None:
             return

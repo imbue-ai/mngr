@@ -144,3 +144,27 @@ def test_stream_json_writer_emits_init_first_and_result_last() -> None:
     assert lines[0]["subtype"] == "init"
     assert lines[1]["type"] == "assistant"
     assert lines[2]["type"] == "result"
+
+
+def test_stream_json_writer_suppresses_user_messages_by_default() -> None:
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(output_format=OutputFormat.STREAM_JSON, session_id="session-1", stdout=stdout)
+    writer.emit_events([_user_event("hi"), _assistant_event("hello")])
+    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
+    types = [json.loads(line)["type"] for line in stdout.getvalue().splitlines()]
+    # Default matches claude -p: user prompts are not echoed back into the stream.
+    assert types == ["system", "assistant", "result"]
+
+
+def test_stream_json_writer_replays_user_messages_when_enabled() -> None:
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(
+        output_format=OutputFormat.STREAM_JSON,
+        session_id="session-1",
+        stdout=stdout,
+        replay_user_messages=True,
+    )
+    writer.emit_events([_user_event("hi"), _assistant_event("hello")])
+    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
+    types = [json.loads(line)["type"] for line in stdout.getvalue().splitlines()]
+    assert types == ["system", "user", "assistant", "result"]

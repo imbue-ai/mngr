@@ -177,7 +177,12 @@ def _run_with_agent(
     agent = result.agent
     host = result.host
 
-    writer = StreamingOutputWriter(output_format=partition.output_format, session_id=str(agent.id), stdout=stdout)
+    writer = StreamingOutputWriter(
+        output_format=partition.output_format,
+        session_id=str(agent.id),
+        stdout=stdout,
+        replay_user_messages=partition.replay_user_messages,
+    )
     state = _RunState(agent=agent, host=host, writer=writer)
 
     events_target = _build_events_target(mngr_ctx, agent)
