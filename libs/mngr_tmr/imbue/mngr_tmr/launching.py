@@ -270,6 +270,7 @@ def _create_snapshot_host(
 ) -> SnapshotName:
     """Launch a dedicated snapshotter agent, snapshot its host, then stop it."""
     agent_name = AgentName(f"tmr-{run_name}-snapshotter")
+    host_name = HostName(f"tmr-{run_name}-snapshotter")
 
     logger.info("Launching snapshotter agent '{}' for provisioning...", agent_name)
     create_result = _create_tmr_agent(
@@ -278,6 +279,7 @@ def _create_snapshot_host(
         config=_with_role_label(config, "snapshotter"),
         mngr_ctx=mngr_ctx,
         is_snapshotter=True,
+        host_name=host_name,
     )
 
     snapshotter_host = create_result.host
@@ -507,6 +509,7 @@ def launch_integrator_agent(
     """Launch an integrator agent that cherry-picks fix branches into a linear stack."""
     agent_name = AgentName(f"tmr-{run_name}-integrator")
     branch_name = f"mngr-tmr/{run_name}/integrated"
+    host_name = HostName(f"tmr-{run_name}-integrator")
     prompt = build_integrator_prompt(fix_branches)
 
     logger.info("Launching integrator agent '{}' to integrate {} branches", agent_name, len(fix_branches))
@@ -516,6 +519,7 @@ def launch_integrator_agent(
         config=_with_role_label(config, "integrator"),
         mngr_ctx=mngr_ctx,
         initial_message=prompt,
+        host_name=host_name,
     )
 
     return (
