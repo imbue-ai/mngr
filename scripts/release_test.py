@@ -11,9 +11,16 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from scripts.release import REPO_ROOT  # noqa: E402
 from scripts.release import _gate_release_on_pending_changelog_entries  # noqa: E402
 from scripts.release import _pluralize_entry  # noqa: E402
+
+
+def _write_changelog_entry(tmp_path: Path, name: str, content: str = "- entry") -> Path:
+    changelog_dir = tmp_path / "changelog"
+    changelog_dir.mkdir(exist_ok=True)
+    entry = changelog_dir / name
+    entry.write_text(content)
+    return entry
 
 
 @pytest.mark.parametrize(
@@ -29,15 +36,19 @@ def test_pluralize_entry(count: int, expected: str) -> None:
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
-def test_gate_returns_true_when_no_pending_entries(dry_run: bool, capsys: pytest.CaptureFixture[str]) -> None:
-    result = _gate_release_on_pending_changelog_entries([], dry_run=dry_run)
+def test_gate_returns_true_when_no_pending_entries(
+    tmp_path: Path, dry_run: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    result = _gate_release_on_pending_changelog_entries(tmp_path, dry_run=dry_run)
     assert result is True
     assert capsys.readouterr().out == ""
 
 
-def test_gate_warns_and_returns_true_in_dry_run_with_pending_entries(capsys: pytest.CaptureFixture[str]) -> None:
-    entries = [REPO_ROOT / "changelog" / "fake-entry.md"]
-    result = _gate_release_on_pending_changelog_entries(entries, dry_run=True)
+def test_gate_warns_and_returns_true_in_dry_run_with_pending_entries(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_changelog_entry(tmp_path, "fake-entry.md")
+    result = _gate_release_on_pending_changelog_entries(tmp_path, dry_run=True)
     assert result is True
     output = capsys.readouterr().out
     assert "WARNING" in output
@@ -45,12 +56,12 @@ def test_gate_warns_and_returns_true_in_dry_run_with_pending_entries(capsys: pyt
     assert "changelog/fake-entry.md" in output
 
 
-def test_gate_blocks_and_returns_false_with_pending_entries(capsys: pytest.CaptureFixture[str]) -> None:
-    entries = [
-        REPO_ROOT / "changelog" / "fake-a.md",
-        REPO_ROOT / "changelog" / "fake-b.md",
-    ]
-    result = _gate_release_on_pending_changelog_entries(entries, dry_run=False)
+def test_gate_blocks_and_returns_false_with_pending_entries(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_changelog_entry(tmp_path, "fake-a.md")
+    _write_changelog_entry(tmp_path, "fake-b.md")
+    result = _gate_release_on_pending_changelog_entries(tmp_path, dry_run=False)
     assert result is False
     captured = capsys.readouterr()
     # The blocking-error path writes to stderr (matches the rest of

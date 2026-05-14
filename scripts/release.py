@@ -509,12 +509,14 @@ def _print_on_demand_consolidation_command(file: TextIO | None = None) -> None:
         print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {CHANGELOG_PROVIDER}", file=file)
 
 
-def _gate_release_on_pending_changelog_entries(entries: list[Path], dry_run: bool) -> bool:
+def _gate_release_on_pending_changelog_entries(repo_root: Path, dry_run: bool) -> bool:
     """Block a release until pending changelog entries are consolidated.
 
-    Takes the list of pending entries (see ``pending_changelog_entries``)
-    as input rather than reading it directly, so tests can inject a
-    controlled list without monkeypatching.
+    Operates on ``repo_root``'s ``changelog/`` directory directly. Taking
+    the path as a parameter (rather than always reading the module-level
+    ``REPO_ROOT``) is the production contract -- the gate's job is to
+    inspect a particular repo -- and conveniently lets tests pass a
+    ``tmp_path`` populated with synthetic entries.
 
     Returns ``True`` if the release may proceed (no pending entries, or
     ``dry_run`` is set), ``False`` if the caller must abort. After
@@ -524,6 +526,7 @@ def _gate_release_on_pending_changelog_entries(entries: list[Path], dry_run: boo
     ``dry_run`` swaps the error for a warning so ``release.py --dry-run``
     can still preview what would be released.
     """
+    entries = pending_changelog_entries(repo_root)
     if not entries:
         return True
 
@@ -531,7 +534,7 @@ def _gate_release_on_pending_changelog_entries(entries: list[Path], dry_run: boo
     if dry_run:
         print()
         print(f"WARNING: {len(entries)} pending changelog {entry_word} would block a real release:")
-        print(_format_pending_changelog_list(entries, REPO_ROOT))
+        print(_format_pending_changelog_list(entries, repo_root))
         print(f"(consolidate via the '{CHANGELOG_TRIGGER_NAME}' schedule before cutting the release)")
         print()
         return True
@@ -546,7 +549,7 @@ def _gate_release_on_pending_changelog_entries(entries: list[Path], dry_run: boo
     print(file=sys.stderr)
     print("The following entries in changelog/ haven't been consolidated into", file=sys.stderr)
     print("CHANGELOG.md's [Unreleased] section yet:", file=sys.stderr)
-    print(_format_pending_changelog_list(entries, REPO_ROOT), file=sys.stderr)
+    print(_format_pending_changelog_list(entries, repo_root), file=sys.stderr)
     print(file=sys.stderr)
     print(f"The '{CHANGELOG_TRIGGER_NAME}' schedule runs nightly at midnight PST (08:00 UTC). To", file=sys.stderr)
     print("trigger it on demand instead (opens a PR you can merge before re-running", file=sys.stderr)
@@ -625,8 +628,7 @@ def main() -> None:
     # finalize would be missing those entries' bullets. In --dry-run we
     # warn rather than block so the user can still preview what would
     # be released.
-    pending_entries = pending_changelog_entries(REPO_ROOT)
-    if not _gate_release_on_pending_changelog_entries(pending_entries, dry_run=args.dry_run):
+    if not _gate_release_on_pending_changelog_entries(REPO_ROOT, dry_run=args.dry_run):
         sys.exit(1)
 
     base_kind: str = args.bump_kind
