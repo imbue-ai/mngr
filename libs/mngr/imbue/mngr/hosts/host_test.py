@@ -2283,8 +2283,11 @@ def test_host_get_agents_tolerates_agent_with_unregistered_type(
     )
 
     agents = host.get_agents()
-    agent_names = {str(a.name) for a in agents}
-    assert "orphan-agent" in agent_names
+    agents_by_name = {str(a.name): a for a in agents}
+    assert "orphan-agent" in agents_by_name
+    # The docstring promises we degrade to BaseAgent; pin that explicitly so a
+    # regression that returns the wrong fallback class would be caught here.
+    assert isinstance(agents_by_name["orphan-agent"], BaseAgent)
 
 
 # =========================================================================
