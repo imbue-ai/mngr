@@ -198,9 +198,15 @@ def _run_with_agent(
     # delivered via _send_user_turn adds one more. This drives the
     # turn-count field in claude's native result envelope.
     turn_count = 1
+    # Transcript read state is owned by the run, not the per-turn helper, so
+    # that multi-turn invocations do not re-read or re-parse lines from prior
+    # turns and the malformed-line warner keeps its "warn-once" memory across
+    # turns.
+    seen_bytes = 0
+    parser_warner = MalformedJsonLineWarner(source_description=f"common transcript for agent {agent.name}")
     with _DestroyOnSignal(state=state):
         try:
-            final_state = _wait_for_turn_end(agent, events_target, writer)
+            final_state, seen_bytes = _wait_for_turn_end(agent, events_target, writer, parser_warner, seen_bytes)
             for next_prompt in remaining_prompts:
                 if final_state != AgentLifecycleState.WAITING:
                     # Agent already terminated; sending another prompt would just
@@ -208,7 +214,7 @@ def _run_with_agent(
                     break
                 _send_user_turn(mngr_ctx, agent, next_prompt)
                 turn_count += 1
-                final_state = _wait_for_turn_end(agent, events_target, writer)
+                final_state, seen_bytes = _wait_for_turn_end(agent, events_target, writer, parser_warner, seen_bytes)
         except BaseMngrError as exc:
             logger.error("Run failed: {}", exc)
             _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=str(exc), turn_count=turn_count)
@@ -276,25 +282,27 @@ def _wait_for_turn_end(
     agent: AgentInterface[Any],
     events_target: EventsTarget,
     writer: StreamingOutputWriter,
-) -> AgentLifecycleState:
+    parser_warner: MalformedJsonLineWarner,
+    seen_bytes: int,
+) -> tuple[AgentLifecycleState, int]:
     """Poll the agent until it reaches WAITING (or a terminal state); stream events meanwhile.
 
-    Returns the final lifecycle state observed. WAITING means the agent
-    paused for the next user turn; STOPPED or DONE mean the agent exited
-    prematurely (the caller treats this as a claude-side failure).
+    Returns ``(final_state, new_seen_bytes)``. WAITING means the agent paused
+    for the next user turn; STOPPED or DONE mean the agent exited prematurely
+    (the caller treats this as a claude-side failure). The returned offset
+    must be threaded back into the next call so multi-turn invocations do not
+    re-read prior turns' transcript bytes.
     """
-    seen_bytes = 0
-    parser_warner = MalformedJsonLineWarner(source_description=f"common transcript for agent {agent.name}")
     final_state: AgentLifecycleState | None = None
     while final_state is None:
         seen_bytes = _drain_new_events(events_target, writer, parser_warner, seen_bytes)
         state = agent.get_lifecycle_state()
         if state in (AgentLifecycleState.WAITING, AgentLifecycleState.STOPPED, AgentLifecycleState.DONE):
-            _drain_new_events(events_target, writer, parser_warner, seen_bytes)
+            seen_bytes = _drain_new_events(events_target, writer, parser_warner, seen_bytes)
             final_state = state
         else:
             time.sleep(_POLL_INTERVAL_SECONDS)
-    return final_state
+    return final_state, seen_bytes
 
 
 def _drain_new_events(
