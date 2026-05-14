@@ -187,6 +187,10 @@ def _run_with_agent(
         try:
             final_state = _wait_for_turn_end(agent, events_target, writer)
             for next_prompt in remaining_prompts:
+                if final_state != AgentLifecycleState.WAITING:
+                    # Agent already terminated; sending another prompt would just
+                    # produce a confusing delivery error that hides the real cause.
+                    break
                 _send_user_turn(mngr_ctx, agent, next_prompt)
                 final_state = _wait_for_turn_end(agent, events_target, writer)
         except (MngrError, BaseMngrError) as exc:
