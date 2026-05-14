@@ -13,7 +13,10 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
     Subclasses set ``TUI_READY_INDICATOR`` to a stable substring that appears in
     the pane content once the TUI has finished initializing and is ready to
     accept input. Paste-detection send is always enabled so messages are not
-    submitted before the pasted content has been confirmed visible on screen.
+    submitted before the pasted content has been confirmed visible on screen --
+    interactive coding TUIs (Claude Code, Gemini CLI) have complex input handlers
+    that can misinterpret Enter as a literal newline when it arrives too quickly
+    after the message text, so we wait for the paste to render before submitting.
     """
 
     TUI_READY_INDICATOR: ClassVar[str]
