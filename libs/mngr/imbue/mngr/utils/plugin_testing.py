@@ -18,7 +18,11 @@ import imbue.mngr.main
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
+from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.config.agent_class_registry import register_agent_class
+from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.consts import PROFILES_DIRNAME
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.main import load_plugin_hookspecs
@@ -32,6 +36,37 @@ from imbue.mngr.utils.testing import isolate_git
 from imbue.mngr.utils.testing import isolate_tmux_server
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr.utils.testing import setup_mngr_test_environment
+
+# Placeholder agent type names used across the test suite as "any agent type"
+# stand-ins. The default-class fallback (set_default_agent_class) used to make
+# these resolve to BaseAgent silently; now resolve_agent_type requires every
+# name to be known. Registering these as BaseAgent + base config keeps the
+# existing tests working without scattering ``--type command`` rewrites.
+_TEST_PLACEHOLDER_AGENT_TYPES: tuple[str, ...] = (
+    "generic",
+    "test",
+    "test_headless",
+    "echo",
+    "persist-test",
+    "worktree-test",
+    "worktree-gen-test",
+    "wt-base-test",
+    "in-place-test",
+    "in-place-preserve-test",
+    "no-create-test",
+    "no-create-src-test",
+    "target-same-test",
+    "target-diff-test",
+    "my-custom-type",
+    "stacking-type",
+)
+
+
+def register_test_placeholder_agent_types() -> None:
+    """Register the shared placeholder agent type names as BaseAgent fixtures."""
+    for placeholder in _TEST_PLACEHOLDER_AGENT_TYPES:
+        register_agent_class(placeholder, BaseAgent)
+        register_agent_config(placeholder, AgentTypeConfig)
 
 
 @pytest.fixture
@@ -60,6 +95,7 @@ def plugin_manager() -> Generator[pluggy.PluginManager, None, None]:
     load_plugin_hookspecs(pm)
     load_local_backend_only(pm)
     load_agents_from_plugins(pm)
+    register_test_placeholder_agent_types()
 
     yield pm
 

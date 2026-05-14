@@ -22,12 +22,8 @@ import imbue.mngr.main
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
-from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.providers import reset_provider_instances
-from imbue.mngr.config.agent_class_registry import register_agent_class
-from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.consts import PROFILES_DIRNAME
-from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
@@ -43,6 +39,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
+from imbue.mngr.utils.plugin_testing import register_test_placeholder_agent_types
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import isolate_git
@@ -94,28 +91,6 @@ def _remove_deprecated_urwid_module_aliases() -> None:
 # We use SimpleFocusListWalker to ensure urwid is fully loaded first.
 _ = SimpleFocusListWalker
 _remove_deprecated_urwid_module_aliases()
-
-
-# Placeholder agent type names used across the test suite as "any agent type"
-# stand-ins; registered as BaseAgent + base config by the plugin_manager fixture.
-_TEST_PLACEHOLDER_AGENT_TYPES: Final[tuple[str, ...]] = (
-    "generic",
-    "test",
-    "test_headless",
-    "echo",
-    "persist-test",
-    "worktree-test",
-    "worktree-gen-test",
-    "wt-base-test",
-    "in-place-test",
-    "in-place-preserve-test",
-    "no-create-test",
-    "no-create-src-test",
-    "target-same-test",
-    "target-diff-test",
-    "my-custom-type",
-    "stacking-type",
-)
 
 
 # =============================================================================
@@ -533,15 +508,7 @@ def plugin_manager(
 
     # Load other registries (agents)
     load_agents_from_plugins(pm)
-
-    # Register placeholder agent type names that many tests use to mean
-    # "any agent type, just needs to resolve". Historically these leaned on
-    # the BaseAgent default fallback (now removed in favor of an explicit
-    # gate in resolve_agent_type). Registering them here keeps those tests
-    # working without spreading "command" through every fixture.
-    for placeholder in _TEST_PLACEHOLDER_AGENT_TYPES:
-        register_agent_class(placeholder, BaseAgent)
-        register_agent_config(placeholder, AgentTypeConfig)
+    register_test_placeholder_agent_types()
 
     yield pm
 

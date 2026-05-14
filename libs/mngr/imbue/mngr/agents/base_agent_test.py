@@ -127,26 +127,35 @@ def test_is_running_true_when_tmux_session_running(
 
 @pytest.mark.tmux
 def test_lifecycle_state_running_unknown_agent_type_when_different_process_exists(
-    test_agent: BaseAgent,
+    local_provider: LocalProviderInstance,
+    temp_work_dir: Path,
 ) -> None:
     """Test that agent is RUNNING_UNKNOWN_AGENT_TYPE when tmux session exists with
     a different process and the agent type is not registered."""
-    session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
+    # Use a name that is deliberately NOT in the test-placeholder agent-type
+    # registration, so check_agent_type_known returns False and the lifecycle
+    # logic reports RUNNING_UNKNOWN_AGENT_TYPE rather than REPLACED.
+    unregistered_agent = create_test_agent(
+        local_provider,
+        temp_work_dir,
+        agent_config=None,
+        agent_type=AgentTypeName("lifecycle-unregistered-type"),
+        extra_data=None,
+        agent_class=BaseAgent,
+    )
+    session_name = f"{unregistered_agent.mngr_ctx.config.prefix}{unregistered_agent.name}"
 
     # Create a tmux session with a different command (cat waits for input indefinitely)
-    test_agent.host.execute_idempotent_command(
+    unregistered_agent.host.execute_idempotent_command(
         f"tmux new-session -d -s '{session_name}' 'cat'",
         timeout_seconds=5.0,
     )
 
     try:
-        # The test agent has type "test" which is not registered, so with an
-        # unrecognized process running it should be RUNNING_UNKNOWN_AGENT_TYPE
-        # (not REPLACED, which is for known agent types).
         # There's a race condition where tmux spawns a shell first, then execs the command.
         # During that brief window, pane_current_command shows the shell, giving DONE.
         wait_for(
-            lambda: test_agent.get_lifecycle_state() == AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+            lambda: unregistered_agent.get_lifecycle_state() == AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
             error_message="Expected agent lifecycle state to be RUNNING_UNKNOWN_AGENT_TYPE",
         )
     finally:
