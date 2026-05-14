@@ -139,19 +139,23 @@ def update_forward_info_gateway_port(data_dir: Path, gateway_port: int) -> None:
     ``gateway_port`` field so the embedder's view of the supervisor
     PID / started_at is not silently overwritten.
 
-    Silently no-ops when no record exists -- this can only happen if
-    something else has deleted the file between the supervisor's own
-    spawn and the gateway bind, in which case we have bigger
-    problems than a missing port stamp.
+    Raises :class:`LatchkeyStoreError` when no record exists. The only
+    code that calls this helper is the supervisor itself, immediately
+    after it has spawned the gateway, and the only writer of the
+    record is :class:`LatchkeyForwardSupervisor.ensure_running` (which
+    writes it *before* spawning the supervisor child). A missing
+    record here therefore means either someone manually deleted it,
+    the filesystem is broken, or our state machine is wrong --
+    silently moving on would leave the gateway running but invisible
+    to any minds / ``gateway-info`` consumer polling for the port,
+    which is a much worse failure mode than crashing the supervisor.
     """
     existing = load_forward_info(data_dir)
     if existing is None:
-        logger.warning(
-            "No forward info record at {} to stamp gateway_port={} onto",
-            forward_info_path(data_dir),
-            gateway_port,
+        raise LatchkeyStoreError(
+            f"No forward info record at {forward_info_path(data_dir)} to stamp gateway_port={gateway_port} onto; "
+            "refusing to silently leave the gateway invisible to consumers.",
         )
-        return
     save_forward_info(
         data_dir,
         existing.model_copy_update(to_update(existing.field_ref().gateway_port, gateway_port)),

@@ -519,7 +519,15 @@ def test_update_forward_info_gateway_port_stamps_existing_record(tmp_path: Path)
     assert updated.gateway_port == 32867
 
 
-def test_update_forward_info_gateway_port_is_a_no_op_when_record_absent(tmp_path: Path) -> None:
-    """Missing record => no-op + a warning log; never raises."""
-    update_forward_info_gateway_port(tmp_path, gateway_port=32867)
+def test_update_forward_info_gateway_port_raises_when_record_absent(tmp_path: Path) -> None:
+    """Missing record => :class:`LatchkeyStoreError`; never silently drops the stamp.
+
+    Silently moving on would leave the gateway running but invisible
+    to anything polling for ``gateway_port`` (notably the minds
+    desktop client during startup), which is a worse failure mode
+    than crashing the supervisor.
+    """
+    with pytest.raises(LatchkeyStoreError) as exc_info:
+        update_forward_info_gateway_port(tmp_path, gateway_port=32867)
+    assert "32867" in str(exc_info.value)
     assert load_forward_info(tmp_path) is None
