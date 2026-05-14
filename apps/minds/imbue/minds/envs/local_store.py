@@ -66,9 +66,7 @@ def write_dev_env_file(
     """
     target = dev_env_file(name, root_name=root_name)
     if target.exists() and not overwrite:
-        raise DevEnvAlreadyExistsError(
-            f"Dev env file {target} already exists. Run `minds env destroy {name}` first or pass --force to overwrite."
-        )
+        raise DevEnvAlreadyExistsError(f"Dev env file {target} already exists. Run `minds env destroy {name}` first.")
     target.parent.mkdir(parents=True, exist_ok=True)
 
     doc = tomlkit.document()
