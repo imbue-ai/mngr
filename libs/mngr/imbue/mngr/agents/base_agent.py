@@ -446,8 +446,6 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         the tmux "command too long" error.
         """
         if len(message) < LONG_MESSAGE_THRESHOLD:
-            # Use `--` end-of-options separator so messages starting with `-`
-            # (e.g. "--help") aren't parsed as tmux flags.
             send_msg_cmd = f"tmux send-keys -t '{tmux_target}' -l -- {shlex.quote(message)}"
             result = self.host.execute_stateful_command(send_msg_cmd)
             if not result.success:
