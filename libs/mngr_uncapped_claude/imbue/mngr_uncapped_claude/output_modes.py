@@ -2,9 +2,13 @@ import json
 import time
 from typing import Any
 from typing import Final
-from typing import IO
 from typing import assert_never
 
+from loguru import logger
+from pydantic import ConfigDict
+from pydantic import Field
+
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr_uncapped_claude.data_types import OutputFormat
 from imbue.mngr_uncapped_claude.data_types import ResultMeta
@@ -19,7 +23,7 @@ _PLACEHOLDER_MODEL: Final[str] = "unknown"
 def build_result_envelope(
     text: str,
     meta: ResultMeta,
-    num_turns: int,
+    turn_count: int,
 ) -> dict[str, Any]:
     """Synthesize a ``{"type": "result", ...}`` envelope matching claude -p's shape.
 
@@ -35,7 +39,7 @@ def build_result_envelope(
         "api_error_status": None,
         "duration_ms": meta.duration_ms,
         "duration_api_ms": 0,
-        "num_turns": num_turns,
+        "num_turns": turn_count,
         "result": meta.error_text if meta.is_error else text,
         "stop_reason": "end_turn",
         "session_id": meta.session_id,
@@ -87,7 +91,7 @@ def transcript_event_to_stream_json(event: dict[str, Any], session_id: str) -> d
 
 def _assistant_event_to_stream_json(event: dict[str, Any], session_id: str) -> dict[str, Any]:
     text = event.get("text", "")
-    tool_calls = event.get("tool_calls", []) or []
+    tool_calls: list[dict[str, Any]] = _coerce_dict_list(event.get("tool_calls"))
     content_blocks: list[dict[str, Any]] = []
     if text:
         content_blocks.append({"type": "text", "text": text})
@@ -97,7 +101,7 @@ def _assistant_event_to_stream_json(event: dict[str, Any], session_id: str) -> d
                 "type": "tool_use",
                 "id": call.get("tool_call_id", ""),
                 "name": call.get("tool_name", ""),
-                "input": _parse_input_preview(call.get("input_preview", "")),
+                "input": _parse_input_preview(_coerce_str(call.get("input_preview", ""))),
             }
         )
     return {
@@ -145,6 +149,26 @@ def _tool_result_event_to_stream_json(event: dict[str, Any], session_id: str) ->
 
 
 @pure
+def _coerce_dict_list(value: object) -> list[dict[str, Any]]:
+    """Return ``value`` if it is a list of dicts; otherwise an empty list."""
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict):
+            out.append({str(key): val for key, val in item.items()})
+    return out
+
+
+@pure
+def _coerce_str(value: object) -> str:
+    """Return ``value`` if it is a string; otherwise the empty string."""
+    if isinstance(value, str):
+        return value
+    return ""
+
+
+@pure
 def _parse_input_preview(preview: str) -> object:
     """Best-effort parse of the tool input preview into structured JSON.
 
@@ -156,7 +180,8 @@ def _parse_input_preview(preview: str) -> object:
         return {}
     try:
         return json.loads(preview)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        logger.warning("Failed to parse tool input preview as JSON ({}): {!r}", exc.msg, preview)
         return preview
 
 
@@ -178,7 +203,7 @@ def collect_assistant_text(events: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
-class StreamingOutputWriter:
+class StreamingOutputWriter(MutableModel):
     """Stateful helper that emits incremental output as transcript events arrive.
 
     One writer instance handles a single ``mngr uncapped-claude`` invocation.
@@ -188,42 +213,37 @@ class StreamingOutputWriter:
     text (for ``text``).
     """
 
-    output_format: OutputFormat
-    session_id: str
-    stdout: IO[str]
-    _is_init_written: bool
-    _seen_event_ids: set[str]
-    _assistant_text_parts: list[str]
-    _num_assistant_turns: int
+    model_config = ConfigDict(frozen=False, extra="forbid", arbitrary_types_allowed=True)
 
-    def __init__(self, output_format: OutputFormat, session_id: str, stdout: IO[str]) -> None:
-        self.output_format = output_format
-        self.session_id = session_id
-        self.stdout = stdout
-        self._is_init_written = False
-        self._seen_event_ids = set()
-        self._assistant_text_parts = []
-        self._num_assistant_turns = 0
+    output_format: OutputFormat = Field(description="The chosen output format")
+    session_id: str = Field(description="Session identifier used in envelopes")
+    stdout: Any = Field(description="Where output is written (file-like object with write()/flush())")
+    is_init_written: bool = Field(default=False, description="Whether the system/init envelope was emitted")
+    seen_event_ids: set[str] = Field(default_factory=set, description="Event IDs already processed")
+    assistant_text_parts: list[str] = Field(
+        default_factory=list, description="Buffered assistant text used for text/json finalize"
+    )
+    assistant_turn_count: int = Field(default=0, description="Number of assistant turns observed")
 
     def write_init_if_needed(self) -> None:
         """Write the synthesized ``system/init`` envelope on first stream-json call."""
         if self.output_format != OutputFormat.STREAM_JSON:
             return
-        if self._is_init_written:
+        if self.is_init_written:
             return
         envelope = build_system_init_envelope(self.session_id)
         self.stdout.write(json.dumps(envelope, separators=(",", ":")) + "\n")
         self.stdout.flush()
-        self._is_init_written = True
+        self.is_init_written = True
 
     def emit_events(self, events: list[dict[str, Any]]) -> None:
         """Process new transcript events, emitting per-format output as appropriate."""
         for event in events:
             event_id = event.get("event_id")
-            if isinstance(event_id, str) and event_id in self._seen_event_ids:
+            if isinstance(event_id, str) and event_id in self.seen_event_ids:
                 continue
             if isinstance(event_id, str):
-                self._seen_event_ids.add(event_id)
+                self.seen_event_ids.add(event_id)
             self._handle_event(event)
 
     def _handle_event(self, event: dict[str, Any]) -> None:
@@ -231,14 +251,12 @@ class StreamingOutputWriter:
         if event_type == "assistant_message":
             text = event.get("text", "")
             if text:
-                self._assistant_text_parts.append(text)
-            self._num_assistant_turns += 1
+                self.assistant_text_parts.append(text)
+            self.assistant_turn_count += 1
         match self.output_format:
             case OutputFormat.TEXT:
-                # Text mode accumulates until finalize().
                 pass
             case OutputFormat.JSON:
-                # JSON mode emits only the trailing result envelope.
                 pass
             case OutputFormat.STREAM_JSON:
                 self.write_init_if_needed()
@@ -266,16 +284,16 @@ class StreamingOutputWriter:
                 assert_never(unreachable)
 
     def _finalize_text(self) -> None:
-        body = "\n".join(self._assistant_text_parts)
+        body = "\n".join(self.assistant_text_parts)
         if body:
             self.stdout.write(body + "\n")
         self.stdout.flush()
 
     def _finalize_json(self, meta: ResultMeta) -> None:
         envelope = build_result_envelope(
-            text="\n".join(self._assistant_text_parts),
+            text="\n".join(self.assistant_text_parts),
             meta=meta,
-            num_turns=max(self._num_assistant_turns, 1),
+            turn_count=max(self.assistant_turn_count, 1),
         )
         self.stdout.write(json.dumps(envelope, separators=(",", ":")) + "\n")
         self.stdout.flush()
@@ -283,9 +301,9 @@ class StreamingOutputWriter:
     def _finalize_stream_json(self, meta: ResultMeta) -> None:
         self.write_init_if_needed()
         envelope = build_result_envelope(
-            text="\n".join(self._assistant_text_parts),
+            text="\n".join(self.assistant_text_parts),
             meta=meta,
-            num_turns=max(self._num_assistant_turns, 1),
+            turn_count=max(self.assistant_turn_count, 1),
         )
         self.stdout.write(json.dumps(envelope, separators=(",", ":")) + "\n")
         self.stdout.flush()

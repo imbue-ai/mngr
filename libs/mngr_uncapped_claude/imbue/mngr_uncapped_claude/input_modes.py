@@ -72,27 +72,29 @@ def _parse_stream_json_user_line(line: str) -> str:
             f"stream-json input line must be a JSON object, got {type(parsed).__name__}: {line!r}"
         )
 
-    return _extract_user_text_content(parsed, line)
+    parsed_dict: dict[str, Any] = {str(key): value for key, value in parsed.items()}
+    return _extract_user_text_content(parsed_dict, line)
 
 
 def _extract_user_text_content(parsed: dict[str, Any], line: str) -> str:
-    type_value = parsed.get("type")
+    type_value: Any = parsed.get("type")
     if type_value != "user":
         raise InvalidStreamJsonInputError(
             f'only {{"type": "user"}} stream-json input is supported in v1 (got type={type_value!r}): {line!r}'
         )
 
-    message = parsed.get("message")
+    message: Any = parsed.get("message")
     if not isinstance(message, dict):
         raise InvalidStreamJsonInputError(f"stream-json user line must have a 'message' object: {line!r}")
 
-    role = message.get("role")
+    message_dict: dict[str, Any] = {str(key): value for key, value in message.items()}
+    role: Any = message_dict.get("role")
     if role != "user":
         raise InvalidStreamJsonInputError(
             f"stream-json user line must have message.role == 'user' (got {role!r}): {line!r}"
         )
 
-    content = message.get("content")
+    content: Any = message_dict.get("content")
     if not isinstance(content, str):
         raise InvalidStreamJsonInputError(
             "stream-json user line content must be a string in v1 "

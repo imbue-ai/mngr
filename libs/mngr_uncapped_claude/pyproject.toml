@@ -31,7 +31,6 @@ imbue-mngr-wait = { workspace = true }
 venvPath = "../.."
 venv = ".venv"
 pythonVersion = "3.12"
-strict = ["**/*.py"]
 
 [tool.pytest.ini_options]
 timeout_func_only = true

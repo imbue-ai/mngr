@@ -1,1 +1,5 @@
-Add new mngr_uncapped_claude plugin exposing `mngr uncapped-claude`, a drop-in replacement for `claude -p` that runs through `mngr create`/`message`/`transcript` so it works unattended on any mngr host.
+Add `mngr uncapped-claude`, a new top-level command provided by the `imbue-mngr-uncapped-claude` plugin. It acts as a drop-in replacement for `claude -p`: every claude flag is forwarded verbatim to a fresh, ephemeral mngr claude agent that runs in-place in the current directory. The prompt is read from positional argv (or stdin), the agent runs to end-of-turn, the response is harvested from the agent's common transcript, and the agent is destroyed on exit.
+
+- `--input-format` (text / stream-json) and `--output-format` (text / json / stream-json) are simulated by the wrapper to shape stdin/stdout.
+- The following flags are explicitly rejected with exit code 2 in v1: `--fallback-model`, `--max-budget-usd`, `--no-session-persistence`, `--include-hook-events`, `--include-partial-messages`, `-c`/`--continue`, `-r`/`--resume`, `--session-id`.
+- The spawned agent runs with `auto_dismiss_dialogs=True` and `auto_allow_permissions=True` so it never blocks on Claude Code dialogs or permission prompts.

@@ -1,4 +1,5 @@
 import io
+from collections.abc import Iterator
 
 import pytest
 
@@ -8,8 +9,8 @@ from imbue.mngr_uncapped_claude.errors import MissingPromptError
 from imbue.mngr_uncapped_claude.input_modes import iter_user_prompts
 
 
-def _collect(it: object) -> list[str]:
-    return list(it)  # type: ignore[arg-type]
+def _collect(it: Iterator[str]) -> list[str]:
+    return list(it)
 
 
 def test_text_positional_wins() -> None:

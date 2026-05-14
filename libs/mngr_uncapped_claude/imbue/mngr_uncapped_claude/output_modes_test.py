@@ -35,7 +35,7 @@ def _user_event(content: str) -> dict[str, object]:
 
 def test_build_result_envelope_success() -> None:
     meta = ResultMeta(session_id="session-1", duration_ms=1234, is_error=False, error_text=None)
-    envelope = build_result_envelope(text="hi there", meta=meta, num_turns=1)
+    envelope = build_result_envelope(text="hi there", meta=meta, turn_count=1)
     assert envelope["type"] == "result"
     assert envelope["subtype"] == "success"
     assert envelope["is_error"] is False
@@ -48,7 +48,7 @@ def test_build_result_envelope_success() -> None:
 
 def test_build_result_envelope_error_substitutes_error_text() -> None:
     meta = ResultMeta(session_id="session-1", duration_ms=2, is_error=True, error_text="boom")
-    envelope = build_result_envelope(text="ignored", meta=meta, num_turns=1)
+    envelope = build_result_envelope(text="ignored", meta=meta, turn_count=1)
     assert envelope["subtype"] == "error"
     assert envelope["is_error"] is True
     assert envelope["result"] == "boom"
@@ -84,7 +84,7 @@ def test_transcript_unknown_event_dropped() -> None:
 
 def test_text_writer_concatenates_assistant_turns() -> None:
     stdout = io.StringIO()
-    writer = StreamingOutputWriter(OutputFormat.TEXT, "session-1", stdout)
+    writer = StreamingOutputWriter(output_format=OutputFormat.TEXT, session_id="session-1", stdout=stdout)
     writer.emit_events([_assistant_event("hello"), _user_event("ignored"), _assistant_event("world")])
     writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None))
     assert stdout.getvalue() == "hello\nworld\n"
@@ -92,16 +92,15 @@ def test_text_writer_concatenates_assistant_turns() -> None:
 
 def test_text_writer_dedupes_events_by_id() -> None:
     stdout = io.StringIO()
-    writer = StreamingOutputWriter(OutputFormat.TEXT, "session-1", stdout)
+    writer = StreamingOutputWriter(output_format=OutputFormat.TEXT, session_id="session-1", stdout=stdout)
     writer.emit_events([_assistant_event("hello"), _assistant_event("hello")])
     writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None))
-    # Same event_id ("evt-hello") only contributes once.
     assert stdout.getvalue() == "hello\n"
 
 
 def test_json_writer_emits_single_envelope() -> None:
     stdout = io.StringIO()
-    writer = StreamingOutputWriter(OutputFormat.JSON, "session-1", stdout)
+    writer = StreamingOutputWriter(output_format=OutputFormat.JSON, session_id="session-1", stdout=stdout)
     writer.emit_events([_assistant_event("hello")])
     writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None))
     lines = stdout.getvalue().splitlines()
@@ -114,7 +113,7 @@ def test_json_writer_emits_single_envelope() -> None:
 
 def test_stream_json_writer_emits_init_first_and_result_last() -> None:
     stdout = io.StringIO()
-    writer = StreamingOutputWriter(OutputFormat.STREAM_JSON, "session-1", stdout)
+    writer = StreamingOutputWriter(output_format=OutputFormat.STREAM_JSON, session_id="session-1", stdout=stdout)
     writer.emit_events([_assistant_event("hello")])
     writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None))
     lines = [json.loads(line) for line in stdout.getvalue().splitlines()]

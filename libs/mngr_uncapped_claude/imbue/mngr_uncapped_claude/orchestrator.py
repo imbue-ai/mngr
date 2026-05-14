@@ -7,11 +7,15 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import IO
+from typing import Self
 
 from loguru import logger
+from pydantic import ConfigDict
+from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import read_event_content
@@ -56,6 +60,11 @@ _UNATTENDED_SETTINGS: Final[tuple[str, ...]] = (
 # Poll cadence for end-of-turn detection plus transcript tailing.
 _POLL_INTERVAL_SECONDS: Final[float] = 0.1
 
+# Generous readiness timeout: claude needs time to start, dismiss dialogs,
+# and reach the prompt-ready state in a fresh worktree before the first
+# message is delivered. mngr's 10-second default is too short here.
+_AGENT_READY_TIMEOUT_SECONDS: Final[float] = 120.0
+
 # Filename relative to the agent's events directory holding the common
 # transcript stream produced by mngr_claude.
 _COMMON_TRANSCRIPT_PATH: Final[str] = "claude/common_transcript/events.jsonl"
@@ -73,7 +82,7 @@ class _RunState(FrozenModel):
 
     model_config = {"arbitrary_types_allowed": True}
 
-    agent: AgentInterface
+    agent: AgentInterface[Any]
     host: OnlineHostInterface
     writer: StreamingOutputWriter
 
@@ -147,6 +156,7 @@ def _run_with_agent(
         agent_args=partition.pass_through_agent_args,
         label_options=AgentLabelOptions(labels={"created-by": "uncapped-claude"}),
         environment=pass_env_vars,
+        ready_timeout_seconds=_AGENT_READY_TIMEOUT_SECONDS,
     )
 
     try:
@@ -163,11 +173,8 @@ def _run_with_agent(
 
     agent = result.agent
     host = result.host
-    if not isinstance(host, OnlineHostInterface):
-        logger.error("Target host is not online; cannot run uncapped-claude")
-        return None, EXIT_MNGR_ERROR
 
-    writer = StreamingOutputWriter(partition.output_format, str(agent.id), stdout)
+    writer = StreamingOutputWriter(output_format=partition.output_format, session_id=str(agent.id), stdout=stdout)
     state = _RunState(agent=agent, host=host, writer=writer)
 
     events_target = _build_events_target(mngr_ctx, agent)
@@ -175,8 +182,7 @@ def _run_with_agent(
         logger.error("Cannot read events for agent {} (no online host or volume)", agent.name)
         return state, EXIT_MNGR_ERROR
 
-    handler = _SignalHandler(state)
-    with handler:
+    with _DestroyOnSignal(state=state):
         try:
             _wait_for_turn_end(agent, events_target, writer)
             for next_prompt in remaining_prompts:
@@ -214,7 +220,7 @@ def _build_pass_env_vars() -> AgentEnvironmentOptions:
     return AgentEnvironmentOptions(env_vars=pairs)
 
 
-def _build_events_target(mngr_ctx: MngrContext, agent: AgentInterface) -> EventsTarget | None:
+def _build_events_target(mngr_ctx: MngrContext, agent: AgentInterface[Any]) -> EventsTarget | None:
     return try_build_events_target_for_agent(
         mngr_ctx=mngr_ctx,
         agent_id=agent.id,
@@ -224,7 +230,7 @@ def _build_events_target(mngr_ctx: MngrContext, agent: AgentInterface) -> Events
     )
 
 
-def _send_user_turn(mngr_ctx: MngrContext, agent: AgentInterface, prompt: str) -> None:
+def _send_user_turn(mngr_ctx: MngrContext, agent: AgentInterface[Any], prompt: str) -> None:
     """Deliver a follow-up prompt to the running agent via ``send_message_to_agents``."""
     include_filter = f'id == "{agent.id}"'
     result = send_message_to_agents(
@@ -242,23 +248,22 @@ def _send_user_turn(mngr_ctx: MngrContext, agent: AgentInterface, prompt: str) -
 
 
 def _wait_for_turn_end(
-    agent: AgentInterface,
+    agent: AgentInterface[Any],
     events_target: EventsTarget,
     writer: StreamingOutputWriter,
 ) -> None:
     """Poll the agent until it reaches WAITING (or a terminal state); stream events meanwhile."""
     seen_chars = 0
     parser_warner = MalformedJsonLineWarner(source_description=f"common transcript for agent {agent.name}")
-    while True:
+    is_done = False
+    while not is_done:
         seen_chars = _drain_new_events(events_target, writer, parser_warner, seen_chars)
         state = agent.get_lifecycle_state()
-        if state == AgentLifecycleState.WAITING:
+        if state in (AgentLifecycleState.WAITING, AgentLifecycleState.STOPPED, AgentLifecycleState.DONE):
             _drain_new_events(events_target, writer, parser_warner, seen_chars)
-            return
-        if state in (AgentLifecycleState.STOPPED, AgentLifecycleState.DONE):
-            _drain_new_events(events_target, writer, parser_warner, seen_chars)
-            return
-        time.sleep(_POLL_INTERVAL_SECONDS)
+            is_done = True
+        else:
+            time.sleep(_POLL_INTERVAL_SECONDS)
 
 
 def _drain_new_events(
@@ -309,7 +314,7 @@ def _build_result_meta(
     )
 
 
-def _destroy_agent(agent: AgentInterface, host: OnlineHostInterface) -> None:
+def _destroy_agent(agent: AgentInterface[Any], host: OnlineHostInterface) -> None:
     """Best-effort: stop and destroy the agent, swallowing cleanup errors."""
     try:
         host.stop_agents([agent.id])
@@ -321,34 +326,35 @@ def _destroy_agent(agent: AgentInterface, host: OnlineHostInterface) -> None:
         logger.warning("Failed to destroy agent {}: {}", agent.name, exc)
 
 
-class _SignalHandler:
+class _DestroyOnSignal(MutableModel):
     """Context manager: traps SIGINT/SIGTERM, destroys the agent, re-raises.
 
-    Re-installs the original handlers on exit so the wrapper plays nicely
-    with parents that have their own signal handling.
+    The handler closes over the state via the instance, so it does not need
+    to be defined as a nested function. Original signal handlers are
+    restored on exit so the wrapper plays nicely with parents that install
+    their own.
     """
 
-    state: _RunState
-    _original_int: Any
-    _original_term: Any
+    model_config = ConfigDict(frozen=False, extra="forbid", arbitrary_types_allowed=True)
 
-    def __init__(self, state: _RunState) -> None:
-        self.state = state
-        self._original_int = signal.getsignal(signal.SIGINT)
-        self._original_term = signal.getsignal(signal.SIGTERM)
+    state: _RunState = Field(description="Run state used by the signal handler")
+    original_int: Any = Field(default=None, description="Previous SIGINT handler")
+    original_term: Any = Field(default=None, description="Previous SIGTERM handler")
 
-    def __enter__(self) -> "_SignalHandler":
+    def __enter__(self) -> Self:
+        self.original_int = signal.getsignal(signal.SIGINT)
+        self.original_term = signal.getsignal(signal.SIGTERM)
         signal.signal(signal.SIGINT, self._on_signal)
         signal.signal(signal.SIGTERM, self._on_signal)
         return self
 
     def __exit__(self, *_: object) -> None:
-        signal.signal(signal.SIGINT, self._original_int)
-        signal.signal(signal.SIGTERM, self._original_term)
+        signal.signal(signal.SIGINT, self.original_int)
+        signal.signal(signal.SIGTERM, self.original_term)
 
     def _on_signal(self, signum: int, _frame: object) -> None:
         logger.warning("Received signal {}; destroying agent {}", signum, self.state.agent.name)
         _destroy_agent(self.state.agent, self.state.host)
-        signal.signal(signal.SIGINT, self._original_int)
-        signal.signal(signal.SIGTERM, self._original_term)
+        signal.signal(signal.SIGINT, self.original_int)
+        signal.signal(signal.SIGTERM, self.original_term)
         os.kill(os.getpid(), signum)
