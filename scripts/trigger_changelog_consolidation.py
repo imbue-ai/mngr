@@ -5,7 +5,16 @@
 pre-release gate fires) both need the same ``--disable-plugin <name>``
 list passed to ``mngr schedule …`` calls in the isolated
 ``mngr-changelog-schedule`` config namespace. This module is the single
-source of truth for that list and for the trigger / namespace identifiers.
+source of truth for that list: the shell script obtains it via the
+``--print-disable-plugin-args`` flag of this module's CLI, and
+``release.py`` calls :func:`disable_plugin_args` directly.
+
+``TRIGGER_NAME`` and ``MNGR_ROOT_NAME`` are also defined here and
+imported by ``release.py``, but for the shell script's bash-side use
+they are duplicated as literals in ``setup_changelog_agent.sh`` (the
+script needs them before any ``uv run python`` invocation). The Python
+constants here and the matching bash assignments in that script must be
+kept in sync by hand.
 """
 
 import argparse
