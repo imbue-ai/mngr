@@ -1,29 +1,26 @@
 """Read/write helpers for Gemini CLI's settings.json.
 
-Gemini CLI consults three settings files (highest-to-lowest precedence):
-  1. ``/etc/gemini-cli/settings.json`` (system-wide enterprise override)
+Gemini CLI consults three settings tiers (highest-to-lowest precedence):
+  1. system -- default ``/etc/gemini-cli/settings.json``, relocatable via the
+     ``GEMINI_CLI_SYSTEM_SETTINGS_PATH`` env var
   2. ``<project>/.gemini/settings.json`` (workspace)
   3. ``~/.gemini/settings.json`` (user)
 
-This module provides the plumbing the rest of ``mngr_gemini`` needs to inject
-mngr-managed settings (hook commands, MCP servers, allowed tools) into those
-files without clobbering user edits.
-
 The JSON shape produced by the merge and builder helpers here was validated
 against Gemini CLI's published ``settings.schema.json`` and against a live
-Gemini CLI 0.42.0 session. Trust state for the agent's workspace is reserved
-for PR2; the smoke test established that:
+Gemini CLI 0.42.0 session. ``mngr_gemini`` writes a per-agent settings file
+into the agent state dir and points Gemini at it via
+``GEMINI_CLI_SYSTEM_SETTINGS_PATH``, keeping the user's workspace and
+``~/.gemini/`` untouched.
 
-* The persistent trust file is ``~/.gemini/trustedFolders.json`` (a flat
-  ``{ "<path>": "TRUST_FOLDER" }`` map).
-* The ``GEMINI_CLI_TRUST_WORKSPACE=true`` env var is Gemini's documented
-  headless-automation equivalent.
-* ``--skip-trust`` is silently weaker than either of the above: tools run
-  but workspace-declared hooks are stripped from the registry.
-
-See ``build_readiness_hooks_config`` for the workspace-trust caveat that
-follow-up PRs must address. ``GeminiDirectoryNotTrustedError`` is defined
-here so callers can already reference the type.
+Workspace trust (``--skip-trust`` replacement) is also relevant here: smoke-
+testing established that the persistent trust file is
+``~/.gemini/trustedFolders.json`` (a flat ``{ "<path>": "TRUST_FOLDER" }``
+map), that the ``GEMINI_CLI_TRUST_WORKSPACE=true`` env var is Gemini's
+documented headless-automation equivalent, and that ``--skip-trust`` is
+silently weaker than either of the above (tools run, but workspace hooks
+are stripped). ``GeminiDirectoryNotTrustedError`` is defined here so callers
+can already reference the type.
 """
 
 from __future__ import annotations
@@ -65,32 +62,6 @@ class GeminiDirectoryNotTrustedError(ConfigError):
             f"Source directory {source_path} is not trusted by Gemini CLI. "
             "Run `mngr create` interactively (without --no-connect) to be prompted, "
             f"or run Gemini CLI manually in {source_path} and accept the trust dialog."
-        )
-
-
-class GeminiSettingsCorruptError(ConfigError):
-    """An existing Gemini ``settings.json`` cannot be merged into.
-
-    Raised when ``mngr_gemini`` needs to install hooks into an existing
-    ``settings.json`` but the file is unparseable (malformed JSON) or parses
-    to a non-object value (top-level list, string, etc.). We refuse to clobber
-    in that case: silently overwriting could destroy user-managed MCP servers,
-    custom commands, or other settings that happen to live in a file we can't
-    parse. The user is asked to repair or remove the file.
-
-    Gemini CLI does not honor a ``settings.local.json`` sidecar (confirmed by
-    inspecting the published settings schema and the gemini binary), so there
-    is no fallback path that lets us avoid the user's file. Writing a new
-    settings.json elsewhere wouldn't be picked up by the CLI.
-    """
-
-    def __init__(self, settings_path: str, reason: str) -> None:
-        self.settings_path = settings_path
-        self.reason = reason
-        super().__init__(
-            f"Existing Gemini settings file {settings_path} cannot be parsed as a JSON object "
-            f"({reason}). mngr_gemini refuses to overwrite it because doing so would discard "
-            "any user-managed contents. Repair or remove the file and re-run."
         )
 
 
@@ -243,19 +214,12 @@ def build_readiness_hooks_config() -> dict[str, Any]:
     signaling but means startup-time gates (e.g. trust enforcement) must live
     elsewhere.
 
-    Workspace-trust caveat: smoke-testing against Gemini CLI 0.42.0 confirmed
-    that hooks declared in a workspace-level ``<project>/.gemini/settings.json``
-    are silently dropped (``Hook registry initialized with 0 hook entries`` in
-    ``--debug`` output) when the workspace is only trusted for the current
-    session via ``--skip-trust``. To get hooks to fire, the workspace must
-    have persistent trust -- either via an entry in ``~/.gemini/trustedFolders.json``
-    or via the ``GEMINI_CLI_TRUST_WORKSPACE=true`` env var (which the CLI
-    documents at https://geminicli.com/docs/cli/trusted-folders/ as the
-    headless/automated-environments path). With the env var set in the same
-    smoke test, ``Hook registry initialized with 2 hook entries`` and both
-    test sentinels were created. PR2 should therefore prefer
-    ``GEMINI_CLI_TRUST_WORKSPACE=true`` over ``--skip-trust`` for mngr-spawned
-    sessions.
+    ``mngr_gemini`` installs this hook at the system tier (via
+    ``GEMINI_CLI_SYSTEM_SETTINGS_PATH`` in the agent's env) rather than at
+    the workspace tier. That keeps the user's workspace and ``~/.gemini/``
+    untouched. The hook command runs in a shell at hook-execution time, so
+    ``$MNGR_AGENT_STATE_DIR`` expands then -- there's nothing to interpolate
+    at provisioning time.
     """
     return {
         "hooks": {

@@ -16,7 +16,6 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr_gemini.gemini_config import GeminiSettingsCorruptError
 from imbue.mngr_gemini.gemini_config import HOOK_EVENT_SESSION_START
 from imbue.mngr_gemini.plugin import GeminiAgent
 from imbue.mngr_gemini.plugin import GeminiAgentConfig
@@ -181,10 +180,22 @@ def test_provision_with_emit_enabled_writes_transcript_script(gemini_agent: Gemi
 
 
 def test_modify_env_vars_sets_trust_workspace_true(gemini_agent: GeminiAgent) -> None:
-    """The agent's env must mark the workspace as trusted so hooks fire."""
+    """The agent's env must mark the workspace as trusted so headless launches start."""
     env_vars: dict[str, str] = {}
     gemini_agent.modify_env_vars(gemini_agent.host, env_vars)
     assert env_vars["GEMINI_CLI_TRUST_WORKSPACE"] == "true"
+
+
+def test_modify_env_vars_points_system_settings_at_per_agent_file(
+    gemini_agent: GeminiAgent,
+) -> None:
+    """Gemini reads our system-tier settings file from the path in this env var."""
+    env_vars: dict[str, str] = {}
+    gemini_agent.modify_env_vars(gemini_agent.host, env_vars)
+    settings_path = env_vars["GEMINI_CLI_SYSTEM_SETTINGS_PATH"]
+    # The path lives inside the per-agent state dir, never inside the user's work_dir.
+    assert settings_path == str(gemini_agent._get_agent_dir() / "gemini_system_settings.json")
+    assert str(gemini_agent.work_dir) not in settings_path
 
 
 def test_modify_env_vars_preserves_other_vars(gemini_agent: GeminiAgent) -> None:
@@ -192,120 +203,52 @@ def test_modify_env_vars_preserves_other_vars(gemini_agent: GeminiAgent) -> None
     gemini_agent.modify_env_vars(gemini_agent.host, env_vars)
     assert env_vars["PRE_EXISTING"] == "kept"
     assert env_vars["GEMINI_CLI_TRUST_WORKSPACE"] == "true"
+    assert "GEMINI_CLI_SYSTEM_SETTINGS_PATH" in env_vars
 
 
-def _read_workspace_settings(agent: GeminiAgent) -> dict[str, Any]:
-    parsed: Any = json.loads((agent.work_dir / ".gemini" / "settings.json").read_text())
+def _read_system_settings(agent: GeminiAgent) -> dict[str, Any]:
+    parsed: Any = json.loads((agent._get_agent_dir() / "gemini_system_settings.json").read_text())
     assert isinstance(parsed, dict)
     return parsed
 
 
-def test_provision_creates_workspace_settings_with_readiness_hook(
+def test_provision_writes_system_settings_with_readiness_hook(
     gemini_agent: GeminiAgent,
 ) -> None:
-    """A fresh workspace gets a new .gemini/settings.json containing SessionStart."""
+    """The mngr-owned system-tier settings file holds the SessionStart hook."""
     gemini_agent.provision(
         host=gemini_agent.host,
         options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
         mngr_ctx=gemini_agent.mngr_ctx,
     )
-    settings = _read_workspace_settings(gemini_agent)
+    settings = _read_system_settings(gemini_agent)
     assert HOOK_EVENT_SESSION_START in settings["hooks"]
     inner_command = settings["hooks"][HOOK_EVENT_SESSION_START][0]["hooks"][0]["command"]
     assert "session_started" in inner_command
     assert "MNGR_AGENT_STATE_DIR" in inner_command
 
 
-def test_provision_merges_into_existing_workspace_settings_without_clobbering(
+def test_provision_does_not_create_gemini_dir_in_workspace(
     gemini_agent: GeminiAgent,
 ) -> None:
-    """An existing settings.json keeps its user-managed keys after provision."""
-    settings_dir = gemini_agent.work_dir / ".gemini"
-    settings_dir.mkdir()
-    pre_existing: dict[str, Any] = {
-        "mcpServers": {"fs": {"command": "mcp-fs"}},
-        "hooks": {"AfterTool": [{"hooks": [{"type": "command", "command": "echo keep"}]}]},
-    }
-    (settings_dir / "settings.json").write_text(json.dumps(pre_existing))
-
+    """The user's work_dir must be left completely untouched by provision."""
     gemini_agent.provision(
         host=gemini_agent.host,
         options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
         mngr_ctx=gemini_agent.mngr_ctx,
     )
-
-    settings = _read_workspace_settings(gemini_agent)
-    assert settings["mcpServers"] == {"fs": {"command": "mcp-fs"}}
-    assert settings["hooks"]["AfterTool"] == pre_existing["hooks"]["AfterTool"]
-    assert HOOK_EVENT_SESSION_START in settings["hooks"]
+    assert not (gemini_agent.work_dir / ".gemini").exists()
 
 
-def test_provision_is_idempotent_for_workspace_hooks(gemini_agent: GeminiAgent) -> None:
-    """Running provision twice doesn't duplicate the readiness hook entry."""
+def test_provision_is_idempotent(gemini_agent: GeminiAgent) -> None:
+    """Running provision twice yields the same content (mngr owns the file)."""
     options = CreateAgentOptions(agent_type=AgentTypeName("gemini"))
     gemini_agent.provision(host=gemini_agent.host, options=options, mngr_ctx=gemini_agent.mngr_ctx)
-    first = _read_workspace_settings(gemini_agent)
+    first = _read_system_settings(gemini_agent)
     gemini_agent.provision(host=gemini_agent.host, options=options, mngr_ctx=gemini_agent.mngr_ctx)
-    second = _read_workspace_settings(gemini_agent)
+    second = _read_system_settings(gemini_agent)
     assert first == second
     assert len(second["hooks"][HOOK_EVENT_SESSION_START]) == 1
-
-
-def test_provision_refuses_to_clobber_malformed_existing_settings(gemini_agent: GeminiAgent) -> None:
-    """Malformed JSON in the user's settings.json must surface as an error, not be replaced.
-
-    Gemini does not honor a ``settings.local.json`` sidecar, so there is no safe path that
-    lets us avoid the user's file. Better to make the user repair it than to discard
-    contents we couldn't parse.
-    """
-    settings_dir = gemini_agent.work_dir / ".gemini"
-    settings_dir.mkdir()
-    # The text below is intentionally truncated (missing closing braces).
-    corrupt_text = '{"mcpServers": {"fs":'
-    (settings_dir / "settings.json").write_text(corrupt_text)
-
-    with pytest.raises(GeminiSettingsCorruptError) as excinfo:
-        gemini_agent.provision(
-            host=gemini_agent.host,
-            options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
-            mngr_ctx=gemini_agent.mngr_ctx,
-        )
-
-    # The original corrupt file is preserved byte-for-byte.
-    assert (settings_dir / "settings.json").read_text() == corrupt_text
-    assert str(settings_dir / "settings.json") in excinfo.value.settings_path
-
-
-def test_provision_refuses_to_clobber_non_object_existing_settings(gemini_agent: GeminiAgent) -> None:
-    """A top-level JSON list/string/etc. is structurally invalid -- raise, don't overwrite."""
-    settings_dir = gemini_agent.work_dir / ".gemini"
-    settings_dir.mkdir()
-    list_text = "[1, 2, 3]"
-    (settings_dir / "settings.json").write_text(list_text)
-
-    with pytest.raises(GeminiSettingsCorruptError):
-        gemini_agent.provision(
-            host=gemini_agent.host,
-            options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
-            mngr_ctx=gemini_agent.mngr_ctx,
-        )
-    assert (settings_dir / "settings.json").read_text() == list_text
-
-
-def test_provision_tolerates_existing_empty_settings_file(gemini_agent: GeminiAgent) -> None:
-    """A zero-byte (or whitespace-only) settings.json is treated as 'no settings yet'."""
-    settings_dir = gemini_agent.work_dir / ".gemini"
-    settings_dir.mkdir()
-    (settings_dir / "settings.json").write_text("   \n")
-
-    gemini_agent.provision(
-        host=gemini_agent.host,
-        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
-        mngr_ctx=gemini_agent.mngr_ctx,
-    )
-
-    settings = _read_workspace_settings(gemini_agent)
-    assert HOOK_EVENT_SESSION_START in settings["hooks"]
 
 
 def test_provision_installs_hooks_even_when_transcript_disabled(
@@ -318,5 +261,5 @@ def test_provision_installs_hooks_even_when_transcript_disabled(
         options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
         mngr_ctx=agent.mngr_ctx,
     )
-    settings = _read_workspace_settings(agent)
+    settings = _read_system_settings(agent)
     assert HOOK_EVENT_SESSION_START in settings["hooks"]

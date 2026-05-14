@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import importlib.resources
 import json
-from typing import Any
 from typing import ClassVar
 from typing import Mapping
 
-from loguru import logger
 from pydantic import Field
 
 from imbue.mngr import hookimpl
@@ -21,19 +19,31 @@ from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
 from imbue.mngr_gemini import resources as _gemini_resources
-from imbue.mngr_gemini.gemini_config import GeminiSettingsCorruptError
 from imbue.mngr_gemini.gemini_config import build_readiness_hooks_config
-from imbue.mngr_gemini.gemini_config import merge_hooks_config
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME = "common_transcript.sh"
 
-# Set in the agent's environment so Gemini treats ``work_dir`` as persistently
-# trusted for the session. Smoke-testing against Gemini CLI 0.42.0 showed that
-# without this (or an entry in ``~/.gemini/trustedFolders.json``), workspace
-# ``.gemini/settings.json`` hooks are silently stripped: ``Hook registry
-# initialized with 0 hook entries``. The previous ``--skip-trust`` CLI flag
-# only trusted tool execution, not hook registration.
+# Filename for the mngr-owned settings file that mngr_gemini installs into
+# the per-agent state dir. Gemini reads it as system-tier settings, which sit
+# at the top of the precedence stack (system > workspace > user). Keeping
+# mngr's hooks at that tier means the user's workspace and ``~/.gemini/``
+# stay untouched.
+_SYSTEM_SETTINGS_FILENAME = "gemini_system_settings.json"
+
+# Set in the agent's environment so Gemini reads our settings file as the
+# system-tier override. The env-var override is documented at
+# https://geminicli.com/docs/cli/enterprise/#system-settings-path-configuration.
+_SYSTEM_SETTINGS_PATH_ENV_VAR = "GEMINI_CLI_SYSTEM_SETTINGS_PATH"
+
+# Set so Gemini treats ``work_dir`` as persistently trusted for the session,
+# without which workspace-declared hooks would be silently stripped (smoke-
+# tested against Gemini CLI 0.42.0: ``Hook registry initialized with 0 hook
+# entries`` under ``--skip-trust`` vs ``1 hook entries`` under this env var).
 # See https://geminicli.com/docs/cli/trusted-folders/#headless-and-automated-environments.
+# Strictly speaking we no longer install workspace-tier hooks (they live in
+# the system-tier file pointed to by _SYSTEM_SETTINGS_PATH_ENV_VAR), but the
+# env var also covers the broader "is this folder trusted?" gate that
+# determines whether Gemini will run at all in headless mode.
 _TRUST_WORKSPACE_ENV_VAR = "GEMINI_CLI_TRUST_WORKSPACE"
 
 
@@ -104,14 +114,26 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         """Return the gemini transcript converter script."""
         return {_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_gemini_resource_script(_COMMON_TRANSCRIPT_SCRIPT_NAME)}
 
-    def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
-        """Mark ``work_dir`` as trusted for this session so workspace hooks fire.
+    def _get_system_settings_path(self):
+        """Path to the mngr-owned system-tier settings file for this agent.
 
-        Without this env var, Gemini CLI treats workspace ``.gemini/settings.json``
-        as untrusted in headless mode: settings load successfully but every hook
-        defined in them is dropped from the registry, so the readiness sentinel
-        installed by ``provision`` never appears.
+        Lives in the per-agent state dir; not in the user's workspace, not in
+        ``~/.gemini/``. Different agents get different paths.
         """
+        return self._get_agent_dir() / _SYSTEM_SETTINGS_FILENAME
+
+    def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
+        """Wire trust + system-settings env vars for the agent.
+
+        ``GEMINI_CLI_SYSTEM_SETTINGS_PATH`` points Gemini at the per-agent
+        settings file ``provision`` installed, which holds the readiness hook
+        at the system tier. This avoids writing any mngr-managed file into
+        the user's workspace or ``~/.gemini/``.
+
+        ``GEMINI_CLI_TRUST_WORKSPACE=true`` clears Gemini's "is this folder
+        trusted?" gate so headless launches don't refuse to start.
+        """
+        env_vars[_SYSTEM_SETTINGS_PATH_ENV_VAR] = str(self._get_system_settings_path())
         env_vars[_TRUST_WORKSPACE_ENV_VAR] = "true"
 
     def provision(
@@ -120,20 +142,18 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Install workspace settings (readiness hook) and the transcript watcher.
+        """Install mngr's Gemini settings (readiness hook) and the transcript watcher.
 
-        Two steps:
-          1. Install/refresh the readiness hook in ``<work_dir>/.gemini/settings.json``.
-             ``mngr`` reads ``$MNGR_AGENT_STATE_DIR/session_started`` to detect
-             that the agent's TUI is ready, rather than polling for a banner.
-          2. If ``agent_config.emit_common_transcript`` is True, install the
-             common-transcript watcher script.
+        The settings file lives at ``$MNGR_AGENT_STATE_DIR/gemini_system_settings.json``
+        and is pointed to via ``GEMINI_CLI_SYSTEM_SETTINGS_PATH`` (see
+        ``modify_env_vars``). It is mngr-owned: provision rewrites it from
+        scratch every run, so no merge / no clobber-protection is needed. The
+        user's workspace and ``~/.gemini/settings.json`` stay untouched.
 
-        The hook install is unconditional: the readiness sentinel costs nothing
-        when nobody polls for it, and skipping it would only cause ``mngr`` to
-        fall back to TUI-banner polling.
+        When ``agent_config.emit_common_transcript`` is True, the common-
+        transcript watcher script is also installed.
         """
-        self._install_workspace_hooks(host)
+        self._install_system_settings(host)
         if not self.agent_config.emit_common_transcript:
             return
         with mngr_ctx.concurrency_group.make_concurrency_group("gemini_provisioning") as concurrency_group:
@@ -144,48 +164,17 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
                 concurrency_group,
             )
 
-    def _install_workspace_hooks(self, host: OnlineHostInterface) -> None:
-        """Merge the readiness hook into ``<work_dir>/.gemini/settings.json``.
+    def _install_system_settings(self, host: OnlineHostInterface) -> None:
+        """Write the mngr-owned system-tier settings file with the readiness hook.
 
-        Existing user-managed entries (other hook events, mcpServers, approval
-        mode, etc.) are preserved by ``merge_hooks_config``: only new matcher
-        groups are appended, and re-running this method is a no-op once the
-        readiness hook is present. If the file does not yet exist, it is
-        created with just the readiness ``hooks`` block.
-
-        If the file exists but cannot be parsed as a JSON object (malformed,
-        empty-after-whitespace-only, top-level list/string/etc.) we raise
-        ``GeminiSettingsCorruptError`` rather than overwriting it. Gemini has
-        no ``settings.local.json`` sidecar that would let us write somewhere
-        the user doesn't own, so the safe move is to surface the problem.
+        The file's only contents are the readiness ``hooks`` block today;
+        when later PRs add more hooks (e.g. permission auto-allow) they ship
+        in the same file. Because mngr owns this file outright (it lives in
+        the per-agent state dir), no merge logic is needed: each provision
+        run rewrites it.
         """
-        settings_path = self.work_dir / ".gemini" / "settings.json"
-
-        try:
-            existing_text = host.read_text_file(settings_path)
-        except FileNotFoundError:
-            existing_text = ""
-
-        existing_settings: dict[str, Any]
-        if not existing_text.strip():
-            existing_settings = {}
-        else:
-            try:
-                parsed = json.loads(existing_text)
-            except json.JSONDecodeError as exc:
-                raise GeminiSettingsCorruptError(str(settings_path), f"invalid JSON: {exc}") from exc
-            if not isinstance(parsed, dict):
-                raise GeminiSettingsCorruptError(
-                    str(settings_path), f"top-level value is {type(parsed).__name__}, not object"
-                )
-            existing_settings = parsed
-
-        merged = merge_hooks_config(existing_settings, build_readiness_hooks_config())
-        if merged is None:
-            logger.debug("Readiness hook already configured in {}", settings_path)
-            return
-
-        host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
+        settings = {"hooks": build_readiness_hooks_config()["hooks"]}
+        host.write_text_file(self._get_system_settings_path(), json.dumps(settings, indent=2) + "\n")
 
     def assemble_command(
         self,
