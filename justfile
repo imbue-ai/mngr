@@ -241,6 +241,72 @@ deploy-litellm env="production":
 # env. Equivalent to push-secrets + deploy-connector + deploy-litellm.
 deploy-all env="production": (push-secrets env) (deploy-connector env) (deploy-litellm env)
 
+# One-shot recipe for dev iteration on the minds stack. Combines the
+# vendor/mngr sync and the Electron launch into a single command so the
+# very first Create after starting the app picks up your local mngr code
+# rather than whatever stale snapshot the FCT worktree was created from.
+#
+# Why the sync step is necessary on EVERY startup:
+#   The desktop client's Create flow (apps/minds/.../agent_creator.py)
+#   rsyncs the FCT worktree (including vendor/mngr/) into a temp clone
+#   and ships THAT into the Docker container. mngr inside the container
+#   is editable-installed from /code/vendor/mngr/. So if vendor/mngr/ in
+#   the worktree is older than the mngr code you actually want to test
+#   (e.g. a new field you added to settings.toml), the container's mngr
+#   will reject your settings and the bootstrap's chat-agent create call
+#   will fail. The user-visible symptom is an empty workspace with "No
+#   conversation data" in the chat panel. Re-syncing on every startup
+#   makes the first Create work without a follow-up propagate_changes.
+#
+# Why rsync (not `git archive` like `just sync-vendor-mngr`):
+#   - rsync carries uncommitted mngr changes through, so you don't have
+#     to commit just to test something.
+#   - rsync leaves the FCT worktree's git state as a normal diff (visible
+#     to `git status`) instead of creating a commit you'd then have to
+#     undo. Use `just sync-vendor-mngr` for the release-flow sync that
+#     does want to commit.
+#
+# Why MINDS_ROOT_NAME=devminds:
+#   Keeps dev state under ~/.devminds/ (separate from prod ~/.minds/) so
+#   running this recipe doesn't clobber the prod minds profile and the
+#   minds bootstrap derives MNGR_HOST_DIR / MNGR_PREFIX correctly.
+#
+# Override agent_name / branch via positional args -- they're forwarded
+# verbatim to `just minds-start`:
+#   just devminds-start agent_name=foo branch=some-branch
+devminds-start agent_name="mindtest" branch="":
+    #!/bin/bash
+    set -ueo pipefail
+    fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
+    if [ ! -e "$fct_wt/.git" ]; then
+        echo "error: no FCT worktree at $fct_wt" >&2
+        echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
+        echo "       (e.g. base = josh/start-minds) before re-running devminds-start." >&2
+        exit 2
+    fi
+    vendor_mngr="$fct_wt/vendor/mngr"
+    mkdir -p "$vendor_mngr"
+    echo "Syncing $(pwd) -> $vendor_mngr (rsync, uncommitted-friendly, no FCT commit)"
+    # Exclusions must match _RSYNC_EXCLUDES in libs/mngr_imbue_cloud/.../cli/admin.py
+    # and the propagate_changes script -- all three paths populate the same
+    # vendor/mngr/ destination and need to stay in sync.
+    rsync -a --delete \
+        --exclude=.git \
+        --exclude=__pycache__ \
+        --exclude=.venv \
+        --exclude=node_modules \
+        --exclude=.test_output \
+        --exclude=.mypy_cache \
+        --exclude=.ruff_cache \
+        --exclude=.pytest_cache \
+        --exclude=uv.lock \
+        --exclude=.external_worktrees \
+        ./ "$vendor_mngr/"
+    export MINDS_ROOT_NAME=devminds
+    # Delegate to minds-start to keep the env-loading / MINDS_WORKSPACE_*
+    # setup / PID-file gating logic in one place.
+    just minds-start "{{agent_name}}" "{{branch}}"
+
 # Start the minds desktop client (electron) in dev mode.
 # Sources .env (for ANTHROPIC_API_KEY etc.) and sets MINDS_WORKSPACE_*
 # env vars so the create-form auto-fills "repository", "name", and

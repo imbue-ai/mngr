@@ -1,11 +1,11 @@
 ---
-name: minds-dev-iterate
-description: Set up and iterate on the minds app stack (desktop client, workspace server, mngr, forever-claude-template) with a running Docker agent
+name: minds-dev-workflow
+description: End-to-end dev workflow for the minds app stack -- first-time bring-up, every-startup vendor/mngr sync, and the iteration loop against a running Docker agent. Use this when starting or restarting the dev Electron app, or after changing any minds component (mngr, the workspace server, the FCT template).
 ---
 
-# Minds Dev Iteration Loop
+# Minds Dev Workflow
 
-This skill sets up and manages the development iteration loop for testing the minds app stack end-to-end with a running Docker agent.
+This skill covers the full minds dev cycle: standing up an FCT worktree, syncing the live mngr code into that worktree's `vendor/mngr/`, starting the dev Electron app the first time, and iterating against a running Docker agent. Use it whenever you're about to start the dev app (the vendor/mngr sync needs to happen *every* startup) or after editing any component (mngr, the system_interface workspace server, the FCT template).
 
 ## Architecture Overview
 
@@ -25,45 +25,50 @@ local mngr repo  -->  FCT worktree's vendor/mngr/  -->  Docker container's /code
                       (under .external_worktrees/)     (via rsync over SSH)
 ```
 
-The desktop client runs on the host (via Electron). The workspace server + mngr run inside the container. The first sync is the bake's `--mngr-source` option (`mngr imbue_cloud admin pool create --mngr-source <monorepo-root>` rsyncs the working tree into the FCT worktree's `vendor/mngr/` for the duration of the bake); `apps/minds/scripts/propagate_changes` does subsequent ones to a running agent.
+The desktop client runs on the host (via Electron). The workspace server + mngr run inside the container. The vendor/mngr/ sync is what makes the dev loop work end-to-end.
 
-## Quick start
+### Critical: the vendor/mngr/ sync must happen BEFORE every Create
+
+When you click "Create" in the desktop client with a LOCAL-Docker provider, the desktop client (`apps/minds/.../agent_creator.py`) takes whatever's currently in the FCT worktree (including `vendor/mngr/`), shallow-clones it to a temp dir, rsyncs the worktree's working dir over the clone (so uncommitted FCT-side changes propagate), and ships the result into `/code/` in the Docker container. mngr inside the container is `uv tool install -e`'d from `/code/vendor/mngr/`.
+
+**The desktop client does NOT auto-sync live mngr code into the worktree.** If `vendor/mngr/` is stale relative to your live mngr working tree, the Docker container's mngr will be stale too -- and (depending on what you've changed) `mngr create` inside the container may reject your `.mngr/settings.toml` with errors like `Unknown fields in agent_types.claude: [...]`. The bootstrap's chat-agent-create step then fails, and you'll see an empty workspace with "No conversation data" in the chat panel.
+
+`just devminds-start` (the all-in-one recipe described below) does this sync for you on every invocation. Use it rather than running `just minds-start` directly when you're testing local mngr changes.
+
+## Quick start (first time and every time)
 
 ```bash
-# 1. Install electron deps once.
+# 1. (Once) Install electron deps.
 cd apps/minds && pnpm install && cd ../..
 
-# 2. Stand up an FCT worktree at .external_worktrees/forever-claude-template/
+# 2. (Once) Stand up an FCT worktree at .external_worktrees/forever-claude-template/
 #    on a branch named after your current mngr branch (so template-side
-#    edits stay parallel-named). Required by `just minds-start`.
+#    edits stay parallel-named). Required by `just minds-start` / `just devminds-start`.
 git -C ~/project/forever-claude-template worktree add \
     -b "$(git rev-parse --abbrev-ref HEAD)" \
     "$PWD/.external_worktrees/forever-claude-template" \
     josh/start-minds   # or another base branch / tag
 
-# 3. (Optional) Bake a fresh pool host with the working-tree mngr code
-#    rsynced into vendor/mngr/. Skip this if a matching pool host (one
-#    whose `attributes` include your `repo_branch_or_tag`) already
-#    exists.
-set -a && . .env && . .minds/production/neon.sh && . .minds/production/pool-ssh.sh && set +a
-uv run mngr imbue_cloud admin pool create \
-    --count 1 \
-    --attributes "{\"repo_branch_or_tag\": \"$(git rev-parse --abbrev-ref HEAD)\"}" \
-    --workspace-dir "$PWD/.external_worktrees/forever-claude-template" \
-    --management-public-key-file .minds/production/pool_management_key/id_ed25519.pub \
-    --database-url "$DATABASE_URL" \
-    --mngr-source "$PWD"
-
-# 4. Start the desktop client. Auto-sets MINDS_WORKSPACE_{GIT_URL,NAME,BRANCH}
-#    so the create-form auto-fills "repository", "name", "branch". Sources
-#    .env so ANTHROPIC_API_KEY etc. are visible.
-just minds-start
-
-# Override defaults if needed:
-just minds-start agent_name=my-test-agent branch=some-other-branch
+# 3. (Every time you start the app) Sync the live mngr working tree into
+#    the FCT worktree's vendor/mngr/ AND launch the devminds Electron
+#    app. This single recipe wraps both steps so the Create-form's first
+#    Create works without a follow-up propagate_changes.
+#
+#    Override agent_name / branch via positional args:
+#       just devminds-start agent_name=foo branch=some-other-branch
+just devminds-start
 ```
 
-After the create-form is filled in and you've created an agent, see [Iterating on a running agent](#iterating-on-a-running-agent) for the inner loop.
+That's it. After the create-form is filled in and you've created an agent, see [Iterating on a running agent](#iterating-on-a-running-agent) for the inner loop.
+
+If you want the prod (`MINDS_ROOT_NAME=minds`) profile rather than the dev profile, do the vendor/mngr sync manually with `just sync-vendor-mngr .external_worktrees/forever-claude-template` (which commits to FCT) or rsync by hand, then `MINDS_ROOT_NAME=minds just minds-start`. `devminds-start` is dev-only.
+
+### What `just devminds-start` does
+
+1. Verifies the FCT worktree exists at `.external_worktrees/forever-claude-template/` and bails with a helpful error if not.
+2. Rsyncs the live mngr working tree into the FCT worktree's `vendor/mngr/` using the same exclusions as the pool-bake's `--mngr-source` path (`.git`, `__pycache__`, `.venv`, `node_modules`, etc.). Uncommitted changes are included; nothing is committed in the FCT worktree.
+3. Sets `MINDS_ROOT_NAME=devminds` (so the app uses `~/.devminds/` for state, separate from the prod `~/.minds/`).
+4. Delegates to `just minds-start` to launch Electron with the right `MINDS_WORKSPACE_*` env vars and PID-file gating.
 
 ## Iterating on a running agent
 
@@ -77,7 +82,7 @@ apps/minds/scripts/propagate_changes \
 
 This:
 
-1. Rsyncs the mngr repo into the FCT worktree's `vendor/mngr/`
+1. Rsyncs the mngr repo into the FCT worktree's `vendor/mngr/` (same step `devminds-start` does, idempotent)
 2. Stops the agent (`mngr stop`)
 3. Rsyncs the full template (with updated vendor/mngr/) into `/code/` in the container
 4. Rebuilds the workspace server frontend (`npm run build` via SSH)
@@ -98,15 +103,15 @@ The port is randomly assigned by Docker per agent:
 
 ```bash
 docker ps --format '{{.Names}} {{.Ports}}' | grep mindtest
-# e.g.  mngr-mindtest-host 0.0.0.0:32772->22/tcp
+# e.g.  devminds-mindtest 0.0.0.0:32772->22/tcp
 ```
 
 The SSH key for a minds Docker agent lives under `MNGR_HOST_DIR`, which the minds desktop client overrides to `~/.minds/mngr/` (production) or `~/.devminds/mngr/` (dev) instead of the default `~/.mngr/`:
 
 ```bash
-find ~/.minds/mngr/profiles -path "*/docker/*/keys/docker_ssh_key"
-# or for dev:
 find ~/.devminds/mngr/profiles -path "*/docker/*/keys/docker_ssh_key"
+# or for prod:
+find ~/.minds/mngr/profiles -path "*/docker/*/keys/docker_ssh_key"
 ```
 
 Do NOT use a key from `~/.mngr/profiles/...` -- that belongs to non-minds mngr agents and will silently fail with "Permission denied (publickey)".
@@ -117,18 +122,23 @@ Do NOT use a key from `~/.mngr/profiles/...` -- that belongs to non-minds mngr a
 
 | Recipe | Purpose |
 |---|---|
-| `just minds-start` | Launch the desktop client with `MINDS_WORKSPACE_*` env vars set so the create-form auto-fills. Sources `.env`. |
+| `just devminds-start` | **Preferred dev entry point.** Sync live mngr -> FCT vendor/mngr, then launch the Electron app with `MINDS_ROOT_NAME=devminds`. Wraps the next two recipes. |
+| `just minds-start` | Launch the desktop client with `MINDS_WORKSPACE_*` env vars set so the create-form auto-fills. Sources `.env`. Does NOT sync vendor/mngr -- use only if you've already synced (or are deliberately testing the stale-vendor-mngr state). |
+| `just sync-vendor-mngr <fct-path>` | One-shot: snapshot mngr HEAD into FCT's vendor/mngr/ via `git archive` and commit in FCT. Use for "release" syncs, not dev iteration (it commits and only carries committed mngr content). |
+| `just minds-stop` | Kill the desktop client started in this worktree by `just minds-start` / `just devminds-start`. |
 | `just minds-build` | Build the desktop client distributable via `todesktop` (slow, only for releases). |
-| `mngr imbue_cloud admin pool create --mngr-source <monorepo-root> ...` | Bake a Vultr pool host. Pass `--mngr-source` to rsync the monorepo working tree into the FCT worktree's `vendor/mngr/` for the duration of provisioning. (The previous `just create-pool-hosts*` recipes have been removed.) |
+| `apps/minds/scripts/propagate_changes ...` | Sync changes into a running container without restarting the Electron app from scratch. See "Iterating on a running agent". |
+| `mngr imbue_cloud admin pool create --mngr-source <monorepo-root> ...` | Bake a Vultr pool host. `--mngr-source` rsyncs the monorepo into the FCT vendor/mngr/ for the duration of the bake. (For pool hosts only -- has no effect on Docker mode.) |
 | `just deploy-connector [env]` | Deploy `remote-service-connector` to Modal. |
 | `just deploy-litellm [env]` | Deploy `modal_litellm` proxy to Modal. |
 | `just deploy-all [env]` | Push secrets + deploy connector + deploy litellm. |
 | `just push-secrets [env]` | Upsert per-env Modal secrets from `.minds/<env>/*.sh`. |
 
-### Env vars `just minds-start` sets
+### Env vars `minds-start` / `devminds-start` set
 
 | Variable | Purpose | Default in dev |
 |----------|---------|----------------|
+| `MINDS_ROOT_NAME` | Selects the data root: `devminds` -> `~/.devminds/`, `minds` -> `~/.minds/` | `devminds` (set by `devminds-start`) |
 | `MINDS_WORKSPACE_GIT_URL` | Template repo path/URL for the create-form | `<repo>/.external_worktrees/forever-claude-template/` if it exists, else `~/project/forever-claude-template` |
 | `MINDS_WORKSPACE_NAME` | Default agent name in the create-form | `mindtest` (override with `agent_name=...`) |
 | `MINDS_WORKSPACE_BRANCH` | Default git branch for the template | The FCT path's current branch (matches your mngr branch when you set up the worktree on a parallel-named branch) |
@@ -149,10 +159,10 @@ If this chain breaks (orphaned `mngr observe`/`mngr event` processes appear), so
 
 ### Rsync exclusions
 
-Both `mngr imbue_cloud admin pool create --mngr-source ...` (mngr-working-tree -> vendor/mngr) and `propagate_changes` exclude:
-`.git`, `__pycache__`, `.venv`, `node_modules`, `.test_output`, `.mypy_cache`, `.ruff_cache`, `.pytest_cache`, `uv.lock`, `.external_worktrees`
+`devminds-start`, `mngr imbue_cloud admin pool create --mngr-source ...`, and `propagate_changes` all share the same exclusions when rsyncing into `vendor/mngr/`:
+`.git`, `__pycache__`, `.venv`, `node_modules`, `.test_output`, `.mypy_cache`, `.ruff_cache`, `.pytest_cache`, `uv.lock`, `.external_worktrees`.
 
-`propagate_changes` additionally protects `runtime/`, `.mngr/`, and `.claude/settings.local.json` from deletion.
+`propagate_changes` additionally protects `runtime/`, `.mngr/`, and `.claude/settings.local.json` from deletion when rsyncing into `/code/`.
 
 ### Editable installs
 
@@ -170,7 +180,7 @@ The template's `.mngr/settings.toml` controls agent types, create templates, env
 
 | Path | Contents |
 |---|---|
-| `/tmp/claude-*/.../tasks/<id>.output` | Electron app stdout when launched via `just minds-start` (path printed at launch) |
+| `/tmp/claude-*/.../tasks/<id>.output` | Electron app stdout when launched via `just minds-start` / `just devminds-start` (path printed at launch) |
 | `~/.minds/logs/minds.log`, `~/.minds/logs/minds-events.jsonl` | Minds backend (production) |
 | `~/.devminds/logs/minds.log`, `~/.devminds/logs/minds-events.jsonl` | Minds backend (dev) |
 
@@ -196,7 +206,7 @@ rsync -a --delete \
     ./ .external_worktrees/forever-claude-template/vendor/mngr/
 ```
 
-This is what `mngr imbue_cloud admin pool create --mngr-source ...` does for the duration of the bake (then resets `vendor/mngr/` to HEAD when the bake finishes), and the same rsync that `propagate_changes` does as step 1 on each iteration.
+This is what `just devminds-start` does internally, what `mngr imbue_cloud admin pool create --mngr-source ...` does for the duration of the bake, and what `propagate_changes` does as step 1 on each iteration.
 
 ### Start electron by hand without the just recipe
 
@@ -206,6 +216,7 @@ TEMPLATE_BRANCH=$(cd .external_worktrees/forever-claude-template && git branch -
   set -a
   source .env
   set +a
+  export MINDS_ROOT_NAME=devminds
   export MINDS_WORKSPACE_GIT_URL="$(pwd)/.external_worktrees/forever-claude-template"
   export MINDS_WORKSPACE_NAME="mindtest"
   export MINDS_WORKSPACE_BRANCH="$TEMPLATE_BRANCH"
