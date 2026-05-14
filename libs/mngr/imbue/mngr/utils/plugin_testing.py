@@ -61,7 +61,7 @@ def register_placeholder_agent_type(name: str) -> None:
         register_agent_config(name, AgentTypeConfig)
 
 
-def register_test_placeholder_agent_types() -> None:
+def register_test_placeholder_agent_type() -> None:
     """Register the canonical placeholder agent type as a BaseAgent fixture."""
     register_placeholder_agent_type(PLACEHOLDER_AGENT_TYPE)
 
@@ -92,7 +92,7 @@ def plugin_manager() -> Generator[pluggy.PluginManager, None, None]:
     load_plugin_hookspecs(pm)
     load_local_backend_only(pm)
     load_agents_from_plugins(pm)
-    register_test_placeholder_agent_types()
+    register_test_placeholder_agent_type()
 
     yield pm
 
