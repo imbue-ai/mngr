@@ -17,9 +17,7 @@ from imbue.mngr.primitives import PluginTier
 # Remove entries from here as they get published.
 UNPUBLISHED_PACKAGES: Final[frozenset[str]] = frozenset(
     {
-        "imbue-mngr-schedule",
         "imbue-mngr-tmr",
-        "imbue-mngr-gemini",
     }
 )
 
