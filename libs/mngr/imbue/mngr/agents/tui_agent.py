@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import ClassVar
 
 from imbue.mngr.agents.base_agent import BaseAgent
-from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.agent import AgentConfigT
 
 
@@ -26,30 +25,3 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
 
     def uses_paste_detection_send(self) -> bool:
         return True
-
-    def uses_submission_signal(self) -> bool:
-        """Whether to wait for a tmux wait-for submission signal after pressing Enter.
-
-        Claude's plugin wires this signal via the UserPromptSubmit hook. Agents
-        whose CLIs do not expose an equivalent hook should override to return
-        False -- they will press Enter and return immediately, relying on the
-        prior paste-visibility check to confirm the message reached the TUI.
-        """
-        return True
-
-    def _send_enter_and_wait(self, tmux_target: str) -> None:
-        if self.uses_submission_signal():
-            super()._send_enter_and_wait(tmux_target)
-            return
-        # Brief sleep before Enter so the TUI has time to absorb the pasted
-        # text into its input buffer before we submit. Interactive TUIs in
-        # general occasionally swallow Enter on fresh sessions if we submit
-        # immediately after pasting; agents with a submission hook handle
-        # this race through that hook, agents without one rely on this sleep.
-        send_enter_cmd = f"sleep 0.2 && tmux send-keys -t '{tmux_target}' Enter"
-        result = self.host.execute_stateful_command(send_enter_cmd)
-        if not result.success:
-            raise SendMessageError(
-                str(self.name),
-                f"tmux send-keys Enter failed: {result.stderr or result.stdout}",
-            )

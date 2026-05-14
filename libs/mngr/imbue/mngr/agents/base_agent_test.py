@@ -6,6 +6,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 
+import pydantic
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
@@ -45,6 +46,42 @@ def test_agent(
         extra_data=None,
         agent_class=BaseAgent,
     )
+
+
+class _PollingProbeAgent(BaseAgent[AgentTypeConfig]):
+    """BaseAgent subclass that captures send-keys calls and synthesizes pane content.
+
+    Overrides only the two methods the poll-based no-signal Enter path touches:
+    ``_send_enter_keystroke`` (records the shell command instead of running it)
+    and ``_capture_pane_content`` (returns text containing the indicator unless
+    ``always_missing_indicator`` is set, which simulates a swallowed Enter).
+    """
+
+    captured_commands: list[str] = pydantic.Field(default_factory=list)
+    pane_capture_count: int = pydantic.Field(default=0)
+    always_missing_indicator: bool = pydantic.Field(default=False)
+
+    def get_tui_ready_indicator(self) -> str | None:
+        return "probe-banner"
+
+    def uses_submission_signal(self) -> bool:
+        return False
+
+    def _send_enter_keystroke(self, tmux_target: str) -> None:
+        self.captured_commands.append(f"tmux send-keys -t '{tmux_target}' Enter")
+
+    def _capture_pane_content(self, tmux_target: str, include_scrollback: bool = False) -> str | None:
+        self.pane_capture_count += 1
+        if self.always_missing_indicator:
+            return "user typed message but Enter was swallowed"
+        return "input row cleared -- probe-banner ready"
+
+
+class _PollingProbeAgentNoIndicator(_PollingProbeAgent):
+    """Variant with no ready indicator -- exercises the degraded single-Enter path."""
+
+    def get_tui_ready_indicator(self) -> str | None:
+        return None
 
 
 @pytest.mark.tmux
@@ -344,6 +381,55 @@ def test_get_tui_ready_indicator_returns_none_by_default(
 ) -> None:
     """Test that get_tui_ready_indicator returns None by default."""
     assert test_agent.get_tui_ready_indicator() is None
+
+
+def test_uses_submission_signal_returns_true_by_default(
+    test_agent: BaseAgent,
+) -> None:
+    """uses_submission_signal defaults to True so existing claude-style agents keep working."""
+    assert test_agent.uses_submission_signal() is True
+
+
+def _make_polling_probe(probe_class: type[_PollingProbeAgent]) -> _PollingProbeAgent:
+    """Construct a polling probe via model_construct (no real host needed for these tests)."""
+    return probe_class.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("polling-probe"),
+        agent_type=AgentTypeName("probe"),
+    )
+
+
+def test_send_enter_and_poll_for_input_ready_returns_when_indicator_appears() -> None:
+    """The poll-based no-signal path returns success when the ready indicator reappears."""
+    agent = _make_polling_probe(_PollingProbeAgent)
+    agent._send_enter_and_poll_for_input_ready("probe-target")
+
+    assert agent.captured_commands == ["tmux send-keys -t 'probe-target' Enter"]
+    assert agent.pane_capture_count >= 1
+
+
+@pytest.mark.allow_warnings
+def test_send_enter_and_poll_for_input_ready_retries_when_indicator_missing() -> None:
+    """If the indicator never reappears, the Enter keystroke is retried before raising.
+
+    Marked allow_warnings because the final timeout path intentionally logs a
+    captured pane snapshot via logger.error before raising SendMessageError.
+    """
+    agent = _make_polling_probe(_PollingProbeAgent)
+    agent.always_missing_indicator = True
+
+    with pytest.raises(SendMessageError, match="Timeout waiting for TUI input prompt to clear"):
+        agent._send_enter_and_poll_for_input_ready("probe-target")
+    assert agent.captured_commands == ["tmux send-keys -t 'probe-target' Enter"] * 3
+
+
+def test_send_enter_and_poll_for_input_ready_skips_polling_when_no_indicator() -> None:
+    """With no get_tui_ready_indicator set, the no-signal path degrades to a single Enter with no poll."""
+    agent = _make_polling_probe(_PollingProbeAgentNoIndicator)
+    agent._send_enter_and_poll_for_input_ready("probe-target")
+
+    assert agent.captured_commands == ["tmux send-keys -t 'probe-target' Enter"]
+    assert agent.pane_capture_count == 0
 
 
 def test_normalize_for_match_strips_non_alnum_and_lowercases() -> None:

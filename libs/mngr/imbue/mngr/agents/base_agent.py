@@ -50,6 +50,11 @@ _SEND_MESSAGE_TIMEOUT_SECONDS: Final[float] = 15.0
 # this can take a while, especialy on modal--the process needs to actually start and render the TUI before the indicator appears
 _TUI_READY_TIMEOUT_SECONDS: Final[float] = 30.0
 _CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 10.0
+# Bounds for the no-submission-signal Enter path. Each attempt sends Enter
+# then polls the pane for the TUI ready indicator (input prompt cleared).
+# Worst case waits MAX_ATTEMPTS * PER_ATTEMPT_TIMEOUT seconds before raising.
+_SEND_ENTER_NO_SIGNAL_MAX_ATTEMPTS: Final[int] = 3
+_SEND_ENTER_NO_SIGNAL_PER_ATTEMPT_TIMEOUT_SECONDS: Final[float] = 2.0
 
 # Default timeout for signal-based synchronization
 # Note that this does need to be fairly long, since it can take a little while for the machine to respond if you're unlucky
@@ -401,6 +406,18 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """
         return None
 
+    def uses_submission_signal(self) -> bool:
+        """Whether to wait for a tmux wait-for submission signal after pressing Enter.
+
+        Agents like Claude wire this signal via a UserPromptSubmit hook in their
+        TUI; ``_send_enter_and_wait`` arms a tmux wait-for channel that the hook
+        fires when the message is submitted. Agents whose CLIs do not expose an
+        equivalent hook should override to return False -- the Enter path then
+        polls ``get_tui_ready_indicator()`` for the input prompt to clear,
+        retrying Enter if the keystroke is swallowed by an in-progress paste.
+        """
+        return True
+
     def _preflight_send_message(self, tmux_target: str) -> None:
         """Run preflight checks before sending a message.
 
@@ -579,14 +596,24 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         return found
 
     def _send_enter_and_wait(self, tmux_target: str) -> None:
-        """Send Enter to submit the message and wait for the submission signal.
+        """Send Enter to submit the message, then wait for confirmation.
 
-        Uses tmux wait-for to detect when the UserPromptSubmit hook fires.
-        Raises SendMessageError if the signal is not received within the timeout.
+        Dispatches based on ``uses_submission_signal()``: when True (the default),
+        arms a tmux wait-for channel that the agent's UserPromptSubmit-style hook
+        fires; when False, polls the TUI ready indicator for the input prompt
+        to clear after Enter is sent.
+        """
+        if self.uses_submission_signal():
+            self._send_enter_and_wait_for_submission_signal(tmux_target)
+            return
+        self._send_enter_and_poll_for_input_ready(tmux_target)
+
+    def _send_enter_and_wait_for_submission_signal(self, tmux_target: str) -> None:
+        """Send Enter and wait for a tmux wait-for channel fired by a TUI hook.
 
         The wait_channel is derived from the pure session name (without window
         suffix) because the UserPromptSubmit hook signals using ``#S`` which
-        is just the session name.
+        is just the session name. Raises SendMessageError on timeout.
         """
         wait_channel = f"mngr-submit-{self.session_name}"
         if self._send_enter_and_wait_for_signal(tmux_target, wait_channel):
@@ -606,6 +633,64 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             tmux_target,
             f"Timeout waiting for message submission signal (waited {self.enter_submission_timeout_seconds}s)",
         )
+
+    def _send_enter_and_poll_for_input_ready(self, tmux_target: str) -> None:
+        """Send Enter and poll for the TUI ready indicator to reappear.
+
+        Used by agents that lack a UserPromptSubmit-style hook. The
+        paste-visibility check in ``_send_message_with_paste_detection`` already
+        confirmed the message reached the input field; after Enter is processed
+        the input clears and ``get_tui_ready_indicator()`` (e.g. gemini's
+        ``Type your message`` placeholder) becomes visible in the pane again.
+
+        Interactive TUIs occasionally swallow Enter on fresh sessions when it
+        arrives before the pasted text has been absorbed -- we retry the
+        keystroke up to ``_SEND_ENTER_NO_SIGNAL_MAX_ATTEMPTS`` times before
+        raising SendMessageError. If no indicator is configured the path
+        degrades to a single best-effort Enter with no confirmation.
+        """
+        indicator = self.get_tui_ready_indicator()
+        if indicator is None:
+            self._send_enter_keystroke(tmux_target)
+            return
+
+        for attempt in range(_SEND_ENTER_NO_SIGNAL_MAX_ATTEMPTS):
+            self._send_enter_keystroke(tmux_target)
+            if poll_until(
+                lambda: self._check_pane_contains(tmux_target, indicator),
+                timeout=_SEND_ENTER_NO_SIGNAL_PER_ATTEMPT_TIMEOUT_SECONDS,
+                poll_interval=0.05,
+            ):
+                logger.trace("Input prompt cleared after Enter attempt {}", attempt + 1)
+                return
+            logger.debug(
+                "Enter attempt {} did not produce TUI ready indicator {!r}; retrying",
+                attempt + 1,
+                indicator,
+            )
+
+        pane_content = self._capture_pane_content(tmux_target)
+        if pane_content is not None:
+            logger.error(
+                "send-enter-and-poll timeout -- remote pane content:\n{}",
+                pane_content,
+            )
+        total_wait = _SEND_ENTER_NO_SIGNAL_MAX_ATTEMPTS * _SEND_ENTER_NO_SIGNAL_PER_ATTEMPT_TIMEOUT_SECONDS
+        self._raise_send_timeout(
+            tmux_target,
+            f"Timeout waiting for TUI input prompt to clear after Enter "
+            f"(waited {total_wait:.1f}s across {_SEND_ENTER_NO_SIGNAL_MAX_ATTEMPTS} attempts)",
+        )
+
+    def _send_enter_keystroke(self, tmux_target: str) -> None:
+        """Send a single Enter keystroke via tmux send-keys; raise on failure."""
+        send_enter_cmd = f"tmux send-keys -t '{tmux_target}' Enter"
+        result = self.host.execute_stateful_command(send_enter_cmd)
+        if not result.success:
+            raise SendMessageError(
+                str(self.name),
+                f"tmux send-keys Enter failed: {result.stderr or result.stdout}",
+            )
 
     # FIXME: this function could be improved by having a single command that is running on the host, checking *either* condition (eg, whether we've seen a new enqueue event OR we've seen the wait-for signal)
     #  since either one is sufficient for us to call it success
