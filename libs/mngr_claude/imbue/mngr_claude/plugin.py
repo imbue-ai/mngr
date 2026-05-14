@@ -2057,8 +2057,17 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         For each specified session, searches the user's Claude config directory
         by ID (or reads a .jsonl path directly), copies the containing project
-        directory into the per-agent config dir, and writes the last session ID
-        so --resume picks it up.
+        directory into this agent's Claude config dir, and writes the last
+        session ID so --resume picks it up.
+
+        Destination resolution depends on ``use_env_config_dir``:
+        - Default (``False``): copies into the per-agent config dir at
+          ``$MNGR_AGENT_STATE_DIR/plugin/claude/anthropic/projects/<encoded>/``.
+        - Shared (``True``): copies into the user's shared
+          ``$CLAUDE_CONFIG_DIR/projects/<encoded-work_dir>/``. Per spec decision
+          4c this is the only sanctioned mngr write to the user's config dir
+          in shared mode, and it only adds new project subdirs -- it never
+          modifies existing user files.
         """
         adopt_session_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
         if not adopt_session_args:
