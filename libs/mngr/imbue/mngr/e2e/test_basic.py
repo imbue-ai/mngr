@@ -25,8 +25,11 @@ def test_help_succeeds(e2e: E2eSession) -> None:
     )
     expect(result).to_succeed()
     expect(result.stdout).to_contain("Usage")
-    expect(result.stdout).to_contain("create")
-    expect(result.stdout).to_contain("list")
+    expect(result.stdout).to_contain("--version")
+    expect(result.stdout).to_contain("--help")
+    # Every command the tutorial block promises must show up in the help output.
+    for command in ("create", "list", "destroy", "message", "connect", "push", "pull", "clone"):
+        expect(result.stdout).to_contain(command)
 
 
 @pytest.mark.release
@@ -42,6 +45,7 @@ def test_create_help_succeeds(e2e: E2eSession) -> None:
     expect(result).to_succeed()
     expect(result.stdout).to_contain("--no-connect")
     expect(result.stdout).to_contain("--type")
+    expect(result.stderr).to_be_empty()
 
 
 @pytest.mark.release
@@ -54,22 +58,25 @@ def test_list_with_no_agents(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_list_json_with_no_agents(e2e: E2eSession) -> None:
     result = e2e.run("mngr list --format json", comment="List agents as JSON in a fresh environment")
     expect(result).to_succeed()
     parsed = json.loads(result.stdout)
     assert parsed["agents"] == []
+    assert parsed["errors"] == []
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_named_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
     mngr create my-task
-    # that command give the agent a name of "my-task". If you don't specify a name, mngr will generate a random one for you.
+    # that command gives the agent a name of "my-task". If you don't specify a name, mngr will generate a random one for you.
     """)
     expect(
         e2e.run(
@@ -87,29 +94,37 @@ def test_create_named_agent(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_with_json_output(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can control output format for scripting:
     mngr create my-task --no-connect --format json
     # (--quiet suppresses all output)
     """)
-    expect(
-        e2e.run(
-            "mngr create my-task --no-connect --type command --no-ensure-clean --format json -- sleep 100064",
-            comment="you can control output format for scripting",
-        )
-    ).to_succeed()
+    create_result = e2e.run(
+        "mngr create my-task --no-connect --type command --no-ensure-clean --format json -- sleep 100064",
+        comment="you can control output format for scripting",
+    )
+    expect(create_result).to_succeed()
+    create_payload = json.loads(create_result.stdout)
+    assert "agent_id" in create_payload
+    assert "host_id" in create_payload
 
     list_result = e2e.run("mngr list --format json", comment="Verify agent appears in JSON list")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     assert len(parsed["agents"]) == 1
+    listed_agent = parsed["agents"][0]
+    assert listed_agent["name"] == "my-task"
+    assert listed_agent["id"] == create_payload["agent_id"]
+    assert listed_agent["host"]["id"] == create_payload["host_id"]
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(60)
 def test_create_headless(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.
@@ -125,13 +140,14 @@ def test_create_headless(e2e: E2eSession) -> None:
 
     list_result = e2e.run("mngr list", comment="Verify headless agent appears in list")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain("my-task")
+    expect(list_result.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(60)
 def test_create_and_destroy_agent(e2e: E2eSession) -> None:
     expect(
         e2e.run(
@@ -152,6 +168,7 @@ def test_create_and_destroy_agent(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(60)
 def test_create_and_rename_agent(e2e: E2eSession) -> None:
     expect(
         e2e.run(
@@ -165,10 +182,11 @@ def test_create_and_rename_agent(e2e: E2eSession) -> None:
         comment="Rename agent to renamed-task",
     )
     expect(rename_result).to_succeed()
+    expect(rename_result.stdout).to_contain("Renamed agent: my-task -> renamed-task")
 
-    list_result = e2e.run("mngr list", comment="Verify only the new name appears")
+    list_result = e2e.run("mngr list", comment="Verify only the new name appears and agent is still alive")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain("renamed-task")
+    expect(list_result.stdout).to_match(r"renamed-task\s+(RUNNING|WAITING)")
     expect(list_result.stdout).not_to_contain("my-task")
 
 
@@ -176,6 +194,7 @@ def test_create_and_rename_agent(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_with_label(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can add labels to organize your agents and tags for host metadata:
@@ -196,3 +215,28 @@ def test_create_with_label(e2e: E2eSession) -> None:
     assert len(matching_agents) == 1
     assert matching_agents[0]["labels"]["team"] == "backend"
     assert matching_agents[0]["host"]["tags"]["env"] == "staging"
+
+    # Labels are useful for filtering, so verify the filter flags actually
+    # match the agent we just created. A matching filter returns the agent;
+    # a non-matching filter returns no agents (this also rules out the
+    # degenerate case where the filter is a no-op).
+    matching_label = e2e.run(
+        "mngr list --label team=backend --format json",
+        comment="Filter agents by matching label",
+    )
+    expect(matching_label).to_succeed()
+    assert [a["name"] for a in json.loads(matching_label.stdout)["agents"]] == ["my-task"]
+
+    non_matching_label = e2e.run(
+        "mngr list --label team=frontend --format json",
+        comment="Non-matching label filter returns no agents",
+    )
+    expect(non_matching_label).to_succeed()
+    assert json.loads(non_matching_label.stdout)["agents"] == []
+
+    matching_host_label = e2e.run(
+        "mngr list --host-label env=staging --format json",
+        comment="Filter agents by matching host label",
+    )
+    expect(matching_host_label).to_succeed()
+    assert [a["name"] for a in json.loads(matching_host_label.stdout)["agents"]] == ["my-task"]
