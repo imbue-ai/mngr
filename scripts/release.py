@@ -462,6 +462,10 @@ def _format_pending_changelog_list(entries: list[Path], repo_root: Path) -> str:
     return "\n".join(f"  - {entry.relative_to(repo_root)}" for entry in entries)
 
 
+def _pluralize_entry(count: int) -> str:
+    return "entry" if count == 1 else "entries"
+
+
 def _print_on_demand_consolidation_command() -> None:
     """Print the one-liner that triggers an on-demand consolidation run.
 
@@ -490,16 +494,17 @@ def _gate_release_on_pending_changelog_entries(dry_run: bool) -> bool:
     if not entries:
         return True
 
+    entry_word = _pluralize_entry(len(entries))
     if dry_run:
         print()
-        print(f"WARNING: {len(entries)} pending changelog entry/entries would block a real release:")
+        print(f"WARNING: {len(entries)} pending changelog {entry_word} would block a real release:")
         print(_format_pending_changelog_list(entries, REPO_ROOT))
         print(f"(consolidate via the '{CHANGELOG_TRIGGER_NAME}' schedule before cutting the release)")
         print()
         return True
 
     print()
-    print(f"ERROR: cannot release with {len(entries)} pending changelog entry/entries.")
+    print(f"ERROR: cannot release with {len(entries)} pending changelog {entry_word}.")
     print()
     print("The following entries in changelog/ haven't been consolidated into")
     print("CHANGELOG.md's [Unreleased] section yet:")
