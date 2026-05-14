@@ -428,7 +428,7 @@ class UnknownBackendError(ConfigError):
         registered_str = ", ".join(self.registered) or "(none)"
         message = f"Unknown provider backend: {backend_name}. Registered backends: {registered_str}"
         super().__init__(message)
-        self.user_help_text = get_plugin_install_hint(backend_name)
+        self.user_help_text = get_plugin_install_hint(backend_name, kind="backend")
 
 
 class NestedTmuxError(MngrError):

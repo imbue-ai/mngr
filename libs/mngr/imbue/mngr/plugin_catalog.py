@@ -5,6 +5,7 @@ detection, and helpers used by the install wizard and test fixtures.
 """
 
 from typing import Final
+from typing import Literal
 
 from pydantic import Field
 
@@ -292,24 +293,36 @@ def _format_install_hint(entry: CatalogEntry) -> str:
     )
 
 
-def get_plugin_install_hint(name: str) -> str:
+def get_plugin_install_hint(
+    name: str,
+    kind: Literal["agent_type", "backend"] = "agent_type",
+) -> str:
     """Return user-facing help text for a missing plugin entry point.
 
     If the name appears in the catalog, names the actual PyPI package and
     description. Otherwise returns a generic prompt to check installed
     plugins, since fabricating a package name for an unknown name would be
-    misleading. The fallback also points at ``--type command -- <shell
-    command>`` for callers who actually just want to run a shell command.
+    misleading.
+
+    When ``kind == "agent_type"`` (the default), the fallback also points at
+    ``--type command -- <shell command>`` for callers who actually just want
+    to run a shell command. That tip is suppressed for ``kind == "backend"``,
+    where it would be irrelevant (provider backends have no equivalent
+    shell-command escape hatch).
     """
     entry = get_catalog_entry(name)
     if entry is not None:
         return _format_install_hint(entry)
-    return (
+    fallback = (
         f"We do not recognize '{name}'. If it is provided by a third-party"
         " plugin, install that package and ensure the plugin is enabled."
-        " To run an arbitrary shell command without registering a type,"
-        " use `--type command -- <shell command>` instead."
     )
+    if kind == "agent_type":
+        fallback += (
+            " To run an arbitrary shell command without registering a type,"
+            " use `--type command -- <shell command>` instead."
+        )
+    return fallback
 
 
 def get_install_hint_for_cli_command(command_name: str) -> str | None:

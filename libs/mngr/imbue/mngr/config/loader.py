@@ -419,7 +419,7 @@ def _parse_providers(
                     f" block. Currently disabled plugins: {', '.join(sorted(disabled_plugins))}"
                 )
             else:
-                msg += f" {get_plugin_install_hint(backend)}"
+                msg += f" {get_plugin_install_hint(backend, kind='backend')}"
             if strict:
                 raise ConfigParseError(msg) from e
             if not silent:
