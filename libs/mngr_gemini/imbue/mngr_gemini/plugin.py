@@ -183,7 +183,7 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         the per-agent state dir), no merge logic is needed: each provision
         run rewrites it.
         """
-        settings = {"hooks": build_readiness_hooks_config()["hooks"]}
+        settings = build_readiness_hooks_config()
         host.write_text_file(self._get_system_settings_path(), json.dumps(settings, indent=2) + "\n")
 
     def assemble_command(
