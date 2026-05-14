@@ -24,6 +24,8 @@ surfaced as a non-zero exit (no ``--allow-degraded`` mode).
 import os
 import signal
 import threading
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -39,6 +41,7 @@ from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_final_json
+from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import HostId
@@ -52,8 +55,14 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
+from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
 from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import delete_forward_info
+from imbue.mngr_latchkey.store import load_forward_info
+from imbue.mngr_latchkey.store import save_forward_info
+from imbue.mngr_latchkey.store import update_forward_info_gateway_port
 
 # Env-var overrides for the two resolved settings; documented in the
 # CLI help and in the spec.
@@ -78,6 +87,14 @@ class _LatchkeyCommonCliOptions(CommonCliOptions):
 
 class _CreateAgentEnvCliOptions(_LatchkeyCommonCliOptions):
     """Backing options object for ``mngr latchkey create-agent-env``."""
+
+
+class _AdminJwtCliOptions(_LatchkeyCommonCliOptions):
+    """Backing options object for ``mngr latchkey admin-jwt``."""
+
+
+class _GatewayInfoCliOptions(_LatchkeyCommonCliOptions):
+    """Backing options object for ``mngr latchkey gateway-info``."""
 
 
 class _LinkPermissionsCliOptions(_LatchkeyCommonCliOptions):
@@ -377,16 +394,45 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     # in a terminal and closes it).
     latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
 
+    # Refuse to start if another forward is already alive for this
+    # latchkey directory; two forwards would fight over the same
+    # reverse tunnels and produce a confusing stream of failures.
+    existing = load_forward_info(latchkey.plugin_data_dir)
+    if existing is not None and is_forward_info_alive(existing):
+        raise click.ClickException(
+            f"Another ``mngr latchkey forward`` is already running for this latchkey directory "
+            f"(pid={existing.pid}); refusing to start a second supervisor.",
+        )
+    if existing is not None:
+        logger.info(
+            "Discarding stale forward record (pid={}); the previous supervisor is no longer running.",
+            existing.pid,
+        )
+
+    save_forward_info(
+        latchkey.plugin_data_dir,
+        LatchkeyForwardInfo(pid=os.getpid(), started_at=datetime.now(timezone.utc)),
+    )
+
     # Eagerly ensure the gateway is up so users see startup failures
     # immediately, not on the first agent discovery. The discovery
     # handler will idempotently re-ensure on every fire. The gateway
     # subprocess is owned by ``mngr_ctx.concurrency_group`` and gets
     # terminated when this command's click context exits.
     try:
-        latchkey.start_gateway(mngr_ctx.concurrency_group)
+        gateway_port = latchkey.start_gateway(mngr_ctx.concurrency_group)
     except LatchkeyError as e:
         raise click.ClickException(f"Failed to start shared Latchkey gateway: {e}") from e
-    logger.info("Started shared Latchkey gateway at {}", latchkey.gateway_url)
+    logger.info(
+        "Started shared Latchkey gateway at http://{}:{}",
+        latchkey.listen_host,
+        gateway_port,
+    )
+
+    try:
+        update_forward_info_gateway_port(latchkey.plugin_data_dir, gateway_port)
+    except LatchkeyStoreError as e:
+        raise click.ClickException(f"Failed to publish gateway port: {e}") from e
 
     tunnel_manager = SSHTunnelManager()
     tunnel_manager.start_reverse_tunnel_health_check()
@@ -422,6 +468,7 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
             latchkey.stop_gateway()
         except LatchkeyError as e:
             logger.warning("Failed to stop shared Latchkey gateway during shutdown: {}", e)
+        delete_forward_info(latchkey.plugin_data_dir)
 
 
 class _ShutdownSignalHandler(FrozenModel):
@@ -519,9 +566,148 @@ def latchkey(ctx: click.Context) -> None:
     del ctx
 
 
+# =============================================================================
+# Subcommand: admin-jwt
+# =============================================================================
+
+
+@click.command(name="admin-jwt")
+@add_common_options
+@click.pass_context
+def _admin_jwt_command(ctx: click.Context, **kwargs: Any) -> None:
+    """Print a JWT that grants the bearer wildcard access to the gateway."""
+    del kwargs
+    mngr_ctx, _output_opts, opts = setup_command_context(
+        ctx=ctx,
+        command_name="latchkey.admin-jwt",
+        command_class=_AdminJwtCliOptions,
+        is_format_template_supported=False,
+    )
+
+    latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
+
+    try:
+        jwt = latchkey.create_admin_permissions_jwt()
+    except (LatchkeyError, LatchkeyStoreError) as e:
+        raise click.ClickException(f"Failed to mint admin JWT: {e}") from e
+
+    # Emit on stdout via the project-standard helper for user-facing
+    # output.
+    write_human_line(jwt)
+
+
+_add_common_latchkey_options(_admin_jwt_command)
+
+CommandHelpMetadata(
+    key="latchkey.admin-jwt",
+    one_line_description="Mint a wildcard ``permissions-override`` JWT for the shared gateway",
+    synopsis="mngr latchkey admin-jwt [OPTIONS]",
+    description="""Materializes the admin permissions file at
+``<plugin_data_dir>/latchkey_admin_permissions.json`` (idempotent --
+an existing file is reused as-is) and mints a JWT signed for that
+path via ``latchkey gateway create-jwt --no-validate``. The JWT is
+printed on stdout as a single line.
+
+The returned token unlocks every service and every extension
+endpoint reachable through the gateway, so treat it like a root
+credential and pass it as the
+``X-Latchkey-Gateway-Permissions-Override`` header to gateway
+requests that need wildcard access (e.g. the minds desktop client
+streaming pending permission requests from the
+``permission-requests`` extension).""",
+    examples=(("Capture into a shell variable", "ADMIN_JWT=$(mngr latchkey admin-jwt)"),),
+).register()
+
+add_pager_help_option(_admin_jwt_command)
+
+
+# =============================================================================
+# Subcommand: gateway-info
+# =============================================================================
+
+
+@click.command(name="gateway-info")
+@add_common_options
+@click.pass_context
+def _gateway_info_command(ctx: click.Context, **kwargs: Any) -> None:
+    """Print the running shared gateway's URL + password as a single JSON object."""
+    del kwargs
+    mngr_ctx, _output_opts, opts = setup_command_context(
+        ctx=ctx,
+        command_name="latchkey.gateway-info",
+        command_class=_GatewayInfoCliOptions,
+        is_format_template_supported=False,
+    )
+
+    latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
+
+    info = load_forward_info(latchkey.plugin_data_dir)
+    if info is None or not is_forward_info_alive(info):
+        raise click.ClickException(
+            "No ``mngr latchkey forward`` supervisor is running for this latchkey directory; "
+            "start one with ``mngr latchkey forward`` before asking for its gateway info.",
+        )
+    if info.gateway_port is None:
+        raise click.ClickException(
+            "The supervisor is running but has not finished binding its gateway port yet; retry in a moment.",
+        )
+
+    try:
+        password = latchkey.derive_gateway_password()
+    except LatchkeyError as e:
+        raise click.ClickException(f"Failed to derive gateway password: {e}") from e
+
+    emit_final_json(
+        {
+            "url": f"http://{latchkey.listen_host}:{info.gateway_port}",
+            "password": password,
+        },
+    )
+
+
+_add_common_latchkey_options(_gateway_info_command)
+
+CommandHelpMetadata(
+    key="latchkey.gateway-info",
+    one_line_description="Print the running shared gateway's URL + password as JSON",
+    synopsis="mngr latchkey gateway-info [OPTIONS]",
+    description="""Reads the supervised ``mngr latchkey forward`` record
+to discover the bound gateway port and derives the gateway password
+locally (via ``latchkey gateway create-jwt`` against a sentinel path,
+the same way :meth:`Latchkey.derive_gateway_password` does in
+Python). Emits a single JSON object on stdout:
+
+```
+{
+  "url": "http://127.0.0.1:32867",
+  "password": "<sha256-of-derived-jwt>"
+}
+```
+
+Fails with a non-zero exit when no supervisor is running for the
+active latchkey directory, or when the supervisor has not yet
+stamped its bound gateway port onto its on-disk record (i.e. the
+supervisor is still in its startup window).
+
+The password is intentionally NOT persisted on disk; this command
+is the supported way to retrieve it without writing your own
+Python integration.""",
+    examples=(
+        (
+            "Capture into shell variables",
+            'eval "$(mngr latchkey gateway-info | jq -r \'@text "GATEWAY_URL=\\(.url); GATEWAY_PASSWORD=\\(.password)"\')"',
+        ),
+    ),
+).register()
+
+add_pager_help_option(_gateway_info_command)
+
+
 latchkey.add_command(_create_agent_env_command)
 latchkey.add_command(_link_permissions_command)
 latchkey.add_command(_forward_command)
+latchkey.add_command(_admin_jwt_command)
+latchkey.add_command(_gateway_info_command)
 
 
 CommandHelpMetadata(
