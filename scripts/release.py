@@ -488,8 +488,12 @@ def _print_on_demand_consolidation_command() -> None:
     print(f"    {disable_args}")
 
 
-def _gate_release_on_pending_changelog_entries(dry_run: bool) -> bool:
+def _gate_release_on_pending_changelog_entries(entries: list[Path], dry_run: bool) -> bool:
     """Block a release until pending changelog entries are consolidated.
+
+    Takes the list of pending entries (see ``pending_changelog_entries``)
+    as input rather than reading it directly, so tests can inject a
+    controlled list without monkeypatching.
 
     Returns ``True`` if the release may proceed (no pending entries, or
     ``dry_run`` is set), ``False`` if the caller must abort. After
@@ -499,7 +503,6 @@ def _gate_release_on_pending_changelog_entries(dry_run: bool) -> bool:
     ``dry_run`` swaps the error for a warning so ``release.py --dry-run``
     can still preview what would be released.
     """
-    entries = pending_changelog_entries(REPO_ROOT)
     if not entries:
         return True
 
@@ -595,7 +598,8 @@ def main() -> None:
     # finalize would be missing those entries' bullets. In --dry-run we
     # warn rather than block so the user can still preview what would
     # be released.
-    if not _gate_release_on_pending_changelog_entries(dry_run=args.dry_run):
+    pending_entries = pending_changelog_entries(REPO_ROOT)
+    if not _gate_release_on_pending_changelog_entries(pending_entries, dry_run=args.dry_run):
         sys.exit(1)
 
     base_kind: str = args.bump_kind
