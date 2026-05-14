@@ -249,7 +249,10 @@ class ClaudeAgentConfig(AgentTypeConfig):
     )
     settings_overrides: dict[str, Any] = Field(
         default_factory=dict,
-        description="Key-value overrides merged into settings.json at provisioning time. "
+        description="Overrides deep-merged into settings.json at provisioning time. "
+        "Nested dicts are merged key-by-key (so e.g. {'permissions': {'allow': [...]}} "
+        "preserves sibling keys like permissions.defaultMode from the base settings); "
+        "lists and scalars in the override replace the corresponding base value. "
         "Example: {'model': 'opus[1m]', 'fastMode': True}.",
     )
     emit_common_transcript: bool = Field(
