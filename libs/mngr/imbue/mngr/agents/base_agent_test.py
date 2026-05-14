@@ -1072,22 +1072,6 @@ def test_send_message_simple_raises_on_enter_failure(
 
 
 # =========================================================================
-# _raise_send_timeout tests
-# =========================================================================
-
-
-def test_raise_send_timeout_raises_send_message_error(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """_raise_send_timeout should raise SendMessageError with the given reason."""
-    stub = _StubHost()
-    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
-
-    with pytest.raises(SendMessageError, match="timeout reason"):
-        agent._raise_send_timeout("mngr-test:0", "timeout reason")
-
-
-# =========================================================================
 # _get_command_basename tests
 # =========================================================================
 

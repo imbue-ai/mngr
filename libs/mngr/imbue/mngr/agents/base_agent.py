@@ -10,7 +10,6 @@ from typing import Callable
 from typing import Final
 from typing import Generator
 from typing import Mapping
-from typing import NoReturn
 from typing import Sequence
 
 from loguru import logger
@@ -336,10 +335,6 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         Subclasses can override to perform checks (e.g., dialog detection)
         and raise an appropriate error to abort the send.
         """
-
-    def _raise_send_timeout(self, tmux_target: str, timeout_reason: str) -> NoReturn:
-        """Raise a SendMessageError for a send timeout."""
-        raise SendMessageError(str(self.name), timeout_reason)
 
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
