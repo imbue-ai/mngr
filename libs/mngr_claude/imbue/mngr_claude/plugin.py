@@ -1665,7 +1665,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         settings_path = self.work_dir / settings_relative
 
         # Check gitignore. During create(), preflight_check already verified
-        # this on the source, but this covers other code paths (e.g. mngr provision).
+        # this on the source; this check runs on the destination as a defense
+        # in depth.
         _check_settings_local_gitignored(host, self.work_dir, require_repo_rule=False)
 
         hooks_config = build_readiness_hooks_config()

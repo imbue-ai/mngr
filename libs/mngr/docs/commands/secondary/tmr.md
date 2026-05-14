@@ -38,7 +38,7 @@ Use --use-snapshot with remote providers to build and provision one host first,
 snapshot it, then launch all remaining agents from the snapshot (much faster).
 Use --env to pass environment variables and --label to tag all agents.
 Use --prompt-suffix to append custom instructions to the agent prompt.
-Use --max-agents to limit how many agents run simultaneously (0 = no limit).
+Use --max-parallel-agents to limit how many agents run simultaneously (0 = no limit).
 
 Each agent writes its result to .test_output/testing_agent_outcome.json (in its work directory)
 with a structured JSON containing: changes (list of kind/status/summary), errored flag,
@@ -86,15 +86,14 @@ mngr tmr [OPTIONS] [PYTEST_ARGS]...
 | `--prompt-suffix` | text | Additional text to append to the agent prompt | None |
 | `--use-snapshot` | boolean | Build one agent first, snapshot its host, then launch remaining agents from the snapshot (faster for remote providers) | `False` |
 | `--snapshot` | text | Use an existing snapshot/image ID for all agents (skips building; implies --use-snapshot behavior) | None |
-| `--max-parallel` | integer | Maximum number of agents to launch concurrently (launch-time parallelism) | `4` |
+| `--max-parallel-launch` | integer | Maximum number of agents to launch concurrently (launch-time parallelism) | `10` |
 | `--agents-per-host` | integer | Number of agents sharing each remote host (ignored for local provider) | `4` |
-| `--max-agents` | integer | Maximum number of agents running at any one time (0 = no limit). When set, agents are launched incrementally as earlier ones finish. | `0` |
+| `--max-parallel-agents` | integer | Maximum number of agents running at any one time (0 = no limit). When set, agents are launched incrementally as earlier ones finish. | `0` |
 | `--launch-delay` | float | Seconds to wait between launching each agent (avoids provider rate limits) | `2.0` |
-| `--poll-interval` | float | Seconds between polling cycles when waiting for agents to finish | `10.0` |
+| `--poll-interval` | float | Seconds between polling cycles when waiting for agents to finish | `60.0` |
 | `--timeout` | float | Maximum seconds each agent can run before being stopped (per-agent timeout) | `3600.0` |
-| `--result-check-interval` | float | Seconds between direct result file checks for agents whose status may be stale | `300.0` |
 | `--integrator-timeout` | float | Maximum seconds to wait for the integrator agent to merge fix branches | `3600.0` |
-| `--output-html` | path | Path for the HTML report [default: tmr_<timestamp>/index.html] | None |
+| `--output-dir` | path | Directory for the run's outputs (HTML report at index.html, per-agent artifacts) [default: tmr_<timestamp>/] | None |
 | `--source` | directory | Source directory for test collection and agent work dirs [default: current directory] | None |
 | `--reintegrate` | text | Re-read outcomes from a previous TMR run (by run name), re-run integrator, and regenerate report. Skips test collection and agent launching. | None |
 | `--additional-authorized-host` | text | SSH public key line to install in authorized_keys on each agent host (test agents, integrator, host pool, and snapshotter), allowing inbound SSH [repeatable] | None |
@@ -146,7 +145,7 @@ $ mngr tmr --env API_KEY=xxx --label batch=run1
 **Limit to 4 concurrent agents**
 
 ```bash
-$ mngr tmr --max-agents 4 tests/
+$ mngr tmr --max-parallel-agents 4 tests/
 ```
 
 **Custom poll interval**
@@ -158,5 +157,5 @@ $ mngr tmr --poll-interval 30
 **Specify output location**
 
 ```bash
-$ mngr tmr --output-html report.html
+$ mngr tmr --output-dir reports/run-1
 ```
