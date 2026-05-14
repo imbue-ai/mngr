@@ -343,12 +343,13 @@ class ImbueCloudProvider(BaseProviderInstance):
         account = self._require_account()
         token = self._get_access_token(account)
         # Wrap connector-unreachable as ProviderUnavailableError so the
-        # discovery boundary soft-skips this provider. The catch is narrow
-        # by design: ImbueCloudAuthError (401/403, wrong token) propagates
-        # as its own typed error and surfaces as a hard error. The client
-        # layer can't raise ProviderUnavailableError directly because its
-        # constructor needs the provider instance name, which the client
-        # doesn't know.
+        # discovery boundary records it on ListResult.errors as a provider
+        # failure. The catch is narrow by design: ImbueCloudAuthError
+        # (401/403, wrong token) propagates as its own typed error so
+        # programmatic consumers can still discriminate via exception_type
+        # (both classes land on result.errors). The client layer can't
+        # raise ProviderUnavailableError directly because its constructor
+        # needs the provider instance name, which the client doesn't know.
         try:
             self._leased_hosts_cache = self.client.list_hosts(token)
         except ImbueCloudConnectorError as exc:
