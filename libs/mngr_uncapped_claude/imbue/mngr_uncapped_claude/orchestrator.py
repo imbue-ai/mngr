@@ -168,7 +168,7 @@ def _run_with_agent(
             mngr_ctx=mngr_ctx,
             create_work_dir=False,
         )
-    except (MngrError, BaseMngrError) as exc:
+    except BaseMngrError as exc:
         logger.error("Failed to create agent: {}", exc)
         return None, EXIT_MNGR_ERROR
 
@@ -202,7 +202,7 @@ def _run_with_agent(
                 _send_user_turn(mngr_ctx, agent, next_prompt)
                 turn_count += 1
                 final_state = _wait_for_turn_end(agent, events_target, writer)
-        except (MngrError, BaseMngrError) as exc:
+        except BaseMngrError as exc:
             logger.error("Run failed: {}", exc)
             _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=str(exc), turn_count=turn_count)
             return state, EXIT_MNGR_ERROR
@@ -371,11 +371,11 @@ def _destroy_agent(agent: AgentInterface[Any], host: OnlineHostInterface) -> Non
     """Best-effort: stop and destroy the agent, swallowing cleanup errors."""
     try:
         host.stop_agents([agent.id])
-    except (OSError, MngrError, BaseMngrError) as exc:
+    except (OSError, BaseMngrError) as exc:
         logger.warning("Failed to stop agent {}: {}", agent.name, exc)
     try:
         host.destroy_agent(agent)
-    except (OSError, MngrError, BaseMngrError) as exc:
+    except (OSError, BaseMngrError) as exc:
         logger.warning("Failed to destroy agent {}: {}", agent.name, exc)
 
 
