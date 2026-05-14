@@ -9,8 +9,6 @@ from typing import Any
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
-from imbue.mngr.agents.base_agent import _check_paste_content
-from imbue.mngr.agents.base_agent import _normalize_for_match
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -337,117 +335,11 @@ def test_get_expected_process_name_uses_command_basename(
     assert test_agent.get_expected_process_name() == "sleep"
 
 
-def test_uses_paste_detection_send_returns_false_by_default(
-    test_agent: BaseAgent,
-) -> None:
-    """Test that uses_paste_detection_send returns False by default."""
-    assert test_agent.uses_paste_detection_send() is False
-
-
 def test_tmux_target_appends_window_zero(
     test_agent: BaseAgent,
 ) -> None:
     """tmux_target should return session_name:0 to always target window 0."""
     assert test_agent.tmux_target == f"{test_agent.session_name}:0"
-
-
-def test_get_tui_ready_indicator_returns_none_by_default(
-    test_agent: BaseAgent,
-) -> None:
-    """Test that get_tui_ready_indicator returns None by default."""
-    assert test_agent.get_tui_ready_indicator() is None
-
-
-def test_normalize_for_match_strips_non_alnum_and_lowercases() -> None:
-    """_normalize_for_match should strip non-alphanumeric chars and lowercase."""
-    assert _normalize_for_match("Hello, World!") == "helloworld"
-    assert _normalize_for_match("foo-bar_baz 123") == "foobarbaz123"
-    assert _normalize_for_match("") == ""
-    assert _normalize_for_match("  \n\t  ") == ""
-
-
-def test_check_paste_content_detects_paste_indicator() -> None:
-    """_check_paste_content returns True when tmux paste indicator is present."""
-    assert _check_paste_content("some text\n[Pasted text 123 chars]\nmore text", "anything") is True
-
-
-def test_check_paste_content_detects_fuzzy_content_match() -> None:
-    """_check_paste_content returns True when normalized message tail is found in pane."""
-    pane = "prompt> hello world this is a test message"
-    assert _check_paste_content(pane, "Hello, World! This is a test message") is True
-
-
-def test_check_paste_content_returns_false_when_no_match() -> None:
-    """_check_paste_content returns False when neither paste indicator nor content match."""
-    pane = "prompt> totally different content"
-    assert _check_paste_content(pane, "Hello, World! This is a test message") is False
-
-
-def test_check_paste_content_handles_empty_message() -> None:
-    """_check_paste_content returns True for empty messages (nothing to verify)."""
-    assert _check_paste_content("some content", "") is True
-
-
-@pytest.mark.tmux
-def test_send_enter_and_wait_for_signal_returns_true_when_signal_received(
-    test_agent: BaseAgent,
-) -> None:
-    """Test that _send_enter_and_wait_for_signal returns True when tmux wait-for signal is received."""
-    session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
-    tmux_target = f"{session_name}:0"
-    wait_channel = f"mngr-submit-{session_name}"
-
-    # Create a tmux session
-    test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'bash'",
-        timeout_seconds=5.0,
-    )
-
-    try:
-        # Signal the channel from a background process after a short delay
-        # This simulates what the UserPromptSubmit hook does
-        test_agent.host.execute_idempotent_command(
-            f"( sleep 0.1 && tmux wait-for -S '{wait_channel}' ) &",
-            timeout_seconds=1.0,
-        )
-
-        # Call the method - it should receive the signal and return True
-        result = test_agent._send_enter_and_wait_for_signal(tmux_target, wait_channel)
-        assert result is True
-    finally:
-        test_agent.host.execute_idempotent_command(
-            f"tmux kill-session -t '={session_name}' 2>/dev/null",
-            timeout_seconds=5.0,
-        )
-
-
-@pytest.mark.tmux
-def test_send_enter_and_wait_for_signal_returns_false_on_timeout(
-    test_agent: BaseAgent,
-) -> None:
-    """Test that _send_enter_and_wait_for_signal returns False when signal times out."""
-    # Use a shorter timeout so the test doesn't wait the full 2 seconds
-    test_agent.enter_submission_timeout_seconds = 0.2
-    session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
-    tmux_target = f"{session_name}:0"
-    # Use a unique channel that won't be signaled
-    wait_channel = f"mngr-submit-never-signaled-{session_name}"
-
-    # Create a tmux session
-    test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'bash'",
-        timeout_seconds=5.0,
-    )
-
-    try:
-        # Call the method without signaling - should timeout and return False
-        result = test_agent._send_enter_and_wait_for_signal(tmux_target, wait_channel)
-        assert result is False
-    finally:
-        test_agent.host.execute_idempotent_command(
-            f"tmux kill-session -t '={session_name}' 2>/dev/null",
-            timeout_seconds=5.0,
-        )
 
 
 # =========================================================================
@@ -1039,7 +931,7 @@ def _create_named_agent_with_stub_host(
     Uses model_construct to bypass Pydantic validation so the stub host
     (which does not implement the full OnlineHostInterface) can be used.
     Accepts a cls parameter to create subclass instances and **kwargs
-    for additional fields (e.g. enter_submission_timeout_seconds).
+    for additional fields defined on those subclasses.
     """
     return cls.model_construct(
         id=AgentId.generate(),
@@ -1192,22 +1084,6 @@ def test_send_message_simple_raises_on_enter_failure(
 
 
 # =========================================================================
-# _raise_send_timeout tests
-# =========================================================================
-
-
-def test_raise_send_timeout_raises_send_message_error(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """_raise_send_timeout should raise SendMessageError with the given reason."""
-    stub = _StubHost()
-    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
-
-    with pytest.raises(SendMessageError, match="timeout reason"):
-        agent._raise_send_timeout("mngr-test:0", "timeout reason")
-
-
-# =========================================================================
 # _get_command_basename tests
 # =========================================================================
 
@@ -1294,24 +1170,3 @@ def test_write_data_persists_to_file(
     # Read back and verify
     result = test_agent._read_data()
     assert result["custom_field"] == "custom_value"
-
-
-# =========================================================================
-# _check_paste_content edge cases
-# =========================================================================
-
-
-def test_check_paste_content_short_message_tail() -> None:
-    """_check_paste_content with a short message should use its full length as probe."""
-    pane = "prompt> abc"
-    # Message shorter than 60 chars
-    assert _check_paste_content(pane, "abc") is True
-
-
-def test_check_paste_content_long_message_uses_tail() -> None:
-    """_check_paste_content with a long message should match on the last 60 chars."""
-    # Create a message longer than 60 chars where only the tail matches the pane
-    tail = "a" * 60
-    message = "x" * 100 + tail
-    pane = "prompt> " + tail
-    assert _check_paste_content(pane, message) is True
