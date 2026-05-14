@@ -138,11 +138,6 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
         """
         return "pi"
 
-    def uses_submission_signal(self) -> bool:
-        # Pi has no UserPromptSubmit-style hook, so fall through to the
-        # paste-visibility + poll path inherited from InteractiveTuiAgent.
-        return False
-
     def on_before_provisioning(
         self,
         host: OnlineHostInterface,
