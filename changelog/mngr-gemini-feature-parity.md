@@ -1,0 +1,1 @@
+Add `specs/mngr-gemini-feature-parity/concise.md` mapping out a nine-PR plan to bring `mngr_gemini` to feature parity with `mngr_claude` (settings management, hook injection, lifecycle hookimpls, session adoption, headless variant, skill-provisioned subtypes, usage telemetry, subagent proxy). Spec only; no behavioral changes.
