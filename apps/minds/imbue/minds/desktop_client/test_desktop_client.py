@@ -1265,5 +1265,3 @@ def test_auto_open_toggle(tmp_path: Path) -> None:
 
     config = MindsConfig(data_dir=tmp_path)
     assert config.get_auto_open_requests_panel() is False
-
-
