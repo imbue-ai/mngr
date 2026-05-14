@@ -129,10 +129,7 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         plugin-scoped namespacing ``mngr_claude`` uses under
         ``plugin/claude/anthropic/``.
         """
-        agent_dir = self._get_agent_dir()
-        for part in _PLUGIN_STATE_SUBDIR:
-            agent_dir = agent_dir / part
-        return agent_dir / _SYSTEM_SETTINGS_FILENAME
+        return self._get_agent_dir().joinpath(*_PLUGIN_STATE_SUBDIR, _SYSTEM_SETTINGS_FILENAME)
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Wire trust + system-settings env vars for the agent.
