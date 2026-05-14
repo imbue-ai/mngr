@@ -45,4 +45,8 @@ def maybe_upload_report(html_path: Path, run_name: str) -> str | None:
         logger.warning("Failed to upload TMR report to s3://{}/{}: {}", _BUCKET, key, exc)
         return None
 
-    return f"{_URL_BASE}/{run_name}.html"
+    url = f"{_URL_BASE}/{run_name}.html"
+    # Logged on every successful upload (every report regeneration), symmetric
+    # with the "HTML report written to ..." log line in generate_html_report.
+    logger.info("HTML report mirrored to {}", url)
+    return url
