@@ -6,6 +6,7 @@ import pytest
 
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.polling import retry_action_with_poll
 from imbue.mngr.utils.polling import wait_for
 
 
@@ -103,3 +104,55 @@ def test_wait_for_custom_error_message() -> None:
     """wait_for should use custom error message."""
     with pytest.raises(TimeoutError, match="Custom error"):
         wait_for(lambda: False, timeout=0.1, poll_interval=0.05, error_message="Custom error")
+
+
+def test_retry_action_with_poll_returns_true_on_first_success() -> None:
+    """retry_action_with_poll should return True after a single action when condition is met."""
+    action_calls: list[int] = []
+
+    result = retry_action_with_poll(
+        action=lambda: action_calls.append(1),
+        condition=lambda: True,
+        max_attempts=3,
+        per_attempt_timeout=0.2,
+        poll_interval=0.05,
+    )
+
+    assert result is True
+    assert len(action_calls) == 1
+
+
+def test_retry_action_with_poll_retries_until_condition_met() -> None:
+    """retry_action_with_poll should re-invoke action on each round until condition is met."""
+    action_calls: list[int] = []
+
+    def condition() -> bool:
+        # Condition becomes true once the action has been invoked at least twice.
+        return len(action_calls) >= 2
+
+    result = retry_action_with_poll(
+        action=lambda: action_calls.append(1),
+        condition=condition,
+        max_attempts=4,
+        per_attempt_timeout=0.1,
+        poll_interval=0.05,
+    )
+
+    assert result is True
+    assert len(action_calls) == 2
+
+
+def test_retry_action_with_poll_returns_false_when_condition_never_met() -> None:
+    """retry_action_with_poll should return False after exactly max_attempts rounds on failure."""
+    action_calls: list[int] = []
+
+    result = retry_action_with_poll(
+        action=lambda: action_calls.append(1),
+        condition=lambda: False,
+        max_attempts=3,
+        per_attempt_timeout=0.05,
+        poll_interval=0.02,
+    )
+
+    assert result is False
+    assert len(action_calls) == 3
