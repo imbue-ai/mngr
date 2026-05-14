@@ -92,15 +92,9 @@ PRs are ordered so dependency arrows point upward. PRs in the same tier are inde
 - `code_guardian_gemini_agent.py`, `fixme_fairy_gemini_agent.py` registering matching agent types.
 - Acceptance: `mngr create … code-guardian-gemini` provisions the skill and the agent recognizes it.
 
-### Tier 4: sibling packages (independent of each other, depend on PR1)
+### Out of scope (deferred)
 
-**PR8: `libs/mngr_gemini_usage`**
-- New package mirroring `mngr_claude_usage`. Gemini exposes OpenTelemetry, not statusline shims, so the approach differs: configure `telemetry.target = "local"` + `telemetry.outfile = .gemini/telemetry.log`, then tail and convert OTel GenAI semantic-convention metrics (`gen_ai.client.token.usage`, `gen_ai.client.operation.duration`) into `events.jsonl`.
-- Acceptance: per-agent cost/token snapshots appear in `events.jsonl` after a Gemini turn.
-
-**PR9: `libs/mngr_gemini_subagent_proxy`**
-- New package mirroring `mngr_claude_subagent_proxy`. Register `mngr-proxy-gemini-child` agent type. Use Gemini's `BeforeAgent`/`AfterAgent` hooks for subagent lifecycle (no `UserPromptSubmit` analog — call this gap out in the PR).
-- Acceptance: a `gemini` agent can spawn a `mngr-proxy-gemini-child` and round-trip a request.
+The sibling-package work (`mngr_gemini_usage` mirroring `mngr_claude_usage`, `mngr_gemini_subagent_proxy` mirroring `mngr_claude_subagent_proxy`) is deferred. Both depend on PR1 but neither is on the critical path for the core agent reaching parity, and the telemetry path in particular needs design work (Gemini exposes OpenTelemetry, not statusline shims, so the integration shape differs).
 
 ## Out of scope
 
@@ -111,6 +105,6 @@ PRs are ordered so dependency arrows point upward. PRs in the same tier are inde
 ## Hand-off notes for implementing agents
 
 - Each PR should add its own `changelog/<branch>.md` file (CI enforces this).
-- Each PR should branch off `main` (not this branch — this branch only holds the spec).
+- Each PR should branch off `mngr/gemini-transcript` (not `main`). That line carries the common-transcript work this stack reuses; branching off `main` would conflict on `plugin.py` and `resources/`.
 - Run `just test-quick libs/mngr_gemini` while iterating; `just test-offload` before marking ready.
 - Read `libs/mngr_claude/imbue/mngr_claude/<analog>.py` before writing the corresponding Gemini file — most patterns transfer; the differences are at the Gemini config surface, not the mngr surface.
