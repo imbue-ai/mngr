@@ -104,8 +104,18 @@ def test_spawn_rewrites_input(
 
     assert prompt_file.read_text() == "find all readmes"
     map_data = json.loads(map_file.read_text())
-    assert set(map_data.keys()) == {"target_name", "subagent_type", "parent_cwd", "run_in_background"}
+    assert set(map_data.keys()) == {
+        "target_name",
+        "subagent_type",
+        "subagent_type_resolved_path",
+        "parent_cwd",
+        "run_in_background",
+    }
     assert map_data["subagent_type"] == "general-purpose"
+    # general-purpose is a Claude Code built-in with no on-disk .md file,
+    # so the resolver returns None and the parent's prompt is written
+    # verbatim into the prompt file (no system-prompt prepend).
+    assert map_data["subagent_type_resolved_path"] is None
     assert map_data["run_in_background"] is False
     assert map_data["target_name"].startswith("parent-agent--subagent-")
     assert script_file.is_file()
@@ -213,6 +223,121 @@ def test_wait_script_traps_env_file_cleanup_on_failure() -> None:
         "EXIT trap must be installed BEFORE the env-capture redirect (and "
         "before mngr create) and cleared AFTER successful shred"
     )
+
+
+def test_spawn_prepends_resolved_agent_definition_body_to_prompt_file(
+    hook_env: pytest.MonkeyPatch,
+    state_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typed ``subagent_type`` that resolves to an on-disk agent definition
+    causes the spawn hook to prepend the definition body (the spawned
+    subagent's system prompt) to the prompt file under a clearly-marked
+    section header, and to record the resolved path in the map file.
+
+    Without this, the mngr proxy spawns a generic Claude with no system
+    prompt for specialized types (verify-and-fix, review-conversation,
+    etc.) -- silently losing the typed-subagent contract.
+    """
+    # Drop a marketplace-installed plugin agent under a fake HOME so the
+    # resolver finds it without touching the developer's real ~/.claude/.
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    marketplace_agent = (
+        fake_home
+        / ".claude"
+        / "plugins"
+        / "marketplaces"
+        / "imbue-code-guardian"
+        / "plugins"
+        / "imbue-code-guardian"
+        / "agents"
+        / "verify-and-fix.md"
+    )
+    marketplace_agent.parent.mkdir(parents=True)
+    system_prompt_body = "You are an autonomous code verifier and fixer. Use your best judgment throughout."
+    marketplace_agent.write_text(
+        f"---\nname: verify-and-fix\ndescription: verify branch\n---\n\n{system_prompt_body}\n"
+    )
+
+    hook_input: dict[str, object] = {
+        "tool_use_id": "toolu_typed1234567",
+        "tool_input": {
+            "prompt": "fix the verify branch",
+            "description": "verify branch",
+            "subagent_type": "imbue-code-guardian:verify-and-fix",
+            "run_in_background": False,
+        },
+    }
+    stdin_buffer = io.StringIO(json.dumps(hook_input))
+    stdout_buffer = io.StringIO()
+    spawn_hook.run(stdin_buffer, stdout_buffer)
+
+    response = json.loads(stdout_buffer.getvalue())
+    assert response["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    tid = "toolu_typed1234567"
+    prompt_file = state_dir / "subagent_prompts" / f"{tid}.md"
+    map_file = state_dir / "subagent_map" / f"{tid}.json"
+
+    prompt_text = prompt_file.read_text()
+    # System prompt body appears under a clearly-marked section header
+    # BEFORE the parent's task prompt. Header has to be unambiguous so
+    # the spawned subagent doesn't mistake instructions from one section
+    # for the other.
+    assert "# System prompt for subagent_type 'imbue-code-guardian:verify-and-fix'" in prompt_text
+    assert system_prompt_body in prompt_text
+    assert "# Task from parent" in prompt_text
+    assert "fix the verify branch" in prompt_text
+    assert prompt_text.index(system_prompt_body) < prompt_text.index("fix the verify branch"), (
+        "System prompt body must appear before the parent task in the prompt file"
+    )
+    # YAML frontmatter is stripped from the system-prompt body -- otherwise
+    # the spawned subagent would see "---\nname: ...\n---" lines as user
+    # content.
+    assert "name: verify-and-fix" not in prompt_text
+
+    map_data = json.loads(map_file.read_text())
+    assert map_data["subagent_type"] == "imbue-code-guardian:verify-and-fix"
+    assert map_data["subagent_type_resolved_path"] == str(marketplace_agent)
+
+
+def test_spawn_unresolved_subagent_type_writes_raw_prompt(
+    hook_env: pytest.MonkeyPatch,
+    state_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a typed ``subagent_type`` does NOT resolve (built-in or unknown),
+    the prompt file gets the parent's prompt verbatim and the map file
+    records ``subagent_type_resolved_path: None``.
+
+    Same behavior the proxy had before typed-subagent support landed; pinning
+    that the fallback path is preserved.
+    """
+    fake_home = tmp_path / "fake_home_empty"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    hook_input: dict[str, object] = {
+        "tool_use_id": "toolu_unresolved12",
+        "tool_input": {
+            "prompt": "find the readmes",
+            "description": "explore",
+            "subagent_type": "some-plugin:nonexistent",
+            "run_in_background": False,
+        },
+    }
+    spawn_hook.run(io.StringIO(json.dumps(hook_input)), io.StringIO())
+
+    tid = "toolu_unresolved12"
+    prompt_text = (state_dir / "subagent_prompts" / f"{tid}.md").read_text()
+    map_data = json.loads((state_dir / "subagent_map" / f"{tid}.json").read_text())
+
+    assert prompt_text == "find the readmes"
+    assert map_data["subagent_type_resolved_path"] is None
 
 
 def test_spawn_depth_limit_denies_with_reason(

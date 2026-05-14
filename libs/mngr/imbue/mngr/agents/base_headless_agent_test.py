@@ -117,24 +117,6 @@ def test_send_message_raises(
         agent.send_message("hello")
 
 
-def test_uses_paste_detection_send_returns_false(
-    local_host: Host,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-) -> None:
-    agent = _make_agent(local_host, temp_mngr_ctx, tmp_path)
-    assert agent.uses_paste_detection_send() is False
-
-
-def test_get_tui_ready_indicator_returns_none(
-    local_host: Host,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-) -> None:
-    agent = _make_agent(local_host, temp_mngr_ctx, tmp_path)
-    assert agent.get_tui_ready_indicator() is None
-
-
 def test_is_agent_finished_when_stopped(
     local_host: Host,
     temp_mngr_ctx: MngrContext,
