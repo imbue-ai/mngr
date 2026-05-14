@@ -195,19 +195,16 @@ def _run_with_agent(
                 final_state = _wait_for_turn_end(agent, events_target, writer)
         except (MngrError, BaseMngrError) as exc:
             logger.error("Run failed: {}", exc)
-            meta = _build_result_meta(start_time, agent_id=str(agent.id), error_text=str(exc))
-            writer.finalize(meta)
+            _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=str(exc))
             return state, EXIT_MNGR_ERROR
 
     if final_state != AgentLifecycleState.WAITING:
         error_text = f"agent ended in state {final_state.value} before reaching WAITING"
         logger.error("{}", error_text)
-        meta = _build_result_meta(start_time, agent_id=str(agent.id), error_text=error_text)
-        writer.finalize(meta)
+        _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=error_text)
         return state, EXIT_CLAUDE_ERROR
 
-    meta = _build_result_meta(start_time, agent_id=str(agent.id), error_text=None)
-    writer.finalize(meta)
+    _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=None)
     return state, EXIT_SUCCESS
 
 
@@ -347,6 +344,17 @@ def _build_result_meta(
         is_error=error_text is not None,
         error_text=error_text,
     )
+
+
+def _finalize_run(
+    writer: StreamingOutputWriter,
+    start_time: float,
+    agent_id: str,
+    error_text: str | None,
+) -> None:
+    """Build the result metadata for this run and flush the writer's trailing envelope."""
+    meta = _build_result_meta(start_time, agent_id=agent_id, error_text=error_text)
+    writer.finalize(meta)
 
 
 def _destroy_agent(agent: AgentInterface[Any], host: OnlineHostInterface) -> None:
