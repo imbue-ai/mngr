@@ -1,6 +1,5 @@
 import json
 import shutil
-import threading
 from datetime import datetime
 from datetime import timezone
 from functools import cached_property
@@ -51,6 +50,7 @@ from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
 from imbue.mngr_lima.errors import LimaCommandError
@@ -84,10 +84,13 @@ _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
 
 # ssh-keyscan tuning. sshd finishes loading host keys slightly after the
 # TCP port becomes reachable, so wait_for_sshd can succeed while keyscan
-# still sees an empty banner. We retry a few times before giving up.
+# still sees an empty banner. We poll until a key shows up before giving up.
+# _HOST_KEY_SCAN_TIMEOUT_SECONDS bounds a single ssh-keyscan subprocess;
+# _HOST_KEY_SCAN_POLL_TIMEOUT_SECONDS bounds the overall wait for a key to
+# appear; _HOST_KEY_SCAN_POLL_INTERVAL_SECONDS is the gap between scans.
 _HOST_KEY_SCAN_TIMEOUT_SECONDS = 10.0
-_HOST_KEY_SCAN_MAX_ATTEMPTS = 5
-_HOST_KEY_SCAN_RETRY_DELAY_SECONDS = 2.0
+_HOST_KEY_SCAN_POLL_TIMEOUT_SECONDS = 10.0
+_HOST_KEY_SCAN_POLL_INTERVAL_SECONDS = 2.0
 
 
 class LimaProviderInstance(BaseProviderInstance):
@@ -264,6 +267,31 @@ class LimaProviderInstance(BaseProviderInstance):
             ),
         )
 
+    def _scan_host_keys_once(self, hostname: str, port: int) -> list[str] | None:
+        """Run ssh-keyscan once and return the parsed ``"<type> <data>"`` entries.
+
+        Returns ``None`` when the scan produced nothing usable -- this is the
+        "condition not yet met" signal for :func:`poll_for_value`. sshd can race
+        with ssh-keyscan during VM bring-up (the TCP port is reachable but sshd
+        has not finished loading host keys), so an empty result just means we
+        should poll again.
+        """
+        result = self.mngr_ctx.concurrency_group.run_process_to_completion(
+            ["ssh-keyscan", "-t", "rsa,ecdsa,ed25519", "-p", str(port), hostname],
+            timeout=_HOST_KEY_SCAN_TIMEOUT_SECONDS,
+        )
+        key_entries: list[str] = []
+        if result.returncode == 0 and result.stdout.strip():
+            for line in result.stdout.strip().splitlines():
+                if line and not line.startswith("#"):
+                    parts = line.split(None, 2)
+                    if len(parts) >= 3:
+                        key_entries.append(f"{parts[1]} {parts[2]}")
+        if key_entries:
+            return key_entries
+        logger.info("ssh-keyscan for {}:{} returned no keys; will poll again", hostname, port)
+        return None
+
     def _scan_and_add_host_key(self, hostname: str, port: int) -> None:
         """Scan SSH host keys and add all of them to known_hosts.
 
@@ -273,47 +301,24 @@ class LimaProviderInstance(BaseProviderInstance):
 
         sshd can race with ssh-keyscan during VM bring-up: the TCP port is
         reachable (what wait_for_sshd checks) but sshd has not finished
-        loading host keys, so ssh-keyscan returns empty output. Retry with
-        backoff, and raise if we still can not read a key -- otherwise
+        loading host keys, so ssh-keyscan returns empty output. Poll until a
+        key shows up, and raise if none appears within the timeout -- otherwise
         downstream rsync/ssh fails with a cryptic "host key not known".
         """
         clear_host_from_known_hosts(self._known_hosts_path, hostname, port)
-        for attempt in range(_HOST_KEY_SCAN_MAX_ATTEMPTS):
-            result = self.mngr_ctx.concurrency_group.run_process_to_completion(
-                ["ssh-keyscan", "-t", "rsa,ecdsa,ed25519", "-p", str(port), hostname],
-                timeout=_HOST_KEY_SCAN_TIMEOUT_SECONDS,
-            )
-            added_any = False
-            if result.returncode == 0 and result.stdout.strip():
-                for line in result.stdout.strip().splitlines():
-                    if line and not line.startswith("#"):
-                        parts = line.split(None, 2)
-                        if len(parts) >= 3:
-                            key_type_and_data = f"{parts[1]} {parts[2]}"
-                            add_host_to_known_hosts(self._known_hosts_path, hostname, port, key_type_and_data)
-                            added_any = True
-                if added_any:
-                    return
-            if attempt < _HOST_KEY_SCAN_MAX_ATTEMPTS - 1:
-                logger.info(
-                    "ssh-keyscan for {}:{} returned no keys; retrying after {}s (attempt {}/{})",
-                    hostname,
-                    port,
-                    _HOST_KEY_SCAN_RETRY_DELAY_SECONDS,
-                    attempt + 1,
-                    _HOST_KEY_SCAN_MAX_ATTEMPTS,
-                )
-                # `threading.Event().wait()` instead of `time.sleep()` so the
-                # PREVENT_TIME_SLEEP ratchet stays at 0. Equivalent semantics
-                # here (no Event ever gets set, so this is just a sleep that
-                # is interruptible by KeyboardInterrupt) -- ratchet's intent
-                # is "prefer pollable / interruptible waits", which this is.
-                threading.Event().wait(_HOST_KEY_SCAN_RETRY_DELAY_SECONDS)
-        raise MngrError(
-            f"ssh-keyscan could not read a host key for {hostname}:{port} after "
-            f"{_HOST_KEY_SCAN_MAX_ATTEMPTS} attempts; the Lima VM may not have "
-            f"finished starting sshd"
+        key_entries, _, _ = poll_for_value(
+            lambda: self._scan_host_keys_once(hostname, port),
+            timeout=_HOST_KEY_SCAN_POLL_TIMEOUT_SECONDS,
+            poll_interval=_HOST_KEY_SCAN_POLL_INTERVAL_SECONDS,
         )
+        if key_entries is None:
+            raise MngrError(
+                f"ssh-keyscan could not read a host key for {hostname}:{port} within "
+                f"{_HOST_KEY_SCAN_POLL_TIMEOUT_SECONDS}s; the Lima VM may not have "
+                f"finished starting sshd"
+            )
+        for key_type_and_data in key_entries:
+            add_host_to_known_hosts(self._known_hosts_path, hostname, port, key_type_and_data)
 
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData) -> None:
         """Update the certified host data in the host record."""
