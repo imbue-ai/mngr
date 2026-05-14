@@ -25,7 +25,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
-from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -101,56 +100,11 @@ class AgentErrorInfo(ErrorInfo):
         )
 
 
-class WarningInfo(FrozenModel):
-    """Information about a non-fatal warning encountered during listing.
-
-    Surfaced via ``ListResult.warnings`` for programmatic consumers and via
-    the CLI's warning summary for human consumers. Independent of
-    ``--on-error``: warnings never gate exit code.
-    """
-
-    type: str = Field(description="The class name of the warning (e.g., 'ProviderBinaryMissingError')")
-    message: str = Field(description="The warning message")
-
-    @classmethod
-    def build(cls, exception: BaseException) -> "WarningInfo":
-        """Build a WarningInfo from an exception."""
-        return cls(type=type(exception).__name__, message=str(exception))
-
-
-class ProviderWarningInfo(WarningInfo):
-    """Warning information with provider context.
-
-    Populated when a provider raises ``ProviderUnavailableError`` (binary
-    missing, daemon down, credentials never configured, transient network
-    failure) during discovery.
-    """
-
-    provider_name: ProviderInstanceName = Field(description="Name of the provider that emitted the warning")
-
-    @classmethod
-    def build_for_provider(
-        cls,
-        exception: ProviderUnavailableError,
-        provider_name: ProviderInstanceName,
-    ) -> "ProviderWarningInfo":
-        """Build a ProviderWarningInfo from an exception and provider name."""
-        return cls(
-            type=type(exception).__name__,
-            message=str(exception),
-            provider_name=provider_name,
-        )
-
-
 class ListResult(MutableModel):
     """Result of listing agents."""
 
     agents: list[AgentDetails] = Field(default_factory=list, description="List of agents with their full information")
     errors: list[ErrorInfo] = Field(default_factory=list, description="Errors encountered while listing")
-    warnings: list[WarningInfo] = Field(
-        default_factory=list,
-        description="Non-fatal warnings (provider unavailable) encountered while listing",
-    )
 
 
 class _ListAgentsParams(FrozenModel):
@@ -162,7 +116,6 @@ class _ListAgentsParams(FrozenModel):
     error_behavior: ErrorBehavior
     on_agent: Callable[[AgentDetails], None] | None
     on_error: Callable[[ErrorInfo], None] | None
-    on_warning: Callable[[WarningInfo], None] | None = None
     field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = Field(
         default_factory=dict,
     )
@@ -186,8 +139,6 @@ def list_agents(
     on_agent: Callable[[AgentDetails], None] | None = None,
     # Optional callback invoked immediately when each error is encountered (for streaming)
     on_error: Callable[[ErrorInfo], None] | None = None,
-    # Optional callback invoked immediately when a provider is unavailable (for streaming jsonl)
-    on_warning: Callable[[WarningInfo], None] | None = None,
     # whether to force the providers to refresh their caches and get new data. Only needed if calling this multiple
     # times within the same process
     reset_caches: bool = False,
@@ -218,7 +169,6 @@ def list_agents(
             error_behavior=error_behavior,
             on_agent=on_agent,
             on_error=on_error,
-            on_warning=on_warning,
             field_generators=field_generators,
         )
 
@@ -307,15 +257,6 @@ def _construct_and_discover_for_provider(
         if reset_caches:
             provider.reset_caches()
         provider_results = provider.discover_hosts_and_agents(cg=mngr_ctx.concurrency_group, include_destroyed=True)
-    except ProviderUnavailableError as e:
-        # Record as a WarningInfo (not an error) so other providers continue
-        # producing hosts and the listing's exit code is unaffected.
-        warning_info = ProviderWarningInfo.build_for_provider(e, provider_name)
-        with results_lock:
-            result.warnings.append(warning_info)
-        if params.on_warning:
-            params.on_warning(warning_info)
-        return
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
             if isinstance(e, MngrError):
@@ -533,14 +474,6 @@ def _construct_discover_and_emit_for_provider(
         for future in host_futures:
             future.result()
 
-    except ProviderUnavailableError as e:
-        # See _construct_and_discover_for_provider.
-        warning_info = ProviderWarningInfo.build_for_provider(e, provider_name)
-        with results_lock:
-            result.warnings.append(warning_info)
-        if params.on_warning:
-            params.on_warning(warning_info)
-        return
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
             if isinstance(e, MngrError):

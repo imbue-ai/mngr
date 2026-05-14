@@ -21,8 +21,6 @@ from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.api.list import ProviderErrorInfo
-from imbue.mngr.api.list import ProviderWarningInfo
-from imbue.mngr.api.list import WarningInfo
 from imbue.mngr.api.list import agent_details_to_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
 from imbue.mngr.cli.common_opts import add_common_options
@@ -42,7 +40,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import ErrorBehavior
-from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_sort_keys
@@ -379,10 +376,8 @@ def _list_jsonl(
         error_behavior=error_behavior,
         on_agent=limited_callback,
         on_error=_emit_jsonl_error,
-        on_warning=_emit_jsonl_warning,
         is_streaming=False,
     )
-    _render_warnings_to_stderr(result.warnings, ctx)
     _render_errors_to_stderr(result.errors)
     _exit_for_errors(ctx, error_behavior, result)
 
@@ -417,7 +412,6 @@ def _list_streaming_human(
     finally:
         renderer.finish()
 
-    _render_warnings_to_stderr(result.warnings, ctx)
     _render_errors_to_stderr(result.errors)
     _exit_for_errors(ctx, error_behavior, result)
 
@@ -445,7 +439,6 @@ def _list_streaming_template(
         is_streaming=True,
     )
 
-    _render_warnings_to_stderr(result.warnings, ctx)
     _render_errors_to_stderr(result.errors)
     _exit_for_errors(ctx, error_behavior, result)
 
@@ -713,7 +706,7 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
         elif params.output_opts.output_format == OutputFormat.HUMAN:
             write_human_line("No agents found")
         elif params.output_opts.output_format == OutputFormat.JSON:
-            _emit_json_output([], result.errors, result.warnings)
+            _emit_json_output([], result.errors)
         else:
             # JSONL is handled above with streaming, so this should be unreachable
             raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")
@@ -724,15 +717,14 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
         elif params.output_opts.output_format == OutputFormat.HUMAN:
             _emit_human_output(agents_to_display, params.fields, params.custom_headers)
         elif params.output_opts.output_format == OutputFormat.JSON:
-            _emit_json_output(agents_to_display, result.errors, result.warnings)
+            _emit_json_output(agents_to_display, result.errors)
         else:
             # JSONL is handled above with streaming, so this should be unreachable
             raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")
 
-    # stderr always carries the human-readable warning/error summary; the
-    # output format only controls stdout. --quiet still drops these because
-    # it removes the loguru console handler that backs the rendering.
-    _render_warnings_to_stderr(result.warnings, ctx)
+    # stderr always carries the human-readable error summary; the output
+    # format only controls stdout. --quiet still drops these because it
+    # removes the loguru console handler that backs the rendering.
     _render_errors_to_stderr(result.errors)
     _exit_for_errors(ctx, params.error_behavior, result)
 
@@ -740,16 +732,13 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
 def _emit_json_output(
     agents: list[AgentDetails],
     errors: list[ErrorInfo],
-    warnings: list[WarningInfo],
 ) -> None:
-    """Emit JSON output with all agents, errors, and warnings."""
+    """Emit JSON output with all agents and errors."""
     agents_data = [agent.model_dump(mode="json") for agent in agents]
     errors_data = [error.model_dump(mode="json") for error in errors]
-    warnings_data = [warning.model_dump(mode="json") for warning in warnings]
     output_data = {
         "agents": agents_data,
         "errors": errors_data,
-        "warnings": warnings_data,
     }
     emit_final_json(output_data)
 
@@ -764,46 +753,6 @@ def _emit_jsonl_error(error: ErrorInfo) -> None:
     """Emit a single error as a JSONL line (streaming callback)."""
     error_data = {"event": "error", **error.model_dump(mode="json")}
     emit_final_json(error_data)
-
-
-def _emit_jsonl_warning(warning: WarningInfo) -> None:
-    """Emit a single warning as a JSONL line (streaming callback)."""
-    warning_data = {"event": "warning", **warning.model_dump(mode="json")}
-    emit_final_json(warning_data)
-
-
-def _render_warnings_to_stderr(warnings: list[WarningInfo], ctx: click.Context) -> None:
-    """Render WarningInfo entries to stderr.
-
-    Default: one summary line listing the unavailable providers.
-    With ``-v`` / ``-vv``: one detail line per warning. Empty input is a
-    no-op. ``--quiet`` removes the console handler so loguru drops these
-    records before they reach stderr.
-
-    Reads the resolved console_level from ``ctx.meta["logging_config"]``
-    so runtime ``-v`` / ``-q`` flags are honored. (``mngr_ctx.config.logging``
-    holds only the on-disk config without CLI overrides.)
-    """
-    if not warnings:
-        return
-    logging_config = ctx.meta.get("logging_config")
-    console_level = logging_config.console_level if logging_config is not None else LogLevel.BUILD
-    is_verbose = console_level in (LogLevel.DEBUG, LogLevel.TRACE)
-    if is_verbose:
-        for w in warnings:
-            label = str(w.provider_name) if isinstance(w, ProviderWarningInfo) else w.type
-            logger.warning("{}: {}: {}", label, w.type, w.message)
-        return
-    names = sorted({str(w.provider_name) for w in warnings if isinstance(w, ProviderWarningInfo)})
-    if not names:
-        return
-    plural = "providers" if len(names) > 1 else "provider"
-    logger.warning(
-        "{} {} unavailable: {}. Use -v for details.",
-        len(names),
-        plural,
-        ", ".join(names),
-    )
 
 
 def _render_errors_to_stderr(errors: list[ErrorInfo]) -> None:
@@ -824,9 +773,9 @@ def _exit_for_errors(ctx: click.Context, error_behavior: ErrorBehavior, result: 
     - ``--on-error abort`` (default): exit 1 if ``result.errors`` is non-empty.
     - ``--on-error continue``: no exit here; caller inspects ``result.errors``.
 
-    Warnings never affect the exit code. Internal bugs and other
-    non-provider exceptions (CEL compile failures, AbortError, etc.)
-    propagate around this helper and produce exit 1 regardless of mode.
+    Internal bugs and other non-provider exceptions (CEL compile failures,
+    AbortError, etc.) propagate around this helper and produce exit 1
+    regardless of mode.
     """
     if error_behavior == ErrorBehavior.ABORT and result.errors:
         ctx.exit(1)

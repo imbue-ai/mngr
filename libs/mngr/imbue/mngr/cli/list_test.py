@@ -1606,7 +1606,7 @@ def test_list_command_format_template_no_agents(
     )
     assert result.exit_code == 0
     # Template mode produces no stdout for zero agents (stderr may still
-    # carry the warning/error summary).
+    # carry the error summary).
     assert result.stdout.strip() == ""
 
 

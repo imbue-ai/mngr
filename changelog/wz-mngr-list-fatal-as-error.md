@@ -1,38 +1,23 @@
-Provider error handling overhauled end-to-end: clean two-tier model, structured `result.warnings` channel, consistent CLI rendering, and a saner `--on-error` semantic.
+Provider error handling for `mngr list` (and the shared discovery boundary) is now uniform: **every provider failure is an error**. There is no separate "warning" severity tier -- the `--on-error` flag is the single mechanism that expresses what the user wants done about failures.
 
-**Severity model.** Two distinct categories with different treatment:
+**Typed exception hierarchy (kept).** Providers raise typed exceptions instead of `logger.warning(...) + return []`: `ProviderUnavailableError` (and subclasses `ProviderBinaryMissingError`, `ProviderDaemonNotRunningError`, `ProviderCredentialsMissingError`, `ProviderNetworkUnreachableError`), `ProviderNotAuthorizedError`, `ProviderDiscoveryError`. These remain useful for programmatic discrimination via `ErrorInfo.exception_type`, but they no longer drive a severity decision.
 
-- **WARNING** (`ProviderUnavailableError` and subclasses): provider literally cannot run on this machine right now (binary missing, daemon down, credentials never configured, network unreachable). Surfaced via `result.warnings` and a one-line stderr summary; never affects exit code; other providers continue producing hosts.
-- **ERROR** (`ProviderNotAuthorizedError` and other `ProviderError`): the provider was reached and produced a real failure that needs the user's attention. Surfaced via `result.errors` and per-error red stderr lines; gates exit code per `--on-error`.
+**No warning tier.** Removed `WarningInfo` / `ProviderWarningInfo`, `ListResult.warnings`, the `on_warning` callback, and the CLI's warning rendering. `ProviderUnavailableError` is no longer special-cased at the discovery boundary -- it flows through the same path as any other provider failure and lands on `result.errors`.
 
-**Hierarchy refactor (`mngr/errors.py`).** New `ProviderUnavailableError` subclasses for clearer typing:
-
-- `ProviderBinaryMissingError` — required CLI binary not on PATH (used by `LimaNotInstalledError`)
-- `ProviderDaemonNotRunningError` — daemon down (used by Docker)
-- `ProviderCredentialsMissingError` — credentials never set (used by Vultr)
-- `ProviderNetworkUnreachableError` — connector 5xx / transient (used by `ImbueCloudConnectorError`)
-
-`ModalAuthError` moved from `PluginMngrError` to `ProviderNotAuthorizedError` so `mngr list` surfaces it consistently with other auth failures. `ImbueCloudAuthError` now multi-inherits `ProviderNotAuthorizedError`. `ImbueCloudConnectorError` now multi-inherits `ProviderNetworkUnreachableError`.
-
-**`--on-error` semantic.** Now controls only the exit code; both modes produce identical stdout/stderr and identical `result.errors`/`result.warnings`:
-
+**`--on-error` semantic.** Controls only the exit code:
 - `abort` (default): exits 1 if `result.errors` is non-empty.
-- `continue`: exits 0 always (callers inspect `result.errors` programmatically).
-
-Warnings never affect exit code in either mode.
+- `continue`: exits 0; callers inspect `result.errors` programmatically.
 
 **CLI rendering (`mngr list`).**
+- `--format json`: top-level object is `{"agents": [...], "errors": [...]}` (no `warnings` key).
+- `--format jsonl`: agent lines plus `{"event": "error", ...}` lines; no `event: warning` lines.
+- stderr carries one red `ERROR: <provider>: <type>: <message>` line per `result.errors` entry, for every output format. `--quiet` suppresses them (loguru console handler removed).
 
-- Default human format: one-line warning summary after the data table (`WARNING: N provider(s) unavailable: <names>. Use -v for details.`); per-error red lines for `result.errors`.
-- `-v` / `-vv`: expands the summary to per-warning detail lines.
-- `--quiet`: suppresses both warning summary and per-error lines (loguru console handler removed).
-- `--format json`: top-level `warnings` array now always present alongside `errors`.
-- `--format jsonl`: warnings stream as `{"event": "warning", "type": ..., "provider_name": ..., "message": ...}` lines via `on_warning` callback.
+**Shared discovery boundary (`api/discover.py`).** `discover_hosts_and_agents` -- used by `destroy`, `exec`, `snapshot`, etc. -- no longer soft-skips an unavailable provider with a `logger.warning`. The failure is wrapped in `ProviderDiscoveryError` and propagates, so a provider that can't be reached fails loudly instead of silently dropping its machines. (`api/gc.py` is intentionally unchanged: its `MngrError` soft-skip predates this work and has an orphan-detection-safety reason.)
 
 **User-facing behavior changes.**
+- `mngr list` on a machine where a configured provider can't run (Lima `limactl` missing, Docker daemon down, Vultr key unset, Modal not authorized) now exits 1 under the default `--on-error abort`, with the failure shown as an error. Previously it exited 0 with a soft warning. To opt out: disable the provider (`mngr config set --scope user providers.<name>.is_enabled false`) or pass `--on-error continue`.
+- `mngr list --format json` output no longer contains a `warnings` array.
+- `mngr destroy` / `mngr exec` / `mngr snapshot` against an unavailable provider now fail with a typed error instead of silently skipping that provider.
 
-- `mngr list` on a machine where Lima/Docker daemon/Vultr key isn't set up no longer aborts. It exits 0, shows the data the working providers produced, and emits a one-line warning summary. Previously: exit 1, raw error message, no data shown.
-- `mngr list --on-error continue` now exits 0 even if errors were collected. Programmatic consumers should check `result.errors` (in `--format json`) rather than the exit code.
-- `mngr list --quiet` now exits 0 when only warnings are present (previously hid the warning but still exited 1 from the abort path).
-
-Modal auth failures and other "real" errors still exit 1 in `--on-error abort` mode and surface as red `ERROR: <provider>: <type>: <message>` lines on stderr.
+**Modal auth.** `ModalProviderBackend` initialization now raises `ModalAuthError` (a `ProviderNotAuthorizedError`) instead of a bare `MngrError` on `ModalProxyAuthError`, so the failure carries the proper `exception_type` and the canonical `--scope user` disable hint.

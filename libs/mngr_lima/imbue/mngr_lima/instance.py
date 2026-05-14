@@ -768,17 +768,17 @@ sudo poweroff
     ) -> list[DiscoveredHost]:
         """Discover all Lima hosts managed by this provider instance.
 
-        If limactl is not installed, returns host records from local state only
-        (all marked as offline). This allows discovery to succeed gracefully
-        in environments without Lima.
+        Raises ``ProviderUnavailableError`` when limactl is missing or a
+        limactl command fails; the discovery boundary records that on
+        ``ListResult.errors``.
         """
         prefix = self.mngr_ctx.config.prefix
 
         # _ensure_lima_available already raises ProviderBinaryMissingError
         # (a ProviderUnavailableError) when limactl is missing; wrap
         # LimaCommandError as ProviderUnavailableError so both shapes look
-        # the same to the discovery boundary, which surfaces them as
-        # WarningInfo so the listing continues with other providers.
+        # the same to the discovery boundary, which records them on
+        # ``ListResult.errors``.
         try:
             self._ensure_lima_available()
             instances = limactl_list(cg)

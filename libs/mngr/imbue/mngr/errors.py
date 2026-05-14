@@ -181,9 +181,10 @@ class ProviderUnavailableError(ProviderError):
 
     Covers "the user enabled the provider but the prerequisite isn't there":
     binary missing on PATH, daemon down, credentials never configured,
-    network unreachable, transient 5xx. The discovery boundary surfaces
-    these as ``WarningInfo`` entries on ``ListResult.warnings``; they do
-    not gate exit code or abort the listing.
+    network unreachable, transient 5xx. The discovery boundary records this
+    on ``ListResult.errors`` like any other provider failure; the
+    ``--on-error`` mode decides whether it aborts the run. The typed subclass
+    still lets programmatic consumers discriminate via ``exception_type``.
 
     For "credentials configured but rejected (401/403)", raise
     ``ProviderNotAuthorizedError`` instead.
