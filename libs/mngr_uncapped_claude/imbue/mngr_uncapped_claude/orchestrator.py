@@ -180,7 +180,9 @@ def _run_with_agent(
 
     events_target = _build_events_target(mngr_ctx, agent)
     if events_target is None:
-        logger.error("Cannot read events for agent {} (no online host or volume)", agent.name)
+        error_text = f"Cannot read events for agent {agent.name} (no online host or volume)"
+        logger.error("{}", error_text)
+        _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=error_text, turn_count=1)
         return state, EXIT_MNGR_ERROR
 
     final_state: AgentLifecycleState
