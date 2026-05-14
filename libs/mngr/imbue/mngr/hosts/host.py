@@ -988,11 +988,17 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
         If the agent's stored type is no longer registered (e.g. the plugin
         was uninstalled or the type was renamed since the agent was created),
-        we degrade to BaseAgent + base AgentTypeConfig with a logged warning
-        so commands like ``mngr destroy`` / ``mngr list`` / ``mngr cleanup``
-        can still operate on the agent. ``check_agent_type_known`` separately
-        marks the agent's lifecycle state as ``RUNNING_UNKNOWN_AGENT_TYPE``
-        so users see that something is off.
+        we degrade to the orphan-fallback class wired via
+        ``set_orphan_agent_class`` (configured by ``load_agents_from_plugins``
+        in the agents layer) plus a base ``AgentTypeConfig``, with a logged
+        warning so commands like ``mngr destroy`` / ``mngr list`` /
+        ``mngr cleanup`` can still operate on the agent. If no orphan
+        fallback has been wired (e.g. tests that skipped plugin loading),
+        the original ``UnknownAgentTypeError`` is propagated so the missing
+        setup surfaces instead of silently being swallowed.
+        ``check_agent_type_known`` separately marks the agent's lifecycle
+        state as ``RUNNING_UNKNOWN_AGENT_TYPE`` so users see that something
+        is off.
         """
         data_path = agent_dir / "data.json"
         try:
