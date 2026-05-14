@@ -31,6 +31,23 @@ class SubagentProxyMode(UpperCaseStrEnum):
     hook IS installed -- the same label-driven ``hooks/reap.py`` PROXY
     mode uses -- so terminal children spawned via the skill's protocol
     are reaped on the parent's next session start.
+
+    Typed-subagent handling: when the parent calls Task with a
+    specialized ``subagent_type`` (e.g. ``imbue-code-guardian:verify-and-fix``)
+    whose agent definition resolves to an on-disk ``.md`` under
+    ``<work_dir>/.claude/agents/``, ``~/.claude/agents/``, or
+    ``~/.claude/plugins/marketplaces/*/plugins/<plugin>/agents/``, the
+    deny reason includes a one-line pointer at that path so Claude
+    knows to prepend its body (the spawned subagent's system prompt)
+    to the prompt file before ``mngr create``. Built-in types (no
+    on-disk file) and unresolved types fall through to the uniform
+    short skill-pointer reason.
+
+    Known limitation in this mode: tool restrictions declared in an
+    agent definition's frontmatter (``tools: [Read, Grep]``, etc.) are
+    NOT honored. The spawned mngr subagent inherits the user's full
+    Claude config. The skill documents the limitation; a future
+    extension can add ``--type`` variants with restricted permissions.
     """
 
     PROXY = auto()

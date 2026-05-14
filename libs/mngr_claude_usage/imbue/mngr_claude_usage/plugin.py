@@ -1,11 +1,12 @@
-"""Claude rate-limit data writer for `mngr usage`.
+"""Claude usage data writer for `mngr usage`.
 
 Single responsibility: install a per-agent statusline shim into Claude
-agents so each render appends a rate-limit event to
-``$MNGR_AGENT_STATE_DIR/events/claude/rate_limits/events.jsonl``.
+agents so each render appends one ``cost_snapshot`` event (carrying
+rate_limits + cost + session_id) to
+``$MNGR_AGENT_STATE_DIR/events/claude/usage/events.jsonl``.
 
 Discovery is by convention -- ``mngr usage`` enumerates agents via
-``list_agents`` and reads each agent's ``events/<source>/rate_limits/
+``list_agents`` and reads each agent's ``events/<source>/usage/
 events.jsonl`` via the events API (``discover_event_sources`` +
 ``read_event_content``), the same mechanism ``mngr event`` uses. We don't
 implement a reader hookspec; we just write to the conventional path and let
@@ -32,7 +33,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude_usage import resources as _resources
 
-_RATE_LIMITS_WRITER_SCRIPT = "claude_rate_limits_writer.sh"
+_USAGE_WRITER_SCRIPT = "claude_usage_writer.sh"
 _STATUSLINE_SHIM_SCRIPT = "claude_statusline.sh"
 _USER_STATUSLINE_CMD_FILE = "user_statusline_cmd"
 
@@ -117,15 +118,15 @@ def _provision_statusline_shim(host: OnlineHostInterface, state_dir: Path, work_
     install_packaged_script_on_host(
         host,
         module=_resources,
-        filename=_RATE_LIMITS_WRITER_SCRIPT,
-        dest=commands_dir / _RATE_LIMITS_WRITER_SCRIPT,
+        filename=_USAGE_WRITER_SCRIPT,
+        dest=commands_dir / _USAGE_WRITER_SCRIPT,
     )
     _install_settings_local_statusline(host, work_dir, shim_path)
 
 
 @hookimpl
 def on_before_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
-    """Provision the rate-limit statusline shim for Claude agents on any host.
+    """Provision the usage statusline shim for Claude agents on any host.
 
     Steps:
     1. Capture the user's pre-existing ``statusLine.command`` (if any) into

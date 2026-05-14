@@ -27,7 +27,6 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
-from imbue.minds.desktop_client.agent_creator import _make_host_name
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
@@ -35,10 +34,10 @@ from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.primitives import AIProvider
-from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostName
 
 
 def test_extract_repo_name_strips_dot_git_and_trailing_slash() -> None:
@@ -71,21 +70,21 @@ def test_redact_url_credentials_in_text_strips_embedded_userinfo() -> None:
     assert _redact_url_credentials_in_text(msg) == "fatal: unable to access 'https://github.com/x/y': bad"
 
 
-def test_make_host_name_appends_host_suffix() -> None:
-    assert _make_host_name(AgentName("alpha")) == "alpha-host"
-
-
-def test_build_mngr_create_command_lifts_latchkey_env_to_env_flags() -> None:
-    """``_build_mngr_create_command`` lifts each entry of ``latchkey_env`` into a ``--env`` flag.
+def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> None:
+    """``_build_mngr_create_command`` lifts each entry of ``latchkey_env`` into a ``--host-env`` flag.
 
     The shape of the env (which keys are set, which URL is used, etc.) is decided
     upstream by ``prepare_agent_latchkey``; this command-builder just plumbs
     whatever it gets through to ``mngr create``. The plugin's
     ``agent_setup_test.py`` covers all the per-mode permutations.
+
+    ``--host-env`` (not ``--env``) is used so the wiring is written to the
+    new host's env file once and every agent that ever runs on the host
+    inherits the same gateway URL / password / JWT.
     """
     command, _ = _build_mngr_create_command(
         launch_mode=LaunchMode.LOCAL,
-        agent_name=AgentName("hello"),
+        host_name=HostName("hello"),
         latchkey_env={
             "LATCHKEY_GATEWAY": "http://127.0.0.1:1989",
             "LATCHKEY_GATEWAY_PASSWORD": "sup3rs3cret",
@@ -98,13 +97,28 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_env_flags() -> None:
     assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=eyJhbGc.fake.jwt" in command
     assert "LATCHKEY_DISABLE_COUNTING=1" in command
 
+    # Each latchkey entry must be preceded by ``--host-env`` (not ``--env``)
+    # so every agent on the host shares the same gateway wiring.
+    latchkey_keys = {
+        "LATCHKEY_GATEWAY",
+        "LATCHKEY_GATEWAY_PASSWORD",
+        "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE",
+        "LATCHKEY_DISABLE_COUNTING",
+    }
+    for index, arg in enumerate(command):
+        if any(arg.startswith(f"{key}=") for key in latchkey_keys):
+            assert index > 0
+            assert command[index - 1] == "--host-env", (
+                f"Latchkey arg {arg!r} should be passed via --host-env, got {command[index - 1]!r}"
+            )
+
 
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
-    """Empty / ``None`` ``latchkey_env`` opts the agent out of latchkey wiring entirely."""
+    """Empty / ``None`` ``latchkey_env`` opts the host out of latchkey wiring entirely."""
     for latchkey_env in (None, {}):
         command, _ = _build_mngr_create_command(
             launch_mode=LaunchMode.LOCAL,
-            agent_name=AgentName("hello"),
+            host_name=HostName("hello"),
             latchkey_env=latchkey_env,
         )
         joined = " ".join(command)
@@ -115,7 +129,7 @@ def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
 def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() -> None:
     command, api_key = _build_mngr_create_command(
         launch_mode=LaunchMode.LOCAL,
-        agent_name=AgentName("hello"),
+        host_name=HostName("hello"),
     )
     assert "--template" in command
     assert "main" in command
@@ -139,15 +153,16 @@ def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() ->
 def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> None:
     command, api_key = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
-        agent_name=AgentName("hello"),
+        host_name=HostName("hello"),
         imbue_cloud_account="alice@imbue.com",
         imbue_cloud_repo_url="https://github.com/imbue-ai/forever-claude-template",
         imbue_cloud_branch_or_tag="v1.2.3",
     )
     joined = " ".join(command)
     # Address points at the imbue_cloud_<slug> provider so mngr routes
-    # create_host to ImbueCloudProvider.
-    assert "@hello-host.imbue_cloud_alice-imbue-com" in joined
+    # create_host to ImbueCloudProvider. The agent name is now the constant
+    # ``system-services``; the user's input drives the host name.
+    assert "system-services@hello.imbue_cloud_alice-imbue-com" in joined
     # IMBUE_CLOUD does not pass --reuse / --update (each lease is one-shot)
     # nor --id (the canonical id is parsed from the JSONL ``created`` event).
     assert "--id" not in command
@@ -189,7 +204,7 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
     ):
         command, _ = _build_mngr_create_command(
             launch_mode=mode,
-            agent_name=AgentName("hello"),
+            host_name=HostName("hello"),
             imbue_cloud_account=account,
         )
         joined = " ".join(command)
@@ -432,7 +447,7 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
 
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
-        agent_name="my-agent",
+        host_name="my-workspace",
         launch_mode=LaunchMode.LOCAL,
         ai_provider=AIProvider.IMBUE_CLOUD,
         account_email="alice@imbue.com",
@@ -441,7 +456,7 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
 
     assert len(cli.create_calls) == 1
     assert cli.create_calls[0]["account"] == "alice@imbue.com"
-    assert cli.create_calls[0]["metadata"] == {"agent_name": "my-agent"}
+    assert cli.create_calls[0]["metadata"] == {"host_name": "my-workspace"}
 
 
 # Flaky under heavy CI load: this is a sync unit test but its setup spins up
@@ -457,7 +472,7 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
 
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
-        agent_name="my-agent",
+        host_name="my-workspace",
         launch_mode=LaunchMode.LOCAL,
         ai_provider=AIProvider.API_KEY,
         anthropic_api_key="sk-ant-user-supplied",
@@ -475,7 +490,7 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
 
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
-        agent_name="my-agent",
+        host_name="my-workspace",
         launch_mode=LaunchMode.LOCAL,
         ai_provider=AIProvider.SUBSCRIPTION,
     )
@@ -492,7 +507,7 @@ def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path
 
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
-        agent_name="my-agent",
+        host_name="my-workspace",
         launch_mode=LaunchMode.LOCAL,
         ai_provider=AIProvider.API_KEY,
         anthropic_api_key="",

@@ -13,10 +13,10 @@
     <form id="create-form" action="/create" method="post">
       <div class="flex gap-6 mb-4 items-start">
         <div class="basis-[200px] shrink-0 pt-2.5">
-          <label for="agent_name" class="text-sm text-zinc-900 font-medium block">Name</label>
+          <label for="host_name" class="text-sm text-zinc-900 font-medium block">Name</label>
         </div>
         <div class="flex-1">
-          {{ ui.text_input('agent_name', value=agent_name, placeholder='assistant', id='agent_name', required=true) }}
+          {{ ui.text_input('host_name', value=host_name, placeholder='assistant', id='host_name', required=true) }}
         </div>
       </div>
 

@@ -49,14 +49,16 @@ from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
-from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
-from imbue.mngr_latchkey.agent_setup import finalize_agent_permissions
+from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -336,17 +338,16 @@ def _rsync_worktree_over_clone(
         )
 
 
-def _make_host_name(agent_name: AgentName) -> str:
-    """Build the host name for an agent.
-
-    Uses ``{agent_name}-host`` so it is obvious why the host was created.
-    """
-    return f"{agent_name}-host"
+# Constant agent name for every minds-created agent. Minds runs one agent
+# per host, so the agent name carries no per-workspace information; the
+# workspace is identified by its host name. Kept as a SafeName-typed
+# constant so callers can pass it to ``mngr`` without re-validating.
+_DEFAULT_AGENT_NAME: Final[AgentName] = AgentName("system-services")
 
 
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
-    agent_name: AgentName,
+    host_name: HostName,
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
@@ -367,15 +368,17 @@ def _build_mngr_create_command(
     CLOUD mode: --template main --template vultr (runs in Docker on a Vultr VPS)
     IMBUE_CLOUD mode: --new-host on the imbue_cloud_<slug> provider (the
         plugin's create_host adopts the pool's pre-baked agent under
-        ``agent_name``); ``imbue_cloud_*`` arguments encode the lease
-        attributes (--build-arg).
+        the lease's baked name); ``imbue_cloud_*`` arguments encode the
+        lease attributes (--build-arg).
 
     Every mode creates a separate host, so the agent address uses
-    ``agent_name@{agent_name}-host`` so hosts are clearly attributable.
-    ``--reuse`` and ``--update`` are passed for the non-IMBUE_CLOUD modes
-    so re-deploying resets the agent on the same host instead of failing
-    on a duplicate name (IMBUE_CLOUD's lease flow is one-shot per pool
-    host, so reuse is not meaningful there).
+    ``system-services@<host_name>`` -- the agent name is constant across
+    every minds workspace; the host name (the user's input from the
+    create-project form) is the workspace identifier. ``--reuse`` and
+    ``--update`` are passed for the non-IMBUE_CLOUD modes so re-deploying
+    resets the agent on the same host instead of failing on a duplicate
+    name (IMBUE_CLOUD's lease flow is one-shot per pool host, so reuse
+    is not meaningful there).
 
     Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``, ``GH_TOKEN``)
     are forwarded by the FCT template's own ``pass_(host_)env`` declarations,
@@ -389,21 +392,23 @@ def _build_mngr_create_command(
     :func:`imbue.mngr_latchkey.agent_setup.prepare_agent_latchkey`. The
     caller decides whether the agent is tunneled (constant agent-side
     loopback URL) or running on the bare host (live gateway port);
-    this function just lifts the entries into ``--env`` flags. Pass
-    ``None`` or an empty dict to opt the agent out of latchkey wiring.
+    this function just lifts the entries into ``--host-env`` flags so
+    every agent that ever runs on the new host inherits the same
+    gateway wiring. Pass ``None`` or an empty dict to opt the host out
+    of latchkey wiring.
     """
     match launch_mode:
         case LaunchMode.LOCAL:
-            address = f"{agent_name}@{_make_host_name(agent_name)}.docker"
+            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.docker"
         case LaunchMode.LIMA:
-            address = f"{agent_name}@{_make_host_name(agent_name)}.lima"
+            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.lima"
         case LaunchMode.CLOUD:
-            address = f"{agent_name}@{_make_host_name(agent_name)}.vultr"
+            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.vultr"
         case LaunchMode.IMBUE_CLOUD:
             if not imbue_cloud_account:
                 raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_account")
             slug = _slugify_account(imbue_cloud_account)
-            address = f"{agent_name}@{_make_host_name(agent_name)}.imbue_cloud_{slug}"
+            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.imbue_cloud_{slug}"
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -413,11 +418,15 @@ def _build_mngr_create_command(
     # [create_templates.main] section, so we no longer pass `--message` here.
     # ``--format jsonl`` makes mngr emit ``{"event": "created", "agent_id": ..., "host_id": ...}``
     # as the final stdout line; ``run_mngr_create`` parses that to recover
-    # the canonical agent id.
-    latchkey_env_args: list[str] = []
+    # the canonical agent id (and the canonical host id, used to swing
+    # the latchkey opaque permissions handle onto its canonical path).
+    latchkey_host_env_args: list[str] = []
     if latchkey_env:
         for key, value in latchkey_env.items():
-            latchkey_env_args.extend(["--env", f"{key}={value}"])
+            # ``--host-env`` (not ``--env``) so the wiring is written to
+            # the host's env file once and every agent on the host
+            # inherits the same gateway URL / password / JWT.
+            latchkey_host_env_args.extend(["--host-env", f"{key}={value}"])
 
     mngr_command: list[str] = [
         MNGR_BINARY,
@@ -427,12 +436,20 @@ def _build_mngr_create_command(
         "--format",
         "jsonl",
         "--label",
-        f"workspace={agent_name}",
+        f"workspace={host_name}",
+        # Pin the agent's per-workspace branch to the host name. mngr's
+        # default for ``--branch`` is ``:mngr/*`` where ``*`` expands to the
+        # agent name, but our agent name is the constant ``system-services``
+        # -- without this override every workspace would share the same
+        # branch ``mngr/system-services``. ``:`` keeps the base branch as
+        # ``current`` so we just rename the *new* branch.
+        "--branch",
+        f":mngr/{host_name}",
         "--env",
         f"MINDS_API_KEY={api_key}",
         "--label",
         "user_created=true",
-        *latchkey_env_args,
+        *latchkey_host_env_args,
         "--label",
         "is_primary=true",
     ]
@@ -612,7 +629,7 @@ class _CreateEventCapture(MutableModel):
 def run_mngr_create(
     launch_mode: LaunchMode,
     workspace_dir: Path | None,
-    agent_name: AgentName,
+    host_name: HostName,
     on_output: OutputCallback | None = None,
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
@@ -623,7 +640,7 @@ def run_mngr_create(
     latchkey_env: Mapping[str, str] | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
-) -> tuple[str, AgentId]:
+) -> tuple[str, AgentId, HostId]:
     """Create an mngr agent via ``mngr create --format jsonl``.
 
     The repo's own ``.mngr/settings.toml`` defines agent types, templates,
@@ -638,16 +655,18 @@ def run_mngr_create(
     the FCT template's own ``pass_(host_)env`` declarations cause mngr to
     forward them onto the host as appropriate.
 
-    Returns ``(api_key, canonical_agent_id)``. The canonical id is parsed
-    out of the ``"event": "created"`` JSONL line that ``mngr create``
-    emits as its final stdout record.
+    Returns ``(api_key, canonical_agent_id, canonical_host_id)``. Both
+    canonical ids are parsed out of the ``"event": "created"`` JSONL
+    line that ``mngr create`` emits as its final stdout record; the host
+    id is what minds keys per-host latchkey state (permissions, opaque
+    handle symlink target) by.
 
     Raises ``MngrCommandError`` if the command fails or never emits a
     ``created`` event (e.g. crashed before final-output stage).
     """
     mngr_command, api_key = _build_mngr_create_command(
         launch_mode,
-        agent_name,
+        host_name,
         imbue_cloud_account=imbue_cloud_account,
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
@@ -690,7 +709,7 @@ def run_mngr_create(
             )
         )
 
-    if capture.canonical_agent_id is None:
+    if capture.canonical_agent_id is None or capture.canonical_host_id is None:
         # Exit-zero without a created event almost certainly means the
         # JSONL output got mangled or some pre-emit error path took over.
         # Fail loudly rather than fall through with a sentinel id.
@@ -700,7 +719,12 @@ def run_mngr_create(
             )
         )
 
-    return api_key, capture.canonical_agent_id
+    try:
+        canonical_host_id = HostId(capture.canonical_host_id)
+    except ValueError as e:
+        raise MngrCommandError(f"mngr create emitted an invalid host_id {capture.canonical_host_id!r}: {e}") from e
+
+    return api_key, capture.canonical_agent_id, canonical_host_id
 
 
 class AgentCreator(MutableModel):
@@ -818,7 +842,7 @@ class AgentCreator(MutableModel):
     def start_creation(
         self,
         repo_source: str,
-        agent_name: str = "",
+        host_name: str = "",
         branch: str = "",
         launch_mode: LaunchMode = LaunchMode.LOCAL,
         ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
@@ -867,7 +891,13 @@ class AgentCreator(MutableModel):
         ``RandomId`` prefixes) so they can never accidentally be swapped.
         """
         log_queue: queue.Queue[str] = queue.Queue()
-        effective_name = agent_name.strip() if agent_name.strip() else extract_repo_name(repo_source)
+        # ``host_name`` falls back to a repo-derived name when blank so the
+        # API path (``/api/create-agent``) doesn't need to compute it itself.
+        # The form path already requires the field. ``HostName(...)`` is
+        # invoked downstream in ``_create_agent_background`` so any invalid
+        # input fails inside the background thread with an error_message
+        # rather than crashing this synchronous entry point.
+        effective_name = host_name.strip() if host_name.strip() else extract_repo_name(repo_source)
         effective_branch = branch.strip()
 
         creation_id = CreationId()
@@ -938,7 +968,7 @@ class AgentCreator(MutableModel):
         self,
         creation_id: CreationId,
         repo_source: str,
-        agent_name: str,
+        host_name: str,
         branch: str,
         log_queue: queue.Queue[str],
         launch_mode: LaunchMode,
@@ -1067,7 +1097,7 @@ class AgentCreator(MutableModel):
                                 alias=None,
                                 max_budget=100.0,
                                 budget_duration="1d",
-                                metadata={"agent_name": agent_name},
+                                metadata={"host_name": host_name},
                             )
                         except ImbueCloudCliError as exc:
                             raise MngrCommandError(f"Failed to create LiteLLM key: {exc}") from exc
@@ -1087,13 +1117,13 @@ class AgentCreator(MutableModel):
                     self._statuses[cid_str] = AgentCreationStatus.CREATING
 
                 # Pre-create the shared latchkey gateway password and a
-                # per-agent permissions-override JWT before invoking
+                # per-host permissions-override JWT before invoking
                 # ``mngr create``. The JWT references an *opaque*
                 # UUID-named permissions handle that we materialize
                 # here with a deny-all baseline; after ``mngr create``
-                # returns the canonical agent id, ``finalize_agent_permissions``
+                # returns the canonical host id, ``finalize_host_permissions``
                 # replaces that handle with a symlink to the canonical
-                # ``permissions_path_for_agent`` location. This avoids
+                # ``permissions_path_for_host`` location. This avoids
                 # the post-create ``mngr provision --env`` step (which
                 # was fragile and could silently leave
                 # ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` missing in
@@ -1112,12 +1142,12 @@ class AgentCreator(MutableModel):
                 # re-creating the agent.
                 latchkey_setup = self._prepare_latchkey_or_warn(log_queue)
 
-                parsed_name = AgentName(agent_name)
-                log_queue.put("[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value))
-                api_key, canonical_id = run_mngr_create(
+                parsed_host = HostName(host_name)
+                log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
+                api_key, canonical_id, canonical_host_id = run_mngr_create(
                     launch_mode=launch_mode,
                     workspace_dir=workspace_dir,
-                    agent_name=parsed_name,
+                    host_name=parsed_host,
                     on_output=emit_log,
                     latchkey_env=latchkey_setup.env,
                     imbue_cloud_account=account_email if launch_mode is LaunchMode.IMBUE_CLOUD else None,
@@ -1146,12 +1176,15 @@ class AgentCreator(MutableModel):
                 save_api_key_hash(self.paths.data_dir, canonical_id, key_hash)
                 log_queue.put("[minds] API key generated and hash stored.")
 
-                # Now that we know the canonical agent id, point the
+                # Now that we know the canonical host id, point the
                 # opaque permissions handle (which the JWT references)
-                # at the canonical agent-keyed permissions file. After
+                # at the canonical host-keyed permissions file. After
                 # this, ``LatchkeyPermissionGrantHandler`` can write to
                 # the canonical path and the gateway will see the
-                # changes via the symlink.
+                # changes via the symlink. Keying by host (not agent)
+                # matches the ``--host-env`` injection above: every
+                # agent on the host shares the same gateway wiring and
+                # the same permissions file.
                 #
                 # We downgrade ``LatchkeyStoreError`` here to a warning
                 # rather than failing agent creation: the gateway still
@@ -1162,20 +1195,20 @@ class AgentCreator(MutableModel):
                 # agent.
                 if self.latchkey is not None:
                     try:
-                        finalize_agent_permissions(
+                        finalize_host_permissions(
                             self.latchkey,
                             latchkey_setup.opaque_permissions_path,
-                            canonical_id,
+                            canonical_host_id,
                         )
                     except LatchkeyStoreError as link_error:
                         logger.warning(
-                            "Failed to link latchkey permissions handle for agent {}: {}",
-                            canonical_id,
+                            "Failed to link latchkey permissions handle for host {}: {}",
+                            canonical_host_id,
                             link_error,
                         )
                         log_queue.put(
                             "[minds] Warning: could not link latchkey permissions handle to "
-                            f"canonical path for agent {canonical_id}; permission grants will not "
+                            f"canonical path for host {canonical_host_id}; permission grants will not "
                             f"take effect until the agent is re-created. Reason: {link_error}"
                         )
 
