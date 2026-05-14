@@ -558,7 +558,10 @@ async def run() -> list[StepResult]:
         try:
             proc.terminate()
             proc.wait(timeout=5)
-        except _TRANSIENT:
+        except (subprocess.TimeoutExpired, *_TRANSIENT):
+            # subprocess.TimeoutExpired is NOT a _TRANSIENT type, so it must be
+            # named explicitly -- otherwise a slow-to-exit Electron escapes the
+            # finally block and proc.kill() / teardown() never run.
             with contextlib.suppress(Exception):
                 proc.kill()
         teardown()
