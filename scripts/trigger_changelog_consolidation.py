@@ -10,7 +10,6 @@ source of truth for that list and for the trigger / namespace identifiers.
 
 import argparse
 import importlib.metadata
-import sys
 from typing import Final
 
 TRIGGER_NAME: Final[str] = "changelog-consolidation"
@@ -38,7 +37,7 @@ def disable_plugin_args() -> list[str]:
     return args
 
 
-def main() -> int:
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--print-disable-plugin-args",
@@ -49,10 +48,10 @@ def main() -> int:
     args = parser.parse_args()
     if args.print_disable_plugin_args:
         print(" ".join(disable_plugin_args()))
-        return 0
+        return
+    # parser.error() prints usage to stderr and calls sys.exit(2); it does not return.
     parser.error("no action specified; pass --print-disable-plugin-args")
-    return 2
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
