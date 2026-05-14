@@ -5,3 +5,5 @@ A concise, human-friendly summary of changes. Entries are categorized using the 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
 ## [Unreleased]
+
+## [v0.2.8] - 2026-05-13
