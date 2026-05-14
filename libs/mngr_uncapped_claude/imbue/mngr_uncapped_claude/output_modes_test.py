@@ -86,7 +86,7 @@ def test_text_writer_concatenates_assistant_turns() -> None:
     writer = StreamingOutputWriter(output_format=OutputFormat.TEXT, session_id="session-1", stdout=stdout)
     writer.emit_events([_assistant_event("hello"), _user_event("ignored"), _assistant_event("world")])
     writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None))
-    assert stdout.getvalue() == "hello\nworld\n"
+    assert stdout.getvalue() == "helloworld\n"
 
 
 def test_text_writer_dedupes_events_by_id() -> None:

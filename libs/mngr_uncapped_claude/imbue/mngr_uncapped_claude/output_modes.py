@@ -266,7 +266,7 @@ class StreamingOutputWriter(MutableModel):
                 assert_never(unreachable)
 
     def _finalize_text(self) -> None:
-        body = "\n".join(self.assistant_text_parts)
+        body = "".join(self.assistant_text_parts)
         if body:
             self.stdout.write(body + "\n")
         self.stdout.flush()
@@ -281,7 +281,7 @@ class StreamingOutputWriter(MutableModel):
     def _write_result_envelope(self, meta: ResultMeta) -> None:
         """Build and emit the trailing ``result`` envelope on a single line."""
         envelope = build_result_envelope(
-            text="\n".join(self.assistant_text_parts),
+            text="".join(self.assistant_text_parts),
             meta=meta,
             turn_count=max(self.assistant_turn_count, 1),
         )
