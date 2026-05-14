@@ -27,13 +27,12 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.errors import ProcessSetupError
-from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
+from imbue.mngr.agents.common_transcript import provision_common_transcript_scripts
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.providers import get_provider_instance
@@ -47,6 +46,7 @@ from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import RelativePath
 from imbue.mngr.interfaces.data_types import VolumeFileType
@@ -1059,48 +1059,47 @@ def _load_claude_resource_script(filename: str) -> str:
     return script_path.read_text()
 
 
-def _provision_background_scripts(
-    host: OnlineHostInterface, agent_state_dir: Path, concurrency_group: ConcurrencyGroup
-) -> None:
-    """Write the background task scripts to $MNGR_AGENT_STATE_DIR/commands/.
+# Scripts that produce the common transcript (returned by
+# ClaudeAgent.get_common_transcript_scripts). stream_transcript.sh tails Claude's
+# native session JSONL files into logs/claude_transcript/events.jsonl, which
+# common_transcript.sh then converts to the agent-agnostic schema. The wrapper
+# claude_background_tasks.sh launches both (plus activity tracking) and is what
+# assemble_command actually backgrounds.
+_CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAMES: Final[tuple[str, ...]] = (
+    "stream_transcript.sh",
+    "common_transcript.sh",
+    "claude_background_tasks.sh",
+)
 
-    Provisions stream_transcript.sh, claude_background_tasks.sh,
-    common_transcript.sh, wait_for_stop_hook.sh, and sync_keychain_credentials.py
-    so they can be launched by the agent's assemble_command or hooks at runtime.
+# Claude-specific helper scripts that are not part of the transcript pipeline.
+_CLAUDE_OTHER_BACKGROUND_SCRIPT_NAMES: Final[tuple[str, ...]] = (
+    "wait_for_stop_hook.sh",
+    "sync_keychain_credentials.py",
+)
+
+
+def _provision_claude_background_scripts(
+    transcript_scripts: Mapping[str, str],
+    host: OnlineHostInterface,
+    agent_state_dir: Path,
+    concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Write Claude's background task scripts to $MNGR_AGENT_STATE_DIR/commands/.
+
+    Provisions the common-transcript scripts plus the Claude-specific helpers
+    (wait_for_stop_hook.sh, sync_keychain_credentials.py).
 
     Note: mngr_log.sh (shared logging library) is provisioned by
     Host.provision_agent() to both host-level and agent-level commands
     directories, so we do not write it here.
     """
-    commands_dir = agent_state_dir / "commands"
-    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(commands_dir))}", timeout_seconds=5.0)
-
-    # Claude-specific scripts from this plugin's resources
-    threads: list[ObservableThread] = []
-    for script_name in (
-        "stream_transcript.sh",
-        "claude_background_tasks.sh",
-        "common_transcript.sh",
-        "wait_for_stop_hook.sh",
-        "sync_keychain_credentials.py",
-    ):
-        script_content = _load_claude_resource_script(script_name)
-        script_path = commands_dir / script_name
-        with log_span("Writing {} to agent state dir", script_name):
-            try:
-                thread = concurrency_group.start_new_thread(
-                    host.write_file, (script_path, script_content.encode(), "0755")
-                )
-            except InvalidConcurrencyGroupStateError:
-                # The parent group is shutting down (e.g., another provisioning step
-                # failed). Stop spawning threads and let the real error propagate.
-                logger.debug("Concurrency group shutting down; aborting background script provisioning")
-                return
-            threads.append(thread)
-
-    # make sure everything actually uploaded
-    for thread in threads:
-        thread.join(60.0)
+    other_scripts = {name: _load_claude_resource_script(name) for name in _CLAUDE_OTHER_BACKGROUND_SCRIPT_NAMES}
+    provision_common_transcript_scripts(
+        host,
+        agent_state_dir,
+        {**transcript_scripts, **other_scripts},
+        concurrency_group,
+    )
 
 
 def _has_api_credentials_available(
@@ -1331,7 +1330,7 @@ class CostThresholdDialogIndicator(DialogIndicator):
         return self._MATCH_SPENDING_TEXT in content and self._MATCH_DOCS_URL in content
 
 
-class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
+class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMixin):
     """Agent implementation for Claude with session resumption support."""
 
     TUI_READY_INDICATOR = "Claude Code"
@@ -1341,6 +1340,15 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
     # UserPromptSubmit hook misfires. The bash command in tui_utils evaluates
     # the embedded $MNGR_AGENT_STATE_DIR on the host. Claude-specific.
     _QUEUE_LOG_PATH_TEMPLATE: ClassVar[str] = "$MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"
+
+    def get_common_transcript_scripts(self) -> Mapping[str, str]:
+        """Return the scripts that produce Claude's common transcript.
+
+        Includes the orchestrator (claude_background_tasks.sh) because it is
+        the entry point that the per-agent assemble_command backgrounds; it
+        in turn launches stream_transcript.sh and common_transcript.sh.
+        """
+        return {name: _load_claude_resource_script(name) for name in _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAMES}
 
     def _send_enter_and_validate(self, tmux_target: str) -> None:
         # Claude wires a UserPromptSubmit hook that fires `tmux wait-for -S`
@@ -1912,7 +1920,8 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
 
             # Provision background task scripts to the agent state directory
             provision_backgroun_script_thread = concurrency_group.start_new_thread(
-                _provision_background_scripts, (host, self._get_agent_dir(), concurrency_group)
+                _provision_claude_background_scripts,
+                (self.get_common_transcript_scripts(), host, self._get_agent_dir(), concurrency_group),
             )
 
             if host.is_local:

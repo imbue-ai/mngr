@@ -2,6 +2,7 @@ import importlib.metadata
 import os
 import subprocess
 import sys
+import textwrap
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -102,6 +103,26 @@ def cg() -> Generator[ConcurrencyGroup, None, None]:
     """Provide a ConcurrencyGroup for tests that need to run processes."""
     with ConcurrencyGroup(name="test") as group:
         yield group
+
+
+@pytest.fixture
+def stub_mngr_log_sh() -> str:
+    """A no-op mngr_log.sh stub for testing shell scripts that source it.
+
+    Background scripts in mngr_claude/resources and mngr_gemini/resources
+    source $MNGR_AGENT_STATE_DIR/commands/mngr_log.sh for logging helpers.
+    In production the file is provisioned by Host.provision_agent(); tests
+    write this stub to the same path so the script under test can source it
+    without doing real I/O.
+    """
+    return textwrap.dedent("""\
+        #!/bin/bash
+        mngr_timestamp() { date -u +"%Y-%m-%dT%H:%M:%S.000000000Z"; }
+        log_info() { :; }
+        log_debug() { :; }
+        log_warn() { :; }
+        log_error() { :; }
+    """)
 
 
 @pytest.fixture

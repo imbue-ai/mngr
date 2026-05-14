@@ -458,6 +458,35 @@ class NoPermissionsAgentMixin:
     """
 
 
+class HasCommonTranscriptMixin(ABC):
+    """Mixin for agent types that emit a common, agent-agnostic transcript.
+
+    Subclasses promise to produce a JSONL transcript at
+    ``$MNGR_AGENT_STATE_DIR/events/<agent_type>/common_transcript/events.jsonl``
+    using the shared event envelope (``timestamp``, ``type``, ``event_id``,
+    ``source``) and one of three message types: ``user_message``,
+    ``assistant_message``, ``tool_result``. ``mngr transcript`` discovers
+    any such file regardless of agent type, so any agent that satisfies
+    this contract gets ``mngr transcript`` support for free.
+
+    Subclasses implement ``get_common_transcript_scripts`` to return the
+    per-agent converter scripts that watch the agent's native transcript
+    files and write to the common path. They are responsible for launching
+    those scripts as part of ``assemble_command`` (typically as a
+    backgrounded child of the tmux session).
+    """
+
+    @abstractmethod
+    def get_common_transcript_scripts(self) -> Mapping[str, str]:
+        """Return ``{script_name: contents}`` for the transcript converter scripts.
+
+        These are written to ``$MNGR_AGENT_STATE_DIR/commands/`` at mode
+        ``0755`` during provisioning by
+        :func:`imbue.mngr.agents.common_transcript.provision_common_transcript_scripts`.
+        """
+        ...
+
+
 class HeadlessAgentMixin(ABC):
     """Mixin for agent types that run headlessly (no TUI, no interactive input).
 

@@ -1,15 +1,32 @@
 from __future__ import annotations
 
+import importlib.resources
+from collections.abc import Mapping
 from typing import ClassVar
 
 from pydantic import Field
 
 from imbue.mngr import hookimpl
+from imbue.mngr.agents.common_transcript import provision_common_transcript_scripts
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_and_poll_for_cleared_indicator
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
+from imbue.mngr_gemini import resources as _gemini_resources
+
+_COMMON_TRANSCRIPT_SCRIPT_NAME = "common_transcript.sh"
+
+
+def _load_gemini_resource_script(filename: str) -> str:
+    """Load a resource script from the mngr_gemini resources package."""
+    resource_files = importlib.resources.files(_gemini_resources)
+    script_path = resource_files.joinpath(filename)
+    return script_path.read_text()
 
 
 class GeminiAgentConfig(AgentTypeConfig):
@@ -29,9 +46,17 @@ class GeminiAgentConfig(AgentTypeConfig):
         default=("--skip-trust",),
         description="Additional CLI arguments to pass to the gemini agent",
     )
+    emit_common_transcript: bool = Field(
+        default=True,
+        description="Emit a common, agent-agnostic transcript at "
+        "events/gemini/common_transcript/events.jsonl. When enabled, a background "
+        "process polls gemini's session JSONL files and converts user, assistant, "
+        "tool-call, and tool-result events into the common schema that "
+        "`mngr transcript` reads.",
+    )
 
 
-class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig]):
+class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMixin):
     """Agent implementation for Google's Gemini CLI."""
 
     # Stable banner string in gemini's header that persists for the lifetime
@@ -60,6 +85,45 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig]):
             tmux_target,
             cleared_indicator=self.INPUT_CLEARED_INDICATOR,
         )
+
+    def get_common_transcript_scripts(self) -> Mapping[str, str]:
+        """Return the gemini transcript converter script."""
+        return {_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_gemini_resource_script(_COMMON_TRANSCRIPT_SCRIPT_NAME)}
+
+    def provision(
+        self,
+        host: OnlineHostInterface,
+        options: CreateAgentOptions,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Provision the gemini transcript converter to commands/."""
+        if not self.agent_config.emit_common_transcript:
+            return
+        with mngr_ctx.concurrency_group.make_concurrency_group("gemini_provisioning") as concurrency_group:
+            provision_common_transcript_scripts(
+                host,
+                self._get_agent_dir(),
+                self.get_common_transcript_scripts(),
+                concurrency_group,
+            )
+
+    def assemble_command(
+        self,
+        host: OnlineHostInterface,
+        agent_args: tuple[str, ...],
+        command_override: CommandString | None,
+        initial_message: str | None = None,
+    ) -> CommandString:
+        """Assemble the gemini command, prefixing the transcript watcher if enabled.
+
+        The watcher runs as a backgrounded child of the tmux command shell;
+        when the tmux session terminates the child dies via SIGHUP propagation.
+        """
+        base_command = super().assemble_command(host, agent_args, command_override, initial_message)
+        if not self.agent_config.emit_common_transcript:
+            return base_command
+        background_cmd = f"( bash $MNGR_AGENT_STATE_DIR/commands/{_COMMON_TRANSCRIPT_SCRIPT_NAME} ) &"
+        return CommandString(f"{background_cmd} {base_command}")
 
 
 @hookimpl

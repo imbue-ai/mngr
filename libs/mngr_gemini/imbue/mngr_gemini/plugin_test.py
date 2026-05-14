@@ -26,6 +26,7 @@ def test_gemini_agent_config_has_correct_defaults() -> None:
     assert config.cli_args == ("--skip-trust",)
     assert config.permissions == []
     assert config.parent_type is None
+    assert config.emit_common_transcript is True
 
 
 def test_gemini_agent_config_merge_with_concatenates_skip_trust_and_user_args() -> None:
@@ -89,9 +90,38 @@ def gemini_agent(
 
 def test_assemble_command_includes_skip_trust_from_default_cli_args(gemini_agent: GeminiAgent) -> None:
     command = gemini_agent.assemble_command(gemini_agent.host, (), command_override=None)
-    assert str(command).split() == ["gemini", "--skip-trust"]
+    assert str(command).endswith("gemini --skip-trust")
 
 
 def test_assemble_command_appends_user_agent_args_after_cli_args(gemini_agent: GeminiAgent) -> None:
     command = gemini_agent.assemble_command(gemini_agent.host, ("--debug",), command_override=None)
-    assert str(command).split() == ["gemini", "--skip-trust", "--debug"]
+    assert str(command).endswith("gemini --skip-trust --debug")
+
+
+def test_assemble_command_prepends_transcript_watcher_when_enabled(gemini_agent: GeminiAgent) -> None:
+    command = str(gemini_agent.assemble_command(gemini_agent.host, (), command_override=None))
+    assert "$MNGR_AGENT_STATE_DIR/commands/common_transcript.sh" in command
+    assert command.startswith("(")
+
+
+def test_assemble_command_skips_transcript_watcher_when_disabled(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    agent = GeminiAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-gemini"),
+        agent_type=AgentTypeName("gemini"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=local_provider.mngr_ctx,
+        agent_config=GeminiAgentConfig(emit_common_transcript=False),
+        host=host,
+    )
+    command = str(agent.assemble_command(agent.host, (), command_override=None))
+    assert "common_transcript.sh" not in command
+    assert command == "gemini --skip-trust"
