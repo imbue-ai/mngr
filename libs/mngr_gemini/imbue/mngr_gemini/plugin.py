@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.resources
+import json
+from typing import Any
 from typing import ClassVar
 from typing import Mapping
 
+from loguru import logger
 from pydantic import Field
 
 from imbue.mngr import hookimpl
@@ -18,8 +21,19 @@ from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
 from imbue.mngr_gemini import resources as _gemini_resources
+from imbue.mngr_gemini.gemini_config import build_readiness_hooks_config
+from imbue.mngr_gemini.gemini_config import merge_hooks_config
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME = "common_transcript.sh"
+
+# Set in the agent's environment so Gemini treats ``work_dir`` as persistently
+# trusted for the session. Smoke-testing against Gemini CLI 0.42.0 showed that
+# without this (or an entry in ``~/.gemini/trustedFolders.json``), workspace
+# ``.gemini/settings.json`` hooks are silently stripped: ``Hook registry
+# initialized with 0 hook entries``. The previous ``--skip-trust`` CLI flag
+# only trusted tool execution, not hook registration.
+# See https://geminicli.com/docs/cli/trusted-folders/#headless-and-automated-environments.
+_TRUST_WORKSPACE_ENV_VAR = "GEMINI_CLI_TRUST_WORKSPACE"
 
 
 def _load_gemini_resource_script(filename: str) -> str:
@@ -36,15 +50,14 @@ class GeminiAgentConfig(AgentTypeConfig):
         default=CommandString("gemini"),
         description="Command to run gemini agent",
     )
-    # `--skip-trust` bypasses gemini's first-run "Do you trust this folder?"
-    # dialog by trusting the workspace for this session only. Without it the
-    # agent reaches the TUI but cannot accept input until a human picks an
-    # option. Placed in the default cli_args (rather than hardcoded into
-    # assemble_command) so a user-defined parent_type can append additional
-    # flags via the normal merge_with concatenation.
     cli_args: tuple[str, ...] = Field(
-        default=("--skip-trust",),
-        description="Additional CLI arguments to pass to the gemini agent",
+        default=(),
+        description="Additional CLI arguments to pass to the gemini agent. "
+        "The previous default of ('--skip-trust',) was dropped: that flag only "
+        "trusts the workspace for tool execution, not hook registration, so "
+        "the readiness hook installed by provision() would never fire. Trust "
+        "is now established via GEMINI_CLI_TRUST_WORKSPACE=true on the agent's "
+        "environment (see modify_env_vars).",
     )
     emit_common_transcript: bool = Field(
         default=True,
@@ -90,18 +103,36 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         """Return the gemini transcript converter script."""
         return {_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_gemini_resource_script(_COMMON_TRANSCRIPT_SCRIPT_NAME)}
 
+    def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
+        """Mark ``work_dir`` as trusted for this session so workspace hooks fire.
+
+        Without this env var, Gemini CLI treats workspace ``.gemini/settings.json``
+        as untrusted in headless mode: settings load successfully but every hook
+        defined in them is dropped from the registry, so the readiness sentinel
+        installed by ``provision`` never appears.
+        """
+        env_vars[_TRUST_WORKSPACE_ENV_VAR] = "true"
+
     def provision(
         self,
         host: OnlineHostInterface,
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Provision the gemini transcript converter to commands/.
+        """Install workspace settings (readiness hook) and the transcript watcher.
 
-        When ``agent_config.emit_common_transcript`` is ``False`` this is a
-        no-op: no script is written and ``assemble_command`` will not prepend
-        the watcher.
+        Two steps:
+          1. Install/refresh the readiness hook in ``<work_dir>/.gemini/settings.json``.
+             ``mngr`` reads ``$MNGR_AGENT_STATE_DIR/session_started`` to detect
+             that the agent's TUI is ready, rather than polling for a banner.
+          2. If ``agent_config.emit_common_transcript`` is True, install the
+             common-transcript watcher script.
+
+        The hook install is unconditional: the readiness sentinel costs nothing
+        when nobody polls for it, and skipping it would only cause ``mngr`` to
+        fall back to TUI-banner polling.
         """
+        self._install_workspace_hooks(host)
         if not self.agent_config.emit_common_transcript:
             return
         with mngr_ctx.concurrency_group.make_concurrency_group("gemini_provisioning") as concurrency_group:
@@ -111,6 +142,42 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
                 self.get_common_transcript_scripts(),
                 concurrency_group,
             )
+
+    def _install_workspace_hooks(self, host: OnlineHostInterface) -> None:
+        """Merge the readiness hook into ``<work_dir>/.gemini/settings.json``.
+
+        Existing user-managed entries (other hook events, mcpServers, approval
+        mode, etc.) are preserved by ``merge_hooks_config``: only new matcher
+        groups are appended, and re-running this method is a no-op once the
+        readiness hook is present. If the file does not yet exist, it is
+        created with just the readiness ``hooks`` block.
+        """
+        settings_path = self.work_dir / ".gemini" / "settings.json"
+
+        existing_settings: dict[str, Any] = {}
+        try:
+            existing_text = host.read_text_file(settings_path)
+        except FileNotFoundError:
+            existing_text = ""
+        if existing_text.strip():
+            try:
+                parsed = json.loads(existing_text)
+            except json.JSONDecodeError as exc:
+                # Matches read_gemini_settings: a user typo must not break agent
+                # provisioning. The merged-write below will replace the corrupt
+                # file; the user can recover from the .bak via shutil.copy2-style
+                # backups left by their editor if needed.
+                logger.warning("Existing {} is malformed ({}); replacing", settings_path, exc)
+                parsed = {}
+            if isinstance(parsed, dict):
+                existing_settings = parsed
+
+        merged = merge_hooks_config(existing_settings, build_readiness_hooks_config())
+        if merged is None:
+            logger.debug("Readiness hook already configured in {}", settings_path)
+            return
+
+        host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
 
     def assemble_command(
         self,

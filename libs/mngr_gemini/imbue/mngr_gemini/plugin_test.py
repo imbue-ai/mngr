@@ -1,8 +1,10 @@
 """Unit tests for GeminiAgentConfig and GeminiAgent."""
 
+import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -14,6 +16,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr_gemini.gemini_config import HOOK_EVENT_SESSION_START
 from imbue.mngr_gemini.plugin import GeminiAgent
 from imbue.mngr_gemini.plugin import GeminiAgentConfig
 from imbue.mngr_gemini.plugin import register_agent_type
@@ -24,21 +27,21 @@ def test_gemini_agent_config_has_correct_defaults() -> None:
     config = GeminiAgentConfig()
 
     assert str(config.command) == "gemini"
-    assert config.cli_args == ("--skip-trust",)
+    assert config.cli_args == ()
     assert config.permissions == []
     assert config.parent_type is None
     assert config.emit_common_transcript is True
 
 
-def test_gemini_agent_config_merge_with_concatenates_skip_trust_and_user_args() -> None:
-    """User-supplied cli_args concatenate after the default --skip-trust."""
+def test_gemini_agent_config_merge_with_concatenates_user_args() -> None:
+    """User-supplied cli_args concatenate onto the (empty) default."""
     base = GeminiAgentConfig()
     override = GeminiAgentConfig(cli_args=("--verbose",))
 
     merged = base.merge_with(override)
 
     assert isinstance(merged, GeminiAgentConfig)
-    assert merged.cli_args == ("--skip-trust", "--verbose")
+    assert merged.cli_args == ("--verbose",)
     assert str(merged.command) == "gemini"
 
 
@@ -105,14 +108,16 @@ def gemini_agent_without_transcript(
     return _make_gemini_agent(local_provider, tmp_path, GeminiAgentConfig(emit_common_transcript=False))
 
 
-def test_assemble_command_includes_skip_trust_from_default_cli_args(gemini_agent: GeminiAgent) -> None:
+def test_assemble_command_uses_bare_gemini_command_with_no_default_cli_args(
+    gemini_agent: GeminiAgent,
+) -> None:
     command = gemini_agent.assemble_command(gemini_agent.host, (), command_override=None)
-    assert str(command).endswith("gemini --skip-trust")
+    assert str(command).endswith("gemini")
 
 
 def test_assemble_command_appends_user_agent_args_after_cli_args(gemini_agent: GeminiAgent) -> None:
     command = gemini_agent.assemble_command(gemini_agent.host, ("--debug",), command_override=None)
-    assert str(command).endswith("gemini --skip-trust --debug")
+    assert str(command).endswith("gemini --debug")
 
 
 def test_assemble_command_prepends_transcript_watcher_when_enabled(gemini_agent: GeminiAgent) -> None:
@@ -127,7 +132,7 @@ def test_assemble_command_skips_transcript_watcher_when_disabled(
     agent = gemini_agent_without_transcript
     command = str(agent.assemble_command(agent.host, (), command_override=None))
     assert "common_transcript.sh" not in command
-    assert command == "gemini --skip-trust"
+    assert command == "gemini"
 
 
 def test_get_expected_process_name_returns_node(gemini_agent: GeminiAgent) -> None:
@@ -170,5 +175,107 @@ def test_provision_with_emit_enabled_writes_transcript_script(gemini_agent: Gemi
     expected_script = gemini_agent._get_agent_dir() / "commands" / "common_transcript.sh"
     assert expected_script.exists()
     assert expected_script.read_text().startswith("#!/usr/bin/env bash")
-    # Verify the script was written with execute permissions
+    # Execute permissions are required for the watcher script to run.
     assert expected_script.stat().st_mode & 0o111
+
+
+def test_modify_env_vars_sets_trust_workspace_true(gemini_agent: GeminiAgent) -> None:
+    """The agent's env must mark the workspace as trusted so hooks fire."""
+    env_vars: dict[str, str] = {}
+    gemini_agent.modify_env_vars(gemini_agent.host, env_vars)
+    assert env_vars["GEMINI_CLI_TRUST_WORKSPACE"] == "true"
+
+
+def test_modify_env_vars_preserves_other_vars(gemini_agent: GeminiAgent) -> None:
+    env_vars = {"PRE_EXISTING": "kept"}
+    gemini_agent.modify_env_vars(gemini_agent.host, env_vars)
+    assert env_vars["PRE_EXISTING"] == "kept"
+    assert env_vars["GEMINI_CLI_TRUST_WORKSPACE"] == "true"
+
+
+def _read_workspace_settings(agent: GeminiAgent) -> dict[str, Any]:
+    parsed: Any = json.loads((agent.work_dir / ".gemini" / "settings.json").read_text())
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+def test_provision_creates_workspace_settings_with_readiness_hook(
+    gemini_agent: GeminiAgent,
+) -> None:
+    """A fresh workspace gets a new .gemini/settings.json containing SessionStart."""
+    gemini_agent.provision(
+        host=gemini_agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
+        mngr_ctx=gemini_agent.mngr_ctx,
+    )
+    settings = _read_workspace_settings(gemini_agent)
+    assert HOOK_EVENT_SESSION_START in settings["hooks"]
+    inner_command = settings["hooks"][HOOK_EVENT_SESSION_START][0]["hooks"][0]["command"]
+    assert "session_started" in inner_command
+    assert "MNGR_AGENT_STATE_DIR" in inner_command
+
+
+def test_provision_merges_into_existing_workspace_settings_without_clobbering(
+    gemini_agent: GeminiAgent,
+) -> None:
+    """An existing settings.json keeps its user-managed keys after provision."""
+    settings_dir = gemini_agent.work_dir / ".gemini"
+    settings_dir.mkdir()
+    pre_existing: dict[str, Any] = {
+        "mcpServers": {"fs": {"command": "mcp-fs"}},
+        "hooks": {"AfterTool": [{"hooks": [{"type": "command", "command": "echo keep"}]}]},
+    }
+    (settings_dir / "settings.json").write_text(json.dumps(pre_existing))
+
+    gemini_agent.provision(
+        host=gemini_agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
+        mngr_ctx=gemini_agent.mngr_ctx,
+    )
+
+    settings = _read_workspace_settings(gemini_agent)
+    assert settings["mcpServers"] == {"fs": {"command": "mcp-fs"}}
+    assert settings["hooks"]["AfterTool"] == pre_existing["hooks"]["AfterTool"]
+    assert HOOK_EVENT_SESSION_START in settings["hooks"]
+
+
+def test_provision_is_idempotent_for_workspace_hooks(gemini_agent: GeminiAgent) -> None:
+    """Running provision twice doesn't duplicate the readiness hook entry."""
+    options = CreateAgentOptions(agent_type=AgentTypeName("gemini"))
+    gemini_agent.provision(host=gemini_agent.host, options=options, mngr_ctx=gemini_agent.mngr_ctx)
+    first = _read_workspace_settings(gemini_agent)
+    gemini_agent.provision(host=gemini_agent.host, options=options, mngr_ctx=gemini_agent.mngr_ctx)
+    second = _read_workspace_settings(gemini_agent)
+    assert first == second
+    assert len(second["hooks"][HOOK_EVENT_SESSION_START]) == 1
+
+
+def test_provision_recovers_from_malformed_existing_settings(gemini_agent: GeminiAgent) -> None:
+    """A user typo in settings.json must not break provisioning -- replace and continue."""
+    settings_dir = gemini_agent.work_dir / ".gemini"
+    settings_dir.mkdir()
+    # The text below is intentionally truncated (missing closing braces).
+    (settings_dir / "settings.json").write_text('{"mcpServers": {"fs":')
+
+    gemini_agent.provision(
+        host=gemini_agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
+        mngr_ctx=gemini_agent.mngr_ctx,
+    )
+
+    settings = _read_workspace_settings(gemini_agent)
+    assert HOOK_EVENT_SESSION_START in settings["hooks"]
+
+
+def test_provision_installs_hooks_even_when_transcript_disabled(
+    gemini_agent_without_transcript: GeminiAgent,
+) -> None:
+    """Readiness hook ships unconditionally -- decoupled from transcript emission."""
+    agent = gemini_agent_without_transcript
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+    settings = _read_workspace_settings(agent)
+    assert HOOK_EVENT_SESSION_START in settings["hooks"]
