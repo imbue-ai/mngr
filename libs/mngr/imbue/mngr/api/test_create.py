@@ -19,6 +19,7 @@ from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import DuplicateAgentNameError
+from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -236,15 +237,16 @@ def test_agent_state_is_persisted(
 # =============================================================================
 
 
-def test_create_agent_with_unknown_type_and_no_command_raises(
+def test_create_agent_with_unknown_type_raises(
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
 ) -> None:
-    """Test that creating an agent with an unknown type and no command raises UserInputError.
+    """An unknown agent type should fail fast with UnknownAgentTypeError.
 
-    With no registered type and no command_override / config command / agent_args,
-    BaseAgent.assemble_command has nothing to build into a shell command, so it
-    raises UserInputError with a message pointing the user at `--type command`.
+    Previously this silently resolved to BaseAgent + empty config and only
+    failed later inside ``assemble_command``; now the type gate in
+    ``resolve_agent_type`` catches it up front and points the user at
+    ``--type command -- ...`` via the error's plugin install hint.
     """
     agent_name = AgentName(f"test-unknown-type-no-cmd-{int(time.time())}")
 
@@ -255,7 +257,7 @@ def test_create_agent_with_unknown_type_and_no_command_raises(
         name=agent_name,
     )
 
-    with pytest.raises(UserInputError, match=r"has no command configured"):
+    with pytest.raises(UnknownAgentTypeError, match="Unknown agent type 'my-custom-command'"):
         create(
             source_location=source_location,
             target_host=local_host,

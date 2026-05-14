@@ -610,7 +610,7 @@ def create(ctx: click.Context, **kwargs) -> None:
         # --foreground is required for headless types (makes the behavior explicit)
         # and rejected for non-headless types (it doesn't apply).
         resolved_agent_type = _resolve_agent_type_name(opts.type, is_type_explicit, opts.positional_agent_type)
-        is_headless = is_streaming_headless_agent_type(resolved_agent_type)
+        is_headless = is_streaming_headless_agent_type(resolved_agent_type, mngr_ctx.config)
 
         if is_headless and not opts.foreground:
             raise UserInputError(

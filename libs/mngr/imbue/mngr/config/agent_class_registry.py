@@ -10,7 +10,6 @@ from imbue.mngr.primitives import AgentTypeName
 # =============================================================================
 
 _agent_class_registry: dict[AgentTypeName, type] = {}
-_default_agent_class: type | None = None
 
 
 def register_agent_class(
@@ -21,28 +20,19 @@ def register_agent_class(
     _agent_class_registry[AgentTypeName(agent_type)] = agent_class
 
 
-def set_default_agent_class(agent_class: type) -> None:
-    """Set the default agent class returned when a type is not registered."""
-    global _default_agent_class
-    _default_agent_class = agent_class
-
-
 def get_agent_class(agent_type: str) -> type:
     """Get the agent class for an agent type.
 
-    Returns the default agent class if no specific type is registered.
-    Raises UnknownAgentTypeError if no default has been set.
+    Raises UnknownAgentTypeError if no class is registered for this type.
     """
     key = AgentTypeName(agent_type)
     if key in _agent_class_registry:
         return _agent_class_registry[key]
-    if _default_agent_class is not None:
-        return _default_agent_class
     raise UnknownAgentTypeError(agent_type)
 
 
 def is_agent_class_registered(agent_type: str) -> bool:
-    """Check if an agent class is registered for the given type (not counting the default fallback)."""
+    """Check if an agent class is registered for the given type."""
     return AgentTypeName(agent_type) in _agent_class_registry
 
 
@@ -53,6 +43,4 @@ def list_registered_agent_class_types() -> list[str]:
 
 def reset_agent_class_registry() -> None:
     """Reset the registry. Used for test isolation."""
-    global _default_agent_class
     _agent_class_registry.clear()
-    _default_agent_class = None

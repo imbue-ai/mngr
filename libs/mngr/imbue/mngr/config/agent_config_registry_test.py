@@ -6,9 +6,9 @@ from pydantic import Field
 from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.agent_class_registry import reset_agent_class_registry
-from imbue.mngr.config.agent_class_registry import set_default_agent_class
 from imbue.mngr.config.agent_config_registry import _apply_custom_overrides_to_parent_config
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
+from imbue.mngr.config.agent_config_registry import is_known_agent_type
 from imbue.mngr.config.agent_config_registry import list_registered_agent_config_types
 from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
@@ -16,6 +16,7 @@ from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import Permission
@@ -188,11 +189,11 @@ def test_list_registered_agent_config_types() -> None:
         reset_agent_config_registry()
 
 
-def test_get_agent_class_raises_when_unknown_and_no_default() -> None:
-    """get_agent_class should raise MngrError when agent type is unknown and no default is set."""
+def test_get_agent_class_raises_when_unknown() -> None:
+    """get_agent_class should raise UnknownAgentTypeError when agent type is unknown."""
     reset_agent_class_registry()
-    with pytest.raises(MngrError, match="Unknown agent type 'nonexistent'"):
-        get_agent_class("nonexistent")
+    with pytest.raises(UnknownAgentTypeError, match="Unknown agent type 'definitely-unregistered'"):
+        get_agent_class("definitely-unregistered")
 
 
 def test_get_agent_class_unknown_includes_install_hint_for_known_plugin() -> None:
@@ -386,7 +387,6 @@ def test_resolve_agent_type_raises_when_plugin_disabled() -> None:
     reset_agent_class_registry()
     reset_agent_config_registry()
     try:
-        set_default_agent_class(_FakeAgentClass)
         register_agent_class("my-plugin", _FakeAgentClass)
         register_agent_config("my-plugin", AgentTypeConfig)
 
@@ -455,8 +455,6 @@ def test_resolve_agent_type_uses_explicit_plugin_field() -> None:
     reset_agent_class_registry()
     reset_agent_config_registry()
     try:
-        set_default_agent_class(_FakeAgentClass)
-
         config = MngrConfig(
             agent_types={
                 AgentTypeName("my-type"): AgentTypeConfig(plugin="real-plugin"),
@@ -476,7 +474,8 @@ def test_resolve_agent_type_explicit_plugin_field_overrides_name() -> None:
     reset_agent_class_registry()
     reset_agent_config_registry()
     try:
-        set_default_agent_class(_FakeAgentClass)
+        register_agent_class("disabled-name", _FakeAgentClass)
+        register_agent_config("disabled-name", AgentTypeConfig)
 
         config = MngrConfig(
             agent_types={
@@ -507,3 +506,79 @@ def test_resolve_agent_type_allows_non_disabled_plugin() -> None:
     finally:
         reset_agent_class_registry()
         reset_agent_config_registry()
+
+
+# =============================================================================
+# resolve_agent_type unknown-type tests
+# =============================================================================
+
+
+def test_resolve_agent_type_raises_for_unregistered_type() -> None:
+    """resolve_agent_type should raise UnknownAgentTypeError for a name not in any registry or user config."""
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    config = MngrConfig()
+    with pytest.raises(UnknownAgentTypeError, match="Unknown agent type 'definitely-unregistered'"):
+        resolve_agent_type(AgentTypeName("definitely-unregistered"), config)
+
+
+def test_resolve_agent_type_raises_for_unknown_parent_type() -> None:
+    """resolve_agent_type should raise UnknownAgentTypeError when a custom type's parent_type is unknown."""
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    config = MngrConfig(
+        agent_types={
+            AgentTypeName("child-type"): AgentTypeConfig(
+                parent_type=AgentTypeName("ghost-parent"),
+            ),
+        },
+    )
+    with pytest.raises(UnknownAgentTypeError, match="Unknown agent type 'ghost-parent'"):
+        resolve_agent_type(AgentTypeName("child-type"), config)
+
+
+def test_resolve_agent_type_accepts_config_only_registered_type() -> None:
+    """resolve_agent_type should accept a type with only a config class registered (no class).
+
+    This mirrors how the built-in ``command`` agent type used to register
+    (agent_class=None, falling back to BaseAgent). After the default-fallback
+    removal, ``command`` registers BaseAgent explicitly -- but config-only
+    registrations are still a legitimate state (e.g. plugin loads only the
+    config-side hookimpl during inspection), and the gate should not reject
+    them as unknown.
+    """
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    try:
+        register_agent_class("config-only-type", _FakeAgentClass)
+        register_agent_config("config-only-type", AgentTypeConfig)
+        assert is_known_agent_type("config-only-type", MngrConfig()) is True
+
+        # config-registered-only (no class)
+        reset_agent_class_registry()
+        register_agent_config("only-config", AgentTypeConfig)
+        assert is_known_agent_type("only-config", MngrConfig()) is True
+    finally:
+        reset_agent_class_registry()
+        reset_agent_config_registry()
+
+
+def test_is_known_agent_type_accepts_user_defined_type() -> None:
+    """is_known_agent_type should accept a name defined only in user config."""
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    config = MngrConfig(
+        agent_types={
+            AgentTypeName("my-user-defined-type"): AgentTypeConfig(
+                command=CommandString("echo hi"),
+            ),
+        },
+    )
+    assert is_known_agent_type("my-user-defined-type", config) is True
+
+
+def test_is_known_agent_type_rejects_unknown() -> None:
+    """is_known_agent_type should reject names not in any source."""
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    assert is_known_agent_type("nothing-here", MngrConfig()) is False
