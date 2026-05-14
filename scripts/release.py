@@ -548,7 +548,7 @@ def _gate_release_on_pending_changelog_entries(entries: list[Path], dry_run: boo
     print("CHANGELOG.md's [Unreleased] section yet:", file=sys.stderr)
     print(_format_pending_changelog_list(entries, REPO_ROOT), file=sys.stderr)
     print(file=sys.stderr)
-    print(f"The '{CHANGELOG_TRIGGER_NAME}' schedule runs nightly at midnight Pacific. To", file=sys.stderr)
+    print(f"The '{CHANGELOG_TRIGGER_NAME}' schedule runs nightly at midnight PST (08:00 UTC). To", file=sys.stderr)
     print("trigger it on demand instead (opens a PR you can merge before re-running", file=sys.stderr)
     print("this script), run:", file=sys.stderr)
     print(file=sys.stderr)
