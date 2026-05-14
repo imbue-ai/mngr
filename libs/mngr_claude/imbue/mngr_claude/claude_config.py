@@ -15,6 +15,7 @@ from loguru import logger
 
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import ConfigError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.utils.file_utils import atomic_write
 
 
@@ -110,6 +111,24 @@ def get_user_claude_config_dir() -> Path:
     if original and Path(original).is_dir():
         return Path(original)
     return get_claude_config_dir()
+
+
+def resolve_shared_claude_config_dir() -> Path:
+    """Return the value of $CLAUDE_CONFIG_DIR. Raises UserInputError if unset or empty.
+
+    Used by the ``use_env_config_dir`` mode of ``ClaudeAgentConfig`` where mngr
+    delegates the claude config dir to whatever the user has in their shell env
+    rather than provisioning a per-agent dir. The flag is meaningless unless
+    the env var is set, so this helper makes the failure mode explicit.
+    """
+    env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not env_dir:
+        raise UserInputError(
+            "use_env_config_dir=True requires $CLAUDE_CONFIG_DIR to be set in the parent "
+            "process environment, but it is unset (or empty). Either set CLAUDE_CONFIG_DIR "
+            "to the directory you want claude agents to share, or set use_env_config_dir=False."
+        )
+    return Path(env_dir)
 
 
 def find_user_claude_config() -> Path:

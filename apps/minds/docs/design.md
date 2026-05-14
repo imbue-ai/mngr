@@ -17,6 +17,8 @@ Workspaces are built on top of `mngr` and should interact with it exclusively th
 
 Each workspace is created from a template repository (or local directory). The repo's own `.mngr/settings.toml` drives all configuration -- agent types, templates, environment variables, and other settings. There is no `minds.toml`, vendoring, or parent tracking.
 
+Within a workspace, the "primary" agent (carrying `is_primary=true`) is dedicated to running the bootstrap and background services -- its window-0 command is `sleep infinity && claude`, so claude never actually starts there. The user's chat agents are separate `mngr` agents; the bootstrap creates the first one on initial container boot and writes `CLAUDE_CONFIG_DIR` to the host env file so every agent (chat, worktree, worker) shares the services agent's Claude config dir (auth, plugins, marketplaces, sessions). The services agent is hidden from the UI agent list and the workspace_server destroy endpoint refuses to tear it down. See [the swap-primary-agent spec](../../../specs/swap-primary-agent/spec.md) for the design rationale.
+
 ## Configuration
 
 All configuration lives in the template repository's `.mngr/settings.toml`. The desktop client passes `--template main` plus a mode-specific template (`--template docker` for LOCAL, `--template lima` for LIMA, `--template vultr` for CLOUD, or `--template imbue_cloud` for IMBUE_CLOUD) when running `mngr create`. The template's settings file defines everything the agent needs.

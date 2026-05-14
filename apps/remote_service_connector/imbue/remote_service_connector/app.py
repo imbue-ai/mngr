@@ -18,6 +18,7 @@ import io
 import json
 import logging
 import os
+import re
 import shlex
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -36,6 +37,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from pydantic import Field
+from pydantic import field_validator
 from supertokens_python import InputAppInfo
 from supertokens_python import SupertokensConfig
 from supertokens_python import init as supertokens_init
@@ -214,6 +216,14 @@ class TunnelComponentTooLongError(ValueError):
         super().__init__(f"{component_name} '{value}' exceeds maximum length of {max_length}")
 
 
+class InvalidHostNameError(ValueError):
+    """Raised when a host_name fails the SafeName regex on the lease request."""
+
+    def __init__(self, value: object) -> None:
+        self.value = value
+        super().__init__(f"host_name must be alphanumeric (with dashes/underscores allowed in the middle): {value!r}")
+
+
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
@@ -279,15 +289,42 @@ AuthResult = AdminAuth | AgentAuth
 
 # -- Host pool models --
 
+# Mirror of mngr's SafeName regex (libs/mngr/imbue/mngr/primitives.py:_SAFE_NAME_RE).
+# Duplicated here -- not imported -- because this file is self-contained and
+# must not depend on the monorepo. Keep this in sync if the mngr-side rule
+# changes (alphanumeric, dashes/underscores allowed in the middle only).
+_HOST_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$")
+
+
+def _validate_host_name(value: str) -> str:
+    """Field validator: enforce the SafeName regex.
+
+    Rejects empty strings and anything outside the alphanumeric+``-``/``_``
+    middle-allowed shape so the connector cannot persist a host_name that
+    mngr's ``HostName`` would refuse on the client side.
+    """
+    stripped = value.strip() if isinstance(value, str) else value
+    if not isinstance(stripped, str) or not _HOST_NAME_RE.match(stripped):
+        raise InvalidHostNameError(value)
+    return stripped
+
 
 class LeaseHostRequest(BaseModel):
     ssh_public_key: str = Field(description="SSH public key to authorize on the leased host")
+    host_name: str = Field(
+        description=(
+            "User-chosen friendly name for the leased host. Must satisfy mngr's SafeName "
+            "regex (alphanumeric, dashes/underscores allowed in the middle). Required."
+        )
+    )
     attributes: dict[str, Any] = Field(
         description=(
             "Lease-attribute filter. Matches with PostgreSQL '@>' so only fields the request "
             "explicitly sets are constrained; missing fields are unconstrained. Required."
         ),
     )
+
+    _validate_host_name = field_validator("host_name")(_validate_host_name)
 
 
 class LeaseHostResponse(BaseModel):
@@ -298,6 +335,7 @@ class LeaseHostResponse(BaseModel):
     container_ssh_port: int = Field(description="SSH port mapped to the Docker container")
     agent_id: str = Field(description="Pre-provisioned mngr agent ID")
     host_id: str = Field(description="Host ID in the mngr provider")
+    host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(description="Attributes the row was matched against")
 
 
@@ -313,6 +351,7 @@ class LeasedHostInfo(BaseModel):
     container_ssh_port: int = Field(description="SSH port mapped to the Docker container")
     agent_id: str = Field(description="Pre-provisioned mngr agent ID")
     host_id: str = Field(description="Host ID in the mngr provider")
+    host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(description="Attributes attached to the lease row")
     leased_at: str = Field(description="ISO 8601 timestamp when the host was leased")
 
@@ -1595,10 +1634,13 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                             status_code=502, detail=f"Failed to inject SSH key on host: {exc}"
                         ) from exc
 
+                    # ``host_name`` is mutable per-lease: it gets overwritten with the
+                    # user-supplied name each time the pool row is leased (and could
+                    # later be patched by a rename endpoint).
                     cur.execute(
-                        "UPDATE pool_hosts SET status = 'leased', leased_to_user = %s, leased_at = NOW() "
-                        "WHERE id = %s",
-                        (admin.username, host_db_id),
+                        "UPDATE pool_hosts SET status = 'leased', leased_to_user = %s, "
+                        "leased_at = NOW(), host_name = %s WHERE id = %s",
+                        (admin.username, body.host_name, host_db_id),
                     )
         finally:
             conn.close()
@@ -1611,6 +1653,7 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
             container_ssh_port=container_ssh_port,
             agent_id=agent_id,
             host_id=host_id,
+            host_name=body.host_name,
             attributes=attrs_dict,
         ).model_dump()
 
@@ -1659,7 +1702,8 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes, leased_at "
+                    "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, "
+                    "host_name, attributes, leased_at "
                     "FROM pool_hosts "
                     "WHERE status = 'leased' AND leased_to_user = %s",
                     (admin.username,),
@@ -1676,8 +1720,9 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
                 container_ssh_port=r[4],
                 agent_id=r[5],
                 host_id=r[6],
-                attributes=r[7] if isinstance(r[7], dict) else {},
-                leased_at=str(r[8]) if r[8] is not None else "",
+                host_name=r[7],
+                attributes=r[8] if isinstance(r[8], dict) else {},
+                leased_at=str(r[9]) if r[9] is not None else "",
             ).model_dump()
             for r in rows
         ]

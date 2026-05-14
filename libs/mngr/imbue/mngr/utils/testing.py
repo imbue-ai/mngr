@@ -16,10 +16,12 @@ from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from enum import auto
 from io import StringIO
 from pathlib import Path
 from typing import Final
 from typing import IO
+from typing import assert_never
 from uuid import uuid4
 
 import pluggy
@@ -29,6 +31,7 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.cli.create import create as create_command
@@ -111,6 +114,46 @@ def register_modal_test_environment(environment_name: str) -> None:
     """
     if environment_name not in worker_modal_environment_names:
         worker_modal_environment_names.append(environment_name)
+
+
+class ModalCleanupOutcome(UpperCaseStrEnum):
+    """Outcome of a Modal-side delete call.
+
+    DELETED and NOT_FOUND both mean the resource is gone (whether we did the
+    deleting); only FAILED is a reason to keep tracking it for leak detection.
+
+    Distinct from `imbue.mngr.api.data_types.CleanupResult` (Pydantic model
+    returned by `mngr cleanup`).
+    """
+
+    DELETED = auto()
+    NOT_FOUND = auto()
+    FAILED = auto()
+
+
+def deregister_modal_test_volume(volume_name: str) -> None:
+    """Stop tracking a Modal volume for leak detection.
+
+    Call only when the caller's delete returned DELETED or NOT_FOUND.
+    On FAILED, do NOT call this -- leaving the name tracked lets the
+    session-end leak detector surface it, with
+    `cleanup_old_modal_test_environments.py` as the hourly safety net.
+    """
+    if volume_name in worker_modal_volume_names:
+        worker_modal_volume_names.remove(volume_name)
+
+
+def deregister_modal_test_environment(environment_name: str) -> None:
+    """Stop tracking a Modal environment for leak detection.
+
+    Call only when the caller's delete returned DELETED or NOT_FOUND.
+    On FAILED, do NOT call this -- leaving the name tracked lets the
+    session-end leak detector surface it, with
+    `cleanup_old_modal_test_environments.py` as the hourly safety net.
+    Mirrors `deregister_modal_test_volume`.
+    """
+    if environment_name in worker_modal_environment_names:
+        worker_modal_environment_names.remove(environment_name)
 
 
 class ModalSubprocessTestEnv(FrozenModel):
@@ -1143,10 +1186,13 @@ def delete_modal_volumes_in_environment(environment_name: str) -> None:
         logger.warning("Failed to list/delete Modal volumes in environment {}: {}", environment_name, e)
 
 
-def delete_modal_environment(environment_name: str) -> None:
+def delete_modal_environment(environment_name: str) -> ModalCleanupOutcome:
     """Delete a Modal environment.
 
-    This is robust to concurrent deletion - failures result in warnings, not errors.
+    Robust to concurrent deletion: returns a ModalCleanupOutcome instead of
+    raising. Callers should treat DELETED and NOT_FOUND as success (the env
+    is gone, whether we did the deleting or someone else did) and only
+    FAILED as a reason to keep the env tracked for leak detection.
     """
     try:
         result = subprocess.run(
@@ -1155,16 +1201,28 @@ def delete_modal_environment(environment_name: str) -> None:
             text=True,
             timeout=30,
         )
-        if result.returncode != 0:
-            logger.warning(
-                "Modal environment delete returned non-zero for {}: {}",
-                environment_name,
-                result.stderr or result.stdout,
-            )
-        else:
+        if result.returncode == 0:
             logger.debug("Deleted Modal environment {}", environment_name)
+            return ModalCleanupOutcome.DELETED
+        stderr = result.stderr or result.stdout
+        # Require the env name to appear alongside "not found" so unrelated
+        # errors (e.g. "credentials not found", "config file not found") do
+        # NOT get misclassified as NOT_FOUND. NOT_FOUND lets the caller drop
+        # the env from leak tracking; misclassifying a real FAILED here would
+        # silently defeat the session-end leak detector for that env.
+        stderr_lower = stderr.lower()
+        if "not found" in stderr_lower and environment_name.lower() in stderr_lower:
+            logger.debug("Modal environment {} already gone: {}", environment_name, stderr.strip())
+            return ModalCleanupOutcome.NOT_FOUND
+        logger.warning(
+            "Modal environment delete returned non-zero for {}: {}",
+            environment_name,
+            stderr,
+        )
+        return ModalCleanupOutcome.FAILED
     except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
         logger.warning("Failed to delete Modal environment {}: {}", environment_name, e)
+        return ModalCleanupOutcome.FAILED
 
 
 def cleanup_old_modal_test_environments(
@@ -1181,10 +1239,17 @@ def cleanup_old_modal_test_environments(
     2. Deletes all volumes in the environment
     3. Deletes the environment itself
 
-    This function is designed to be robust to concurrent deletion. Any failure to
-    delete an environment, app, or volume results in a warning, not an error.
-    This allows the cleanup to continue even if some resources were already deleted
-    by another process.
+    This function is designed to be robust to concurrent deletion: it never raises
+    on a failed delete, so the loop always processes every old environment. App
+    and volume failures log at warning level. A FAILED environment delete logs at
+    error level so a stuck safety-net run is greppable in the cron/CI logs that
+    drive this script (DELETED and NOT_FOUND are silent successes).
+
+    Warning vs error rationale: `modal environment delete` cascades and "deletes
+    all apps in the selected environment" (per Modal CLI docs), so individual
+    app/volume delete failures are best-effort and not real leaks as long as the
+    env-level delete succeeds. Reserving error level for the env-level FAILED
+    keeps cron/CI logs free of false-positive noise.
 
     Returns the number of environments that were processed (attempted deletion).
     """
@@ -1206,8 +1271,21 @@ def cleanup_old_modal_test_environments(
         # Then delete all volumes
         delete_modal_volumes_in_environment(env_name)
 
-        # Finally delete the environment itself
-        delete_modal_environment(env_name)
+        # Finally delete the environment itself. `delete_modal_environment`
+        # already logs at debug/warning for individual outcomes; surface
+        # FAILED at error level here so a stuck safety-net run is greppable
+        # in the cron/CI logs that drive this script.
+        outcome = delete_modal_environment(env_name)
+        match outcome:
+            case ModalCleanupOutcome.DELETED | ModalCleanupOutcome.NOT_FOUND:
+                pass
+            case ModalCleanupOutcome.FAILED:
+                logger.error(
+                    "Safety-net cleanup failed to delete Modal environment {}; leaving it for the next cleanup run.",
+                    env_name,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     return len(old_envs)
 

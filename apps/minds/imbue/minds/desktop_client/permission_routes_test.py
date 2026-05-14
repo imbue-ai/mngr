@@ -33,6 +33,7 @@ from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGr
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import load_services_catalog
+from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import REQUESTS_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -151,6 +152,7 @@ def _make_recording_handler(
         latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent"),
         services_catalog=load_services_catalog(),
         mngr_message_sender=MngrMessageSender(mngr_binary="/nonexistent"),
+        gateway_client=build_fake_gateway_client(),
         grant_outcome=grant_outcome,
         grant_message=grant_message,
     )

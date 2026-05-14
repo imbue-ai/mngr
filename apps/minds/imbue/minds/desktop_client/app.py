@@ -55,6 +55,7 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.request_events import RequestInbox
+from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import parse_request_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import find_handler_for_event
@@ -88,6 +89,8 @@ from imbue.minds.primitives import ServiceName
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import InvalidName
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 
@@ -491,7 +494,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
 
     form = await request.form()
     git_url = str(form.get("git_url", "")).strip()
-    agent_name = str(form.get("agent_name", "")).strip()
+    host_name = str(form.get("host_name", "")).strip()
     branch = str(form.get("branch", "")).strip()
     try:
         launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.LOCAL.value)))
@@ -514,7 +517,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         # so a validation error doesn't silently revert their choice.
         html_body = render_create_form(
             git_url=git_url,
-            agent_name=agent_name,
+            host_name=host_name,
             branch=branch,
             launch_mode=launch_mode,
             ai_provider=ai_provider,
@@ -528,6 +531,16 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
 
     if not git_url:
         return _re_render_with_error("Repository URL is required.")
+
+    # Validate the host name eagerly so the user sees the error inline on
+    # the form rather than as a deferred "FAILED" status on the creating
+    # page. An empty value falls through; ``start_creation`` substitutes a
+    # repo-derived fallback for the API path.
+    if host_name:
+        try:
+            HostName(host_name)
+        except InvalidName as exc:
+            return _re_render_with_error(str(exc))
 
     is_imbue_cloud_compute = launch_mode is LaunchMode.IMBUE_CLOUD
     is_imbue_cloud_ai = ai_provider is AIProvider.IMBUE_CLOUD
@@ -562,7 +575,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     # the association is keyed under the right id.
     creation_id = agent_creator.start_creation(
         git_url,
-        agent_name=agent_name,
+        host_name=host_name,
         branch=branch,
         launch_mode=launch_mode,
         ai_provider=ai_provider,
@@ -623,7 +636,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             media_type="application/json",
         )
     git_url = str(body.get("git_url", "")).strip()
-    agent_name = str(body.get("agent_name", "")).strip()
+    host_name = str(body.get("host_name", "")).strip()
     branch = str(body.get("branch", "")).strip()
     try:
         launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.LOCAL.value)))
@@ -650,6 +663,17 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             content='{"error": "git_url is required"}',
             media_type="application/json",
         )
+    # Validate the host name eagerly so a malformed value returns 400 from
+    # the API rather than failing deferred in the background thread.
+    if host_name:
+        try:
+            HostName(host_name)
+        except InvalidName as exc:
+            return Response(
+                status_code=400,
+                content=json.dumps({"error": str(exc)}),
+                media_type="application/json",
+            )
     # Mirror the form path's account requirement so the API rejects
     # imbue_cloud-without-account up front instead of failing later inside
     # the background thread with a vague MngrCommandError.
@@ -677,14 +701,14 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         if session_store_inst is not None:
             account_email = session_store_inst.get_account_email(account_id) or ""
 
-    if agent_name:
+    if host_name:
         backend_resolver = request.app.state.backend_resolver
         existing_names: set[str] = set()
         for existing_id in backend_resolver.list_known_workspace_ids():
             existing_name = backend_resolver.get_workspace_name(existing_id)
             if existing_name is not None:
                 existing_names.add(existing_name)
-        if agent_name in existing_names:
+        if host_name in existing_names:
             return Response(
                 status_code=409,
                 content=json.dumps(
@@ -692,7 +716,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
                         "error": (
                             "An agent named '{}' already exists. "
                             "Pick a different name, or destroy the existing one first."
-                        ).format(agent_name)
+                        ).format(host_name)
                     }
                 ),
                 media_type="application/json",
@@ -700,7 +724,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
 
     creation_id = agent_creator.start_creation(
         git_url,
-        agent_name=agent_name,
+        host_name=host_name,
         branch=branch,
         launch_mode=launch_mode,
         ai_provider=ai_provider,
@@ -1884,9 +1908,23 @@ def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
     the chrome SSE wakes up and pushes the new ``request_count`` immediately
     (otherwise it would lag up to 30s for the next poll tick, breaking the
     requests panel auto-open and badge UX).
+
+    ``LATCHKEY_PERMISSION`` events from the JSONL stream are ignored
+    here: latchkey 2.9.0 ships a gateway extension that owns the
+    pending-permission queue, and the desktop client consumes it via
+    :class:`PermissionRequestsConsumer` instead. Any latchkey events
+    that still arrive over the legacy JSONL channel are stale (the
+    agents migrating to the extension write directly to the gateway
+    now) and would only double-count.
     """
     event = parse_request_event(raw_line)
     if event is None:
+        return
+    if event.request_type == str(RequestType.LATCHKEY_PERMISSION):
+        logger.debug(
+            "Ignoring legacy JSONL latchkey-permission event from agent {}; the gateway extension owns this flow now",
+            agent_id_str,
+        )
         return
     for app in _request_event_apps.values():
         current_inbox: RequestInbox | None = app.state.request_inbox

@@ -114,7 +114,7 @@ _DEFAULT_GIT_URL: Final[str] = os.getenv(
 )
 
 
-_DEFAULT_AGENT_NAME: Final[str] = os.getenv("MINDS_WORKSPACE_NAME", "assistant")
+_DEFAULT_HOST_NAME: Final[str] = os.getenv("MINDS_WORKSPACE_NAME", "assistant")
 
 
 _DEFAULT_BRANCH: Final[str] = os.getenv("MINDS_WORKSPACE_BRANCH", "pilot")
@@ -123,7 +123,7 @@ _DEFAULT_BRANCH: Final[str] = os.getenv("MINDS_WORKSPACE_BRANCH", "pilot")
 @pure
 def render_create_form(
     git_url: str = "",
-    agent_name: str = "",
+    host_name: str = "",
     branch: str = "",
     launch_mode: LaunchMode | None = None,
     ai_provider: AIProvider | None = None,
@@ -141,9 +141,13 @@ def render_create_form(
     provider defaults to ``LIMA`` (a real VM, the recommended local
     sandbox) rather than ``LOCAL`` (bare Docker, which requires a running
     Docker daemon and is the more error-prone path).
+
+    ``host_name`` is the value of the form's "Name" field; it drives the
+    host name on the resulting workspace. (The agent itself is always
+    named ``system-services``.)
     """
     effective_url = git_url if git_url else _DEFAULT_GIT_URL
-    effective_name = agent_name if agent_name else _DEFAULT_AGENT_NAME
+    effective_name = host_name if host_name else _DEFAULT_HOST_NAME
     effective_branch = branch if branch else _DEFAULT_BRANCH
     has_account = bool(default_account_id and accounts)
     effective_launch_mode = (
@@ -157,7 +161,7 @@ def render_create_form(
     template = JINJA_ENV.get_template("create.html")
     return template.render(
         git_url=effective_url,
-        agent_name=effective_name,
+        host_name=effective_name,
         branch=effective_branch,
         launch_modes=list(LaunchMode),
         selected_launch_mode=effective_launch_mode.value,

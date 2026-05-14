@@ -4,6 +4,21 @@ const fs = require('fs');
 const path = require('path');
 const paths = require('./paths');
 
+// Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
+// launches go through a pipe (e.g. `just devminds-start | head -30`), the
+// reader can exit while the backend is still alive, leaving subsequent
+// writes from the dev-mode forwarder (below) to raise EPIPE asynchronously
+// as an 'error' event. Without this handler the unhandled error surfaces
+// as a JS alert in the Electron window. We log nothing because the
+// downstream consumer is gone -- the log file is the durable record.
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on('error', (err) => {
+    if (!err || err.code !== 'EPIPE') {
+      throw err;
+    }
+  });
+}
+
 let backendProcess = null;
 
 /**
@@ -277,12 +292,23 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         }
       });
 
-      // Stderr is human-readable logging -- capture to log file and console
+      // Stderr is human-readable logging -- capture to log file and console.
+      // The dev-mode forward to process.stderr can throw EPIPE if the parent
+      // (e.g. a `just` recipe whose stdout was piped through `head`) goes
+      // away while the backend is still emitting log lines. We swallow the
+      // error: the log file is the durable record, and a broken parent pipe
+      // should never bring down the Electron main process.
       child.stderr.on('data', (data) => {
         const text = data.toString();
         logStream.write(text);
         if (paths.isDev()) {
-          process.stderr.write(text);
+          try {
+            process.stderr.write(text);
+          } catch (err) {
+            if (err && err.code !== 'EPIPE') {
+              throw err;
+            }
+          }
         }
       });
 

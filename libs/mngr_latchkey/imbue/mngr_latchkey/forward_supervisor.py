@@ -38,7 +38,6 @@ from imbue.mngr_latchkey.store import delete_forward_info
 from imbue.mngr_latchkey.store import forward_log_path
 from imbue.mngr_latchkey.store import load_forward_info
 from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
-from imbue.mngr_latchkey.store import save_forward_info
 
 # Bare-name default for the ``mngr`` CLI; callers that bundle their own
 # copy (e.g. the minds desktop client) pass the absolute path explicitly.
@@ -82,15 +81,14 @@ def _cmdline_looks_like_mngr_latchkey_forward(cmdline: list[str]) -> bool:
     return "latchkey" in remainder and "forward" in remainder
 
 
-def _is_forward_info_alive(info: LatchkeyForwardInfo) -> bool:
-    """Verify that an info still corresponds to our running supervisor.
+def is_forward_info_alive(info: LatchkeyForwardInfo) -> bool:
+    """Verify that an info still corresponds to a running supervisor.
 
     Two checks, both must pass:
 
     1. A process with the recorded PID exists.
     2. That process's cmdline looks like ``mngr latchkey forward``
        (defends against PID reuse).
-
     """
     try:
         process = psutil.Process(info.pid)
@@ -174,6 +172,10 @@ class LatchkeyForwardSupervisor(MutableModel):
     )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # PID of the forward child we most recently spawned (or adopted) so
+    # ``stop()`` can find it even if the child has not yet published
+    # its on-disk record.
+    _last_known_pid: int | None = PrivateAttr(default=None)
 
     @property
     def plugin_data_dir(self) -> Path:
@@ -196,7 +198,13 @@ class LatchkeyForwardSupervisor(MutableModel):
           record is deleted and a fresh supervisor is spawned.
         * If no record exists, a fresh supervisor is spawned.
 
-        Always returns the info corresponding to the live supervisor.
+        The on-disk record is written by the spawned forward process
+        itself (in :func:`_forward_command`), not by this method. The
+        returned :class:`LatchkeyForwardInfo` is therefore an
+        in-memory view of the spawn -- callers that need to read
+        from disk should poll :func:`load_forward_info` until the
+        forward child has published its record.
+
         ``LatchkeyError`` is raised when ``Popen`` itself fails (e.g.
         the ``mngr`` binary is missing).
         """
@@ -209,12 +217,13 @@ class LatchkeyForwardSupervisor(MutableModel):
                     "No existing mngr latchkey forward record at {}; spawning a fresh supervisor",
                     record_path,
                 )
-            elif _is_forward_info_alive(existing):
+            elif is_forward_info_alive(existing):
                 logger.info(
                     "Adopted existing mngr latchkey forward supervisor (pid={}, record={})",
                     existing.pid,
                     record_path,
                 )
+                self._last_known_pid = existing.pid
                 return existing
             else:
                 logger.info(
@@ -239,9 +248,8 @@ class LatchkeyForwardSupervisor(MutableModel):
                 except OSError as e:
                     raise LatchkeyError(f"Failed to spawn 'mngr latchkey forward': {e}") from e
 
-            info = LatchkeyForwardInfo(pid=pid, started_at=datetime.now(timezone.utc))
-            save_forward_info(plugin_dir, info)
-            return info
+            self._last_known_pid = pid
+            return LatchkeyForwardInfo(pid=pid, started_at=datetime.now(timezone.utc))
 
     def stop(self) -> None:
         """Terminate the supervisor and delete its record.
@@ -251,11 +259,51 @@ class LatchkeyForwardSupervisor(MutableModel):
         ``latchkey gateway`` subprocess, cancels every reverse tunnel,
         and exits. Embedders that want the gateway to *survive* their
         own shutdown should simply not call this method.
+
+        Source-of-truth precedence:
+
+        * :attr:`_last_known_pid` (set by :meth:`ensure_running`) --
+          our own freshly-spawned PID. Terminated without a cmdline
+          check because the freshly-forked child may not have exec'd
+          its real argv yet, and any cmdline check would race the
+          kernel.
+        * On-disk record -- could be arbitrarily old, so the PID is
+          verified via :func:`is_forward_info_alive` (PID alive +
+          cmdline matches) before terminating. A record that points
+          at a recycled PID never causes us to signal an unrelated
+          process.
         """
         plugin_dir = self.plugin_data_dir
         with self._lock:
+            cached_pid = self._last_known_pid
+            self._last_known_pid = None
             info = load_forward_info(plugin_dir)
             delete_forward_info(plugin_dir)
-        if info is not None:
-            logger.info("Stopping detached mngr latchkey forward supervisor (pid={})", info.pid)
-            _terminate_pid(info.pid)
+        if cached_pid is not None:
+            logger.info("Stopping detached mngr latchkey forward supervisor (pid={})", cached_pid)
+            _terminate_pid(cached_pid)
+            return
+        if info is None:
+            return
+        if not is_forward_info_alive(info):
+            logger.debug(
+                "Skipping terminate: pid {} on disk is no longer a live mngr latchkey forward process",
+                info.pid,
+            )
+            return
+        logger.info("Stopping detached mngr latchkey forward supervisor (pid={})", info.pid)
+        _terminate_pid(info.pid)
+
+    def restart(self) -> LatchkeyForwardInfo:
+        """Terminate any existing live supervisor and spawn a fresh one.
+
+        Use this on embedder startup when you want to guarantee the
+        supervisor was launched from the current binary's code -- i.e.
+        after a package update -- rather than adopting a stale
+        supervisor running an older version. The cmdline-verified
+        termination in :meth:`stop` makes this safe to call
+        unconditionally; a missing or stale record yields a no-op
+        stop followed by a normal spawn.
+        """
+        self.stop()
+        return self.ensure_running()

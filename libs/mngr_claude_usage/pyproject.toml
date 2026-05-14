@@ -1,7 +1,7 @@
 [project]
 name = "imbue-mngr-claude-usage"
 version = "0.1.0"
-description = "Claude rate-limit data provider for `mngr usage` (per-agent statusline shim + events.jsonl reader)"
+description = "Claude usage data provider for `mngr usage` (per-agent statusline shim that captures rate-limits + cost + session_id)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -23,7 +23,7 @@ exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "imbue/mngr_claude_usage/resources/claude_statusline.sh" = "imbue/mngr_claude_usage/resources/claude_statusline.sh"
-"imbue/mngr_claude_usage/resources/claude_rate_limits_writer.sh" = "imbue/mngr_claude_usage/resources/claude_rate_limits_writer.sh"
+"imbue/mngr_claude_usage/resources/claude_usage_writer.sh" = "imbue/mngr_claude_usage/resources/claude_usage_writer.sh"
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
