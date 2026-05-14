@@ -168,20 +168,27 @@ def _format_cost_line(
     aggregate_cost: CostSnapshot,
     session_count: int,
     since_seconds: int,
-    latest_event_at: int | None,
+    latest_event_at: int,
     now: int,
 ) -> str | None:
     """Render one cost line under each source header for a single [[cost-mode]].
+
+    Caller contract: only invoke when there's at least one session of
+    this mode (``session_count >= 1``), so ``latest_event_at`` is always
+    a real timestamp -- the freshest session's last event for this mode.
+    ``UsageSnapshot`` enforces this pairing by construction (the
+    per-mode ``latest_*_event_at`` property is ``int | None`` and is
+    ``None`` iff the mode has zero sessions); callers in
+    ``_write_source_section`` gate on the timestamp being present.
 
     ``mode_label`` is the human-display tag for this mode's cost (e.g.
     ``"subscription cost"`` or ``"api cost"``); ``mode_suffix`` is
     appended verbatim to the label. Use ``""`` when the mode's semantics
     don't need a callout (api cost), and a leading-space parenthetical
     like ``" (imputed)"`` when they do (subscription cost). The
-    ``in last <since>`` suffix is
-    rendered through ``_format_duration`` -- the default 24h plugin
-    config thus prints ``in last 1d``. The combination yields lines
-    like:
+    ``in last <since>`` suffix is rendered through ``_format_duration``
+    -- the default 24h plugin config thus prints ``in last 1d``. The
+    combination yields lines like:
 
       subscription cost (imputed): $0.42 (2m ago)            (N == 1)
       subscription cost (imputed): $5.43 across 3 sessions in last 1d
@@ -197,15 +204,14 @@ def _format_cost_line(
       it in favor of the breakdown.
 
     Returns None when this mode's aggregate has no ``total_cost_usd``
-    (no usable cost data in this mode for the window) -- the caller
-    skips the line entirely. Allows the human renderer to show only the
-    mode(s) that actually contributed.
+    (sessions exist but the writer never emitted a USD cost field) --
+    the caller skips the line entirely.
     """
     total = aggregate_cost.total_cost_usd
     if total is None:
         return None
     prefix = f"{mode_label}{mode_suffix}"
-    if session_count <= 1 and latest_event_at is not None:
+    if session_count == 1:
         age_seconds = max(0, now - latest_event_at)
         return f"{prefix}: {_format_usd(total)} ({_format_age_phrase(age_seconds)})"
     return f"{prefix}: {_format_usd(total)} across {session_count} sessions in last {_format_duration(since_seconds)}"
@@ -491,30 +497,36 @@ def _write_source_section(model: _UsageRenderModel, now: int, header: str, detai
     any_renderable = False
     # Subscription line first (imputed cost is informational; rendering it
     # before real spend keeps the eye-line "more important info further down").
-    subscription_line = _format_cost_line(
-        mode_label="subscription cost",
-        mode_suffix=" (imputed)",
-        aggregate_cost=model.subscription_cost,
-        session_count=model.subscription_session_count,
-        since_seconds=model.since_seconds,
-        latest_event_at=model.latest_subscription_event_at,
-        now=now,
-    )
-    if subscription_line is not None:
-        write_human_line(subscription_line)
-        any_renderable = True
-    api_line = _format_cost_line(
-        mode_label="api cost",
-        mode_suffix="",
-        aggregate_cost=model.api_cost,
-        session_count=model.api_session_count,
-        since_seconds=model.since_seconds,
-        latest_event_at=model.latest_api_event_at,
-        now=now,
-    )
-    if api_line is not None:
-        write_human_line(api_line)
-        any_renderable = True
+    # Gate on the per-mode latest-event-at: it's None iff there are zero
+    # sessions of this mode, in which case there's nothing to format.
+    sub_latest = model.latest_subscription_event_at
+    if sub_latest is not None:
+        subscription_line = _format_cost_line(
+            mode_label="subscription cost",
+            mode_suffix=" (imputed)",
+            aggregate_cost=model.subscription_cost,
+            session_count=model.subscription_session_count,
+            since_seconds=model.since_seconds,
+            latest_event_at=sub_latest,
+            now=now,
+        )
+        if subscription_line is not None:
+            write_human_line(subscription_line)
+            any_renderable = True
+    api_latest = model.latest_api_event_at
+    if api_latest is not None:
+        api_line = _format_cost_line(
+            mode_label="api cost",
+            mode_suffix="",
+            aggregate_cost=model.api_cost,
+            session_count=model.api_session_count,
+            since_seconds=model.since_seconds,
+            latest_event_at=api_latest,
+            now=now,
+        )
+        if api_line is not None:
+            write_human_line(api_line)
+            any_renderable = True
     if detail and model.session_count > 1:
         for session in model.sessions:
             session_line = _format_session_detail_line(session, now)

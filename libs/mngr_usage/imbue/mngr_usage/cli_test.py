@@ -121,15 +121,21 @@ def test_format_human_line_no_data_drops_reset_suffix() -> None:
 
 
 def test_format_cost_line_returns_none_when_aggregate_has_no_cost() -> None:
-    """No usable cost in the aggregate -> the caller drops the line entirely."""
+    """Sessions exist but writer never emitted a USD cost field -> caller drops the line.
+
+    Real call sites guarantee ``session_count >= 1`` and a real
+    ``latest_event_at`` (gated in ``_write_source_section``); this test
+    pins the ``total_cost_usd is None`` early-return that fires when the
+    writer left out cost data despite having sessions of the mode.
+    """
     assert (
         _format_cost_line(
             mode_label="api cost",
             mode_suffix="",
             aggregate_cost=CostSnapshot(),
-            session_count=0,
+            session_count=1,
             since_seconds=86400,
-            latest_event_at=None,
+            latest_event_at=2000,
             now=2000,
         )
         is None
@@ -179,25 +185,6 @@ def test_format_cost_line_multi_session_shape_uses_since_suffix() -> None:
         now=2000,
     )
     assert line == "api cost: $5.43 across 3 sessions in last 1d"
-
-
-def test_format_cost_line_uses_multi_session_shape_when_latest_event_unknown() -> None:
-    """``latest_event_at is None`` falls back to the multi-session shape even at N == 1.
-
-    Defensive case: an aggregate with cost but no event timestamp wouldn't
-    have a sensible age to print, so dropping to the across-N-sessions shape
-    avoids fabricating one.
-    """
-    line = _format_cost_line(
-        mode_label="api cost",
-        mode_suffix="",
-        aggregate_cost=CostSnapshot(total_cost_usd=0.50),
-        session_count=1,
-        since_seconds=3600,
-        latest_event_at=None,
-        now=2000,
-    )
-    assert line == "api cost: $0.50 across 1 sessions in last 1h"
 
 
 def test_session_mode_tag_maps_each_variant() -> None:
