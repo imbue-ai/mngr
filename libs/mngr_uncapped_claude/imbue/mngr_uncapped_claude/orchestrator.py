@@ -78,7 +78,9 @@ EXIT_MNGR_ERROR: Final[int] = 2
 class _RunState(FrozenModel):
     """Bundle of resources owned by a single ``run()`` invocation.
 
-    Held by the signal handler so it can destroy the agent on Ctrl-C.
+    Used both by the signal handler (to destroy the agent on Ctrl-C) and
+    by ``run()`` itself (to destroy the agent during normal end-of-run
+    cleanup).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
