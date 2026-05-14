@@ -29,7 +29,7 @@ def test_cli_help_contains_options(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(tmr, ["--help"])
     assert "--agent-type" in result.output
     assert "--poll-interval" in result.output
-    assert "--output-html" in result.output
+    assert "--output-dir" in result.output
     assert "--source" in result.output
 
 
@@ -46,7 +46,7 @@ def test_cli_help_contains_timeout_options(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(tmr, ["--help"])
     assert "--timeout" in result.output
     assert "--integrator-timeout" in result.output
-    assert "--max-agents" in result.output
+    assert "--max-parallel-agents" in result.output
 
 
 def _human_output_opts() -> OutputOptions:
