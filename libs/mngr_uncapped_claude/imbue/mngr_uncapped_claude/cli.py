@@ -49,7 +49,6 @@ def uncapped_claude(ctx: click.Context, **_kwargs: Any) -> None:
     except UnsupportedClaudeFlagError as exc:
         logger.error("{}", exc)
         ctx.exit(EXIT_MNGR_ERROR)
-        return
 
     try:
         exit_code = orchestrator_run(
@@ -62,7 +61,6 @@ def uncapped_claude(ctx: click.Context, **_kwargs: Any) -> None:
     except BaseMngrError as exc:
         logger.error("{}", exc)
         ctx.exit(EXIT_MNGR_ERROR)
-        return
 
     ctx.exit(exit_code)
 
