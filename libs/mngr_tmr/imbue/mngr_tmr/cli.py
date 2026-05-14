@@ -124,7 +124,7 @@ class TmrCliOptions(CommonCliOptions):
     integrator_timeout: float
     output_dir: str | None
     source: str | None
-    reintegrate: str | None
+    reintegrate: bool
     run_name: str | None
     additional_authorized_keys: tuple[str, ...]
 
@@ -235,8 +235,10 @@ def _run_reintegrate(
     Discovers agents by the tmr_run_name label, reads their result files,
     re-runs the integrator, and generates a fresh report.
     """
-    assert opts.reintegrate is not None
-    run_name = opts.reintegrate
+    assert opts.reintegrate
+    if not opts.run_name:
+        raise click.UsageError("--reintegrate requires --run-name <NAME> (the run name to reintegrate).")
+    run_name = opts.run_name
     is_human = output_opts.output_format == OutputFormat.HUMAN
     if is_human:
         write_human_line("Reintegrating run: {}", run_name)
@@ -551,17 +553,17 @@ def _run_integrator_phase(
 )
 @click.option(
     "--reintegrate",
-    default=None,
-    help="Re-read outcomes from a previous TMR run (by run name), re-run integrator, and regenerate report. "
-    "Skips test collection and agent launching.",
+    is_flag=True,
+    default=False,
+    help="Re-read outcomes from a previous TMR run, re-run the integrator, and regenerate the report. "
+    "Skips test collection and agent launching. The run to reintegrate is identified by --run-name.",
 )
 @click.option(
     "--run-name",
     default=None,
-    help="Override the auto-generated run name (default: a UTC YYYYMMDDHHMMSS timestamp). "
-    "Mostly useful for orchestration that wants to predict the run's identity ahead of time. "
-    "Names must not collide with prior runs whose agents are still discoverable, "
-    "or agent creation will fail on duplicate names.",
+    help="The run name. For new runs, overrides the auto-generated UTC YYYYMMDDHHMMSS timestamp; "
+    "must not collide with prior runs whose agents are still discoverable, or agent creation will fail. "
+    "For --reintegrate, identifies which previous run to reintegrate (required).",
 )
 @click.option(
     "--additional-authorized-host",
@@ -588,7 +590,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
 
     source_dir = Path(opts.source) if opts.source is not None else Path.cwd()
 
-    if opts.reintegrate is not None:
+    if opts.reintegrate:
         _run_reintegrate(opts, mngr_ctx, output_opts, source_dir)
         return
 
@@ -782,7 +784,7 @@ def _build_run_commands(run_name: str, integrated_branch: str | None = None) -> 
     """Build a list of (label, command) pairs for the run."""
     commands = [
         ("List agents from this run", f"mngr ls --include 'labels.tmr_run_name == \"{run_name}\"'"),
-        ("Reintegrate", f"mngr tmr --reintegrate {run_name}"),
+        ("Reintegrate", f"mngr tmr --reintegrate --run-name {run_name}"),
     ]
     if integrated_branch is not None:
         commands.append(("Push integrated branch", f"git push origin {integrated_branch}"))

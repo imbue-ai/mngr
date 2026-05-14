@@ -89,7 +89,8 @@ jobs:
             -S 'agent_types.yolo.parent_type="claude"' \
             -S 'agent_types.yolo.cli_args=["--dangerously-skip-permissions"]' \
             --agent-type yolo \
-            --reintegrate "${{ inputs.run_name }}" \
+            --reintegrate \
+            --run-name "${{ inputs.run_name }}" \
             --env "MODAL_TOKEN_ID=${MODAL_TOKEN_ID}" \
             --env "MODAL_TOKEN_SECRET=${MODAL_TOKEN_SECRET}" \
             --env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
