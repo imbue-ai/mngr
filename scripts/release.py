@@ -551,7 +551,10 @@ def _gate_release_on_pending_changelog_entries(repo_root: Path, dry_run: bool) -
     print("CHANGELOG.md's [Unreleased] section yet:", file=sys.stderr)
     print(_format_pending_changelog_list(entries, repo_root), file=sys.stderr)
     print(file=sys.stderr)
-    print(f"The '{CHANGELOG_TRIGGER_NAME}' schedule runs nightly at midnight PST (08:00 UTC). To", file=sys.stderr)
+    print(
+        f"The '{CHANGELOG_TRIGGER_NAME}' schedule runs nightly at 08:00 UTC (midnight or 1 AM Pacific, depending on DST). To",
+        file=sys.stderr,
+    )
     print("trigger it on demand instead (opens a PR you can merge before re-running", file=sys.stderr)
     print("this script), run:", file=sys.stderr)
     print(file=sys.stderr)
@@ -615,11 +618,14 @@ def main() -> None:
         parser.error("bump_kind is required: patch, minor, or major")
 
     # On a real run, enforce branch == main before doing anything else.
-    # Skip in --dry-run so users can still preview a release from any
-    # branch (matches the pre-changelog-gate behavior of this script).
-    if not args.dry_run:
-        branch = run("git", "branch", "--show-current")
-        if branch != "main":
+    # In --dry-run, surface a WARNING instead so the user sees they would
+    # be blocked on a real run, but the preview still proceeds (matching
+    # the dry-run-friendly behavior of the changelog gate below).
+    branch = run("git", "branch", "--show-current")
+    if branch != "main":
+        if args.dry_run:
+            print(f"WARNING: not on main branch (currently on {branch}); a real release would fail this check.")
+        else:
             print(f"ERROR: Must be on main branch (currently on {branch})", file=sys.stderr)
             sys.exit(1)
 
