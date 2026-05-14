@@ -14,7 +14,7 @@ Latchkey gateway lifecycle and per-agent setup [experimental].
 Wires the shared Latchkey gateway and per-agent permissions
 without requiring the minds desktop app. Run ``mngr latchkey forward``
 once at startup, then call ``mngr latchkey create-agent-env`` /
-``mngr latchkey link-permissions`` per agent.
+``mngr latchkey link-permissions`` per host.
 
 Settings:
 
@@ -51,9 +51,10 @@ in tunneled mode and emits its result as a single JSON object on stdout:
 }
 ```
 
-Pipe the ``env`` values into ``mngr create --env KEY=VALUE``,
-then call ``mngr latchkey link-permissions`` with the
-``opaque_permissions_path`` and the canonical agent id once
+Pipe the ``env`` values into ``mngr create --host-env KEY=VALUE``
+so every agent on the host inherits the same gateway wiring, then
+call ``mngr latchkey link-permissions`` with the
+``opaque_permissions_path`` and the canonical host id once
 ``mngr create`` returns it. The gateway URL is always the constant
 agent-side loopback URL (``http://127.0.0.1:1989``); there is no
 on-host (DEV) mode -- a running ``mngr latchkey forward`` is
@@ -96,15 +97,15 @@ mngr latchkey create-agent-env [OPTIONS]
 **Wire env vars into mngr create**
 
 ```bash
-$ eval "$(mngr latchkey create-agent-env | jq -r '.env | to_entries[] | "--env \(.key)=\(.value)"')"
+$ eval "$(mngr latchkey create-agent-env | jq -r '.env | to_entries[] | "--host-env \(.key)=\(.value)"')"
 ```
 
 ## mngr latchkey link-permissions
 
-Link an opaque permissions handle to a canonical agent ID.
+Link an opaque permissions handle to a canonical host ID.
 
-Wraps :func:`imbue.mngr_latchkey.agent_setup.finalize_agent_permissions`.
-Idempotent: re-running for the same agent preserves prior grants and
+Wraps :func:`imbue.mngr_latchkey.agent_setup.finalize_host_permissions`.
+Idempotent: re-running for the same host preserves prior grants and
 discards the freshly-created baseline.
 
 **Usage:**
@@ -134,7 +135,7 @@ mngr latchkey link-permissions [OPTIONS]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--agent-id` | text | Canonical agent ID returned by ``mngr create``. | None |
+| `--host-id` | text | Canonical host ID returned by ``mngr create``. | None |
 | `--opaque-path` | path | Opaque permissions handle emitted by ``mngr latchkey create-agent-env``. | None |
 | `--latchkey-binary` | text | Path to the upstream ``latchkey`` CLI. Falls back to $MNGR_LATCHKEY_BINARY, then ``[plugins.latchkey].latchkey_binary`` in settings.toml, then 'latchkey' on PATH. | None |
 | `--latchkey-directory` | path | Root directory for ``LATCHKEY_DIRECTORY`` and the plugin's ``mngr_latchkey/`` metadata subtree. Falls back to $MNGR_LATCHKEY_DIRECTORY, then ``[plugins.latchkey].directory`` in settings.toml, then '~/.mngr/latchkey'. | None |
@@ -142,10 +143,10 @@ mngr latchkey link-permissions [OPTIONS]
 
 ## Examples
 
-**Finalize permissions for a freshly-created agent**
+**Finalize permissions for a freshly-created host**
 
 ```bash
-$ mngr latchkey link-permissions --agent-id $AGENT_ID --opaque-path /path/from/create-agent-env.json
+$ mngr latchkey link-permissions --host-id $HOST_ID --opaque-path /path/from/create-agent-env.json
 ```
 
 ## mngr latchkey forward

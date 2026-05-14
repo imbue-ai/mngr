@@ -13,6 +13,7 @@ from imbue.mngr_modal.errors import ModalMngrError
 from imbue.modal_proxy.data_types import FileEntry as ProxyFileEntry
 from imbue.modal_proxy.data_types import FileEntryType as ProxyFileEntryType
 from imbue.modal_proxy.errors import ModalProxyInternalError
+from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.interface import VolumeInterface
 
@@ -72,6 +73,16 @@ class ModalVolume(BaseVolume):
     def listdir(self, path: str) -> list[VolumeFile]:
         entries = self.modal_volume.listdir(path)
         return [_proxy_file_entry_to_volume_file(e) for e in entries]
+
+    @_translate_transient_proxy_errors
+    def path_exists(self, path: str) -> bool:
+        # Modal has no stat-like primitive; probe via listdir, which accepts
+        # both file and directory paths and raises NotFoundError otherwise.
+        try:
+            self.modal_volume.listdir(path)
+            return True
+        except ModalProxyNotFoundError:
+            return False
 
     @_translate_transient_proxy_errors
     def read_file(self, path: str) -> bytes:

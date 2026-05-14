@@ -5,9 +5,12 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.agent_addr import discover_by_address
+from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
-from imbue.mngr.api.find import find_and_maybe_start_agent_by_name_or_id
+from imbue.mngr.api.find import filter_one_agent
+from imbue.mngr.api.find import materialize_agent
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import AGENT_NAME
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -19,6 +22,7 @@ from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
 
@@ -26,8 +30,8 @@ from imbue.mngr.primitives import OutputFormat
 class RenameCliOptions(CommonCliOptions):
     """Options passed from the CLI to the rename command."""
 
-    current: str
-    new_name: str
+    current: AgentAddress
+    new_name: AgentName
     dry_run: bool
     label: tuple[str, ...] = ()
     # Planned features (not yet implemented)
@@ -64,8 +68,8 @@ def _output_result(
 
 
 @click.command(name="rename")
-@click.argument("current")
-@click.argument("new_name", metavar="NEW-NAME")
+@click.argument("current", type=AGENT_ADDRESS)
+@click.argument("new_name", type=AGENT_NAME, metavar="NEW-NAME")
 @optgroup.group("Behavior")
 @optgroup.option(
     "--dry-run",
@@ -103,11 +107,7 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
     if opts.host:
         raise NotImplementedError("--host is not implemented yet. Currently only agent renaming is supported.")
 
-    # Validate new name
-    try:
-        new_agent_name = AgentName(opts.new_name)
-    except ValueError as e:
-        raise UserInputError(f"Invalid new name: {e}") from None
+    new_agent_name = opts.new_name
 
     # Parse any --label KEY=VALUE pairs to merge in the same write as the rename.
     labels_to_merge: dict[str, str] = {}
@@ -115,11 +115,12 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
         key, value = parse_label_string(label_str)
         labels_to_merge[key] = value
 
-    # Resolve the agent (without requiring the agent process to be running)
-    plain_id, agents_by_host, _ = discover_by_address(opts.current, mngr_ctx)
-    agent, host = find_and_maybe_start_agent_by_name_or_id(
-        plain_id, agents_by_host, mngr_ctx, "rename", skip_agent_state_check=True
-    )
+    # Resolve the agent (without requiring the agent process to be running).
+    # Discovery is run explicitly so the result can also drive the
+    # name-conflict check below.
+    agents_by_host, _ = discover_by_address(opts.current, mngr_ctx)
+    host_ref, agent_ref = filter_one_agent(opts.current.agent, None, agents_by_host)
+    agent, host = materialize_agent(host_ref, agent_ref, mngr_ctx, skip_agent_state_check=True)
 
     old_name = str(agent.name)
 

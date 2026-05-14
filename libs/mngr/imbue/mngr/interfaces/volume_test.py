@@ -27,6 +27,12 @@ class InMemoryVolume(BaseVolume):
                 )
         return results
 
+    def path_exists(self, path: str) -> bool:
+        if path in self.files:
+            return True
+        prefix = path.rstrip("/") + "/"
+        return any(k.startswith(prefix) for k in self.files)
+
     def read_file(self, path: str) -> bytes:
         if path not in self.files:
             raise FileNotFoundError(path)
@@ -193,6 +199,22 @@ def test_scoped_volume_prefix_trailing_slash_stripped() -> None:
     vol = InMemoryVolume(files={"/data/file.txt": b"content"})
     scoped = ScopedVolume(delegate=vol, prefix="/data/")
     assert scoped.read_file("file.txt") == b"content"
+
+
+def test_scoped_volume_path_exists_file(volume_with_files: InMemoryVolume) -> None:
+    scoped = volume_with_files.scoped("/host")
+    assert scoped.path_exists("data.json") is True
+
+
+def test_scoped_volume_path_exists_directory(volume_with_files: InMemoryVolume) -> None:
+    scoped = volume_with_files.scoped("/host")
+    assert scoped.path_exists("agents") is True
+
+
+def test_scoped_volume_path_exists_missing(volume_with_files: InMemoryVolume) -> None:
+    scoped = volume_with_files.scoped("/host")
+    assert scoped.path_exists("nonexistent.txt") is False
+    assert scoped.path_exists("nonexistent_dir") is False
 
 
 # =============================================================================
