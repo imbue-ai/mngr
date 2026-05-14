@@ -1,0 +1,1 @@
+Fix mngr claude agents losing the user's `permissions.defaultMode` (e.g. `"auto"`) from `~/.claude/settings.json` when an agent type's `settings_overrides` re-specifies any key under `permissions` (such as `allow`). The per-agent `settings.json` builder now deep-merges `settings_overrides` so that nested sibling keys not present in the override are preserved from the base.

@@ -4066,6 +4066,29 @@ def test_build_settings_json_local_context_no_flags() -> None:
     assert "fastMode" not in data
 
 
+def test_build_settings_json_preserves_nested_sibling_keys() -> None:
+    """settings_overrides supplying a subset of nested keys preserves sibling keys.
+
+    Regression test: when the user's ~/.claude/settings.json sets
+    permissions.defaultMode (e.g. "auto") and an agent-type config provides
+    settings_overrides.permissions.allow, the resulting per-agent settings.json
+    must still contain defaultMode -- a shallow update would wipe it out.
+    """
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(json.dumps({"permissions": {"allow": ["Read"], "defaultMode": "auto"}}))
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions": {"allow": ["Read", "Edit", "Write"]}},
+    )
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    data = json.loads(content)
+    assert data["permissions"]["defaultMode"] == "auto"
+    assert data["permissions"]["allow"] == ["Read", "Edit", "Write"]
+
+
 # =============================================================================
 # Volume-based session preservation tests
 # =============================================================================

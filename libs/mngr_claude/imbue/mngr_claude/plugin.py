@@ -421,6 +421,25 @@ def _rewrite_installed_plugins_paths(content: str, source_claude_dir: Path, targ
     return json.dumps(data, indent=2) + "\n"
 
 
+def _deep_merge_settings(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    """Recursively merge ``override`` into a copy of ``base``.
+
+    Nested dicts are merged key-by-key so that sibling keys not present in
+    ``override`` (e.g. ``permissions.defaultMode`` from the user's
+    ``~/.claude/settings.json``) survive when only a subset of inner keys
+    (e.g. ``permissions.allow``) is supplied via ``settings_overrides``. Lists
+    and scalars in ``override`` replace the corresponding value in ``base``.
+    """
+    merged = copy.deepcopy(base)
+    for key, override_value in override.items():
+        base_value = merged.get(key)
+        if isinstance(base_value, dict) and isinstance(override_value, Mapping):
+            merged[key] = _deep_merge_settings(base_value, override_value)
+        else:
+            merged[key] = copy.deepcopy(override_value)
+    return merged
+
+
 def _build_settings_json(
     source_claude_dir: Path,
     config: ClaudeAgentConfig,
@@ -432,6 +451,10 @@ def _build_settings_json(
     Uses the local file as a base when sync_local is True and the file exists,
     otherwise uses generated defaults. Applies context-dependent flags
     (e.g. skipDangerousModePermissionPrompt for unattended) and user overrides.
+
+    ``settings_overrides`` is deep-merged so that supplying a subset of nested
+    keys (e.g. ``permissions.allow``) preserves sibling keys already present in
+    the base (e.g. the user's ``permissions.defaultMode``).
     """
     source = source_claude_dir / "settings.json"
     if sync_local and source.exists():
@@ -443,7 +466,7 @@ def _build_settings_json(
     else:
         data = _generate_claude_home_settings()
     data.update(compute_settings_json_flags(ctx))
-    data.update(config.settings_overrides)
+    data = _deep_merge_settings(data, config.settings_overrides)
     return json.dumps(data, indent=2) + "\n"
 
 
