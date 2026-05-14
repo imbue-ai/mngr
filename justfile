@@ -287,20 +287,22 @@ devminds-start agent_name="mindtest" branch="":
     vendor_mngr="$fct_wt/vendor/mngr"
     mkdir -p "$vendor_mngr"
     echo "Syncing $(pwd) -> $vendor_mngr (rsync, uncommitted-friendly, no FCT commit)"
-    # Exclusions must match _RSYNC_EXCLUDES in libs/mngr_imbue_cloud/.../cli/admin.py
-    # and the propagate_changes script -- all three paths populate the same
-    # vendor/mngr/ destination and need to stay in sync.
+    # Exclusions must match _RSYNC_MANUAL_EXCLUDES + _GITIGNORE_RSYNC_FILTER
+    # in libs/mngr_imbue_cloud/.../cli/admin.py and apps/minds/.../cli/pool.py,
+    # and the RSYNC_EXCLUDES array in apps/minds/scripts/propagate_changes --
+    # all four paths populate the same vendor/mngr/ destination.
+    #
+    # `--filter=:- .gitignore` reads .gitignore at each directory level under
+    # the source and applies its exclude rules, so __pycache__, .venv,
+    # node_modules, .test_output, .mypy_cache, .ruff_cache, .pytest_cache,
+    # .external_worktrees, etc. are all covered without listing them here.
+    # `.git` and `uv.lock` aren't in .gitignore (`.git` is git's internal
+    # dir; `uv.lock` is intentionally committed but each install context
+    # regenerates its own), so we exclude those manually.
     rsync -a --delete \
+        --filter=':- .gitignore' \
         --exclude=.git \
-        --exclude=__pycache__ \
-        --exclude=.venv \
-        --exclude=node_modules \
-        --exclude=.test_output \
-        --exclude=.mypy_cache \
-        --exclude=.ruff_cache \
-        --exclude=.pytest_cache \
         --exclude=uv.lock \
-        --exclude=.external_worktrees \
         ./ "$vendor_mngr/"
     export MINDS_ROOT_NAME=devminds
     # Delegate to minds-start to keep the env-loading / MINDS_WORKSPACE_*
@@ -370,8 +372,22 @@ minds-start agent_name="mindtest" branch="":
     cd apps/minds && pnpm start
 
 # Stop the minds desktop client started in this worktree by `just minds-start`.
-# Reads the PID file written by minds-start and SIGTERMs the recipe shell;
-# pnpm and electron follow on cascade. Idempotent (no-op if nothing running).
+# Reads the PID file written by minds-start, snapshots the full descendant
+# tree (so we can verify it cleans up even if signal propagation is
+# imperfect), SIGTERMs the recipe shell, then waits up to 10s for the whole
+# tree to exit. Any descendants still alive after the grace period get
+# SIGKILL'd individually -- the recipe is NOT considered done until the
+# entire tree is gone. Idempotent (no-op if nothing running).
+#
+# Why we have to verify the descendants, not just the recipe shell:
+#   bash's default behavior on SIGTERM forwards the signal to its
+#   foreground child, and pnpm / node / electron usually propagate down to
+#   the rest of the tree. But the propagation isn't guaranteed -- we've
+#   seen at least one case where killing the recipe shell left electron +
+#   uv-run-minds as orphans. The earlier version of this recipe declared
+#   success as soon as the recipe shell exited, which masked that failure
+#   mode. Now we explicitly check that nothing under the recipe shell
+#   survives.
 minds-stop:
     #!/bin/bash
     set -ueo pipefail
@@ -386,18 +402,32 @@ minds-stop:
         rm -f "$pid_file"
         exit 0
     fi
-    echo "Stopping minds-start (pid=$pid)"
+    # Snapshot the full descendant tree before sending SIGTERM. pstree
+    # walks PPID links and gives us PIDs in flat form via `-p -T`.
+    descendants=$(pstree -p -T "$pid" 2>/dev/null | grep -oE '\([0-9]+\)' | tr -d '()' | sort -u)
+    echo "Stopping minds-start (pid=$pid, descendants=$(echo $descendants | tr '\n' ' '))"
     kill "$pid"
-    # Wait up to 10s for graceful shutdown, then SIGKILL.
+    # Wait up to 10s for the whole tree to exit (not just the recipe shell).
     for i in $(seq 1 10); do
-        if ! kill -0 "$pid" 2>/dev/null; then
+        still_alive=""
+        for descendant in $descendants; do
+            if kill -0 "$descendant" 2>/dev/null; then
+                still_alive="$still_alive $descendant"
+            fi
+        done
+        if [ -z "$still_alive" ]; then
             rm -f "$pid_file"
             exit 0
         fi
         sleep 1
     done
-    echo "minds-start (pid=$pid) did not exit after SIGTERM; sending SIGKILL"
-    kill -9 "$pid" 2>/dev/null || true
+    # Force-kill anything that survived the grace period. Each kill targets
+    # a specific PID we observed under the recipe shell -- never a broad
+    # pgrep-style match.
+    echo "Tree did not exit after 10s SIGTERM grace; force-killing leftovers:$still_alive"
+    for descendant in $still_alive; do
+        kill -9 "$descendant" 2>/dev/null || true
+    done
     rm -f "$pid_file"
 
 # Build the minds desktop client distributable (slow; uses todesktop).

@@ -159,8 +159,18 @@ If this chain breaks (orphaned `mngr observe`/`mngr event` processes appear), so
 
 ### Rsync exclusions
 
-`devminds-start`, `mngr imbue_cloud admin pool create --mngr-source ...`, and `propagate_changes` all share the same exclusions when rsyncing into `vendor/mngr/`:
-`.git`, `__pycache__`, `.venv`, `node_modules`, `.test_output`, `.mypy_cache`, `.ruff_cache`, `.pytest_cache`, `uv.lock`, `.external_worktrees`.
+`devminds-start`, `mngr imbue_cloud admin pool create --mngr-source ...`, and `propagate_changes` all share one form when rsyncing into `vendor/mngr/`:
+
+```
+rsync -a --delete --filter=':- .gitignore' --exclude=.git --exclude=uv.lock ...
+```
+
+`--filter=':- .gitignore'` is rsync's dir-merge filter: it reads `.gitignore` at each directory level under the source and applies its `-` (exclude) rules. That covers `__pycache__`, `.venv`, `node_modules`, `.test_output`, `.mypy_cache`, `.ruff_cache`, `.pytest_cache`, `.external_worktrees`, and anything else listed in the source repo's gitignore.
+
+The two manual excludes are for things gitignore deliberately doesn't list:
+
+- `.git` -- gitignore never lists it (git's internal dir).
+- `uv.lock` -- intentionally committed at the mngr root, but each install context should regenerate its own.
 
 `propagate_changes` additionally protects `runtime/`, `.mngr/`, and `.claude/settings.local.json` from deletion when rsyncing into `/code/`.
 
@@ -199,10 +209,8 @@ git worktree add /path/to/mngr/worktree/.external_worktrees/forever-claude-templ
 
 ```bash
 rsync -a --delete \
-    --exclude='.git' --exclude='__pycache__' --exclude='.venv' \
-    --exclude='node_modules' --exclude='.test_output' --exclude='.mypy_cache' \
-    --exclude='.ruff_cache' --exclude='.pytest_cache' --exclude='uv.lock' \
-    --exclude='.external_worktrees' \
+    --filter=':- .gitignore' \
+    --exclude=.git --exclude=uv.lock \
     ./ .external_worktrees/forever-claude-template/vendor/mngr/
 ```
 
