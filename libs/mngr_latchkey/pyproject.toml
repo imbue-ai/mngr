@@ -30,6 +30,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
 exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
+# ``.mjs`` files under ``imbue/mngr_latchkey/extensions/`` are picked up
+# by hatchling's default file selection (the package dir is included
+# verbatim modulo ``exclude``). They are copied into the spawned latchkey
+# gateway's extension directory at runtime by ``Latchkey._spawn_gateway``.
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }

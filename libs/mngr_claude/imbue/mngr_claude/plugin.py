@@ -19,6 +19,7 @@ from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Callable
+from typing import ClassVar
 from typing import Final
 
 import click
@@ -33,7 +34,8 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
-from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -1338,8 +1340,29 @@ class CostThresholdDialogIndicator(DialogIndicator):
         return self._MATCH_SPENDING_TEXT in content and self._MATCH_DOCS_URL in content
 
 
-class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
+class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
     """Agent implementation for Claude with session resumption support."""
+
+    TUI_READY_INDICATOR = "Claude Code"
+
+    # Path template for the transcript event log, passed through to
+    # send_enter_via_tmux_wait_for_hook as the fallback source when the
+    # UserPromptSubmit hook misfires. The bash command in tui_utils evaluates
+    # the embedded $MNGR_AGENT_STATE_DIR on the host. Claude-specific.
+    _QUEUE_LOG_PATH_TEMPLATE: ClassVar[str] = "$MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"
+
+    def _send_enter_and_validate(self, tmux_target: str) -> None:
+        # Claude wires a UserPromptSubmit hook that fires `tmux wait-for -S`
+        # on the per-session channel; wait for it. If the hook misfires
+        # (occasionally happens while another message is being processed),
+        # fall back to checking the transcript log for a fresh enqueue.
+        send_enter_via_tmux_wait_for_hook(
+            self,
+            tmux_target,
+            wait_channel=f"mngr-submit-{self.session_name}",
+            timeout_seconds=self.enter_submission_timeout_seconds,
+            queue_log_path_template=self._QUEUE_LOG_PATH_TEMPLATE,
+        )
 
     @classmethod
     def preflight_check(
@@ -1411,25 +1434,6 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         shell command with exports and fallbacks, but the actual process is always 'claude'.
         """
         return "claude"
-
-    def uses_paste_detection_send(self) -> bool:
-        """Enable paste-detection send_message for Claude Code.
-
-        Claude Code echoes input to the terminal and has a complex input handler
-        that can misinterpret Enter as a literal newline if sent too quickly after
-        the message text. The paste-detection approach waits for the pasted content
-        to appear on screen before submitting.
-        """
-        return True
-
-    def get_tui_ready_indicator(self) -> str | None:
-        """Return Claude Code's banner text as the TUI ready indicator.
-
-        Claude Code displays "Claude Code" in its banner when the TUI is ready.
-        Waiting for this ensures we don't send input before the UI is fully rendered,
-        which would cause the input to be lost or appear as raw text.
-        """
-        return "Claude Code"
 
     _DIALOG_INDICATORS: tuple[DialogIndicator, ...] = (
         TrustDialogIndicator(),
@@ -2053,12 +2057,12 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Adopt sessions when --adopt-session is used.
+        """Adopt a session so the agent's claude resumes existing context.
 
-        For each specified session, searches the user's Claude config directory
-        by ID (or reads a .jsonl path directly), copies the containing project
-        directory into this agent's Claude config dir, and writes the last
-        session ID so --resume picks it up.
+        Dispatches to ``_adopt_explicit_sessions`` (``--adopt-session``)
+        or ``_adopt_cloned_session`` (``--from <agent>``); both end in
+        ``_finalize_adopted_session``. The combination is rejected
+        upstream in ``on_before_create``.
 
         Destination resolution depends on ``use_env_config_dir``:
         - Default (``False``): copies into the per-agent config dir at
@@ -2070,21 +2074,35 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
           modifies existing user files.
         """
         adopt_session_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
-        if not adopt_session_args:
-            return
+        assert not (adopt_session_args and options.source_agent_state_location is not None), (
+            "--adopt-session and --from <agent> are mutually exclusive (should have been rejected by on_before_create)"
+        )
+        if adopt_session_args:
+            self._adopt_explicit_sessions(host, adopt_session_args)
+        if options.source_agent_state_location is not None:
+            self._adopt_cloned_session(host, options.source_agent_state_location)
 
+    def _adopt_explicit_sessions(
+        self,
+        host: OnlineHostInterface,
+        adopt_session_args: tuple[str, ...],
+    ) -> None:
+        """Position sessions named on the command line under the destination's
+        encoded project dir and finalize. Used by ``--adopt-session``.
+        """
         config_dir = self.get_claude_config_dir()
         copied_project_dirs: set[str] = set()
-        # Claude Code organizes sessions by encoded working directory path.
-        # Place adopted sessions under the project dir matching this agent's
-        # work_dir so that `claude --resume` can find them.
-        dest_project_name = encode_claude_project_dir_name(self.work_dir)
+        # Claude Code organizes sessions by encoded working directory path,
+        # so place adopted sessions under the project dir matching this
+        # agent's work_dir; see ``_resolve_work_dir_on_host`` for why we
+        # resolve through symlinks.
+        dest_project_name = encode_claude_project_dir_name(self._resolve_work_dir_on_host())
+        dest_project_dir = config_dir / "projects" / dest_project_name
 
         for arg in adopt_session_args:
             session_id, source_project_dir = _resolve_adopt_session(arg)
             # Deduplicate project dir copies (multiple sessions may be in the same project)
             if source_project_dir.name not in copied_project_dirs:
-                dest_project_dir = config_dir / "projects" / dest_project_name
                 with log_span("Adopting session {}", session_id):
                     host.copy_directory(host, source_project_dir, dest_project_dir)
                 copied_project_dirs.add(source_project_dir.name)
@@ -2092,21 +2110,29 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         assert last_session_id is not None, "adopt_session_args was non-empty but no session ID was set"
 
-        # Remove the sessions-index.json copied from the source project dir.
-        # It contains stale entries pointing to the source paths and project,
-        # and its presence prevents Claude Code from discovering the adopted
-        # session files. Claude Code rebuilds the index on next startup.
-        dest_project_dir = config_dir / "projects" / dest_project_name
-        stale_index = dest_project_dir / "sessions-index.json"
-        host.execute_idempotent_command(f"rm -f {shlex.quote(str(stale_index))}")
-
-        host.write_text_file(self._get_agent_dir() / "claude_session_id", last_session_id)
+        self._finalize_adopted_session(host, dest_project_dir, last_session_id)
         logger.info("Adopted {} session(s), active session: {}", len(adopt_session_args), last_session_id)
 
+    def _finalize_adopted_session(
+        self,
+        host: OnlineHostInterface,
+        adopted_project_dir: Path,
+        adopted_session_id: str,
+    ) -> None:
+        """Drop the stale ``sessions-index.json`` (claude rebuilds it; the
+        rsynced one points at source paths and blocks lookup of the
+        adopted session) and write ``claude_session_id`` so the startup
+        ``claude --resume "$MAIN_CLAUDE_SESSION_ID"`` targets it.
+        """
+        stale_index = adopted_project_dir / "sessions-index.json"
+        host.execute_idempotent_command(f"rm -f {shlex.quote(str(stale_index))}", timeout_seconds=5.0)
+        host.write_text_file(self._get_agent_dir() / "claude_session_id", adopted_session_id)
+
     def _transfer_source_plugin_data(self, source_agent_state_location: HostLocation) -> None:
-        """Copy the source agent's plugin/ directory into this agent's state
-        directory. Runs before _setup_per_agent_config_dir, which overwrites
-        identity-specific config files with fresh values for the new agent.
+        """Rsync the source agent's ``plugin/`` into this agent's state dir.
+        Runs before ``_setup_per_agent_config_dir`` (which overwrites
+        identity-specific files); the destination-side rewiring runs later
+        in ``on_after_provisioning`` via ``_adopt_cloned_session``.
         """
         source_host = source_agent_state_location.host
         source_plugin_dir = source_agent_state_location.path / "plugin"
@@ -2118,6 +2144,115 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         with log_span("Transferring source plugin data"):
             self.host.copy_directory(source_host, source_plugin_dir, dest_plugin_dir)
+
+    def _resolve_work_dir_on_host(self) -> Path:
+        """Return ``self.work_dir`` with symlinks resolved as the destination
+        host sees it. On Modal, ``/mngr/projects/agent-<uuid>`` is a symlink
+        onto ``/__modal/volumes/<vol-id>/projects/agent-<uuid>``; claude
+        uses the resolved form for its cwd and per-project storage.
+
+        Falls back to the unresolved path on ``readlink -f`` failure, but
+        warns -- on a host where the canonical path differs, the fallback
+        will silently break clone-resume.
+        """
+        result = self.host.execute_idempotent_command(
+            f"readlink -f {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0
+        )
+        if result.success and result.stdout.strip():
+            return Path(result.stdout.strip())
+        logger.warning(
+            "readlink -f {} failed (success={}, stderr={!r}); falling back to unresolved path",
+            self.work_dir,
+            result.success,
+            result.stderr.strip(),
+        )
+        return self.work_dir
+
+    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> None:
+        """Rewire the rsynced plugin/ so ``claude --resume`` finds the source's session.
+
+        After ``_transfer_source_plugin_data`` rsyncs the source's
+        ``plugin/``, the JSONL is filed under the *source* agent's
+        encoded work_dir; claude on the destination searches under
+        ``projects/<dest-encoded-work-dir>/`` so it can't see it.
+
+        This method discovers the source's active session source-side
+        (``ls -t``, so we can bail without a second destination round-trip
+        if there's nothing to adopt), carries ``claude_session_id_history``
+        forward, renames the project subdir to the destination's encoded
+        work_dir, and hands off to ``_finalize_adopted_session``.
+
+        Session id comes from the JSONL filename, not the source's
+        ``claude_session_id`` file: ``claude -p`` ignores ``--session-id``
+        and auto-generates its own, so the file (defaulted to the agent
+        UUID by the SessionStart hook) disagrees with the JSONL on disk.
+        """
+        source_host = source_location.host
+        source_state_dir = source_location.path
+
+        # Carry the source's claude_session_id_history forward so the
+        # destination's history reflects the prior run.
+        source_history_path = source_state_dir / "claude_session_id_history"
+        if source_host.path_exists(source_history_path):
+            host.write_text_file(
+                self._get_agent_dir() / "claude_session_id_history",
+                source_host.read_text_file(source_history_path),
+            )
+
+        # Layout: plugin/claude/anthropic/projects/<encoded-work-dir>/<sid>.jsonl.
+        # The shallow ``*/*.jsonl`` glob excludes nested subagent transcripts
+        # at ``<sid>/subagents/agent-X.jsonl``.
+        source_projects_dir = source_state_dir / "plugin" / "claude" / "anthropic" / "projects"
+        latest_on_source = source_host.execute_idempotent_command(
+            f"ls -t {shlex.quote(str(source_projects_dir))}/*/*.jsonl 2>/dev/null | head -n1",
+            timeout_seconds=5.0,
+        )
+        if not (latest_on_source.success and latest_on_source.stdout.strip()):
+            # Either the source has no sessions (cloned agent gets a fresh
+            # claude session) or the ``ls`` failed; surface either case so
+            # a silent regression doesn't hide as DEBUG noise.
+            logger.warning(
+                "Clone adopt: no session JSONL found at source {} (ls success={}, stderr={!r}); "
+                "cloned agent will start a fresh claude session",
+                source_projects_dir,
+                latest_on_source.success,
+                latest_on_source.stderr.strip(),
+            )
+            return
+        latest_path = Path(latest_on_source.stdout.strip())
+        source_project_name = latest_path.parent.name
+        adopted_session_id = latest_path.stem
+
+        # Rename source-encoded project subdir to the destination's encoded
+        # work_dir. Same host, so a plain ``mv`` is enough. Refuse to
+        # clobber a pre-existing target: collision means the source had a
+        # multi-cwd setup whose encoded name coincidentally matched ours,
+        # and silent clobber would risk losing data we don't realize is there.
+        dest_projects_dir = self._get_agent_dir() / "plugin" / "claude" / "anthropic" / "projects"
+        dest_project_name = encode_claude_project_dir_name(self._resolve_work_dir_on_host())
+        if source_project_name != dest_project_name:
+            source_subdir = dest_projects_dir / source_project_name
+            target_dir = dest_projects_dir / dest_project_name
+            if host.path_exists(target_dir):
+                logger.warning(
+                    "Refusing to rekey cloned project subdir {} -> {}: target dir already exists. "
+                    "Cloned agent will not resume the source's session.",
+                    source_subdir,
+                    target_dir,
+                )
+                return
+            rename_cmd = f"mv {shlex.quote(str(source_subdir))} {shlex.quote(str(target_dir))}"
+            rename_result = host.execute_idempotent_command(rename_cmd, timeout_seconds=10.0)
+            if not rename_result.success:
+                logger.warning(
+                    "Failed to rekey cloned project subdir {} -> {}: {}",
+                    source_subdir,
+                    target_dir,
+                    rename_result.stderr.strip(),
+                )
+                return
+
+        self._finalize_adopted_session(host, dest_projects_dir / dest_project_name, adopted_session_id)
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve session files and clean up per-agent credentials and trust entries.
@@ -2598,10 +2733,9 @@ def register_cli_options(command_name: str) -> Mapping[str, list[OptionStackItem
 
 @hookimpl
 def on_before_create(args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
-    """Validate create args when --adopt-session is used.
-
-    When plugin_data contains "adopt_session":
-    - Validates the agent type is claude (or unset/default)
+    """Validate create args when --adopt-session is used: agent type must
+    be claude (or unset), and the option is incompatible with cloning via
+    ``--from <agent>`` (both adopt a session into the new agent).
     """
     adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
     if not adopt_session:
@@ -2610,6 +2744,12 @@ def on_before_create(args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
     agent_type = args.agent_options.agent_type
     if agent_type is not None and str(agent_type) != "claude":
         raise UserInputError(f"--adopt-session can only be used with the claude agent type, not '{agent_type}'.")
+
+    if args.agent_options.source_agent_state_location is not None:
+        raise UserInputError(
+            "--adopt-session is incompatible with cloning via --from <agent>: both "
+            "adopt a session into the new agent. Pick one."
+        )
 
     return None
 
