@@ -26,6 +26,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import TextIO
 from typing import cast
 
 import httpx
@@ -467,7 +468,7 @@ def _pluralize_entry(count: int) -> str:
     return "entry" if count == 1 else "entries"
 
 
-def _print_on_demand_consolidation_command(file: Any = None) -> None:
+def _print_on_demand_consolidation_command(file: TextIO | None = None) -> None:
     """Print the one-liner that triggers an on-demand consolidation run.
 
     Equivalent to the example invocation in ``setup_changelog_agent.sh``'s
