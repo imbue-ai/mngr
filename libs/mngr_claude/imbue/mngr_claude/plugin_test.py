@@ -1846,6 +1846,73 @@ def test_on_destroy_handles_no_session_data(
     assert not dest_dir.exists()
 
 
+def test_on_destroy_skips_keychain_cleanup_in_shared_mode(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In shared mode, on_destroy must NOT call the macOS keychain delete -- the
+    shared $CLAUDE_CONFIG_DIR exists, so the per-agent-keychain branch would
+    otherwise hash the user's own config dir and delete the user's real
+    credentials.
+    """
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+    )
+
+    delete_calls: list[str] = []
+
+    def _fake_delete(label: str, _cg: object) -> bool:
+        delete_calls.append(label)
+        return False
+
+    with (
+        patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True),
+        patch(f"{_CLAUDE_AGENT_MODULE}._delete_macos_keychain_credential", side_effect=_fake_delete),
+    ):
+        agent.on_destroy(host)
+
+    assert delete_calls == []
+
+
+def test_on_destroy_still_calls_keychain_cleanup_in_default_mode(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Default (per-agent) mode must keep invoking the macOS keychain delete on
+    its own per-agent config dir -- this is the existing behavior, kept stable
+    by the shared-mode fix.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    # Ensure per-agent config dir exists on disk so the keychain branch fires.
+    agent.get_claude_config_dir().mkdir(parents=True, exist_ok=True)
+
+    delete_calls: list[str] = []
+
+    def _fake_delete(label: str, _cg: object) -> bool:
+        delete_calls.append(label)
+        return False
+
+    with (
+        patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True),
+        patch(f"{_CLAUDE_AGENT_MODULE}._delete_macos_keychain_credential", side_effect=_fake_delete),
+    ):
+        agent.on_destroy(host)
+
+    # Two labels: API key and OAuth credentials.
+    assert len(delete_calls) == 2
+    assert any(label.startswith("Claude Code-") for label in delete_calls)
+    assert any(label.startswith("Claude Code-credentials-") for label in delete_calls)
+
+
 @pytest.mark.rsync
 def test_preserve_session_files_partial_data(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext

@@ -2122,6 +2122,13 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         (the config dir itself is deleted with the agent state).
         For legacy agents without per-agent config dirs: cleans up the global
         ~/.claude.json trust entry.
+
+        In ``use_env_config_dir`` mode: skip keychain / trust cleanup entirely.
+        ``get_claude_config_dir()`` resolves to the user's shared $CLAUDE_CONFIG_DIR,
+        which exists, so the per-agent-keychain branch would otherwise compute the
+        same label hash Claude Code itself uses and delete the user's real
+        credentials. Since provision() never wrote any per-agent keychain or
+        trust entries in this mode, there is nothing for us to clean up.
         """
         # Preserve session files before the state dir is deleted
         if self.agent_config.preserve_sessions_on_destroy:
@@ -2129,6 +2136,12 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                 _preserve_session_files(self, host)
             except (MngrError, OSError) as e:
                 logger.warning("Failed to preserve session files for agent {}: {}", self.name, e)
+
+        if self.agent_config.use_env_config_dir:
+            # Shared-config mode: mngr never wrote per-agent keychain entries or
+            # ~/.claude.json trust markers, so there is nothing to clean up. Any
+            # keychain delete here would target the user's own credentials.
+            return
 
         config_dir = self.get_claude_config_dir()
         per_agent_config_exists = host.execute_idempotent_command(
