@@ -182,17 +182,25 @@ def _run_with_agent(
         logger.error("Cannot read events for agent {} (no online host or volume)", agent.name)
         return state, EXIT_MNGR_ERROR
 
+    final_state: AgentLifecycleState
     with _DestroyOnSignal(state=state):
         try:
-            _wait_for_turn_end(agent, events_target, writer)
+            final_state = _wait_for_turn_end(agent, events_target, writer)
             for next_prompt in remaining_prompts:
                 _send_user_turn(mngr_ctx, agent, next_prompt)
-                _wait_for_turn_end(agent, events_target, writer)
+                final_state = _wait_for_turn_end(agent, events_target, writer)
         except (MngrError, BaseMngrError) as exc:
             logger.error("Run failed: {}", exc)
             meta = _build_result_meta(start_time, agent_id=str(agent.id), error_text=str(exc))
             writer.finalize(meta)
             return state, EXIT_MNGR_ERROR
+
+    if final_state != AgentLifecycleState.WAITING:
+        error_text = f"agent ended in state {final_state.value} before reaching WAITING"
+        logger.error("{}", error_text)
+        meta = _build_result_meta(start_time, agent_id=str(agent.id), error_text=error_text)
+        writer.finalize(meta)
+        return state, EXIT_CLAUDE_ERROR
 
     meta = _build_result_meta(start_time, agent_id=str(agent.id), error_text=None)
     writer.finalize(meta)
@@ -251,19 +259,25 @@ def _wait_for_turn_end(
     agent: AgentInterface[Any],
     events_target: EventsTarget,
     writer: StreamingOutputWriter,
-) -> None:
-    """Poll the agent until it reaches WAITING (or a terminal state); stream events meanwhile."""
+) -> AgentLifecycleState:
+    """Poll the agent until it reaches WAITING (or a terminal state); stream events meanwhile.
+
+    Returns the final lifecycle state observed. WAITING means the agent
+    paused for the next user turn; STOPPED or DONE mean the agent exited
+    prematurely (the caller treats this as a claude-side failure).
+    """
     seen_chars = 0
     parser_warner = MalformedJsonLineWarner(source_description=f"common transcript for agent {agent.name}")
-    is_done = False
-    while not is_done:
+    final_state: AgentLifecycleState | None = None
+    while final_state is None:
         seen_chars = _drain_new_events(events_target, writer, parser_warner, seen_chars)
         state = agent.get_lifecycle_state()
         if state in (AgentLifecycleState.WAITING, AgentLifecycleState.STOPPED, AgentLifecycleState.DONE):
             _drain_new_events(events_target, writer, parser_warner, seen_chars)
-            is_done = True
+            final_state = state
         else:
             time.sleep(_POLL_INTERVAL_SECONDS)
+    return final_state
 
 
 def _drain_new_events(

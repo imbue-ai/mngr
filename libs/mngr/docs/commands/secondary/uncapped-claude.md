@@ -34,8 +34,8 @@ command to exit with code 2:
 - --session-id
 
 Exit codes:
-  0 - Successful turn (no claude or api error)
-  1 - claude or api error reported in the transcript
+  0 - Successful turn (agent reached WAITING with a reply)
+  1 - The spawned claude agent exited before completing the turn
   2 - mngr-side failure (bad flags, missing prompt, agent failed to start, etc.)
 
 **Usage:**
