@@ -83,7 +83,6 @@ class _ProbeAgent(BaseAgent[AgentTypeConfig]):
     captured_commands: list[str] = pydantic.Field(default_factory=list)
     pane_capture_count: int = pydantic.Field(default=0)
     always_missing_indicator: bool = pydantic.Field(default=False)
-    command_succeeds: bool = pydantic.Field(default=True)
 
     def _capture_pane_content(self, tmux_target: str, include_scrollback: bool = False) -> str | None:
         self.pane_capture_count += 1
