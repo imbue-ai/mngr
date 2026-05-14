@@ -169,6 +169,39 @@ Fields:
   (matching the --mngr-e2e-run-name used) and description_markdown (brief
   description of what this run was for).
 
+# Publishing the outputs archive
+
+After the outcome file is written, package the outputs and publish them
+where the orchestrator can find them. Run this from the git repo root:
+
+```bash
+ARCHIVE_DIR="$MNGR_AGENT_STATE_DIR/plugin/{PLUGIN_NAME}"
+mkdir -p "$ARCHIVE_DIR"
+
+STAGING=$(mktemp -d)
+trap 'rm -rf "$STAGING"' EXIT
+
+# Rename .test_output -> test_output inside the archive
+cp -a .test_output "$STAGING/test_output"
+
+# Include an incremental git bundle if any commits exist beyond the base.
+# The bundle is created with the explicit branch name so the orchestrator
+# can fetch ``$BRANCH:$BRANCH`` cleanly.
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [ -n "$(git rev-list --max-count=1 "$MNGR_GIT_BASE_BRANCH..$BRANCH" 2>/dev/null)" ]; then
+    git bundle create "$STAGING/branch.bundle" "$MNGR_GIT_BASE_BRANCH..$BRANCH"
+fi
+
+TARBALL="$ARCHIVE_DIR/outputs.tar.gz"
+tar -czf "$TARBALL.tmp" -C "$STAGING" .
+mv "$TARBALL.tmp" "$TARBALL"
+```
+
+This MUST be the very last step. The orchestrator polls for outputs.tar.gz
+and treats its appearance as the signal that you are done. The .tmp + rename
+sequence prevents the orchestrator from reading a half-written archive. Omit
+branch.bundle when you made no commits beyond the base branch.
+
 # Important: do not ask for user input
 
 For this initial request, do NOT ask the user for any input or clarification.

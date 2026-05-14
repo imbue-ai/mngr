@@ -51,6 +51,9 @@ class LocalVolume(BaseVolume):
             )
         return entries
 
+    def path_exists(self, path: str) -> bool:
+        return self._resolve(path).exists()
+
     def read_file(self, path: str) -> bytes:
         resolved = self._resolve(path)
         return resolved.read_bytes()

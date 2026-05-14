@@ -134,6 +134,21 @@ def test_scoped_listdir_works_when_root_path_is_symlink(symlink_volume: LocalVol
     assert entries[0].file_type == VolumeFileType.DIRECTORY
 
 
+def test_path_exists_returns_true_for_file(volume: LocalVolume) -> None:
+    volume.write_files({"hello.txt": b"world"})
+    assert volume.path_exists("hello.txt") is True
+
+
+def test_path_exists_returns_true_for_directory(volume: LocalVolume) -> None:
+    volume.write_files({"sub/file.txt": b"x"})
+    assert volume.path_exists("sub") is True
+
+
+def test_path_exists_returns_false_for_missing(volume: LocalVolume) -> None:
+    assert volume.path_exists("nonexistent.txt") is False
+    assert volume.path_exists("missing/dir") is False
+
+
 def test_path_traversal_blocked(volume: LocalVolume) -> None:
     """Paths with '..' that escape the volume root should be rejected."""
     with pytest.raises(MngrError, match="escapes volume root"):
