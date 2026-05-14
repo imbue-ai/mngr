@@ -86,9 +86,9 @@
 - Audit any other consumer of the raw agents list — anywhere that reads the websocket `agents_updated` payload or the `/api/agents` response — and route through the same selector so no component bypasses the filter.
 - No backend changes to `/api/agents`, the websocket `agents_updated` broadcast, or `create_chat_agent`'s primary-agent lookup — those still need to see the services agent.
 
-### `forever-claude-template/apps/minds/imbue/minds/desktop_client/agent_creator.py` (if applicable)
+### `apps/minds/imbue/minds/desktop_client/agent_creator.py`
 
-- Audit only — the local desktop-side creator currently passes `--label is_primary=true` (line 454) for the main agent. That stays. No change.
+- Audit only — the local desktop-side creator (in this mngr repo, not in FCT) currently passes `--label is_primary=true` (line 454) for the main agent. That stays. No change.
 
 ### Documentation
 
