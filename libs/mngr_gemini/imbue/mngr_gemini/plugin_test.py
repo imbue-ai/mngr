@@ -23,20 +23,20 @@ def test_gemini_agent_config_has_correct_defaults() -> None:
     config = GeminiAgentConfig()
 
     assert str(config.command) == "gemini"
-    assert config.cli_args == ()
+    assert config.cli_args == ("--skip-trust",)
     assert config.permissions == []
     assert config.parent_type is None
 
 
-def test_gemini_agent_config_merge_with_override() -> None:
-    """Verify that merge_with works correctly for GeminiAgentConfig."""
+def test_gemini_agent_config_merge_with_concatenates_skip_trust_and_user_args() -> None:
+    """User-supplied cli_args concatenate after the default --skip-trust."""
     base = GeminiAgentConfig()
     override = GeminiAgentConfig(cli_args=("--verbose",))
 
     merged = base.merge_with(override)
 
     assert isinstance(merged, GeminiAgentConfig)
-    assert merged.cli_args == ("--verbose",)
+    assert merged.cli_args == ("--skip-trust", "--verbose")
     assert str(merged.command) == "gemini"
 
 
@@ -82,11 +82,11 @@ def gemini_agent(
     )
 
 
-def test_assemble_command_injects_skip_trust(gemini_agent: GeminiAgent) -> None:
+def test_assemble_command_includes_skip_trust_from_default_cli_args(gemini_agent: GeminiAgent) -> None:
     command = gemini_agent.assemble_command(gemini_agent.host, (), command_override=None)
     assert str(command).split() == ["gemini", "--skip-trust"]
 
 
-def test_assemble_command_preserves_user_agent_args(gemini_agent: GeminiAgent) -> None:
+def test_assemble_command_appends_user_agent_args_after_cli_args(gemini_agent: GeminiAgent) -> None:
     command = gemini_agent.assemble_command(gemini_agent.host, ("--debug",), command_override=None)
     assert str(command).split() == ["gemini", "--skip-trust", "--debug"]
