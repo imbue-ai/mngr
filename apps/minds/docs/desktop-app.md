@@ -95,7 +95,8 @@ All desktop app state lives in `~/.<MINDS_ROOT_NAME>/` (default: `~/.minds/`):
     minds.log             # Combined stdout/stderr log from the backend
     minds-events.jsonl    # Structured JSONL event log
   auth/                   # Cookie signing key, one-time codes
-  config.toml             # Optional minds config (cloudflare/supertokens URLs)
+  config.toml             # Optional minds user preferences (default account, etc.)
+  envs/                   # Per-developer dynamic dev env override files (mode 0600)
   window-state.json       # Per-window content URLs, restored on next launch
   mngr/                   # mngr host directory (MNGR_HOST_DIR)
     agents/               # per-agent state managed by mngr
@@ -110,20 +111,30 @@ The corresponding `MNGR_HOST_DIR` becomes `~/.devminds/mngr/` and
 the two copies never collide. Standalone `mngr` invocations ignore
 `MINDS_ROOT_NAME`.
 
-### Configuration file
+### Environment selection
 
-`~/.<MINDS_ROOT_NAME>/config.toml` is optional. When present, it may set:
+The desktop client picks the tier it talks to (`dev`, `staging`,
+`production`, or a per-developer dynamic dev env) via:
 
-```toml
-remote_service_connector_url = "https://..."
+```bash
+minds run --config-file <path-to-client.toml>
 ```
 
-The `REMOTE_SERVICE_CONNECTOR_URL` environment variable overrides the file.
-The field has a built-in default that points at the current dev-deployed
-server, so packaged minds works out of the box with no config file. The
-SuperTokens core URI and API key are configured on the backend server
-(alongside the Cloudflare credentials) and never need to be set on the
-client.
+When `--config-file` is not passed, the default resolves to
+`apps/minds/imbue/minds/config/envs/_bundled/client.toml` (written by
+the Electron production build when `MINDS_BUILD_TIER=production`), then
+falls back to `apps/minds/imbue/minds/config/envs/dev/client.toml`
+shipped with the wheel. See `apps/minds/docs/environments.md` for the
+full operator workflow and `apps/minds/docs/vault-setup.md` for how
+deploy-time secrets flow through HCP Vault.
+
+### Configuration file
+
+`~/.<MINDS_ROOT_NAME>/config.toml` is optional and holds user-personal
+preferences only (the default account for new workspaces, the
+auto-open behavior for the requests panel). It no longer carries any
+tier-bound URL -- env selection happens via `--config-file` as
+described above.
 
 ## Development
 
