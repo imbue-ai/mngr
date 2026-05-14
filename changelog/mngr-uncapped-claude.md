@@ -1,0 +1,1 @@
+Add new mngr_uncapped_claude plugin exposing `mngr uncapped-claude`, a drop-in replacement for `claude -p` that runs through `mngr create`/`message`/`transcript` so it works unattended on any mngr host.
