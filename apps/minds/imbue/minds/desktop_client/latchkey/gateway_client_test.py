@@ -33,7 +33,7 @@ def test_set_permission_rule_sends_expected_headers_body_and_url() -> None:
     def _handler(request: httpx.Request) -> httpx.Response:
         captured["url"] = str(request.url)
         captured["method"] = request.method
-        captured["auth"] = request.headers.get("Authorization")
+        captured["auth"] = request.headers.get("X-Latchkey-Gateway-Password")
         captured["override"] = request.headers.get("X-Latchkey-Gateway-Permissions-Override")
         captured["body"] = json.loads(request.content)
         return httpx.Response(201, json={"slack-api": ["any"]})
@@ -49,7 +49,7 @@ def test_set_permission_rule_sends_expected_headers_body_and_url() -> None:
     assert url.startswith("http://gateway.invalid:1989/permissions/rules")
     assert "rule_key=slack-api" in url
     assert "latchkey_permissions.json" in url
-    assert captured["auth"] == "Bearer hunter2"
+    assert captured["auth"] == "hunter2"
     assert captured["override"] == "admin-jwt-token"
     assert captured["body"] == ["any"]
 
@@ -103,7 +103,7 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
     body = "".join(json.dumps(item) + "\n" for item in requests_payload).encode("utf-8")
 
     def _handler(request: httpx.Request) -> httpx.Response:
-        assert request.headers["Authorization"] == "Bearer hunter2"
+        assert request.headers["X-Latchkey-Gateway-Password"] == "hunter2"
         assert request.headers["X-Latchkey-Gateway-Permissions-Override"] == "admin-jwt-token"
         assert "follow=true" in str(request.url)
         return httpx.Response(200, content=body, headers={"Content-Type": "application/x-ndjson"})

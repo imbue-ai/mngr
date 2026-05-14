@@ -40,6 +40,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 
 # Header names baked into the upstream gateway's wire contract.
+_HEADER_PASSWORD: Final[str] = "X-Latchkey-Gateway-Password"
 _HEADER_PERMISSIONS_OVERRIDE: Final[str] = "X-Latchkey-Gateway-Permissions-Override"
 
 # The follow-stream connection is held open for the lifetime of the
@@ -105,7 +106,7 @@ class LatchkeyGatewayClient(MutableModel):
 
     def _build_headers(self) -> dict[str, str]:
         return {
-            "Authorization": f"Bearer {self.password}",
+            _HEADER_PASSWORD: self.password,
             _HEADER_PERMISSIONS_OVERRIDE: self.admin_jwt,
         }
 
