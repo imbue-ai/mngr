@@ -10,14 +10,20 @@ mngr-managed settings (hook commands, MCP servers, allowed tools) into those
 files without clobbering user edits.
 
 The JSON shape produced by the merge and builder helpers here was validated
-against Gemini CLI's published ``settings.schema.json``. Trust state (i.e. the
-``--skip-trust`` replacement) is reserved for PR2 under the ``security``
-top-level key: smoke-testing confirmed that ``security.folderTrust.enabled``
-is the active toggle, and that hooks in a workspace-level settings file are
-silently dropped when the workspace is only trusted per-session via
-``--skip-trust``. See ``build_readiness_hooks_config`` for the workspace-trust
-caveat that follow-up PRs must address. ``GeminiDirectoryNotTrustedError`` is
-defined here so callers can already reference the type.
+against Gemini CLI's published ``settings.schema.json`` and against a live
+Gemini CLI 0.42.0 session. Trust state for the agent's workspace is reserved
+for PR2; the smoke test established that:
+
+* The persistent trust file is ``~/.gemini/trustedFolders.json`` (a flat
+  ``{ "<path>": "TRUST_FOLDER" }`` map).
+* The ``GEMINI_CLI_TRUST_WORKSPACE=true`` env var is Gemini's documented
+  headless-automation equivalent.
+* ``--skip-trust`` is silently weaker than either of the above: tools run
+  but workspace-declared hooks are stripped from the registry.
+
+See ``build_readiness_hooks_config`` for the workspace-trust caveat that
+follow-up PRs must address. ``GeminiDirectoryNotTrustedError`` is defined
+here so callers can already reference the type.
 """
 
 from __future__ import annotations
@@ -215,11 +221,15 @@ def build_readiness_hooks_config() -> dict[str, Any]:
     that hooks declared in a workspace-level ``<project>/.gemini/settings.json``
     are silently dropped (``Hook registry initialized with 0 hook entries`` in
     ``--debug`` output) when the workspace is only trusted for the current
-    session via ``--skip-trust``. Hooks installed by ``mngr_gemini`` must
-    therefore either land in the user-level ``~/.gemini/settings.json`` (and
-    self-guard on ``MNGR_AGENT_STATE_DIR`` so they only fire for our agents)
-    or be installed alongside a persistent ``security.folderTrust`` entry for
-    the workspace.
+    session via ``--skip-trust``. To get hooks to fire, the workspace must
+    have persistent trust -- either via an entry in ``~/.gemini/trustedFolders.json``
+    or via the ``GEMINI_CLI_TRUST_WORKSPACE=true`` env var (which the CLI
+    documents at https://geminicli.com/docs/cli/trusted-folders/ as the
+    headless/automated-environments path). With the env var set in the same
+    smoke test, ``Hook registry initialized with 2 hook entries`` and both
+    test sentinels were created. PR2 should therefore prefer
+    ``GEMINI_CLI_TRUST_WORKSPACE=true`` over ``--skip-trust`` for mngr-spawned
+    sessions.
     """
     return {
         "hooks": {
