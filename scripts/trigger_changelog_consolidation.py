@@ -106,21 +106,35 @@ def _format_pending_list(entries: list[Path], repo_root: Path) -> str:
 def gate_release_on_pending_entries(
     repo_root: Path,
     provider: str = "modal",
+    dry_run: bool = False,
     input_fn: Callable[[str], str] = input,
     run_trigger_fn: Callable[[str], int] = run_trigger,
 ) -> bool:
     """Block a release until pending changelog entries are consolidated.
 
-    Returns ``True`` if the release may proceed (no pending entries),
-    ``False`` if the caller must abort (entries are pending; the agent
-    was triggered or the user declined). Either way, the caller should
-    re-run ``release.py`` after merging the consolidation PR.
+    Returns ``True`` if the release may proceed (no pending entries, or
+    ``dry_run`` is set), ``False`` if the caller must abort (entries are
+    pending; the agent was triggered or the user declined). Either way,
+    the caller should re-run ``release.py`` after merging the
+    consolidation PR.
+
+    ``dry_run`` swaps the prompt for a warning so ``release.py --dry-run``
+    can still preview what would be released; a real release attempt with
+    pending entries will hit the prompt.
 
     ``input_fn`` and ``run_trigger_fn`` are injected so tests can drive
     the gate's branching without monkeypatching the module's globals.
     """
     entries = pending_changelog_entries(repo_root)
     if not entries:
+        return True
+
+    if dry_run:
+        print()
+        print(f"WARNING: {len(entries)} pending changelog entry/entries would block a real release:")
+        print(_format_pending_list(entries, repo_root))
+        print(f"(use '{TRIGGER_NAME}' to consolidate before cutting the release)")
+        print()
         return True
 
     print()

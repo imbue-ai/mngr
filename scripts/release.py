@@ -509,10 +509,20 @@ def main() -> None:
     if args.bump_kind is None:
         parser.error("bump_kind is required: patch, minor, or major")
 
+    # Branch check first: cheap, local-only, and surfaces the most common
+    # user error (running this from a feature branch) before we prompt
+    # about pending changelog entries.
+    branch = run("git", "branch", "--show-current")
+    if branch != "main":
+        print(f"ERROR: Must be on main branch (currently on {branch})", file=sys.stderr)
+        sys.exit(1)
+
     # Refuse to release while there are unconsolidated entries in
     # changelog/. Otherwise the [Unreleased] section we're about to
-    # finalize would be missing those entries' bullets.
-    if not args.dry_run and not gate_release_on_pending_entries(REPO_ROOT):
+    # finalize would be missing those entries' bullets. In --dry-run we
+    # warn rather than block so the user can still preview what would
+    # be released.
+    if not gate_release_on_pending_entries(REPO_ROOT, dry_run=args.dry_run):
         sys.exit(1)
 
     base_kind: str = args.bump_kind
@@ -624,12 +634,9 @@ def main() -> None:
         print("\n(dry run -- no changes made)")
         return
 
-    # Ensure we're on main and up to date before prompting for confirmation
-    branch = run("git", "branch", "--show-current")
-    if branch != "main":
-        print(f"ERROR: Must be on main branch (currently on {branch})", file=sys.stderr)
-        sys.exit(1)
-
+    # Ensure the working tree is clean and up to date before prompting
+    # for confirmation. (Branch == main is already enforced above, before
+    # the pending-changelog-entry gate.)
     if run("git", "status", "--porcelain"):
         print("ERROR: Working tree is not clean. Commit or stash changes first.", file=sys.stderr)
         sys.exit(1)

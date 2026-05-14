@@ -125,6 +125,28 @@ def test_gate_blocks_when_trigger_fails(tmp_path: Path) -> None:
     )
 
 
+def test_gate_warns_but_passes_in_dry_run(tmp_path: Path) -> None:
+    changelog_dir = tmp_path / "changelog"
+    changelog_dir.mkdir()
+    (changelog_dir / "foo.md").write_text("entry")
+
+    def fail_input(_: str) -> str:
+        raise AssertionError("input should not be called in dry_run mode")
+
+    def fail_trigger(_: str) -> int:
+        raise AssertionError("trigger should not be called in dry_run mode")
+
+    assert (
+        gate_release_on_pending_entries(
+            tmp_path,
+            dry_run=True,
+            input_fn=fail_input,
+            run_trigger_fn=fail_trigger,
+        )
+        is True
+    )
+
+
 def test_gate_treats_uppercase_y_as_accept(tmp_path: Path) -> None:
     changelog_dir = tmp_path / "changelog"
     changelog_dir.mkdir()
