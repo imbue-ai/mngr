@@ -22,7 +22,6 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.utils.polling import poll_until
-from imbue.mngr.utils.polling import retry_action_with_poll
 
 _SEND_MESSAGE_TIMEOUT_SECONDS: Final[float] = 15.0
 # This can take a while, especially on Modal -- the process needs to actually
@@ -159,16 +158,20 @@ def send_enter_and_poll_for_cleared_indicator(
 
     Raises ``SendMessageError`` if all ``max_attempts`` rounds time out.
     """
-    succeeded = retry_action_with_poll(
-        action=lambda: send_enter_keystroke(agent, tmux_target),
-        condition=lambda: agent._check_pane_contains(tmux_target, cleared_indicator),
-        max_attempts=max_attempts,
-        per_attempt_timeout=per_attempt_timeout_seconds,
-        poll_interval=0.05,
-    )
-    if succeeded:
-        logger.trace("Input prompt cleared after retry-with-poll")
-        return
+    for attempt in range(max_attempts):
+        send_enter_keystroke(agent, tmux_target)
+        if poll_until(
+            lambda: agent._check_pane_contains(tmux_target, cleared_indicator),
+            timeout=per_attempt_timeout_seconds,
+            poll_interval=0.05,
+        ):
+            logger.trace("Input prompt cleared after Enter attempt {}", attempt + 1)
+            return
+        logger.debug(
+            "Enter attempt {} did not produce TUI ready indicator {!r}; retrying",
+            attempt + 1,
+            cleared_indicator,
+        )
 
     pane_content = agent._capture_pane_content(tmux_target)
     if pane_content is not None:
