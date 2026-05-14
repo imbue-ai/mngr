@@ -214,10 +214,13 @@ def apply_bootstrap() -> None:
         os.environ.setdefault("MNGR_HOST_DIR", str(mngr_host_dir_for(root_name)))
         os.environ.setdefault("MNGR_PREFIX", mngr_prefix_for(root_name))
     _ensure_mngr_settings(root_name)
-    _reconcile_imbue_cloud_providers_from_sessions(root_name)
+    # Provider reconciliation moved out of apply_bootstrap because it now
+    # requires the per-env connector URL; callers (i.e. `minds run`) invoke
+    # `reconcile_imbue_cloud_providers_from_sessions(connector_url)` after
+    # loading the client config.
 
 
-def _reconcile_imbue_cloud_providers_from_sessions(root_name: str) -> None:
+def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_name: str | None = None) -> None:
     """Re-register ``[providers.imbue_cloud_<slug>]`` for every active session.
 
     The mngr_imbue_cloud plugin owns the SuperTokens session list -- emails
@@ -241,6 +244,8 @@ def _reconcile_imbue_cloud_providers_from_sessions(root_name: str) -> None:
     No-op when the accounts file doesn't exist yet (fresh install with no
     signins).
     """
+    if root_name is None:
+        root_name = resolve_minds_root_name()
     accounts_path = _imbue_cloud_accounts_path(root_name)
     if accounts_path is None or not accounts_path.is_file():
         return
@@ -268,7 +273,12 @@ def _reconcile_imbue_cloud_providers_from_sessions(root_name: str) -> None:
             # provider that was previously auto-disabled by an auth-error
             # observation. Re-enable happens only on an explicit signin
             # event.
-            set_imbue_cloud_provider_for_account(email, root_name=root_name, force_enable=False)
+            set_imbue_cloud_provider_for_account(
+                email,
+                connector_url=connector_url,
+                root_name=root_name,
+                force_enable=False,
+            )
         except BootstrapError as e:
             # Bad email format (e.g. ``""``) -- log and keep going so a
             # single corrupt session entry doesn't block reconciliation
@@ -367,6 +377,7 @@ def _atomic_write_settings(settings_path: Path, doc: tomlkit.TOMLDocument) -> No
 def set_imbue_cloud_provider_for_account(
     email: str,
     *,
+    connector_url: str,
     root_name: str | None = None,
     force_enable: bool = True,
 ) -> bool:
@@ -375,6 +386,12 @@ def set_imbue_cloud_provider_for_account(
     Called by minds when a SuperTokens session for ``email`` is created
     (signin/signup/oauth-success) and from the bootstrap reconcile. Idempotent:
     a no-op if an equivalent entry already exists.
+
+    ``connector_url`` is the URL of the ``remote_service_connector`` the
+    provider should talk to. It is written into the provider block as
+    ``connector_url`` so the ``mngr_imbue_cloud`` plugin no longer needs a
+    baked-in default. Callers (i.e. ``minds run``) source this from the
+    loaded ``ClientEnvConfig``.
 
     When ``force_enable`` is True (signin events), ``is_enabled`` is set to
     True even if the block was previously disabled by an auth-error
@@ -404,12 +421,14 @@ def set_imbue_cloud_provider_for_account(
         isinstance(existing, dict)
         and existing.get("backend") == _IMBUE_CLOUD_BACKEND_NAME
         and existing.get("account") == email
+        and existing.get("connector_url") == connector_url
         and existing_is_enabled == desired_is_enabled
     ):
         return False
     new_block = tomlkit.table()
     new_block["backend"] = _IMBUE_CLOUD_BACKEND_NAME
     new_block["account"] = email
+    new_block["connector_url"] = connector_url
     if desired_is_enabled is not None:
         new_block["is_enabled"] = desired_is_enabled
     providers[provider_name] = new_block

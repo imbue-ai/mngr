@@ -26,6 +26,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
+from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -2022,6 +2023,7 @@ def create_desktop_client(
     notification_dispatcher: NotificationDispatcher | None = None,
     paths: WorkspacePaths | None = None,
     minds_config: MindsConfig | None = None,
+    client_env_config: ClientEnvConfig | None = None,
     envelope_stream_consumer: EnvelopeStreamConsumer | None = None,
     session_store: MultiAccountSessionStore | None = None,
     request_inbox: RequestInbox | None = None,
@@ -2080,6 +2082,7 @@ def create_desktop_client(
     app.state.notification_dispatcher = notification_dispatcher
     app.state.session_store = session_store
     app.state.minds_config = minds_config
+    app.state.client_env_config = client_env_config
     app.state.request_inbox = request_inbox
     app.state.request_event_handlers = request_event_handlers
     app.state.auth_server_port = server_port

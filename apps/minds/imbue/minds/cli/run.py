@@ -38,11 +38,14 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import disable_imbue_cloud_provider_for_account
 from imbue.minds.bootstrap import imbue_cloud_provider_name_for_account
 from imbue.minds.bootstrap import minds_data_dir_for
+from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_HOST
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_PORT
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.loader import load_client_config
+from imbue.minds.config.loader import resolve_default_client_config_path
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -116,6 +119,16 @@ _GATEWAY_PORT_POLL_INTERVAL_SECONDS: Final[float] = 0.2
     default=False,
     help="Do not open the minds UI in the system browser",
 )
+@click.option(
+    "--config-file",
+    "config_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Path to a per-env client config TOML. When unset, falls back to the "
+        "build-bundled file (production builds) and finally to the dev tier defaults."
+    ),
+)
 @click.pass_context
 def run(
     ctx: click.Context,
@@ -123,12 +136,16 @@ def run(
     port: int,
     mngr_forward_port: int,
     no_browser: bool,
+    config_file: Path | None,
 ) -> None:
     # noqa: PLR0913 — flag count matches the legacy `minds forward` interface
     """Run the minds bare-origin server with `mngr forward` as a subprocess."""
     root_name = resolve_minds_root_name()
     data_directory = minds_data_dir_for(root_name)
     minds_config = MindsConfig(data_dir=data_directory)
+    client_config_path = config_file if config_file is not None else resolve_default_client_config_path()
+    client_env_config = load_client_config(client_config_path)
+    connector_url_str = str(client_env_config.connector_url).rstrip("/")
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
 
     logger.info("Starting `minds run`...")
@@ -136,7 +153,13 @@ def run(
     logger.info("  mngr forward: http://127.0.0.1:{}", mngr_forward_port)
     logger.info("  MINDS_ROOT_NAME: {}", root_name)
     logger.info("  Data directory: {}", data_directory)
-    logger.info("  remote_service_connector_url: {}", minds_config.remote_service_connector_url)
+    logger.info("  Config file: {}", client_config_path)
+    logger.info("  connector_url: {}", client_env_config.connector_url)
+    logger.info("  litellm_proxy_url: {}", client_env_config.litellm_proxy_url)
+
+    # Bootstrap couldn't write provider entries without the connector URL,
+    # so the reconcile happens here once we've loaded the client config.
+    reconcile_imbue_cloud_providers_from_sessions(connector_url_str, root_name=root_name)
 
     paths = WorkspacePaths(data_dir=data_directory)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
@@ -199,7 +222,10 @@ def run(
         mngr_message_sender=MngrMessageSender(),
         gateway_client=gateway_client,
     )
-    imbue_cloud_cli = ImbueCloudCli(parent_concurrency_group=root_concurrency_group)
+    imbue_cloud_cli = ImbueCloudCli(
+        parent_concurrency_group=root_concurrency_group,
+        connector_url=client_env_config.connector_url,
+    )
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
     session_store = MultiAccountSessionStore(data_dir=data_directory, cli=imbue_cloud_cli)
     response_events = load_response_events(data_directory)
@@ -299,6 +325,7 @@ def run(
         envelope_stream_consumer=consumer,
         session_store=session_store,
         minds_config=minds_config,
+        client_env_config=client_env_config,
         request_inbox=request_inbox,
         request_event_handlers=(latchkey_permission_handler,),
         server_port=port,

@@ -1,0 +1,25 @@
+# Dev tier deploy config -- read by deploy scripts and by `minds env create`.
+#
+# `modal_workspace` is the dev tier's Modal workspace; dynamic dev envs are
+# Modal environments inside this workspace selected via `modal deploy
+# --env=<dev-name>`. The base `modal_env` here ("main") names the shared
+# dev environment that holds the dev-tier connector + litellm-proxy.
+
+modal_workspace = "CHANGE_ME"
+modal_env = "main"
+vault_path_prefix = "secrets/kv/minds/dev"
+cloudflare_domain = "CHANGE_ME.example.com"
+
+oauth_google_client_id = ""
+oauth_github_client_id = ""
+
+[secrets]
+services = [
+    "cloudflare",
+    "litellm",
+    "litellm-connector",
+    "neon",
+    "paid-accounts",
+    "pool-ssh",
+    "supertokens",
+]

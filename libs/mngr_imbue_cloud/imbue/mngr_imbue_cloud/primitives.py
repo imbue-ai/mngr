@@ -8,14 +8,6 @@ from imbue.imbue_common.primitives import NonEmptyStr
 
 IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
 
-_DEFAULT_CONNECTOR_URL: Final[str] = "https://joshalbrecht--remote-service-connector-production-fastapi-app.modal.run"
-
-
-def get_default_connector_url() -> str:
-    """The baked-in production connector URL."""
-    return _DEFAULT_CONNECTOR_URL
-
-
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 

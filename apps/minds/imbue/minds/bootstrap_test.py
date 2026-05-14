@@ -137,20 +137,36 @@ def _stub_mngr_host_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, root_na
     return settings_dir / "settings.toml"
 
 
+_FAKE_CONNECTOR_URL = "https://test--remote-service-connector-fastapi-app.modal.run"
+
+
 def test_set_imbue_cloud_provider_for_account_writes_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "tname")
-    changed = set_imbue_cloud_provider_for_account("alice@example.com", root_name="tname")
+    changed = set_imbue_cloud_provider_for_account(
+        "alice@example.com",
+        connector_url=_FAKE_CONNECTOR_URL,
+        root_name="tname",
+    )
     assert changed is True
     parsed = tomllib.loads(settings_path.read_text())
     block = parsed["providers"]["imbue_cloud_alice-example-com"]
-    assert block == {"backend": "imbue_cloud", "account": "alice@example.com", "is_enabled": True}
+    assert block == {
+        "backend": "imbue_cloud",
+        "account": "alice@example.com",
+        "connector_url": _FAKE_CONNECTOR_URL,
+        "is_enabled": True,
+    }
 
 
 def test_disable_imbue_cloud_provider_for_account_flips_is_enabled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "tname")
-    set_imbue_cloud_provider_for_account("alice@example.com", root_name="tname")
+    set_imbue_cloud_provider_for_account(
+        "alice@example.com",
+        connector_url=_FAKE_CONNECTOR_URL,
+        root_name="tname",
+    )
 
     changed = disable_imbue_cloud_provider_for_account("alice@example.com", root_name="tname")
     assert changed is True
@@ -163,10 +179,19 @@ def test_disable_imbue_cloud_provider_for_account_flips_is_enabled(
 
 def test_set_force_enable_re_enables_disabled_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "tname")
-    set_imbue_cloud_provider_for_account("alice@example.com", root_name="tname")
+    set_imbue_cloud_provider_for_account(
+        "alice@example.com",
+        connector_url=_FAKE_CONNECTOR_URL,
+        root_name="tname",
+    )
     disable_imbue_cloud_provider_for_account("alice@example.com", root_name="tname")
 
-    changed = set_imbue_cloud_provider_for_account("alice@example.com", root_name="tname", force_enable=True)
+    changed = set_imbue_cloud_provider_for_account(
+        "alice@example.com",
+        connector_url=_FAKE_CONNECTOR_URL,
+        root_name="tname",
+        force_enable=True,
+    )
     assert changed is True
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["imbue_cloud_alice-example-com"]["is_enabled"] is True
@@ -177,10 +202,19 @@ def test_set_preserve_does_not_re_enable_disabled_block(monkeypatch: pytest.Monk
     provider disabled -- only an explicit signin event force-enables.
     """
     settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "tname")
-    set_imbue_cloud_provider_for_account("alice@example.com", root_name="tname")
+    set_imbue_cloud_provider_for_account(
+        "alice@example.com",
+        connector_url=_FAKE_CONNECTOR_URL,
+        root_name="tname",
+    )
     disable_imbue_cloud_provider_for_account("alice@example.com", root_name="tname")
 
-    changed = set_imbue_cloud_provider_for_account("alice@example.com", root_name="tname", force_enable=False)
+    changed = set_imbue_cloud_provider_for_account(
+        "alice@example.com",
+        connector_url=_FAKE_CONNECTOR_URL,
+        root_name="tname",
+        force_enable=False,
+    )
     assert changed is False
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["imbue_cloud_alice-example-com"]["is_enabled"] is False
