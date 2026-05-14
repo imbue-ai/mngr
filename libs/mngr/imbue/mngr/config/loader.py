@@ -40,6 +40,7 @@ from imbue.mngr.config.provider_config_registry import list_registered_provider_
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UnknownBackendError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.plugin_catalog import PluginKind
 from imbue.mngr.plugin_catalog import get_plugin_install_hint
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import PluginName
@@ -419,7 +420,7 @@ def _parse_providers(
                     f" block. Currently disabled plugins: {', '.join(sorted(disabled_plugins))}"
                 )
             else:
-                msg += f" {get_plugin_install_hint(backend, kind='backend')}"
+                msg += f" {get_plugin_install_hint(backend, kind=PluginKind.BACKEND)}"
             if strict:
                 raise ConfigParseError(msg) from e
             if not silent:
