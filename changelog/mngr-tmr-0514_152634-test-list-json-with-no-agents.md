@@ -1,0 +1,1 @@
+Fix `test_list_json_with_no_agents` in `libs/mngr/imbue/mngr/e2e/test_basic.py` by giving it a 120s pytest timeout (the default 10s is too short for the Modal-discovery code path that `mngr list` exercises), and additionally assert that `errors == []` in the JSON output, matching the sister test in `test_list.py`.
