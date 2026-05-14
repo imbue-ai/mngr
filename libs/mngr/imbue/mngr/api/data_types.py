@@ -49,13 +49,6 @@ class ConnectionOptions(FrozenModel):
         default=False,
         description="Whether to allow connecting to hosts with unknown SSH keys",
     )
-    is_start_desired: bool = Field(
-        default=True,
-        description=(
-            "If the tmux session is missing at connect time, automatically start the agent before "
-            "attaching. When False, a clear error is raised instead."
-        ),
-    )
 
 
 class GcResourceTypes(FrozenModel):
