@@ -46,8 +46,8 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig]):
 
     def uses_submission_signal(self) -> bool:
         # Gemini's CLI has no equivalent of claude's UserPromptSubmit hook to
-        # signal a tmux wait-for channel; BaseAgent falls back to polling the
-        # TUI_READY_INDICATOR for input-prompt clear instead.
+        # signal a tmux wait-for channel; InteractiveTuiAgent falls back to
+        # polling the TUI_READY_INDICATOR for input-prompt clear instead.
         return False
 
 
