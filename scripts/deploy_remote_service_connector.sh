@@ -1,42 +1,65 @@
 #!/usr/bin/env bash
 #
-# Deploy the remote_service_connector Modal app for a given environment.
+# Deploy the remote_service_connector Modal app for a given tier.
 #
-# The environment name selects the Modal secrets that back the app:
-# cloudflare-<env> and supertokens-<env>, plus a Secret.from_dict that bakes
-# MNGR_DEPLOY_ENV into the container so runtime code can read it.
+# Pulls tier secrets from HCP Vault into Modal Secrets via
+# scripts/push_modal_secrets.py, then deploys the Modal app pinned to
+# the workspace named in the tier's deploy.toml.
 #
 # Usage:
-#     scripts/deploy_remote_service_connector.sh <env-name>
+#     scripts/deploy_remote_service_connector.sh <tier>
 #
 # Examples:
 #     scripts/deploy_remote_service_connector.sh production
 #     scripts/deploy_remote_service_connector.sh staging
+#     scripts/deploy_remote_service_connector.sh dev
 #
-# Secrets are managed separately with scripts/push_modal_secrets.py.
+# Requires:
+#   - `vault login` against the HCP `admin` namespace
+#   - `modal token set` (or equivalent) for the tier's Modal workspace
 
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-    echo "usage: $0 <env-name>" >&2
+    echo "usage: $0 <tier>" >&2
     exit 2
 fi
 
-env_name="$1"
+tier="$1"
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 app_file="$repo_root/apps/remote_service_connector/imbue/remote_service_connector/app.py"
+deploy_toml="$repo_root/apps/minds/imbue/minds/config/envs/${tier}/deploy.toml"
 
 if [[ ! -f "$app_file" ]]; then
     echo "error: app file not found: $app_file" >&2
     exit 1
 fi
+if [[ ! -f "$deploy_toml" ]]; then
+    echo "error: deploy.toml not found for tier '${tier}': $deploy_toml" >&2
+    exit 1
+fi
 
-export MNGR_DEPLOY_ENV="$env_name"
+# Read modal_workspace from deploy.toml via a one-liner Python invocation
+# so we don't grow a shell TOML parser. Falls back to an empty string if
+# the key is absent, which the loader will reject upstream.
+modal_workspace=$(uv run python -c "
+import sys, tomllib
+with open('$deploy_toml', 'rb') as f:
+    data = tomllib.load(f)
+print(data.get('modal_workspace', ''))
+")
 
-echo "Deploying remote-service-connector-${env_name} with secrets:"
-echo "  - cloudflare-${env_name}"
-echo "  - supertokens-${env_name}"
-echo ""
+if [[ -z "$modal_workspace" || "$modal_workspace" == "CHANGE_ME" ]]; then
+    echo "error: '$deploy_toml' has no real modal_workspace set (got: '$modal_workspace')." >&2
+    echo "       Edit the file before deploying." >&2
+    exit 1
+fi
 
+echo "==> Pushing Vault secrets to Modal for tier '${tier}'..."
+uv run python "$repo_root/scripts/push_modal_secrets.py" "$tier"
+
+export MNGR_DEPLOY_ENV="$tier"
+
+echo "==> Deploying remote-service-connector-${tier} to Modal workspace '${modal_workspace}'..."
 cd "$repo_root"
-exec uv run modal deploy "$app_file"
+exec uv run modal deploy --name "remote-service-connector-${tier}" "$app_file"

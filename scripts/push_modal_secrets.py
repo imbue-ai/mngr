@@ -1,29 +1,35 @@
 #!/usr/bin/env python3
-"""Upsert Modal secrets from local ``.minds/<env>/<service>.sh`` files.
+"""Pull tier secrets from HCP Vault and push them into Modal Secrets.
 
-Each ``.sh`` file is shell-style: one ``export KEY=value`` (or plain
-``KEY=value``) line per variable. Lines starting with ``#`` and blank lines
-are ignored. The script sources each file via ``bash`` so quoting, escapes,
-and ``export`` prefixes behave exactly as they do when you source the file
-yourself.
+For each service named in the tier's ``deploy.toml`` ``[secrets].services``
+list, this script:
 
-``.minds/template/`` is the schema: every file there defines the expected
-keys for a service. Per-env files (e.g. ``.minds/production/``) must declare
-every key the template declares (empty values are fine and just mean "unset
-on the server"). The push aborts with a diagnostic if a per-env file drifts
-from the template.
+1. Reads ``<vault_path_prefix>/<service>`` from HCP Vault via the local
+   ``vault`` CLI (so authentication piggybacks on whatever ``vault login``
+   set up).
+2. Validates that every key declared by ``.minds/template/<service>.sh``
+   is present in the Vault entry. Empty values are fine (declared but
+   intentionally unset on Modal); missing keys are an error.
+3. Pushes the non-empty subset to Modal as the secret
+   ``<service>-<tier>`` via ``modal secret create --force``.
 
-Given ``.minds/production/cloudflare.sh`` and ``.minds/production/supertokens.sh``,
-this pushes two Modal secrets: ``cloudflare-production`` and
-``supertokens-production``. Existing secrets are overwritten (``--force``).
+Vault values are kept in process memory only -- never written to disk.
 
 Usage:
-    uv run scripts/push_modal_secrets.py <env-name>
-    uv run scripts/push_modal_secrets.py <env-name> --dir <dir>   # override .minds
+    uv run scripts/push_modal_secrets.py <tier> [--dry-run]
 
 Examples:
     uv run scripts/push_modal_secrets.py production
-    uv run scripts/push_modal_secrets.py staging
+    uv run scripts/push_modal_secrets.py staging --dry-run
+
+The ``<tier>`` argument must match one of the directories under
+``apps/minds/imbue/minds/config/envs/`` (i.e. ``dev``, ``staging``,
+``production``). The Vault path prefix and the list of services to push
+come from ``apps/minds/imbue/minds/config/envs/<tier>/deploy.toml``.
+
+Dynamic dev env secrets do **not** flow through this script -- they live
+on the developer's machine only and are pushed to per-Modal-env secrets
+by ``minds env create``.
 """
 
 import argparse
@@ -32,114 +38,74 @@ import subprocess
 import sys
 from pathlib import Path
 
-_TEMPLATE_DIR_NAME = "template"
+# Ensure the in-repo packages are importable when this script runs via uv.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "apps" / "minds"))
+
+from imbue.minds.config.loader import EnvConfigError  # noqa: E402
+from imbue.minds.config.loader import load_deploy_config  # noqa: E402
+from imbue.minds.envs.primitives import VaultReadError  # noqa: E402
+from imbue.minds.envs.vault_reader import VaultPath  # noqa: E402
+from imbue.minds.envs.vault_reader import read_vault_kv  # noqa: E402
+
+_TEMPLATE_DIR_RELATIVE = Path(".minds") / "template"
 
 
-def _parse_env_file(path: Path) -> dict[str, str]:
-    """Return every ``KEY=value`` pair declared in a shell-style env file.
+def _parse_template_keys(template_dir: Path, service: str) -> tuple[str, ...]:
+    """Return the expected key names declared in ``<service>.sh``.
 
-    Uses ``bash`` to source the file with ``set -a`` and dump the resulting
-    environment as a null-delimited list, so quoting, escapes, ``export``
-    prefixes, and variable interpolation all behave exactly as they do in a
-    real shell. Empty values are kept (they signal "declared but unset").
-
-    Runs both the source step and the baseline comparison inside ``env -i``
-    so the deployer's own shell env cannot either shadow keys set by the
-    file (baseline-value-equals-file-value => silently dropped) or leak
-    into interpolated values (``SUPERTOKENS_API_KEY=${OTHER}`` pulling
-    from the deployer's env).
+    Each template file is a shell-style ``export KEY=`` listing (with
+    optional comment lines). We treat any ``export KEY=`` or ``KEY=``
+    occurrence as a declaration, ignoring the value.
     """
-    if not path.is_file():
-        raise FileNotFoundError(f"env file not found: {path}")
-    script = f"set -a; . {shlex.quote(str(path))}; env -0"
-    result = subprocess.run(
-        ["env", "-i", "bash", "-c", script],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    baseline = subprocess.run(
-        ["env", "-i", "bash", "-c", "env -0"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    before = _parse_env_dump(baseline.stdout)
-    after = _parse_env_dump(result.stdout)
-    # Keep every key whose value changed vs. the clean-shell baseline. That
-    # covers both "newly declared" (not in baseline) and "overwritten to a
-    # different value" (in baseline but different). Empty-string values are
-    # retained -- they signal "declared but intentionally unset".
-    return {k: v for k, v in after.items() if before.get(k) != v}
-
-
-def _parse_env_dump(raw: str) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for entry in raw.split("\0"):
-        if not entry:
+    template_path = template_dir / f"{service}.sh"
+    if not template_path.is_file():
+        raise FileNotFoundError(
+            f"No template schema found for service {service!r}: expected {template_path}. "
+            f"Add a .minds/template/{service}.sh file or remove {service!r} from the "
+            "tier's deploy.toml [secrets].services list."
+        )
+    keys: list[str] = []
+    for raw_line in template_path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
             continue
-        key, sep, value = entry.partition("=")
-        if not sep:
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        equals = line.find("=")
+        if equals <= 0:
             continue
-        result[key] = value
-    return result
+        key = line[:equals].strip()
+        if key.isidentifier():
+            keys.append(key)
+    return tuple(keys)
 
 
 def _validate_against_template(
-    template_dir: Path,
-    env_dir: Path,
-) -> list[str]:
-    """Return a list of human-readable error messages if the env drifts from the template.
-
-    Each template ``<service>.sh`` must have a matching ``<service>.sh`` in the
-    env directory, and that env file must declare (value optional) every key
-    the template declares. Extra keys in the env file are allowed.
-    """
-    if not template_dir.is_dir():
-        return [f"template directory not found: {template_dir}"]
-
-    errors: list[str] = []
-    template_files = sorted(template_dir.glob("*.sh"))
-    if not template_files:
-        return [f"template directory has no .sh files: {template_dir}"]
-
-    for template_file in template_files:
-        env_file = env_dir / template_file.name
-        template_keys = set(_parse_env_file(template_file).keys())
-        if not env_file.is_file():
-            errors.append(
-                f"{env_dir.name}/{template_file.name} is missing; template declares keys {sorted(template_keys)}"
-            )
-            continue
-        env_keys = set(_parse_env_file(env_file).keys())
-        missing = template_keys - env_keys
-        if missing:
-            errors.append(
-                f"{env_dir.name}/{template_file.name} is missing keys declared in "
-                f"template/{template_file.name}: {sorted(missing)}. "
-                f"Add `export <KEY>=` lines (empty is fine)."
-            )
-        extras = env_keys - template_keys
-        if extras:
-            # Not an error -- extra keys are allowed. Warn so drift is visible.
-            print(
-                f"[warn] {env_dir.name}/{template_file.name} has extra keys "
-                f"not declared in template/{template_file.name}: {sorted(extras)}",
-                file=sys.stderr,
-            )
-    return errors
+    expected_keys: tuple[str, ...],
+    vault_values: dict[str, str],
+    service: str,
+    vault_path: VaultPath,
+) -> None:
+    missing = [key for key in expected_keys if key not in vault_values]
+    if missing:
+        raise SystemExit(
+            f"error: Vault entry {vault_path} (service {service!r}) is missing keys declared in "
+            f".minds/template/{service}.sh: {sorted(missing)}. "
+            f"Set every key (empty value is fine; the push will skip empties)."
+        )
 
 
-def _upsert_modal_secret(name: str, values: dict[str, str], is_dry_run: bool) -> None:
-    """Create or overwrite a Modal secret with the given non-empty key/value pairs."""
+def _upsert_modal_secret(name: str, values: dict[str, str], *, is_dry_run: bool) -> None:
+    """Create or overwrite the Modal secret with the non-empty subset of ``values``."""
     non_empty = {k: v for k, v in values.items() if v}
     if not non_empty:
-        print(f"[skip] {name}: no non-empty KEY=VALUE pairs found", file=sys.stderr)
+        print(f"[skip] {name}: every value was empty", file=sys.stderr)
         return
     args = ["uv", "run", "modal", "secret", "create", "--force", name]
     for key, value in non_empty.items():
         args.append(f"{key}={value}")
-    printable = [args[i] if "=" not in args[i] else f"{args[i].split('=', 1)[0]}=***" for i in range(len(args))]
+    printable = [a if "=" not in a else f"{a.split('=', 1)[0]}=***" for a in args]
     print(f"[push] {name}: {len(non_empty)} key(s)")
     print(f"       {' '.join(shlex.quote(p) for p in printable)}")
     if is_dry_run:
@@ -149,49 +115,59 @@ def _upsert_modal_secret(name: str, values: dict[str, str], is_dry_run: bool) ->
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("env_name", help="Environment name (e.g. production, staging)")
     parser.add_argument(
-        "--dir",
-        default=".minds",
-        help="Root directory holding template/ and <env>/ subdirectories (default: .minds)",
+        "tier",
+        help="Environment tier name (must match a directory under apps/minds/imbue/minds/config/envs/)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the Modal commands without executing them",
     )
+    parser.add_argument(
+        "--template-dir",
+        default=str(_REPO_ROOT / _TEMPLATE_DIR_RELATIVE),
+        help="Override the .minds/template/ schema directory (default: repo root)",
+    )
     args = parser.parse_args()
 
-    if args.env_name == _TEMPLATE_DIR_NAME:
+    try:
+        deploy_config = load_deploy_config(args.tier)
+    except EnvConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    template_dir = Path(args.template_dir)
+    if not template_dir.is_dir():
+        print(f"error: template dir not found: {template_dir}", file=sys.stderr)
+        return 2
+
+    vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
+    services = deploy_config.secrets.services
+    if not services:
         print(
-            f"error: '{_TEMPLATE_DIR_NAME}' is reserved for the committed schema; "
-            f"use a concrete env name like 'production'",
+            f"error: tier {args.tier!r} declares no services in [secrets].services; nothing to push.",
             file=sys.stderr,
         )
         return 2
 
-    root = Path(args.dir)
-    template_dir = root / _TEMPLATE_DIR_NAME
-    env_dir = root / args.env_name
+    for service in services:
+        vault_path = VaultPath(f"{vault_prefix}/{service}")
+        try:
+            vault_values = read_vault_kv(vault_path)
+        except VaultReadError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
-    if not env_dir.is_dir():
-        print(f"error: directory not found: {env_dir}", file=sys.stderr)
-        return 2
+        expected_keys = _parse_template_keys(template_dir, str(service))
+        _validate_against_template(expected_keys, vault_values, str(service), vault_path)
 
-    errors = _validate_against_template(template_dir, env_dir)
-    if errors:
-        print("error: per-env files are out of sync with the template:", file=sys.stderr)
-        for msg in errors:
-            print(f"  - {msg}", file=sys.stderr)
-        return 1
-
-    template_files = sorted(template_dir.glob("*.sh"))
-    for template_file in template_files:
-        service_name = template_file.stem
-        secret_name = f"{service_name}-{args.env_name}"
-        env_file = env_dir / template_file.name
-        values = _parse_env_file(env_file)
-        _upsert_modal_secret(secret_name, values, is_dry_run=args.dry_run)
+        modal_secret_name = f"{service}-{args.tier}"
+        # Only push the keys the template declares; ignore stray extras
+        # so a Vault entry can carry operator-only notes without leaking
+        # into Modal.
+        filtered = {key: vault_values[key] for key in expected_keys}
+        _upsert_modal_secret(modal_secret_name, filtered, is_dry_run=args.dry_run)
 
     return 0
 

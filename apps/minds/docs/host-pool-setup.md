@@ -53,31 +53,34 @@ ssh-keygen -t ed25519 -f .minds/production/pool_management_key/id_ed25519 -N ""
 
 The private key goes into the `pool-ssh-production` Modal secret. The public key path is passed to the bake command in step 5.
 
-## Step 3: Create the Modal secrets
+## Step 3: Populate the tier's Vault entries
 
-Two secrets in addition to the existing `cloudflare-production` and `supertokens-production`:
+Secrets live in HCP Vault now (not `.minds/<env>/` shell files); see
+`apps/minds/docs/vault-setup.md` for prerequisites. For the host-pool
+flow specifically:
 
-### neon-production
+### secrets/kv/minds/production/neon
 
 The **pooled** Neon connection string:
 
 ```bash
-# .minds/production/neon.sh
-export DATABASE_URL=postgresql://user:pass@host-pooler.neon.tech/db?sslmode=require
+vault kv put -mount=secrets kv/minds/production/neon \
+    DATABASE_URL=postgresql://user:pass@host-pooler.neon.tech/db?sslmode=require
 ```
 
-### pool-ssh-production
+### secrets/kv/minds/production/pool-ssh
 
 The management private key:
 
 ```bash
-# .minds/production/pool-ssh.sh
-export POOL_SSH_PRIVATE_KEY="-----BEGIN OPENSSH PRIVATE KEY-----
-...
------END OPENSSH PRIVATE KEY-----"
+vault kv put -mount=secrets kv/minds/production/pool-ssh \
+    POOL_SSH_PRIVATE_KEY=@.minds/production/pool_management_key/id_ed25519
 ```
 
-Push both secrets to Modal:
+(`@<path>` tells `vault kv put` to read the value from the file -- the
+file itself never leaves the operator's laptop.)
+
+Push every tier secret from Vault to Modal:
 
 ```bash
 uv run scripts/push_modal_secrets.py production
@@ -86,19 +89,23 @@ uv run scripts/push_modal_secrets.py production
 ## Step 4: Redeploy the remote_service_connector
 
 ```bash
-MNGR_DEPLOY_ENV=production modal deploy apps/remote_service_connector/imbue/remote_service_connector/app.py
+scripts/deploy_remote_service_connector.sh production
 ```
+
+This re-runs the Vault->Modal push and then ``modal deploy``s the app
+against the workspace named in
+`apps/minds/imbue/minds/config/envs/production/deploy.toml`.
 
 ## Step 5: Bake one or more pool hosts
 
-Provision a Vultr VPS, run the FCT template's `mngr create --template main --template vultr` to bake the agent state, install the management SSH key on both the VPS and the container, then write a `pool_hosts` row:
+Provision a Vultr VPS, run the FCT template's `mngr create --template main --template vultr` to bake the agent state, install the management SSH key on both the VPS and the container, then write a `pool_hosts` row.
+
+Fetch the values you need from Vault into the local shell once:
 
 ```bash
-set -a
-. .env                          # VULTR_API_KEY, ANTHROPIC_API_KEY
-. .minds/production/neon.sh     # DATABASE_URL
-. .minds/production/pool-ssh.sh # POOL_SSH_PRIVATE_KEY (only needed if you also push secrets)
-set +a
+export VULTR_API_KEY=$(vault kv get -mount=secrets -field=VULTR_API_KEY kv/minds/production/pool-ssh)
+export DATABASE_URL=$(vault kv get -mount=secrets -field=DATABASE_URL kv/minds/production/neon)
+export ANTHROPIC_API_KEY=$(vault kv get -mount=secrets -field=ANTHROPIC_API_KEY kv/minds/production/litellm)
 
 uv run mngr imbue_cloud admin pool create \
     --count 1 \

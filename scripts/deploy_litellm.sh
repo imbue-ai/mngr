@@ -1,37 +1,61 @@
 #!/usr/bin/env bash
 #
-# Deploy the LiteLLM proxy Modal app for a given environment.
+# Deploy the LiteLLM proxy Modal app for a given tier.
+#
+# Pulls tier secrets from HCP Vault into Modal Secrets via
+# scripts/push_modal_secrets.py, then deploys the Modal app pinned to
+# the workspace named in the tier's deploy.toml.
 #
 # Usage:
-#     scripts/deploy_litellm.sh <env-name>
+#     scripts/deploy_litellm.sh <tier>
 #
 # Examples:
 #     scripts/deploy_litellm.sh production
+#     scripts/deploy_litellm.sh dev
 #
-# Before deploying, push the litellm-<env> secret to Modal:
-#     uv run python scripts/push_modal_secrets.py <env-name>
+# Requires:
+#   - `vault login` against the HCP `admin` namespace
+#   - `modal token set` (or equivalent) for the tier's Modal workspace
 
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-    echo "usage: $0 <env-name>" >&2
+    echo "usage: $0 <tier>" >&2
     exit 2
 fi
 
-env_name="$1"
+tier="$1"
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 app_file="$repo_root/apps/modal_litellm/app.py"
+deploy_toml="$repo_root/apps/minds/imbue/minds/config/envs/${tier}/deploy.toml"
 
 if [[ ! -f "$app_file" ]]; then
     echo "error: app file not found: $app_file" >&2
     exit 1
 fi
+if [[ ! -f "$deploy_toml" ]]; then
+    echo "error: deploy.toml not found for tier '${tier}': $deploy_toml" >&2
+    exit 1
+fi
 
-export MNGR_DEPLOY_ENV="$env_name"
+modal_workspace=$(uv run python -c "
+import sys, tomllib
+with open('$deploy_toml', 'rb') as f:
+    data = tomllib.load(f)
+print(data.get('modal_workspace', ''))
+")
 
-echo "Deploying litellm-proxy-${env_name} with secrets:"
-echo "  - litellm-${env_name}"
-echo ""
+if [[ -z "$modal_workspace" || "$modal_workspace" == "CHANGE_ME" ]]; then
+    echo "error: '$deploy_toml' has no real modal_workspace set (got: '$modal_workspace')." >&2
+    echo "       Edit the file before deploying." >&2
+    exit 1
+fi
 
+echo "==> Pushing Vault secrets to Modal for tier '${tier}'..."
+uv run python "$repo_root/scripts/push_modal_secrets.py" "$tier"
+
+export MNGR_DEPLOY_ENV="$tier"
+
+echo "==> Deploying litellm-proxy-${tier} to Modal workspace '${modal_workspace}'..."
 cd "$repo_root"
-exec uv run modal deploy "$app_file"
+exec uv run modal deploy --name "litellm-proxy-${tier}" "$app_file"

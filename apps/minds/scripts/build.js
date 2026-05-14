@@ -361,6 +361,59 @@ function copyPyproject() {
   }
 }
 
+/**
+ * Bake the chosen tier's client.toml into _bundled/client.toml so the
+ * shipped desktop client resolves to it by default.
+ *
+ * Tier is picked from MINDS_BUILD_TIER (production / staging / dev /
+ * <anything-else>). When unset, leaves _bundled/ empty and the runtime
+ * falls back to apps/minds/imbue/minds/config/envs/dev/client.toml --
+ * which is the right behavior for a local `uv run minds run` build.
+ */
+function bundleClientConfig() {
+  const tier = process.env.MINDS_BUILD_TIER;
+  const bundledDir = path.join(
+    ROOT,
+    'imbue',
+    'minds',
+    'config',
+    'envs',
+    '_bundled'
+  );
+  const bundledClient = path.join(bundledDir, 'client.toml');
+
+  // Start from a clean slate so a previous build's artifact doesn't leak
+  // into this one (a developer flipping MINDS_BUILD_TIER off should get
+  // the dev fallback, not yesterday's production URL).
+  if (fs.existsSync(bundledClient)) {
+    fs.rmSync(bundledClient);
+  }
+  fs.mkdirSync(bundledDir, { recursive: true });
+
+  if (!tier) {
+    console.log('MINDS_BUILD_TIER unset; using dev/client.toml as the runtime default.');
+    return;
+  }
+
+  const tierClient = path.join(
+    ROOT,
+    'imbue',
+    'minds',
+    'config',
+    'envs',
+    tier,
+    'client.toml'
+  );
+  if (!fs.existsSync(tierClient)) {
+    throw new Error(
+      `MINDS_BUILD_TIER='${tier}' but ${tierClient} does not exist. ` +
+        `Either fix the tier name or add the file.`
+    );
+  }
+  fs.copyFileSync(tierClient, bundledClient);
+  console.log(`Bundled ${tierClient} -> ${bundledClient}`);
+}
+
 async function main() {
   console.log('Building Minds desktop app...\n');
 
@@ -381,6 +434,7 @@ async function main() {
 
   bundleLatchkey();
   copyPyproject();
+  bundleClientConfig();
 
   console.log('\nBuild complete!');
   console.log(`Resources directory: ${RESOURCES_DIR}`);
