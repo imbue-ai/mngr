@@ -76,6 +76,22 @@ _AGENT_READY_TIMEOUT_SECONDS: Final[float] = 120.0
 # transcript stream produced by mngr_claude.
 _COMMON_TRANSCRIPT_PATH: Final[str] = "claude/common_transcript/events.jsonl"
 
+# Lifecycle states that end the per-turn polling loop. WAITING is the
+# success case (agent paused for the next user turn); the others all mean
+# the agent will never reach WAITING and would cause the loop to hang:
+# STOPPED/DONE are the natural terminal states, REPLACED means the agent's
+# tmux pane was hijacked by another process, and RUNNING_UNKNOWN_AGENT_TYPE
+# means mngr no longer recognizes the agent type so it cannot determine when
+# the turn is done. The caller treats any non-WAITING result as a claude-side
+# failure (EXIT_CLAUDE_ERROR) with the state name in the error envelope.
+_TURN_END_STATES: Final[tuple[AgentLifecycleState, ...]] = (
+    AgentLifecycleState.WAITING,
+    AgentLifecycleState.STOPPED,
+    AgentLifecycleState.DONE,
+    AgentLifecycleState.REPLACED,
+    AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+)
+
 EXIT_SUCCESS: Final[int] = 0
 EXIT_CLAUDE_ERROR: Final[int] = 1
 EXIT_MNGR_ERROR: Final[int] = 2
@@ -321,16 +337,17 @@ def _wait_for_turn_end(
     """Poll the agent until it reaches WAITING (or a terminal state); stream events meanwhile.
 
     Returns ``(final_state, new_seen_bytes)``. WAITING means the agent paused
-    for the next user turn; STOPPED or DONE mean the agent exited prematurely
-    (the caller treats this as a claude-side failure). The returned offset
-    must be threaded back into the next call so multi-turn invocations do not
-    re-read prior turns' transcript bytes.
+    for the next user turn; any other state in :data:`_TURN_END_STATES`
+    (STOPPED, DONE, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE) means the agent
+    will never reach WAITING and the caller treats this as a claude-side
+    failure. The returned offset must be threaded back into the next call
+    so multi-turn invocations do not re-read prior turns' transcript bytes.
     """
     final_state: AgentLifecycleState | None = None
     while final_state is None:
         seen_bytes = _drain_new_events(events_target, writer, parser_warner, read_failure_warner, seen_bytes)
         state = agent.get_lifecycle_state()
-        if state in (AgentLifecycleState.WAITING, AgentLifecycleState.STOPPED, AgentLifecycleState.DONE):
+        if state in _TURN_END_STATES:
             seen_bytes = _drain_new_events(events_target, writer, parser_warner, read_failure_warner, seen_bytes)
             final_state = state
         else:
