@@ -39,7 +39,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr import resources as mngr_resources
-from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.config.agent_class_registry import get_orphan_agent_class
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
@@ -1010,13 +1010,19 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             resolved_class = resolved.agent_class
             resolved_config = resolved.agent_config
         except UnknownAgentTypeError:
+            orphan_class = get_orphan_agent_class()
+            if orphan_class is None:
+                # No fallback configured (e.g. tests that didn't load the
+                # agent registry). Re-raise so the test surfaces the
+                # missing setup rather than silently swallowing the error.
+                raise
             logger.warning(
                 "Agent {} has type '{}' which is no longer registered; "
-                "loading as BaseAgent so existing commands keep working.",
+                "loading as orphan fallback so existing commands keep working.",
                 data.get("name"),
                 agent_type,
             )
-            resolved_class = BaseAgent
+            resolved_class = orphan_class
             resolved_config = AgentTypeConfig()
 
         return resolved_class(

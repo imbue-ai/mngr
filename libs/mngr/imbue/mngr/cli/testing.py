@@ -24,11 +24,10 @@ from imbue.mngr.utils.testing import get_short_random_string
 def _ensure_test_agent_type_registered(agent_type: AgentTypeName) -> None:
     """Register an arbitrary agent-type name as BaseAgent if it is otherwise unknown.
 
-    The strict gate in ``resolve_agent_type`` (and ``host.create_agent_state``,
-    which goes through it) rejects names that are not registered or declared
-    in user config. Test helpers historically passed ad-hoc placeholder names
-    that relied on the BaseAgent default fallback; now that the fallback is
-    gone, register the name on demand for the rest of the test session.
+    ``resolve_agent_type`` (and ``host.create_agent_state``, which goes through
+    it) rejects names that are not registered or declared in user config.
+    Test helpers that pass ad-hoc placeholder agent-type names register them
+    on demand here so resolution succeeds for the rest of the test session.
     """
     register_placeholder_agent_type(str(agent_type))
 

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import pluggy
 
+from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.default_plugins import codex_agent
 from imbue.mngr.agents.default_plugins import command_agent
 from imbue.mngr.agents.default_plugins import headless_command_agent
 from imbue.mngr.config.agent_class_registry import list_registered_agent_class_types
 from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.agent_class_registry import reset_agent_class_registry
+from imbue.mngr.config.agent_class_registry import set_orphan_agent_class
 from imbue.mngr.config.agent_config_registry import list_registered_agent_config_types
 from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
@@ -36,6 +38,12 @@ def load_agents_from_plugins(pm: pluggy.PluginManager) -> None:
     """Load agent types from plugins via the register_agent_type hook."""
     if _registry_state["agents_loaded"]:
         return
+
+    # Wire BaseAgent as the orphan-load fallback so the hosts layer can
+    # degrade gracefully for on-disk agents whose plugin was uninstalled,
+    # without importing concretely from the agents layer (forbidden by the
+    # import-linter contract).
+    set_orphan_agent_class(BaseAgent)
 
     # Register built-in agent type classes (each has a hookimpl static method)
     # Claude-based agent types are registered via entry points from the mngr_claude plugin

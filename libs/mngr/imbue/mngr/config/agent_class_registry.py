@@ -11,6 +11,12 @@ from imbue.mngr.primitives import AgentTypeName
 
 _agent_class_registry: dict[AgentTypeName, type] = {}
 
+# Used by the on-disk load path when an agent's recorded type is no longer
+# registered (e.g. the plugin was uninstalled). Set by the agents layer at
+# plugin-load time so the hosts layer can degrade gracefully without
+# importing concretely from agents (which the import-linter forbids).
+_orphan_agent_class: type | None = None
+
 
 def register_agent_class(
     agent_type: str,
@@ -41,6 +47,25 @@ def list_registered_agent_class_types() -> list[str]:
     return sorted(str(k) for k in _agent_class_registry.keys())
 
 
+def set_orphan_agent_class(agent_class: type) -> None:
+    """Set the class to use when loading an agent whose type is no longer registered.
+
+    Consulted only by the on-disk load path in the hosts layer, so commands
+    like ``mngr destroy`` keep working after a plugin is uninstalled. New
+    agents created via ``resolve_agent_type`` are unaffected -- they still
+    require a registered type or a valid ``parent_type`` chain.
+    """
+    global _orphan_agent_class
+    _orphan_agent_class = agent_class
+
+
+def get_orphan_agent_class() -> type | None:
+    """Return the orphan fallback class set by ``set_orphan_agent_class``, or None."""
+    return _orphan_agent_class
+
+
 def reset_agent_class_registry() -> None:
     """Reset the registry. Used for test isolation."""
+    global _orphan_agent_class
     _agent_class_registry.clear()
+    _orphan_agent_class = None

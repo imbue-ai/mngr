@@ -40,10 +40,9 @@ from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr.utils.testing import setup_mngr_test_environment
 
 # Placeholder agent type names used across the test suite as "any agent type"
-# stand-ins. The default-class fallback (set_default_agent_class) used to make
-# these resolve to BaseAgent silently; now resolve_agent_type requires every
-# name to be known. Registering these as BaseAgent + base config keeps the
-# existing tests working without scattering ``--type command`` rewrites.
+# stand-ins. ``resolve_agent_type`` requires every name to be known, so these
+# get registered as BaseAgent + base config so tests can pass them without
+# scattering ``--type command`` rewrites.
 _TEST_PLACEHOLDER_AGENT_TYPES: tuple[str, ...] = (
     "generic",
     "test",
