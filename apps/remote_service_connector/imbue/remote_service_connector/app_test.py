@@ -1639,7 +1639,11 @@ def test_lease_host_returns_available_host(monkeypatch: pytest.MonkeyPatch) -> N
     )
     resp = client.post(
         "/hosts/lease",
-        json={"ssh_public_key": "ssh-ed25519 AAAA testkey", "attributes": {"version": "v0.1.0"}},
+        json={
+            "ssh_public_key": "ssh-ed25519 AAAA testkey",
+            "host_name": "my-workspace",
+            "attributes": {"version": "v0.1.0"},
+        },
         headers=_admin_headers(),
     )
     assert resp.status_code == 200
@@ -1647,12 +1651,15 @@ def test_lease_host_returns_available_host(monkeypatch: pytest.MonkeyPatch) -> N
     assert body["host_db_id"] == "00000000-0000-0000-0000-000000000001"
     assert body["vps_ip"] == "10.0.0.1"
     assert body["agent_id"] == "agent-111"
+    assert body["host_name"] == "my-workspace"
     assert body["attributes"] == {"version": "v0.1.0"}
     # Verify SSH key was injected on both VPS and container
     assert len(backend.append_key_calls) == 2
-    # Verify host was marked as leased
+    # Verify host was marked as leased and the user-supplied host_name was
+    # written to the row.
     assert backend.pool_rows[0].status == "leased"
     assert backend.pool_rows[0].leased_to_user == _ADMIN_STUB_USERNAME
+    assert backend.pool_rows[0].host_name == "my-workspace"
 
 
 def test_lease_host_returns_503_when_pool_empty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1660,7 +1667,11 @@ def test_lease_host_returns_503_when_pool_empty(monkeypatch: pytest.MonkeyPatch)
     client, _backend = _make_pool_test_client(monkeypatch)
     resp = client.post(
         "/hosts/lease",
-        json={"ssh_public_key": "ssh-ed25519 AAAA testkey", "attributes": {"version": "v0.1.0"}},
+        json={
+            "ssh_public_key": "ssh-ed25519 AAAA testkey",
+            "host_name": "my-workspace",
+            "attributes": {"version": "v0.1.0"},
+        },
         headers=_admin_headers(),
     )
     assert resp.status_code == 503
@@ -1673,12 +1684,35 @@ def test_lease_host_returns_503_when_version_mismatch(monkeypatch: pytest.Monkey
     backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-000000000001"), version="v0.2.0")
     resp = client.post(
         "/hosts/lease",
-        json={"ssh_public_key": "ssh-ed25519 AAAA testkey", "attributes": {"version": "v0.1.0"}},
+        json={
+            "ssh_public_key": "ssh-ed25519 AAAA testkey",
+            "host_name": "my-workspace",
+            "attributes": {"version": "v0.1.0"},
+        },
         headers=_admin_headers(),
     )
     assert resp.status_code == 503
     assert "No pre-created agents" in resp.json()["detail"]
     # Verify the host was not leased
+    assert backend.pool_rows[0].status == "available"
+
+
+def test_lease_host_rejects_invalid_host_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/lease rejects host_name values that fail the SafeName regex."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-000000000001"), version="v0.1.0")
+    resp = client.post(
+        "/hosts/lease",
+        json={
+            "ssh_public_key": "ssh-ed25519 AAAA testkey",
+            "host_name": "bad.name",
+            "attributes": {"version": "v0.1.0"},
+        },
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 422
+    # The available row stays available since validation rejected the request
+    # before the SELECT/UPDATE.
     assert backend.pool_rows[0].status == "available"
 
 
@@ -1831,7 +1865,11 @@ def test_route_lease_host_returns_403_when_email_not_in_allowlist(
     monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
     resp = client.post(
         "/hosts/lease",
-        json={"ssh_public_key": "ssh-ed25519 AAAA testkey", "attributes": {"version": "v0.1.0"}},
+        json={
+            "ssh_public_key": "ssh-ed25519 AAAA testkey",
+            "host_name": "my-workspace",
+            "attributes": {"version": "v0.1.0"},
+        },
         headers=_admin_headers(),
     )
     assert resp.status_code == 403
@@ -1849,7 +1887,11 @@ def test_route_lease_host_returns_403_when_paid_suffixes_unset(
     monkeypatch.delenv("PAID_ACCOUNT_SUFFIXES", raising=False)
     resp = client.post(
         "/hosts/lease",
-        json={"ssh_public_key": "ssh-ed25519 AAAA testkey", "attributes": {"version": "v0.1.0"}},
+        json={
+            "ssh_public_key": "ssh-ed25519 AAAA testkey",
+            "host_name": "my-workspace",
+            "attributes": {"version": "v0.1.0"},
+        },
         headers=_admin_headers(),
     )
     assert resp.status_code == 403

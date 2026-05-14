@@ -25,7 +25,7 @@ from imbue.mngr_modal.instance import ModalProviderInstance
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
 def test_provision_statusline_shim_on_modal_host(real_modal_provider: ModalProviderInstance) -> None:
-    """Provision the rate-limits statusline shim onto a real Modal sandbox host
+    """Provision the usage statusline shim onto a real Modal sandbox host
     and verify each artifact lands correctly via ``host.read_text_file``.
 
     Covers the full host-portable pipeline:
@@ -59,7 +59,7 @@ def test_provision_statusline_shim_on_modal_host(real_modal_provider: ModalProvi
 
         # The shim and writer scripts landed under state_dir/commands/.
         shim_path = state_dir / "commands" / "claude_statusline.sh"
-        writer_path = state_dir / "commands" / "claude_rate_limits_writer.sh"
+        writer_path = state_dir / "commands" / "claude_usage_writer.sh"
         shim_content = host.read_text_file(shim_path)
         writer_content = host.read_text_file(writer_path)
         # Shell scripts -- shebang sanity-check is enough here; content matches
