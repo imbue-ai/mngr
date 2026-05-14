@@ -2394,18 +2394,25 @@ image = modal.Image.debian_slim().pip_install(
 app = modal.App(name=f"remote-service-connector-{_DEPLOY_ENV}", image=image)
 
 
-# Modal URLs follow ``{workspace}--{app-name}-{function-name}.modal.run``, with
-# underscores in identifiers normalized to hyphens. For this deployment that's
-# ``joshalbrecht--remote-service-connector-<env>-fastapi-app.modal.run``. This
-# fallback is only used when AUTH_WEBSITE_DOMAIN is not set in the secret; in
-# practice we set it explicitly from ``.minds/<env>/supertokens.sh``.
-_MODAL_WORKSPACE = "joshalbrecht"
-_DEFAULT_CONNECTOR_DOMAIN = f"https://{_MODAL_WORKSPACE}--remote-service-connector-{_DEPLOY_ENV}-fastapi-app.modal.run"
-
-
 def _get_auth_website_domain() -> str:
-    """Return the public URL used in outbound email links (verification, reset)."""
-    return os.environ.get("AUTH_WEBSITE_DOMAIN", _DEFAULT_CONNECTOR_DOMAIN)
+    """Return the public URL used in outbound email links (verification, reset).
+
+    Reads ``AUTH_WEBSITE_DOMAIN`` from the per-tier ``supertokens-<env>``
+    Modal secret. The value is **required**: it is the URL embedded into
+    password-reset and email-verification links, and it must match the
+    workspace this app is actually deployed under. Raises
+    :class:`RuntimeError` if the secret forgot to set it -- silently
+    falling back to a hardcoded workspace would be wrong for every
+    non-default tier.
+    """
+    value = os.environ.get("AUTH_WEBSITE_DOMAIN")
+    if not value:
+        raise RuntimeError(
+            "AUTH_WEBSITE_DOMAIN is not set. Populate it in the "
+            f"`supertokens-{_DEPLOY_ENV}` Modal secret (the deploy script "
+            "pushes it from the tier's Vault entry)."
+        )
+    return value
 
 
 def _build_oauth_providers() -> list[ProviderInput]:
