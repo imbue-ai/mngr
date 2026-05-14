@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
@@ -125,3 +126,57 @@ def test_assemble_command_skips_transcript_watcher_when_disabled(
     command = str(agent.assemble_command(agent.host, (), command_override=None))
     assert "common_transcript.sh" not in command
     assert command == "gemini --skip-trust"
+
+
+def test_get_expected_process_name_returns_node(gemini_agent: GeminiAgent) -> None:
+    """gemini-cli is a node script with no process.title override -- ps shows 'node'."""
+    assert gemini_agent.get_expected_process_name() == "node"
+
+
+def test_get_common_transcript_scripts_returns_common_transcript_sh(gemini_agent: GeminiAgent) -> None:
+    """The mixin's required script set is keyed by filename and contains the converter body."""
+    scripts = gemini_agent.get_common_transcript_scripts()
+    assert "common_transcript.sh" in scripts
+    body = scripts["common_transcript.sh"]
+    assert body.startswith("#!/usr/bin/env bash")
+    assert "events/gemini/common_transcript/events.jsonl" in body
+
+
+def test_provision_with_emit_disabled_does_not_write_script(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    agent = GeminiAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-gemini"),
+        agent_type=AgentTypeName("gemini"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=local_provider.mngr_ctx,
+        agent_config=GeminiAgentConfig(emit_common_transcript=False),
+        host=host,
+    )
+    agent.provision(host=host, options=CreateAgentOptions(agent_type=AgentTypeName("gemini")), mngr_ctx=agent.mngr_ctx)
+
+    # No script written because emit was disabled
+    expected_script = agent._get_agent_dir() / "commands" / "common_transcript.sh"
+    assert not expected_script.exists()
+
+
+def test_provision_with_emit_enabled_writes_transcript_script(gemini_agent: GeminiAgent) -> None:
+    """provision should write common_transcript.sh to the agent's commands/ directory."""
+    gemini_agent.provision(
+        host=gemini_agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
+        mngr_ctx=gemini_agent.mngr_ctx,
+    )
+
+    expected_script = gemini_agent._get_agent_dir() / "commands" / "common_transcript.sh"
+    assert expected_script.exists()
+    assert expected_script.read_text().startswith("#!/usr/bin/env bash")
+    # Verify the script was written with execute permissions
+    assert expected_script.stat().st_mode & 0o111
