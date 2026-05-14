@@ -537,15 +537,17 @@ def test_resolve_agent_type_raises_for_unknown_parent_type() -> None:
         resolve_agent_type(AgentTypeName("child-type"), config)
 
 
-def test_resolve_agent_type_accepts_config_only_registered_type() -> None:
-    """resolve_agent_type should accept a type with only a config class registered (no class).
+def test_is_known_agent_type_accepts_registered_types() -> None:
+    """is_known_agent_type should accept a name registered via either registry.
 
-    This mirrors how the built-in ``command`` agent type used to register
-    (agent_class=None, falling back to BaseAgent). After the default-fallback
-    removal, ``command`` registers BaseAgent explicitly -- but config-only
-    registrations are still a legitimate state (e.g. plugin loads only the
-    config-side hookimpl during inspection), and the gate should not reject
-    them as unknown.
+    The predicate treats a name as known if it has a registered class, a
+    registered config, or a user ``[agent_types.X]`` block. This covers both
+    fully-registered types and partial registrations (e.g. a plugin that
+    only contributes a config-side hookimpl during inspection). The gate in
+    ``resolve_agent_type`` uses this predicate; it does not guarantee that
+    ``resolve_agent_type`` will succeed end-to-end for a config-only name
+    (it still needs an agent class), only that such a name is not rejected
+    up front as unknown.
     """
     reset_agent_class_registry()
     reset_agent_config_registry()
