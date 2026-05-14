@@ -588,16 +588,20 @@ def test_is_known_agent_type_accepts_registered_types() -> None:
     reset_agent_class_registry()
     reset_agent_config_registry()
     try:
-        register_agent_class("config-only-type", _FakeAgentClass)
-        register_agent_config("config-only-type", AgentTypeConfig)
-        assert is_known_agent_type("config-only-type", MngrConfig()) is True
+        # Both class and config registered -- the common case for a normally-
+        # installed plugin. Covers the 2nd and 3rd OR branches together.
+        register_agent_class("both-registered-type", _FakeAgentClass)
+        register_agent_config("both-registered-type", AgentTypeConfig)
+        assert is_known_agent_type("both-registered-type", MngrConfig()) is True
 
-        # config-registered-only (no class)
+        # Config registered but no class. Exercises the 3rd OR branch
+        # (is_agent_config_registered) in isolation.
         reset_agent_class_registry()
         register_agent_config("only-config", AgentTypeConfig)
         assert is_known_agent_type("only-config", MngrConfig()) is True
 
-        # class-registered-only (no config); covers the third OR branch
+        # Class registered but no config. Exercises the 2nd OR branch
+        # (is_agent_class_registered) in isolation.
         reset_agent_class_registry()
         reset_agent_config_registry()
         register_agent_class("only-class", _FakeAgentClass)
