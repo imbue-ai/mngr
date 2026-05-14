@@ -160,8 +160,8 @@ class LimaProviderInstance(BaseProviderInstance):
         """Return (private_key_path, public_key_path) for this host's pre-injected sshd host key.
 
         Per-host (not per-provider) so each VM has its own identity and removing
-        a host cleanly leaves no shared state. Mirrors mngr_imbue_cloud's
-        per-host keypair layout.
+        a host cleanly leaves no shared state. Mirrors mngr_vps_docker's
+        pre-injected sshd host-key layout.
         """
         host_keys_dir = self._keys_dir / "hosts" / str(host_id)
         return host_keys_dir / "ssh_host_ed25519_key", host_keys_dir / "ssh_host_ed25519_key.pub"
