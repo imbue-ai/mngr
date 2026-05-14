@@ -51,9 +51,12 @@ class GeminiDirectoryNotTrustedError(ConfigError):
     Gemini CLI shows a "Do you trust this folder?" dialog on first run in any
     new directory. When mngr launches Gemini and then sends keystrokes via
     tmux, those keystrokes accept the dialog and are consumed, so the intended
-    initial prompt is lost AND the directory is silently trusted. ``mngr_gemini``
-    currently sidesteps this with the ``--skip-trust`` CLI flag; the proper fix
-    is to write trust state into ``~/.gemini/settings.json`` before launch.
+    initial prompt is lost AND the directory is silently trusted. The
+    automated launch path clears this gate by setting
+    ``GEMINI_CLI_TRUST_WORKSPACE=true`` on the agent's environment (see
+    ``GeminiAgent.modify_env_vars``); this error type is raised by callers
+    that detect an untrusted state outside that flow (e.g. interactive
+    launches that cannot or choose not to set the env var).
     """
 
     def __init__(self, source_path: str) -> None:
