@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import ClassVar
-from typing import Mapping
 
 from pydantic import Field
 
@@ -198,10 +198,13 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
     ) -> CommandString:
         """Assemble the gemini command, prefixing the transcript watcher if enabled.
 
-        The watcher runs as a backgrounded child of the tmux command shell;
-        when the tmux session terminates the child dies via SIGHUP propagation.
-        When ``agent_config.emit_common_transcript`` is ``False`` the watcher
-        is not prepended and the returned command is the base assembled by the
+        The watcher is launched fire-and-forget as a backgrounded subshell
+        (``( bash ... ) &``). Bash does not propagate SIGHUP to background
+        children of non-interactive shells by default, so the watcher may
+        outlive the tmux session and continue polling until killed by host
+        teardown or until its session inputs disappear. When
+        ``agent_config.emit_common_transcript`` is ``False`` the watcher is
+        not prepended and the returned command is the base assembled by the
         superclass.
         """
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)

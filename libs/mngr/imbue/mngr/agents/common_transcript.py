@@ -8,8 +8,8 @@ mode ``0755`` so the agent's ``assemble_command`` can launch them.
 from __future__ import annotations
 
 import shlex
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping
 
 from loguru import logger
 
