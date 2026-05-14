@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
-from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
@@ -68,7 +67,6 @@ def gemini_agent(
     tmp_path: Path,
 ) -> GeminiAgent:
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    assert isinstance(host, Host)
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     return GeminiAgent.model_construct(
@@ -86,13 +84,9 @@ def gemini_agent(
 
 def test_assemble_command_injects_skip_trust(gemini_agent: GeminiAgent) -> None:
     command = gemini_agent.assemble_command(gemini_agent.host, (), command_override=None)
-    tokens = str(command).split()
-    assert "gemini" in tokens
-    assert "--skip-trust" in tokens
+    assert str(command).split() == ["gemini", "--skip-trust"]
 
 
 def test_assemble_command_preserves_user_agent_args(gemini_agent: GeminiAgent) -> None:
     command = gemini_agent.assemble_command(gemini_agent.host, ("--debug",), command_override=None)
-    tokens = str(command).split()
-    assert "--skip-trust" in tokens
-    assert "--debug" in tokens
+    assert str(command).split() == ["gemini", "--skip-trust", "--debug"]
