@@ -130,12 +130,6 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
             "Headless agents do not accept interactive messages.",
         )
 
-    def uses_paste_detection_send(self) -> bool:
-        return False
-
-    def get_tui_ready_indicator(self) -> str | None:
-        return None
-
     def _is_agent_finished(self) -> bool:
         """Check if the agent process has exited (tmux lifecycle) or is no longer running."""
         state = self.get_lifecycle_state()

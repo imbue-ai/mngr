@@ -74,14 +74,14 @@ def test_render_create_form_has_default_values() -> None:
     html = render_create_form()
     assert "assistant" in html
     assert "forever-claude-template" in html
-    assert "agent_name" in html
+    assert "host_name" in html
     assert "launch_mode" in html
 
 
 def test_render_create_form_prefills_values() -> None:
-    html = render_create_form(git_url="https://custom/repo", agent_name="my-bot", branch="feature/test")
+    html = render_create_form(git_url="https://custom/repo", host_name="my-workspace", branch="feature/test")
     assert "https://custom/repo" in html
-    assert "my-bot" in html
+    assert "my-workspace" in html
     assert "feature/test" in html
 
 

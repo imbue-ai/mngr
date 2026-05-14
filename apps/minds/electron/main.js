@@ -1704,6 +1704,20 @@ function initiateFullQuit() {
   app.quit();
 }
 
+// Route POSIX SIGTERM / SIGINT through `app.quit()` so they trigger the
+// same `before-quit` chain that window-close uses (which already runs
+// `backend.shutdown()`, SIGTERMing the python backend and waiting for
+// uvicorn's graceful exit). Without these handlers Node's default for
+// these signals is to exit immediately, which orphans the python backend
+// and the `mngr forward` / `observe` subprocesses. The `just minds-stop`
+// recipe sends SIGTERM to this process so the clean-shutdown chain can run.
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => {
+    console.log(`[lifecycle] ${signal} received, requesting app.quit()`);
+    app.quit();
+  });
+}
+
 app.on('window-all-closed', async () => {
   console.log('[lifecycle] window-all-closed fired, isShuttingDown=' + isShuttingDown);
   if (isShuttingDown) return;
