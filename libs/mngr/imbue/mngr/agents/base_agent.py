@@ -89,9 +89,10 @@ class BaseAgent(AgentInterface[AgentConfigT]):
 
         if not parts:
             raise UserInputError(
-                f"Agent type '{self.agent_type}' has no command configured. Either set "
-                f"`command = '...'` on the type, or pass a shell command after `--` "
-                f"(e.g. `mngr create foo --type command -- sleep 99999`)."
+                f"Agent type '{self.agent_type}' has no command to run. "
+                f"Pass a shell command after `--` "
+                f"(e.g. `mngr create foo --type command -- sleep 99999`), "
+                f"or set `command = '...'` on a custom `[agent_types.X]` in your config."
             )
 
         command = CommandString(" ".join(parts))

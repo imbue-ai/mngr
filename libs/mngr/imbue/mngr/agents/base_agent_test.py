@@ -408,7 +408,7 @@ def test_assemble_command_raises_when_no_base_and_no_args(
         agent_class=BaseAgent,
     )
 
-    with pytest.raises(UserInputError, match=r"has no command configured"):
+    with pytest.raises(UserInputError, match=r"has no command to run"):
         agent.assemble_command(
             host=agent.host,
             agent_args=(),
