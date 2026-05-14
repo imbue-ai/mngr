@@ -300,7 +300,10 @@ class LimaProviderInstance(BaseProviderInstance):
         _, public_key_path = self._host_keypair_paths(host_id)
         if not public_key_path.exists():
             # Legacy host created before the pre-injection change; no known
-            # public key on disk. Skip; the caller (or pyinfra) will TOFU.
+            # public key on disk. Skip writing known_hosts. Because pyinfra is
+            # configured with strict host-key checking, connecting to such a
+            # host fails host-key verification until it is destroyed and
+            # recreated -- there is no trust-on-first-use fallback.
             logger.warning(
                 "No pre-injected host key on disk for {}; known_hosts will not be populated "
                 "(legacy host? destroy + recreate to migrate).",
