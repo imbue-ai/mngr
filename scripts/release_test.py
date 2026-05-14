@@ -57,10 +57,14 @@ def test_gate_blocks_and_returns_false_with_pending_entries(capsys: pytest.Captu
     ]
     result = _gate_release_on_pending_changelog_entries(entries, dry_run=False)
     assert result is False
-    output = capsys.readouterr().out
-    assert "ERROR" in output
-    assert "2 pending changelog entries" in output
-    assert "changelog/fake-a.md" in output
-    assert "changelog/fake-b.md" in output
+    captured = capsys.readouterr()
+    # The blocking-error path writes to stderr (matches the rest of
+    # release.py's 'ERROR:' convention); stdout should stay empty.
+    assert captured.out == ""
+    err = captured.err
+    assert "ERROR" in err
+    assert "2 pending changelog entries" in err
+    assert "changelog/fake-a.md" in err
+    assert "changelog/fake-b.md" in err
     # The error path prints the on-demand command for the user to copy.
-    assert "mngr schedule run" in output
+    assert "mngr schedule run" in err

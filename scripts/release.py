@@ -467,7 +467,7 @@ def _pluralize_entry(count: int) -> str:
     return "entry" if count == 1 else "entries"
 
 
-def _print_on_demand_consolidation_command() -> None:
+def _print_on_demand_consolidation_command(file: Any = None) -> None:
     """Print the one-liner that triggers an on-demand consolidation run.
 
     Equivalent to the example invocation in ``setup_changelog_agent.sh``'s
@@ -480,12 +480,17 @@ def _print_on_demand_consolidation_command() -> None:
     The provider is read from ``CHANGELOG_PROVIDER`` (default ``modal``),
     matching the env var the deploy script honors, so the printed command
     targets the same provider the schedule was deployed under.
+
+    ``file`` is forwarded to ``print``; defaults to ``sys.stdout`` (via
+    ``print``'s own default when ``None`` is passed). Callers in error
+    paths pass ``sys.stderr`` so the on-demand command lands on the same
+    stream as the surrounding error message.
     """
     provider = os.environ.get("CHANGELOG_PROVIDER", "modal")
     disable_args = " ".join(changelog_disable_plugin_args())
-    print(f"  env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME={CHANGELOG_MNGR_ROOT_NAME} \\")
-    print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {provider} \\")
-    print(f"    {disable_args}")
+    print(f"  env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME={CHANGELOG_MNGR_ROOT_NAME} \\", file=file)
+    print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {provider} \\", file=file)
+    print(f"    {disable_args}", file=file)
 
 
 def _gate_release_on_pending_changelog_entries(entries: list[Path], dry_run: bool) -> bool:
@@ -515,19 +520,24 @@ def _gate_release_on_pending_changelog_entries(entries: list[Path], dry_run: boo
         print()
         return True
 
-    print()
-    print(f"ERROR: cannot release with {len(entries)} pending changelog {entry_word}.")
-    print()
-    print("The following entries in changelog/ haven't been consolidated into")
-    print("CHANGELOG.md's [Unreleased] section yet:")
-    print(_format_pending_changelog_list(entries, REPO_ROOT))
-    print()
-    print(f"The '{CHANGELOG_TRIGGER_NAME}' schedule runs nightly at midnight Pacific. To")
-    print("trigger it on demand instead (opens a PR you can merge before re-running")
-    print("this script), run:")
-    print()
-    _print_on_demand_consolidation_command()
-    print()
+    # Route the block-release path to stderr to match every other
+    # 'ERROR:' message in this file (see _find_last_release_tag, the
+    # workflow polling helpers, the branch check, etc.). The dry-run
+    # WARNING above stays on stdout to match release.py's other
+    # informational WARNINGs (e.g. the empty-[Unreleased] notice).
+    print(file=sys.stderr)
+    print(f"ERROR: cannot release with {len(entries)} pending changelog {entry_word}.", file=sys.stderr)
+    print(file=sys.stderr)
+    print("The following entries in changelog/ haven't been consolidated into", file=sys.stderr)
+    print("CHANGELOG.md's [Unreleased] section yet:", file=sys.stderr)
+    print(_format_pending_changelog_list(entries, REPO_ROOT), file=sys.stderr)
+    print(file=sys.stderr)
+    print(f"The '{CHANGELOG_TRIGGER_NAME}' schedule runs nightly at midnight Pacific. To", file=sys.stderr)
+    print("trigger it on demand instead (opens a PR you can merge before re-running", file=sys.stderr)
+    print("this script), run:", file=sys.stderr)
+    print(file=sys.stderr)
+    _print_on_demand_consolidation_command(file=sys.stderr)
+    print(file=sys.stderr)
     return False
 
 
