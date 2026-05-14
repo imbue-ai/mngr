@@ -133,6 +133,60 @@ def test_iter_permission_requests_skips_malformed_lines() -> None:
     ]
 
 
+def test_get_granted_permissions_unions_matching_scopes() -> None:
+    """The reader collects permission names across every rule whose key is in ``scopes``."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/permissions"
+        assert "path=" in str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "rules": [
+                    {"slack-api": ["slack-read-all", "slack-write-messages"]},
+                    {"github-rest-api": ["github-read-all"]},
+                    {"slack-api": ["any"]},
+                ],
+            },
+        )
+
+    client = _build_client(_handler)
+    granted = client.get_granted_permissions_for_scopes(
+        Path("/perms/host-1/latchkey_permissions.json"),
+        scopes=["slack-api"],
+    )
+    assert granted == frozenset({"slack-read-all", "slack-write-messages", "any"})
+
+
+def test_get_granted_permissions_returns_empty_on_404() -> None:
+    """A missing permissions file is treated as 'no rules', not an error."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(404, json={"error": "not found"})
+
+    client = _build_client(_handler)
+    granted = client.get_granted_permissions_for_scopes(
+        Path("/perms/host-1/latchkey_permissions.json"),
+        scopes=["slack-api"],
+    )
+    assert granted == frozenset()
+
+
+def test_get_granted_permissions_raises_on_other_4xx() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(403, json={"error": "outside root"})
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError):
+        client.get_granted_permissions_for_scopes(
+            Path("/etc/passwd"),
+            scopes=["any"],
+        )
+
+
 def test_iter_permission_requests_raises_on_http_error() -> None:
     def _handler(request: httpx.Request) -> httpx.Response:
         del request

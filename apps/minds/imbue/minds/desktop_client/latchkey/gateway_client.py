@@ -181,6 +181,51 @@ class LatchkeyGatewayClient(MutableModel):
                 f"DELETE {url} returned {response.status_code}: {response.text.strip()}",
             )
 
+    def get_granted_permissions_for_scopes(
+        self,
+        permissions_file_path: Path,
+        scopes: Sequence[str],
+    ) -> frozenset[str]:
+        """Return the union of granted permission schemas across ``scopes`` in the file.
+
+        Wraps ``GET /permissions?path=<...>`` and walks the parsed
+        ``rules`` list. A missing file (404) is treated as "no rules"
+        and returns the empty set, matching the previous filesystem
+        read's behaviour. Any other non-2xx surfaces as
+        :class:`LatchkeyGatewayClientError`.
+        """
+        url = f"{self.base_url.rstrip('/')}/permissions"
+        params = {"path": str(permissions_file_path)}
+        try:
+            with self._one_shot_client() as client:
+                response = client.get(url, params=params, headers=self._build_headers())
+        except httpx.HTTPError as e:
+            raise LatchkeyGatewayClientError(f"GET {url} failed: {e}") from e
+        if response.status_code == 404:
+            return frozenset()
+        if response.status_code >= 400:
+            raise LatchkeyGatewayClientError(
+                f"GET {url} returned {response.status_code}: {response.text.strip()}",
+            )
+        try:
+            payload = response.json()
+        except ValueError as e:
+            raise LatchkeyGatewayClientError(f"GET {url} returned non-JSON body: {e}") from e
+        if not isinstance(payload, dict):
+            raise LatchkeyGatewayClientError(f"GET {url} returned non-object JSON: {payload!r}")
+        rules = payload.get("rules")
+        if not isinstance(rules, list):
+            return frozenset()
+        scopes_set = set(scopes)
+        granted: set[str] = set()
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            for scope_name, permissions in rule.items():
+                if scope_name in scopes_set and isinstance(permissions, list):
+                    granted.update(p for p in permissions if isinstance(p, str))
+        return frozenset(granted)
+
     def set_permission_rule(
         self,
         permissions_file_path: Path,

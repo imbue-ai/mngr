@@ -409,12 +409,6 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     # password is intentionally NOT persisted -- consumers derive it
     # on demand via :meth:`Latchkey.derive_gateway_password` (a pure
     # function of the user's latchkey encryption key).
-    #
-    # ``update_forward_info_gateway_port`` raises if the supervisor
-    # record has disappeared between ``ensure_running`` and now;
-    # surface that as a clean non-zero exit rather than a raw
-    # traceback, since it indicates a broken filesystem / lifecycle
-    # invariant that the user needs to investigate.
     try:
         update_forward_info_gateway_port(latchkey.plugin_data_dir, gateway_port)
     except LatchkeyStoreError as e:

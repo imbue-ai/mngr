@@ -14,13 +14,14 @@ Two kinds of state live there:
   ``{plugin_data_dir}/latchkey_forward.json``.
 * ``LatchkeyPermissionsConfig`` -- the contents of latchkey's permissions
   config, in detent's rule format. Stored on disk per-host as
-  ``{plugin_data_dir}/hosts/{host_id}/latchkey_permissions.json`` so
-  every agent running on the same host shares one permissions file.
-  The shared gateway consults this file via the
-  ``X-Latchkey-Gateway-Permissions-Override`` header injected through
-  the JWT minted at agent-creation time. Rewritten whenever the user
-  grants or revokes permissions. Only the subset of detent's file
-  schema that we actually produce is modeled.
+  ``{plugin_data_dir}/hosts/{host_id}/latchkey_permissions.json``
+  (plus the deny-all default and the admin file at the data-dir root)
+  so every agent running on the same host shares one permissions file.
+  Only the subset of detent's file schema that we actually produce is
+  modeled. :func:`save_permissions` is used by the three pre-gateway
+  bootstrap paths (default file, admin file, per-agent opaque
+  baseline); reads and per-host edits go through the gateway's
+  ``permissions`` extension instead.
 
 The gateway never reads the per-host file directly via its host-id
 path. Instead, an opaque ``{plugin_data_dir}/permissions/<uuid>.json``
@@ -43,7 +44,6 @@ is what :attr:`Latchkey.plugin_data_dir` returns.
 import json
 import os
 import uuid
-from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Final
@@ -138,17 +138,6 @@ def update_forward_info_gateway_port(data_dir: Path, gateway_port: int) -> None:
     gateway port. The record is preserved verbatim except for the
     ``gateway_port`` field so the embedder's view of the supervisor
     PID / started_at is not silently overwritten.
-
-    Raises :class:`LatchkeyStoreError` when no record exists. The only
-    code that calls this helper is the supervisor itself, immediately
-    after it has spawned the gateway, and the only writer of the
-    record is :class:`LatchkeyForwardSupervisor.ensure_running` (which
-    writes it *before* spawning the supervisor child). A missing
-    record here therefore means either someone manually deleted it,
-    the filesystem is broken, or our state machine is wrong --
-    silently moving on would leave the gateway running but invisible
-    to any minds / ``gateway-info`` consumer polling for the port,
-    which is a much worse failure mode than crashing the supervisor.
     """
     existing = load_forward_info(data_dir)
     if existing is None:
@@ -212,10 +201,6 @@ class LatchkeyStoreError(Exception):
     """Base exception for permissions-config persistence failures."""
 
 
-class MalformedPermissionsConfigError(LatchkeyStoreError, ValueError):
-    """Raised when an existing ``latchkey_permissions.json`` cannot be parsed."""
-
-
 class LatchkeyPermissionsConfig(FrozenModel):
     """In-memory representation of a Latchkey/Detent permissions config file.
 
@@ -262,17 +247,7 @@ def admin_permissions_path(data_dir: Path) -> Path:
     """Return the path to the admin permissions file used by the management UI.
 
     Holds a single ``{\"any\": [\"any\"]}`` rule -- a wildcard grant that
-    lets the admin client reach every service (including the gateway's
-    own ``latchkey-self.invalid`` extension endpoints) through the
-    shared gateway. The corresponding JWT, minted at startup by
-    :meth:`Latchkey.create_admin_permissions_jwt`, is what the minds
-    desktop client passes in ``X-Latchkey-Gateway-Permissions-Override``
-    when it talks to the ``permissions`` / ``permission-requests``
-    extensions.
-
-    Materialized on demand by :func:`ensure_admin_permissions_file`; the
-    file is intentionally NOT a per-host file so a single admin JWT is
-    enough for the desktop client to manage every host's permissions.
+    lets the admin client reach every service and manage every host's permissions.
     """
     return data_dir / _ADMIN_PERMISSIONS_FILENAME
 
@@ -377,58 +352,13 @@ def link_opaque_permissions_to_host(
     logger.debug("Linked opaque latchkey permissions handle {} -> {}", opaque_path, host_path)
 
 
-def load_permissions(path: Path) -> LatchkeyPermissionsConfig:
-    """Load a permissions config from disk.
-
-    Returns an empty config if the file is absent. Raises
-    ``MalformedPermissionsConfigError`` if the file exists but cannot be
-    parsed as the expected shape.
-    """
-    if not path.is_file():
-        return LatchkeyPermissionsConfig()
-
-    try:
-        raw = path.read_text()
-    except OSError as e:
-        raise LatchkeyStoreError(f"Cannot read permissions file at {path}: {e}") from e
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise MalformedPermissionsConfigError(f"Invalid JSON in permissions file at {path}: {e}") from e
-
-    if not isinstance(data, dict):
-        raise MalformedPermissionsConfigError(f"Expected a JSON object at the top of {path}")
-
-    rules_raw = data.get("rules", [])
-    if not isinstance(rules_raw, list):
-        raise MalformedPermissionsConfigError(f"Expected 'rules' to be a list in {path}")
-    rules: list[dict[str, list[str]]] = []
-    for rule in rules_raw:
-        if not isinstance(rule, dict):
-            raise MalformedPermissionsConfigError(f"Expected each rule to be an object in {path}")
-        normalized: dict[str, list[str]] = {}
-        for scope_name, permissions in rule.items():
-            if not isinstance(scope_name, str):
-                raise MalformedPermissionsConfigError(f"Rule scope keys must be strings in {path}")
-            if not isinstance(permissions, list) or not all(isinstance(p, str) for p in permissions):
-                raise MalformedPermissionsConfigError(
-                    f"Rule values must be lists of permission schema names in {path}"
-                )
-            normalized[scope_name] = [str(p) for p in permissions]
-        rules.append(normalized)
-
-    # ``schemas`` and ``include`` are intentionally not modeled: minds
-    # manages this file programmatically and only reads / writes the
-    # subset of detent's schema we actually produce (the ``rules``
-    # list). Any hand-edited entries for those keys are silently dropped
-    # on the next save.
-
-    return LatchkeyPermissionsConfig(rules=tuple(rules))
-
-
 def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
-    """Atomically write the permissions config to disk with mode 0o600."""
+    """Atomically write the permissions config to disk with mode 0o600.
+
+    Used only for the pre-gateway-startup write paths (deny-all default,
+    admin file, per-agent opaque baseline). Reads + per-host edits go
+    through the gateway's ``permissions`` extension instead.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
 
     serialized = {"rules": [dict(rule) for rule in config.rules]}
@@ -438,60 +368,3 @@ def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
     tmp_path.chmod(0o600)
     os.replace(tmp_path, path)
     logger.debug("Wrote permissions config to {} ({} rule(s))", path, len(config.rules))
-
-
-def granted_permissions_for_scope(
-    config: LatchkeyPermissionsConfig,
-    scope: str,
-) -> tuple[str, ...]:
-    """Return the currently-granted permissions for a single scope.
-
-    A scope that does not appear in any rule yields an empty tuple. If
-    multiple rules name the same scope (minds itself never writes that),
-    the last occurrence wins -- mirroring detent's first-match-wins
-    evaluation against the rule list.
-    """
-    granted: tuple[str, ...] = ()
-    for rule in config.rules:
-        for rule_scope, permissions in rule.items():
-            if rule_scope == scope:
-                granted = tuple(permissions)
-    return granted
-
-
-def set_permissions_for_scope(
-    config: LatchkeyPermissionsConfig,
-    scope: str,
-    granted_permissions: Sequence[str],
-) -> LatchkeyPermissionsConfig:
-    """Return a new config with the rule for ``scope`` set to ``granted_permissions``.
-
-    If a single-key rule for ``scope`` already exists, it is replaced in
-    place; otherwise a new rule is appended. Rules for unrelated scopes
-    are preserved verbatim. Pre-existing duplicates (two rules naming
-    the same scope -- minds never writes that, but a hand-edited file
-    might) are collapsed into the single rule we write.
-
-    Callers wanting to manage multiple scopes call this once per scope.
-    """
-    if not granted_permissions:
-        raise LatchkeyStoreError(
-            "granted_permissions must be non-empty; the UI must block empty grants",
-        )
-
-    new_rules: list[dict[str, list[str]]] = []
-    is_replaced = False
-    for rule in config.rules:
-        if scope in rule:
-            if not is_replaced:
-                new_rules.append({scope: list(granted_permissions)})
-                is_replaced = True
-            # else: drop the duplicate.
-        else:
-            new_rules.append({k: list(v) for k, v in rule.items()})
-    if not is_replaced:
-        new_rules.append({scope: list(granted_permissions)})
-
-    return config.model_copy_update(
-        to_update(config.field_ref().rules, tuple(new_rules)),
-    )

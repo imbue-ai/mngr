@@ -7,6 +7,7 @@ subclass so we can drive the various success / failure permutations
 deterministically.
 """
 
+import json
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -25,7 +26,6 @@ from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
-from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.testing import FakeLatchkey
@@ -76,7 +76,7 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     # The opaque path lives under the plugin's data subdir and was
     # materialized with deny-all baseline rules.
     assert setup.opaque_permissions_path.parent == opaque_permissions_dir(fake.plugin_data_dir)
-    assert load_permissions(setup.opaque_permissions_path).rules == ()
+    assert json.loads(setup.opaque_permissions_path.read_text()) == {"rules": []}
 
 
 def test_prepare_full_wiring_on_host_uses_live_port(tmp_path: Path) -> None:

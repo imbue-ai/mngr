@@ -61,9 +61,6 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
-from imbue.mngr_latchkey.store import LatchkeyStoreError
-from imbue.mngr_latchkey.store import granted_permissions_for_scope
-from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 _MNGR_MESSAGE_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -632,18 +629,17 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             return IMPLICIT_DEFAULT_PERMISSIONS
         path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
         try:
-            config = load_permissions(path)
-        except LatchkeyStoreError as e:
+            granted = self.gateway_client.get_granted_permissions_for_scopes(
+                path,
+                service_info.scope_schemas,
+            )
+        except LatchkeyGatewayClientError as e:
             logger.warning(
-                "Could not load permissions for host {}; using implicit defaults: {}",
+                "Could not load permissions for host {} via the gateway extension; using implicit defaults: {}",
                 host_id,
                 e,
             )
             return IMPLICIT_DEFAULT_PERMISSIONS
-
-        granted: set[str] = set()
-        for scope in service_info.scope_schemas:
-            granted.update(granted_permissions_for_scope(config, scope))
         granted_in_catalog = tuple(p for p in service_info.permission_schemas if p in granted)
         if granted_in_catalog:
             return granted_in_catalog

@@ -370,10 +370,6 @@ class _StreamedPermissionRequestHandler(FrozenModel):
     instance per mutation and Python attribute assignment is atomic for
     our purposes here. Same trick the legacy JSONL
     ``_handle_request_event_callback`` already uses.
-
-    Modeled as a frozen-pydantic callable so the project's
-    ``PREVENT_INLINE_FUNCTIONS`` ratchet is satisfied without giving up
-    the per-app binding to ``app.state``.
     """
 
     app: FastAPI = Field(

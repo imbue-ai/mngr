@@ -19,7 +19,6 @@ from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
-from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
@@ -204,8 +203,8 @@ def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(
     # Auth browser must not have been invoked.
     assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
     # Permissions file reflects the new rule and is keyed by host (not agent).
-    config = load_permissions(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id))
-    assert config.rules == ({"slack-api": ["slack-read-all", "slack-write-all"]},)
+    on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
+    assert on_disk == {"rules": [{"slack-api": ["slack-read-all", "slack-write-all"]}]}
     # Response event was written and mngr message sent.
     responses = load_response_events(tmp_path)
     assert len(responses) == 1
@@ -374,8 +373,8 @@ def test_grant_replaces_existing_rule_for_same_scope(tmp_path: Path) -> None:
         granted_permissions=("slack-read-all", "slack-write-all"),
     )
 
-    config = load_permissions(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id))
-    assert config.rules == ({"slack-api": ["slack-read-all", "slack-write-all"]},)
+    on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
+    assert on_disk == {"rules": [{"slack-api": ["slack-read-all", "slack-write-all"]}]}
 
 
 # -- LatchkeyPermissionGrantHandler.grant: NEEDS_MANUAL_CREDENTIALS path --
