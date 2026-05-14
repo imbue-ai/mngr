@@ -26,25 +26,37 @@ from imbue.mngr_tmr.testing import FAILED_FIX
 from imbue.mngr_tmr.testing import SUCCEEDED_FIX
 from imbue.mngr_tmr.utils import CollectTestsError
 from imbue.mngr_tmr.utils import collect_tests
+from imbue.mngr_tmr.utils import dedup_name
+from imbue.mngr_tmr.utils import make_run_name
 from imbue.mngr_tmr.utils import sanitize_test_name_for_agent
-from imbue.mngr_tmr.utils import short_random_id
 from imbue.mngr_tmr.utils import should_pull_changes_from_outcome
 from imbue.mngr_tmr.utils import transfer_mode_for_provider
 
 
-def test_short_random_id_length() -> None:
-    rid = short_random_id()
-    assert len(rid) == 6
+def test_make_run_name_format() -> None:
+    name = make_run_name()
+    assert len(name) == 11
+    assert name[4] == "_"
+    int(name[:4], 10)
+    int(name[5:], 10)
 
 
-def test_short_random_id_is_hex() -> None:
-    rid = short_random_id()
-    int(rid, 16)
+def test_dedup_name_first_use_returns_base() -> None:
+    used: set[str] = set()
+    assert dedup_name("foo", used) == "foo"
+    assert used == {"foo"}
 
 
-def test_short_random_id_is_unique() -> None:
-    ids = {short_random_id() for _ in range(100)}
-    assert len(ids) == 100
+def test_dedup_name_collision_appends_counter() -> None:
+    used: set[str] = {"foo"}
+    assert dedup_name("foo", used) == "foo-2"
+    assert dedup_name("foo", used) == "foo-3"
+    assert used == {"foo", "foo-2", "foo-3"}
+
+
+def test_dedup_name_skips_existing_counters() -> None:
+    used: set[str] = {"foo", "foo-2"}
+    assert dedup_name("foo", used) == "foo-3"
 
 
 def test_sanitize_simple_test_name() -> None:

@@ -68,6 +68,8 @@ def launch_and_poll_agents(
     all_agents: list[TestAgentInfo],
     all_hosts: dict[str, OnlineHostInterface],
     launch_failures: list[AgentMetadata],
+    run_name: str,
+    used_suffixes: set[str],
     source_dir: Path | None = None,
 ) -> list[AgentMetadata]:
     """Launch agents incrementally and poll until all finish.
@@ -110,6 +112,8 @@ def launch_and_poll_agents(
         "all_hosts": all_hosts,
         "agent_id_to_info": agent_id_to_info,
         "launch_failures": launch_failures,
+        "run_name": run_name,
+        "used_suffixes": used_suffixes,
     }
 
     launch_agents_up_to_limit(**launch_kwargs)
