@@ -878,12 +878,12 @@ def test_get_expected_process_name_returns_claude(
     assert agent.get_expected_process_name() == "claude"
 
 
-def test_uses_paste_detection_send_returns_true(
+def test_tui_ready_indicator_is_claude_code(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """ClaudeAgent.uses_paste_detection_send should return True."""
+    """ClaudeAgent inherits InteractiveTuiAgent's TUI_READY_INDICATOR class var."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
-    assert agent.uses_paste_detection_send() is True
+    assert agent.get_tui_ready_indicator() == "Claude Code"
 
 
 def test_preflight_check_raises_when_not_gitignored(

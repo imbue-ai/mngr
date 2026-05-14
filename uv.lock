@@ -19,6 +19,7 @@ members = [
     "imbue-mngr-claude-usage",
     "imbue-mngr-file",
     "imbue-mngr-forward",
+    "imbue-mngr-gemini",
     "imbue-mngr-imbue-cloud",
     "imbue-mngr-kanpan",
     "imbue-mngr-latchkey",
@@ -1847,6 +1848,17 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.30" },
     { name = "websockets", specifier = ">=13" },
 ]
+
+[[package]]
+name = "imbue-mngr-gemini"
+version = "0.1.0"
+source = { editable = "libs/mngr_gemini" }
+dependencies = [
+    { name = "imbue-mngr" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-imbue-cloud"

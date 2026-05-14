@@ -19,6 +19,7 @@ from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Callable
+from typing import ClassVar
 from typing import Final
 
 import click
@@ -33,7 +34,8 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
-from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -1329,8 +1331,29 @@ class CostThresholdDialogIndicator(DialogIndicator):
         return self._MATCH_SPENDING_TEXT in content and self._MATCH_DOCS_URL in content
 
 
-class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
+class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
     """Agent implementation for Claude with session resumption support."""
+
+    TUI_READY_INDICATOR = "Claude Code"
+
+    # Path template for the transcript event log, passed through to
+    # send_enter_via_tmux_wait_for_hook as the fallback source when the
+    # UserPromptSubmit hook misfires. The bash command in tui_utils evaluates
+    # the embedded $MNGR_AGENT_STATE_DIR on the host. Claude-specific.
+    _QUEUE_LOG_PATH_TEMPLATE: ClassVar[str] = "$MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"
+
+    def _send_enter_and_validate(self, tmux_target: str) -> None:
+        # Claude wires a UserPromptSubmit hook that fires `tmux wait-for -S`
+        # on the per-session channel; wait for it. If the hook misfires
+        # (occasionally happens while another message is being processed),
+        # fall back to checking the transcript log for a fresh enqueue.
+        send_enter_via_tmux_wait_for_hook(
+            self,
+            tmux_target,
+            wait_channel=f"mngr-submit-{self.session_name}",
+            timeout_seconds=self.enter_submission_timeout_seconds,
+            queue_log_path_template=self._QUEUE_LOG_PATH_TEMPLATE,
+        )
 
     @classmethod
     def preflight_check(
@@ -1388,25 +1411,6 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         shell command with exports and fallbacks, but the actual process is always 'claude'.
         """
         return "claude"
-
-    def uses_paste_detection_send(self) -> bool:
-        """Enable paste-detection send_message for Claude Code.
-
-        Claude Code echoes input to the terminal and has a complex input handler
-        that can misinterpret Enter as a literal newline if sent too quickly after
-        the message text. The paste-detection approach waits for the pasted content
-        to appear on screen before submitting.
-        """
-        return True
-
-    def get_tui_ready_indicator(self) -> str | None:
-        """Return Claude Code's banner text as the TUI ready indicator.
-
-        Claude Code displays "Claude Code" in its banner when the TUI is ready.
-        Waiting for this ensures we don't send input before the UI is fully rendered,
-        which would cause the input to be lost or appear as raw text.
-        """
-        return "Claude Code"
 
     _DIALOG_INDICATORS: tuple[DialogIndicator, ...] = (
         TrustDialogIndicator(),
