@@ -2989,6 +2989,29 @@ def test_on_before_create_rejects_non_claude_agent_type() -> None:
         on_before_create(args=args)
 
 
+def test_on_before_create_rejects_adopt_session_with_clone_source(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """on_before_create should raise UserInputError when both --adopt-session
+    and a clone source (source_agent_state_location) are passed: each is its
+    own session-adoption directive and on_after_provisioning would silently
+    pick one and drop the other otherwise.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    args = OnBeforeCreateArgs(
+        agent_options=CreateAgentOptions(
+            agent_type=AgentTypeName("claude"),
+            plugin_data={"adopt_session": ("some-id",)},
+            source_agent_state_location=HostLocation(host=host, path=tmp_path / "src"),
+        ),
+        target_host=NewHostOptions(provider=ProviderInstanceName("local")),
+        create_work_dir=True,
+    )
+    with pytest.raises(UserInputError, match="incompatible with cloning via --from"):
+        on_before_create(args=args)
+
+
 # =============================================================================
 # on_after_provisioning Session Adoption Tests
 # =============================================================================
@@ -3146,15 +3169,31 @@ def test_on_after_provisioning_adopts_session_from_jsonl_path(
 
 
 # =============================================================================
-# _transfer_source_plugin_data Tests
+# Clone session-adoption tests
+#
+# Drive both halves of the clone flow as it runs in production:
+# (1) ``_transfer_source_plugin_data`` rsyncs source plugin/ over;
+# (2) ``_adopt_cloned_session`` (later, from on_after_provisioning) renames
+#     the project subdir, drops the stale sessions-index, writes
+#     claude_session_id.
 # =============================================================================
 
 
+def _run_clone_adoption(agent: ClaudeAgent, host: OnlineHostInterface, source_dir: Path) -> None:
+    """Drive both clone steps in order against the test agent/host."""
+    location = HostLocation(host=host, path=source_dir)
+    agent._transfer_source_plugin_data(location)
+    agent._adopt_cloned_session(host, location)
+
+
 @pytest.mark.rsync
-def test_transfer_source_plugin_data_copies_plugin_dir(
+def test_clone_adoption_copies_plugin_dir(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_transfer_source_plugin_data should copy the plugin/ directory via rsync."""
+    """Top-of-state files (e.g. ``.claude.json``) under plugin/ are preserved
+    as-is, and the agent's state dir's own ``data.json`` is untouched (only
+    plugin/ is rsynced).
+    """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
     dest_dir = agent._get_agent_dir()
@@ -3168,24 +3207,31 @@ def test_transfer_source_plugin_data_copies_plugin_dir(
     plugin_dir = source_dir / "plugin" / "claude" / "anthropic"
     plugin_dir.mkdir(parents=True)
     (plugin_dir / ".claude.json").write_text('{"trust": true}')
-    projects_dir = plugin_dir / "projects" / "test-project"
+    source_project_subdir = "source-encoded-work-dir"
+    projects_dir = plugin_dir / "projects" / source_project_subdir
     projects_dir.mkdir(parents=True)
     (projects_dir / "session.jsonl").write_text('{"type":"message"}\n')
 
-    agent._transfer_source_plugin_data(HostLocation(host=host, path=source_dir))
+    _run_clone_adoption(agent, host, source_dir)
 
-    # data.json should be untouched (only plugin/ is copied)
+    # data.json (outside plugin/) untouched.
     assert json.loads((dest_dir / "data.json").read_text())["id"] == "new-agent"
-
-    # Plugin files should have been copied
+    # Plugin files under plugin/ are preserved as-is.
     assert (dest_dir / "plugin" / "claude" / "anthropic" / ".claude.json").exists()
-    assert (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / "test-project" / "session.jsonl").exists()
+    # The session JSONL ended up under the destination's encoded work_dir,
+    # not the source's -- verified more directly in
+    # test_clone_adoption_rekeys_project_dir below.
+    dest_project_name = encode_claude_project_dir_name(agent.work_dir)
+    assert (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / dest_project_name / "session.jsonl").exists()
+    assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / source_project_subdir).exists()
 
 
-def test_transfer_source_plugin_data_skips_when_no_plugin_dir(
+def test_clone_adoption_skips_when_no_plugin_dir(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_transfer_source_plugin_data should skip gracefully when source has no plugin/ dir."""
+    """The rsync step is a no-op when the source has no plugin/ dir, and the
+    subsequent adopt step bails (logs a warning) without raising.
+    """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
     dest_dir = agent._get_agent_dir()
@@ -3195,7 +3241,138 @@ def test_transfer_source_plugin_data_skips_when_no_plugin_dir(
     source_dir.mkdir()
 
     # Should not raise
-    agent._transfer_source_plugin_data(HostLocation(host=host, path=source_dir))
+    _run_clone_adoption(agent, host, source_dir)
+
+
+@pytest.mark.rsync
+def test_clone_adoption_rekeys_project_dir(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """After clone adoption, the project subdir under plugin/claude/anthropic/projects/
+    should be renamed from the source agent's encoded work_dir to the
+    destination agent's, so ``claude --resume`` on the destination finds the
+    session JSONL. The destination's ``claude_session_id`` should be set to
+    the JSONL filename's stem so the startup command's
+    ``claude --resume "$MAIN_CLAUDE_SESSION_ID"`` targets that file.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    dest_dir = agent._get_agent_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / "source_agent_state"
+    plugin_dir = source_dir / "plugin" / "claude" / "anthropic"
+    # Project subdir name uses the source's (different) work_dir encoding.
+    src_project = plugin_dir / "projects" / "-Users-ev-some-source-workdir"
+    src_project.mkdir(parents=True)
+    session_id = "11111111-2222-3333-4444-555555555555"
+    (src_project / f"{session_id}.jsonl").write_text('{"type":"message"}\n')
+
+    _run_clone_adoption(agent, host, source_dir)
+
+    dest_project_name = encode_claude_project_dir_name(agent.work_dir)
+    rekeyed = dest_dir / "plugin" / "claude" / "anthropic" / "projects" / dest_project_name
+    assert (rekeyed / f"{session_id}.jsonl").exists(), (
+        f"Expected session JSONL under {rekeyed}, dest projects dir is "
+        f"{[p.name for p in (dest_dir / 'plugin' / 'claude' / 'anthropic' / 'projects').iterdir()]}"
+    )
+    # Source-encoded subdir should be gone.
+    assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / "-Users-ev-some-source-workdir").exists()
+    # Session id should be the JSONL stem so ``claude --resume`` finds the file.
+    assert (dest_dir / "claude_session_id").read_text().strip() == session_id
+
+
+@pytest.mark.rsync
+def test_clone_adoption_uses_jsonl_filename_not_source_session_id_file(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """``claude_session_id`` on the destination must be the *actual* session
+    JSONL filename's stem, not the contents of the source's
+    ``claude_session_id`` file. When the source ran ``claude -p``, claude's
+    ``--session-id`` flag was ignored and claude auto-generated its own id,
+    so the source's ``claude_session_id`` file (which the SessionStart hook
+    default-fills with the agent UUID) doesn't agree with the JSONL on disk.
+    The JSONL filename is the ground truth for what ``claude --resume <id>``
+    can find.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    dest_dir = agent._get_agent_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / "source_agent_state"
+    plugin_dir = source_dir / "plugin" / "claude" / "anthropic"
+    src_project = plugin_dir / "projects" / "-source-encoded"
+    src_project.mkdir(parents=True)
+
+    actual_session_id_from_jsonl = "aaaa1111-bbbb-2222-cccc-333344445555"
+    stale_agent_uuid = "ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb"
+    (src_project / f"{actual_session_id_from_jsonl}.jsonl").write_text('{"type":"message"}\n')
+    # The source's claude_session_id contains a *different* id (the agent
+    # UUID written by the SessionStart hook default).
+    (source_dir / "claude_session_id").write_text(f"{stale_agent_uuid}\n")
+    (source_dir / "claude_session_id_history").write_text(f"{stale_agent_uuid} startup\n")
+
+    _run_clone_adoption(agent, host, source_dir)
+
+    # Destination's claude_session_id must be the JSONL filename's stem,
+    # not the source's claude_session_id contents.
+    assert (dest_dir / "claude_session_id").read_text().strip() == actual_session_id_from_jsonl, (
+        f"claude_session_id on destination should be {actual_session_id_from_jsonl} "
+        f"(JSONL stem), got {(dest_dir / 'claude_session_id').read_text().strip()}"
+    )
+    # History is still carried verbatim for traceability.
+    assert stale_agent_uuid in (dest_dir / "claude_session_id_history").read_text()
+
+
+@pytest.mark.rsync
+def test_clone_adoption_refuses_to_clobber_existing_target(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """When the source has a project subdir whose name coincidentally matches
+    the destination's encoded work_dir AND a separate, more-recently-active
+    source-encoded subdir, the rsync brings both over and the rekey ``mv``
+    would clobber the pre-existing target. _adopt_cloned_session refuses
+    the clobber and returns without writing claude_session_id, leaving
+    both subdirs intact for manual inspection. This guards a defensive
+    branch designed to prevent silent data loss when source has visited
+    multiple cwds.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    dest_dir = agent._get_agent_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / "source_agent_state"
+    plugin_dir = source_dir / "plugin" / "claude" / "anthropic"
+
+    # (a) A project subdir whose name happens to equal the destination's
+    # encoded work_dir -- this becomes the pre-existing target after rsync.
+    dest_project_name = encode_claude_project_dir_name(agent.work_dir)
+    coincident_subdir = plugin_dir / "projects" / dest_project_name
+    coincident_subdir.mkdir(parents=True)
+    older_session_id = "00000000-0000-0000-0000-000000000001"
+    older_jsonl = coincident_subdir / f"{older_session_id}.jsonl"
+    older_jsonl.write_text('{"type":"older"}\n')
+
+    # (b) A separate source-encoded subdir holding the most-recently-active
+    # session JSONL so ``ls -t`` picks it as latest_on_source.
+    src_project = plugin_dir / "projects" / "-Users-ev-some-source-workdir"
+    src_project.mkdir(parents=True)
+    newer_session_id = "11111111-2222-3333-4444-555555555555"
+    newer_jsonl = src_project / f"{newer_session_id}.jsonl"
+    newer_jsonl.write_text('{"type":"newer"}\n')
+
+    # Set explicit mtimes so ``ls -t`` ordering is deterministic regardless
+    # of write-order timing.
+    os.utime(older_jsonl, (1_000_000_000, 1_000_000_000))
+    os.utime(newer_jsonl, (2_000_000_000, 2_000_000_000))
+
+    _run_clone_adoption(agent, host, source_dir)
+
+    dest_projects = dest_dir / "plugin" / "claude" / "anthropic" / "projects"
+    # Both subdirs survive: the rekey was refused, no clobber happened.
+    assert (dest_projects / dest_project_name / f"{older_session_id}.jsonl").exists()
+    assert (dest_projects / "-Users-ev-some-source-workdir" / f"{newer_session_id}.jsonl").exists()
+    # claude_session_id was NOT written: the function bailed before finalize.
+    assert not (dest_dir / "claude_session_id").exists()
 
 
 # =============================================================================
