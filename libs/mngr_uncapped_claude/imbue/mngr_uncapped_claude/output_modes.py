@@ -100,7 +100,7 @@ def transcript_event_to_stream_json(event: dict[str, Any], session_id: str) -> d
 
 
 def _assistant_event_to_stream_json(event: dict[str, Any], session_id: str) -> dict[str, Any]:
-    text = event.get("text", "")
+    text = _coerce_str(event.get("text"))
     tool_calls: list[dict[str, Any]] = _coerce_dict_list(event.get("tool_calls"))
     content_blocks: list[dict[str, Any]] = []
     if text:
