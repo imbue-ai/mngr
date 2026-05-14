@@ -230,18 +230,32 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
         )
 
     def _send_enter_and_poll_for_input_ready(self, tmux_target: str) -> None:
-        """Send Enter and poll for the TUI ready indicator to reappear.
+        """Send Enter and poll for the TUI ready indicator to be visible.
 
         Used by agents that lack a UserPromptSubmit-style hook. The
         paste-visibility check in ``_send_message_with_paste_detection`` already
-        confirmed the message reached the input field; after Enter is processed
-        the input clears and ``get_tui_ready_indicator()`` (e.g. gemini's
-        ``Type your message`` placeholder) becomes visible in the pane again.
+        confirmed the message reached the input field, so this path mainly
+        guards against the Enter keystroke being swallowed.
+
+        ``get_tui_ready_indicator()`` plays two different roles depending on
+        the subclass, and either is sufficient for the poll to resolve:
+
+        * Gemini-style: the indicator is an input-row placeholder (e.g.
+          ``Type your message``) that is hidden while the user's text is
+          present in the input field and reappears once Enter is processed
+          and the input clears. The poll waits for it to reappear.
+        * Pi-style: the indicator is a persistent banner (e.g. ``pi v``)
+          that stays visible the entire time. The poll resolves immediately,
+          so the path is effectively fire-and-forget after Enter -- the
+          earlier paste-visibility check is what gave us confidence the
+          message landed.
 
         Interactive TUIs occasionally swallow Enter on fresh sessions when it
         arrives before the pasted text has been absorbed -- we retry the
         keystroke up to ``_SEND_ENTER_NO_SIGNAL_MAX_ATTEMPTS`` times before
-        raising SendMessageError.
+        raising SendMessageError. The retry is only meaningful for the
+        gemini-style case where the indicator's visibility actually tracks
+        Enter being processed.
         """
         indicator = self.get_tui_ready_indicator()
         for attempt in range(_SEND_ENTER_NO_SIGNAL_MAX_ATTEMPTS):
