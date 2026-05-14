@@ -12,9 +12,10 @@ class ImbueCloudError(MngrError):
 class ImbueCloudConnectorError(ImbueCloudError, ProviderNetworkUnreachableError):
     """Connector returned an unexpected response (5xx, malformed, network).
 
-    The ``ProviderNetworkUnreachableError`` parent makes the discovery
-    boundary classify this as a warning (provider-unavailable) rather
-    than a hard error.
+    The ``ProviderNetworkUnreachableError`` parent gives the discovery
+    boundary a typed provider-unavailable class and lets programmatic
+    consumers discriminate via ``exception_type``. Like any other provider
+    failure it lands on ``ListResult.errors``.
     """
 
     def __init__(self, message: str, provider_name: str | None = None) -> None:
@@ -27,10 +28,11 @@ class ImbueCloudConnectorError(ImbueCloudError, ProviderNetworkUnreachableError)
 class ImbueCloudAuthError(ImbueCloudError, HostAuthenticationError, ProviderNotAuthorizedError):
     """Connector rejected the configured token (401/403).
 
-    The ``ProviderNotAuthorizedError`` parent makes the discovery boundary
-    classify this as a hard error (user-actionable). The
-    ``HostAuthenticationError`` parent lets per-host
-    ``except HostAuthenticationError`` clauses match.
+    The ``ProviderNotAuthorizedError`` parent gives the discovery boundary
+    a typed, user-actionable auth-failure class and lets programmatic
+    consumers discriminate via ``exception_type``. Like any other provider
+    failure it lands on ``ListResult.errors``. The ``HostAuthenticationError``
+    parent lets per-host ``except HostAuthenticationError`` clauses match.
     """
 
     def __init__(self, message: str, provider_name: str | None = None) -> None:
