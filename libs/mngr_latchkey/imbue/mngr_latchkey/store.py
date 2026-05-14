@@ -50,6 +50,7 @@ from typing import Final
 
 from loguru import logger
 from pydantic import Field
+from pydantic import JsonValue
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
@@ -204,21 +205,22 @@ class LatchkeyStoreError(Exception):
 class LatchkeyPermissionsConfig(FrozenModel):
     """In-memory representation of a Latchkey/Detent permissions config file.
 
-    Minds manages this file programmatically, so we model only the subset
-    of detent's full schema that we ever produce: the ordered ``rules``
-    list. Detent's ``schemas`` and ``include`` directives are intentionally
-    not modeled; any hand-edited entries for those keys are silently
-    dropped on the next minds-driven save.
+    Models the ``schemas`` and ``rules`` sections. Detent's ``include``
+    directive is not modeled; any hand-edited ``include`` entries are
+    silently dropped on the next minds-driven save.
     """
 
-    # Each rule is a single-key dict mapping a scope schema name to a list
-    # of permission schema names. Detent's wider rule shape (multi-key
-    # dicts) is not produced by minds; we tolerate them on read but
-    # collapse them to single-key form on write via
-    # ``set_permissions_for_scope``.
     rules: tuple[dict[str, list[str]], ...] = Field(
         default_factory=tuple,
         description="Ordered rules. Each rule is one scope schema -> list of permission schemas.",
+    )
+    schemas: dict[str, JsonValue] = Field(
+        default_factory=dict,
+        description=(
+            "Optional inline detent request-schema definitions, keyed by schema name. "
+            "Used by the per-agent baseline to grant access to specific gateway-self endpoints "
+            "without depending on names from detent's built-in schema catalog."
+        ),
     )
 
 
@@ -361,7 +363,9 @@ def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    serialized = {"rules": [dict(rule) for rule in config.rules]}
+    serialized: dict[str, JsonValue] = {"rules": [dict(rule) for rule in config.rules]}
+    if config.schemas:
+        serialized["schemas"] = dict(config.schemas)
 
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(serialized, indent=2))

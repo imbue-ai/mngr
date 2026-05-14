@@ -84,10 +84,10 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
             ),
         )
         permissions_file_path.parent.mkdir(parents=True, exist_ok=True)
-        existing_rules: list[dict[str, list[str]]] = []
+        existing: dict = {"rules": []}
         if permissions_file_path.is_file():
-            loaded = json.loads(permissions_file_path.read_text())
-            existing_rules = loaded.get("rules", [])
+            existing = json.loads(permissions_file_path.read_text())
+        existing_rules = existing.get("rules", [])
         replaced = False
         new_rules: list[dict[str, list[str]]] = []
         for rule in existing_rules:
@@ -101,7 +101,10 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
                 continue
         if not replaced:
             new_rules.append({rule_key: list(granted_tuple)})
-        permissions_file_path.write_text(json.dumps({"rules": new_rules}, indent=2))
+        # Mirror the real extension's spread semantics: every key other
+        # than ``rules`` is preserved verbatim (notably ``schemas``).
+        updated = {**existing, "rules": new_rules}
+        permissions_file_path.write_text(json.dumps(updated, indent=2))
 
     def delete_permission_request(self, request_id: str) -> None:
         self._deleted_request_ids.append(request_id)

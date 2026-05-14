@@ -739,3 +739,57 @@ def test_deny_calls_gateway_delete_permission_request_only(tmp_path: Path) -> No
 
     assert fake_client.set_calls == ()
     assert fake_client.deleted_request_ids == ("evt-deny",)
+
+
+def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Path) -> None:
+    """A grant must rewrite ``rules`` only; the agent baseline ``schemas`` block survives.
+
+    The real gateway extension does ``{...file, rules: <new>}``, so the
+    inline schema definitions the per-agent baseline writes for the
+    ``latchkey-self`` access remain intact across user-driven grants.
+    The fake client mirrors that behaviour; this test pins it.
+    """
+    fake_client = FakeLatchkeyGatewayClient(
+        base_url="http://gateway.invalid",
+        password="p",
+        admin_jwt="jwt",
+    )
+    latchkey = _make_latchkey_with_status(tmp_path, credential_status="valid")
+    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
+    handler = LatchkeyPermissionGrantHandler(
+        data_dir=tmp_path,
+        latchkey=latchkey,
+        services_catalog={_SLACK_SERVICE_INFO.name: _SLACK_SERVICE_INFO},
+        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        gateway_client=fake_client,
+    )
+    host_id = HostId()
+    host_path = permissions_path_for_host(tmp_path / "mngr_latchkey", host_id)
+    host_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline = {
+        "rules": [
+            {
+                "latchkey-self": [
+                    "latchkey-self-create-permission-request",
+                    "latchkey-self-read-permissions",
+                ],
+            },
+        ],
+        "schemas": {
+            "latchkey-self": {"properties": {"domain": {"const": "latchkey-self.invalid"}}},
+        },
+    }
+    host_path.write_text(json.dumps(baseline))
+
+    handler.grant(
+        request_event_id="evt-pres",
+        agent_id=AgentId(),
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    on_disk = json.loads(host_path.read_text())
+    assert on_disk["schemas"] == baseline["schemas"]
+    assert {"latchkey-self": baseline["rules"][0]["latchkey-self"]} in on_disk["rules"]
+    assert {"slack-api": ["slack-read-all"]} in on_disk["rules"]

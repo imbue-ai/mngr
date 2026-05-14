@@ -73,10 +73,29 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     assert setup.env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] == "header.payload.signature"
     assert setup.env[ENV_LATCHKEY_DISABLE_COUNTING] == "1"
     assert setup.opaque_permissions_path is not None
-    # The opaque path lives under the plugin's data subdir and was
-    # materialized with deny-all baseline rules.
     assert setup.opaque_permissions_path.parent == opaque_permissions_dir(fake.plugin_data_dir)
-    assert json.loads(setup.opaque_permissions_path.read_text()) == {"rules": []}
+    # The baseline grants exactly the two gateway-self endpoints every
+    # agent needs: ``POST /permission-requests`` to submit a request,
+    # and ``GET /permissions`` to read its own permissions file.
+    on_disk = json.loads(setup.opaque_permissions_path.read_text())
+    assert on_disk["rules"] == [
+        {
+            "latchkey-self": [
+                "latchkey-self-create-permission-request",
+                "latchkey-self-read-permissions",
+            ],
+        },
+    ]
+    schemas = on_disk["schemas"]
+    assert schemas["latchkey-self"]["properties"]["domain"] == {"const": "latchkey-self.invalid"}
+    assert schemas["latchkey-self-create-permission-request"]["properties"] == {
+        "method": {"const": "POST"},
+        "path": {"const": "/permission-requests"},
+    }
+    assert schemas["latchkey-self-read-permissions"]["properties"] == {
+        "method": {"const": "GET"},
+        "path": {"const": "/permissions"},
+    }
 
 
 def test_prepare_full_wiring_on_host_uses_live_port(tmp_path: Path) -> None:
