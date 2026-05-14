@@ -11,12 +11,14 @@ command group.
 ## CLI
 
 Once `imbue-mngr-latchkey` is installed, `mngr` discovers the plugin
-via the standard entry-point mechanism and exposes three subcommands:
+via the standard entry-point mechanism and exposes:
 
 ```
 mngr latchkey forward            # long-running supervisor: gateway + reverse tunnels
 mngr latchkey create-agent-env   # emit LATCHKEY_* env vars + opaque permissions handle as JSON
 mngr latchkey link-permissions   # swing the opaque handle's symlink to the canonical host path
+mngr latchkey admin-jwt          # mint a wildcard permissions-override JWT for the gateway
+mngr latchkey gateway-info       # print the running gateway's URL + listen password as JSON
 ```
 
 `mngr latchkey forward` spawns the shared gateway eagerly on startup
@@ -137,6 +139,87 @@ via `Latchkey.plugin_data_dir`).
 ## Permissions config
 
 The package owns the `latchkey_permissions.json` schema (a subset of
-detent's rule format). UI surfaces (such as the minds permission
-dialog) read and update it via the helpers in
-`imbue.mngr_latchkey.store`.
+detent's rule format). Per-host edits go through the gateway's
+bundled `permissions` extension (see below); only the deny-all
+default, the admin file, and the per-agent opaque baseline are
+written directly via `imbue.mngr_latchkey.store.save_permissions`.
+
+## Gateway HTTP extensions
+
+`mngr latchkey forward` drops two `.mjs` extensions into
+`<latchkey-directory>/extensions/` and starts the gateway with the
+environment configured to load them. Both expose plain HTTP endpoints
+on the gateway's listen port and authenticate the caller via two
+headers:
+
+* `X-Latchkey-Gateway-Password: <password>` -- the gateway listen
+  password from `mngr latchkey gateway-info`.
+* `X-Latchkey-Gateway-Permissions-Override: <jwt>` -- a JWT minted
+  for the permissions file you want the gateway to evaluate the
+  request against. For full access to both extensions, use the JWT
+  from `mngr latchkey admin-jwt`.
+
+A shell client typically wires these up once:
+
+```sh
+ADMIN_JWT=$(mngr latchkey admin-jwt)
+eval "$(mngr latchkey gateway-info | jq -r '@text "GATEWAY_URL=\(.url); GATEWAY_PASSWORD=\(.password)"')"
+auth=(-H "X-Latchkey-Gateway-Password: $GATEWAY_PASSWORD" -H "X-Latchkey-Gateway-Permissions-Override: $ADMIN_JWT")
+```
+
+### `permission-requests` extension
+
+A pending-permission queue. Agents submit a request when they hit a
+blocked service; UIs (the minds desktop client, your own front-end)
+consume the stream and DELETE on resolution.
+
+* `POST /permission-requests` with body
+  `{"agent_id": "...", "service_name": "...", "rationale": "..."}`.
+  The extension generates a `request_id` server-side and returns the
+  full record. The newly-created agent baseline grants this endpoint
+  to every agent.
+* `GET /permission-requests` returns the current queue as
+  newline-delimited JSON. Add `?follow=true` to keep the connection
+  open and stream every newly-POSTed request as it arrives.
+* `DELETE /permission-requests/<request_id>` removes a single pending
+  request. UIs call this on grant or deny so a fresh `?follow=true`
+  consumer never sees the resolved request again.
+
+Pending requests are stored as one JSON file per request under
+`<latchkey-directory>/permission_requests/`.
+
+### `permissions` extension
+
+Reads and edits a detent permissions file at a caller-supplied path.
+The gateway is launched with the environment variable
+`LATCHKEY_EXTENSION_PERMISSIONS_ROOT` pointing at this package's data
+directory; any `path` query parameter that resolves outside that
+root is rejected with HTTP 403.
+
+* `GET /permissions?path=<file>` returns the full permissions file.
+* `GET /permissions/rules?path=<file>&rule_key=<scope>` returns the
+  rule for `<scope>`, or 404 if absent.
+* `POST /permissions/rules?path=<file>&rule_key=<scope>` with a JSON
+  body of permission-schema names (`["any"]`,
+  `["slack-read-all", ...]`, ...) adds or replaces the rule for
+  `<scope>`. Everything in the file other than the matching rule is
+  preserved verbatim, so inline `schemas` definitions and unrelated
+  rules survive the rewrite.
+* `DELETE /permissions/rules?path=<file>&rule_key=<scope>` removes
+  the named rule.
+
+A typical end-to-end shell flow:
+
+```sh
+# Stream pending requests as they come in.
+curl -N "${auth[@]}" "$GATEWAY_URL/permission-requests?follow=true"
+
+# Grant the agent slack-read-all on its host's permissions file.
+HOST_PERMS=$MNGR_LATCHKEY_DIRECTORY/mngr_latchkey/hosts/$HOST_ID/latchkey_permissions.json
+curl -X POST "${auth[@]}" \
+  -H "Content-Type: application/json" -d '["slack-read-all"]' \
+  "$GATEWAY_URL/permissions/rules?path=$HOST_PERMS&rule_key=slack-api"
+
+# Clear the pending request now that it has been resolved.
+curl -X DELETE "${auth[@]}" "$GATEWAY_URL/permission-requests/$REQUEST_ID"
+```
