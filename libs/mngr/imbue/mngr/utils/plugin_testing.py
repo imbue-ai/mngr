@@ -19,7 +19,9 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.config.agent_class_registry import is_agent_class_registered
 from imbue.mngr.config.agent_class_registry import register_agent_class
+from imbue.mngr.config.agent_config_registry import is_agent_config_registered
 from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -62,11 +64,24 @@ _TEST_PLACEHOLDER_AGENT_TYPES: tuple[str, ...] = (
 )
 
 
+def register_placeholder_agent_type(name: str) -> None:
+    """Register a single agent-type name as BaseAgent + base AgentTypeConfig if unregistered.
+
+    Idempotent: existing registrations under ``name`` are left alone. Use this
+    in test helpers that take an arbitrary agent-type name and want it to
+    pass through ``resolve_agent_type``'s known-type gate without scattering
+    register_agent_class / register_agent_config calls across the suite.
+    """
+    if not is_agent_class_registered(name):
+        register_agent_class(name, BaseAgent)
+    if not is_agent_config_registered(name):
+        register_agent_config(name, AgentTypeConfig)
+
+
 def register_test_placeholder_agent_types() -> None:
     """Register the shared placeholder agent type names as BaseAgent fixtures."""
     for placeholder in _TEST_PLACEHOLDER_AGENT_TYPES:
-        register_agent_class(placeholder, BaseAgent)
-        register_agent_config(placeholder, AgentTypeConfig)
+        register_placeholder_agent_type(placeholder)
 
 
 @pytest.fixture

@@ -6,10 +6,6 @@ from pathlib import Path
 from typing import Any
 
 from imbue.mngr.agents.base_agent import BaseAgent
-from imbue.mngr.config.agent_class_registry import is_agent_class_registered
-from imbue.mngr.config.agent_class_registry import register_agent_class
-from imbue.mngr.config.agent_config_registry import is_agent_config_registered
-from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -21,6 +17,7 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.plugin_testing import register_placeholder_agent_type
 from imbue.mngr.utils.testing import get_short_random_string
 
 
@@ -33,10 +30,7 @@ def _ensure_test_agent_type_registered(agent_type: AgentTypeName) -> None:
     that relied on the BaseAgent default fallback; now that the fallback is
     gone, register the name on demand for the rest of the test session.
     """
-    if not is_agent_class_registered(str(agent_type)):
-        register_agent_class(str(agent_type), BaseAgent)
-    if not is_agent_config_registered(str(agent_type)):
-        register_agent_config(str(agent_type), AgentTypeConfig)
+    register_placeholder_agent_type(str(agent_type))
 
 
 def create_test_agent(
