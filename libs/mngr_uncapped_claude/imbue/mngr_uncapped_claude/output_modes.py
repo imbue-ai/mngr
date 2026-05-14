@@ -215,7 +215,6 @@ class StreamingOutputWriter(MutableModel):
     assistant_text_parts: list[str] = Field(
         default_factory=list, description="Buffered assistant text used for text/json finalize"
     )
-    assistant_message_count: int = Field(default=0, description="Number of assistant_message events observed")
 
     def write_init_if_needed(self) -> None:
         """Write the synthesized ``system/init`` envelope on first stream-json call."""
@@ -244,7 +243,6 @@ class StreamingOutputWriter(MutableModel):
             text = event.get("text", "")
             if text:
                 self.assistant_text_parts.append(text)
-            self.assistant_message_count += 1
         match self.output_format:
             case OutputFormat.TEXT:
                 pass
