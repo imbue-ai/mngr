@@ -19,6 +19,7 @@ Usage:
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from collections import deque
@@ -475,10 +476,15 @@ def _print_on_demand_consolidation_command() -> None:
     the deploy script. The deploy script's header inlines that list as
     ``$DISABLE_PLUGIN_ARGS``; this helper expands it onto its own line
     because the resolved value is long.
+
+    The provider is read from ``CHANGELOG_PROVIDER`` (default ``modal``),
+    matching the env var the deploy script honors, so the printed command
+    targets the same provider the schedule was deployed under.
     """
+    provider = os.environ.get("CHANGELOG_PROVIDER", "modal")
     disable_args = " ".join(changelog_disable_plugin_args())
     print(f"  env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME={CHANGELOG_MNGR_ROOT_NAME} \\")
-    print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider modal \\")
+    print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {provider} \\")
     print(f"    {disable_args}")
 
 
