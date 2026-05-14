@@ -26,13 +26,10 @@ can already reference the type.
 from __future__ import annotations
 
 import copy
-import fcntl
 import json
 import re
 import shutil
-from collections.abc import Generator
 from collections.abc import Mapping
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -98,27 +95,8 @@ def get_system_gemini_settings_path() -> Path:
 
 
 # =============================================================================
-# Atomic read / write with locking
+# Atomic read / write
 # =============================================================================
-
-
-@contextmanager
-def _gemini_settings_lock(settings_path: Path) -> Generator[None, None, None]:
-    """Acquire an exclusive lock for the given settings file and yield.
-
-    Uses a separate ``.lock`` file next to the settings file so atomic
-    replacement of the settings file itself does not invalidate the lock.
-    """
-    lock_path = settings_path.parent / (settings_path.name + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.touch(exist_ok=True)
-
-    with open(lock_path, "r") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def read_gemini_settings(settings_path: Path) -> dict[str, Any]:
@@ -135,8 +113,7 @@ def write_gemini_settings(settings_path: Path, settings: Mapping[str, Any]) -> N
     """Atomically write ``settings`` to ``settings_path`` with a ``.bak`` backup.
 
     Creates a ``settings.json.bak`` backup of the existing file (if any) before
-    writing. Caller must hold the settings lock; use
-    :func:`_gemini_settings_lock` for the lock-then-write pattern.
+    writing.
     """
     if settings_path.exists():
         backup_path = settings_path.parent / (settings_path.name + ".bak")
