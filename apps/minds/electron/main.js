@@ -7,61 +7,20 @@ const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const limaInstall = require('./lima-install');
 
-// Suppress ToDesktop's built-in blocking modal; we surface update-ready
-// state via a non-blocking "Update" button in the chrome titlebar instead.
-// See the `update-downloaded` listener below and `ipcMain.on('install-update')`.
+// Use ToDesktop's default auto-update behavior: it checks on launch +
+// on an interval, downloads in the background, and shows its own
+// "Restart to update" prompt when a download completes. We previously
+// suppressed that prompt to build a custom titlebar pill, but the pill
+// renderer was never wired up -- leaving users with detection but no
+// way to install. Defaults are simpler and actually work.
 //
 // Only init when packaged: in dev (`pnpm start`), `electron.autoUpdater`
 // is undefined on macOS (Squirrel is not linked in the unsigned dev
 // binary), and todesktop's constructor throws trying to subscribe to
 // it. Skipping init keeps dev launches working; the auto-updater is
 // never useful in dev anyway.
-let updateReady = false;
-
 if (app.isPackaged) {
-  todesktop.init({
-    updateReadyAction: {
-      showInstallAndRestartPrompt: 'never',
-      showNotification: 'never',
-    },
-  });
-
-  if (todesktop.autoUpdater) {
-    todesktop.autoUpdater.on('update-downloaded', () => {
-      updateReady = true;
-      for (const b of bundles) {
-        if (b.chromeView && !b.chromeView.webContents.isDestroyed()) {
-          b.chromeView.webContents.send('update-ready');
-        }
-      }
-      // Also surface a modal prompt. The titlebar "Update" pill alone
-      // has been repeatedly overlooked by users, so we make the
-      // update impossible to miss: a blocking dialog with an explicit
-      // "Restart & Update" action. "Later" keeps the pill around so
-      // they can still trigger it on their own schedule.
-      dialog
-        .showMessageBox({
-          type: 'info',
-          buttons: ['Restart & Update', 'Later'],
-          defaultId: 0,
-          cancelId: 1,
-          message: 'A new version of Minds is ready.',
-          detail: 'It has been downloaded in the background. Restart now to apply it.',
-        })
-        .then((result) => {
-          if (result.response === 0 && todesktop.autoUpdater) {
-            try {
-              todesktop.autoUpdater.restartAndInstall();
-            } catch (err) {
-              console.error('[update] restartAndInstall failed:', err);
-            }
-          }
-        })
-        .catch((err) => {
-          console.error('[update] update-ready dialog failed:', err);
-        });
-    });
-  }
+  todesktop.init();
 } else {
   console.log('[update] Skipping ToDesktop init (dev build -- not packaged)');
 }
@@ -1216,10 +1175,11 @@ async function onReady() {
   await runStartupSequence(initialBundle);
 }
 
-// User-initiated update check from File > Check for Updates. ToDesktop's
-// auto-updater runs on launch + every autoCheckInterval, but this menu
-// item lets the user trigger it on demand (useful right after a release
-// ships, or to confirm "up to date" when you're not sure).
+// User-initiated update check from File > Check for Updates. Delegates
+// entirely to ToDesktop: `checkForUpdates()` triggers the same flow as
+// the automatic launch/interval checks -- if an update exists it
+// downloads in the background and ToDesktop shows its own
+// "Restart to update" prompt when the download completes.
 async function triggerUpdateCheck() {
   const autoUpdater = todesktop.autoUpdater;
   if (!autoUpdater || typeof autoUpdater.checkForUpdates !== 'function') {
@@ -1230,64 +1190,14 @@ async function triggerUpdateCheck() {
     });
     return;
   }
-  // Every path must surface SOMETHING to the user -- silent no-ops are the
-  // single biggest UX complaint here. We suppress todesktop's built-in
-  // Notifier modal (see the `todesktop.init` call up top), so the four
-  // outcomes of checkForUpdates() need explicit dialogs:
-  //   1. already up to date       -> "You're up to date"
-  //   2. update available          -> "Downloading; titlebar Update button will appear when ready"
-  //   3. update already downloaded -> "Click the Update button to restart and install"
-  //   4. error / checkForUpdates throws -> error dialog
-  const onNotAvailable = () => {
-    dialog.showMessageBox({
-      type: 'info',
-      message: 'You\'re up to date.',
-      detail: 'No updates are currently available.',
-    });
-  };
-  const onAvailable = (info) => {
-    const v = info && (info.version || info.releaseName);
-    dialog.showMessageBox({
-      type: 'info',
-      message: v ? `Update ${v} available.` : 'Update available.',
-      detail: 'Downloading in the background. When ready, an Update button will appear in the titlebar -- click it to restart and install.',
-    });
-  };
-  const onDownloaded = () => {
-    dialog.showMessageBox({
-      type: 'info',
-      message: 'Update ready to install.',
-      detail: 'Click the Update button in the titlebar to restart and apply the update.',
-    });
-  };
-  const onError = (err) => {
-    dialog.showMessageBox({
-      type: 'error',
-      message: 'Update check failed.',
-      detail: String(err && err.message ? err.message : err),
-    });
-  };
-  autoUpdater.once('update-not-available', onNotAvailable);
-  autoUpdater.once('update-available', onAvailable);
-  autoUpdater.once('update-downloaded', onDownloaded);
-  autoUpdater.once('error', onError);
   try {
     await autoUpdater.checkForUpdates({ source: 'menu' });
-    // If an update is already-downloaded from a previous check (e.g. the
-    // auto-check on launch fired before the user clicked), no new event
-    // fires -- surface the in-memory `updateReady` flag.
-    if (updateReady) onDownloaded();
   } catch (err) {
     dialog.showMessageBox({
       type: 'error',
       message: 'Update check failed.',
       detail: String(err && err.message ? err.message : err),
     });
-  } finally {
-    autoUpdater.removeListener('update-not-available', onNotAvailable);
-    autoUpdater.removeListener('update-available', onAvailable);
-    autoUpdater.removeListener('update-downloaded', onDownloaded);
-    autoUpdater.removeListener('error', onError);
   }
 }
 
@@ -1778,36 +1688,6 @@ ipcMain.on('close-workspace-windows', (_event, agentId) => {
 ipcMain.on('open-log-file', () => {
   const logPath = path.join(paths.getLogDir(), 'minds.log');
   shell.openPath(logPath);
-});
-
-// Non-blocking auto-update: the chrome titlebar polls this on load so it
-// can show the "Update" button if the download completed before the
-// chrome finished loading, and otherwise listens for 'update-ready'.
-ipcMain.handle('is-update-ready', () => updateReady);
-
-ipcMain.on('install-update', () => {
-  // restartAndInstall() throws "Cannot restart and install. There is
-  // no update downloaded" if called before `update-downloaded` has
-  // fired. The chrome button is hidden in that state, but guard anyway
-  // so a stale click doesn't surface Electron's uncaught-exception dialog.
-  if (!updateReady || !todesktop.autoUpdater) {
-    dialog.showMessageBox({
-      type: 'info',
-      message: 'No update to install.',
-      detail: 'The app is already up to date, or the new version has not finished downloading yet. Try the app menu > Check for Updates...',
-    });
-    return;
-  }
-  try {
-    todesktop.autoUpdater.restartAndInstall();
-  } catch (err) {
-    console.error('[update] restartAndInstall failed:', err);
-    dialog.showMessageBox({
-      type: 'error',
-      message: 'Update failed to install.',
-      detail: String(err && err.message ? err.message : err),
-    });
-  }
 });
 
 // -- Lima lazy install --
