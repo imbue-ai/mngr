@@ -134,7 +134,7 @@ def _user_event_to_stream_json(event: dict[str, Any], session_id: str) -> dict[s
         "type": "user",
         "message": {
             "role": "user",
-            "content": event.get("content", ""),
+            "content": _coerce_str(event.get("content", "")),
         },
         "session_id": session_id,
     }
