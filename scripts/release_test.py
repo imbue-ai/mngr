@@ -15,12 +15,10 @@ from scripts.release import _gate_release_on_pending_changelog_entries  # noqa: 
 from scripts.release import _pluralize_entry  # noqa: E402
 
 
-def _write_changelog_entry(tmp_path: Path, name: str, content: str = "- entry") -> Path:
+def _write_changelog_entry(tmp_path: Path, name: str, content: str = "- entry") -> None:
     changelog_dir = tmp_path / "changelog"
     changelog_dir.mkdir(exist_ok=True)
-    entry = changelog_dir / name
-    entry.write_text(content)
-    return entry
+    (changelog_dir / name).write_text(content)
 
 
 @pytest.mark.parametrize(
