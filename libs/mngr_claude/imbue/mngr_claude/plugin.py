@@ -92,6 +92,7 @@ from imbue.mngr_claude.claude_config import is_source_directory_trusted
 from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.claude_config import read_claude_config
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
+from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
 
 _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
 
@@ -265,6 +266,14 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "are copied to <local_host_dir>/plugin/mngr_claude/preserved_sessions/<agent-name>--<agent-id>/. "
         "For remote agents, files are pulled to the local machine so they survive host destruction. "
         "Set to False to discard session data on destroy.",
+    )
+    use_env_config_dir: bool = Field(
+        default=False,
+        description="When True, share the user's $CLAUDE_CONFIG_DIR across all claude agents instead of "
+        "provisioning a per-agent config dir. Local hosts only; $CLAUDE_CONFIG_DIR must be set. "
+        "When set, mngr never writes to the user's Claude config; the user is responsible for "
+        "interactive `claude` setup (trust dialogs, onboarding, credentials) ahead of time. "
+        "Other sync/override/auto-dismiss fields on this config are silently ignored in this mode.",
     )
 
 
@@ -1376,18 +1385,32 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
         _check_settings_local_gitignored(source_host, source_path, require_repo_rule=True)
 
     def get_claude_config_dir(self) -> Path:
-        """Return the per-agent Claude config directory path.
+        """Return the Claude config directory for this agent.
 
-        This directory replaces ~/.claude/ for this agent when CLAUDE_CONFIG_DIR
-        is set. Located at $MNGR_AGENT_STATE_DIR/plugin/claude/anthropic/.
+        Default: per-agent isolated directory at
+        ``$MNGR_AGENT_STATE_DIR/plugin/claude/anthropic/`` that replaces
+        ``~/.claude/`` for this agent.
+
+        When ``use_env_config_dir=True``: resolve to the value of
+        ``$CLAUDE_CONFIG_DIR`` (the user's shared config dir), so multiple
+        agents share a single directory. Raises ``UserInputError`` if the env
+        var is unset.
         """
+        if self.agent_config.use_env_config_dir:
+            return resolve_shared_claude_config_dir()
         return self._get_agent_dir() / "plugin" / "claude" / "anthropic"
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
-        """Add CLAUDE_CONFIG_DIR, ORIGINAL_CLAUDE_CONFIG_DIR, and optionally enable common transcript emission."""
-        env_vars["CLAUDE_CONFIG_DIR"] = str(self.get_claude_config_dir())
-        env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"] = str(get_user_claude_config_dir())
+        """Add CLAUDE_CONFIG_DIR, ORIGINAL_CLAUDE_CONFIG_DIR, and optionally enable common transcript emission.
+
+        In ``use_env_config_dir`` mode, leave CLAUDE_CONFIG_DIR alone (the agent
+        inherits the parent shell's value) and don't set ORIGINAL_CLAUDE_CONFIG_DIR
+        at all, since there's no per-agent dir to distinguish from the user's.
+        """
         config = self.agent_config
+        if not config.use_env_config_dir:
+            env_vars["CLAUDE_CONFIG_DIR"] = str(self.get_claude_config_dir())
+            env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"] = str(get_user_claude_config_dir())
         if config.emit_common_transcript:
             env_vars["MNGR_EMIT_COMMON_TRANSCRIPT"] = "1"
 
@@ -1579,13 +1602,28 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
         startup dialogs are dismissed so we fail early with a clear message.
         Interactive and auto-approve runs skip these checks because
         provision() will handle them.
+
+        In ``use_env_config_dir`` mode: enforce local-only + require
+        $CLAUDE_CONFIG_DIR to be set, and skip the dialog-dismissal
+        validation entirely (user is responsible for their own config).
         """
         config = self.agent_config
 
+        if config.use_env_config_dir:
+            if not host.is_local:
+                raise UserInputError(
+                    "use_env_config_dir=True is only supported for local hosts; "
+                    "this agent targets a non-local host. Disable use_env_config_dir "
+                    "or move the agent to a local host."
+                )
+            # Side-effect: raises if $CLAUDE_CONFIG_DIR is unset, surfacing the
+            # error inside on_before_provisioning's normal error path.
+            resolve_shared_claude_config_dir()
         # Validate dialogs for non-interactive local runs so we fail early with
         # a clear message. Skip when auto_dismiss_dialogs is True because
-        # provision() will auto-dismiss all dialogs in that case.
-        if (
+        # provision() will auto-dismiss all dialogs in that case. Skip entirely
+        # in shared mode because mngr does not write to the user's config.
+        elif (
             host.is_local
             and not mngr_ctx.is_interactive
             and not mngr_ctx.is_auto_approve
@@ -1598,6 +1636,10 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
             else:
                 trust_path = self.work_dir
             check_claude_dialogs_dismissed(find_user_claude_config(), trust_path)
+        else:
+            # Remote-host non-shared, or interactive/auto-approve local, or
+            # auto_dismiss_dialogs=True: provision() handles dialog setup.
+            pass
         if not config.check_installation:
             logger.debug("Skipped claude installation check (check_installation=False)")
             return
@@ -1899,23 +1941,30 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
         - git-worktree/git-mirror: trust is extended from the source directory
         - rsync/none: trust is prompted for the work_dir
         - auto_dismiss_dialogs=True: trust is auto-added for work_dir
+
+        In ``use_env_config_dir`` mode: skip all writes to the user's Claude
+        config -- no plugin path sentinel resolution, no dialog dismissal, no
+        cost-threshold acknowledgement, and no per-agent config dir setup. The
+        user takes responsibility for their own config.
         """
+        config = self.agent_config
+
         # Resolve sentinel-prefixed installPaths in ~/.claude/ if present.
         # Deploy images have paths rewritten to a sentinel at build time
         # (because the container's home dir isn't known at build). Resolve
         # them to the actual ~/.claude/ path now, so all downstream code
-        # can assume paths use ~/.claude/ as the prefix.
-        _resolve_plugins_dir_sentinel(host)
+        # can assume paths use ~/.claude/ as the prefix. Skipped in shared
+        # mode because we don't want to rewrite the user's persistent config.
+        if not config.use_env_config_dir:
+            _resolve_plugins_dir_sentinel(host)
 
         with mngr_ctx.concurrency_group.make_concurrency_group("claude_provisioning") as concurrency_group:
-            config = self.agent_config
-
             # Provision background task scripts to the agent state directory
             provision_backgroun_script_thread = concurrency_group.start_new_thread(
                 _provision_background_scripts, (host, self._get_agent_dir(), concurrency_group)
             )
 
-            if host.is_local:
+            if host.is_local and not config.use_env_config_dir:
                 # Determine the source path for trust extension
                 source_path: Path | None = None
                 transfer_mode = options.transfer_mode
@@ -1980,8 +2029,10 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
                     _install_claude(host, config.version)
                     logger.info("Claude installed successfully")
 
-            # no matter what, *always* dismiss the cost popup, it's pointless
-            acknowledge_cost_threshold(find_user_claude_config())
+            # no matter what, *always* dismiss the cost popup, it's pointless.
+            # Skipped in shared mode -- mngr never writes to the user's config.
+            if not config.use_env_config_dir:
+                acknowledge_cost_threshold(find_user_claude_config())
 
             # Transfer plugin data from source agent before config setup (if cloning via --from).
             # This copies sessions, memory, transcript offsets, etc. The subsequent config setup
@@ -1989,8 +2040,10 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
             if options.source_agent_state_location is not None:
                 self._transfer_source_plugin_data(options.source_agent_state_location)
 
-            # Set up per-agent config directory (for both local and remote hosts)
-            self._setup_per_agent_config_dir(host, options, mngr_ctx)
+            # Set up per-agent config directory (skipped in shared mode -- the
+            # shared $CLAUDE_CONFIG_DIR is the user's responsibility to populate).
+            if not config.use_env_config_dir:
+                self._setup_per_agent_config_dir(host, options, mngr_ctx)
 
             # Configure readiness hooks (for both local and remote hosts)
             self._configure_agent_hooks(host)
@@ -2004,29 +2057,52 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Adopt sessions when --adopt-session is used.
+        """Adopt a session so the agent's claude resumes existing context.
 
-        For each specified session, searches the user's Claude config directory
-        by ID (or reads a .jsonl path directly), copies the containing project
-        directory into the per-agent config dir, and writes the last session ID
-        so --resume picks it up.
+        Dispatches to ``_adopt_explicit_sessions`` (``--adopt-session``)
+        or ``_adopt_cloned_session`` (``--from <agent>``); both end in
+        ``_finalize_adopted_session``. The combination is rejected
+        upstream in ``on_before_create``.
+
+        Destination resolution depends on ``use_env_config_dir``:
+        - Default (``False``): copies into the per-agent config dir at
+          ``$MNGR_AGENT_STATE_DIR/plugin/claude/anthropic/projects/<encoded>/``.
+        - Shared (``True``): copies into the user's shared
+          ``$CLAUDE_CONFIG_DIR/projects/<encoded-work_dir>/``. Per spec decision
+          4c this is the only sanctioned mngr write to the user's config dir
+          in shared mode, and it only adds new project subdirs -- it never
+          modifies existing user files.
         """
         adopt_session_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
-        if not adopt_session_args:
-            return
+        assert not (adopt_session_args and options.source_agent_state_location is not None), (
+            "--adopt-session and --from <agent> are mutually exclusive (should have been rejected by on_before_create)"
+        )
+        if adopt_session_args:
+            self._adopt_explicit_sessions(host, adopt_session_args)
+        if options.source_agent_state_location is not None:
+            self._adopt_cloned_session(host, options.source_agent_state_location)
 
+    def _adopt_explicit_sessions(
+        self,
+        host: OnlineHostInterface,
+        adopt_session_args: tuple[str, ...],
+    ) -> None:
+        """Position sessions named on the command line under the destination's
+        encoded project dir and finalize. Used by ``--adopt-session``.
+        """
         config_dir = self.get_claude_config_dir()
         copied_project_dirs: set[str] = set()
-        # Claude Code organizes sessions by encoded working directory path.
-        # Place adopted sessions under the project dir matching this agent's
-        # work_dir so that `claude --resume` can find them.
-        dest_project_name = encode_claude_project_dir_name(self.work_dir)
+        # Claude Code organizes sessions by encoded working directory path,
+        # so place adopted sessions under the project dir matching this
+        # agent's work_dir; see ``_resolve_work_dir_on_host`` for why we
+        # resolve through symlinks.
+        dest_project_name = encode_claude_project_dir_name(self._resolve_work_dir_on_host())
+        dest_project_dir = config_dir / "projects" / dest_project_name
 
         for arg in adopt_session_args:
             session_id, source_project_dir = _resolve_adopt_session(arg)
             # Deduplicate project dir copies (multiple sessions may be in the same project)
             if source_project_dir.name not in copied_project_dirs:
-                dest_project_dir = config_dir / "projects" / dest_project_name
                 with log_span("Adopting session {}", session_id):
                     host.copy_directory(host, source_project_dir, dest_project_dir)
                 copied_project_dirs.add(source_project_dir.name)
@@ -2034,21 +2110,29 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
 
         assert last_session_id is not None, "adopt_session_args was non-empty but no session ID was set"
 
-        # Remove the sessions-index.json copied from the source project dir.
-        # It contains stale entries pointing to the source paths and project,
-        # and its presence prevents Claude Code from discovering the adopted
-        # session files. Claude Code rebuilds the index on next startup.
-        dest_project_dir = config_dir / "projects" / dest_project_name
-        stale_index = dest_project_dir / "sessions-index.json"
-        host.execute_idempotent_command(f"rm -f {shlex.quote(str(stale_index))}")
-
-        host.write_text_file(self._get_agent_dir() / "claude_session_id", last_session_id)
+        self._finalize_adopted_session(host, dest_project_dir, last_session_id)
         logger.info("Adopted {} session(s), active session: {}", len(adopt_session_args), last_session_id)
 
+    def _finalize_adopted_session(
+        self,
+        host: OnlineHostInterface,
+        adopted_project_dir: Path,
+        adopted_session_id: str,
+    ) -> None:
+        """Drop the stale ``sessions-index.json`` (claude rebuilds it; the
+        rsynced one points at source paths and blocks lookup of the
+        adopted session) and write ``claude_session_id`` so the startup
+        ``claude --resume "$MAIN_CLAUDE_SESSION_ID"`` targets it.
+        """
+        stale_index = adopted_project_dir / "sessions-index.json"
+        host.execute_idempotent_command(f"rm -f {shlex.quote(str(stale_index))}", timeout_seconds=5.0)
+        host.write_text_file(self._get_agent_dir() / "claude_session_id", adopted_session_id)
+
     def _transfer_source_plugin_data(self, source_agent_state_location: HostLocation) -> None:
-        """Copy the source agent's plugin/ directory into this agent's state
-        directory. Runs before _setup_per_agent_config_dir, which overwrites
-        identity-specific config files with fresh values for the new agent.
+        """Rsync the source agent's ``plugin/`` into this agent's state dir.
+        Runs before ``_setup_per_agent_config_dir`` (which overwrites
+        identity-specific files); the destination-side rewiring runs later
+        in ``on_after_provisioning`` via ``_adopt_cloned_session``.
         """
         source_host = source_agent_state_location.host
         source_plugin_dir = source_agent_state_location.path / "plugin"
@@ -2060,6 +2144,115 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
 
         with log_span("Transferring source plugin data"):
             self.host.copy_directory(source_host, source_plugin_dir, dest_plugin_dir)
+
+    def _resolve_work_dir_on_host(self) -> Path:
+        """Return ``self.work_dir`` with symlinks resolved as the destination
+        host sees it. On Modal, ``/mngr/projects/agent-<uuid>`` is a symlink
+        onto ``/__modal/volumes/<vol-id>/projects/agent-<uuid>``; claude
+        uses the resolved form for its cwd and per-project storage.
+
+        Falls back to the unresolved path on ``readlink -f`` failure, but
+        warns -- on a host where the canonical path differs, the fallback
+        will silently break clone-resume.
+        """
+        result = self.host.execute_idempotent_command(
+            f"readlink -f {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0
+        )
+        if result.success and result.stdout.strip():
+            return Path(result.stdout.strip())
+        logger.warning(
+            "readlink -f {} failed (success={}, stderr={!r}); falling back to unresolved path",
+            self.work_dir,
+            result.success,
+            result.stderr.strip(),
+        )
+        return self.work_dir
+
+    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> None:
+        """Rewire the rsynced plugin/ so ``claude --resume`` finds the source's session.
+
+        After ``_transfer_source_plugin_data`` rsyncs the source's
+        ``plugin/``, the JSONL is filed under the *source* agent's
+        encoded work_dir; claude on the destination searches under
+        ``projects/<dest-encoded-work-dir>/`` so it can't see it.
+
+        This method discovers the source's active session source-side
+        (``ls -t``, so we can bail without a second destination round-trip
+        if there's nothing to adopt), carries ``claude_session_id_history``
+        forward, renames the project subdir to the destination's encoded
+        work_dir, and hands off to ``_finalize_adopted_session``.
+
+        Session id comes from the JSONL filename, not the source's
+        ``claude_session_id`` file: ``claude -p`` ignores ``--session-id``
+        and auto-generates its own, so the file (defaulted to the agent
+        UUID by the SessionStart hook) disagrees with the JSONL on disk.
+        """
+        source_host = source_location.host
+        source_state_dir = source_location.path
+
+        # Carry the source's claude_session_id_history forward so the
+        # destination's history reflects the prior run.
+        source_history_path = source_state_dir / "claude_session_id_history"
+        if source_host.path_exists(source_history_path):
+            host.write_text_file(
+                self._get_agent_dir() / "claude_session_id_history",
+                source_host.read_text_file(source_history_path),
+            )
+
+        # Layout: plugin/claude/anthropic/projects/<encoded-work-dir>/<sid>.jsonl.
+        # The shallow ``*/*.jsonl`` glob excludes nested subagent transcripts
+        # at ``<sid>/subagents/agent-X.jsonl``.
+        source_projects_dir = source_state_dir / "plugin" / "claude" / "anthropic" / "projects"
+        latest_on_source = source_host.execute_idempotent_command(
+            f"ls -t {shlex.quote(str(source_projects_dir))}/*/*.jsonl 2>/dev/null | head -n1",
+            timeout_seconds=5.0,
+        )
+        if not (latest_on_source.success and latest_on_source.stdout.strip()):
+            # Either the source has no sessions (cloned agent gets a fresh
+            # claude session) or the ``ls`` failed; surface either case so
+            # a silent regression doesn't hide as DEBUG noise.
+            logger.warning(
+                "Clone adopt: no session JSONL found at source {} (ls success={}, stderr={!r}); "
+                "cloned agent will start a fresh claude session",
+                source_projects_dir,
+                latest_on_source.success,
+                latest_on_source.stderr.strip(),
+            )
+            return
+        latest_path = Path(latest_on_source.stdout.strip())
+        source_project_name = latest_path.parent.name
+        adopted_session_id = latest_path.stem
+
+        # Rename source-encoded project subdir to the destination's encoded
+        # work_dir. Same host, so a plain ``mv`` is enough. Refuse to
+        # clobber a pre-existing target: collision means the source had a
+        # multi-cwd setup whose encoded name coincidentally matched ours,
+        # and silent clobber would risk losing data we don't realize is there.
+        dest_projects_dir = self._get_agent_dir() / "plugin" / "claude" / "anthropic" / "projects"
+        dest_project_name = encode_claude_project_dir_name(self._resolve_work_dir_on_host())
+        if source_project_name != dest_project_name:
+            source_subdir = dest_projects_dir / source_project_name
+            target_dir = dest_projects_dir / dest_project_name
+            if host.path_exists(target_dir):
+                logger.warning(
+                    "Refusing to rekey cloned project subdir {} -> {}: target dir already exists. "
+                    "Cloned agent will not resume the source's session.",
+                    source_subdir,
+                    target_dir,
+                )
+                return
+            rename_cmd = f"mv {shlex.quote(str(source_subdir))} {shlex.quote(str(target_dir))}"
+            rename_result = host.execute_idempotent_command(rename_cmd, timeout_seconds=10.0)
+            if not rename_result.success:
+                logger.warning(
+                    "Failed to rekey cloned project subdir {} -> {}: {}",
+                    source_subdir,
+                    target_dir,
+                    rename_result.stderr.strip(),
+                )
+                return
+
+        self._finalize_adopted_session(host, dest_projects_dir / dest_project_name, adopted_session_id)
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve session files and clean up per-agent credentials and trust entries.
@@ -2073,6 +2266,17 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
         (the config dir itself is deleted with the agent state).
         For legacy agents without per-agent config dirs: cleans up the global
         ~/.claude.json trust entry.
+
+        In ``use_env_config_dir`` mode: skip keychain / trust cleanup entirely.
+        ``get_claude_config_dir()`` resolves to the user's shared $CLAUDE_CONFIG_DIR,
+        which exists, so the per-agent-keychain branch would otherwise compute the
+        same label hash Claude Code itself uses and delete the user's real
+        credentials. Since provision() never wrote any per-agent keychain or
+        trust entries in this mode, there is nothing for us to clean up. Session
+        preservation also skips copying the ``projects/`` directory in this mode
+        (it lives in the user's persistent dir and contains all of their
+        cross-project session history); only transcripts and the session-id
+        history from the agent state dir are preserved.
         """
         # Preserve session files before the state dir is deleted
         if self.agent_config.preserve_sessions_on_destroy:
@@ -2080,6 +2284,12 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
                 _preserve_session_files(self, host)
             except (MngrError, OSError) as e:
                 logger.warning("Failed to preserve session files for agent {}: {}", self.name, e)
+
+        if self.agent_config.use_env_config_dir:
+            # Shared-config mode: mngr never wrote per-agent keychain entries or
+            # ~/.claude.json trust markers, so there is nothing to clean up. Any
+            # keychain delete here would target the user's own credentials.
+            return
 
         config_dir = self.get_claude_config_dir()
         per_agent_config_exists = host.execute_idempotent_command(
@@ -2125,19 +2335,32 @@ def _preserve_session_files(agent: ClaudeAgent, host: OnlineHostInterface) -> No
     For local agents, this is a same-host copy. For remote agents, files are
     pulled to the local machine via copy_directory (rsync over SSH).
     Failures are logged as warnings but do not prevent agent destruction.
+
+    In ``use_env_config_dir`` mode the ``projects/`` copy is skipped: session
+    JSONLs already live in the user's persistent ``$CLAUDE_CONFIG_DIR`` (which
+    is not deleted with the agent state), and ``$CLAUDE_CONFIG_DIR/projects/``
+    contains the user's entire cross-project session history -- copying it
+    per-agent would duplicate gigabytes of unrelated sessions into mngr's
+    preserved-sessions store. Transcripts and the session-id history still
+    live under the agent state dir and are preserved as usual.
     """
     agent_dir = agent._get_agent_dir()
+    is_shared_config = agent.agent_config.use_env_config_dir
 
-    # Source paths for session data (on the agent's host)
+    # Source paths for session data (on the agent's host). In shared-config
+    # mode the projects dir is the user's persistent dir, so don't probe or
+    # copy it; sessions there survive the agent's state-dir deletion already.
     config_dir = agent.get_claude_config_dir()
     projects_dir = config_dir / "projects"
     raw_transcript_path = agent_dir / "logs" / "claude_transcript"
     common_transcript_path = agent_dir / "events" / "claude" / "common_transcript"
     history_path = agent_dir / "claude_session_id_history"
 
-    # Check which source directories/files exist on the agent's host (single roundtrip)
+    # Check which source directories/files exist on the agent's host (single roundtrip).
+    # The projects probe is omitted in shared-config mode -- we never copy it there.
+    projects_probe = "" if is_shared_config else f"[ -d {shlex.quote(str(projects_dir))} ] && echo projects;"
     check_script = (
-        f"[ -d {shlex.quote(str(projects_dir))} ] && echo projects;"
+        f"{projects_probe}"
         f" [ -d {shlex.quote(str(raw_transcript_path))} ] && echo raw_transcript;"
         f" [ -d {shlex.quote(str(common_transcript_path))} ] && echo common_transcript;"
         f" [ -f {shlex.quote(str(history_path))} ] && echo history;"
@@ -2156,7 +2379,9 @@ def _preserve_session_files(agent: ClaudeAgent, host: OnlineHostInterface) -> No
     local_host = _get_local_host(agent.mngr_ctx)
 
     with log_span("Preserving session files for agent {}", agent.name):
-        # Copy each available data category using copy_directory
+        # Copy each available data category using copy_directory.
+        # In shared-config mode, "projects" is never present in `available`
+        # because we omitted its probe -- so this branch naturally skips.
         if "projects" in available:
             _copy_to_local(local_host, host, projects_dir, dest_dir / "projects", "session projects", agent.name)
 
@@ -2508,10 +2733,9 @@ def register_cli_options(command_name: str) -> Mapping[str, list[OptionStackItem
 
 @hookimpl
 def on_before_create(args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
-    """Validate create args when --adopt-session is used.
-
-    When plugin_data contains "adopt_session":
-    - Validates the agent type is claude (or unset/default)
+    """Validate create args when --adopt-session is used: agent type must
+    be claude (or unset), and the option is incompatible with cloning via
+    ``--from <agent>`` (both adopt a session into the new agent).
     """
     adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
     if not adopt_session:
@@ -2520,6 +2744,12 @@ def on_before_create(args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
     agent_type = args.agent_options.agent_type
     if agent_type is not None and str(agent_type) != "claude":
         raise UserInputError(f"--adopt-session can only be used with the claude agent type, not '{agent_type}'.")
+
+    if args.agent_options.source_agent_state_location is not None:
+        raise UserInputError(
+            "--adopt-session is incompatible with cloning via --from <agent>: both "
+            "adopt a session into the new agent. Pick one."
+        )
 
     return None
 

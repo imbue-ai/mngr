@@ -25,13 +25,14 @@ def _hook_input(
     prompt: str = "find the readmes",
     description: str = "explore repo",
     run_in_background: bool = False,
+    subagent_type: str = "general-purpose",
 ) -> dict[str, object]:
     return {
         "tool_use_id": tool_use_id,
         "tool_input": {
             "prompt": prompt,
             "description": description,
-            "subagent_type": "general-purpose",
+            "subagent_type": subagent_type,
             "run_in_background": run_in_background,
         },
     }
@@ -192,6 +193,81 @@ def test_deny_below_max_depth_emits_skill_pointer_reason(hook_env: pytest.Monkey
     reason = response["hookSpecificOutput"]["permissionDecisionReason"]
     assert "mngr-subagents" in reason
     assert "depth limit" not in reason
+
+
+def test_deny_typed_subagent_reason_points_at_resolved_agent_definition(
+    hook_env: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``tool_input.subagent_type`` resolves to an on-disk agent
+    definition, the deny reason names the resolved path so Claude knows
+    to prepend its body to the prompt file before ``mngr create``.
+
+    Without this, DENY mode silently strips the typed-subagent system
+    prompt: Claude follows the skill's two-command protocol with only
+    the parent's prompt, and the spawned subagent runs without the
+    behavior the agent type was designed for (verify-and-fix's
+    autofix instructions, code-reviewer's review checklist, etc.).
+    """
+    # ``hook_env`` is declared so the env baseline (state dir, parent name) is set up; the body
+    # doesn't reference it directly.
+    del hook_env
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    marketplace_agent = (
+        fake_home
+        / ".claude"
+        / "plugins"
+        / "marketplaces"
+        / "imbue-code-guardian"
+        / "plugins"
+        / "imbue-code-guardian"
+        / "agents"
+        / "verify-and-fix.md"
+    )
+    marketplace_agent.parent.mkdir(parents=True)
+    marketplace_agent.write_text("---\nname: verify-and-fix\ndescription: verify\n---\n\nSystem prompt body.\n")
+
+    payload = _hook_input(subagent_type="imbue-code-guardian:verify-and-fix")
+    response = _run_deny(payload)
+
+    reason = response["hookSpecificOutput"]["permissionDecisionReason"]
+    # Base skill pointer is still present.
+    assert "mngr-subagents" in reason
+    # Typed-subagent pointer appended with the resolved path.
+    assert str(marketplace_agent) in reason
+    assert "prepend the body" in reason
+    # The body itself is NOT inlined -- the deny reason stays a pointer,
+    # not the agent's full system prompt.
+    assert "System prompt body." not in reason
+
+
+def test_deny_typed_subagent_reason_omits_pointer_for_unresolved_type(
+    hook_env: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``tool_input.subagent_type`` is a built-in (``general-purpose``)
+    or otherwise unresolvable, the deny reason is the unchanged short
+    skill-pointer text -- no path appended.
+
+    Pins the contract that the typed-subagent suffix is opt-in (only
+    fires when there's something to point at), not an unconditional
+    paragraph that crowds every deny.
+    """
+    del hook_env
+    fake_home = tmp_path / "fake_home_empty"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    response = _run_deny(_hook_input())
+    reason = response["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "mngr-subagents" in reason
+    assert "prepend the body" not in reason
+    assert ".md" not in reason
 
 
 @pytest.mark.parametrize(

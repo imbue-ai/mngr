@@ -88,6 +88,8 @@ from imbue.minds.primitives import ServiceName
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import InvalidName
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 
@@ -483,7 +485,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
 
     form = await request.form()
     git_url = str(form.get("git_url", "")).strip()
-    agent_name = str(form.get("agent_name", "")).strip()
+    host_name = str(form.get("host_name", "")).strip()
     branch = str(form.get("branch", "")).strip()
     try:
         launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.LOCAL.value)))
@@ -506,7 +508,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         # so a validation error doesn't silently revert their choice.
         html_body = render_create_form(
             git_url=git_url,
-            agent_name=agent_name,
+            host_name=host_name,
             branch=branch,
             launch_mode=launch_mode,
             ai_provider=ai_provider,
@@ -520,6 +522,16 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
 
     if not git_url:
         return _re_render_with_error("Repository URL is required.")
+
+    # Validate the host name eagerly so the user sees the error inline on
+    # the form rather than as a deferred "FAILED" status on the creating
+    # page. An empty value falls through; ``start_creation`` substitutes a
+    # repo-derived fallback for the API path.
+    if host_name:
+        try:
+            HostName(host_name)
+        except InvalidName as exc:
+            return _re_render_with_error(str(exc))
 
     is_imbue_cloud_compute = launch_mode is LaunchMode.IMBUE_CLOUD
     is_imbue_cloud_ai = ai_provider is AIProvider.IMBUE_CLOUD
@@ -554,7 +566,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     # the association is keyed under the right id.
     creation_id = agent_creator.start_creation(
         git_url,
-        agent_name=agent_name,
+        host_name=host_name,
         branch=branch,
         launch_mode=launch_mode,
         ai_provider=ai_provider,
@@ -615,7 +627,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             media_type="application/json",
         )
     git_url = str(body.get("git_url", "")).strip()
-    agent_name = str(body.get("agent_name", "")).strip()
+    host_name = str(body.get("host_name", "")).strip()
     branch = str(body.get("branch", "")).strip()
     try:
         launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.LOCAL.value)))
@@ -642,6 +654,17 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             content='{"error": "git_url is required"}',
             media_type="application/json",
         )
+    # Validate the host name eagerly so a malformed value returns 400 from
+    # the API rather than failing deferred in the background thread.
+    if host_name:
+        try:
+            HostName(host_name)
+        except InvalidName as exc:
+            return Response(
+                status_code=400,
+                content=json.dumps({"error": str(exc)}),
+                media_type="application/json",
+            )
     # Mirror the form path's account requirement so the API rejects
     # imbue_cloud-without-account up front instead of failing later inside
     # the background thread with a vague MngrCommandError.
@@ -671,7 +694,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
 
     creation_id = agent_creator.start_creation(
         git_url,
-        agent_name=agent_name,
+        host_name=host_name,
         branch=branch,
         launch_mode=launch_mode,
         ai_provider=ai_provider,
