@@ -34,6 +34,32 @@ if (app.isPackaged) {
           b.chromeView.webContents.send('update-ready');
         }
       }
+      // Also surface a modal prompt. The titlebar "Update" pill alone
+      // has been repeatedly overlooked by users, so we make the
+      // update impossible to miss: a blocking dialog with an explicit
+      // "Restart & Update" action. "Later" keeps the pill around so
+      // they can still trigger it on their own schedule.
+      dialog
+        .showMessageBox({
+          type: 'info',
+          buttons: ['Restart & Update', 'Later'],
+          defaultId: 0,
+          cancelId: 1,
+          message: 'A new version of Minds is ready.',
+          detail: 'It has been downloaded in the background. Restart now to apply it.',
+        })
+        .then((result) => {
+          if (result.response === 0 && todesktop.autoUpdater) {
+            try {
+              todesktop.autoUpdater.restartAndInstall();
+            } catch (err) {
+              console.error('[update] restartAndInstall failed:', err);
+            }
+          }
+        })
+        .catch((err) => {
+          console.error('[update] update-ready dialog failed:', err);
+        });
     });
   }
 } else {
