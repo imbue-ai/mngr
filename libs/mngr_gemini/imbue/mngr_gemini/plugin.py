@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+from pathlib import Path
 from typing import ClassVar
 from typing import Mapping
 
@@ -23,12 +24,18 @@ from imbue.mngr_gemini.gemini_config import build_readiness_hooks_config
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME = "common_transcript.sh"
 
+# Plugin-scoped subdir inside the per-agent state dir. Mirrors how
+# ``mngr_claude`` namespaces its files under ``plugin/claude/anthropic/``
+# inside ``$MNGR_AGENT_STATE_DIR``; future ``mngr_gemini`` state can land
+# alongside the system-settings file here.
+_PLUGIN_STATE_SUBDIR = ("plugin", "gemini")
+
 # Filename for the mngr-owned settings file that mngr_gemini installs into
 # the per-agent state dir. Gemini reads it as system-tier settings, which sit
 # at the top of the precedence stack (system > workspace > user). Keeping
 # mngr's hooks at that tier means the user's workspace and ``~/.gemini/``
 # stay untouched.
-_SYSTEM_SETTINGS_FILENAME = "gemini_system_settings.json"
+_SYSTEM_SETTINGS_FILENAME = "system_settings.json"
 
 # Set in the agent's environment so Gemini reads our settings file as the
 # system-tier override. The env-var override is documented at
@@ -114,13 +121,18 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         """Return the gemini transcript converter script."""
         return {_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_gemini_resource_script(_COMMON_TRANSCRIPT_SCRIPT_NAME)}
 
-    def _get_system_settings_path(self):
+    def _get_system_settings_path(self) -> Path:
         """Path to the mngr-owned system-tier settings file for this agent.
 
-        Lives in the per-agent state dir; not in the user's workspace, not in
-        ``~/.gemini/``. Different agents get different paths.
+        Lives at ``$MNGR_AGENT_STATE_DIR/plugin/gemini/system_settings.json``
+        -- not in the user's workspace, not in ``~/.gemini/``. Mirrors the
+        plugin-scoped namespacing ``mngr_claude`` uses under
+        ``plugin/claude/anthropic/``.
         """
-        return self._get_agent_dir() / _SYSTEM_SETTINGS_FILENAME
+        agent_dir = self._get_agent_dir()
+        for part in _PLUGIN_STATE_SUBDIR:
+            agent_dir = agent_dir / part
+        return agent_dir / _SYSTEM_SETTINGS_FILENAME
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Wire trust + system-settings env vars for the agent.
@@ -144,8 +156,9 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
     ) -> None:
         """Install mngr's Gemini settings (readiness hook) and the transcript watcher.
 
-        The settings file lives at ``$MNGR_AGENT_STATE_DIR/gemini_system_settings.json``
-        and is pointed to via ``GEMINI_CLI_SYSTEM_SETTINGS_PATH`` (see
+        The settings file lives at
+        ``$MNGR_AGENT_STATE_DIR/plugin/gemini/system_settings.json`` and is
+        pointed to via ``GEMINI_CLI_SYSTEM_SETTINGS_PATH`` (see
         ``modify_env_vars``). It is mngr-owned: provision rewrites it from
         scratch every run, so no merge / no clobber-protection is needed. The
         user's workspace and ``~/.gemini/settings.json`` stay untouched.

@@ -186,15 +186,20 @@ def test_modify_env_vars_sets_trust_workspace_true(gemini_agent: GeminiAgent) ->
     assert env_vars["GEMINI_CLI_TRUST_WORKSPACE"] == "true"
 
 
-def test_modify_env_vars_points_system_settings_at_per_agent_file(
+def test_modify_env_vars_points_system_settings_at_plugin_scoped_per_agent_file(
     gemini_agent: GeminiAgent,
 ) -> None:
-    """Gemini reads our system-tier settings file from the path in this env var."""
+    """Gemini reads our system-tier settings from a plugin-scoped per-agent path.
+
+    Mirrors ``mngr_claude``'s ``plugin/claude/anthropic/`` namespacing inside
+    the per-agent state dir.
+    """
     env_vars: dict[str, str] = {}
     gemini_agent.modify_env_vars(gemini_agent.host, env_vars)
     settings_path = env_vars["GEMINI_CLI_SYSTEM_SETTINGS_PATH"]
-    # The path lives inside the per-agent state dir, never inside the user's work_dir.
-    assert settings_path == str(gemini_agent._get_agent_dir() / "gemini_system_settings.json")
+    expected = gemini_agent._get_agent_dir() / "plugin" / "gemini" / "system_settings.json"
+    assert settings_path == str(expected)
+    # Never inside the user's work_dir.
     assert str(gemini_agent.work_dir) not in settings_path
 
 
@@ -207,7 +212,8 @@ def test_modify_env_vars_preserves_other_vars(gemini_agent: GeminiAgent) -> None
 
 
 def _read_system_settings(agent: GeminiAgent) -> dict[str, Any]:
-    parsed: Any = json.loads((agent._get_agent_dir() / "gemini_system_settings.json").read_text())
+    path = agent._get_agent_dir() / "plugin" / "gemini" / "system_settings.json"
+    parsed: Any = json.loads(path.read_text())
     assert isinstance(parsed, dict)
     return parsed
 
