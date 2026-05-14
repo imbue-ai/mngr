@@ -125,6 +125,7 @@ class TmrCliOptions(CommonCliOptions):
     output_dir: str | None
     source: str | None
     reintegrate: str | None
+    run_name: str | None
     additional_authorized_keys: tuple[str, ...]
 
 
@@ -555,6 +556,14 @@ def _run_integrator_phase(
     "Skips test collection and agent launching.",
 )
 @click.option(
+    "--run-name",
+    default=None,
+    help="Override the auto-generated run name (default: a UTC YYYYMMDDHHMMSS timestamp). "
+    "Mostly useful for orchestration that wants to predict the run's identity ahead of time. "
+    "Names must not collide with prior runs whose agents are still discoverable, "
+    "or agent creation will fail on duplicate names.",
+)
+@click.option(
     "--additional-authorized-host",
     "additional_authorized_keys",
     multiple=True,
@@ -604,12 +613,13 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     label_options = resolve_labels(opts.label)
     provided_snapshot = SnapshotName(opts.snapshot) if opts.snapshot is not None else None
 
-    # Step 5: Generate the shared run name (MMDD_HHMMSS, UTC). Used as the
-    # discriminator in agent / host / branch names, the output directory, the
-    # tmr_run_name label, and the e2e run-name flag (with a 'tmr_' prefix
-    # there to give .test_output/e2e/tmr_{run}_try_N/ provenance vs. ad-hoc
-    # local pytest runs). Agents append _try_1, _try_2 etc. for each test run.
-    run = make_run_name()
+    # Step 5: Generate the shared run name (YYYYMMDDHHMMSS, UTC) -- or accept
+    # an explicit override via --run-name. Used as the discriminator in agent
+    # / host / branch names, the output directory, the tmr_run_name label, and
+    # the e2e run-name flag (with a 'tmr_' prefix there to give
+    # .test_output/e2e/tmr_{run}_try_N/ provenance vs. ad-hoc local pytest
+    # runs). Agents append _try_1, _try_2 etc. for each test run.
+    run = opts.run_name if opts.run_name else make_run_name()
     testing_flags = testing_flags + ("--mngr-e2e-run-name", f"tmr_{run}")
 
     # Add tmr_run_name (so reintegrate can find this run's agents) and

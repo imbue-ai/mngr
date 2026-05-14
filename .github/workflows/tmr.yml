@@ -19,6 +19,10 @@ on:
         description: "Extra SSH public keys to install in authorized_keys on each agent host (one per line). Appended to the keys in .github/tmr-authorized-keys."
         required: false
         default: ""
+      run_name:
+        description: "Override the auto-generated run name (default: a UTC YYYYMMDDHHMMSS timestamp). The reintegrate workflow uses this name to rediscover this run's agents."
+        required: false
+        default: ""
 
 jobs:
   tmr:
@@ -123,6 +127,10 @@ jobs:
           while IFS= read -r line; do
             add_authorized_key "$line"
           done <<< "${ADDITIONAL_AUTHORIZED_HOSTS}"
+          run_name_args=()
+          if [ -n "${{ inputs.run_name }}" ]; then
+            run_name_args+=(--run-name "${{ inputs.run_name }}")
+          fi
           uv run --project libs/mngr_tmr mngr tmr -vv \
             -S 'agent_types.yolo.parent_type="claude"' \
             -S 'agent_types.yolo.cli_args=["--dangerously-skip-permissions"]' \
@@ -133,6 +141,7 @@ jobs:
             --env "MODAL_TOKEN_SECRET=${MODAL_TOKEN_SECRET}" \
             --env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
             "${authorized_host_args[@]}" \
+            "${run_name_args[@]}" \
             --output-dir tmr-report \
             --format jsonl \
             ${{ inputs.test_paths }} \
