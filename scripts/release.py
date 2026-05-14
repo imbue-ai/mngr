@@ -611,13 +611,14 @@ def main() -> None:
     if args.bump_kind is None:
         parser.error("bump_kind is required: patch, minor, or major")
 
-    # Branch check first: cheap, local-only, and surfaces the most common
-    # user error (running this from a feature branch) before we prompt
-    # about pending changelog entries.
-    branch = run("git", "branch", "--show-current")
-    if branch != "main":
-        print(f"ERROR: Must be on main branch (currently on {branch})", file=sys.stderr)
-        sys.exit(1)
+    # On a real run, enforce branch == main before doing anything else.
+    # Skip in --dry-run so users can still preview a release from any
+    # branch (matches the pre-changelog-gate behavior of this script).
+    if not args.dry_run:
+        branch = run("git", "branch", "--show-current")
+        if branch != "main":
+            print(f"ERROR: Must be on main branch (currently on {branch})", file=sys.stderr)
+            sys.exit(1)
 
     # Refuse to release while there are unconsolidated entries in
     # changelog/. Otherwise the [Unreleased] section we're about to
@@ -738,8 +739,8 @@ def main() -> None:
         return
 
     # Ensure the working tree is clean and up to date before prompting
-    # for confirmation. (Branch == main is already enforced above, before
-    # the pending-changelog-entry gate.)
+    # for confirmation. (Branch == main is enforced above for non-dry-run
+    # invocations, before the pending-changelog-entry gate.)
     if run("git", "status", "--porcelain"):
         print("ERROR: Working tree is not clean. Commit or stash changes first.", file=sys.stderr)
         sys.exit(1)
