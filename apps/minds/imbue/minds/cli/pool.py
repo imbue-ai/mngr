@@ -24,18 +24,16 @@ from imbue.minds.desktop_client.api_key_store import generate_api_key
 _CONTAINER_SSH_PORT: Final[int] = 2222
 _MNGR_COMMAND_TIMEOUT_SECONDS: Final[int] = 600
 
-_RSYNC_EXCLUDES: Final[tuple[str, ...]] = (
-    ".git",
-    "__pycache__",
-    ".venv",
-    "node_modules",
-    ".test_output",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".pytest_cache",
-    "uv.lock",
-    ".external_worktrees",
-)
+# Manual rsync excludes layered on top of `--filter=:- .gitignore`. The
+# filter handles `__pycache__`, `.venv`, `node_modules`, `.test_output`,
+# `.mypy_cache`, `.ruff_cache`, `.pytest_cache`, `.external_worktrees`, and
+# anything else mngr's gitignore lists. These two patterns are NOT in
+# .gitignore so we exclude them explicitly:
+#   - `.git`: gitignore never lists it; it's git's internal dir.
+#   - `uv.lock`: intentionally committed at the mngr root, but each install
+#     context should regenerate its own.
+_RSYNC_MANUAL_EXCLUDES: Final[tuple[str, ...]] = (".git", "uv.lock")
+_GITIGNORE_RSYNC_FILTER: Final[str] = ":- .gitignore"
 _SSH_COMMAND_TIMEOUT_SECONDS: Final[int] = 60
 
 
@@ -128,10 +126,10 @@ def _sync_mngr_into_template(mngr_source: Path, workspace_dir: Path) -> None:
     vendor_mngr = workspace_dir / "vendor" / "mngr"
     vendor_mngr.mkdir(parents=True, exist_ok=True)
     exclude_args: list[str] = []
-    for pattern in _RSYNC_EXCLUDES:
+    for pattern in _RSYNC_MANUAL_EXCLUDES:
         exclude_args.extend(["--exclude", pattern])
     command = (
-        ["rsync", "-a", "--delete"]
+        ["rsync", "-a", "--delete", "--filter={}".format(_GITIGNORE_RSYNC_FILTER)]
         + exclude_args
         + [
             "{}/".format(mngr_source),

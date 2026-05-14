@@ -763,6 +763,7 @@ class FakePoolRow:
     vps_instance_id: str
     agent_id: str
     host_id_str: str
+    host_name: str
     ssh_port: int
     ssh_user: str
     container_ssh_port: int
@@ -808,6 +809,7 @@ def _make_pool_row(
     status: str = "available",
     leased_to_user: str | None = None,
     leased_at: str | None = None,
+    host_name: str | None = None,
 ) -> FakePoolRow:
     row = FakePoolRow()
     row.host_id = host_id
@@ -815,6 +817,9 @@ def _make_pool_row(
     row.vps_instance_id = f"vps-{host_id}"
     row.agent_id = agent_id
     row.host_id_str = host_id_str
+    # Matches the migration's backfill: pre-leased rows default to host_id_str
+    # so they remain visible under a stable name until something leases them.
+    row.host_name = host_name if host_name is not None else host_id_str
     row.ssh_port = ssh_port
     row.ssh_user = ssh_user
     row.container_ssh_port = container_ssh_port
@@ -866,12 +871,16 @@ class FakeCursor:
                 break
 
         elif "update pool_hosts set status = 'leased'" in query_lower:
-            username, host_id = params
+            # Lease SQL now also writes the user-supplied host_name on the
+            # same UPDATE so the friendly name is set atomically with the
+            # status flip.
+            username, host_name, host_id = params
             for row in self._backend.pool_rows:
                 if row.host_id == host_id:
                     row.status = "leased"
                     row.leased_to_user = username
                     row.leased_at = "2026-01-01T00:00:00+00:00"
+                    row.host_name = host_name
                     break
 
         elif (
@@ -901,6 +910,7 @@ class FakeCursor:
                                 row.container_ssh_port,
                                 row.agent_id,
                                 row.host_id_str,
+                                row.host_name,
                                 _row_attributes(row),
                                 row.leased_at,
                             )
@@ -1009,6 +1019,7 @@ class FakePoolBackend:
         container_ssh_port: int = 2222,
         agent_id: str = "agent-abc123",
         host_id_str: str = "host-xyz",
+        host_name: str | None = None,
     ) -> FakePoolRow:
         """Add an available host to the in-memory pool."""
         row = _make_pool_row(
@@ -1020,6 +1031,7 @@ class FakePoolBackend:
             ssh_user=ssh_user,
             container_ssh_port=container_ssh_port,
             version=version,
+            host_name=host_name,
         )
         self.pool_rows.append(row)
         return row
@@ -1035,6 +1047,7 @@ class FakePoolBackend:
         container_ssh_port: int = 2222,
         agent_id: str = "agent-abc123",
         host_id_str: str = "host-xyz",
+        host_name: str | None = None,
     ) -> FakePoolRow:
         """Add a leased host to the in-memory pool."""
         row = _make_pool_row(
@@ -1049,6 +1062,7 @@ class FakePoolBackend:
             status="leased",
             leased_to_user=leased_to_user,
             leased_at="2026-01-01T00:00:00+00:00",
+            host_name=host_name,
         )
         self.pool_rows.append(row)
         return row

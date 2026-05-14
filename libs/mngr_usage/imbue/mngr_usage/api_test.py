@@ -1,16 +1,19 @@
 """Unit tests for ``mngr_usage.api`` -- the reader pipeline + wait primitive.
 
-Pipeline tests (gather_usage_snapshots, _SnapshotCollector) are covered
-end-to-end in ``cli_test.py`` through the planted-events fixtures. The
-tests here focus on the bits the wait subcommand depends on directly:
-``derive_elapsed`` arithmetic, ``window_render_dict`` /
-``build_source_cel_context`` shape (which is the CEL surface), and the
-``wait_for_usage`` polling loop with injected clock/poll/sleep.
+Pipeline tests (``gather_usage_snapshots``, ``_RawEventsCollector``,
+``aggregate_events_to_snapshots``) are covered end-to-end in
+``cli_test.py`` through the planted-events fixtures. The tests here focus
+on the bits the wait subcommand depends on directly: ``derive_elapsed``
+arithmetic, ``window_render_dict`` / ``build_source_cel_context`` shape
+(which is the CEL surface), and the ``wait_for_usage`` polling loop with
+injected clock/poll/sleep.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+
+import pytest
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.cel_utils import compile_cel_filters
@@ -18,6 +21,9 @@ from imbue.mngr_usage.api import build_source_cel_context
 from imbue.mngr_usage.api import derive_elapsed
 from imbue.mngr_usage.api import wait_for_usage
 from imbue.mngr_usage.api import window_render_dict
+from imbue.mngr_usage.data_types import CostMode
+from imbue.mngr_usage.data_types import CostSnapshot
+from imbue.mngr_usage.data_types import SessionCostRecord
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
 
@@ -120,6 +126,75 @@ def test_build_source_cel_context_shape_matches_per_source_json() -> None:
     assert ctx["five_hour"]["used_percentage"] == 42.0
     assert abs(ctx["five_hour"]["elapsed_percentage"] - 20.0) < 0.001
     assert ctx["seven_day"]["used_percentage"] == 11.0
+
+
+def test_build_source_cel_context_exposes_per_mode_aggregates_and_sessions() -> None:
+    """Cost is split by mode: ``subscription_cost.*`` (imputed) and
+    ``api_cost.*`` (real billable spend). The per-session breakdown is
+    available via ``sessions[]`` (newest-first); each session carries
+    ``cost_mode`` so predicates can filter by mode without re-deriving.
+    There is intentionally no combined ``cost`` field.
+    """
+    snapshot = UsageSnapshot(
+        source_name="claude",
+        updated_at=2000,
+        windows={},
+        sessions=(
+            SessionCostRecord(
+                session_id="newer-sub",
+                cost=CostSnapshot(total_cost_usd=0.42, total_duration_ms=12000),
+                cost_mode=CostMode.SUBSCRIPTION,
+                first_event_at=1500,
+                last_event_at=2000,
+            ),
+            SessionCostRecord(
+                session_id="older-api",
+                cost=CostSnapshot(total_cost_usd=1.00, total_duration_ms=5000),
+                cost_mode=CostMode.API_KEY,
+                first_event_at=900,
+                last_event_at=1100,
+            ),
+        ),
+        since_seconds=86400,
+    )
+    ctx = build_source_cel_context(snapshot, now=2000)
+    # Per-mode aggregates -- each only sums sessions of that mode.
+    assert ctx["subscription_cost"]["total_cost_usd"] == pytest.approx(0.42)
+    assert ctx["subscription_cost"]["total_duration_ms"] == 12000
+    assert ctx["api_cost"]["total_cost_usd"] == pytest.approx(1.00)
+    assert ctx["api_cost"]["total_duration_ms"] == 5000
+    # Per-mode session counts; total session_count is the sum.
+    assert ctx["subscription_session_count"] == 1
+    assert ctx["api_session_count"] == 1
+    assert ctx["session_count"] == 2
+    assert ctx["since_seconds"] == 86400
+    # No combined cost field: subscription and api cost stay distinct.
+    assert "cost" not in ctx
+    # sessions[] enumerates every session in the window, newest first, with mode tags.
+    assert len(ctx["sessions"]) == 2
+    assert ctx["sessions"][0]["session_id"] == "newer-sub"
+    assert ctx["sessions"][0]["cost_mode"] == CostMode.SUBSCRIPTION
+    assert ctx["sessions"][0]["cost"]["total_cost_usd"] == 0.42
+    assert ctx["sessions"][1]["session_id"] == "older-api"
+    assert ctx["sessions"][1]["cost_mode"] == CostMode.API_KEY
+
+
+def test_build_source_cel_context_no_sessions_has_empty_list_and_all_none_aggregates() -> None:
+    """When the snapshot has no sessions, ``sessions`` is an empty list and
+    both per-mode aggregates have all-None numeric fields."""
+    snapshot = UsageSnapshot(
+        source_name="claude",
+        updated_at=900,
+        windows={"five_hour": WindowSnapshot(used_percentage=42.0, resets_at=15400, window_seconds=18000)},
+    )
+    ctx = build_source_cel_context(snapshot, now=1000)
+    assert ctx["sessions"] == []
+    assert ctx["session_count"] == 0
+    assert ctx["subscription_session_count"] == 0
+    assert ctx["api_session_count"] == 0
+    # Per-mode aggregates over no sessions are all-None.
+    assert ctx["subscription_cost"]["total_cost_usd"] is None
+    assert ctx["api_cost"]["total_cost_usd"] is None
 
 
 # =============================================================================
