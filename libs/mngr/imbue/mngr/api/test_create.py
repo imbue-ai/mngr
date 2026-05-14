@@ -273,7 +273,7 @@ def test_create_agent_with_unknown_type_raises(
 
     local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-    agent_options = _make_options(agent_name, agent_type="my-custom-command")
+    agent_options = _make_options(agent_name, command=None, agent_type="my-custom-command")
 
     with pytest.raises(UnknownAgentTypeError, match="Unknown agent type 'my-custom-command'"):
         create(
