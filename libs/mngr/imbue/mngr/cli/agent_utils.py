@@ -1,8 +1,5 @@
 from collections.abc import Callable
-from collections.abc import Mapping
-from collections.abc import Sequence
 
-from imbue.imbue_common.pure import pure
 from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.cli.connect import select_agent_interactively
@@ -13,29 +10,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
-from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import DiscoveredHost
-from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import OutputFormat
-
-
-@pure
-def filter_agents_by_host(
-    agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
-    host_filter: HostAddress,
-) -> dict[DiscoveredHost, Sequence[DiscoveredAgent]]:
-    """Filter agents_by_host to only include hosts matching the given :class:`HostAddress`.
-
-    Raises :class:`UserInputError` if no hosts match the filter.
-    """
-    filtered = {
-        host_ref: agent_refs
-        for host_ref, agent_refs in agents_by_host.items()
-        if host_filter.matches(HostAddress(host=host_ref.host_name, provider=host_ref.provider_name))
-    }
-    if not filtered:
-        raise UserInputError(f"No host found matching: {host_filter}")
-    return filtered
 
 
 def select_agent_interactively_with_host(
