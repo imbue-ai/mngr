@@ -12,11 +12,13 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 from pydantic import PrivateAttr
 
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import set_imbue_cloud_provider_for_account
 from imbue.minds.cli.run import _ImbueCloudAuthErrorDisabler
+from imbue.minds.cli.run import run
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
@@ -141,6 +143,28 @@ def test_non_auth_error_is_ignored(
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"][_PROVIDER_NAME].get("is_enabled") in (True, None)
     assert consumer.bounce_call_count == 0
+
+
+# -- minds run argument validation --
+#
+# The ``port <= 0`` / ``mngr_forward_port <= 0`` guards are the first
+# statements in ``run()``'s body, before any config resolution or server
+# startup, so ``CliRunner`` trips them without spawning subprocesses.
+
+
+def test_run_rejects_port_zero() -> None:
+    """``--port 0`` fails fast with a clear UsageError instead of crashing the
+    spawned ``mngr forward`` subprocess later with an obscure message."""
+    result = CliRunner().invoke(run, ["--port", "0"])
+    assert result.exit_code != 0
+    assert "--port must be > 0" in result.output
+
+
+def test_run_rejects_mngr_forward_port_zero() -> None:
+    """``--mngr-forward-port 0`` fails fast with a clear UsageError."""
+    result = CliRunner().invoke(run, ["--mngr-forward-port", "0"])
+    assert result.exit_code != 0
+    assert "--mngr-forward-port must be > 0" in result.output
 
 
 def test_already_disabled_provider_does_not_re_bounce(
