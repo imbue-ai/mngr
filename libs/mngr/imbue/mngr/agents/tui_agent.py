@@ -42,9 +42,10 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
             super()._send_enter_and_wait(tmux_target)
             return
         # Brief sleep before Enter so the TUI has time to absorb the pasted
-        # text into its input buffer before we submit. TUIs without a
-        # submission hook occasionally swallow Enter on fresh sessions if
-        # we submit immediately after pasting.
+        # text into its input buffer before we submit. Interactive TUIs in
+        # general occasionally swallow Enter on fresh sessions if we submit
+        # immediately after pasting; agents with a submission hook handle
+        # this race through that hook, agents without one rely on this sleep.
         send_enter_cmd = f"sleep 0.2 && tmux send-keys -t '{tmux_target}' Enter"
         result = self.host.execute_stateful_command(send_enter_cmd)
         if not result.success:
