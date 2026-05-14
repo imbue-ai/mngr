@@ -202,7 +202,7 @@ Run the end-to-end UI integration test: launch Electron → reach workspace-list
 
 **Invocation:**
 ```bash
-uv run python apps/minds/scripts/integ_test.py
+uv run python apps/minds/scripts/integ_check.py
 ```
 
 Optional env vars:
