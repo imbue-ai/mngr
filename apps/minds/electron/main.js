@@ -1177,13 +1177,15 @@ async function onReady() {
 
 // User-initiated update check from File > Check for Updates.
 //
-// ToDesktop's `checkForUpdates()` drives the *install* side: when it
-// finds a newer release it downloads in the background and shows its
-// own "Restart to update" prompt. But it is silent when you're already
-// up to date -- a menu click with no newer version produces zero UI,
-// which reads as "nothing happened / broken". So for the menu-triggered
-// path we attach one-shot listeners purely to give the user feedback;
-// we do NOT show our own install prompt (ToDesktop owns that).
+// Follows ToDesktop's documented API: `autoUpdater.checkForUpdates()`
+// returns a Promise resolving to `{ updateInfo }` -- `updateInfo` is the
+// release metadata when a newer version exists (ToDesktop then downloads
+// it in the background and shows its own "Restart to update" prompt via
+// the default updateReadyAction), or null/absent when already current.
+// We branch on that return value for the menu-click feedback rather
+// than listening for events -- events are ToDesktop's "granular control"
+// path and may not fire on every resolve, which is exactly what made an
+// earlier version of this function silent.
 async function triggerUpdateCheck() {
   const autoUpdater = todesktop.autoUpdater;
   if (!autoUpdater || typeof autoUpdater.checkForUpdates !== 'function') {
@@ -1194,42 +1196,29 @@ async function triggerUpdateCheck() {
     });
     return;
   }
-  const onNotAvailable = () => {
-    dialog.showMessageBox({
-      type: 'info',
-      message: "You're up to date.",
-      detail: 'No newer version is available.',
-    });
-  };
-  const onAvailable = (info) => {
-    const v = info && (info.version || info.releaseName);
-    dialog.showMessageBox({
-      type: 'info',
-      message: v ? `Update ${v} found.` : 'Update found.',
-      detail: 'Downloading in the background. You will be prompted to restart when it is ready.',
-    });
-  };
-  const onError = (err) => {
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    const updateInfo = result && result.updateInfo;
+    if (updateInfo) {
+      const v = updateInfo.version || updateInfo.releaseName;
+      dialog.showMessageBox({
+        type: 'info',
+        message: v ? `Update ${v} found.` : 'Update found.',
+        detail: 'Downloading in the background. You will be prompted to restart when it is ready.',
+      });
+    } else {
+      dialog.showMessageBox({
+        type: 'info',
+        message: "You're up to date.",
+        detail: 'No newer version is available.',
+      });
+    }
+  } catch (err) {
     dialog.showMessageBox({
       type: 'error',
       message: 'Update check failed.',
       detail: String(err && err.message ? err.message : err),
     });
-  };
-  autoUpdater.once('update-not-available', onNotAvailable);
-  autoUpdater.once('update-available', onAvailable);
-  autoUpdater.once('error', onError);
-  try {
-    await autoUpdater.checkForUpdates({ source: 'menu' });
-  } catch (err) {
-    onError(err);
-  } finally {
-    // Listeners are `once`, but remove explicitly in case checkForUpdates
-    // resolved without ever emitting (so a later automatic check doesn't
-    // surface a stale menu-triggered dialog).
-    autoUpdater.removeListener('update-not-available', onNotAvailable);
-    autoUpdater.removeListener('update-available', onAvailable);
-    autoUpdater.removeListener('error', onError);
   }
 }
 
