@@ -596,6 +596,12 @@ def test_is_known_agent_type_accepts_registered_types() -> None:
         reset_agent_class_registry()
         register_agent_config("only-config", AgentTypeConfig)
         assert is_known_agent_type("only-config", MngrConfig()) is True
+
+        # class-registered-only (no config); covers the third OR branch
+        reset_agent_class_registry()
+        reset_agent_config_registry()
+        register_agent_class("only-class", _FakeAgentClass)
+        assert is_known_agent_type("only-class", MngrConfig()) is True
     finally:
         reset_agent_class_registry()
         reset_agent_config_registry()
