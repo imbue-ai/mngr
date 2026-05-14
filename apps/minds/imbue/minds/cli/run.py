@@ -448,7 +448,7 @@ def _sleep_then_open(url: str, delay: float = 1.0) -> None:
 
 
 def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
-    """Spawn (or adopt) the detached ``mngr latchkey forward`` supervisor.
+    """Restart the detached ``mngr latchkey forward`` supervisor on minds startup.
 
     Reuses ``latchkey``'s already-resolved binary + directory paths so
     the supervisor sees exactly the same latchkey state minds itself
@@ -457,6 +457,15 @@ def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
     PATH alongside the bundled ``latchkey`` (the
     :class:`MngrMessageSender` and ``mngr forward`` subprocess paths
     already make the same assumption).
+
+    Uses :meth:`LatchkeyForwardSupervisor.restart` rather than
+    ``ensure_running`` so that minds upgrades always run with a
+    freshly-spawned supervisor: an older supervisor running stale
+    code from a previous minds version is terminated and replaced
+    on every minds start. A running supervisor that minds is happy
+    to adopt does not exist in practice -- the supervisor's lifetime
+    is tied to the gateway it owns, and the gateway is a minds-only
+    consumer today.
 
     Failures are logged as warnings rather than raised: a broken
     supervisor degrades latchkey to "unreachable from inside agents"
@@ -468,7 +477,7 @@ def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
         latchkey_directory=latchkey.latchkey_directory,
     )
     try:
-        info = supervisor.ensure_running()
+        info = supervisor.restart()
     except LatchkeyError as e:
         logger.warning("Could not start detached mngr latchkey forward supervisor: {}", e)
         return

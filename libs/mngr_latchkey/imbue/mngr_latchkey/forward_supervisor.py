@@ -260,13 +260,18 @@ class LatchkeyForwardSupervisor(MutableModel):
         and exits. Embedders that want the gateway to *survive* their
         own shutdown should simply not call this method.
 
-        Uses :attr:`_last_known_pid` (set by
-        :meth:`ensure_running`) as the primary source of truth so a
-        stop call that races the forward child's startup -- before
-        the child has published its on-disk record -- still finds
-        the right PID to terminate. Falls back to the on-disk record
-        for callers that ``stop()`` a supervisor that was started by
-        an earlier process.
+        Source-of-truth precedence:
+
+        * :attr:`_last_known_pid` (set by :meth:`ensure_running`) --
+          our own freshly-spawned PID. Terminated without a cmdline
+          check because the freshly-forked child may not have exec'd
+          its real argv yet, and any cmdline check would race the
+          kernel.
+        * On-disk record -- could be arbitrarily old, so the PID is
+          verified via :func:`is_forward_info_alive` (PID alive +
+          cmdline matches) before terminating. A record that points
+          at a recycled PID never causes us to signal an unrelated
+          process.
         """
         plugin_dir = self.plugin_data_dir
         with self._lock:
@@ -274,7 +279,31 @@ class LatchkeyForwardSupervisor(MutableModel):
             self._last_known_pid = None
             info = load_forward_info(plugin_dir)
             delete_forward_info(plugin_dir)
-        pid_to_terminate = cached_pid if cached_pid is not None else (info.pid if info is not None else None)
-        if pid_to_terminate is not None:
-            logger.info("Stopping detached mngr latchkey forward supervisor (pid={})", pid_to_terminate)
-            _terminate_pid(pid_to_terminate)
+        if cached_pid is not None:
+            logger.info("Stopping detached mngr latchkey forward supervisor (pid={})", cached_pid)
+            _terminate_pid(cached_pid)
+            return
+        if info is None:
+            return
+        if not is_forward_info_alive(info):
+            logger.debug(
+                "Skipping terminate: pid {} on disk is no longer a live mngr latchkey forward process",
+                info.pid,
+            )
+            return
+        logger.info("Stopping detached mngr latchkey forward supervisor (pid={})", info.pid)
+        _terminate_pid(info.pid)
+
+    def restart(self) -> LatchkeyForwardInfo:
+        """Terminate any existing live supervisor and spawn a fresh one.
+
+        Use this on embedder startup when you want to guarantee the
+        supervisor was launched from the current binary's code -- i.e.
+        after a package update -- rather than adopting a stale
+        supervisor running an older version. The cmdline-verified
+        termination in :meth:`stop` makes this safe to call
+        unconditionally; a missing or stale record yields a no-op
+        stop followed by a normal spawn.
+        """
+        self.stop()
+        return self.ensure_running()

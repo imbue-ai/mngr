@@ -292,8 +292,82 @@ def test_stop_is_no_op_when_nothing_running(tmp_path: Path) -> None:
         latchkey_binary="/usr/bin/latchkey-unused",
         latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
     )
-    # Must not raise even with no running supervisor / on-disk record.
     supervisor.stop()
+
+
+def test_stop_skips_termination_for_stale_pid(tmp_path: Path) -> None:
+    """A record whose PID is alive but not a ``mngr latchkey forward`` is not signaled.
+
+    Guards against PID reuse: between a previous supervisor exiting
+    and ``stop()`` being called, the OS may have recycled its PID
+    for an unrelated process. The cmdline-verified termination in
+    ``stop()`` skips the SIGTERM in that case.
+    """
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary="/usr/bin/mngr-unused",
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+    )
+    plugin_dir = supervisor.plugin_data_dir
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    # PID 1 is alive on every POSIX system, but its cmdline is not ours.
+    save_forward_info(plugin_dir, LatchkeyForwardInfo(pid=1, started_at=datetime.now(timezone.utc)))
+    supervisor.stop()
+    # PID 1 must still be running -- ``stop()`` recognized the cmdline
+    # mismatch and skipped the SIGTERM.
+    assert psutil.pid_exists(1)
+
+
+def test_restart_terminates_existing_and_spawns_fresh(tmp_path: Path) -> None:
+    """``restart()`` always replaces the running supervisor."""
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"
+
+    # Round 1: start a supervisor and let it publish its record. This
+    # simulates a 'previous minds session left a supervisor running'
+    # situation that a fresh minds startup will encounter.
+    supervisor_old = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=latchkey_directory,
+    )
+    info_old = supervisor_old.ensure_running()
+    _wait_for_forward_record(supervisor_old.plugin_data_dir)
+    assert _wait_for_process_alive(info_old.pid)
+
+    # Round 2: a fresh supervisor (new minds process). ``restart()``
+    # must terminate the old PID and produce a new one.
+    supervisor_new = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=latchkey_directory,
+    )
+    info_new = supervisor_new.restart()
+    try:
+        assert info_new.pid != info_old.pid
+        assert _wait_for_process_exit(info_old.pid)
+        assert _wait_for_process_alive(info_new.pid)
+        new_record = _wait_for_forward_record(supervisor_new.plugin_data_dir)
+        assert new_record.pid == info_new.pid
+    finally:
+        supervisor_new.stop()
+        assert _wait_for_process_exit(info_new.pid)
+
+
+def test_restart_is_a_clean_spawn_when_no_previous_supervisor(tmp_path: Path) -> None:
+    """``restart()`` on a fresh latchkey directory is equivalent to ``ensure_running()``."""
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+    )
+    info = supervisor.restart()
+    try:
+        assert _wait_for_process_alive(info.pid)
+    finally:
+        supervisor.stop()
+        assert _wait_for_process_exit(info.pid)
 
 
 def test_get_forward_info_returns_none_when_unstarted(tmp_path: Path) -> None:
