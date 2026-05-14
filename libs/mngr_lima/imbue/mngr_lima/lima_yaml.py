@@ -131,10 +131,8 @@ mkdir -p /run/sshd
 # Lima VMs run as a regular user, not root, so /code must be pre-created.
 mkdir -p /code && chmod 777 /code
 
-# Pre-injected SSH host key, when provided by the caller. Eliminates the
-# ssh-keyscan-during-boot race by making sshd serve a key the host machine
-# already knows. Idempotent: if the file already matches we still re-write
-# it, then restart sshd to pick up any change.
+# Install the caller-provided sshd host key (when given). Written
+# unconditionally; sshd is restarted below if it changed.
 SSH_KEY_CHANGED=0
 {host_key_block}
 

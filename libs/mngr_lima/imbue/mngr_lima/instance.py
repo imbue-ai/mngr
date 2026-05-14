@@ -418,10 +418,8 @@ sudo poweroff
         # Create the persistent volume directory
         volume_dir = self._ensure_host_volume_dir(host_id)
 
-        # Pre-generate the sshd host keypair so we can both inject it into the
-        # VM (via the Lima provision script) and atomically populate
-        # known_hosts on the host machine -- eliminating the ssh-keyscan race
-        # that the host-side TCP forwarder otherwise exposes during VM boot.
+        # Pre-generate the sshd host keypair so it can be injected into the VM
+        # and recorded in known_hosts without scanning.
         host_private_key_pem, host_public_key_openssh = self._ensure_host_keypair(host_id)
 
         # Generate or load Lima YAML config
