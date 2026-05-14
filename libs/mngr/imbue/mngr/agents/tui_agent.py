@@ -84,4 +84,4 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
         """Run the start action; on creation, also wait for the TUI ready banner."""
         super().wait_for_ready_signal(is_creating, start_action, timeout)
         if is_creating:
-            wait_for_tui_ready(self, self.tmux_target, self.TUI_READY_INDICATOR)
+            wait_for_tui_ready(self, self.tmux_target, self.get_tui_ready_indicator())
