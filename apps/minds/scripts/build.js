@@ -256,6 +256,27 @@ function bundleLatchkey() {
       );
     }
 
+    // Apply our pnpm-patch on top of the npm-installed staging tree.
+    // We use `pnpm patch` for local-dev applicability (it's the only
+    // patch mechanism that natively integrates with the workspace
+    // install), but the bundled staging install uses `npm` here, which
+    // doesn't honor pnpm's `patchedDependencies`. Without this step the
+    // shipped binary carries a vanilla latchkey while the workspace
+    // checkout has the patched one -- discovered the hard way when
+    // 0.2.25 still crashed for end users.
+    const patchFile = path.join(
+      MONOREPO_ROOT, 'apps/minds/patches/latchkey@2.10.1.patch'
+    );
+    if (fs.existsSync(patchFile)) {
+      const stagedLatchkey = path.join(stagingNodeModules, 'latchkey');
+      console.log(`Applying ${path.basename(patchFile)} to staging latchkey...`);
+      execFileSync(
+        'patch',
+        ['-p1', '--forward', '--input', patchFile],
+        { cwd: stagedLatchkey, stdio: 'inherit' }
+      );
+    }
+
     // Copy the flat, self-contained node_modules tree into resources/.
     // dereference: true handles most symlinks, but nested symlinks (notably
     // node_modules/.bin/*) end up pointing back at the source tree rather
