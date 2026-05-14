@@ -185,24 +185,6 @@ def _parse_input_preview(preview: str) -> object:
         return preview
 
 
-@pure
-def collect_assistant_text(events: list[dict[str, Any]]) -> str:
-    """Concatenate the text from every ``assistant_message`` event in order.
-
-    Used by ``OutputFormat.TEXT``. Joins multiple assistant turns with
-    newlines so the user sees the full assistant-side content of the run,
-    matching how ``claude -p`` prints its response stream.
-    """
-    parts: list[str] = []
-    for event in events:
-        if event.get("type") != "assistant_message":
-            continue
-        text = event.get("text", "")
-        if text:
-            parts.append(text)
-    return "\n".join(parts)
-
-
 class StreamingOutputWriter(MutableModel):
     """Stateful helper that emits incremental output as transcript events arrive.
 

@@ -6,7 +6,6 @@ from imbue.mngr_uncapped_claude.data_types import ResultMeta
 from imbue.mngr_uncapped_claude.output_modes import StreamingOutputWriter
 from imbue.mngr_uncapped_claude.output_modes import build_result_envelope
 from imbue.mngr_uncapped_claude.output_modes import build_system_init_envelope
-from imbue.mngr_uncapped_claude.output_modes import collect_assistant_text
 from imbue.mngr_uncapped_claude.output_modes import transcript_event_to_stream_json
 
 
@@ -122,8 +121,3 @@ def test_stream_json_writer_emits_init_first_and_result_last() -> None:
     assert lines[0]["subtype"] == "init"
     assert lines[1]["type"] == "assistant"
     assert lines[2]["type"] == "result"
-
-
-def test_collect_assistant_text_skips_non_assistant_events() -> None:
-    text = collect_assistant_text([_assistant_event("a"), _user_event("u"), _assistant_event("b")])
-    assert text == "a\nb"
