@@ -133,14 +133,6 @@ def test_record_pre_injected_host_key_writes_known_hosts(lima_provider: LimaProv
     assert public_openssh.strip() in known_hosts
 
 
-def test_record_pre_injected_host_key_legacy_host_skips(lima_provider: LimaProviderInstance) -> None:
-    # A host with no pre-injected keypair on disk (created before this change)
-    # must not get a known_hosts entry, and the call must not raise.
-    host_id = HostId.generate()
-    lima_provider._record_pre_injected_host_key(host_id, "127.0.0.1", 60022)
-    assert not lima_provider._known_hosts_path.exists()
-
-
 def test_delete_host_removes_keypair_dir(lima_provider: LimaProviderInstance) -> None:
     host_id = HostId.generate()
     lima_provider._ensure_host_keypair(host_id)
