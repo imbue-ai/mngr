@@ -11,10 +11,6 @@ on:
         description: "Pytest args after `--` (must be valid bash; quote values containing spaces, e.g. `-m \"foo and bar\"`)"
         required: true
         default: "-m release"
-      agent_type:
-        description: "Agent type (e.g. yolo, claude)"
-        required: true
-        default: "yolo"
       mngr_user_id:
         description: "Override MNGR_USER_ID for the orchestrator. Leave blank to use the shared 'tmr-ci' namespace, which lets any teammate with their key in .github/tmr-authorized-keys debug the CI-created modal agents (see libs/mngr_tmr/scripts/setup_tmr_ci_debug.py)."
         required: false
@@ -126,7 +122,7 @@ jobs:
           uv run --project libs/mngr_tmr mngr tmr -vv \
             -S 'agent_types.yolo.parent_type="claude"' \
             -S 'agent_types.yolo.cli_args=["--dangerously-skip-permissions"]' \
-            --agent-type "${{ inputs.agent_type }}" \
+            --agent-type yolo \
             --provider modal \
             --use-snapshot \
             --env "MODAL_TOKEN_ID=${MODAL_TOKEN_ID}" \
