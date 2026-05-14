@@ -372,22 +372,37 @@ minds-start agent_name="mindtest" branch="":
     cd apps/minds && pnpm start
 
 # Stop the minds desktop client started in this worktree by `just minds-start`.
-# Reads the PID file written by minds-start, snapshots the full descendant
-# tree (so we can verify it cleans up even if signal propagation is
-# imperfect), SIGTERMs the recipe shell, then waits up to 10s for the whole
-# tree to exit. Any descendants still alive after the grace period get
-# SIGKILL'd individually -- the recipe is NOT considered done until the
-# entire tree is gone. Idempotent (no-op if nothing running).
 #
-# Why we have to verify the descendants, not just the recipe shell:
-#   bash's default behavior on SIGTERM forwards the signal to its
-#   foreground child, and pnpm / node / electron usually propagate down to
-#   the rest of the tree. But the propagation isn't guaranteed -- we've
-#   seen at least one case where killing the recipe shell left electron +
-#   uv-run-minds as orphans. The earlier version of this recipe declared
-#   success as soon as the recipe shell exited, which masked that failure
-#   mode. Now we explicitly check that nothing under the recipe shell
-#   survives.
+# Strategy: walk the recipe shell's process tree, find Electron's main
+# process, and SIGTERM that specifically. The Electron main process has a
+# `process.on('SIGTERM', () => app.quit())` handler (apps/minds/electron/
+# main.js) that triggers the `before-quit` chain -- which already
+# SIGTERMs the python backend and waits for uvicorn's graceful exit.
+# After electron exits cleanly: its zygotes / utility children die via
+# PR_SET_DEATHSIG, the python backend's grandparent-death watcher (which
+# already exists in apps/minds/imbue/minds/cli/run.py) sees electron die
+# and exits cleanly itself, pnpm / node / sh / the recipe shell exit as
+# their children terminate. Whole tree gone in <2s typically.
+#
+# Why we don't just SIGTERM the recipe shell (the PID stored in pid_file):
+#   `kill <pid>` signals only that PID. Bash's default SIGTERM behavior is
+#   to exit cleanly without forwarding the signal to its children, so
+#   children become orphans and survive indefinitely. We saw this
+#   empirically -- the previous version of this recipe always fell through
+#   to the SIGKILL fallback because nothing was telling electron to quit.
+#
+# Why not kill the recipe shell's process group with `kill -- -<pgid>`:
+#   In this stack the PGID leader is `just` itself (one level above the
+#   recipe shell), and the group cleanly contains only this minds
+#   invocation. That's safe-by-inspection here but brittle as a general
+#   rule -- nothing prevents some future change to the harness from
+#   placing unrelated processes in the same PGID. PID-by-PID via pstree
+#   can't accidentally touch anything outside the tree.
+#
+# Idempotent (no-op if nothing running). Falls back to SIGTERM-the-recipe
+# if electron hasn't reached its main process yet (rare startup race), and
+# to SIGKILLing specific surviving PIDs if the graceful path doesn't
+# finish within 10s.
 minds-stop:
     #!/bin/bash
     set -ueo pipefail
@@ -402,12 +417,33 @@ minds-stop:
         rm -f "$pid_file"
         exit 0
     fi
-    # Snapshot the full descendant tree before sending SIGTERM. pstree
-    # walks PPID links and gives us PIDs in flat form via `-p -T`.
+    # Snapshot the full descendant tree. pstree -p -T walks PPID links and
+    # gives PIDs in flat form. We'll use this both to identify electron's
+    # main process and to verify the whole tree exits.
     descendants=$(pstree -p -T "$pid" 2>/dev/null | grep -oE '\([0-9]+\)' | tr -d '()' | sort -u)
-    echo "Stopping minds-start (pid=$pid, descendants=$(echo $descendants | tr '\n' ' '))"
-    kill "$pid"
-    # Wait up to 10s for the whole tree to exit (not just the recipe shell).
+    # Locate Electron's main process: the descendant whose cmd contains the
+    # electron binary path and is NOT a `--type=zygote` / `--type=utility`
+    # / `--type=...` subprocess. There's exactly one such process per
+    # session (the rest are renderer / GPU / network helpers it spawned).
+    electron_main_pid=""
+    for d in $descendants; do
+        cmd=$(ps -o cmd= -p "$d" 2>/dev/null || true)
+        if [[ "$cmd" == *"node_modules/electron/dist/electron "* && "$cmd" != *"--type="* ]]; then
+            electron_main_pid="$d"
+            break
+        fi
+    done
+    if [ -n "$electron_main_pid" ]; then
+        echo "Stopping minds (recipe=$pid, electron=$electron_main_pid) via clean shutdown"
+        kill -TERM "$electron_main_pid"
+    else
+        # Pre-electron startup race: electron hasn't been exec'd yet. Fall
+        # back to the recipe shell, which at least kills the bash sitting
+        # in `pnpm install` / similar.
+        echo "Stopping minds-start (pid=$pid, electron not yet spawned)"
+        kill -TERM "$pid"
+    fi
+    # Wait up to 10s for the whole tree to exit.
     for i in $(seq 1 10); do
         still_alive=""
         for descendant in $descendants; do
