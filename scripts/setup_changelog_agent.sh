@@ -6,7 +6,8 @@ set -euo pipefail
 # running this is the way to redeploy after editing the prompt or this
 # script.
 #
-# The scheduled agent runs at midnight PST as a headless_claude agent. The
+# The scheduled agent runs nightly at 08:00 UTC (midnight or 1 AM Pacific,
+# depending on DST) as a headless_claude agent. The
 # orchestration steps live in scripts/changelog_consolidation_prompt.md and
 # are executed by claude itself (running consolidate_changelog.py, summarizing
 # the new section, committing, pushing a branch, opening a PR). Claude's
@@ -40,7 +41,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 TRIGGER_NAME="changelog-consolidation"
-# Midnight PST (UTC-8) = 08:00 UTC.
+# 08:00 UTC nightly (midnight or 1 AM Pacific, depending on DST).
 SCHEDULE="0 8 * * *"
 PROVIDER=$(uv run python "${REPO_ROOT}/scripts/trigger_changelog_consolidation.py" --print-provider)
 VERIFY="${CHANGELOG_VERIFY:-none}"
