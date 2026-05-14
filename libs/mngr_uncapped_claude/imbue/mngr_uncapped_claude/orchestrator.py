@@ -96,6 +96,27 @@ class _RunState(FrozenModel):
     writer: StreamingOutputWriter
 
 
+class _TranscriptReadFailureWarner(MutableModel):
+    """Emit at most one warning per run for non-ENOENT transcript-read failures.
+
+    ``_drain_new_events`` is called every ``_POLL_INTERVAL_SECONDS`` (~100ms).
+    If the read fails for a persistent reason other than "file not yet
+    created" (e.g. permission denied, host unreachable), logging on every
+    poll would flood stderr with hundreds of identical warnings per minute.
+    This warner emits the first such failure at WARNING level and silently
+    drops subsequent ones (still surfacing them at TRACE for debugging).
+    """
+
+    has_warned: bool = Field(default=False, description="Whether the WARNING-level message was already emitted")
+
+    def warn(self, exc: BaseException) -> None:
+        if self.has_warned:
+            logger.trace("Failed to read common transcript (warning already emitted): {}", exc)
+            return
+        logger.warning("Failed to read common transcript: {}", exc)
+        self.has_warned = True
+
+
 def run(
     mngr_ctx: MngrContext,
     partition: ArgPartition,
@@ -210,9 +231,12 @@ def _run_with_agent(
     # turns.
     seen_bytes = 0
     parser_warner = MalformedJsonLineWarner(source_description=f"common transcript for agent {agent.name}")
+    read_failure_warner = _TranscriptReadFailureWarner()
     with _DestroyOnSignal(state=state):
         try:
-            final_state, seen_bytes = _wait_for_turn_end(agent, events_target, writer, parser_warner, seen_bytes)
+            final_state, seen_bytes = _wait_for_turn_end(
+                agent, events_target, writer, parser_warner, read_failure_warner, seen_bytes
+            )
             for next_prompt in remaining_prompts:
                 if final_state != AgentLifecycleState.WAITING:
                     # Agent already terminated; sending another prompt would just
@@ -220,7 +244,9 @@ def _run_with_agent(
                     break
                 _send_user_turn(mngr_ctx, agent, next_prompt)
                 turn_count += 1
-                final_state, seen_bytes = _wait_for_turn_end(agent, events_target, writer, parser_warner, seen_bytes)
+                final_state, seen_bytes = _wait_for_turn_end(
+                    agent, events_target, writer, parser_warner, read_failure_warner, seen_bytes
+                )
         except BaseMngrError as exc:
             logger.error("Run failed: {}", exc)
             _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=str(exc), turn_count=turn_count)
@@ -289,6 +315,7 @@ def _wait_for_turn_end(
     events_target: EventsTarget,
     writer: StreamingOutputWriter,
     parser_warner: MalformedJsonLineWarner,
+    read_failure_warner: _TranscriptReadFailureWarner,
     seen_bytes: int,
 ) -> tuple[AgentLifecycleState, int]:
     """Poll the agent until it reaches WAITING (or a terminal state); stream events meanwhile.
@@ -301,10 +328,10 @@ def _wait_for_turn_end(
     """
     final_state: AgentLifecycleState | None = None
     while final_state is None:
-        seen_bytes = _drain_new_events(events_target, writer, parser_warner, seen_bytes)
+        seen_bytes = _drain_new_events(events_target, writer, parser_warner, read_failure_warner, seen_bytes)
         state = agent.get_lifecycle_state()
         if state in (AgentLifecycleState.WAITING, AgentLifecycleState.STOPPED, AgentLifecycleState.DONE):
-            seen_bytes = _drain_new_events(events_target, writer, parser_warner, seen_bytes)
+            seen_bytes = _drain_new_events(events_target, writer, parser_warner, read_failure_warner, seen_bytes)
             final_state = state
         else:
             time.sleep(_POLL_INTERVAL_SECONDS)
@@ -315,6 +342,7 @@ def _drain_new_events(
     events_target: EventsTarget,
     writer: StreamingOutputWriter,
     parser_warner: MalformedJsonLineWarner,
+    read_failure_warner: _TranscriptReadFailureWarner,
     seen_bytes: int,
 ) -> int:
     """Read the transcript file, emit any new events past ``seen_bytes``, return new offset.
@@ -336,7 +364,7 @@ def _drain_new_events(
         if "No such file or directory" in str(exc):
             logger.trace("common transcript not yet available at {}", _COMMON_TRANSCRIPT_PATH)
         else:
-            logger.warning("Failed to read common transcript: {}", exc)
+            read_failure_warner.warn(exc)
         return seen_bytes
     content_bytes = content.encode("utf-8")
     if len(content_bytes) <= seen_bytes:
