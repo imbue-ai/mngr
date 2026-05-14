@@ -208,6 +208,19 @@ class PluginTier(UpperCaseStrEnum):
     DEPENDENT = auto()
 
 
+class PluginKind(UpperCaseStrEnum):
+    """What category of mngr extension a plugin provides.
+
+    Shared by the install-hint helper and (when it lands) the
+    ``mngr plugin list --kind`` CLI filter. Member names match the
+    project's user-facing vocabulary; convert kebab-case CLI strings
+    (``agent-type``, ``provider``) at the CLI boundary.
+    """
+
+    AGENT_TYPE = auto()
+    PROVIDER = auto()
+
+
 # === ID Types ===
 
 

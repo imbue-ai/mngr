@@ -2,7 +2,6 @@ from pathlib import Path
 
 from click import ClickException
 
-from imbue.mngr.plugin_catalog import PluginKind
 from imbue.mngr.plugin_catalog import get_plugin_install_hint
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -10,6 +9,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
+from imbue.mngr.primitives import PluginKind
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 
@@ -429,7 +429,7 @@ class UnknownBackendError(ConfigError):
         registered_str = ", ".join(self.registered) or "(none)"
         message = f"Unknown provider backend: {backend_name}. Registered backends: {registered_str}"
         super().__init__(message)
-        self.user_help_text = get_plugin_install_hint(backend_name, kind=PluginKind.BACKEND)
+        self.user_help_text = get_plugin_install_hint(backend_name, kind=PluginKind.PROVIDER)
 
 
 class NestedTmuxError(MngrError):

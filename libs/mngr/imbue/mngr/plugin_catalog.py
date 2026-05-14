@@ -4,29 +4,16 @@ This module defines the full plugin catalog, signal checks for binary
 detection, and helpers used by the install wizard and test fixtures.
 """
 
-from enum import auto
 from typing import Final
+from typing import assert_never
 
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.primitives import PluginKind
 from imbue.mngr.primitives import PluginTier
-
-
-class PluginKind(UpperCaseStrEnum):
-    """What kind of plugin a missing-entry-point install hint is for.
-
-    Used by ``get_plugin_install_hint`` to decide whether the agent-type
-    ``--type command`` escape hatch applies (it does for AGENT_TYPE; it
-    does not for BACKEND, which has no shell-command equivalent).
-    """
-
-    AGENT_TYPE = auto()
-    BACKEND = auto()
-
 
 # Packages not yet published on PyPI. Excluded from the install wizard.
 # Remove entries from here as they get published.
@@ -321,7 +308,7 @@ def get_plugin_install_hint(
     When ``kind`` is ``PluginKind.AGENT_TYPE`` (the default), the fallback
     also points at ``--type command -- <shell command>`` for callers who
     actually just want to run a shell command. That tip is suppressed for
-    ``PluginKind.BACKEND``, where it would be irrelevant (provider backends
+    ``PluginKind.PROVIDER``, where it would be irrelevant (provider backends
     have no equivalent shell-command escape hatch).
     """
     entry = get_catalog_entry(name)
@@ -331,11 +318,16 @@ def get_plugin_install_hint(
         f"We do not recognize '{name}'. If it is provided by a third-party"
         " plugin, install that package and ensure the plugin is enabled."
     )
-    if kind is PluginKind.AGENT_TYPE:
-        fallback += (
-            " To run an arbitrary shell command without registering a type,"
-            " use `--type command -- <shell command>` instead."
-        )
+    match kind:
+        case PluginKind.AGENT_TYPE:
+            fallback += (
+                " To run an arbitrary shell command without registering a type,"
+                " use `--type command -- <shell command>` instead."
+            )
+        case PluginKind.PROVIDER:
+            pass
+        case _:
+            assert_never(kind)
     return fallback
 
 
