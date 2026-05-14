@@ -292,8 +292,12 @@ class StreamingOutputWriter(MutableModel):
             case _ as unreachable:
                 assert_never(unreachable)
 
+    def _collected_assistant_text(self) -> str:
+        """Return the concatenation of every assistant text block seen so far."""
+        return "".join(self.assistant_text_parts)
+
     def _finalize_text(self) -> None:
-        body = "".join(self.assistant_text_parts)
+        body = self._collected_assistant_text()
         if body:
             self.stdout.write(body + "\n")
         self.stdout.flush()
@@ -308,7 +312,7 @@ class StreamingOutputWriter(MutableModel):
     def _write_result_envelope(self, meta: ResultMeta, turn_count: int) -> None:
         """Build and emit the trailing ``result`` envelope on a single line."""
         envelope = build_result_envelope(
-            text="".join(self.assistant_text_parts),
+            text=self._collected_assistant_text(),
             meta=meta,
             turn_count=max(turn_count, 1),
         )
