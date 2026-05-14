@@ -174,7 +174,7 @@ def test_create_agent_work_dir_is_created(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("test"),
+            agent_type=AgentTypeName("generic"),
             name=agent_name,
             command=CommandString("cat test_marker.txt && sleep 30"),
         )
@@ -204,7 +204,7 @@ def test_agent_state_is_persisted(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("persist-test"),
+            agent_type=AgentTypeName("generic"),
             name=agent_name,
             command=CommandString("sleep 60"),
         )
@@ -229,7 +229,7 @@ def test_agent_state_is_persisted(
         data = json.loads(data_file.read_text())
         assert data["id"] == str(result.agent.id)
         assert data["name"] == str(agent_name)
-        assert data["type"] == "persist-test"
+        assert data["type"] == "generic"
 
 
 # =============================================================================
@@ -286,7 +286,7 @@ def test_create_agent_with_worktree(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_git_repo)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("worktree-test"),
+            agent_type=AgentTypeName("generic"),
             name=agent_name,
             command=CommandString("sleep 527146"),
             transfer_mode=TransferMode.GIT_WORKTREE,
@@ -349,7 +349,7 @@ def test_worktree_with_custom_branch_name(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_git_repo)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("worktree-test"),
+            agent_type=AgentTypeName("generic"),
             name=agent_name,
             command=CommandString("sleep 60"),
             transfer_mode=TransferMode.GIT_WORKTREE,
@@ -407,7 +407,7 @@ def test_worktree_with_existing_branch(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_git_repo)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("worktree-test"),
+            agent_type=AgentTypeName("generic"),
             name=agent_name,
             command=CommandString("sleep 60"),
             transfer_mode=TransferMode.GIT_WORKTREE,
@@ -462,7 +462,7 @@ def test_worktree_already_checked_out_gives_helpful_error(
     local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_git_repo)
 
     agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("worktree-test"),
+        agent_type=AgentTypeName("generic"),
         name=AgentName("test-already-checked-out"),
         command=CommandString("sleep 60"),
         transfer_mode=TransferMode.GIT_WORKTREE,
@@ -498,7 +498,7 @@ def test_worktree_in_repo_with_no_commits_gives_helpful_error(
     local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, empty_repo)
 
     agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("worktree-test"),
+        agent_type=AgentTypeName("generic"),
         name=AgentName("test-no-commits"),
         command=CommandString("sleep 60"),
         transfer_mode=TransferMode.GIT_WORKTREE,
@@ -580,7 +580,7 @@ def test_worktree_branch_is_cleaned_up_when_create_fails(
     local_host, source_location = _get_local_host_and_location(test_ctx, temp_git_repo)
 
     agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("worktree-test"),
+        agent_type=AgentTypeName("generic"),
         name=agent_name,
         command=CommandString("sleep 60"),
         transfer_mode=TransferMode.GIT_WORKTREE,
@@ -633,7 +633,7 @@ def test_preexisting_branch_is_preserved_when_create_fails(
     local_host, source_location = _get_local_host_and_location(test_ctx, temp_git_repo)
 
     agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("worktree-test"),
+        agent_type=AgentTypeName("generic"),
         name=AgentName(f"test-preserve-{int(time.time())}"),
         command=CommandString("sleep 60"),
         transfer_mode=TransferMode.GIT_WORKTREE,
@@ -684,7 +684,7 @@ def test_in_place_mode_sets_is_generated_work_dir_false(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("in-place-test"),
+            agent_type=AgentTypeName("generic"),
             name=agent_name,
             command=CommandString("sleep 60"),
             transfer_mode=TransferMode.NONE,
@@ -744,7 +744,7 @@ def test_in_place_preserves_generated_work_dir_entry(
 
         # Create an in-place agent (transfer_mode=NONE means in-place, no transfer)
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("in-place-preserve-test"),
+            agent_type=AgentTypeName("generic"),
             name=agent_name,
             command=CommandString("sleep 60"),
             transfer_mode=TransferMode.NONE,
@@ -784,7 +784,7 @@ def test_worktree_mode_sets_is_generated_work_dir_true(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_git_repo)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("worktree-gen-test"),
+            agent_type=AgentTypeName("generic"),
             name=agent_name,
             command=CommandString("sleep 60"),
             transfer_mode=TransferMode.GIT_WORKTREE,
@@ -836,7 +836,7 @@ def test_worktree_base_folder_overrides_default_worktree_location(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_git_repo)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("wt-base-test"),
+            agent_type=AgentTypeName("generic"),
             name=agent_name,
             command=CommandString("sleep 60"),
             transfer_mode=TransferMode.GIT_WORKTREE,
@@ -879,7 +879,7 @@ def test_target_path_different_from_source_sets_is_generated_work_dir_true(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("target-diff-test"),
+            agent_type=AgentTypeName("generic"),
             name=agent_name,
             command=CommandString("sleep 60"),
             target_path=target_dir,
@@ -924,7 +924,7 @@ def test_target_path_same_as_source_sets_is_generated_work_dir_false(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("target-same-test"),
+            agent_type=AgentTypeName("generic"),
             name=agent_name,
             command=CommandString("sleep 60"),
             target_path=temp_work_dir,
@@ -975,7 +975,7 @@ def test_create_work_dir_false_uses_target_path(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("no-create-test"),
+            agent_type=AgentTypeName("generic"),
             name=agent_name,
             command=CommandString("sleep 60"),
             target_path=target_dir,
@@ -1014,7 +1014,7 @@ def test_create_work_dir_false_without_target_path_uses_source(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("no-create-src-test"),
+            agent_type=AgentTypeName("generic"),
             name=agent_name,
             command=CommandString("sleep 60"),
         )
@@ -1235,7 +1235,7 @@ def test_on_before_create_hook_modifies_agent_options(
     local_host = _get_local_host_for_test(test_ctx)
 
     agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("test"),
+        agent_type=AgentTypeName("generic"),
         name=AgentName("original-name"),
         command=CommandString("sleep 1"),
     )
@@ -1260,7 +1260,7 @@ def test_on_before_create_hook_modifies_create_work_dir(
     local_host = _get_local_host_for_test(test_ctx)
 
     agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("test"),
+        agent_type=AgentTypeName("generic"),
         name=AgentName("test-agent"),
         command=CommandString("sleep 1"),
     )
@@ -1284,7 +1284,7 @@ def test_on_before_create_hook_returning_none_passes_through(
 
     original_name = AgentName("unchanged-name")
     agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("test"),
+        agent_type=AgentTypeName("generic"),
         name=original_name,
         command=CommandString("sleep 1"),
     )
@@ -1309,7 +1309,7 @@ def test_on_before_create_hooks_chain_in_order(
     local_host = _get_local_host_for_test(test_ctx)
 
     agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("test"),
+        agent_type=AgentTypeName("generic"),
         name=AgentName("base"),
         command=CommandString("sleep 1"),
     )

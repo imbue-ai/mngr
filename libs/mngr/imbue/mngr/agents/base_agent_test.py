@@ -403,7 +403,7 @@ def test_assemble_command_raises_when_no_base_and_no_args(
         local_provider,
         temp_work_dir,
         agent_config=config,
-        agent_type=AgentTypeName("my-custom-type"),
+        agent_type=AgentTypeName("generic"),
         extra_data=None,
         agent_class=BaseAgent,
     )
@@ -936,7 +936,7 @@ def _create_named_agent_with_stub_host(
     return cls.model_construct(
         id=AgentId.generate(),
         name=name,
-        agent_type=AgentTypeName("test"),
+        agent_type=AgentTypeName("generic"),
         work_dir=Path("/tmp/stub-work"),
         create_time=datetime.now(timezone.utc),
         host_id=HostId.generate(),

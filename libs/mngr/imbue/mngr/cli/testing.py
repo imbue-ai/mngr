@@ -62,7 +62,7 @@ def create_test_agent(
 
     agent_id = AgentId.generate()
     agent_name = AgentName(f"test-agent-{get_short_random_string()}")
-    resolved_type = agent_type or AgentTypeName("test")
+    resolved_type = agent_type or AgentTypeName("generic")
     if register_agent_type:
         _ensure_test_agent_type_registered(resolved_type)
     resolved_config = agent_config or AgentTypeConfig(command=CommandString("sleep 1000"))

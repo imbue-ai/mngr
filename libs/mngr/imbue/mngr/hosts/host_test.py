@@ -92,7 +92,7 @@ def _create_testable_agent(
     data = {
         "id": str(agent_id),
         "name": str(agent_name),
-        "type": "test",
+        "type": "generic",
         "command": "sleep 1000",
         "work_dir": str(temp_work_dir),
         "create_time": create_time.isoformat(),
@@ -102,7 +102,7 @@ def _create_testable_agent(
     agent = _TestableAgent(
         id=agent_id,
         name=agent_name,
-        agent_type=AgentTypeName("test"),
+        agent_type=AgentTypeName("generic"),
         work_dir=temp_work_dir,
         create_time=create_time,
         host_id=host.id,
@@ -632,7 +632,7 @@ def _create_test_agent(
     data = {
         "id": str(agent_id),
         "name": str(agent_name),
-        "type": "test",
+        "type": "generic",
         "command": "sleep 1000",
         "work_dir": str(temp_work_dir),
     }
@@ -641,7 +641,7 @@ def _create_test_agent(
     return BaseAgent(
         id=agent_id,
         name=agent_name,
-        agent_type=AgentTypeName("test"),
+        agent_type=AgentTypeName("generic"),
         work_dir=temp_work_dir,
         create_time=datetime.now(timezone.utc),
         host_id=host.id,

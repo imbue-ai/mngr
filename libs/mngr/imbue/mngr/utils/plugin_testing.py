@@ -39,28 +39,12 @@ from imbue.mngr.utils.testing import isolate_tmux_server
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr.utils.testing import setup_mngr_test_environment
 
-# Placeholder agent type names used across the test suite as "any agent type"
-# stand-ins. ``resolve_agent_type`` requires every name to be known, so these
-# get registered as BaseAgent + base config so tests can pass them without
-# scattering ``--type command`` rewrites.
-_TEST_PLACEHOLDER_AGENT_TYPES: tuple[str, ...] = (
-    "generic",
-    "test",
-    "test_headless",
-    "echo",
-    "persist-test",
-    "worktree-test",
-    "worktree-gen-test",
-    "wt-base-test",
-    "in-place-test",
-    "in-place-preserve-test",
-    "no-create-test",
-    "no-create-src-test",
-    "target-same-test",
-    "target-diff-test",
-    "my-custom-type",
-    "stacking-type",
-)
+# Canonical placeholder agent type used across the test suite as an
+# "any agent type" stand-in. ``resolve_agent_type`` requires every name to
+# be known, so this gets pre-registered by the ``plugin_manager`` fixture
+# below. Tests that need a placeholder type should use this name -- helpers
+# like ``create_test_agent`` also default to it.
+PLACEHOLDER_AGENT_TYPE: str = "generic"
 
 
 def register_placeholder_agent_type(name: str) -> None:
@@ -78,9 +62,8 @@ def register_placeholder_agent_type(name: str) -> None:
 
 
 def register_test_placeholder_agent_types() -> None:
-    """Register the shared placeholder agent type names as BaseAgent fixtures."""
-    for placeholder in _TEST_PLACEHOLDER_AGENT_TYPES:
-        register_placeholder_agent_type(placeholder)
+    """Register the canonical placeholder agent type as a BaseAgent fixture."""
+    register_placeholder_agent_type(PLACEHOLDER_AGENT_TYPE)
 
 
 @pytest.fixture
