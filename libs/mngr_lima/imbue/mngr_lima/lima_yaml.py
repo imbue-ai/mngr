@@ -94,15 +94,16 @@ def _build_provisioning_script(
     host_private_key_pem: str | None = None,
     host_public_key_openssh: str | None = None,
 ) -> str:
-    """Build the cloud-init provisioning script that ensures required packages are installed.
+    """Build the Lima ``provision[mode=system]`` script that ensures required packages are installed.
 
     When host_private_key_pem and host_public_key_openssh are both provided, the script
     also overwrites the guest's ed25519 sshd host key with the pre-generated pair and
-    removes other host-key types so sshd presents only the pre-trusted key. This runs in
-    cloud-init's runcmd phase, after cc_ssh has generated random keys; we replace them
-    in place and restart sshd. By the time ``limactl_start_new`` returns, sshd is
-    running with our known key, so the host machine's known_hosts entry (written
-    atomically alongside) is correct without ever scanning the guest.
+    removes other host-key types so sshd presents only the pre-trusted key. Lima runs
+    this script during VM bring-up; it overwrites the host key file unconditionally
+    (so it does not matter what key, if any, the image generated earlier) and then
+    restarts sshd. By the time ``limactl_start_new`` returns, sshd is running with our
+    known key, so the host machine's known_hosts entry (written atomically alongside)
+    is correct without ever scanning the guest.
     """
     host_key_block = _build_host_key_block(host_private_key_pem, host_public_key_openssh)
     return f"""\
@@ -166,7 +167,7 @@ def _build_host_key_block(
     """Return a bash block that overwrites the guest's ed25519 host key in place.
 
     Empty when no keypair is provided (preserves the legacy behavior of letting
-    cc_ssh generate a random key).
+    the guest keep whatever host key it generated on its own).
     """
     if host_private_key_pem is None or host_public_key_openssh is None:
         return "# (no pre-injected host key)"

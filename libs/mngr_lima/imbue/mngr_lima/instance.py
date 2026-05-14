@@ -173,11 +173,9 @@ class LimaProviderInstance(BaseProviderInstance):
         into the VM via the Lima provision script and added to known_hosts on
         the host machine atomically -- no ssh-keyscan required.
         """
-        private_path, public_path = self._host_keypair_paths(host_id)
-        private_path.parent.mkdir(parents=True, exist_ok=True)
-        if not (private_path.exists() and public_path.exists()):
-            load_or_create_host_keypair(private_path.parent, "ssh_host_ed25519_key")
-        return private_path.read_text(), public_path.read_text().strip()
+        private_path, _ = self._host_keypair_paths(host_id)
+        private_key_path, public_key_openssh = load_or_create_host_keypair(private_path.parent, "ssh_host_ed25519_key")
+        return private_key_path.read_text(), public_key_openssh
 
     @property
     def _tags_dir(self) -> Path:
