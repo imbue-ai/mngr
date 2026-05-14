@@ -38,7 +38,6 @@ from imbue.mngr_latchkey.store import delete_forward_info
 from imbue.mngr_latchkey.store import forward_log_path
 from imbue.mngr_latchkey.store import load_forward_info
 from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
-from imbue.mngr_latchkey.store import save_forward_info
 
 # Bare-name default for the ``mngr`` CLI; callers that bundle their own
 # copy (e.g. the minds desktop client) pass the absolute path explicitly.
@@ -173,6 +172,10 @@ class LatchkeyForwardSupervisor(MutableModel):
     )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # PID of the forward child we most recently spawned (or adopted) so
+    # ``stop()`` can find it even if the child has not yet published
+    # its on-disk record.
+    _last_known_pid: int | None = PrivateAttr(default=None)
 
     @property
     def plugin_data_dir(self) -> Path:
@@ -195,7 +198,13 @@ class LatchkeyForwardSupervisor(MutableModel):
           record is deleted and a fresh supervisor is spawned.
         * If no record exists, a fresh supervisor is spawned.
 
-        Always returns the info corresponding to the live supervisor.
+        The on-disk record is written by the spawned forward process
+        itself (in :func:`_forward_command`), not by this method. The
+        returned :class:`LatchkeyForwardInfo` is therefore an
+        in-memory view of the spawn -- callers that need to read
+        from disk should poll :func:`load_forward_info` until the
+        forward child has published its record.
+
         ``LatchkeyError`` is raised when ``Popen`` itself fails (e.g.
         the ``mngr`` binary is missing).
         """
@@ -214,6 +223,7 @@ class LatchkeyForwardSupervisor(MutableModel):
                     existing.pid,
                     record_path,
                 )
+                self._last_known_pid = existing.pid
                 return existing
             else:
                 logger.info(
@@ -238,9 +248,8 @@ class LatchkeyForwardSupervisor(MutableModel):
                 except OSError as e:
                     raise LatchkeyError(f"Failed to spawn 'mngr latchkey forward': {e}") from e
 
-            info = LatchkeyForwardInfo(pid=pid, started_at=datetime.now(timezone.utc))
-            save_forward_info(plugin_dir, info)
-            return info
+            self._last_known_pid = pid
+            return LatchkeyForwardInfo(pid=pid, started_at=datetime.now(timezone.utc))
 
     def stop(self) -> None:
         """Terminate the supervisor and delete its record.
@@ -250,11 +259,22 @@ class LatchkeyForwardSupervisor(MutableModel):
         ``latchkey gateway`` subprocess, cancels every reverse tunnel,
         and exits. Embedders that want the gateway to *survive* their
         own shutdown should simply not call this method.
+
+        Uses :attr:`_last_known_pid` (set by
+        :meth:`ensure_running`) as the primary source of truth so a
+        stop call that races the forward child's startup -- before
+        the child has published its on-disk record -- still finds
+        the right PID to terminate. Falls back to the on-disk record
+        for callers that ``stop()`` a supervisor that was started by
+        an earlier process.
         """
         plugin_dir = self.plugin_data_dir
         with self._lock:
+            cached_pid = self._last_known_pid
+            self._last_known_pid = None
             info = load_forward_info(plugin_dir)
             delete_forward_info(plugin_dir)
-        if info is not None:
-            logger.info("Stopping detached mngr latchkey forward supervisor (pid={})", info.pid)
-            _terminate_pid(info.pid)
+        pid_to_terminate = cached_pid if cached_pid is not None else (info.pid if info is not None else None)
+        if pid_to_terminate is not None:
+            logger.info("Stopping detached mngr latchkey forward supervisor (pid={})", pid_to_terminate)
+            _terminate_pid(pid_to_terminate)

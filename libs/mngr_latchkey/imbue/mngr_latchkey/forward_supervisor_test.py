@@ -83,26 +83,64 @@ def _make_fake_mngr_binary(tmp_path: Path) -> Path:
 
     Recognised invocations:
 
-    * ``mngr latchkey forward [...]`` -- preserves the cmdline so the
-      supervisor's cmdline-based liveness probe accepts the process,
-      then sleeps until SIGTERM. The handler exits cleanly so
-      ``terminate()`` succeeds within the grace period.
+    * ``mngr latchkey forward --latchkey-directory <dir> [...]`` -- mirrors
+      the real :func:`_forward_command` to the extent the supervisor's
+      tests care about: writes a ``LatchkeyForwardInfo`` record to
+      ``<dir>/mngr_latchkey/latchkey_forward.json`` (with the script's
+      own PID), deletes it on SIGTERM, sleeps in between.
     * Anything else -- exits 99. Lets tests assert that the supervisor
       only ever spawns the supported subcommand.
     """
     script = tmp_path / "mngr"
-    # Setting argv[0] to ``mngr`` ensures the cmdline probe matches
-    # regardless of how Python or the interpreter line is laid out.
     script.write_text(
         "#!/usr/bin/env python3\n"
-        "import sys, signal, os\n"
+        "import json, os, signal, sys\n"
+        "from datetime import datetime, timezone\n"
+        "from pathlib import Path\n"
         'if sys.argv[1:3] != ["latchkey", "forward"]:\n'
         "    sys.exit(99)\n"
-        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+        "args = sys.argv[3:]\n"
+        "latchkey_directory = None\n"
+        "for i, arg in enumerate(args):\n"
+        '    if arg == "--latchkey-directory" and i + 1 < len(args):\n'
+        "        latchkey_directory = Path(args[i + 1])\n"
+        "        break\n"
+        "if latchkey_directory is None:\n"
+        "    sys.exit(98)\n"
+        'record_path = latchkey_directory / "mngr_latchkey" / "latchkey_forward.json"\n'
+        "record_path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "record_path.write_text(json.dumps({\n"
+        '    "pid": os.getpid(),\n'
+        '    "started_at": datetime.now(timezone.utc).isoformat(),\n'
+        '    "gateway_port": None,\n'
+        "}))\n"
+        "def _on_term(*_):\n"
+        "    try:\n"
+        "        record_path.unlink()\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, _on_term)\n"
         "signal.pause()\n"
     )
     script.chmod(0o755)
     return script
+
+
+_FORWARD_RECORD_POLL_TIMEOUT: Final[float] = 5.0
+_FORWARD_RECORD_POLL_INTERVAL: Final[float] = 0.05
+
+
+def _wait_for_forward_record(plugin_dir: Path) -> LatchkeyForwardInfo:
+    """Block until the forward child publishes its record. Fails the test on timeout."""
+    deadline = time.monotonic() + _FORWARD_RECORD_POLL_TIMEOUT
+    waiter = threading.Event()
+    while time.monotonic() < deadline:
+        record = load_forward_info(plugin_dir)
+        if record is not None:
+            return record
+        waiter.wait(timeout=_FORWARD_RECORD_POLL_INTERVAL)
+    raise AssertionError(f"forward record never appeared at {plugin_dir} within {_FORWARD_RECORD_POLL_TIMEOUT}s")
 
 
 # -- cmdline matcher ---------------------------------------------------------
@@ -154,11 +192,10 @@ def test_ensure_running_spawns_when_no_record_exists(tmp_path: Path) -> None:
         assert info.pid > 0
         assert isinstance(info.started_at, datetime)
         assert _wait_for_process_alive(info.pid)
-        # The record was persisted with the same shape we got back.
-        persisted = load_forward_info(supervisor.plugin_data_dir)
-        assert persisted is not None
+        # The forward child publishes the record asynchronously after
+        # the spawn returns; poll until it appears.
+        persisted = _wait_for_forward_record(supervisor.plugin_data_dir)
         assert persisted.pid == info.pid
-        # The log file was created.
         assert forward_log_path(supervisor.plugin_data_dir).is_file()
     finally:
         supervisor.stop()
@@ -240,7 +277,7 @@ def test_stop_terminates_running_supervisor_and_deletes_record(tmp_path: Path) -
 
     info = supervisor.ensure_running()
     assert _wait_for_process_alive(info.pid)
-    assert forward_info_path(supervisor.plugin_data_dir).is_file()
+    _wait_for_forward_record(supervisor.plugin_data_dir)
 
     supervisor.stop()
     assert _wait_for_process_exit(info.pid)
