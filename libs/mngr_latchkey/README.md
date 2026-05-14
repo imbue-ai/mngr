@@ -147,8 +147,7 @@ written directly via `imbue.mngr_latchkey.store.save_permissions`.
 ## Gateway HTTP extensions
 
 `mngr latchkey forward` drops two `.mjs` extensions into
-`<latchkey-directory>/extensions/` and starts the gateway with the
-environment configured to load them. Both expose plain HTTP endpoints
+`<latchkey-directory>/extensions/`. Both expose plain HTTP endpoints
 on the gateway's listen port and authenticate the caller via two
 headers:
 
@@ -159,7 +158,7 @@ headers:
   request against. For full access to both extensions, use the JWT
   from `mngr latchkey admin-jwt`.
 
-A shell client typically wires these up once:
+A shell client would typically wire these up once:
 
 ```sh
 ADMIN_JWT=$(mngr latchkey admin-jwt)
@@ -176,14 +175,15 @@ consume the stream and DELETE on resolution.
 * `POST /permission-requests` with body
   `{"agent_id": "...", "service_name": "...", "rationale": "..."}`.
   The extension generates a `request_id` server-side and returns the
-  full record. The newly-created agent baseline grants this endpoint
-  to every agent.
+  full record. Available to agents.
 * `GET /permission-requests` returns the current queue as
   newline-delimited JSON. Add `?follow=true` to keep the connection
   open and stream every newly-POSTed request as it arrives.
+  Available to the admin.
 * `DELETE /permission-requests/<request_id>` removes a single pending
   request. UIs call this on grant or deny so a fresh `?follow=true`
-  consumer never sees the resolved request again.
+  consumer never sees the resolved request again. Available to
+  the admin.
 
 Pending requests are stored as one JSON file per request under
 `<latchkey-directory>/permission_requests/`.
@@ -203,8 +203,7 @@ root is rejected with HTTP 403.
   body of permission-schema names (`["any"]`,
   `["slack-read-all", ...]`, ...) adds or replaces the rule for
   `<scope>`. Everything in the file other than the matching rule is
-  preserved verbatim, so inline `schemas` definitions and unrelated
-  rules survive the rewrite.
+  preserved verbatim.
 * `DELETE /permissions/rules?path=<file>&rule_key=<scope>` removes
   the named rule.
 
