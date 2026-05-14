@@ -18,15 +18,17 @@ Gemini CLI exposes the underlying primitives needed for most of these (see "Gemi
 | Need | Gemini CLI mechanism |
 |---|---|
 | Settings | `~/.gemini/settings.json`, project `.gemini/settings.json`, `/etc/gemini-cli/settings.json` |
-| Hooks | `hooks` key in settings; events: `BeforeTool`, `AfterTool`, `BeforeAgent`, `AfterAgent`, `BeforeModel`, `AfterModel`, `BeforeToolSelection`, `SessionStart`, `SessionEnd`, `Notification`, `PreCompress` |
+| Hooks | `hooks` top-level key in settings (event-specific configs); `hooksConfig` for system-wide enable/disable. Events confirmed in the published schema: `BeforeTool`, `AfterTool`, `BeforeAgent`, `AfterAgent`, `BeforeModel`, `AfterModel`, `BeforeToolSelection`, `SessionStart`, `SessionEnd`, `Notification`, `PreCompress` |
 | Slash commands | TOML files in `~/.gemini/commands/` and project `.gemini/commands/` |
 | Skills | Agent Skills standard, `~/.gemini/skills/` and `.gemini/skills/` |
 | Subagents | Markdown + YAML frontmatter in `.gemini/agents/*.md` |
 | MCP | `mcpServers` + `mcp.allowed` in settings |
 | Memory file | `GEMINI.md` (project parent-walk + `~/.gemini/GEMINI.md`) |
-| Permissions | Policy Engine, `tools.core`, `security.allowedTools`, approval modes `plan` < `default` < `autoEdit` < `yolo` |
+| Permissions | Policy Engine, `tools.core`, `security.allowedTools`, approval modes `plan` < `default` < `auto_edit` < `yolo` (set via `general.defaultApprovalMode` -- note: NOT `general.approvalMode`, that key does not exist in the schema). CLI flags: `--approval-mode`, `-y/--yolo` |
+| Folder trust | `security.folderTrust.enabled` (boolean, default `true`); `--skip-trust` CLI flag is per-session only |
 | Telemetry | OpenTelemetry; local `.gemini/telemetry.log` or OTLP exporters |
-| Non-interactive | `-p/--prompt` + `--approval-mode yolo` |
+| Non-interactive | `-p/--prompt` plus `-o text|json|stream-json` for parseable output; `-y` or `--approval-mode yolo` for tool auto-approval |
+| Claude-format hook migration | `gemini hooks migrate --from-claude` (built-in subcommand) |
 
 ## Current state
 
@@ -47,22 +49,22 @@ PRs are ordered so dependency arrows point upward. PRs in the same tier are inde
 
 ### Tier 1: foundation
 
-**PR1: `gemini_config.py` — settings file management**
-- New module. Functions to read/write `~/.gemini/settings.json` (atomic), project `.gemini/settings.json`, and `~/.gemini/.env`. Helpers for the `hooks`/`mcpServers`/`tools.core`/`security.allowedTools`/`general.approvalMode`/`context.fileName` settings keys with merge-preserving semantics so we don't clobber user edits.
-- Define typed dataclasses for the `hooks` block shaped by the Gemini hook spec (matcher, command, exit-code-2 = block).
-- Error classes mirroring Claude's (`GeminiDirectoryNotTrustedError`, etc.) — `--skip-trust` is the current escape hatch; the proper fix is to write trust state into `settings.json` before launch.
-- Acceptance: unit tests cover atomic write, merge with existing keys, malformed-JSON recovery, env-var interpolation in string values.
-- Files: `libs/mngr_gemini/imbue/mngr_gemini/gemini_config.py` (+ test).
-- No other-PR dependencies.
+**PR1 (LANDED on this branch): `gemini_config.py` — settings file management**
+- Already merged into `mngr/gemini-feature-parity`. Subsequent PRs should rebase or branch off this commit. JSON shape produced by the builders was validated end-to-end against the published Gemini settings schema (smoke-tested against Gemini CLI 0.42.0).
+- Provides path helpers, atomic/fcntl-locked read/write with `.bak` backup, malformed-JSON-tolerant reads, env-var interpolation, two hook-config builders (`SessionStart` readiness sentinel + `BeforeTool` wildcard auto-allow), `merge_hooks_config`/`hook_already_exists` dedup-preserving merge, and the placeholder `GeminiDirectoryNotTrustedError` class.
+- Not yet wired to `GeminiAgent`; `--skip-trust` remains the current escape hatch and gets replaced in PR2.
 
 ### Tier 2: lifecycle wiring (depends on PR1)
 
 **PR2: hook injection (readiness + permission auto-allow)**
 - Generate a `SessionStart` hook that touches a `session_started` sentinel so `mngr` can detect readiness without polling the TUI.
-- Generate a `BeforeTool` hook (or use `--approval-mode yolo`) for headless-style auto-approval. Document the GitHub #20469 non-interactive policy-engine caveat.
-- Replace the current `--skip-trust` workaround with a settings-managed `trustedFolders` entry seeded by `gemini_config.py`.
-- Files: extend `gemini_config.py`, add `resources/readiness_hook.sh` (or similar tiny shell stub if we need stdout JSON output).
-- Acceptance: agent reaches ready state without `--skip-trust`; sentinel file appears within N seconds.
+- Generate a `BeforeTool` hook (or use `--approval-mode yolo`/`-y`) for headless-style auto-approval. Document the GitHub #20469 non-interactive policy-engine caveat.
+- Replace the current `--skip-trust` workaround by writing a persistent `security.folderTrust` entry plus per-workspace trust state before launch. **Critical**: smoke-testing against Gemini CLI 0.42.0 confirmed that workspace-level `.gemini/settings.json` hooks are silently dropped when the workspace is only trusted per-session via `--skip-trust` (`Hook registry initialized with 0 hook entries`). Two viable paths -- pick one in PR2:
+  - **A. User-scope hooks self-guarded on `MNGR_AGENT_STATE_DIR`**: write hooks into `~/.gemini/settings.json` with each command prefixed by `[ -z "$MNGR_AGENT_STATE_DIR" ] && exit 0;` so they only fire under mngr-spawned sessions. Mirrors how `mngr_claude` guards on `MAIN_CLAUDE_SESSION_ID`.
+  - **B. Persistent workspace trust + workspace-scope hooks**: install a persistent trust entry under the user's Gemini config before launch, then write hooks to `<workspace>/.gemini/settings.json`. Cleaner isolation but requires touching the user's trust state.
+- Investigate whether `gemini hooks migrate --from-claude` does any of the equivalent work for us before reimplementing.
+- Files: extend `gemini_config.py`, add `resources/readiness_hook.sh` only if we need a multi-statement command body that's too awkward inline.
+- Acceptance: agent reaches ready state without `--skip-trust`; sentinel file appears within N seconds; `--debug` output shows `Hook registry initialized with N hook entries` where N > 0.
 
 **PR3: provisioning lifecycle wiring in `plugin.py`**
 - Add hookimpls: `on_before_create` (preflight: settings.local.json gitignored, required env vars present), `agent_field_generators` (a `waiting_reason` field; map approval prompts → `PERMISSIONS`, idle → `END_OF_TURN`).
@@ -83,9 +85,9 @@ PRs are ordered so dependency arrows point upward. PRs in the same tier are inde
 ### Tier 3: variants (mostly independent, depends only on PR1 + PR2)
 
 **PR6: headless Gemini agent**
-- New `headless_gemini_agent.py` mirroring `headless_claude_agent.py`. Uses `gemini -p` for one-shot prompts; parses Gemini's output (currently no equivalent of Claude's JSON stream — likely have to capture stdout/stderr until they ship `--output-format json`).
+- New `headless_gemini_agent.py` mirroring `headless_claude_agent.py`. Uses `gemini -p <prompt> -o stream-json` for one-shot prompts and parses the line-delimited JSON stream Gemini emits.
 - Acceptance: a headless agent runs a single prompt to completion and returns the assistant text.
-- Open question to surface in the PR description: does Gemini CLI emit a structured stream we can parse, or do we have to scrape? Search recent issues before starting.
+- Smoke-test confirmed `-o stream-json` exists in Gemini 0.42.0 (`gemini --help` lists `-o text|json|stream-json`), so unlike the earlier draft of this spec there is no open question about scraping vs. parsing.
 
 **PR7: skill-provisioned base + code-guardian/fixme-fairy Gemini variants**
 - `skill_agent_gemini.py` mirroring `skill_agent.py` for `~/.gemini/skills/` layout.

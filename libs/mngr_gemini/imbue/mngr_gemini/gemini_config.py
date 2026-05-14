@@ -9,11 +9,15 @@ This module provides the plumbing the rest of ``mngr_gemini`` needs to inject
 mngr-managed settings (hook commands, MCP servers, allowed tools) into those
 files without clobbering user edits.
 
-Trust state (``--skip-trust`` replacement) is intentionally left to PR2: the
-exact settings key used by Gemini for ``trustedFolders`` is not yet confirmed
-against a live CLI, and writing the wrong key would silently mistrust folders
-that the agent then can't run in. ``GeminiDirectoryNotTrustedError`` is defined
-here so callers can already reference the type.
+The JSON shape produced by the merge and builder helpers here was validated
+against Gemini CLI's published ``settings.schema.json``. Trust state (i.e. the
+``--skip-trust`` replacement) is reserved for PR2 under the ``security``
+top-level key: smoke-testing confirmed that ``security.folderTrust.enabled``
+is the active toggle, and that hooks in a workspace-level settings file are
+silently dropped when the workspace is only trusted per-session via
+``--skip-trust``. See ``build_readiness_hooks_config`` for the workspace-trust
+caveat that follow-up PRs must address. ``GeminiDirectoryNotTrustedError`` is
+defined here so callers can already reference the type.
 """
 
 from __future__ import annotations
@@ -206,6 +210,16 @@ def build_readiness_hooks_config() -> dict[str, Any]:
     Claude Code's ``SessionStart`` can. That gap is acceptable for readiness
     signaling but means startup-time gates (e.g. trust enforcement) must live
     elsewhere.
+
+    Workspace-trust caveat: smoke-testing against Gemini CLI 0.42.0 confirmed
+    that hooks declared in a workspace-level ``<project>/.gemini/settings.json``
+    are silently dropped (``Hook registry initialized with 0 hook entries`` in
+    ``--debug`` output) when the workspace is only trusted for the current
+    session via ``--skip-trust``. Hooks installed by ``mngr_gemini`` must
+    therefore either land in the user-level ``~/.gemini/settings.json`` (and
+    self-guard on ``MNGR_AGENT_STATE_DIR`` so they only fire for our agents)
+    or be installed alongside a persistent ``security.folderTrust`` entry for
+    the workspace.
     """
     return {
         "hooks": {
