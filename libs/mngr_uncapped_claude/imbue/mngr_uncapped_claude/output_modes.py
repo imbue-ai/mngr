@@ -178,7 +178,6 @@ def _coerce_str(value: object) -> str:
     return ""
 
 
-@pure
 def _parse_input_preview(preview: str) -> object:
     """Best-effort parse of the tool input preview into structured JSON.
 
