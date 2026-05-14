@@ -35,6 +35,6 @@ class ResultMeta(FrozenModel):
     """Metadata used to synthesize claude's `result` envelope."""
 
     session_id: str = Field(description="Session/agent identifier (best-effort)")
-    duration_ms: int = Field(description="Wall-clock duration of the turn")
+    duration_ms: int = Field(description="Wall-clock duration of the run")
     is_error: bool = Field(description="Whether the turn ended in an error")
     error_text: str | None = Field(description="Error text if any")
