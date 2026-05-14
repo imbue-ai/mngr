@@ -1,5 +1,11 @@
+import subprocess
+import sys
+from pathlib import Path
+
 from scripts.trigger_changelog_consolidation import _ENABLED_PLUGINS
 from scripts.trigger_changelog_consolidation import disable_plugin_args
+
+_SCRIPT_PATH = Path(__file__).resolve().parent / "trigger_changelog_consolidation.py"
 
 
 def test_disable_plugin_args_returns_paired_flags() -> None:
@@ -14,3 +20,32 @@ def test_disable_plugin_args_returns_paired_flags() -> None:
     assert _ENABLED_PLUGINS.isdisjoint(names)
     # Names should be unique (no double-disables).
     assert len(names) == len(set(names))
+
+
+def test_cli_print_disable_plugin_args_matches_helper() -> None:
+    """The CLI flag is the integration point with setup_changelog_agent.sh;
+    its output must match the in-process helper.
+    """
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPT_PATH), "--print-disable-plugin-args"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    assert result.stdout.strip() == " ".join(disable_plugin_args())
+
+
+def test_cli_without_action_errors_and_mentions_flag() -> None:
+    """No action -> parser.error: exit code 2 and the flag name appears in stderr
+    so the user knows what to pass.
+    """
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPT_PATH)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 2
+    assert "--print-disable-plugin-args" in result.stderr
