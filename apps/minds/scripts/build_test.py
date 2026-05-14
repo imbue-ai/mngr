@@ -9,9 +9,15 @@ package it ships. Two properties are load-bearing:
   no use for them and shipping them bloats the bundle / exposes test-only
   imports to the runtime.
 
-These tests run ``uv build`` for each workspace package listed in
-``WORKSPACE_PACKAGES`` (must mirror the list in ``build.js``) and assert
-both properties.
+``test_workspace_wheel_is_pure_python`` and
+``test_workspace_wheel_excludes_test_files`` run ``uv build`` for each
+workspace package listed in ``WORKSPACE_PACKAGES`` and assert both
+properties. Because they exercise the real build toolchain and build every
+wheel, they are marked ``@pytest.mark.acceptance``.
+
+``test_workspace_package_lists_are_consistent`` is a fast, pure file-parsing
+drift guard (no toolchain, no network) and stays an unmarked integration
+test so it runs on every branch.
 """
 
 import re
@@ -68,6 +74,7 @@ def built_wheels(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     return wheels
 
 
+@pytest.mark.acceptance
 @pytest.mark.parametrize("package_name", WORKSPACE_PACKAGES)
 def test_workspace_wheel_is_pure_python(built_wheels: dict[str, Path], package_name: str) -> None:
     """Every workspace wheel must be tagged py3-none-any.
@@ -86,6 +93,7 @@ def test_workspace_wheel_is_pure_python(built_wheels: dict[str, Path], package_n
     )
 
 
+@pytest.mark.acceptance
 @pytest.mark.parametrize("package_name", WORKSPACE_PACKAGES)
 def test_workspace_wheel_excludes_test_files(built_wheels: dict[str, Path], package_name: str) -> None:
     """Wheels must not contain test files.
