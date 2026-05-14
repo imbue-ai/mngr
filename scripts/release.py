@@ -32,7 +32,9 @@ import semver
 import tomlkit
 from changelog_release_utils import finalize_changelog_unreleased
 from changelog_release_utils import today_pacific
-from trigger_changelog_consolidation import gate_release_on_pending_entries
+from trigger_changelog_consolidation import TRIGGER_NAME as CHANGELOG_TRIGGER_NAME
+from trigger_changelog_consolidation import pending_changelog_entries
+from trigger_changelog_consolidation import run_trigger as run_changelog_trigger
 from utils import PACKAGES
 from utils import PACKAGE_BY_PYPI_NAME
 from utils import REPO_ROOT
@@ -455,6 +457,65 @@ def _print_bump_summary(
         print("  (none)")
 
 
+def _format_pending_changelog_list(entries: list[Path], repo_root: Path) -> str:
+    return "\n".join(f"  - {entry.relative_to(repo_root)}" for entry in entries)
+
+
+def _gate_release_on_pending_changelog_entries(dry_run: bool) -> bool:
+    """Block a release until pending changelog entries are consolidated.
+
+    Returns ``True`` if the release may proceed (no pending entries, or
+    ``dry_run`` is set), ``False`` if the caller must abort (entries are
+    pending; the agent was triggered or the user declined). Either way,
+    after a real release attempt the user should re-run ``release.py``
+    once the consolidation PR has been merged.
+
+    ``dry_run`` swaps the prompt for a warning so ``release.py --dry-run``
+    can still preview what would be released; a real release attempt with
+    pending entries will hit the prompt.
+    """
+    entries = pending_changelog_entries(REPO_ROOT)
+    if not entries:
+        return True
+
+    if dry_run:
+        print()
+        print(f"WARNING: {len(entries)} pending changelog entry/entries would block a real release:")
+        print(_format_pending_changelog_list(entries, REPO_ROOT))
+        print(f"(use '{CHANGELOG_TRIGGER_NAME}' to consolidate before cutting the release)")
+        print()
+        return True
+
+    print()
+    print(f"ERROR: cannot release with {len(entries)} pending changelog entry/entries.")
+    print()
+    print("The following entries in changelog/ haven't been consolidated into")
+    print("CHANGELOG.md's [Unreleased] section yet:")
+    print(_format_pending_changelog_list(entries, REPO_ROOT))
+    print()
+    print("Release notes for this version would not include them. The nightly")
+    print(f"consolidation agent ('{CHANGELOG_TRIGGER_NAME}') normally handles this at midnight")
+    print("Pacific. You can trigger it on demand now (runs on Modal, takes a few")
+    print("minutes, opens a PR for you to review and merge).")
+    print()
+    answer = input(f"Trigger the {CHANGELOG_TRIGGER_NAME} agent now? [y/N] ")
+    if answer.strip().lower() != "y":
+        print()
+        print("Aborted. Wait for the nightly cron or re-run release.py and answer 'y'.")
+        return False
+
+    print()
+    print(f"Triggering '{CHANGELOG_TRIGGER_NAME}'...")
+    exit_code = run_changelog_trigger()
+    print()
+    if exit_code != 0:
+        print(f"ERROR: 'mngr schedule run' exited {exit_code}. See output above.")
+        return False
+    print("Consolidation finished. Review and merge the PR it opened, then re-run")
+    print("scripts/release.py.")
+    return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Selectively bump and publish changed packages to PyPI.")
     parser.add_argument(
@@ -522,7 +583,7 @@ def main() -> None:
     # finalize would be missing those entries' bullets. In --dry-run we
     # warn rather than block so the user can still preview what would
     # be released.
-    if not gate_release_on_pending_entries(REPO_ROOT, dry_run=args.dry_run):
+    if not _gate_release_on_pending_changelog_entries(dry_run=args.dry_run):
         sys.exit(1)
 
     base_kind: str = args.bump_kind
