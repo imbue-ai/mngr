@@ -87,15 +87,17 @@ def list_dev_env_instances(name: DevEnvName, *, api_key: SecretStr) -> tuple[Vul
     for similarly-named dev envs).
     """
     expected_tag = dev_env_tag(name)
-    cursor: str | None = None
     matches: list[VultrInstanceSummary] = []
-    while True:
+    cursor: str | None = None
+    has_more = True
+    while has_more:
         path = "/instances?per_page=100"
         if cursor:
             path += f"&cursor={cursor}"
         payload = _vultr_request("GET", path, api_key=api_key)
         if payload is None:
-            break
+            has_more = False
+            continue
         instances_raw = payload.get("instances", [])
         instances = _INSTANCE_LIST_ADAPTER.validate_python(instances_raw)
         for instance in instances:
@@ -104,8 +106,7 @@ def list_dev_env_instances(name: DevEnvName, *, api_key: SecretStr) -> tuple[Vul
         meta = payload.get("meta") if isinstance(payload, dict) else None
         links = meta.get("links") if isinstance(meta, dict) else None
         cursor = links.get("next") if isinstance(links, dict) else None
-        if not cursor:
-            break
+        has_more = bool(cursor)
     return tuple(matches)
 
 

@@ -34,9 +34,20 @@ from imbue.minds.envs.primitives import DevEnvAlreadyExistsError
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.primitives import DevEnvProvisioningError
+from imbue.minds.envs.providers.modal_env import ModalEnvProviderError
 from imbue.minds.envs.providers.neon_db import NeonDatabaseRecord
+from imbue.minds.envs.providers.neon_db import NeonProviderError
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
+from imbue.minds.envs.providers.supertokens_app import SuperTokensProviderError
 from imbue.minds.envs.providers.vultr_tags import VultrInstanceSummary
+from imbue.minds.errors import MindError
+
+_PROVIDER_ERRORS: tuple[type[Exception], ...] = (
+    ModalEnvProviderError,
+    NeonProviderError,
+    SuperTokensProviderError,
+    MindError,
+)
 
 _DEV_TIER_NAME: Final[str] = "dev"
 
@@ -170,7 +181,7 @@ def create_dev_env(
             credentials.supertokens_api_key,
         )
         completed_steps.append("supertokens_app")
-    except Exception as exc:
+    except _PROVIDER_ERRORS as exc:
         _best_effort_rollback(
             name=name,
             completed_steps=completed_steps,
@@ -221,23 +232,37 @@ def _best_effort_rollback(
     rolled back.
     """
     for step in reversed(completed_steps):
+        rollback_fn = _ROLLBACK_TABLE.get(step)
+        if rollback_fn is None:
+            logger.warning("Unknown rollback step {!r} for dev env {!r}; skipping", step, str(name))
+            continue
         try:
-            if step == "supertokens_app":
-                providers.delete_supertokens_app(
-                    name,
-                    credentials.supertokens_core_url,
-                    credentials.supertokens_api_key,
-                )
-            elif step == "neon_db":
-                providers.delete_neon_db(
-                    name,
-                    credentials.neon_project_id,
-                    credentials.neon_api_token,
-                )
-            elif step == "modal_env":
-                providers.delete_modal_env(name)
-        except Exception as exc:
+            rollback_fn(name, providers, credentials)
+        except _PROVIDER_ERRORS as exc:
             logger.warning("Rollback of {!r} step for dev env {!r} failed: {}", step, str(name), exc)
+
+
+def _rollback_modal_env(name: DevEnvName, providers: "Providers", credentials: "ProviderCredentials") -> None:
+    providers.delete_modal_env(name)
+
+
+def _rollback_neon_db(name: DevEnvName, providers: "Providers", credentials: "ProviderCredentials") -> None:
+    providers.delete_neon_db(name, credentials.neon_project_id, credentials.neon_api_token)
+
+
+def _rollback_supertokens_app(name: DevEnvName, providers: "Providers", credentials: "ProviderCredentials") -> None:
+    providers.delete_supertokens_app(
+        name,
+        credentials.supertokens_core_url,
+        credentials.supertokens_api_key,
+    )
+
+
+_ROLLBACK_TABLE: dict[str, Callable[[DevEnvName, "Providers", "ProviderCredentials"], None]] = {
+    "modal_env": _rollback_modal_env,
+    "neon_db": _rollback_neon_db,
+    "supertokens_app": _rollback_supertokens_app,
+}
 
 
 def destroy_dev_env(
@@ -260,7 +285,8 @@ def destroy_dev_env(
     """
     if not dev_env_file(name, root_name=root_name).is_file():
         raise DevEnvNotFoundError(f"No local file for dev env {name!r}; nothing to destroy.")
-    _ = keep_agents  # placeholder for the eventual `mngr destroy` integration
+    # Placeholder for the eventual `mngr destroy` integration; not yet wired in.
+    _ = keep_agents
 
     instances = providers.list_vultr_instances(name, credentials.vultr_api_key)
     if instances:

@@ -12,14 +12,15 @@ The returned values are kept in process memory only; no file is written.
 
 import json
 import shutil
-import subprocess
 from typing import Final
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.envs.primitives import VaultReadError
 
 VAULT_BINARY: Final[str] = "vault"
 _DEFAULT_MOUNT: Final[str] = "secrets"
 _KV_PATH_PREFIX: Final[str] = "secrets/kv/"
+_DEFAULT_TIMEOUT_SECONDS: Final[float] = 30.0
 
 
 class VaultPath(str):
@@ -30,7 +31,12 @@ class VaultPath(str):
     """
 
 
-def read_vault_kv(path: VaultPath, *, vault_binary: str = VAULT_BINARY) -> dict[str, str]:
+def read_vault_kv(
+    path: VaultPath,
+    *,
+    parent_concurrency_group: ConcurrencyGroup | None = None,
+    vault_binary: str = VAULT_BINARY,
+) -> dict[str, str]:
     """Return the ``data.data`` dict of the KV-v2 secret at ``path``.
 
     ``path`` looks like ``secrets/kv/minds/production/cloudflare``. We strip
@@ -38,10 +44,15 @@ def read_vault_kv(path: VaultPath, *, vault_binary: str = VAULT_BINARY) -> dict[
     ``vault kv get -format=json -mount=secrets <rest>`` so the user's existing
     ``VAULT_ADDR`` / ``VAULT_NAMESPACE`` / token configuration is honored.
 
+    The ``vault`` invocation is routed through a :class:`ConcurrencyGroup`
+    so the spawned subprocess is bracketed by managed cleanup. When the
+    caller does not have a CG of their own (e.g. a one-shot deploy script
+    or test fixture), we synthesize a fresh CG for the duration of the
+    call.
+
     Raises :class:`VaultReadError` for any failure (CLI missing, command
     failed, output not parseable, no ``data.data`` field, value not a
-    string). The error message includes the path so the operator can fix
-    the right Vault entry; secret values are never quoted.
+    string).
     """
     if shutil.which(vault_binary) is None:
         raise VaultReadError(
@@ -59,8 +70,21 @@ def read_vault_kv(path: VaultPath, *, vault_binary: str = VAULT_BINARY) -> dict[
         raise VaultReadError(f"Vault path {path!r} has no trailing key after the mount prefix.")
 
     command = [vault_binary, "kv", "get", "-format=json", f"-mount={_DEFAULT_MOUNT}", relative]
+    parent_cg = (
+        parent_concurrency_group if parent_concurrency_group is not None else ConcurrencyGroup(name="vault-kv-get")
+    )
+    cg = (
+        parent_cg.make_concurrency_group(name="vault-kv-get-child")
+        if parent_concurrency_group is not None
+        else parent_cg
+    )
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        with cg:
+            result = cg.run_process_to_completion(
+                command=command,
+                timeout=_DEFAULT_TIMEOUT_SECONDS,
+                is_checked_after=False,
+            )
     except OSError as exc:
         raise VaultReadError(f"Failed to invoke {vault_binary}: {exc}") from exc
 

@@ -10,13 +10,16 @@ the ``vault`` CLI.
 """
 
 import json
+import sys
 from typing import Final
 
 import click
 from loguru import logger
+from pydantic import Field
 from pydantic import SecretStr
 
-from imbue.minds.bootstrap import resolve_minds_root_name
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.envs.primitives import DevEnvAlreadyExistsError
@@ -50,57 +53,94 @@ from imbue.minds.primitives import OutputFormat
 _DEV_TIER: Final[str] = "dev"
 
 
-def _build_real_providers() -> Providers:
-    """Wire the provider modules together with the typed callable signatures.
+def _create_neon_for_provider(name: DevEnvName, project_id: str, api_token: SecretStr) -> NeonDatabaseRecord:
+    return create_neon_database(name, project_id=project_id, api_token=api_token)
 
-    The provider modules expose keyword-only arguments so the wiring here
-    looks a bit ceremonial -- the orchestration uses positional callables
-    to keep the test fakes minimal.
+
+def _delete_neon_for_provider(name: DevEnvName, project_id: str, api_token: SecretStr) -> None:
+    delete_neon_database(name, project_id=project_id, api_token=api_token)
+
+
+def _create_supertokens_for_provider(name: DevEnvName, core_base_url: str, api_key: SecretStr) -> SuperTokensAppRecord:
+    return create_supertokens_app(name, core_base_url=core_base_url, api_key=api_key)
+
+
+def _delete_supertokens_for_provider(name: DevEnvName, core_base_url: str, api_key: SecretStr) -> None:
+    delete_supertokens_app(name, core_base_url=core_base_url, api_key=api_key)
+
+
+def _list_vultr_for_provider(name: DevEnvName, api_key: SecretStr) -> tuple[VultrInstanceSummary, ...]:
+    return list_vultr_instances(name, api_key=api_key)
+
+
+def _delete_vultr_for_provider(instances: tuple[VultrInstanceSummary, ...], api_key: SecretStr) -> None:
+    delete_vultr_instances(instances, api_key=api_key)
+
+
+class _CgBoundCreateModalEnv(FrozenModel):
+    """Adapter that closes the Modal-env create call over a :class:`ConcurrencyGroup`.
+
+    The :class:`Providers` callable type for create_modal_env is
+    ``Callable[[DevEnvName], None]`` -- which our provider module's
+    keyword-only ``parent_concurrency_group`` argument is not directly
+    compatible with. This adapter exists so the wiring stays explicit
+    without nested defs at the wiring site.
     """
 
-    def _create_neon(name: DevEnvName, project_id: str, api_token: SecretStr) -> NeonDatabaseRecord:
-        return create_neon_database(name, project_id=project_id, api_token=api_token)
+    model_config = {"arbitrary_types_allowed": True}
 
-    def _delete_neon(name: DevEnvName, project_id: str, api_token: SecretStr) -> None:
-        delete_neon_database(name, project_id=project_id, api_token=api_token)
+    cg: ConcurrencyGroup = Field(description="Parent group the modal CLI invocation is tied to.")
 
-    def _create_supertokens(name: DevEnvName, core_base_url: str, api_key: SecretStr) -> SuperTokensAppRecord:
-        return create_supertokens_app(name, core_base_url=core_base_url, api_key=api_key)
+    def __call__(self, name: DevEnvName) -> None:
+        create_modal_env(name, parent_concurrency_group=self.cg)
 
-    def _delete_supertokens(name: DevEnvName, core_base_url: str, api_key: SecretStr) -> None:
-        delete_supertokens_app(name, core_base_url=core_base_url, api_key=api_key)
 
-    def _list_vultr(name: DevEnvName, api_key: SecretStr) -> tuple[VultrInstanceSummary, ...]:
-        return list_vultr_instances(name, api_key=api_key)
+class _CgBoundDeleteModalEnv(FrozenModel):
+    """Adapter that closes the Modal-env delete call over a :class:`ConcurrencyGroup`.
 
-    def _delete_vultr(instances: tuple[VultrInstanceSummary, ...], api_key: SecretStr) -> None:
-        delete_vultr_instances(instances, api_key=api_key)
+    Mirrors :class:`_CgBoundCreateModalEnv` for the destroy path.
+    """
 
+    model_config = {"arbitrary_types_allowed": True}
+
+    cg: ConcurrencyGroup = Field(description="Parent group the modal CLI invocation is tied to.")
+
+    def __call__(self, name: DevEnvName) -> None:
+        delete_modal_env(name, parent_concurrency_group=self.cg)
+
+
+def _build_real_providers(cg: ConcurrencyGroup) -> Providers:
+    """Wire the provider modules together with the typed callable signatures.
+
+    Modal-env operations need a :class:`ConcurrencyGroup` to track the
+    spawned ``modal`` CLI; the other providers go through ``httpx`` and
+    have no subprocess to manage.
+    """
     return Providers(
-        create_modal_env=create_modal_env,
-        delete_modal_env=delete_modal_env,
-        create_neon_db=_create_neon,
-        delete_neon_db=_delete_neon,
-        create_supertokens_app=_create_supertokens,
-        delete_supertokens_app=_delete_supertokens,
-        list_vultr_instances=_list_vultr,
-        delete_vultr_instances=_delete_vultr,
+        create_modal_env=_CgBoundCreateModalEnv(cg=cg),
+        delete_modal_env=_CgBoundDeleteModalEnv(cg=cg),
+        create_neon_db=_create_neon_for_provider,
+        delete_neon_db=_delete_neon_for_provider,
+        create_supertokens_app=_create_supertokens_for_provider,
+        delete_supertokens_app=_delete_supertokens_for_provider,
+        list_vultr_instances=_list_vultr_for_provider,
+        delete_vultr_instances=_delete_vultr_for_provider,
     )
 
 
-def _load_dev_credentials_from_vault(vault_prefix: str) -> ProviderCredentials:
+def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup) -> ProviderCredentials:
     """Read every per-provider dev-tier secret from Vault.
 
     The dev-tier Vault entries follow the shared schema; the specific keys
     consumed by ``minds env`` are pulled out here and fed into the typed
-    :class:`ProviderCredentials` model.
+    :class:`ProviderCredentials` model. The ``cloudflare`` entry is read
+    purely to assert it exists (its keys ride along on the per-dev-env
+    Modal deploy, but no value is consumed here).
     """
-    neon = read_vault_kv(VaultPath(f"{vault_prefix}/neon"))
-    supertokens = read_vault_kv(VaultPath(f"{vault_prefix}/supertokens"))
-    cloudflare_or_misc = read_vault_kv(VaultPath(f"{vault_prefix}/cloudflare"))  # not used yet, but validated to exist
-    vultr_secret = read_vault_kv(
-        VaultPath(f"{vault_prefix}/pool-ssh")
-    )  # pool-ssh entry happens to also carry VULTR_API_KEY in dev
+    neon = read_vault_kv(VaultPath(f"{vault_prefix}/neon"), parent_concurrency_group=cg)
+    supertokens = read_vault_kv(VaultPath(f"{vault_prefix}/supertokens"), parent_concurrency_group=cg)
+    read_vault_kv(VaultPath(f"{vault_prefix}/cloudflare"), parent_concurrency_group=cg)
+    vultr_secret = read_vault_kv(VaultPath(f"{vault_prefix}/pool-ssh"), parent_concurrency_group=cg)
 
     project_id = neon.get("NEON_PROJECT_ID", "")
     api_token = neon.get("NEON_API_TOKEN", "")
@@ -120,7 +160,6 @@ def _load_dev_credentials_from_vault(vault_prefix: str) -> ProviderCredentials:
     vultr_api_key = vultr_secret.get("VULTR_API_KEY", "")
     if not vultr_api_key:
         raise MindError(f"Vault entry {vault_prefix}/pool-ssh missing VULTR_API_KEY (shared dev-tier key for Vultr).")
-    _ = cloudflare_or_misc  # asserts the entry exists; not currently consumed.
 
     return ProviderCredentials(
         neon_project_id=project_id,
@@ -131,13 +170,36 @@ def _load_dev_credentials_from_vault(vault_prefix: str) -> ProviderCredentials:
     )
 
 
-def _emit(payload: object, *, output_format: OutputFormat) -> None:
+def _emit_json(payload: object, *, output_format: OutputFormat) -> None:
+    """Emit a JSON-shaped payload on stdout in the requested format.
+
+    Used by every ``minds env`` subcommand for the non-HUMAN output paths.
+    """
     if output_format is OutputFormat.JSON:
-        click.echo(json.dumps(payload, indent=2, default=str))
+        sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
     elif output_format is OutputFormat.JSONL:
-        click.echo(json.dumps(payload, default=str))
+        sys.stdout.write(json.dumps(payload, default=str) + "\n")
     else:
-        click.echo(payload)
+        sys.stdout.write(str(payload) + "\n")
+
+
+def _emit_create_result(result: CreatedDevEnv, *, output_format: OutputFormat) -> None:
+    if output_format is OutputFormat.HUMAN:
+        logger.info("Created dev env '{}'.", result.name)
+        logger.info("  config:    {}", result.config_path)
+        logger.info("  connector: {}", result.connector_url)
+        logger.info("  litellm:   {}", result.litellm_proxy_url)
+        logger.info("Run `minds run --config-file {}` to launch against this env.", result.config_path)
+        return
+    _emit_json(
+        {
+            "name": str(result.name),
+            "config_path": result.config_path,
+            "connector_url": str(result.connector_url),
+            "litellm_proxy_url": str(result.litellm_proxy_url),
+        },
+        output_format=output_format,
+    )
 
 
 @click.group()
@@ -161,44 +223,25 @@ def env_create(ctx: click.Context, name: str) -> None:
     except EnvConfigError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    try:
-        credentials = _load_dev_credentials_from_vault(str(deploy_config.vault_path_prefix))
-    except VaultReadError as exc:
-        raise click.ClickException(str(exc)) from exc
+    with ConcurrencyGroup(name="minds-env-create") as cg:
+        try:
+            credentials = _load_dev_credentials_from_vault(str(deploy_config.vault_path_prefix), cg=cg)
+        except VaultReadError as exc:
+            raise click.ClickException(str(exc)) from exc
 
-    providers = _build_real_providers()
+        providers = _build_real_providers(cg)
 
-    try:
-        result = create_dev_env(
-            dev_env_name,
-            deploy_config=deploy_config,
-            credentials=credentials,
-            providers=providers,
-        )
-    except (DevEnvAlreadyExistsError, DevEnvProvisioningError) as exc:
-        raise click.ClickException(str(exc)) from exc
+        try:
+            result = create_dev_env(
+                dev_env_name,
+                deploy_config=deploy_config,
+                credentials=credentials,
+                providers=providers,
+            )
+        except (DevEnvAlreadyExistsError, DevEnvProvisioningError) as exc:
+            raise click.ClickException(str(exc)) from exc
 
     _emit_create_result(result, output_format=output_format)
-
-
-def _emit_create_result(result: CreatedDevEnv, *, output_format: OutputFormat) -> None:
-    if output_format is OutputFormat.HUMAN:
-        click.echo(f"Created dev env '{result.name}'.")
-        click.echo(f"  config:    {result.config_path}")
-        click.echo(f"  connector: {result.connector_url}")
-        click.echo(f"  litellm:   {result.litellm_proxy_url}")
-        click.echo("")
-        click.echo("Run `minds run --config-file {}` to launch against this env.".format(result.config_path))
-        return
-    _emit(
-        {
-            "name": str(result.name),
-            "config_path": result.config_path,
-            "connector_url": str(result.connector_url),
-            "litellm_proxy_url": str(result.litellm_proxy_url),
-        },
-        output_format=output_format,
-    )
 
 
 @env.command("list")
@@ -210,10 +253,10 @@ def env_list(ctx: click.Context) -> None:
 
     if output_format is OutputFormat.HUMAN:
         if not summaries:
-            click.echo("No dev envs configured. Run `minds env create <name>` to create one.")
+            logger.info("No dev envs configured. Run `minds env create <name>` to create one.")
             return
         for s in summaries:
-            click.echo(f"{s.name}\t{s.connector_url}\t{s.config_path}")
+            logger.info("{}\t{}\t{}", s.name, s.connector_url, s.config_path)
         return
 
     payload = [
@@ -226,9 +269,9 @@ def env_list(ctx: click.Context) -> None:
     ]
     if output_format is OutputFormat.JSONL:
         for entry in payload:
-            click.echo(json.dumps(entry, default=str))
+            sys.stdout.write(json.dumps(entry, default=str) + "\n")
     else:
-        click.echo(json.dumps(payload, indent=2, default=str))
+        sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
 
 
 @env.command("destroy")
@@ -253,27 +296,25 @@ def env_destroy(ctx: click.Context, name: str, keep_agents: bool) -> None:
     except EnvConfigError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    try:
-        credentials = _load_dev_credentials_from_vault(str(deploy_config.vault_path_prefix))
-    except VaultReadError as exc:
-        raise click.ClickException(str(exc)) from exc
+    with ConcurrencyGroup(name="minds-env-destroy") as cg:
+        try:
+            credentials = _load_dev_credentials_from_vault(str(deploy_config.vault_path_prefix), cg=cg)
+        except VaultReadError as exc:
+            raise click.ClickException(str(exc)) from exc
 
-    providers = _build_real_providers()
+        providers = _build_real_providers(cg)
 
-    try:
-        destroy_dev_env(
-            dev_env_name,
-            credentials=credentials,
-            providers=providers,
-            keep_agents=keep_agents,
-        )
-    except DevEnvNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except MindError as exc:
-        # Destroy is best-effort across providers; surface the first failure
-        # rather than papering over it (operator can re-run destroy to retry).
-        logger.error("Destroy of {!r} failed: {}", str(dev_env_name), exc)
-        raise click.ClickException(str(exc)) from exc
+        try:
+            destroy_dev_env(
+                dev_env_name,
+                credentials=credentials,
+                providers=providers,
+                keep_agents=keep_agents,
+            )
+        except DevEnvNotFoundError as exc:
+            raise click.ClickException(str(exc)) from exc
+        except MindError as exc:
+            logger.error("Destroy of {!r} failed: {}", str(dev_env_name), exc)
+            raise click.ClickException(str(exc)) from exc
 
-    _ = resolve_minds_root_name  # keep the import alive; future hooks may need it
-    _emit({"name": str(dev_env_name), "status": "destroyed"}, output_format=output_format)
+    _emit_json({"name": str(dev_env_name), "status": "destroyed"}, output_format=output_format)

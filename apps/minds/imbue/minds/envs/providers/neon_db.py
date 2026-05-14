@@ -78,7 +78,6 @@ def _resolve_default_branch(project_id: str, *, api_token: SecretStr) -> NeonBra
     if not isinstance(branches_raw, list) or not branches_raw:
         raise NeonProviderError(f"Neon project {project_id} has no branches")
     branches = _BRANCH_LIST_ADAPTER.validate_python(branches_raw)
-    # Prefer the branch named ``main``; otherwise the first one.
     for branch in branches:
         if branch.name == "main":
             return branch
@@ -102,7 +101,7 @@ def create_neon_database(
     branch = _resolve_default_branch(project_id, api_token=api_token)
     database_name = f"minds-dev-{name}"
 
-    # Ensure role exists. Neon returns 409 if it already does -- treat as success.
+    # Neon returns 409 when the role already exists; treat that as success.
     try:
         _neon_request(
             "POST",
@@ -121,7 +120,6 @@ def create_neon_database(
         json_body={"database": {"name": database_name, "owner_name": role_name}},
     )
 
-    # Fetch the pooled connection URI for the new DB.
     uri_payload = _neon_request(
         "GET",
         f"/projects/{project_id}/connection_uri?database_name={database_name}&role_name={role_name}&pooled=true",
