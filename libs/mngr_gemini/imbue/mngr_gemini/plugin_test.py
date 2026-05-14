@@ -68,10 +68,10 @@ def test_register_agent_type_returns_gemini_class_and_config() -> None:
     assert config_class is GeminiAgentConfig
 
 
-@pytest.fixture
-def gemini_agent(
+def _make_gemini_agent(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
+    agent_config: GeminiAgentConfig,
 ) -> GeminiAgent:
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
@@ -84,9 +84,25 @@ def gemini_agent(
         create_time=datetime.now(timezone.utc),
         host_id=host.id,
         mngr_ctx=local_provider.mngr_ctx,
-        agent_config=GeminiAgentConfig(),
+        agent_config=agent_config,
         host=host,
     )
+
+
+@pytest.fixture
+def gemini_agent(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> GeminiAgent:
+    return _make_gemini_agent(local_provider, tmp_path, GeminiAgentConfig())
+
+
+@pytest.fixture
+def gemini_agent_without_transcript(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> GeminiAgent:
+    return _make_gemini_agent(local_provider, tmp_path, GeminiAgentConfig(emit_common_transcript=False))
 
 
 def test_assemble_command_includes_skip_trust_from_default_cli_args(gemini_agent: GeminiAgent) -> None:
@@ -106,23 +122,9 @@ def test_assemble_command_prepends_transcript_watcher_when_enabled(gemini_agent:
 
 
 def test_assemble_command_skips_transcript_watcher_when_disabled(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
+    gemini_agent_without_transcript: GeminiAgent,
 ) -> None:
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    agent = GeminiAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("test-gemini"),
-        agent_type=AgentTypeName("gemini"),
-        work_dir=work_dir,
-        create_time=datetime.now(timezone.utc),
-        host_id=host.id,
-        mngr_ctx=local_provider.mngr_ctx,
-        agent_config=GeminiAgentConfig(emit_common_transcript=False),
-        host=host,
-    )
+    agent = gemini_agent_without_transcript
     command = str(agent.assemble_command(agent.host, (), command_override=None))
     assert "common_transcript.sh" not in command
     assert command == "gemini --skip-trust"
@@ -143,24 +145,14 @@ def test_get_common_transcript_scripts_returns_common_transcript_sh(gemini_agent
 
 
 def test_provision_with_emit_disabled_does_not_write_script(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
+    gemini_agent_without_transcript: GeminiAgent,
 ) -> None:
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    agent = GeminiAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("test-gemini"),
-        agent_type=AgentTypeName("gemini"),
-        work_dir=work_dir,
-        create_time=datetime.now(timezone.utc),
-        host_id=host.id,
-        mngr_ctx=local_provider.mngr_ctx,
-        agent_config=GeminiAgentConfig(emit_common_transcript=False),
-        host=host,
+    agent = gemini_agent_without_transcript
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
+        mngr_ctx=agent.mngr_ctx,
     )
-    agent.provision(host=host, options=CreateAgentOptions(agent_type=AgentTypeName("gemini")), mngr_ctx=agent.mngr_ctx)
 
     # No script written because emit was disabled
     expected_script = agent._get_agent_dir() / "commands" / "common_transcript.sh"
