@@ -286,7 +286,12 @@ def _drain_new_events(
     parser_warner: MalformedJsonLineWarner,
     seen_chars: int,
 ) -> int:
-    """Read the transcript file, emit any new events past ``seen_chars``, return new offset."""
+    """Read the transcript file, emit any new events past ``seen_chars``, return new offset.
+
+    Only consumes complete newline-terminated lines; any trailing partial line
+    (a write that has not yet been flushed by mngr_claude) is held back until
+    the next poll, so we do not silently drop in-flight events.
+    """
     try:
         content = read_event_content(events_target, _COMMON_TRANSCRIPT_PATH)
     except FileNotFoundError:
@@ -300,11 +305,17 @@ def _drain_new_events(
         return seen_chars
     if len(content) <= seen_chars:
         return seen_chars
-    new_lines = content[seen_chars:].splitlines()
+    new_slice = content[seen_chars:]
+    last_newline = new_slice.rfind("\n")
+    if last_newline == -1:
+        # Only a partial line so far; wait for the writer to flush a newline.
+        return seen_chars
+    complete_part = new_slice[: last_newline + 1]
+    new_lines = complete_part.splitlines()
     new_events = _parse_event_lines(new_lines, parser_warner)
     if new_events:
         writer.emit_events(new_events)
-    return len(content)
+    return seen_chars + len(complete_part)
 
 
 def _parse_event_lines(lines: Sequence[str], parser_warner: MalformedJsonLineWarner) -> list[dict[str, Any]]:
