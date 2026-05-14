@@ -247,7 +247,7 @@ class StreamingOutputWriter(MutableModel):
     def _handle_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
         if event_type == "assistant_message":
-            text = event.get("text", "")
+            text = _coerce_str(event.get("text", ""))
             if text:
                 self.assistant_text_parts.append(text)
         match self.output_format:
