@@ -47,7 +47,7 @@ def test_generate_default_lima_yaml_custom_image(tmp_path: Path) -> None:
 def test_generate_default_lima_yaml_without_host_key_omits_key_block(tmp_path: Path) -> None:
     """When no pre-injected keypair is provided, the provision script must NOT
     write any /etc/ssh/ssh_host_* file -- preserving legacy behavior of
-    letting cc_ssh generate a random key."""
+    leaving the guest's own host key untouched."""
     volume_path = tmp_path / "volume"
     volume_path.mkdir()
     config = generate_default_lima_yaml(volume_host_path=volume_path, host_dir="/mngr")
