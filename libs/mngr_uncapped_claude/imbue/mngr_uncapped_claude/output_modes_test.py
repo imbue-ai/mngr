@@ -53,6 +53,17 @@ def test_build_result_envelope_error_substitutes_error_text() -> None:
     assert envelope["result"] == "boom"
 
 
+def test_build_result_envelope_error_falls_back_when_text_missing() -> None:
+    meta = ResultMeta(session_id="session-1", duration_ms=2, is_error=True, error_text=None)
+    envelope = build_result_envelope(text="ignored", meta=meta, turn_count=1)
+    assert envelope["subtype"] == "error"
+    assert envelope["is_error"] is True
+    # claude -p's native envelope always carries a string here; verify we
+    # never emit JSON null even when error_text is missing.
+    assert isinstance(envelope["result"], str)
+    assert envelope["result"] != ""
+
+
 def test_build_system_init_envelope_shape() -> None:
     envelope = build_system_init_envelope("session-2")
     assert envelope["type"] == "system"

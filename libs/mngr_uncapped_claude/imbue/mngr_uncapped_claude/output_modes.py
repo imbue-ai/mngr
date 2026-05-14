@@ -19,6 +19,12 @@ from imbue.mngr_uncapped_claude.data_types import ResultMeta
 _PLACEHOLDER_MODEL: Final[str] = "unknown"
 
 
+# Fallback string used in the `result` field when an error is reported
+# without a specific message. claude -p's native envelope always carries
+# a string here, so we never emit JSON null.
+_UNKNOWN_ERROR_TEXT: Final[str] = "unknown error"
+
+
 @pure
 def build_result_envelope(
     text: str,
@@ -32,6 +38,10 @@ def build_result_envelope(
     as best-effort.
     """
     subtype = "error" if meta.is_error else "success"
+    if meta.is_error:
+        result_text = meta.error_text if meta.error_text is not None else _UNKNOWN_ERROR_TEXT
+    else:
+        result_text = text
     return {
         "type": "result",
         "subtype": subtype,
@@ -40,7 +50,7 @@ def build_result_envelope(
         "duration_ms": meta.duration_ms,
         "duration_api_ms": 0,
         "num_turns": turn_count,
-        "result": meta.error_text if meta.is_error else text,
+        "result": result_text,
         "stop_reason": "end_turn",
         "session_id": meta.session_id,
         "total_cost_usd": 0.0,
