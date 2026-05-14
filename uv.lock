@@ -2104,14 +2104,12 @@ source = { editable = "libs/mngr_uncapped_claude" }
 dependencies = [
     { name = "imbue-mngr" },
     { name = "imbue-mngr-claude" },
-    { name = "imbue-mngr-wait" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "imbue-mngr-claude", editable = "libs/mngr_claude" },
-    { name = "imbue-mngr-wait", editable = "libs/mngr_wait" },
 ]
 
 [[package]]

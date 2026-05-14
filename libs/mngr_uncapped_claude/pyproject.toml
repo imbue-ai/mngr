@@ -7,7 +7,6 @@ requires-python = ">=3.12"
 dependencies = [
     "imbue-mngr==0.2.8",
     "imbue-mngr-claude==0.2.8",
-    "imbue-mngr-wait==0.1.5",
 ]
 
 [project.entry-points.mngr]
@@ -24,7 +23,6 @@ exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
 imbue-mngr-claude = { workspace = true }
-imbue-mngr-wait = { workspace = true }
 
 [tool.pyright]
 venvPath = "../.."
