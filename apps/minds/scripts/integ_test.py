@@ -26,6 +26,7 @@ import contextlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -83,17 +84,51 @@ class StepResult(FrozenModel):
 # -------------------------------------------------------------------------
 
 
+# Command-line substrings identifying packaged/dev minds + observer subprocesses
+# left over from a previous run. Matched against each process's full command line
+# via `pgrep -af` (not `pkill -f`) so we can resolve and verify a concrete PID
+# before signalling it -- CLAUDE.md forbids broad `pkill -f` patterns because they
+# can hit unrelated processes (including this driver itself).
+_LEFTOVER_PROCESS_PATTERNS = (
+    "/Applications/minds.app",
+    "apps/minds/node_modules/electron/dist/Electron.app",
+    "minds forward",
+    "mngr observe",
+    "mngr events",
+)
+
+
 def kill_existing_minds() -> None:
-    """Kill any packaged or dev minds + observer subprocesses so our launch is clean."""
-    patterns = [
-        "/Applications/minds.app",
-        "apps/minds/node_modules/electron/dist/Electron.app",
-        "minds forward",
-        "mngr observe",
-        "mngr events",
-    ]
-    for pat in patterns:
-        subprocess.run(["pkill", "-f", pat], check=False)
+    """Kill any packaged or dev minds + observer subprocesses so our launch is clean.
+
+    Resolves concrete PIDs via ``pgrep -af`` and signals each one individually,
+    rather than using ``pkill -f`` with broad patterns (which would also match
+    unrelated processes, including this script). Best-effort: missing ``pgrep``
+    or unsignalable PIDs are ignored.
+    """
+    own_pids = {os.getpid(), os.getppid()}
+    script_path = str(Path(__file__).resolve())
+    try:
+        pgrep = subprocess.run(["pgrep", "-af", "minds|mngr"], capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        # No pgrep available -- nothing we can safely do.
+        return
+    for line in pgrep.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid_str, command = parts
+        try:
+            pid = int(pid_str)
+        except ValueError:
+            continue
+        # Never signal ourselves, our parent, or anything running this script.
+        if pid in own_pids or script_path in command:
+            continue
+        if not any(pattern in command for pattern in _LEFTOVER_PROCESS_PATTERNS):
+            continue
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGTERM)
     # Give the OS a moment to reap and release the CDP port.
     threading.Event().wait(2.0)
 
