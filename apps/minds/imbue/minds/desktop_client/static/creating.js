@@ -36,7 +36,7 @@
           statusTextEl.textContent = 'Failed: ' + (data.error || 'unknown error');
           statusEl.classList.add('text-red-600');
         }
-      } else if (data._type === 'phase' && data.status_text) {
+      } else if (data._type === 'status' && data.status_text) {
         statusTextEl.textContent = data.status_text;
       } else if (data.log) {
         pendingLines.push(data.log);

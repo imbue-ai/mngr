@@ -90,26 +90,31 @@ OutputCallback = Callable[[str, bool], None]
 
 LOG_SENTINEL: Final[str] = "__DONE__"
 
-# Multiplexed over ``log_queue`` (rather than a separate channel) so phase
-# changes stay ordered with respect to the log lines emitted around them.
-PHASE_PREFIX: Final[str] = "__PHASE__:"
-
 
 def make_log_callback(log_queue: queue.Queue[str]) -> OutputCallback:
     """Create an output callback that puts lines into a queue."""
     return lambda line, is_stdout: logger.info(line.rstrip("\n")) or log_queue.put(line.rstrip("\n"))
 
 
-def emit_phase(log_queue: queue.Queue[str], status_text: str) -> None:
-    """Push a phase-change event onto ``log_queue`` to update the UI spinner caption."""
-    log_queue.put(PHASE_PREFIX + status_text)
-
-
 class AgentCreationStatus(UpperCaseStrEnum):
-    """Status of a background agent creation."""
+    """Status of a background agent creation.
 
-    CLONING = auto()
-    CREATING = auto()
+    The non-terminal values correspond to the ordered phases the worker
+    thread walks through; ``_stream_creation_logs`` polls the current
+    status and emits a SSE event each time it changes so the UI spinner
+    caption stays in sync with what the backend is actually doing.
+    Conditional phases (``CHECKING_OUT_BRANCH`` only if a branch was
+    given, ``PROVISIONING_AI`` only for ``IMBUE_CLOUD`` AI provider) are
+    skipped when they don't apply -- the status simply jumps to the next
+    applicable phase.
+    """
+
+    INITIALIZING = auto()
+    CLONING_REPO = auto()
+    CHECKING_OUT_BRANCH = auto()
+    PROVISIONING_AI = auto()
+    CREATING_WORKSPACE = auto()
+    WAITING_FOR_READY = auto()
     DONE = auto()
     FAILED = auto()
 
@@ -134,6 +139,12 @@ class AgentCreationInfo(FrozenModel):
         description="Canonical mngr agent id; populated once ``mngr create`` returns, ``None`` while in-flight",
     )
     status: AgentCreationStatus = Field(description="Current creation status")
+    launch_mode: LaunchMode = Field(
+        description=(
+            "Launch mode for this creation. Carried alongside status so consumers can resolve "
+            "mode-aware status captions without a separate lookup."
+        ),
+    )
     redirect_url: str | None = Field(default=None, description="URL to redirect to when creation is done")
     error: str | None = Field(default=None, description="Error message, set when status is FAILED")
 
@@ -844,6 +855,7 @@ class AgentCreator(MutableModel):
     _canonical_agent_ids: dict[str, AgentId] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
     _errors: dict[str, str] = PrivateAttr(default_factory=dict)
+    _launch_modes: dict[str, LaunchMode] = PrivateAttr(default_factory=dict)
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
     _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -912,7 +924,8 @@ class AgentCreator(MutableModel):
         creation_id = CreationId()
 
         with self._lock:
-            self._statuses[str(creation_id)] = AgentCreationStatus.CLONING
+            self._statuses[str(creation_id)] = AgentCreationStatus.INITIALIZING
+            self._launch_modes[str(creation_id)] = launch_mode
             self._log_queues[str(creation_id)] = log_queue
 
         thread = threading.Thread(
@@ -964,6 +977,7 @@ class AgentCreator(MutableModel):
                 creation_id=creation_id,
                 agent_id=self._canonical_agent_ids.get(cid_str),
                 status=status,
+                launch_mode=self._launch_modes.get(cid_str, LaunchMode.LOCAL),
                 redirect_url=self._redirect_urls.get(cid_str),
                 error=self._errors.get(cid_str),
             )
@@ -1025,14 +1039,12 @@ class AgentCreator(MutableModel):
                 # the imbue_cloud command-construction drift from the other
                 # modes' (and was hard to keep in sync with the bake's view
                 # of the same config).
-                # Emit the initial phase caption now that we know the launch
-                # mode -- the server-rendered initial caption already reflects
-                # this, but pushing it through the SSE channel keeps the
-                # frontend authoritative (no divergence if it ever drifts).
-                if launch_mode is LaunchMode.IMBUE_CLOUD:
-                    emit_phase(log_queue, "Connecting to host...")
-                else:
-                    emit_phase(log_queue, "Cloning repository...")
+                # Worker thread takes over from the initial ``INITIALIZING``
+                # status that ``start_creation`` set; cloning is the first
+                # real action. The caption rendered for this status is
+                # launch-mode-aware via ``_STATUS_TEXT_IMBUE_CLOUD``.
+                with self._lock:
+                    self._statuses[cid_str] = AgentCreationStatus.CLONING_REPO
 
                 if _is_local_path(repo_source):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
@@ -1088,7 +1100,8 @@ class AgentCreator(MutableModel):
                     workspace_dir = clone_target
 
                 if branch:
-                    emit_phase(log_queue, "Checking out branch '{}'...".format(branch))
+                    with self._lock:
+                        self._statuses[cid_str] = AgentCreationStatus.CHECKING_OUT_BRANCH
                     log_queue.put("[minds] Checking out branch '{}'...".format(branch))
                     checkout_branch(
                         workspace_dir,
@@ -1109,7 +1122,8 @@ class AgentCreator(MutableModel):
                             raise MngrCommandError("AI provider IMBUE_CLOUD requires imbue_cloud_cli to be configured")
                         if not account_email:
                             raise MngrCommandError("AI provider IMBUE_CLOUD requires an account_email to be supplied")
-                        emit_phase(log_queue, "Provisioning AI access...")
+                        with self._lock:
+                            self._statuses[cid_str] = AgentCreationStatus.PROVISIONING_AI
                         log_queue.put(f"[minds] Minting LiteLLM virtual key for account {account_email}...")
                         try:
                             key_material: LiteLLMKeyMaterial = self.imbue_cloud_cli.create_litellm_key(
@@ -1134,12 +1148,7 @@ class AgentCreator(MutableModel):
                         assert_never(unreachable)
 
                 with self._lock:
-                    self._statuses[cid_str] = AgentCreationStatus.CREATING
-
-                if launch_mode is LaunchMode.IMBUE_CLOUD:
-                    emit_phase(log_queue, "Setting up agent...")
-                else:
-                    emit_phase(log_queue, "Creating workspace...")
+                    self._statuses[cid_str] = AgentCreationStatus.CREATING_WORKSPACE
 
                 # Pre-create the shared latchkey gateway password and a
                 # per-host permissions-override JWT before invoking
@@ -1247,6 +1256,8 @@ class AgentCreator(MutableModel):
                 # startup. The probe is best-effort: if it times out, we
                 # publish anyway so the user at least lands on the retry
                 # page rather than spinning forever (PR 1471 part 1).
+                with self._lock:
+                    self._statuses[cid_str] = AgentCreationStatus.WAITING_FOR_READY
                 self._wait_for_workspace_ready(canonical_id, log_queue)
 
                 # The redirect URL is *absolute* and points at the plugin's
@@ -1337,7 +1348,6 @@ class AgentCreator(MutableModel):
 
         probe_url = f"http://{agent_id}.localhost:{self.mngr_forward_port}/"
         deadline = time.monotonic() + self.workspace_ready_timeout_seconds
-        emit_phase(log_queue, "Waiting for workspace to be ready...")
         log_queue.put("[minds] Waiting for workspace server to be ready...")
         last_status: int | None = None
         last_error: str | None = None

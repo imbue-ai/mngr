@@ -14,7 +14,6 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
-from imbue.minds.desktop_client.agent_creator import PHASE_PREFIX
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -35,6 +34,7 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
@@ -550,7 +550,7 @@ def test_create_agent_api_returns_agent_id(tmp_path: Path) -> None:
     assert response.status_code == 200
     data = response.json()
     assert "agent_id" in data
-    assert data["status"] == "CLONING"
+    assert data["status"] == "INITIALIZING"
     agent_creator.wait_for_all()
 
 
@@ -636,7 +636,16 @@ def test_creation_status_api_returns_status_for_tracked_agent(tmp_path: Path) ->
     # this test the create runs against a nonexistent repo so it may never
     # produce an agent_id; just check that the creation_id round-trips.
     assert data["creation_id"] == str(creation_id)
-    assert data["status"] in ("CLONING", "CREATING", "DONE", "FAILED")
+    assert data["status"] in (
+        "INITIALIZING",
+        "CLONING_REPO",
+        "CHECKING_OUT_BRANCH",
+        "PROVISIONING_AI",
+        "CREATING_WORKSPACE",
+        "WAITING_FOR_READY",
+        "DONE",
+        "FAILED",
+    )
     agent_creator.wait_for_all()
 
 
@@ -770,26 +779,25 @@ def test_creation_logs_sse_streams_events(tmp_path: Path) -> None:
     agent_creator.wait_for_all()
 
 
-def test_creation_logs_sse_emits_phase_events(tmp_path: Path) -> None:
-    """Phase-prefixed queue lines are surfaced as ``{"_type": "phase"}`` SSE events.
+def test_creation_logs_sse_emits_status_events(tmp_path: Path) -> None:
+    """The current ``AgentCreationStatus`` is surfaced as a ``{"_type": "status"}`` SSE event.
 
-    Regular log lines stay on the ``{"log": ...}`` channel; this test verifies the
-    multiplexing dispatch added to ``_stream_creation_logs`` rather than running a
-    real agent creation (which would require Docker).
+    Regular log lines stay on the ``{"log": ...}`` channel. This test exercises
+    the polling dispatch in ``_stream_creation_logs`` by seeding a particular
+    status into the ``AgentCreator``'s private state and verifying the stream
+    emits a matching status event with the right ``status_text`` -- without
+    running a real agent creation (which would require Docker).
     """
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
     creation_id = CreationId()
     log_queue: queue.Queue[str] = queue.Queue()
     with agent_creator._lock:
-        agent_creator._statuses[str(creation_id)] = AgentCreationStatus.CLONING
+        agent_creator._statuses[str(creation_id)] = AgentCreationStatus.CREATING_WORKSPACE
+        agent_creator._launch_modes[str(creation_id)] = LaunchMode.LOCAL
         agent_creator._log_queues[str(creation_id)] = log_queue
 
     log_queue.put("regular log line")
-    log_queue.put(PHASE_PREFIX + "Creating workspace...")
-    with agent_creator._lock:
-        agent_creator._statuses[str(creation_id)] = AgentCreationStatus.DONE
-        agent_creator._redirect_urls[str(creation_id)] = "/done"
     log_queue.put(LOG_SENTINEL)
 
     payloads: list[dict[str, object]] = []
@@ -802,10 +810,41 @@ def test_creation_logs_sse_emits_phase_events(tmp_path: Path) -> None:
             if payloads[-1].get("_type") == "done":
                 break
 
-    phase_events = [p for p in payloads if p.get("_type") == "phase"]
+    status_events = [p for p in payloads if p.get("_type") == "status"]
     log_events = [p for p in payloads if "log" in p]
-    assert [p["status_text"] for p in phase_events] == ["Creating workspace..."]
+    assert len(status_events) == 1
+    assert status_events[0]["status"] == "CREATING_WORKSPACE"
+    assert status_events[0]["status_text"] == "Creating workspace..."
     assert any(p["log"] == "regular log line" for p in log_events)
+
+
+def test_creation_logs_sse_emits_status_text_for_imbue_cloud(tmp_path: Path) -> None:
+    """Status captions are launch-mode-aware via ``_STATUS_TEXT_IMBUE_CLOUD``."""
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    creation_id = CreationId()
+    log_queue: queue.Queue[str] = queue.Queue()
+    with agent_creator._lock:
+        agent_creator._statuses[str(creation_id)] = AgentCreationStatus.CREATING_WORKSPACE
+        agent_creator._launch_modes[str(creation_id)] = LaunchMode.IMBUE_CLOUD
+        agent_creator._log_queues[str(creation_id)] = log_queue
+
+    log_queue.put(LOG_SENTINEL)
+
+    payloads: list[dict[str, object]] = []
+    with client.stream("GET", "/api/create-agent/{}/logs".format(creation_id)) as response:
+        assert response.status_code == 200
+        for line in response.iter_lines():
+            if not line.startswith("data: "):
+                continue
+            payloads.append(json.loads(line[len("data: ") :]))
+            if payloads[-1].get("_type") == "done":
+                break
+
+    status_events = [p for p in payloads if p.get("_type") == "status"]
+    assert status_events
+    assert status_events[0]["status"] == "CREATING_WORKSPACE"
+    assert status_events[0]["status_text"] == "Setting up agent..."
 
 
 def test_creating_page_rejects_unauthenticated(tmp_path: Path) -> None:

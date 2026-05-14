@@ -68,7 +68,7 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
     log_queue: queue.Queue[str] = queue.Queue()
 
     with creator._lock:
-        creator._statuses[str(agent_id)] = AgentCreationStatus.CLONING
+        creator._statuses[str(agent_id)] = AgentCreationStatus.INITIALIZING
         creator._log_queues[str(agent_id)] = log_queue
 
     app = create_desktop_client(

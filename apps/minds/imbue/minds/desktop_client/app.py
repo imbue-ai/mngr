@@ -30,7 +30,6 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
-from imbue.minds.desktop_client.agent_creator import PHASE_PREFIX
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
@@ -80,6 +79,7 @@ from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
+from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
@@ -717,7 +717,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     # CreationId (minds-internal in-flight handle, distinct prefix from a
     # canonical AgentId). The status-polling endpoints accept either.
     return Response(
-        content=json.dumps({"agent_id": str(creation_id), "status": "CLONING"}),
+        content=json.dumps({"agent_id": str(creation_id), "status": str(AgentCreationStatus.INITIALIZING)}),
         media_type="application/json",
     )
 
@@ -798,9 +798,32 @@ async def _stream_creation_logs(
     agent_creator: AgentCreator,
     creation_id: CreationId,
 ) -> AsyncGenerator[str, None]:
-    """Async generator that yields SSE events from a creation log queue."""
+    """Async generator that yields SSE events from a creation log queue.
+
+    Each iteration polls ``agent_creator.get_creation_info(creation_id)``
+    and emits a ``{"_type": "status", ...}`` event whenever the status
+    has changed since the last emission. This piggybacks on the existing
+    ~1s log-queue keepalive cadence; caption-update latency is therefore
+    bounded by the queue.get timeout below, which is acceptable since
+    each backend phase takes much longer than 1s.
+    """
+    last_status: AgentCreationStatus | None = None
     streaming = True
     while streaming:
+        info = agent_creator.get_creation_info(creation_id)
+        if info is not None and info.status != last_status:
+            last_status = info.status
+            status_event = {
+                "_type": "status",
+                "status": str(info.status),
+                "status_text": status_text_for(
+                    str(info.status),
+                    error=info.error,
+                    launch_mode=info.launch_mode,
+                ),
+            }
+            yield "data: {}\n\n".format(json.dumps(status_event))
+
         try:
             line = await asyncio.get_running_loop().run_in_executor(None, log_queue.get, True, 1.0)
         except (queue.Empty, TimeoutError, OSError):
@@ -821,9 +844,6 @@ async def _stream_creation_logs(
                 # Yield a final keepalive so the done event is flushed to the
                 # browser in its own TCP segment, separate from the stream close.
                 yield ": end\n\n"
-        elif line.startswith(PHASE_PREFIX):
-            status_text = line[len(PHASE_PREFIX) :]
-            yield "data: {}\n\n".format(json.dumps({"_type": "phase", "status_text": status_text}))
         else:
             yield "data: {}\n\n".format(json.dumps({"log": line}))
 
