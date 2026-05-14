@@ -724,7 +724,7 @@ def _run_tmr_pipeline(
         remaining_node_ids = []
 
     is_remote_provider = ProviderInstanceName(opts.provider).lower() != LOCAL_PROVIDER_NAME
-    final_details, timed_out_ids, cached_results = launch_and_poll_agents(
+    final_details, timed_out_ids, cached_results, pulled_branch_agent_ids = launch_and_poll_agents(
         test_node_ids=remaining_node_ids,
         config=config,
         mngr_ctx=mngr_ctx,
@@ -758,6 +758,7 @@ def _run_tmr_pipeline(
         base_commit=base_commit if is_remote_provider else None,
         cached_results=cached_results,
         launch_failures=launch_failures,
+        already_pulled_agent_ids=pulled_branch_agent_ids,
     )
 
     # Step 9: Write report with final results (artifacts already pulled during polling)

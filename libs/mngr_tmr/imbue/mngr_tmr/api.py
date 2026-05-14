@@ -117,7 +117,7 @@ def launch_and_poll_agents(
     artifact_output_dir: Path | None = None,
     source_dir: Path | None = None,
     base_commit: str | None = None,
-) -> tuple[dict[str, AgentDetails], set[str], dict[str, TestResult]]:
+) -> tuple[dict[str, AgentDetails], set[str], dict[str, TestResult], set[str]]:
     """Launch agents incrementally and poll until all finish.
 
     Handles two modes depending on arguments:
@@ -131,7 +131,9 @@ def launch_and_poll_agents(
     pre-existing entries are tracked from the start, and newly launched
     agents (or new launch failures) are appended during execution.
 
-    Returns (final_details, timed_out_ids, cached_results).
+    Returns (final_details, timed_out_ids, cached_results, pulled_branch_agent_ids).
+    ``pulled_branch_agent_ids`` lets the caller skip redundant branch-pull
+    re-attempts against agents whose Modal sandboxes have since been torn down.
     """
     remaining_tests = list(test_node_ids)
     pending_ids: set[str] = set()
@@ -140,6 +142,7 @@ def launch_and_poll_agents(
     timed_out_ids: set[str] = set()
     missing_rounds: dict[str, int] = {}
     cached_results: dict[str, TestResult] = {}
+    pulled_branch_agent_ids: set[str] = set()
     last_result_check: dict[str, float] = {}
 
     for info in all_agents:
@@ -243,12 +246,11 @@ def launch_and_poll_agents(
                 host=all_hosts[agent_id_str],
                 artifact_output_dir=artifact_output_dir,
                 cg=mngr_ctx.concurrency_group,
-                should_stop=agent_detail.state == AgentLifecycleState.WAITING,
             )
             if pre_read is not None:
                 cached_results[agent_id_str] = pre_read
                 if base_commit is not None and source_dir is not None and should_pull_changes_from_result(pre_read):
-                    pull_agent_branch(
+                    pulled = pull_agent_branch(
                         agent_detail.id,
                         agent_detail.name,
                         agent_detail.initial_branch,
@@ -257,6 +259,10 @@ def launch_and_poll_agents(
                         mngr_ctx.concurrency_group,
                         base_commit,
                     )
+                    if pulled is not None:
+                        pulled_branch_agent_ids.add(agent_id_str)
+            if agent_detail.state == AgentLifecycleState.WAITING:
+                stop_agent_on_host(all_hosts[agent_id_str], agent_detail.id, agent_detail.name)
 
         for agent_id_str in list(pending_ids):
             if agent_id_str not in seen_ids:
@@ -288,7 +294,6 @@ def launch_and_poll_agents(
                         host=all_hosts[agent_id_str],
                         artifact_output_dir=artifact_output_dir,
                         cg=mngr_ctx.concurrency_group,
-                        should_stop=True,
                     )
                     if pre_read is not None:
                         cached_results[agent_id_str] = pre_read
@@ -297,7 +302,7 @@ def launch_and_poll_agents(
                             and source_dir is not None
                             and should_pull_changes_from_result(pre_read)
                         ):
-                            pull_agent_branch(
+                            pulled = pull_agent_branch(
                                 AgentId(agent_id_str),
                                 info.agent_name,
                                 info.branch_name,
@@ -306,6 +311,9 @@ def launch_and_poll_agents(
                                 mngr_ctx.concurrency_group,
                                 base_commit,
                             )
+                            if pulled is not None:
+                                pulled_branch_agent_ids.add(agent_id_str)
+                    stop_agent_on_host(all_hosts[agent_id_str], AgentId(agent_id_str), info.agent_name)
                     pending_ids.discard(agent_id_str)
                     changed = True
 
@@ -318,7 +326,7 @@ def launch_and_poll_agents(
         if pending_ids or remaining_tests:
             time.sleep(poll_interval_seconds)
 
-    return final_details, timed_out_ids, cached_results
+    return final_details, timed_out_ids, cached_results, pulled_branch_agent_ids
 
 
 def _collect_agent_results(
@@ -421,12 +429,18 @@ def gather_results(
     base_commit: str | None = None,
     cached_results: dict[str, TestResult] | None = None,
     launch_failures: Sequence[TestMapReduceResult] = (),
+    already_pulled_agent_ids: set[str] | None = None,
 ) -> list[TestMapReduceResult]:
     """Gather results from all finished agents, pulling branches where appropriate.
 
     ``launch_failures`` are prepended to the returned list so agents that
     failed to launch still appear in the report.
+
+    ``already_pulled_agent_ids``: agents whose branches were successfully
+    pulled during polling. The branch-pull fallback skips these — their
+    sandboxes have since been torn down and a re-attempt would always fail.
     """
+    already_pulled = already_pulled_agent_ids or set()
     results = _collect_agent_results(
         agents=agents,
         final_details=final_details,
@@ -444,6 +458,8 @@ def gather_results(
         for result in results:
             if should_pull_changes(result):
                 agent_id_str = next(str(info.agent_id) for info in agents if info.test_node_id == result.test_node_id)
+                if agent_id_str in already_pulled:
+                    continue
                 detail = final_details.get(agent_id_str)
                 if detail is not None:
                     pull_agent_branch(

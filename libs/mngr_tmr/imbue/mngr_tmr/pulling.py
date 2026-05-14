@@ -24,7 +24,6 @@ from imbue.mngr_tmr.data_types import ChangeStatus
 from imbue.mngr_tmr.data_types import IntegratorResult
 from imbue.mngr_tmr.data_types import TestResult
 from imbue.mngr_tmr.data_types import TestRunInfo
-from imbue.mngr_tmr.launching import stop_agent_on_host
 from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 
@@ -143,15 +142,17 @@ def finalize_agent(
     host: OnlineHostInterface,
     artifact_output_dir: Path | None,
     cg: ConcurrencyGroup,
-    should_stop: bool,
 ) -> TestResult | None:
-    """Pull outputs and read result from a finished agent, then optionally stop it."""
-    pre_read: TestResult | None = None
-    if artifact_output_dir is not None:
-        pre_read = pull_agent_outputs(agent_id, agent_name, host, artifact_output_dir, cg)
-    if should_stop:
-        stop_agent_on_host(host, agent_id, agent_name)
-    return pre_read
+    """Pull artifacts from a finished agent and read its result.
+
+    The caller is responsible for stopping the agent *after* any subsequent
+    pull (e.g. ``pull_agent_branch``) has completed — stopping the agent tears
+    down its Modal sandbox, which kills the SSH endpoint that branch pulls
+    rely on.
+    """
+    if artifact_output_dir is None:
+        return None
+    return pull_agent_outputs(agent_id, agent_name, host, artifact_output_dir, cg)
 
 
 def pull_integrator_outputs(
