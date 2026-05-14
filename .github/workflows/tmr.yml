@@ -156,7 +156,7 @@ jobs:
           git push --set-upstream origin "$branch"
           run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           gh pr create \
-            --base main \
+            --base "${{ github.ref_name }}" \
             --head "$branch" \
             --title "TMR: $branch" \
             --body "Automated PR from TMR workflow run [#${{ github.run_id }}]($run_url).
