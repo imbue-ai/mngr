@@ -2,6 +2,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from scripts.trigger_changelog_consolidation import PROVIDER
 from scripts.trigger_changelog_consolidation import _ENABLED_PLUGINS
 from scripts.trigger_changelog_consolidation import disable_plugin_args
 
@@ -34,6 +35,22 @@ def test_cli_print_disable_plugin_args_matches_helper() -> None:
         timeout=30,
     )
     assert result.stdout.strip() == " ".join(disable_plugin_args())
+
+
+def test_cli_print_provider_matches_constant() -> None:
+    """The CLI flag is the integration point with setup_changelog_agent.sh
+    (which reads it to set $PROVIDER); its output must match the in-process
+    constant so the deploy and release.py's printed on-demand command can't
+    drift.
+    """
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPT_PATH), "--print-provider"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    assert result.stdout.strip() == PROVIDER
 
 
 def test_cli_without_action_errors_and_mentions_flag() -> None:
