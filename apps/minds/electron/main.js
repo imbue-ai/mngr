@@ -1175,11 +1175,15 @@ async function onReady() {
   await runStartupSequence(initialBundle);
 }
 
-// User-initiated update check from File > Check for Updates. Delegates
-// entirely to ToDesktop: `checkForUpdates()` triggers the same flow as
-// the automatic launch/interval checks -- if an update exists it
-// downloads in the background and ToDesktop shows its own
-// "Restart to update" prompt when the download completes.
+// User-initiated update check from File > Check for Updates.
+//
+// ToDesktop's `checkForUpdates()` drives the *install* side: when it
+// finds a newer release it downloads in the background and shows its
+// own "Restart to update" prompt. But it is silent when you're already
+// up to date -- a menu click with no newer version produces zero UI,
+// which reads as "nothing happened / broken". So for the menu-triggered
+// path we attach one-shot listeners purely to give the user feedback;
+// we do NOT show our own install prompt (ToDesktop owns that).
 async function triggerUpdateCheck() {
   const autoUpdater = todesktop.autoUpdater;
   if (!autoUpdater || typeof autoUpdater.checkForUpdates !== 'function') {
@@ -1190,14 +1194,42 @@ async function triggerUpdateCheck() {
     });
     return;
   }
-  try {
-    await autoUpdater.checkForUpdates({ source: 'menu' });
-  } catch (err) {
+  const onNotAvailable = () => {
+    dialog.showMessageBox({
+      type: 'info',
+      message: "You're up to date.",
+      detail: 'No newer version is available.',
+    });
+  };
+  const onAvailable = (info) => {
+    const v = info && (info.version || info.releaseName);
+    dialog.showMessageBox({
+      type: 'info',
+      message: v ? `Update ${v} found.` : 'Update found.',
+      detail: 'Downloading in the background. You will be prompted to restart when it is ready.',
+    });
+  };
+  const onError = (err) => {
     dialog.showMessageBox({
       type: 'error',
       message: 'Update check failed.',
       detail: String(err && err.message ? err.message : err),
     });
+  };
+  autoUpdater.once('update-not-available', onNotAvailable);
+  autoUpdater.once('update-available', onAvailable);
+  autoUpdater.once('error', onError);
+  try {
+    await autoUpdater.checkForUpdates({ source: 'menu' });
+  } catch (err) {
+    onError(err);
+  } finally {
+    // Listeners are `once`, but remove explicitly in case checkForUpdates
+    // resolved without ever emitting (so a later automatic check doesn't
+    // surface a stale menu-triggered dialog).
+    autoUpdater.removeListener('update-not-available', onNotAvailable);
+    autoUpdater.removeListener('update-available', onAvailable);
+    autoUpdater.removeListener('error', onError);
   }
 }
 
