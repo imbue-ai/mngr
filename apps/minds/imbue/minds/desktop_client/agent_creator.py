@@ -55,8 +55,9 @@ from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
-from imbue.mngr_latchkey.agent_setup import finalize_agent_permissions
+from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -389,8 +390,10 @@ def _build_mngr_create_command(
     :func:`imbue.mngr_latchkey.agent_setup.prepare_agent_latchkey`. The
     caller decides whether the agent is tunneled (constant agent-side
     loopback URL) or running on the bare host (live gateway port);
-    this function just lifts the entries into ``--env`` flags. Pass
-    ``None`` or an empty dict to opt the agent out of latchkey wiring.
+    this function just lifts the entries into ``--host-env`` flags so
+    every agent that ever runs on the new host inherits the same
+    gateway wiring. Pass ``None`` or an empty dict to opt the host out
+    of latchkey wiring.
     """
     match launch_mode:
         case LaunchMode.LOCAL:
@@ -413,11 +416,15 @@ def _build_mngr_create_command(
     # [create_templates.main] section, so we no longer pass `--message` here.
     # ``--format jsonl`` makes mngr emit ``{"event": "created", "agent_id": ..., "host_id": ...}``
     # as the final stdout line; ``run_mngr_create`` parses that to recover
-    # the canonical agent id.
-    latchkey_env_args: list[str] = []
+    # the canonical agent id (and the canonical host id, used to swing
+    # the latchkey opaque permissions handle onto its canonical path).
+    latchkey_host_env_args: list[str] = []
     if latchkey_env:
         for key, value in latchkey_env.items():
-            latchkey_env_args.extend(["--env", f"{key}={value}"])
+            # ``--host-env`` (not ``--env``) so the wiring is written to
+            # the host's env file once and every agent on the host
+            # inherits the same gateway URL / password / JWT.
+            latchkey_host_env_args.extend(["--host-env", f"{key}={value}"])
 
     mngr_command: list[str] = [
         MNGR_BINARY,
@@ -432,7 +439,7 @@ def _build_mngr_create_command(
         f"MINDS_API_KEY={api_key}",
         "--label",
         "user_created=true",
-        *latchkey_env_args,
+        *latchkey_host_env_args,
         "--label",
         "is_primary=true",
     ]
@@ -623,7 +630,7 @@ def run_mngr_create(
     latchkey_env: Mapping[str, str] | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
-) -> tuple[str, AgentId]:
+) -> tuple[str, AgentId, HostId]:
     """Create an mngr agent via ``mngr create --format jsonl``.
 
     The repo's own ``.mngr/settings.toml`` defines agent types, templates,
@@ -638,9 +645,11 @@ def run_mngr_create(
     the FCT template's own ``pass_(host_)env`` declarations cause mngr to
     forward them onto the host as appropriate.
 
-    Returns ``(api_key, canonical_agent_id)``. The canonical id is parsed
-    out of the ``"event": "created"`` JSONL line that ``mngr create``
-    emits as its final stdout record.
+    Returns ``(api_key, canonical_agent_id, canonical_host_id)``. Both
+    canonical ids are parsed out of the ``"event": "created"`` JSONL
+    line that ``mngr create`` emits as its final stdout record; the host
+    id is what minds keys per-host latchkey state (permissions, opaque
+    handle symlink target) by.
 
     Raises ``MngrCommandError`` if the command fails or never emits a
     ``created`` event (e.g. crashed before final-output stage).
@@ -690,7 +699,7 @@ def run_mngr_create(
             )
         )
 
-    if capture.canonical_agent_id is None:
+    if capture.canonical_agent_id is None or capture.canonical_host_id is None:
         # Exit-zero without a created event almost certainly means the
         # JSONL output got mangled or some pre-emit error path took over.
         # Fail loudly rather than fall through with a sentinel id.
@@ -700,7 +709,12 @@ def run_mngr_create(
             )
         )
 
-    return api_key, capture.canonical_agent_id
+    try:
+        canonical_host_id = HostId(capture.canonical_host_id)
+    except ValueError as e:
+        raise MngrCommandError(f"mngr create emitted an invalid host_id {capture.canonical_host_id!r}: {e}") from e
+
+    return api_key, capture.canonical_agent_id, canonical_host_id
 
 
 class AgentCreator(MutableModel):
@@ -1087,13 +1101,13 @@ class AgentCreator(MutableModel):
                     self._statuses[cid_str] = AgentCreationStatus.CREATING
 
                 # Pre-create the shared latchkey gateway password and a
-                # per-agent permissions-override JWT before invoking
+                # per-host permissions-override JWT before invoking
                 # ``mngr create``. The JWT references an *opaque*
                 # UUID-named permissions handle that we materialize
                 # here with a deny-all baseline; after ``mngr create``
-                # returns the canonical agent id, ``finalize_agent_permissions``
+                # returns the canonical host id, ``finalize_host_permissions``
                 # replaces that handle with a symlink to the canonical
-                # ``permissions_path_for_agent`` location. This avoids
+                # ``permissions_path_for_host`` location. This avoids
                 # the post-create ``mngr provision --env`` step (which
                 # was fragile and could silently leave
                 # ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` missing in
@@ -1114,7 +1128,7 @@ class AgentCreator(MutableModel):
 
                 parsed_name = AgentName(agent_name)
                 log_queue.put("[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value))
-                api_key, canonical_id = run_mngr_create(
+                api_key, canonical_id, canonical_host_id = run_mngr_create(
                     launch_mode=launch_mode,
                     workspace_dir=workspace_dir,
                     agent_name=parsed_name,
@@ -1146,12 +1160,15 @@ class AgentCreator(MutableModel):
                 save_api_key_hash(self.paths.data_dir, canonical_id, key_hash)
                 log_queue.put("[minds] API key generated and hash stored.")
 
-                # Now that we know the canonical agent id, point the
+                # Now that we know the canonical host id, point the
                 # opaque permissions handle (which the JWT references)
-                # at the canonical agent-keyed permissions file. After
+                # at the canonical host-keyed permissions file. After
                 # this, ``LatchkeyPermissionGrantHandler`` can write to
                 # the canonical path and the gateway will see the
-                # changes via the symlink.
+                # changes via the symlink. Keying by host (not agent)
+                # matches the ``--host-env`` injection above: every
+                # agent on the host shares the same gateway wiring and
+                # the same permissions file.
                 #
                 # We downgrade ``LatchkeyStoreError`` here to a warning
                 # rather than failing agent creation: the gateway still
@@ -1162,20 +1179,20 @@ class AgentCreator(MutableModel):
                 # agent.
                 if self.latchkey is not None:
                     try:
-                        finalize_agent_permissions(
+                        finalize_host_permissions(
                             self.latchkey,
                             latchkey_setup.opaque_permissions_path,
-                            canonical_id,
+                            canonical_host_id,
                         )
                     except LatchkeyStoreError as link_error:
                         logger.warning(
-                            "Failed to link latchkey permissions handle for agent {}: {}",
-                            canonical_id,
+                            "Failed to link latchkey permissions handle for host {}: {}",
+                            canonical_host_id,
                             link_error,
                         )
                         log_queue.put(
                             "[minds] Warning: could not link latchkey permissions handle to "
-                            f"canonical path for agent {canonical_id}; permission grants will not "
+                            f"canonical path for host {canonical_host_id}; permission grants will not "
                             f"take effect until the agent is re-created. Reason: {link_error}"
                         )
 

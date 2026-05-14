@@ -6,10 +6,12 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.find import AgentMatch
+from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import parse_agent_addresses_or_raise
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -26,6 +28,7 @@ from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.base_provider import BaseProviderInstance
@@ -35,7 +38,7 @@ class LabelCliOptions(CommonCliOptions):
     """Options passed from the CLI to the label command."""
 
     agents: tuple[str, ...]
-    agent_list: tuple[str, ...]
+    agent_list: tuple[AgentAddress, ...]
     label: tuple[str, ...]
 
 
@@ -208,8 +211,9 @@ def apply_labels(
 @optgroup.option(
     "--agent",
     "agent_list",
+    type=AGENT_ADDRESS,
     multiple=True,
-    help="Agent name or ID to label (can be specified multiple times)",
+    help="Agent address (NAME[@HOST[.PROVIDER]]) to label (can be specified multiple times)",
 )
 @optgroup.group("Labels")
 @optgroup.option(
@@ -237,17 +241,19 @@ def label(ctx: click.Context, **kwargs: Any) -> None:
         key, value = parse_label_string(label_str)
         labels_to_set[key] = value
 
-    # Collect agent identifiers from args and --agent flag
-    agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
+    # Collect agent addresses from args and --agent flag
+    agent_addresses: list[AgentAddress] = parse_agent_addresses_or_raise(expand_stdin_placeholder(opts.agents)) + list(
+        opts.agent_list
+    )
 
-    if not agent_identifiers:
+    if not agent_addresses:
         if STDIN_PLACEHOLDER not in opts.agents:
             raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
         return
 
     # Find matching agents using the shared infrastructure (same as limit, stop, etc.)
-    target_agents = find_agents_by_addresses(
-        raw_identifiers=agent_identifiers,
+    target_agents = find_all_agents(
+        addresses=agent_addresses,
         filter_all=False,
         target_state=None,
         mngr_ctx=mngr_ctx,

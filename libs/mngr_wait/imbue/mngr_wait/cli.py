@@ -6,8 +6,12 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.address_parsers import parse_agent_or_host_address
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.exit_codes import EXIT_CODE_ERROR
+from imbue.mngr.cli.exit_codes import EXIT_CODE_SUCCESS
+from imbue.mngr.cli.exit_codes import EXIT_CODE_TIMEOUT
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
@@ -16,6 +20,7 @@ from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr.utils.parent_process import start_parent_death_watcher
@@ -29,9 +34,6 @@ from imbue.mngr_wait.data_types import compute_default_target_states
 from imbue.mngr_wait.data_types import describe_combined_state
 from imbue.mngr_wait.data_types import validate_state_strings
 from imbue.mngr_wait.primitives import ALL_VALID_STATE_STRINGS
-from imbue.mngr_wait.primitives import EXIT_CODE_ERROR
-from imbue.mngr_wait.primitives import EXIT_CODE_SUCCESS
-from imbue.mngr_wait.primitives import EXIT_CODE_TIMEOUT
 
 
 class WaitCliOptions(CommonCliOptions):
@@ -184,8 +186,12 @@ def wait(ctx: click.Context, **kwargs: object) -> None:
     if target_identifier is None:
         target_identifier = _read_target_from_stdin()
 
-    # Resolve the target
-    resolved = resolve_wait_target(target_identifier, mngr_ctx)
+    # Parse and resolve the target
+    try:
+        target_address = parse_agent_or_host_address(target_identifier)
+    except UserInputError as e:
+        raise click.BadParameter(str(e)) from e
+    resolved = resolve_wait_target(target_address, mngr_ctx)
 
     # Combine positional states and --state option values
     all_state_args = list(opts.states) + list(opts.state)

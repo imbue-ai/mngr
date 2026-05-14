@@ -4,7 +4,7 @@ These tests create a real agent via the CLI, then exercise
 select_agent_interactively_with_host and find_agent_for_command end-to-end.
 The only thing monkeypatched is the urwid TUI (select_agent_interactively),
 since it requires an interactive terminal. Everything else -- list_agents,
-discover_hosts_and_agents, find_and_maybe_start_agent_by_name_or_id --
+discover_hosts_and_agents, find_one_agent, materialize_agent --
 runs against real data on disk.
 """
 
@@ -21,6 +21,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 
 
@@ -92,8 +93,7 @@ def test_find_agent_for_command_with_stopped_agent_and_skip_agent_state_check(
     # With skip_agent_state_check=True, should find the stopped agent
     result = find_agent_for_command(
         mngr_ctx=temp_mngr_ctx,
-        agent_identifier=agent_name,
-        command_usage="test",
+        address=AgentAddress(agent=AgentName(agent_name)),
         host_filter=None,
         is_start_desired=True,
         skip_agent_state_check=True,
@@ -129,7 +129,6 @@ def test_find_agent_for_command_raises_for_stopped_agent_without_skip(
     with pytest.raises(UserInputError, match="stopped and automatic starting is disabled"):
         find_agent_for_command(
             mngr_ctx=temp_mngr_ctx,
-            agent_identifier=agent_name,
-            command_usage="test",
+            address=AgentAddress(agent=AgentName(agent_name)),
             host_filter=None,
         )

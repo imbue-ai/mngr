@@ -1,4 +1,4 @@
-"""Integration tests for the find module (resolve_source_location and ensure_host_started)."""
+"""Integration tests for the find module (resolve_hosted_location and ensure_host_started)."""
 
 from datetime import datetime
 from datetime import timezone
@@ -6,9 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mngr.api.find import ParsedSourceLocation
 from imbue.mngr.api.find import ensure_host_started
-from imbue.mngr.api.find import resolve_source_location
+from imbue.mngr.api.find import resolve_hosted_location
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
@@ -17,7 +16,9 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostedLocation
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
@@ -61,12 +62,12 @@ def test_ensure_host_started_returns_already_online_host(
     assert online_host is host
 
 
-def test_resolve_source_location_resolves_host_and_path(
+def test_resolve_hosted_location_resolves_host_and_path(
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
     local_provider: LocalProviderInstance,
 ) -> None:
-    """Test that resolve_source_location returns a valid HostLocation for a known host.
+    """Test that resolve_hosted_location returns a valid HostLocation for a known host.
 
     Verifies the function resolves a host reference and path to an online host
     with a valid HostLocation.
@@ -80,11 +81,11 @@ def test_resolve_source_location_resolves_host_and_path(
 
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {host_ref: []}
 
-    parsed = ParsedSourceLocation(
-        host_name=HostName(str(host_id)),
-        path=str(temp_work_dir),
+    parsed = HostedLocation(
+        host=HostAddress(host=host_id),
+        path=temp_work_dir,
     )
-    result = resolve_source_location(
+    result = resolve_hosted_location(
         parsed,
         agents_by_host=agents_by_host,
         mngr_ctx=temp_mngr_ctx,

@@ -54,6 +54,7 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.request_events import RequestInbox
+from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import parse_request_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import find_handler_for_event
@@ -1853,9 +1854,23 @@ def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
     the chrome SSE wakes up and pushes the new ``request_count`` immediately
     (otherwise it would lag up to 30s for the next poll tick, breaking the
     requests panel auto-open and badge UX).
+
+    ``LATCHKEY_PERMISSION`` events from the JSONL stream are ignored
+    here: latchkey 2.9.0 ships a gateway extension that owns the
+    pending-permission queue, and the desktop client consumes it via
+    :class:`PermissionRequestsConsumer` instead. Any latchkey events
+    that still arrive over the legacy JSONL channel are stale (the
+    agents migrating to the extension write directly to the gateway
+    now) and would only double-count.
     """
     event = parse_request_event(raw_line)
     if event is None:
+        return
+    if event.request_type == str(RequestType.LATCHKEY_PERMISSION):
+        logger.debug(
+            "Ignoring legacy JSONL latchkey-permission event from agent {}; the gateway extension owns this flow now",
+            agent_id_str,
+        )
         return
     for app in _request_event_apps.values():
         current_inbox: RequestInbox | None = app.state.request_inbox
