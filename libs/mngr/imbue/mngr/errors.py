@@ -263,8 +263,8 @@ class ProviderNotAuthorizedError(ProviderError):
     Surfaces as ``ProviderErrorInfo`` on ``ListResult.errors`` and gates
     the exit code under ``--on-error abort``. Providers that *can*
     cheaply detect missing credentials before any API call should raise
-    ``ProviderCredentialsMissingError`` (warning) for that case and
-    reserve this class for confirmed 401/403 / token-rejected paths.
+    ``ProviderCredentialsMissingError`` for that case and reserve this
+    class for confirmed 401/403 / token-rejected paths.
     """
 
     def __init__(self, provider_name: ProviderInstanceName, auth_help: str | None = None) -> None:
