@@ -82,6 +82,9 @@ _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
     "Unknown": HostState.CRASHED,
 }
 
+# Filename of the pre-injected ed25519 sshd host key stored per host on disk.
+_HOST_KEY_NAME = "ssh_host_ed25519_key"
+
 
 class LimaProviderInstance(BaseProviderInstance):
     """Provider instance for managing Lima VMs as hosts.
@@ -156,15 +159,19 @@ class LimaProviderInstance(BaseProviderInstance):
         """Path to the known_hosts file for this provider instance."""
         return self._keys_dir / "known_hosts"
 
-    def _host_keypair_paths(self, host_id: HostId) -> tuple[Path, Path]:
-        """Return (private_key_path, public_key_path) for this host's pre-injected sshd host key.
+    def _host_keys_dir(self, host_id: HostId) -> Path:
+        """Directory holding this host's pre-injected sshd host keypair.
 
         Per-host (not per-provider) so each VM has its own identity and removing
         a host cleanly leaves no shared state. Mirrors mngr_vps_docker's
         pre-injected sshd host-key layout.
         """
-        host_keys_dir = self._keys_dir / "hosts" / str(host_id)
-        return host_keys_dir / "ssh_host_ed25519_key", host_keys_dir / "ssh_host_ed25519_key.pub"
+        return self._keys_dir / "hosts" / str(host_id)
+
+    def _host_keypair_paths(self, host_id: HostId) -> tuple[Path, Path]:
+        """Return (private_key_path, public_key_path) for this host's pre-injected sshd host key."""
+        host_keys_dir = self._host_keys_dir(host_id)
+        return host_keys_dir / _HOST_KEY_NAME, host_keys_dir / f"{_HOST_KEY_NAME}.pub"
 
     def _ensure_host_keypair(self, host_id: HostId) -> tuple[str, str]:
         """Generate (or load) this host's pre-injected ed25519 keypair.
@@ -173,8 +180,9 @@ class LimaProviderInstance(BaseProviderInstance):
         into the VM via the Lima provision script and added to known_hosts on
         the host machine atomically -- no ssh-keyscan required.
         """
-        private_path, _ = self._host_keypair_paths(host_id)
-        private_key_path, public_key_openssh = load_or_create_host_keypair(private_path.parent, "ssh_host_ed25519_key")
+        private_key_path, public_key_openssh = load_or_create_host_keypair(
+            self._host_keys_dir(host_id), _HOST_KEY_NAME
+        )
         return private_key_path.read_text(), public_key_openssh
 
     @property
@@ -737,7 +745,7 @@ sudo poweroff
             tags_path.unlink(missing_ok=True)
 
         # Delete the per-host pre-injected sshd keypair directory.
-        host_keys_dir = self._keys_dir / "hosts" / str(host_id)
+        host_keys_dir = self._host_keys_dir(host_id)
         if host_keys_dir.exists():
             shutil.rmtree(host_keys_dir, ignore_errors=True)
 
