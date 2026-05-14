@@ -8,8 +8,11 @@ shared gateway); we cover the underlying dispatch logic in
 ``discovery_stream_test.py`` instead.
 """
 
+import contextlib
 import hashlib
 import json
+import subprocess
+import sys
 from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
@@ -297,9 +300,29 @@ def test_admin_jwt_prints_jwt_and_creates_admin_file(
 # -- gateway-info -----------------------------------------------------------
 
 
-def _build_forward_info(*, gateway_port: int | None) -> LatchkeyForwardInfo:
+@contextlib.contextmanager
+def _fake_running_supervisor() -> Iterator[int]:
+    """Yield the PID of a sleeping subprocess whose cmdline passes the supervisor liveness check.
+
+    The subprocess's argv is shaped like ``[python, -c, ..., "mngr",
+    "latchkey", "forward"]`` so
+    :func:`_cmdline_looks_like_mngr_latchkey_forward` accepts it.
+    Terminated on context exit.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import signal; signal.pause()", "mngr", "latchkey", "forward"],
+        start_new_session=True,
+    )
+    try:
+        yield proc.pid
+    finally:
+        proc.kill()
+        proc.wait(timeout=5.0)
+
+
+def _build_forward_info(*, pid: int, gateway_port: int | None) -> LatchkeyForwardInfo:
     return LatchkeyForwardInfo(
-        pid=4242,
+        pid=pid,
         started_at=datetime.now(timezone.utc),
         gateway_port=gateway_port,
     )
@@ -314,19 +337,20 @@ def test_gateway_info_prints_url_and_password_when_supervisor_record_is_ready(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """With a complete forward record on disk, the subcommand emits ``{url, password}``."""
+    """With a live supervisor + complete record, the subcommand emits ``{url, password}``."""
     del clean_latchkey_env
     monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
     monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
     monkeypatch.setenv("HOME", str(tmp_path))
-    save_forward_info(plugin_data_dir(latchkey_root), _build_forward_info(gateway_port=32867))
 
-    result = cli_runner.invoke(
-        latchkey,
-        ["gateway-info"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
+    with _fake_running_supervisor() as pid:
+        save_forward_info(plugin_data_dir(latchkey_root), _build_forward_info(pid=pid, gateway_port=32867))
+        result = cli_runner.invoke(
+            latchkey,
+            ["gateway-info"],
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     expected_password = hashlib.sha256(b"fake-jwt-for:/__minds_gateway_password__/sentinel").hexdigest()
@@ -361,6 +385,37 @@ def test_gateway_info_exits_nonzero_when_no_supervisor_record(
     assert "no ``mngr latchkey forward`` supervisor is running" in result.output.lower()
 
 
+def test_gateway_info_exits_nonzero_when_supervisor_record_is_stale(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    latchkey_root: Path,
+    fake_latchkey_binary: Path,
+    clean_latchkey_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Record exists but its PID is a stranger (or dead) => non-zero exit, same message as 'no record'.
+
+    Picks PID 1 (init) on Linux: alive, but its cmdline is not ours, so
+    :func:`is_forward_info_alive` rejects it -- the exact PID-reuse case
+    we want the subcommand to handle, not propagate as 'still warming up'.
+    """
+    del clean_latchkey_env
+    monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
+    monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    save_forward_info(plugin_data_dir(latchkey_root), _build_forward_info(pid=1, gateway_port=32867))
+
+    result = cli_runner.invoke(
+        latchkey,
+        ["gateway-info"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    assert "no ``mngr latchkey forward`` supervisor is running" in result.output.lower()
+
+
 def test_gateway_info_exits_nonzero_while_supervisor_still_warming_up(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -370,19 +425,20 @@ def test_gateway_info_exits_nonzero_while_supervisor_still_warming_up(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Record-without-port (supervisor mid-startup) => non-zero exit asking for a retry."""
+    """Live supervisor but no port stamped yet => 'still warming up' message."""
     del clean_latchkey_env
     monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
     monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
     monkeypatch.setenv("HOME", str(tmp_path))
-    save_forward_info(plugin_data_dir(latchkey_root), _build_forward_info(gateway_port=None))
 
-    result = cli_runner.invoke(
-        latchkey,
-        ["gateway-info"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
+    with _fake_running_supervisor() as pid:
+        save_forward_info(plugin_data_dir(latchkey_root), _build_forward_info(pid=pid, gateway_port=None))
+        result = cli_runner.invoke(
+            latchkey,
+            ["gateway-info"],
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
     assert result.exit_code != 0
     assert "has not finished binding" in result.output
 

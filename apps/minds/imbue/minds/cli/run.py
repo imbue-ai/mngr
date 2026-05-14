@@ -75,6 +75,7 @@ from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
+from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import load_forward_info
 
@@ -346,6 +347,13 @@ def _wait_for_gateway_port(latchkey: Latchkey) -> LatchkeyForwardInfo:
     try:
         while not deadline.is_set():
             info = load_forward_info(plugin_dir)
+            if info is not None and not is_forward_info_alive(info):
+                # Supervisor died between spawn and port-bind; bail out
+                # instead of polling a stale record forever.
+                raise click.ClickException(
+                    "The ``mngr latchkey forward`` supervisor we spawned has died before binding its "
+                    f"gateway port; check {plugin_dir}/latchkey_forward.log for details.",
+                )
             if info is not None and info.gateway_port is not None:
                 return info
             # Use the same event as the deadline so we wake up promptly

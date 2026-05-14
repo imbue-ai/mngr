@@ -53,6 +53,7 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
+from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
 from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import load_forward_info
@@ -621,15 +622,14 @@ def _gateway_info_command(ctx: click.Context, **kwargs: Any) -> None:
     latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
 
     info = load_forward_info(latchkey.plugin_data_dir)
-    if info is None:
+    if info is None or not is_forward_info_alive(info):
         raise click.ClickException(
             "No ``mngr latchkey forward`` supervisor is running for this latchkey directory; "
             "start one with ``mngr latchkey forward`` before asking for its gateway info.",
         )
     if info.gateway_port is None:
         raise click.ClickException(
-            "The supervisor record exists but the gateway has not finished binding its listen "
-            "port yet; retry in a moment.",
+            "The supervisor is running but has not finished binding its gateway port yet; retry in a moment.",
         )
 
     try:

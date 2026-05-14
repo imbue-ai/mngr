@@ -19,7 +19,7 @@ import psutil
 
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 from imbue.mngr_latchkey.forward_supervisor import _cmdline_looks_like_mngr_latchkey_forward
-from imbue.mngr_latchkey.forward_supervisor import _is_forward_info_alive
+from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import forward_info_path
 from imbue.mngr_latchkey.store import forward_log_path
@@ -58,7 +58,7 @@ def _wait_for_process_alive(pid: int, timeout: float = 5.0) -> bool:
     """Poll until ``pid``'s cmdline matches ``mngr latchkey forward``.
 
     Between fork and exec the child briefly inherits the parent's argv,
-    which makes ``_is_forward_info_alive``'s cmdline check transiently
+    which makes ``is_forward_info_alive``'s cmdline check transiently
     fail. Waiting for the *specific* cmdline pattern (rather than just
     ``cmdline != []``) closes that window so adoption tests do not race
     with the kernel's exec syscall.
@@ -170,7 +170,7 @@ def test_ensure_running_spawns_when_no_record_exists(tmp_path: Path) -> None:
 # ``subprocess.Popen`` returning and the child running its own argv
 # briefly leaves the cmdline as the parent's, racing with the
 # cmdline-based liveness probe). The same logic is covered by the
-# direct ``_is_forward_info_alive`` tests below plus the
+# direct ``is_forward_info_alive`` tests below plus the
 # ``_cmdline_looks_like_mngr_latchkey_forward`` matcher tests above
 # without an end-to-end subprocess race.
 
@@ -271,17 +271,17 @@ def test_get_forward_info_returns_none_when_unstarted(tmp_path: Path) -> None:
 # -- liveness probe (direct) -------------------------------------------------
 
 
-def test_is_forward_info_alive_rejects_unrelated_pid() -> None:
+def testis_forward_info_alive_rejects_unrelated_pid() -> None:
     """A real PID whose cmdline doesn't match is rejected."""
     info = LatchkeyForwardInfo(pid=os.getpid(), started_at=datetime.now(timezone.utc))
     # The test process itself is pytest, not ``mngr latchkey forward``.
-    assert not _is_forward_info_alive(info)
+    assert not is_forward_info_alive(info)
 
 
-def test_is_forward_info_alive_rejects_dead_pid() -> None:
+def testis_forward_info_alive_rejects_dead_pid() -> None:
     dead_pid = 2**31 - 1
     info = LatchkeyForwardInfo(pid=dead_pid, started_at=datetime.now(timezone.utc))
-    assert not _is_forward_info_alive(info)
+    assert not is_forward_info_alive(info)
 
 
 # -- malformed-record handling ----------------------------------------------

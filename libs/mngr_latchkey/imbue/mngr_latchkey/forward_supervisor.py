@@ -82,15 +82,14 @@ def _cmdline_looks_like_mngr_latchkey_forward(cmdline: list[str]) -> bool:
     return "latchkey" in remainder and "forward" in remainder
 
 
-def _is_forward_info_alive(info: LatchkeyForwardInfo) -> bool:
-    """Verify that an info still corresponds to our running supervisor.
+def is_forward_info_alive(info: LatchkeyForwardInfo) -> bool:
+    """Verify that an info still corresponds to a running supervisor.
 
     Two checks, both must pass:
 
     1. A process with the recorded PID exists.
     2. That process's cmdline looks like ``mngr latchkey forward``
        (defends against PID reuse).
-
     """
     try:
         process = psutil.Process(info.pid)
@@ -209,7 +208,7 @@ class LatchkeyForwardSupervisor(MutableModel):
                     "No existing mngr latchkey forward record at {}; spawning a fresh supervisor",
                     record_path,
                 )
-            elif _is_forward_info_alive(existing):
+            elif is_forward_info_alive(existing):
                 logger.info(
                     "Adopted existing mngr latchkey forward supervisor (pid={}, record={})",
                     existing.pid,
