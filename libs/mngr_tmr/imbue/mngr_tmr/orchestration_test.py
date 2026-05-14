@@ -35,10 +35,8 @@ from imbue.mngr_tmr.utils import transfer_mode_for_provider
 
 def test_make_run_name_format() -> None:
     name = make_run_name()
-    assert len(name) == 11
-    assert name[4] == "_"
-    int(name[:4], 10)
-    int(name[5:], 10)
+    assert len(name) == 14
+    assert name.isdigit()
 
 
 def test_dedup_name_first_use_returns_base() -> None:

@@ -19,14 +19,11 @@ from imbue.mngr_tmr.data_types import TestResult
 
 
 def make_run_name() -> str:
-    """Short timestamp identifying a TMR run, e.g. '0514_184215'.
+    """Compact timestamp identifying a TMR run, e.g. '20260514184215'.
 
-    Year is intentionally dropped: runs older than a year aren't expected
-    to matter, and the resulting names are short enough to be readable in
-    agent / host / branch / output-dir names. Sortable by alphabetical
-    comparison only within a year.
+    14 chars, all digits, sortable by alphabetical comparison. UTC.
     """
-    return datetime.now(tz=timezone.utc).strftime("%m%d_%H%M%S")
+    return datetime.now(tz=timezone.utc).strftime("%Y%m%d%H%M%S")
 
 
 def dedup_name(base: str, used: set[str]) -> str:

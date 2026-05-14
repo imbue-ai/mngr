@@ -43,6 +43,7 @@ def _emit_report(
     all_agents: list[TestAgentInfo],
     timed_out_ids: set[str],
     launch_failures: list[AgentMetadata],
+    run_name: str,
 ) -> None:
     if output_dir is None:
         return
@@ -52,7 +53,7 @@ def _emit_report(
             metadata.append(_metadata_for(info, error_summary="Agent was stopped because the timeout was reached."))
         else:
             metadata.append(_metadata_for(info))
-    generate_html_report(metadata, output_dir)
+    generate_html_report(metadata, output_dir, run_name=run_name)
 
 
 def launch_and_poll_agents(
@@ -117,7 +118,7 @@ def launch_and_poll_agents(
     }
 
     launch_agents_up_to_limit(**launch_kwargs)
-    _emit_report(output_dir, all_agents, timed_out_ids, launch_failures)
+    _emit_report(output_dir, all_agents, timed_out_ids, launch_failures, run_name)
 
     while pending_ids or remaining_tests:
         now = time.monotonic()
@@ -161,7 +162,7 @@ def launch_and_poll_agents(
         launch_agents_up_to_limit(**launch_kwargs)
 
         if changed:
-            _emit_report(output_dir, all_agents, timed_out_ids, launch_failures)
+            _emit_report(output_dir, all_agents, timed_out_ids, launch_failures, run_name)
 
         if not pending_ids and not remaining_tests:
             break

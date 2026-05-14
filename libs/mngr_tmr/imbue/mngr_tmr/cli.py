@@ -197,6 +197,19 @@ def _emit_report_path(path: Path, output_opts: OutputOptions) -> None:
             assert_never(unreachable)
 
 
+def _emit_report_url(url: str | None, output_opts: OutputOptions) -> None:
+    """Emit the public URL of the report mirror, if upload occurred."""
+    if url is None:
+        return
+    match output_opts.output_format:
+        case OutputFormat.JSON | OutputFormat.JSONL:
+            emit_event("report_url", {"url": url}, output_opts.output_format)
+        case OutputFormat.HUMAN:
+            write_human_line("Report URL: {}", url)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _emit_integrator_branch(branch_name: str | None, output_opts: OutputOptions) -> None:
     """Emit the name of the integrator branch, if one was produced."""
     if branch_name is None:
@@ -285,11 +298,13 @@ def _run_reintegrate(
     base_commit = get_base_commit(source_dir, cg)
 
     # Write pre-integrator report
-    generate_html_report(
+    _, uploaded_url = generate_html_report(
         test_agent_metadata,
         output_dir,
         run_commands=_build_run_commands(run_name),
+        run_name=run_name,
     )
+    _emit_report_url(uploaded_url, output_opts)
 
     # Run integrator (carry the same tmr_run_name so it shows up in this run's
     # agent list; tmr_role="integrator" lets the discovery query above filter
@@ -316,13 +331,15 @@ def _run_reintegrate(
         test_agent_metadata, integrator_config, mngr_ctx, opts, output_dir, run_name, base_commit=base_commit
     )
     integrated_branch = integrator_meta.branch_name if integrator_meta is not None else None
-    generate_html_report(
+    _, uploaded_url = generate_html_report(
         test_agent_metadata,
         output_dir,
         integrator_metadata=integrator_meta,
         run_commands=_build_run_commands(run_name, integrated_branch),
+        run_name=run_name,
     )
     _emit_report_path(output_dir / "index.html", output_opts)
+    _emit_report_url(uploaded_url, output_opts)
     _emit_integrator_branch(integrated_branch, output_opts)
     _print_run_commands(run_name, output_opts, integrated_branch)
 
@@ -713,7 +730,8 @@ def _run_tmr_pipeline(
     # Step 8: Write the post-polling report (pre-integrator). Artifacts and
     # branch bundles were already downloaded during per-agent finalization;
     # the reporter parses outcome JSON from disk.
-    generate_html_report(test_agent_metadata, output_dir)
+    _, uploaded_url = generate_html_report(test_agent_metadata, output_dir, run_name=run)
+    _emit_report_url(uploaded_url, output_opts)
 
     # Step 9: Build integrator config (defaults to local provider) and integrate.
     # Override the role label so the integrator is distinguishable from the
@@ -736,13 +754,15 @@ def _run_tmr_pipeline(
         test_agent_metadata, integrator_config, mngr_ctx, opts, output_dir, run, base_commit=base_commit
     )
     integrated_branch = integrator_meta.branch_name if integrator_meta is not None else None
-    generate_html_report(
+    _, uploaded_url = generate_html_report(
         test_agent_metadata,
         output_dir,
         integrator_metadata=integrator_meta,
         run_commands=_build_run_commands(run, integrated_branch),
+        run_name=run,
     )
     _emit_report_path(output_dir / "index.html", output_opts)
+    _emit_report_url(uploaded_url, output_opts)
     _emit_integrator_branch(integrated_branch, output_opts)
 
     _print_run_commands(run, output_opts, integrated_branch)

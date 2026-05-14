@@ -34,6 +34,7 @@ from imbue.mngr_tmr.data_types import TestResult
 from imbue.mngr_tmr.data_types import TestRunInfo
 from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
+from imbue.mngr_tmr.report_upload import maybe_upload_report
 from imbue.mngr_tmr.utils import should_pull_changes_from_outcome as _should_pull_outcome
 
 _EXTRACTED_TEST_OUTPUT_DIR = "test_output"
@@ -256,13 +257,20 @@ def generate_html_report(
     *,
     integrator_metadata: AgentMetadata | None = None,
     run_commands: list[tuple[str, str]] | None = None,
-) -> Path:
+    run_name: str | None = None,
+) -> tuple[Path, str | None]:
     """Generate an HTML report summarizing the run.
 
     Walks ``agents`` and reads each testing agent's outcome from
     ``output_dir/<agent_name>/test_output/``; reads the integrator's
     outcome (if any) from ``output_dir/<integrator_name>/``. Writes the
-    report to ``output_dir/index.html`` and returns that path.
+    report to ``output_dir/index.html``.
+
+    When ``run_name`` is set and AWS credentials are configured, also
+    mirrors the report to s3 (see ``report_upload.maybe_upload_report``).
+
+    Returns ``(output_path, uploaded_url)`` where ``uploaded_url`` is the
+    public URL of the s3 mirror, or ``None`` if upload was skipped.
     """
     rows = _build_rows(agents, output_dir)
     integrator = _load_integrator_outcome(integrator_metadata, output_dir) if integrator_metadata is not None else None
@@ -326,7 +334,9 @@ def generate_html_report(
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path.write_text(report_html)
     logger.info("HTML report written to {}", output_path)
-    return output_path
+
+    uploaded_url = maybe_upload_report(output_path, run_name) if run_name is not None else None
+    return output_path, uploaded_url
 
 
 def _build_run_commands_html(commands: list[tuple[str, str]] | None) -> str:
