@@ -14,7 +14,6 @@ failed ``create`` never leaves a stale ``~/.minds/envs/<name>.toml`` behind.
 """
 
 from collections.abc import Callable
-from typing import Final
 
 from loguru import logger
 from pydantic import AnyUrl
@@ -48,8 +47,6 @@ _PROVIDER_ERRORS: tuple[type[Exception], ...] = (
     SuperTokensProviderError,
     MindError,
 )
-
-_DEV_TIER_NAME: Final[str] = "dev"
 
 
 class ProviderCredentials(FrozenModel):
