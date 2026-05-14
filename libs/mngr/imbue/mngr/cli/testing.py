@@ -17,6 +17,7 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.plugin_testing import PLACEHOLDER_AGENT_TYPE
 from imbue.mngr.utils.plugin_testing import register_placeholder_agent_type
 from imbue.mngr.utils.testing import get_short_random_string
 
@@ -62,7 +63,7 @@ def create_test_agent(
 
     agent_id = AgentId.generate()
     agent_name = AgentName(f"test-agent-{get_short_random_string()}")
-    resolved_type = agent_type or AgentTypeName("generic")
+    resolved_type = agent_type or AgentTypeName(PLACEHOLDER_AGENT_TYPE)
     if register_agent_type:
         _ensure_test_agent_type_registered(resolved_type)
     resolved_config = agent_config or AgentTypeConfig(command=CommandString("sleep 1000"))
@@ -106,7 +107,7 @@ def create_test_agent_state(host: Host, work_dir: Path, name: str) -> AgentInter
     creating a tmux session or starting the agent process. Useful for tests
     that need an agent to exist but don't need it running.
     """
-    agent_type = AgentTypeName("generic")
+    agent_type = AgentTypeName(PLACEHOLDER_AGENT_TYPE)
     _ensure_test_agent_type_registered(agent_type)
     options = CreateAgentOptions(
         name=AgentName(name),
@@ -120,7 +121,7 @@ def create_agent_with_events_dir(
     per_host_dir: Path,
     agent_name: str,
     events_source: str | None = None,
-    agent_type: str = "generic",
+    agent_type: str = PLACEHOLDER_AGENT_TYPE,
 ) -> tuple[AgentId, Path]:
     """Create a minimal agent directory with an events subdirectory.
 
