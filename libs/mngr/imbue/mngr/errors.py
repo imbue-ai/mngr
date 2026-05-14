@@ -415,7 +415,7 @@ class UnknownAgentTypeError(ConfigError):
 
     def __init__(self, agent_type: str) -> None:
         self.agent_type = agent_type
-        super().__init__(f"Unknown agent type '{agent_type}' and no default agent class set.")
+        super().__init__(f"Unknown agent type '{agent_type}'.")
         self.user_help_text = get_plugin_install_hint(agent_type)
 
 
