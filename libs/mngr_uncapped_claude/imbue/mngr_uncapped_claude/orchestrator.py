@@ -190,11 +190,11 @@ def _run_with_agent(
                 _wait_for_turn_end(agent, events_target, writer)
         except (MngrError, BaseMngrError) as exc:
             logger.error("Run failed: {}", exc)
-            meta = _build_result_meta(state.writer, start_time, agent_id=str(agent.id), error_text=str(exc))
+            meta = _build_result_meta(start_time, agent_id=str(agent.id), error_text=str(exc))
             writer.finalize(meta)
             return state, EXIT_MNGR_ERROR
 
-    meta = _build_result_meta(writer, start_time, agent_id=str(agent.id), error_text=None)
+    meta = _build_result_meta(start_time, agent_id=str(agent.id), error_text=None)
     writer.finalize(meta)
     return state, EXIT_SUCCESS
 
@@ -301,7 +301,6 @@ def _parse_event_lines(lines: Sequence[str], parser_warner: MalformedJsonLineWar
 
 
 def _build_result_meta(
-    writer: StreamingOutputWriter,
     start_time: float,
     agent_id: str,
     error_text: str | None,
