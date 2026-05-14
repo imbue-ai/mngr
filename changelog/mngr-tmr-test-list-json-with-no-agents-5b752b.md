@@ -1,0 +1,1 @@
+Tests: raise the pytest function-level timeout for `test_list_json_with_no_agents` so the Modal-backed `mngr list --format json` call has time to complete, and add a check that the JSON response reports no provider errors in a fresh environment.
