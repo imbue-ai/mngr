@@ -156,8 +156,7 @@ class ImbueCloudHost(Host):
         Everything else (``name``, ``additional_commands``, ``create_time``,
         ``work_dir``, ``agent_type``, the agent UUID baked into the
         ``--session-id`` fallback) is preserved verbatim from the bake --
-        the pre-baked agent name carries the workspace identity now lives on
-        the *host*, not on the agent.
+        the workspace identity now lives on the *host*, not on the agent.
 
         Falls back to ``super()`` when ``pre_baked_agent_id`` is unset or
         the on-disk ``data.json`` is missing -- e.g. after ``mngr destroy``
