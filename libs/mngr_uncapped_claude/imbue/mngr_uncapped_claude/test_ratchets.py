@@ -121,11 +121,12 @@ def test_prevent_hardcoded_guarded_binary() -> None:
 
 
 def test_prevent_num_prefix() -> None:
-    # Misfire: the lone violation is the `"num_turns"` string key emitted to
+    # Misfires: both violations are the `"num_turns"` string key emitted to
     # match claude -p's native --output-format=json wire shape (see
-    # output_modes.build_result_envelope). Renaming the key would break the
+    # output_modes.build_result_envelope and the corresponding test
+    # asserting on the wire shape). Renaming the key would break the
     # drop-in compatibility this plugin exists to provide.
-    rc.check_num_prefix(_DIR, snapshot(1))
+    rc.check_num_prefix(_DIR, snapshot(2))
 
 
 def test_prevent_trailing_comments() -> None:

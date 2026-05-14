@@ -184,6 +184,11 @@ def _run_with_agent(
         return state, EXIT_MNGR_ERROR
 
     final_state: AgentLifecycleState
+    # Count conversational turns delivered. The initial_message in
+    # CreateAgentOptions counts as the first turn; each follow-up prompt
+    # delivered via _send_user_turn adds one more. This drives the
+    # turn-count field in claude's native result envelope.
+    turn_count = 1
     with _DestroyOnSignal(state=state):
         try:
             final_state = _wait_for_turn_end(agent, events_target, writer)
@@ -193,19 +198,20 @@ def _run_with_agent(
                     # produce a confusing delivery error that hides the real cause.
                     break
                 _send_user_turn(mngr_ctx, agent, next_prompt)
+                turn_count += 1
                 final_state = _wait_for_turn_end(agent, events_target, writer)
         except (MngrError, BaseMngrError) as exc:
             logger.error("Run failed: {}", exc)
-            _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=str(exc))
+            _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=str(exc), turn_count=turn_count)
             return state, EXIT_MNGR_ERROR
 
     if final_state != AgentLifecycleState.WAITING:
         error_text = f"agent ended in state {final_state.value} before reaching WAITING"
         logger.error("{}", error_text)
-        _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=error_text)
+        _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=error_text, turn_count=turn_count)
         return state, EXIT_CLAUDE_ERROR
 
-    _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=None)
+    _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=None, turn_count=turn_count)
     return state, EXIT_SUCCESS
 
 
@@ -352,10 +358,11 @@ def _finalize_run(
     start_time: float,
     agent_id: str,
     error_text: str | None,
+    turn_count: int,
 ) -> None:
     """Build the result metadata for this run and flush the writer's trailing envelope."""
     meta = _build_result_meta(start_time, agent_id=agent_id, error_text=error_text)
-    writer.finalize(meta)
+    writer.finalize(meta, turn_count=turn_count)
 
 
 def _destroy_agent(agent: AgentInterface[Any], host: OnlineHostInterface) -> None:

@@ -85,7 +85,7 @@ def test_text_writer_concatenates_assistant_turns() -> None:
     stdout = io.StringIO()
     writer = StreamingOutputWriter(output_format=OutputFormat.TEXT, session_id="session-1", stdout=stdout)
     writer.emit_events([_assistant_event("hello"), _user_event("ignored"), _assistant_event("world")])
-    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None))
+    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
     assert stdout.getvalue() == "helloworld\n"
 
 
@@ -93,7 +93,7 @@ def test_text_writer_dedupes_events_by_id() -> None:
     stdout = io.StringIO()
     writer = StreamingOutputWriter(output_format=OutputFormat.TEXT, session_id="session-1", stdout=stdout)
     writer.emit_events([_assistant_event("hello"), _assistant_event("hello")])
-    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None))
+    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
     assert stdout.getvalue() == "hello\n"
 
 
@@ -101,7 +101,7 @@ def test_json_writer_emits_single_envelope() -> None:
     stdout = io.StringIO()
     writer = StreamingOutputWriter(output_format=OutputFormat.JSON, session_id="session-1", stdout=stdout)
     writer.emit_events([_assistant_event("hello")])
-    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None))
+    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
     lines = stdout.getvalue().splitlines()
     assert len(lines) == 1
     parsed = json.loads(lines[0])
@@ -110,11 +110,23 @@ def test_json_writer_emits_single_envelope() -> None:
     assert parsed["session_id"] == "session-1"
 
 
+def test_json_writer_reports_orchestrator_turn_count() -> None:
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(output_format=OutputFormat.JSON, session_id="session-1", stdout=stdout)
+    # Two assistant_message events arrive within a single conversational turn.
+    writer.emit_events([_assistant_event("hello"), _assistant_event("world")])
+    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
+    parsed = json.loads(stdout.getvalue().strip())
+    # The field name comes from claude -p's native wire shape; we deliberately
+    # use the literal key to assert wire-compatibility.
+    assert parsed["num_turns"] == 1
+
+
 def test_stream_json_writer_emits_init_first_and_result_last() -> None:
     stdout = io.StringIO()
     writer = StreamingOutputWriter(output_format=OutputFormat.STREAM_JSON, session_id="session-1", stdout=stdout)
     writer.emit_events([_assistant_event("hello")])
-    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None))
+    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
     lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
     assert len(lines) == 3
     assert lines[0]["type"] == "system"

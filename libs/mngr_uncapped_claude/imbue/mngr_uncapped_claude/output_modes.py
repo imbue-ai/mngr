@@ -205,7 +205,7 @@ class StreamingOutputWriter(MutableModel):
     assistant_text_parts: list[str] = Field(
         default_factory=list, description="Buffered assistant text used for text/json finalize"
     )
-    assistant_turn_count: int = Field(default=0, description="Number of assistant turns observed")
+    assistant_message_count: int = Field(default=0, description="Number of assistant_message events observed")
 
     def write_init_if_needed(self) -> None:
         """Write the synthesized ``system/init`` envelope on first stream-json call."""
@@ -234,7 +234,7 @@ class StreamingOutputWriter(MutableModel):
             text = event.get("text", "")
             if text:
                 self.assistant_text_parts.append(text)
-            self.assistant_turn_count += 1
+            self.assistant_message_count += 1
         match self.output_format:
             case OutputFormat.TEXT:
                 pass
@@ -253,15 +253,20 @@ class StreamingOutputWriter(MutableModel):
         self.stdout.write(json.dumps(line, separators=(",", ":")) + "\n")
         self.stdout.flush()
 
-    def finalize(self, meta: ResultMeta) -> None:
-        """Write the trailing envelope (or text dump) for this invocation."""
+    def finalize(self, meta: ResultMeta, turn_count: int) -> None:
+        """Write the trailing envelope (or text dump) for this invocation.
+
+        ``turn_count`` is the count of conversational turns the
+        orchestrator drove (one per user prompt delivered). It populates
+        the turn-count field in the result envelope.
+        """
         match self.output_format:
             case OutputFormat.TEXT:
                 self._finalize_text()
             case OutputFormat.JSON:
-                self._finalize_json(meta)
+                self._finalize_json(meta, turn_count)
             case OutputFormat.STREAM_JSON:
-                self._finalize_stream_json(meta)
+                self._finalize_stream_json(meta, turn_count)
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -271,19 +276,19 @@ class StreamingOutputWriter(MutableModel):
             self.stdout.write(body + "\n")
         self.stdout.flush()
 
-    def _finalize_json(self, meta: ResultMeta) -> None:
-        self._write_result_envelope(meta)
+    def _finalize_json(self, meta: ResultMeta, turn_count: int) -> None:
+        self._write_result_envelope(meta, turn_count)
 
-    def _finalize_stream_json(self, meta: ResultMeta) -> None:
+    def _finalize_stream_json(self, meta: ResultMeta, turn_count: int) -> None:
         self.write_init_if_needed()
-        self._write_result_envelope(meta)
+        self._write_result_envelope(meta, turn_count)
 
-    def _write_result_envelope(self, meta: ResultMeta) -> None:
+    def _write_result_envelope(self, meta: ResultMeta, turn_count: int) -> None:
         """Build and emit the trailing ``result`` envelope on a single line."""
         envelope = build_result_envelope(
             text="".join(self.assistant_text_parts),
             meta=meta,
-            turn_count=max(self.assistant_turn_count, 1),
+            turn_count=max(turn_count, 1),
         )
         self.stdout.write(json.dumps(envelope, separators=(",", ":")) + "\n")
         self.stdout.flush()
