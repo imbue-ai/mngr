@@ -475,7 +475,7 @@ def _pluralize_entry(count: int) -> str:
     return "entry" if count == 1 else "entries"
 
 
-def _print_on_demand_consolidation_command(file: TextIO | None = None) -> None:
+def _print_on_demand_consolidation_command(file: TextIO) -> None:
     """Print the one-liner that triggers an on-demand consolidation run.
 
     Equivalent to the example invocation in ``setup_changelog_agent.sh``'s
@@ -490,10 +490,10 @@ def _print_on_demand_consolidation_command(file: TextIO | None = None) -> None:
     against; changing providers requires editing the constant and
     redeploying the schedule together.
 
-    ``file`` is forwarded to ``print``; defaults to ``sys.stdout`` (via
-    ``print``'s own default when ``None`` is passed). Callers in error
-    paths pass ``sys.stderr`` so the on-demand command lands on the same
-    stream as the surrounding error message.
+    ``file`` is the stream to write to (forwarded to ``print``). The
+    caller in the gate's error path passes ``sys.stderr`` so the
+    on-demand command lands on the same stream as the surrounding error
+    message.
     """
     disable_args = " ".join(changelog_disable_plugin_args())
     print(f"  env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME={CHANGELOG_MNGR_ROOT_NAME} \\", file=file)
