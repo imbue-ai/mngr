@@ -28,14 +28,9 @@ def test_pluralize_entry(count: int, expected: str) -> None:
     assert _pluralize_entry(count) == expected
 
 
-def test_gate_returns_true_when_no_pending_entries(capsys: pytest.CaptureFixture[str]) -> None:
-    result = _gate_release_on_pending_changelog_entries([], dry_run=False)
-    assert result is True
-    assert capsys.readouterr().out == ""
-
-
-def test_gate_returns_true_when_no_pending_entries_and_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
-    result = _gate_release_on_pending_changelog_entries([], dry_run=True)
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_gate_returns_true_when_no_pending_entries(dry_run: bool, capsys: pytest.CaptureFixture[str]) -> None:
+    result = _gate_release_on_pending_changelog_entries([], dry_run=dry_run)
     assert result is True
     assert capsys.readouterr().out == ""
 
