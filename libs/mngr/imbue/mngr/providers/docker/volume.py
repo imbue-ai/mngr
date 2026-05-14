@@ -154,6 +154,11 @@ class DockerVolume(BaseVolume):
             )
         return sorted(entries, key=lambda e: e.path)
 
+    def path_exists(self, path: str) -> bool:
+        resolved = self._resolve(path)
+        exit_code, _ = self._exec(f"test -e '{resolved}'")
+        return exit_code == 0
+
     def read_file(self, path: str) -> bytes:
         resolved = self._resolve(path)
         exit_code, output = self.container.exec_run(["cat", resolved])
