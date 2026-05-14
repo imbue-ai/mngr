@@ -30,6 +30,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.agent_creator import PHASE_PREFIX
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
@@ -820,6 +821,9 @@ async def _stream_creation_logs(
                 # Yield a final keepalive so the done event is flushed to the
                 # browser in its own TCP segment, separate from the stream close.
                 yield ": end\n\n"
+        elif line.startswith(PHASE_PREFIX):
+            status_text = line[len(PHASE_PREFIX) :]
+            yield "data: {}\n\n".format(json.dumps({"_type": "phase", "status_text": status_text}))
         else:
             yield "data: {}\n\n".format(json.dumps({"log": line}))
 

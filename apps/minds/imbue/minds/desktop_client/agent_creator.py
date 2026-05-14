@@ -90,10 +90,19 @@ OutputCallback = Callable[[str, bool], None]
 
 LOG_SENTINEL: Final[str] = "__DONE__"
 
+# Multiplexed over ``log_queue`` (rather than a separate channel) so phase
+# changes stay ordered with respect to the log lines emitted around them.
+PHASE_PREFIX: Final[str] = "__PHASE__:"
+
 
 def make_log_callback(log_queue: queue.Queue[str]) -> OutputCallback:
     """Create an output callback that puts lines into a queue."""
     return lambda line, is_stdout: logger.info(line.rstrip("\n")) or log_queue.put(line.rstrip("\n"))
+
+
+def emit_phase(log_queue: queue.Queue[str], status_text: str) -> None:
+    """Push a phase-change event onto ``log_queue`` to update the UI spinner caption."""
+    log_queue.put(PHASE_PREFIX + status_text)
 
 
 class AgentCreationStatus(UpperCaseStrEnum):
@@ -1016,6 +1025,15 @@ class AgentCreator(MutableModel):
                 # the imbue_cloud command-construction drift from the other
                 # modes' (and was hard to keep in sync with the bake's view
                 # of the same config).
+                # Emit the initial phase caption now that we know the launch
+                # mode -- the server-rendered initial caption already reflects
+                # this, but pushing it through the SSE channel keeps the
+                # frontend authoritative (no divergence if it ever drifts).
+                if launch_mode is LaunchMode.IMBUE_CLOUD:
+                    emit_phase(log_queue, "Connecting to host...")
+                else:
+                    emit_phase(log_queue, "Cloning repository...")
+
                 if _is_local_path(repo_source):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
                     if not resolved_path.is_dir():
@@ -1070,6 +1088,7 @@ class AgentCreator(MutableModel):
                     workspace_dir = clone_target
 
                 if branch:
+                    emit_phase(log_queue, "Checking out branch '{}'...".format(branch))
                     log_queue.put("[minds] Checking out branch '{}'...".format(branch))
                     checkout_branch(
                         workspace_dir,
@@ -1090,6 +1109,7 @@ class AgentCreator(MutableModel):
                             raise MngrCommandError("AI provider IMBUE_CLOUD requires imbue_cloud_cli to be configured")
                         if not account_email:
                             raise MngrCommandError("AI provider IMBUE_CLOUD requires an account_email to be supplied")
+                        emit_phase(log_queue, "Provisioning AI access...")
                         log_queue.put(f"[minds] Minting LiteLLM virtual key for account {account_email}...")
                         try:
                             key_material: LiteLLMKeyMaterial = self.imbue_cloud_cli.create_litellm_key(
@@ -1115,6 +1135,11 @@ class AgentCreator(MutableModel):
 
                 with self._lock:
                     self._statuses[cid_str] = AgentCreationStatus.CREATING
+
+                if launch_mode is LaunchMode.IMBUE_CLOUD:
+                    emit_phase(log_queue, "Setting up agent...")
+                else:
+                    emit_phase(log_queue, "Creating workspace...")
 
                 # Pre-create the shared latchkey gateway password and a
                 # per-host permissions-override JWT before invoking
@@ -1312,6 +1337,7 @@ class AgentCreator(MutableModel):
 
         probe_url = f"http://{agent_id}.localhost:{self.mngr_forward_port}/"
         deadline = time.monotonic() + self.workspace_ready_timeout_seconds
+        emit_phase(log_queue, "Waiting for workspace to be ready...")
         log_queue.put("[minds] Waiting for workspace server to be ready...")
         last_status: int | None = None
         last_error: str | None = None

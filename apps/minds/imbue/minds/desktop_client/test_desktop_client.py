@@ -1,4 +1,5 @@
 import json
+import queue
 from pathlib import Path
 
 import httpx
@@ -10,7 +11,10 @@ from starlette.testclient import TestClient
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.agent_creator import PHASE_PREFIX
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -764,6 +768,44 @@ def test_creation_logs_sse_streams_events(tmp_path: Path) -> None:
         assert response.status_code == 200
         assert "text/event-stream" in response.headers.get("content-type", "")
     agent_creator.wait_for_all()
+
+
+def test_creation_logs_sse_emits_phase_events(tmp_path: Path) -> None:
+    """Phase-prefixed queue lines are surfaced as ``{"_type": "phase"}`` SSE events.
+
+    Regular log lines stay on the ``{"log": ...}`` channel; this test verifies the
+    multiplexing dispatch added to ``_stream_creation_logs`` rather than running a
+    real agent creation (which would require Docker).
+    """
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    creation_id = CreationId()
+    log_queue: queue.Queue[str] = queue.Queue()
+    with agent_creator._lock:
+        agent_creator._statuses[str(creation_id)] = AgentCreationStatus.CLONING
+        agent_creator._log_queues[str(creation_id)] = log_queue
+
+    log_queue.put("regular log line")
+    log_queue.put(PHASE_PREFIX + "Creating workspace...")
+    with agent_creator._lock:
+        agent_creator._statuses[str(creation_id)] = AgentCreationStatus.DONE
+        agent_creator._redirect_urls[str(creation_id)] = "/done"
+    log_queue.put(LOG_SENTINEL)
+
+    payloads: list[dict[str, object]] = []
+    with client.stream("GET", "/api/create-agent/{}/logs".format(creation_id)) as response:
+        assert response.status_code == 200
+        for line in response.iter_lines():
+            if not line.startswith("data: "):
+                continue
+            payloads.append(json.loads(line[len("data: ") :]))
+            if payloads[-1].get("_type") == "done":
+                break
+
+    phase_events = [p for p in payloads if p.get("_type") == "phase"]
+    log_events = [p for p in payloads if "log" in p]
+    assert [p["status_text"] for p in phase_events] == ["Creating workspace..."]
+    assert any(p["log"] == "regular log line" for p in log_events)
 
 
 def test_creating_page_rejects_unauthenticated(tmp_path: Path) -> None:
