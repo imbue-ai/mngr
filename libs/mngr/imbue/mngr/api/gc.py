@@ -166,11 +166,6 @@ def _discover_hosts_for_gc(
                 include_destroyed=True,
                 cg=mngr_ctx.concurrency_group,
             )
-        except ProviderUnavailableError as e:
-            # Excluded from `result` so downstream gc_* helpers don't
-            # treat this provider's volumes as orphaned.
-            logger.warning("Skipping provider {} during GC (unavailable): {}", provider.name, e)
-            continue
         except MngrError as e:
             logger.warning("Failed to discover hosts for provider {}: {}", provider.name, e)
             # Skip the provider entirely when discovery fails.  This is
