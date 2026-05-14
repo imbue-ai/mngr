@@ -52,10 +52,16 @@ from imbue.mngr_uncapped_claude.output_modes import StreamingOutputWriter
 from imbue.mngr_uncapped_claude.output_modes import monotonic_ms_since
 
 # Settings overrides applied to mngr_ctx so the spawned claude agent runs
-# unattended (matches what `headless_claude` already turns on).
+# unattended. The two ``settings_overrides`` flags are normally added by
+# ``mngr_claude`` only when ``ProvisioningContext.is_unattended`` is true,
+# which is computed as ``not host.is_local``; uncapped-claude always runs
+# on the local host, so we set them explicitly to avoid hangs on the
+# "bypass permissions mode" and "skip dangerous mode" prompts.
 _UNATTENDED_SETTINGS: Final[tuple[str, ...]] = (
     "agent_types.claude.auto_dismiss_dialogs=true",
     "agent_types.claude.auto_allow_permissions=true",
+    "agent_types.claude.settings_overrides.skipDangerousModePermissionPrompt=true",
+    "agent_types.claude.settings_overrides.bypassPermissionsModeAccepted=true",
 )
 
 # Poll cadence for end-of-turn detection plus transcript tailing.
