@@ -544,7 +544,7 @@ def test_create_agent_api_passes_host_name(tmp_path: Path) -> None:
     agent_creator.wait_for_all()
 
 
-def test_create_agent_api_rejects_duplicate_agent_name(tmp_path: Path) -> None:
+def test_create_agent_api_rejects_duplicate_host_name(tmp_path: Path) -> None:
     """POST /api/create-agent returns 409 when the requested name is already in use.
 
     The guard walks ``backend_resolver.list_known_workspace_ids()`` and rejects
@@ -567,7 +567,7 @@ def test_create_agent_api_rejects_duplicate_agent_name(tmp_path: Path) -> None:
     assert "existing-agent" in response.json()["error"]
 
 
-def test_create_agent_api_allows_unique_agent_name_when_others_exist(tmp_path: Path) -> None:
+def test_create_agent_api_allows_unique_host_name_when_others_exist(tmp_path: Path) -> None:
     """The duplicate-name guard must not false-positive on a distinct name."""
     existing_id = AgentId()
     resolver = make_resolver_with_data(
