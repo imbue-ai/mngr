@@ -2209,9 +2209,12 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             # Rename the tmux session first (idempotent -- no-ops if session doesn't exist with old name)
             old_session_name = f"{self.mngr_ctx.config.prefix}{old_name}"
             new_session_name = f"{self.mngr_ctx.config.prefix}{new_name}"
+            # `rename-session`'s new-name argument is positional, so a value
+            # starting with `-` (possible if the user has configured a custom
+            # prefix) would be parsed as a tmux flag. Pass `--` to disambiguate.
             result = self.execute_idempotent_command(
                 f"tmux has-session -t {shlex.quote('=' + old_session_name)} 2>/dev/null && "
-                f"tmux rename-session -t {shlex.quote('=' + old_session_name)} {shlex.quote(new_session_name)} || true"
+                f"tmux rename-session -t {shlex.quote('=' + old_session_name)} -- {shlex.quote(new_session_name)} || true"
             )
             logger.debug("Tmux rename result: success={}, stdout={}", result.success, result.stdout.strip())
 
