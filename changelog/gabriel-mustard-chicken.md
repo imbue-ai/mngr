@@ -9,15 +9,22 @@ Workspace-server restart UX improvements:
   unreachable) is now a styled card with a loading spinner instead of the
   blank "Backend not yet available. Retrying..." page. It still auto-refreshes
   every second.
-- Clicking "Restart workspace server" on the recovery page now fires the
-  restart and immediately navigates back to the workspace URL, where the
-  plugin's loader handles the wait. The recovery page no longer blocks on
-  the restart API.
+- The `/api/agents/<id>/restart-workspace-server` endpoint now returns 200
+  as soon as the `mngr exec` kill dispatch completes (it no longer blocks
+  for up to 15 seconds polling the workspace through the plugin). The
+  background workspace-health probe loop continues to flip the tracker back
+  to HEALTHY once the workspace is responsive. This makes the endpoint a
+  reliable "the workspace has been killed" signal for callers that want to
+  navigate to the plugin's loader page.
+- The recovery page's "Restart workspace server" button and the sidebar
+  right-click "Restart workspace server" menu item now both await the
+  restart API response before navigating to the workspace URL. Previously
+  they fired the POST and navigated immediately, which on a still-healthy
+  workspace raced against the in-flight kill and silently reloaded onto
+  the unchanged iframe. Awaiting guarantees the user lands on the plugin's
+  "Workspace server starting..." loader.
 - The recovery page now notes that running agents are not interrupted by a
   workspace-server restart.
-- The sidebar right-click "Restart workspace server" menu item now triggers
-  the restart and navigates straight to the loading page, skipping the
-  intermediate recovery page click.
 - Fixed a bug where `workspaceUrlForAgent` in Electron's main process built
   `/goto/<agent>/` URLs against the minds port instead of the mngr_forward
   plugin port (which owns `/goto/`). This caused 404s after a manual restart

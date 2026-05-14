@@ -987,34 +987,67 @@ async function runChromeSSELoop() {
   }
 }
 
-// Fire-and-forget POST to the workspace-server restart API. The caller is
-// expected to navigate to the workspace URL immediately afterwards; the
-// plugin's loading page will then auto-refresh until the server is back.
+// POST the workspace-server restart API and resolve once the server has
+// acknowledged that the tmux kill dispatch finished (or the request
+// errors / times out). Callers navigate to the workspace URL afterward;
+// because the endpoint returns 200 only after the workspace has been
+// killed, the plugin will then serve its 503 loader until the workspace
+// comes back -- giving the user a visible "Workspace server starting"
+// page instead of a silent reload onto the still-live pre-restart UI.
+//
+// Always resolves (never rejects) so callers can chain navigation
+// regardless of network outcome.
+const _RESTART_REQUEST_TIMEOUT_MS = 10000;
 function postRestartWorkspaceServer(agentId) {
-  if (!agentId || !backendBaseUrl) return;
-  let req;
-  try {
-    req = net.request({
-      url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/restart-workspace-server`,
-      method: 'POST',
-      useSessionCookies: true,
-    });
-  } catch (e) {
-    console.warn('[restart] failed to construct restart request:', e);
-    return;
-  }
-  req.on('response', (response) => {
-    response.on('data', () => {});
-    response.on('end', () => {});
-    response.on('error', () => {});
-    if (response.statusCode >= 400) {
-      console.warn(`[restart] restart API returned ${response.statusCode} for ${agentId}`);
+  return new Promise((resolve) => {
+    if (!agentId || !backendBaseUrl) {
+      resolve();
+      return;
     }
+    let req;
+    try {
+      req = net.request({
+        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/restart-workspace-server`,
+        method: 'POST',
+        useSessionCookies: true,
+      });
+    } catch (e) {
+      console.warn('[restart] failed to construct restart request:', e);
+      resolve();
+      return;
+    }
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      console.warn(`[restart] restart API timed out for ${agentId} after ${_RESTART_REQUEST_TIMEOUT_MS}ms`);
+      try { req.abort(); } catch (_) { /* ignore */ }
+      settle();
+    }, _RESTART_REQUEST_TIMEOUT_MS);
+    req.on('response', (response) => {
+      response.on('data', () => {});
+      response.on('end', () => {
+        clearTimeout(timer);
+        settle();
+      });
+      response.on('error', () => {
+        clearTimeout(timer);
+        settle();
+      });
+      if (response.statusCode >= 400) {
+        console.warn(`[restart] restart API returned ${response.statusCode} for ${agentId}`);
+      }
+    });
+    req.on('error', (err) => {
+      console.warn(`[restart] restart API request failed for ${agentId}:`, err);
+      clearTimeout(timer);
+      settle();
+    });
+    req.end();
   });
-  req.on('error', (err) => {
-    console.warn(`[restart] restart API request failed for ${agentId}:`, err);
-  });
-  req.end();
 }
 
 function sleepInterruptible(ms) {
@@ -1628,15 +1661,20 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
   }
   template.push({
     label: 'Restart workspace server',
-    click: () => {
-      // Kick off the restart and navigate straight to the workspace URL --
-      // the plugin's 503 loading page will spin until the workspace is back,
-      // then auto-refresh into it. No intermediate recovery page click.
-      postRestartWorkspaceServer(agentId);
+    click: async () => {
+      // Close the sidebar first so the user gets immediate visual feedback
+      // while we wait for the restart dispatch to ack. The endpoint returns
+      // 200 once `mngr exec` finishes killing the workspace tmux window;
+      // navigating before that ack would race against a still-live backend
+      // and leave the user looking at the unchanged iframe.
+      closeSidebar(bundle);
+      await postRestartWorkspaceServer(agentId);
       if (workspaceUrl && bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+        // The plugin now serves its styled 503 loader (the
+        // "Workspace server starting" page), which auto-refreshes into the
+        // workspace once the server is back.
         bundle.contentView.webContents.loadURL(workspaceUrl);
       }
-      closeSidebar(bundle);
     },
   });
   const menu = Menu.buildFromTemplate(template);

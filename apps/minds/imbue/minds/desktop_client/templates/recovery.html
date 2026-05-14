@@ -51,21 +51,22 @@
         if (inFlight) return;
         inFlight = true;
         setStatus('Restarting...', true);
-        // Fire the restart and immediately navigate to the workspace URL.
-        // The plugin serves a styled auto-refreshing loader on 503, so the
-        // user sees a loading page until the workspace is back instead of
-        // waiting on this recovery page. The restart fetch keeps running in
-        // the background; we ignore its outcome.
+        // Wait for the restart dispatch to ack (the endpoint returns 200
+        // once the workspace tmux window has been killed) before
+        // navigating, so the plugin reliably serves its 503 loader instead
+        // of racing against a still-live backend. The plugin's loader
+        // auto-refreshes into the workspace once the server is back.
+        function goBack() {
+          if (returnTo) {
+            window.location.assign(returnTo);
+          } else {
+            window.location.reload();
+          }
+        }
         fetch('/api/agents/' + encodeURIComponent(agentId) + '/restart-workspace-server', {
           method: 'POST',
           credentials: 'same-origin',
-          keepalive: true,
-        }).catch(function () { /* navigation aborts in-flight fetch -- ignore */ });
-        if (returnTo) {
-          window.location.assign(returnTo);
-        } else {
-          window.location.reload();
-        }
+        }).then(goBack, goBack);
       }
 
       btn.addEventListener('click', doRestart);
