@@ -81,7 +81,7 @@ class _RunState(FrozenModel):
     Held by the signal handler so it can destroy the agent on Ctrl-C.
     """
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
     agent: AgentInterface[Any]
     host: OnlineHostInterface
