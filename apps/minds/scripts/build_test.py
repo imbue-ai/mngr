@@ -21,11 +21,22 @@ from pathlib import Path
 
 import pytest
 
-# Must mirror WORKSPACE_PACKAGES in apps/minds/scripts/build.js.
+# The full set of workspace packages bundled into the standalone app. This
+# same set is hand-maintained in three other places:
+#   - apps/minds/scripts/build.js          (WORKSPACE_PACKAGES object)
+#   - apps/minds/electron/env-setup.js     (WORKSPACE_PACKAGES array)
+#   - apps/minds/electron/pyproject/pyproject.toml ([project.dependencies]
+#                                           and [tool.uv.sources])
+# test_workspace_package_lists_are_consistent below is the drift guard that
+# keeps all four in sync -- two production regressions (0.2.13, 0.2.25) came
+# from exactly this list drifting, so the guard is load-bearing.
 WORKSPACE_PACKAGES = [
     "minds",
     "imbue-mngr",
     "imbue-mngr-claude",
+    "imbue-mngr-forward",
+    "imbue-mngr-imbue-cloud",
+    "imbue-mngr-lima",
     "imbue-mngr-modal",
     "imbue-common",
     "concurrency-group",
@@ -33,6 +44,7 @@ WORKSPACE_PACKAGES = [
     "modal-proxy",
 ]
 
+APP_ROOT = Path(__file__).resolve().parents[1]
 MONOREPO_ROOT = Path(__file__).resolve().parents[3]
 TEST_PATTERN = re.compile(r"(^|/)(test_[^/]*\.py|[^/]+_test\.py|conftest\.py)$")
 
@@ -91,11 +103,76 @@ def test_workspace_wheel_excludes_test_files(built_wheels: dict[str, Path], pack
     )
 
 
-def test_build_js_workspace_packages_match() -> None:
-    """Guard against drift between the test's WORKSPACE_PACKAGES list and build.js."""
-    build_js = (Path(__file__).parent / "build.js").read_text()
-    for name in WORKSPACE_PACKAGES:
-        assert f"'{name}'" in build_js or f'"{name}"' in build_js, (
-            f"Package {name!r} is in the test's WORKSPACE_PACKAGES but not found in build.js. "
-            "Update one side or the other to keep them in sync."
-        )
+def _parse_build_js_packages() -> set[str]:
+    """Extract the WORKSPACE_PACKAGES object keys from scripts/build.js.
+
+    The object literal looks like ``const WORKSPACE_PACKAGES = { 'name': 'path', ... };``
+    -- we slice out that block and pull every quoted key.
+    """
+    text = (APP_ROOT / "scripts" / "build.js").read_text()
+    match = re.search(r"const WORKSPACE_PACKAGES\s*=\s*\{(.*?)\};", text, re.DOTALL)
+    assert match is not None, "Could not locate WORKSPACE_PACKAGES object in build.js"
+    return set(re.findall(r"""['"]([^'"]+)['"]\s*:""", match.group(1)))
+
+
+def _parse_env_setup_js_packages() -> set[str]:
+    """Extract the WORKSPACE_PACKAGES array entries from electron/env-setup.js.
+
+    The array literal looks like ``const WORKSPACE_PACKAGES = [ 'name', ... ];``.
+    """
+    text = (APP_ROOT / "electron" / "env-setup.js").read_text()
+    match = re.search(r"const WORKSPACE_PACKAGES\s*=\s*\[(.*?)\];", text, re.DOTALL)
+    assert match is not None, "Could not locate WORKSPACE_PACKAGES array in env-setup.js"
+    return set(re.findall(r"""['"]([^'"]+)['"]""", match.group(1)))
+
+
+def _parse_pyproject_packages() -> tuple[set[str], set[str]]:
+    """Extract package names from electron/pyproject/pyproject.toml.
+
+    Returns ``(dependency_names, source_names)`` -- the names listed under
+    ``[project] dependencies`` (with version specifiers stripped) and the
+    keys under ``[tool.uv.sources]``. Both must mirror WORKSPACE_PACKAGES.
+    """
+    text = (APP_ROOT / "electron" / "pyproject" / "pyproject.toml").read_text()
+
+    deps_match = re.search(r"^dependencies\s*=\s*\[(.*?)\]", text, re.DOTALL | re.MULTILINE)
+    assert deps_match is not None, "Could not locate [project] dependencies in pyproject.toml"
+    # Strip PEP 508 version specifiers (>=, ==, etc.) to get the bare name.
+    dependency_names = {re.split(r"[><=!~ ]", entry)[0] for entry in re.findall(r'"([^"]+)"', deps_match.group(1))}
+
+    sources_match = re.search(r"^\[tool\.uv\.sources\]\n(.*?)(?=^\[|\Z)", text, re.DOTALL | re.MULTILINE)
+    assert sources_match is not None, "Could not locate [tool.uv.sources] in pyproject.toml"
+    source_names = set(re.findall(r"^([A-Za-z0-9_.-]+)\s*=", sources_match.group(1), re.MULTILINE))
+
+    return dependency_names, source_names
+
+
+def test_workspace_package_lists_are_consistent() -> None:
+    """Bidirectional drift guard across every place the bundled-package list lives.
+
+    The set of workspace packages shipped in the standalone app is hand-maintained
+    in four files: this test, scripts/build.js, electron/env-setup.js, and
+    electron/pyproject/pyproject.toml (both [project] dependencies and
+    [tool.uv.sources]). They MUST all agree -- two production regressions
+    (0.2.13, 0.2.25) were caused by this list drifting. Any package added to or
+    removed from one file but not the others fails here, naming the offender.
+    """
+    expected = set(WORKSPACE_PACKAGES)
+    dependency_names, source_names = _parse_pyproject_packages()
+    actual_by_source = {
+        "scripts/build.js": _parse_build_js_packages(),
+        "electron/env-setup.js": _parse_env_setup_js_packages(),
+        "electron/pyproject/pyproject.toml [project.dependencies]": dependency_names,
+        "electron/pyproject/pyproject.toml [tool.uv.sources]": source_names,
+    }
+    mismatches = {
+        source: sorted(found.symmetric_difference(expected))
+        for source, found in actual_by_source.items()
+        if found != expected
+    }
+    assert not mismatches, (
+        "Bundled workspace-package lists have drifted out of sync. "
+        f"build_test.py WORKSPACE_PACKAGES = {sorted(expected)}. "
+        f"Differences (symmetric difference vs the test's list) by file: {mismatches}. "
+        "Update every file so the package sets match exactly."
+    )

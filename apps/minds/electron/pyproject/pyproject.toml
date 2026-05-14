@@ -6,7 +6,10 @@ requires-python = ">=3.12"
 # the tool-uv-sources path overrides. uv ignores source overrides for
 # transitive-only packages and falls back to PyPI, which silently installs
 # stale published versions instead of our freshly built wheels.
-# Keep this list in sync with WORKSPACE_PACKAGES in scripts/build.js.
+# This list (both [project] dependencies and [tool.uv.sources]) is mirrored
+# in scripts/build.js, electron/env-setup.js, and scripts/build_test.py; the
+# drift guard test_workspace_package_lists_are_consistent in build_test.py
+# fails if any of them disagree, so update all four together.
 dependencies = [
     "minds>=0.1.0",
     "imbue-mngr>=0.2.0",

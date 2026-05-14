@@ -32,6 +32,11 @@ const MONOREPO_ROOT = path.resolve(ROOT, '../..');
  * The packaged app only needs the transitive runtime closure of what minds
  * imports; other workspace members (e.g. mngr_vps_docker, mngr_kanpan) are
  * not included.
+ *
+ * This list is mirrored in electron/env-setup.js, electron/pyproject/
+ * pyproject.toml, and scripts/build_test.py. The drift guard
+ * `test_workspace_package_lists_are_consistent` in build_test.py fails if any
+ * of them disagree, so update all four together.
  */
 const WORKSPACE_PACKAGES = {
   'minds':                  'apps/minds',

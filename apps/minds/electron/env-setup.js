@@ -37,9 +37,11 @@ function runEnvSetup(onProgress) {
     // user keeps running the OLD code in ~/.minds/.venv even after the
     // signed .app bundle has been replaced. Forcing --reinstall-package
     // for each one makes `uv sync` re-extract our wheels every launch,
-    // while PyPI deps stay cached. Keep this list in sync with
-    // WORKSPACE_PACKAGES in scripts/build.js and the dependencies block
-    // in electron/pyproject/pyproject.toml.
+    // while PyPI deps stay cached. This list is mirrored in
+    // scripts/build.js, electron/pyproject/pyproject.toml, and
+    // scripts/build_test.py; the drift guard
+    // test_workspace_package_lists_are_consistent in build_test.py fails
+    // if any of them disagree, so update all four together.
     const WORKSPACE_PACKAGES = [
       'minds',
       'imbue-mngr',
