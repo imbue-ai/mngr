@@ -64,11 +64,11 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
     Owns the full TUI input pipeline: TUI-ready check on startup,
     paste-detection synchronisation on send, and dispatch between a
     hook-driven submission signal (claude) and a poll-based confirmation
-    (gemini) after Enter is pressed.
+    (gemini, pi) after Enter is pressed.
 
     Subclasses set ``TUI_READY_INDICATOR`` to a stable substring that appears
     in the pane once the TUI has finished initializing and is ready to accept
-    input. Interactive coding TUIs (Claude Code, Gemini CLI) have complex
+    input. Interactive coding TUIs (Claude Code, Gemini CLI, pi) have complex
     input handlers that can misinterpret Enter as a literal newline when it
     arrives too quickly after the message text, so we wait for the paste to
     render before submitting.
