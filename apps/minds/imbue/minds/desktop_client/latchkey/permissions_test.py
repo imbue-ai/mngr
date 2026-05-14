@@ -5,18 +5,19 @@ import pytest
 from starlette.responses import HTMLResponse
 
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
-from imbue.minds.desktop_client.latchkey.core import Latchkey
 from imbue.minds.desktop_client.latchkey.permissions import GrantOutcome
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionFlowError
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-from imbue.minds.desktop_client.latchkey.store import load_permissions
-from imbue.minds.desktop_client.latchkey.store import permissions_path_for_agent
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.store import load_permissions
+from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
 def _make_recording_binary(tmp_path: Path, name: str, *, exit_code: int = 0, stderr: str = "") -> Path:
@@ -69,79 +70,60 @@ _SLACK_SERVICE_INFO = ServicePermissionInfo(
 
 
 _DEFAULT_AUTH_OPTIONS_JSON: str = json.dumps(["browser", "set"])
-_DEFAULT_SET_EXAMPLE: str = 'latchkey auth set slack -H "Authorization: Bearer xoxb-your-token"'
 
 
 def _make_latchkey_with_status(
     tmp_path: Path,
     *,
     credential_status: str,
-    auth_browser_exit: int = 0,
-    auth_browser_stderr: str = "",
     auth_options_json: str = _DEFAULT_AUTH_OPTIONS_JSON,
-    set_credentials_example: str = _DEFAULT_SET_EXAMPLE,
     latchkey_directory: Path | None = None,
 ) -> Latchkey:
-    """Build a ``Latchkey`` that uses two fake binaries.
+    """Build a ``Latchkey`` backed by a fake ``latchkey`` binary.
 
-    Both ``services info`` and ``auth browser`` call the same fake binary
-    via ``latchkey_binary``. The binary inspects ``argv[0]`` (``services``
-    or ``auth``) and either prints a JSON payload or appends to the
-    auth-browser recording. ``auth_options_json`` controls the
-    ``authOptions`` array latchkey reports; pass ``json.dumps(["set"])``
-    to simulate a service that doesn't support browser sign-in.
+    The fake binary only needs to answer ``services info`` -- the grant
+    flow no longer runs ``auth browser`` (the agent drives auth itself
+    via the gateway), and the dialog's ``render_request_page`` probes
+    ``services info`` to decide whether to warn the user about a Chrome
+    sign-in window. ``auth_options_json`` controls the ``authOptions``
+    array; pass ``json.dumps(["set"])`` to simulate a service that
+    doesn't advertise browser sign-in.
     """
     binary = tmp_path / "latchkey"
-    auth_recording = tmp_path / "auth_latchkey_report.jsonl"
     services_payload = json.dumps(
         {
             "credentialStatus": credential_status,
             "authOptions": json.loads(auth_options_json),
-            "setCredentialsExample": set_credentials_example,
         }
     )
     binary.write_text(
         "#!/usr/bin/env python3\n"
-        "import json, os, sys\n"
+        "import sys\n"
         "argv = sys.argv[1:]\n"
         "if argv[:2] == ['services', 'info']:\n"
         f"    print({services_payload!r})\n"
         "    sys.exit(0)\n"
-        "elif argv[:2] == ['auth', 'browser-prepare']:\n"
-        f"    with open({str(auth_recording)!r}, 'a') as f:\n"
-        "        f.write(json.dumps({'argv': argv, 'env_LATCHKEY_DIRECTORY': os.environ.get('LATCHKEY_DIRECTORY', '')}) + '\\n')\n"
-        "    sys.exit(0)\n"
-        "elif argv[:2] == ['auth', 'browser']:\n"
-        f"    with open({str(auth_recording)!r}, 'a') as f:\n"
-        "        f.write(json.dumps({'argv': argv, 'env_LATCHKEY_DIRECTORY': os.environ.get('LATCHKEY_DIRECTORY', '')}) + '\\n')\n"
-        f"    if {auth_browser_stderr!r}:\n"
-        f"        sys.stderr.write({auth_browser_stderr!r})\n"
-        f"    sys.exit({auth_browser_exit})\n"
         "else:\n"
         "    sys.stderr.write('unexpected argv: ' + repr(argv))\n"
         "    sys.exit(99)\n"
     )
     binary.chmod(0o755)
-    return Latchkey(latchkey_binary=str(binary), latchkey_directory=latchkey_directory)
+    # ``latchkey_directory`` is required on ``Latchkey``; default to ``tmp_path``
+    # for tests that don't care about the credential-store location.
+    return Latchkey(latchkey_binary=str(binary), latchkey_directory=latchkey_directory or tmp_path)
 
 
 def _build_handler(
     tmp_path: Path,
     *,
     credential_status: str,
-    auth_browser_exit: int = 0,
-    auth_browser_stderr: str = "",
     auth_options_json: str = _DEFAULT_AUTH_OPTIONS_JSON,
-    set_credentials_example: str = _DEFAULT_SET_EXAMPLE,
     latchkey_directory: Path | None = None,
 ) -> LatchkeyPermissionGrantHandler:
     latchkey = _make_latchkey_with_status(
         tmp_path,
         credential_status=credential_status,
-        auth_browser_exit=auth_browser_exit,
-        auth_browser_stderr=auth_browser_stderr,
         auth_options_json=auth_options_json,
-        set_credentials_example=set_credentials_example,
         latchkey_directory=latchkey_directory,
     )
     mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
@@ -182,33 +164,45 @@ def test_mngr_message_sender_does_not_raise_on_failure(tmp_path: Path) -> None:
 # -- LatchkeyPermissionGrantHandler.grant --
 
 
-def test_grant_grants_scope_regardless_of_credential_status(tmp_path: Path) -> None:
+def test_grant_writes_scope_to_per_host_file_regardless_of_credential_status(tmp_path: Path) -> None:
     """Cred acquisition is agent-driven now; the grant flow writes the scope and exits.
 
     Smoke across all four credential states latchkey can report -- they
     should all produce ``GRANTED`` since the handler no longer runs
-    ``auth browser``.
+    ``auth browser``. The scope rule lands in the per-host
+    ``latchkey_permissions.json`` (every agent on the host shares it).
     """
     for status in ("valid", "missing", "invalid", "unknown"):
         per_run_dir = tmp_path / status
         per_run_dir.mkdir()
         handler = _build_handler(per_run_dir, credential_status=status)
-        agent_id = AgentId()
+        host_id = HostId()
 
         result = handler.grant(
             request_event_id="evt-abc",
-            agent_id=agent_id,
+            agent_id=AgentId(),
+            host_id=host_id,
             service_info=_SLACK_SERVICE_INFO,
             granted_permissions=("slack-read-all",),
         )
 
         assert result.outcome == GrantOutcome.GRANTED, f"status={status}"
+        assert "granted" in result.message.lower(), f"status={status}"
         # Handler must not have invoked auth-browser / browser-prepare;
         # the agent drives those itself via the gateway.
         assert not (per_run_dir / "auth_latchkey_report.jsonl").exists(), f"status={status}"
-        # Scope grant landed in the per-agent permissions file.
-        config = load_permissions(permissions_path_for_agent(per_run_dir, agent_id))
+        # Scope grant landed in the per-host permissions file.
+        config = load_permissions(permissions_path_for_host(per_run_dir / "mngr_latchkey", host_id))
         assert config.rules == ({"slack-api": ["slack-read-all"]},), f"status={status}"
+        # Response event was written and mngr message sent.
+        responses = load_response_events(per_run_dir)
+        assert len(responses) == 1, f"status={status}"
+        assert responses[0].status == str(RequestStatus.GRANTED), f"status={status}"
+        mngr_recording = _read_recording(per_run_dir / "mngr_report.jsonl")
+        assert len(mngr_recording) == 1, f"status={status}"
+        argv = mngr_recording[0]["argv"]
+        assert isinstance(argv, list)
+        assert argv[0] == "message", f"status={status}"
 
 
 def test_grant_rejects_empty_granted_permissions(tmp_path: Path) -> None:
@@ -218,6 +212,7 @@ def test_grant_rejects_empty_granted_permissions(tmp_path: Path) -> None:
         handler.grant(
             request_event_id="evt-abc",
             agent_id=AgentId(),
+            host_id=HostId(),
             service_info=_SLACK_SERVICE_INFO,
             granted_permissions=(),
         )
@@ -233,6 +228,7 @@ def test_grant_rejects_permissions_outside_catalog(tmp_path: Path) -> None:
         handler.grant(
             request_event_id="evt-abc",
             agent_id=AgentId(),
+            host_id=HostId(),
             service_info=_SLACK_SERVICE_INFO,
             granted_permissions=("not-a-real-permission",),
         )
@@ -243,21 +239,24 @@ def test_grant_rejects_permissions_outside_catalog(tmp_path: Path) -> None:
 def test_grant_replaces_existing_rule_for_same_scope(tmp_path: Path) -> None:
     handler = _build_handler(tmp_path, credential_status="valid")
     agent_id = AgentId()
+    host_id = HostId()
 
     handler.grant(
         request_event_id="evt-1",
         agent_id=agent_id,
+        host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
     )
     handler.grant(
         request_event_id="evt-2",
         agent_id=agent_id,
+        host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all", "slack-write-all"),
     )
 
-    config = load_permissions(permissions_path_for_agent(tmp_path, agent_id))
+    config = load_permissions(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id))
     assert config.rules == ({"slack-api": ["slack-read-all", "slack-write-all"]},)
 
 
@@ -316,12 +315,31 @@ def test_render_request_page_omits_browser_notice_when_browser_auth_unsupported(
     assert "Granting permission" in html
 
 
+def test_render_request_page_notes_grants_are_shared_per_host(tmp_path: Path) -> None:
+    """Dialog must tell the user the grant applies to every agent on the host.
+
+    Latchkey state (gateway URL, password, JWT, permissions config) is
+    keyed per-host, so every agent that runs on this workspace's host
+    inherits the same grants. The dialog surfaces that scope so the user
+    isn't surprised by it.
+    """
+    handler = _build_handler(tmp_path, credential_status="valid")
+
+    html = _render_dialog_html(handler)
+
+    # Short bracket note next to the workspace link.
+    assert "grants apply to every agent on this host" in html
+    # Reinforced in the form body so users who skim past the header still see it.
+    assert "shared across every agent running on this workspace's host" in html
+
+
 # -- LatchkeyPermissionGrantHandler.deny --
 
 
 def test_deny_writes_response_event_without_touching_permissions_file(tmp_path: Path) -> None:
     handler = _build_handler(tmp_path, credential_status="valid")
     agent_id = AgentId()
+    host_id = HostId()
 
     handler.deny(
         request_event_id="evt-abc",
@@ -332,8 +350,8 @@ def test_deny_writes_response_event_without_touching_permissions_file(tmp_path: 
     responses = load_response_events(tmp_path)
     assert len(responses) == 1
     assert responses[0].status == str(RequestStatus.DENIED)
-    # No permissions file should have been created.
-    assert not permissions_path_for_agent(tmp_path, agent_id).exists()
+    # No permissions file should have been created on either path.
+    assert not permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).exists()
     # The auth-browser binary must not have been invoked either.
     assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
 

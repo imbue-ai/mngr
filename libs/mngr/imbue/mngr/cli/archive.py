@@ -7,11 +7,13 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.find import AgentMatch
+from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import parse_agent_addresses_or_raise
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -27,6 +29,7 @@ from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 
@@ -35,7 +38,7 @@ class ArchiveCliOptions(CommonCliOptions):
     """Options passed from the CLI to the archive command."""
 
     agents: tuple[str, ...]
-    agent_list: tuple[str, ...]
+    agent_list: tuple[AgentAddress, ...]
     archive_all: bool
     force: bool
     dry_run: bool
@@ -53,8 +56,9 @@ def _output(message: str, output_opts: OutputOptions) -> None:
 @optgroup.option(
     "--agent",
     "agent_list",
+    type=AGENT_ADDRESS,
     multiple=True,
-    help="Agent name or ID to archive (can be specified multiple times)",
+    help="Agent address (NAME[@HOST[.PROVIDER]]) to archive (can be specified multiple times)",
 )
 @optgroup.option(
     "-a",
@@ -85,20 +89,22 @@ def archive(ctx: click.Context, **kwargs: Any) -> None:
         command_class=ArchiveCliOptions,
     )
 
-    # Collect agent identifiers from positional args and --agent flag
-    agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
+    # Collect agent addresses from positional args and --agent flag
+    agent_addresses: list[AgentAddress] = parse_agent_addresses_or_raise(expand_stdin_placeholder(opts.agents)) + list(
+        opts.agent_list
+    )
 
-    if not agent_identifiers and not opts.archive_all:
+    if not agent_addresses and not opts.archive_all:
         if STDIN_PLACEHOLDER not in opts.agents:
             raise UserInputError("Must specify at least one agent or use --all")
         return
 
-    if agent_identifiers and opts.archive_all:
+    if agent_addresses and opts.archive_all:
         raise UserInputError("Cannot specify both agent names and --all")
 
     # Find agents in any state (archive applies to stopped agents)
-    target_agents = find_agents_by_addresses(
-        raw_identifiers=agent_identifiers,
+    target_agents = find_all_agents(
+        addresses=agent_addresses,
         filter_all=opts.archive_all,
         target_state=None,
         mngr_ctx=mngr_ctx,

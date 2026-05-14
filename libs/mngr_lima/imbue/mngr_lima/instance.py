@@ -234,6 +234,7 @@ class LimaProviderInstance(BaseProviderInstance):
     def _create_host_object(
         self,
         host_id: HostId,
+        host_name: HostName,
         ssh_config: LimaSshConfig,
     ) -> Host:
         """Create a Host object from SSH connection info."""
@@ -254,6 +255,7 @@ class LimaProviderInstance(BaseProviderInstance):
 
         return Host(
             id=host_id,
+            host_name=host_name,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -475,7 +477,7 @@ sudo poweroff
                 wait_for_sshd(ssh_config.hostname, ssh_config.port, self.config.ssh_connect_timeout)
 
             # Create the Host object
-            host = self._create_host_object(host_id, ssh_config)
+            host = self._create_host_object(host_id, name, ssh_config)
 
         except (LimaCommandError, MngrError, OSError) as e:
             failure_reason = str(e)
@@ -661,7 +663,7 @@ sudo poweroff
         with log_span("Waiting for SSH to be ready..."):
             wait_for_sshd(ssh_config.hostname, ssh_config.port, self.config.ssh_connect_timeout)
 
-        host_obj = self._create_host_object(host_id, ssh_config)
+        host_obj = self._create_host_object(host_id, HostName(host_record.certified_host_data.host_name), ssh_config)
 
         # Update SSH info in host record (port may change after restart)
         updated_record = host_record.model_copy_update(
@@ -775,7 +777,7 @@ sudo poweroff
 
         # Instance is running -- create online host
         ssh_config = self._get_ssh_config(instance_name)
-        host_obj = self._create_host_object(host_id, ssh_config)
+        host_obj = self._create_host_object(host_id, HostName(host_record.certified_host_data.host_name), ssh_config)
         self._evict_cached_host(host_id, replacement=host_obj)
         return host_obj
 

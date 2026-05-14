@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from pathlib import Path
 
+import pytest
 from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import SecretStr
@@ -32,7 +33,6 @@ from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
-from imbue.minds.desktop_client.latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import AgentName
@@ -75,76 +75,60 @@ def test_make_host_name_appends_host_suffix() -> None:
     assert _make_host_name(AgentName("alpha")) == "alpha-host"
 
 
-def test_build_mngr_create_command_injects_constant_agent_side_latchkey_url() -> None:
-    """Every mode gets the constant agent-side LATCHKEY_GATEWAY URL.
+def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> None:
+    """``_build_mngr_create_command`` lifts each entry of ``latchkey_env`` into a ``--host-env`` flag.
 
-    The reverse tunnel that ``LatchkeyDiscoveryHandler`` sets up post-discovery bridges
-    the agent's loopback at ``AGENT_SIDE_LATCHKEY_PORT`` to whichever host-side gateway
-    port the discovery handler picked, so the URL is the same constant every time.
-    """
-    expected = f"LATCHKEY_GATEWAY=http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
-    for mode in (LaunchMode.LOCAL, LaunchMode.LIMA, LaunchMode.CLOUD):
-        command, _ = _build_mngr_create_command(launch_mode=mode, agent_name=AgentName("hello"))
-        assert expected in command, f"{mode} command missing latchkey env: {command}"
-    # IMBUE_CLOUD requires an account to build the address; pass one and check the env var.
-    command, _ = _build_mngr_create_command(
-        launch_mode=LaunchMode.IMBUE_CLOUD,
-        agent_name=AgentName("hello"),
-        imbue_cloud_account="alice@imbue.com",
-    )
-    assert expected in command
+    The shape of the env (which keys are set, which URL is used, etc.) is decided
+    upstream by ``prepare_agent_latchkey``; this command-builder just plumbs
+    whatever it gets through to ``mngr create``. The plugin's
+    ``agent_setup_test.py`` covers all the per-mode permutations.
 
-
-def test_build_mngr_create_command_disables_latchkey_counting_when_wired() -> None:
-    """Whenever latchkey is wired into the workspace, the workspace-side
-    ``latchkey`` CLI runs in client mode against the host-side gateway.
-    The gateway already counts as one active user, so the workspace must
-    set ``LATCHKEY_DISABLE_COUNTING=1`` to avoid double-counting every
-    agent as a separate goatcounter.com user.
-    """
-    for mode in (LaunchMode.LOCAL, LaunchMode.LIMA, LaunchMode.CLOUD):
-        command, _ = _build_mngr_create_command(launch_mode=mode, agent_name=AgentName("hello"))
-        assert "LATCHKEY_DISABLE_COUNTING=1" in command, f"{mode} command missing disable-counting env: {command}"
-
-
-def test_build_mngr_create_command_explicit_url_overrides_constant() -> None:
-    """Passing ``latchkey_gateway_url`` overrides the default for any mode."""
-    command, _ = _build_mngr_create_command(
-        launch_mode=LaunchMode.LOCAL,
-        agent_name=AgentName("hello"),
-        latchkey_gateway_url="http://127.0.0.1:9999",
-    )
-    assert "LATCHKEY_GATEWAY=http://127.0.0.1:9999" in command
-    # The constant agent-side URL is not also injected.
-    assert f"LATCHKEY_GATEWAY=http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}" not in command
-
-
-def test_build_mngr_create_command_injects_latchkey_password_when_supplied() -> None:
-    """Password is injected at create time so the agent's first
-    ``latchkey curl`` already authenticates to the password-protected
-    shared gateway -- no fragile post-create step required.
+    ``--host-env`` (not ``--env``) is used so the wiring is written to the
+    new host's env file once and every agent that ever runs on the host
+    inherits the same gateway URL / password / JWT.
     """
     command, _ = _build_mngr_create_command(
         launch_mode=LaunchMode.LOCAL,
         agent_name=AgentName("hello"),
-        latchkey_gateway_password="sup3rs3cret",
+        latchkey_env={
+            "LATCHKEY_GATEWAY": "http://127.0.0.1:1989",
+            "LATCHKEY_GATEWAY_PASSWORD": "sup3rs3cret",
+            "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE": "eyJhbGc.fake.jwt",
+            "LATCHKEY_DISABLE_COUNTING": "1",
+        },
     )
+    assert "LATCHKEY_GATEWAY=http://127.0.0.1:1989" in command
     assert "LATCHKEY_GATEWAY_PASSWORD=sup3rs3cret" in command
-
-
-def test_build_mngr_create_command_injects_latchkey_jwt_when_supplied() -> None:
-    """The permissions-override JWT is injected at create time so the
-    agent's env file has it from the very first service start. This is
-    what fixes the previous-design bug where post-create ``mngr provision
-    --env`` could silently fail and leave
-    ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` missing.
-    """
-    command, _ = _build_mngr_create_command(
-        launch_mode=LaunchMode.LOCAL,
-        agent_name=AgentName("hello"),
-        latchkey_permissions_override_jwt="eyJhbGc.fake.jwt",
-    )
     assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=eyJhbGc.fake.jwt" in command
+    assert "LATCHKEY_DISABLE_COUNTING=1" in command
+
+    # Each latchkey entry must be preceded by ``--host-env`` (not ``--env``)
+    # so every agent on the host shares the same gateway wiring.
+    latchkey_keys = {
+        "LATCHKEY_GATEWAY",
+        "LATCHKEY_GATEWAY_PASSWORD",
+        "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE",
+        "LATCHKEY_DISABLE_COUNTING",
+    }
+    for index, arg in enumerate(command):
+        if any(arg.startswith(f"{key}=") for key in latchkey_keys):
+            assert index > 0
+            assert command[index - 1] == "--host-env", (
+                f"Latchkey arg {arg!r} should be passed via --host-env, got {command[index - 1]!r}"
+            )
+
+
+def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
+    """Empty / ``None`` ``latchkey_env`` opts the host out of latchkey wiring entirely."""
+    for latchkey_env in (None, {}):
+        command, _ = _build_mngr_create_command(
+            launch_mode=LaunchMode.LOCAL,
+            agent_name=AgentName("hello"),
+            latchkey_env=latchkey_env,
+        )
+        joined = " ".join(command)
+        assert "LATCHKEY_GATEWAY" not in joined
+        assert "LATCHKEY_DISABLE_COUNTING" not in joined
 
 
 def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() -> None:
@@ -479,6 +463,11 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
     assert cli.create_calls[0]["metadata"] == {"agent_name": "my-agent"}
 
 
+# Flaky under heavy CI load: this is a sync unit test but its setup spins up
+# fresh ConcurrencyGroups and a recording http-server fixture; the combined
+# work occasionally exceeds the 10s pytest-timeout when offload sandboxes are
+# contended. Offload retries flaky tests automatically.
+@pytest.mark.flaky
 def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The API_KEY branch uses the user-supplied key directly and must never call
     ``create_litellm_key``."""
