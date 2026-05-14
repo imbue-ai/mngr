@@ -589,7 +589,9 @@ def test_is_known_agent_type_accepts_registered_types() -> None:
     reset_agent_config_registry()
     try:
         # Both class and config registered -- the common case for a normally-
-        # installed plugin. Covers the 2nd and 3rd OR branches together.
+        # installed plugin. Short-circuit `or` means the 2nd branch
+        # (is_agent_class_registered) returns True before the 3rd branch is
+        # consulted; the subsequent subcases exercise each branch in isolation.
         register_agent_class("both-registered-type", _FakeAgentClass)
         register_agent_config("both-registered-type", AgentTypeConfig)
         assert is_known_agent_type("both-registered-type", MngrConfig()) is True
