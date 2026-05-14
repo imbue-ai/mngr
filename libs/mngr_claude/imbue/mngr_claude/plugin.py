@@ -19,6 +19,7 @@ from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Callable
+from typing import ClassVar
 from typing import Final
 
 import click
@@ -1335,10 +1336,11 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig]):
 
     TUI_READY_INDICATOR = "Claude Code"
 
-    # Path template (read by tui_utils._get_last_queue_timestamp on the host
-    # via a bash command-prefix) for the transcript log used as a fallback
-    # when the UserPromptSubmit hook misfires. Claude-specific.
-    _QUEUE_LOG_PATH_TEMPLATE = "$MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"
+    # Path template for the transcript event log, passed through to
+    # send_enter_via_tmux_wait_for_hook as the fallback source when the
+    # UserPromptSubmit hook misfires. The bash command in tui_utils evaluates
+    # the embedded $MNGR_AGENT_STATE_DIR on the host. Claude-specific.
+    _QUEUE_LOG_PATH_TEMPLATE: ClassVar[str] = "$MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"
 
     def _send_enter_and_validate(self, tmux_target: str) -> None:
         # Claude wires a UserPromptSubmit hook that fires `tmux wait-for -S`
