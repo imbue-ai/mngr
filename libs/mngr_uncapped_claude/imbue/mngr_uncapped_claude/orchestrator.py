@@ -289,7 +289,14 @@ def _drain_new_events(
     """Read the transcript file, emit any new events past ``seen_chars``, return new offset."""
     try:
         content = read_event_content(events_target, _COMMON_TRANSCRIPT_PATH)
-    except (FileNotFoundError, MngrError):
+    except FileNotFoundError:
+        # Benign before the transcript file has been written by mngr_claude.
+        logger.trace("common transcript not yet available at {}", _COMMON_TRANSCRIPT_PATH)
+        return seen_chars
+    except MngrError as exc:
+        # Don't abort the whole turn over a transient read failure; the next
+        # poll will retry. But surface it so the user can see what happened.
+        logger.warning("Failed to read common transcript: {}", exc)
         return seen_chars
     if len(content) <= seen_chars:
         return seen_chars
