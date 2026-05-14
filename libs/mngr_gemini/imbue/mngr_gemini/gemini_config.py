@@ -68,6 +68,32 @@ class GeminiDirectoryNotTrustedError(ConfigError):
         )
 
 
+class GeminiSettingsCorruptError(ConfigError):
+    """An existing Gemini ``settings.json`` cannot be merged into.
+
+    Raised when ``mngr_gemini`` needs to install hooks into an existing
+    ``settings.json`` but the file is unparseable (malformed JSON) or parses
+    to a non-object value (top-level list, string, etc.). We refuse to clobber
+    in that case: silently overwriting could destroy user-managed MCP servers,
+    custom commands, or other settings that happen to live in a file we can't
+    parse. The user is asked to repair or remove the file.
+
+    Gemini CLI does not honor a ``settings.local.json`` sidecar (confirmed by
+    inspecting the published settings schema and the gemini binary), so there
+    is no fallback path that lets us avoid the user's file. Writing a new
+    settings.json elsewhere wouldn't be picked up by the CLI.
+    """
+
+    def __init__(self, settings_path: str, reason: str) -> None:
+        self.settings_path = settings_path
+        self.reason = reason
+        super().__init__(
+            f"Existing Gemini settings file {settings_path} cannot be parsed as a JSON object "
+            f"({reason}). mngr_gemini refuses to overwrite it because doing so would discard "
+            "any user-managed contents. Repair or remove the file and re-run."
+        )
+
+
 # =============================================================================
 # Config directory + settings path resolution
 # =============================================================================

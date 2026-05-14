@@ -16,6 +16,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr_gemini.gemini_config import GeminiSettingsCorruptError
 from imbue.mngr_gemini.gemini_config import HOOK_EVENT_SESSION_START
 from imbue.mngr_gemini.plugin import GeminiAgent
 from imbue.mngr_gemini.plugin import GeminiAgentConfig
@@ -250,12 +251,52 @@ def test_provision_is_idempotent_for_workspace_hooks(gemini_agent: GeminiAgent) 
     assert len(second["hooks"][HOOK_EVENT_SESSION_START]) == 1
 
 
-def test_provision_recovers_from_malformed_existing_settings(gemini_agent: GeminiAgent) -> None:
-    """A user typo in settings.json must not break provisioning -- replace and continue."""
+def test_provision_refuses_to_clobber_malformed_existing_settings(gemini_agent: GeminiAgent) -> None:
+    """Malformed JSON in the user's settings.json must surface as an error, not be replaced.
+
+    Gemini does not honor a ``settings.local.json`` sidecar, so there is no safe path that
+    lets us avoid the user's file. Better to make the user repair it than to discard
+    contents we couldn't parse.
+    """
     settings_dir = gemini_agent.work_dir / ".gemini"
     settings_dir.mkdir()
     # The text below is intentionally truncated (missing closing braces).
-    (settings_dir / "settings.json").write_text('{"mcpServers": {"fs":')
+    corrupt_text = '{"mcpServers": {"fs":'
+    (settings_dir / "settings.json").write_text(corrupt_text)
+
+    with pytest.raises(GeminiSettingsCorruptError) as excinfo:
+        gemini_agent.provision(
+            host=gemini_agent.host,
+            options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
+            mngr_ctx=gemini_agent.mngr_ctx,
+        )
+
+    # The original corrupt file is preserved byte-for-byte.
+    assert (settings_dir / "settings.json").read_text() == corrupt_text
+    assert str(settings_dir / "settings.json") in excinfo.value.settings_path
+
+
+def test_provision_refuses_to_clobber_non_object_existing_settings(gemini_agent: GeminiAgent) -> None:
+    """A top-level JSON list/string/etc. is structurally invalid -- raise, don't overwrite."""
+    settings_dir = gemini_agent.work_dir / ".gemini"
+    settings_dir.mkdir()
+    list_text = "[1, 2, 3]"
+    (settings_dir / "settings.json").write_text(list_text)
+
+    with pytest.raises(GeminiSettingsCorruptError):
+        gemini_agent.provision(
+            host=gemini_agent.host,
+            options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
+            mngr_ctx=gemini_agent.mngr_ctx,
+        )
+    assert (settings_dir / "settings.json").read_text() == list_text
+
+
+def test_provision_tolerates_existing_empty_settings_file(gemini_agent: GeminiAgent) -> None:
+    """A zero-byte (or whitespace-only) settings.json is treated as 'no settings yet'."""
+    settings_dir = gemini_agent.work_dir / ".gemini"
+    settings_dir.mkdir()
+    (settings_dir / "settings.json").write_text("   \n")
 
     gemini_agent.provision(
         host=gemini_agent.host,

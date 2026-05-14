@@ -21,6 +21,7 @@ from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
 from imbue.mngr_gemini import resources as _gemini_resources
+from imbue.mngr_gemini.gemini_config import GeminiSettingsCorruptError
 from imbue.mngr_gemini.gemini_config import build_readiness_hooks_config
 from imbue.mngr_gemini.gemini_config import merge_hooks_config
 
@@ -151,26 +152,33 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         groups are appended, and re-running this method is a no-op once the
         readiness hook is present. If the file does not yet exist, it is
         created with just the readiness ``hooks`` block.
+
+        If the file exists but cannot be parsed as a JSON object (malformed,
+        empty-after-whitespace-only, top-level list/string/etc.) we raise
+        ``GeminiSettingsCorruptError`` rather than overwriting it. Gemini has
+        no ``settings.local.json`` sidecar that would let us write somewhere
+        the user doesn't own, so the safe move is to surface the problem.
         """
         settings_path = self.work_dir / ".gemini" / "settings.json"
 
-        existing_settings: dict[str, Any] = {}
         try:
             existing_text = host.read_text_file(settings_path)
         except FileNotFoundError:
             existing_text = ""
-        if existing_text.strip():
+
+        existing_settings: dict[str, Any]
+        if not existing_text.strip():
+            existing_settings = {}
+        else:
             try:
                 parsed = json.loads(existing_text)
             except json.JSONDecodeError as exc:
-                # Matches read_gemini_settings: a user typo must not break agent
-                # provisioning. The merged-write below will replace the corrupt
-                # file; the user can recover from the .bak via shutil.copy2-style
-                # backups left by their editor if needed.
-                logger.warning("Existing {} is malformed ({}); replacing", settings_path, exc)
-                parsed = {}
-            if isinstance(parsed, dict):
-                existing_settings = parsed
+                raise GeminiSettingsCorruptError(str(settings_path), f"invalid JSON: {exc}") from exc
+            if not isinstance(parsed, dict):
+                raise GeminiSettingsCorruptError(
+                    str(settings_path), f"top-level value is {type(parsed).__name__}, not object"
+                )
+            existing_settings = parsed
 
         merged = merge_hooks_config(existing_settings, build_readiness_hooks_config())
         if merged is None:
