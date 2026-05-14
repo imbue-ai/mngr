@@ -133,8 +133,10 @@ def test_lifecycle_state_running_unknown_agent_type_when_different_process_exist
     """Test that agent is RUNNING_UNKNOWN_AGENT_TYPE when tmux session exists with
     a different process and the agent type is not registered."""
     # Use a name that is deliberately NOT in the test-placeholder agent-type
-    # registration, so check_agent_type_known returns False and the lifecycle
-    # logic reports RUNNING_UNKNOWN_AGENT_TYPE rather than REPLACED.
+    # registration, and pass register_agent_type=False so the create_test_agent
+    # helper does not register it on the fly. That way check_agent_type_known
+    # returns False and the lifecycle logic reports RUNNING_UNKNOWN_AGENT_TYPE
+    # rather than REPLACED.
     unregistered_agent = create_test_agent(
         local_provider,
         temp_work_dir,
@@ -142,6 +144,7 @@ def test_lifecycle_state_running_unknown_agent_type_when_different_process_exist
         agent_type=AgentTypeName("lifecycle-unregistered-type"),
         extra_data=None,
         agent_class=BaseAgent,
+        register_agent_type=False,
     )
     session_name = f"{unregistered_agent.mngr_ctx.config.prefix}{unregistered_agent.name}"
 

@@ -41,6 +41,7 @@ def create_test_agent(
     *,
     extra_data: Mapping[str, Any] | None,
     agent_class: type[BaseAgent[AgentTypeConfig]],
+    register_agent_type: bool = True,
 ) -> BaseAgent[AgentTypeConfig]:
     """Create a test agent backed by a real local host filesystem.
 
@@ -51,13 +52,20 @@ def create_test_agent(
 
     ``extra_data`` is merged into the agent's ``data.json`` after the default
     fields, so callers can inject things like ``ready_timeout_seconds``.
+
+    By default the agent's type is registered as ``BaseAgent`` on the fly so
+    that downstream resolution (e.g. ``check_agent_type_known``) treats it
+    as a known type. Set ``register_agent_type=False`` to keep the type
+    deliberately unregistered -- needed by tests that exercise the
+    ``RUNNING_UNKNOWN_AGENT_TYPE`` lifecycle branch.
     """
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
 
     agent_id = AgentId.generate()
     agent_name = AgentName(f"test-agent-{get_short_random_string()}")
     resolved_type = agent_type or AgentTypeName("test")
-    _ensure_test_agent_type_registered(resolved_type)
+    if register_agent_type:
+        _ensure_test_agent_type_registered(resolved_type)
     resolved_config = agent_config or AgentTypeConfig(command=CommandString("sleep 1000"))
     create_time = datetime.now(timezone.utc)
 
