@@ -13,6 +13,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr_tmr.data_types import AgentKind
 from imbue.mngr_tmr.data_types import Change
 from imbue.mngr_tmr.data_types import ChangeKind
 from imbue.mngr_tmr.data_types import ChangeStatus
@@ -115,29 +116,29 @@ def _make_config(provider: str = "local", snapshot: SnapshotName | None = None) 
 
 
 def test_build_agent_options_rsync_disabled() -> None:
-    opts = _build_agent_options(AgentName("test"), "branch", _make_config())
+    opts = _build_agent_options(AgentName("test"), "branch", _make_config(), AgentKind.TESTING_AGENT)
     assert opts.data_options.is_rsync_enabled is False
 
 
 def test_build_agent_options_local_uses_worktree() -> None:
-    opts = _build_agent_options(AgentName("test"), "branch", _make_config("local"))
+    opts = _build_agent_options(AgentName("test"), "branch", _make_config("local"), AgentKind.TESTING_AGENT)
     assert opts.git is not None
     assert opts.transfer_mode == TransferMode.GIT_WORKTREE
 
 
 def test_build_agent_options_remote_uses_git_mirror() -> None:
-    opts = _build_agent_options(AgentName("test"), "branch", _make_config("modal"))
+    opts = _build_agent_options(AgentName("test"), "branch", _make_config("modal"), AgentKind.TESTING_AGENT)
     assert opts.git is not None
     assert opts.transfer_mode == TransferMode.GIT_MIRROR
 
 
 def test_build_agent_options_local_ready_timeout() -> None:
-    opts = _build_agent_options(AgentName("test"), "branch", _make_config("local"))
+    opts = _build_agent_options(AgentName("test"), "branch", _make_config("local"), AgentKind.TESTING_AGENT)
     assert opts.ready_timeout_seconds == 10.0
 
 
 def test_build_agent_options_remote_ready_timeout() -> None:
-    opts = _build_agent_options(AgentName("test"), "branch", _make_config("docker"))
+    opts = _build_agent_options(AgentName("test"), "branch", _make_config("docker"), AgentKind.TESTING_AGENT)
     assert opts.ready_timeout_seconds == 60.0
 
 
@@ -155,24 +156,39 @@ def test_build_agent_options_passes_env_and_labels() -> None:
         label_options=labels,
         snapshot=None,
     )
-    opts = _build_agent_options(AgentName("test"), "branch", config_with_env_and_labels)
+    opts = _build_agent_options(AgentName("test"), "branch", config_with_env_and_labels, AgentKind.TESTING_AGENT)
     assert opts.environment.env_vars == (EnvVar(key="FOO", value="bar"),)
-    assert opts.label_options.labels == {"batch": "1"}
+    # tmr_role is stamped automatically; everything else is preserved.
+    assert opts.label_options.labels == {"batch": "1", "tmr_role": AgentKind.TESTING_AGENT.value}
 
 
 def test_build_agent_options_sets_agent_name() -> None:
-    opts = _build_agent_options(AgentName("tmr-my-test-abc123"), "mngr-tmr/my-test", _make_config())
+    opts = _build_agent_options(
+        AgentName("tmr-my-test-abc123"), "mngr-tmr/my-test", _make_config(), AgentKind.TESTING_AGENT
+    )
     assert opts.name == AgentName("tmr-my-test-abc123")
 
 
+def test_build_agent_options_stamps_role_label_for_each_kind() -> None:
+    for kind in (AgentKind.TESTING_AGENT, AgentKind.SNAPSHOTTER, AgentKind.INTEGRATOR):
+        opts = _build_agent_options(AgentName("test"), "branch", _make_config(), kind)
+        assert opts.label_options.labels.get("tmr_role") == kind.value
+
+
 def test_build_agent_options_target_path_pins_work_dir() -> None:
-    opts = _build_agent_options(AgentName("test"), "branch", _make_config("modal"), target_path=Path("/code"))
+    opts = _build_agent_options(
+        AgentName("test"), "branch", _make_config("modal"), AgentKind.TESTING_AGENT, target_path=Path("/code")
+    )
     assert opts.target_path == Path("/code")
 
 
 def test_build_agent_options_transfer_mode_override_wins() -> None:
     opts = _build_agent_options(
-        AgentName("test"), "branch", _make_config("modal"), transfer_mode=TransferMode.GIT_WORKTREE
+        AgentName("test"),
+        "branch",
+        _make_config("modal"),
+        AgentKind.TESTING_AGENT,
+        transfer_mode=TransferMode.GIT_WORKTREE,
     )
     assert opts.transfer_mode == TransferMode.GIT_WORKTREE
 

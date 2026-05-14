@@ -49,6 +49,7 @@ from imbue.mngr_tmr.pulling import pull_agent_outputs
 from imbue.mngr_tmr.pulling import pull_integrator_outputs
 from imbue.mngr_tmr.report import generate_html_report
 from imbue.mngr_tmr.report import list_pullable_branches
+from imbue.mngr_tmr.report_upload import maybe_upload_report
 from imbue.mngr_tmr.utils import collect_tests
 from imbue.mngr_tmr.utils import get_base_commit
 from imbue.mngr_tmr.utils import make_run_name
@@ -252,7 +253,8 @@ def _run_reintegrate(
     matching_agents = [
         detail
         for detail in list_result.agents
-        if detail.labels.get("tmr_run_name") == run_name and detail.labels.get("tmr_role") != "integrator"
+        if detail.labels.get("tmr_run_name") == run_name
+        and detail.labels.get("tmr_role") != AgentKind.INTEGRATOR.value
     ]
     if is_human:
         write_human_line("Found {} agent(s) from run {}", len(matching_agents), run_name)
@@ -301,21 +303,19 @@ def _run_reintegrate(
     base_commit = get_base_commit(source_dir, cg)
 
     # Write pre-integrator report
-    _, uploaded_url = generate_html_report(
+    report_path = generate_html_report(
         test_agent_metadata,
         output_dir,
         run_commands=_build_run_commands(run_name),
-        run_name=run_name,
     )
-    _emit_report_url(uploaded_url, output_opts)
+    _emit_report_url(maybe_upload_report(report_path, run_name), output_opts)
 
     # Run integrator (carry the same tmr_run_name so it shows up in this run's
-    # agent list; tmr_role="integrator" lets the discovery query above filter
-    # it out from the testing agents).
+    # agent list; the tmr_role label is set automatically by _create_tmr_agent
+    # from AgentKind.INTEGRATOR, which the reintegrate filter above looks for).
     env_options = AgentEnvironmentOptions(env_vars=resolve_env_vars((), opts.env))
     run_labels = dict(resolve_labels(opts.label).labels)
     run_labels["tmr_run_name"] = run_name
-    run_labels["tmr_role"] = "integrator"
     label_options = AgentLabelOptions(labels=run_labels)
     integrator_agent_type = opts.integrator_type if opts.integrator_type is not None else opts.agent_type
     integrator_templates = opts.integrator_template if opts.integrator_template else opts.agent_template
@@ -334,15 +334,14 @@ def _run_reintegrate(
         test_agent_metadata, integrator_config, mngr_ctx, opts, output_dir, run_name, base_commit=base_commit
     )
     integrated_branch = integrator_meta.branch_name if integrator_meta is not None else None
-    _, uploaded_url = generate_html_report(
+    report_path = generate_html_report(
         test_agent_metadata,
         output_dir,
         integrator_metadata=integrator_meta,
         run_commands=_build_run_commands(run_name, integrated_branch),
-        run_name=run_name,
     )
     _emit_report_path(output_dir / "index.html", output_opts)
-    _emit_report_url(uploaded_url, output_opts)
+    _emit_report_url(maybe_upload_report(report_path, run_name), output_opts)
     _emit_integrator_branch(integrated_branch, output_opts)
     _print_run_commands(run_name, output_opts, integrated_branch)
 
@@ -624,12 +623,12 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     run = opts.run_name if opts.run_name else make_run_name()
     testing_flags = testing_flags + ("--mngr-e2e-run-name", f"tmr_{run}")
 
-    # Add tmr_run_name (so reintegrate can find this run's agents) and
-    # tmr_role=testing (so the same query can filter out the integrator,
-    # which carries tmr_role=integrator).
+    # Add tmr_run_name so reintegrate can find this run's agents. The
+    # tmr_role label is set automatically by _create_tmr_agent based on
+    # the AgentKind passed at each launch site (so the reintegrate filter
+    # can exclude AgentKind.INTEGRATOR.value).
     run_labels = dict(label_options.labels)
     run_labels["tmr_run_name"] = run
-    run_labels["tmr_role"] = "testing"
     label_options = AgentLabelOptions(labels=run_labels)
 
     config = TmrLaunchConfig(
@@ -732,7 +731,6 @@ def _run_tmr_pipeline(
         all_hosts=agent_hosts,
         launch_failures=launch_failures,
         run_name=run,
-        used_suffixes=set(),
         source_dir=source_dir,
     )
 
@@ -742,15 +740,15 @@ def _run_tmr_pipeline(
     # Step 8: Write the post-polling report (pre-integrator). Artifacts and
     # branch bundles were already downloaded during per-agent finalization;
     # the reporter parses outcome JSON from disk.
-    _, uploaded_url = generate_html_report(test_agent_metadata, output_dir, run_name=run)
-    _emit_report_url(uploaded_url, output_opts)
+    report_path = generate_html_report(test_agent_metadata, output_dir)
+    _emit_report_url(maybe_upload_report(report_path, run), output_opts)
 
     # Step 9: Build integrator config (defaults to local provider) and integrate.
-    # Override the role label so the integrator is distinguishable from the
-    # testing agents in `mngr ls` and during reintegrate.
+    # The integrator's tmr_role label is set automatically by _create_tmr_agent
+    # (from AgentKind.INTEGRATOR), distinguishing it from testing agents in
+    # `mngr ls` and during reintegrate.
     integrator_agent_type = opts.integrator_type if opts.integrator_type is not None else opts.agent_type
     integrator_templates = opts.integrator_template if opts.integrator_template else opts.agent_template
-    integrator_label_options = AgentLabelOptions(labels={**label_options.labels, "tmr_role": "integrator"})
     integrator_config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,
@@ -758,7 +756,7 @@ def _run_tmr_pipeline(
         agent_type=AgentTypeName(integrator_agent_type),
         provider_name=ProviderInstanceName(opts.integrator_provider),
         env_options=env_options,
-        label_options=integrator_label_options,
+        label_options=label_options,
         templates=integrator_templates,
         additional_authorized_keys=opts.additional_authorized_keys,
     )
@@ -766,15 +764,14 @@ def _run_tmr_pipeline(
         test_agent_metadata, integrator_config, mngr_ctx, opts, output_dir, run, base_commit=base_commit
     )
     integrated_branch = integrator_meta.branch_name if integrator_meta is not None else None
-    _, uploaded_url = generate_html_report(
+    report_path = generate_html_report(
         test_agent_metadata,
         output_dir,
         integrator_metadata=integrator_meta,
         run_commands=_build_run_commands(run, integrated_branch),
-        run_name=run,
     )
     _emit_report_path(output_dir / "index.html", output_opts)
-    _emit_report_url(uploaded_url, output_opts)
+    _emit_report_url(maybe_upload_report(report_path, run), output_opts)
     _emit_integrator_branch(integrated_branch, output_opts)
 
     _print_run_commands(run, output_opts, integrated_branch)

@@ -102,27 +102,26 @@ def _build_host_environment(config: TmrLaunchConfig) -> HostEnvironmentOptions:
     return HostEnvironmentOptions(authorized_keys=config.additional_authorized_keys)
 
 
-def _with_role_label(config: TmrLaunchConfig, role: str) -> TmrLaunchConfig:
-    """Return a copy of ``config`` with ``tmr_role`` set to ``role``.
-
-    The cli stamps ``tmr_role: testing`` on the main config; this helper
-    overrides it for the snapshotter / integrator paths so their agents
-    can be told apart from testing agents via a server-side label filter
-    (``mngr ls --include 'labels.tmr_role == "integrator"'`` etc.).
-    """
-    new_labels = AgentLabelOptions(labels={**config.label_options.labels, "tmr_role": role})
-    return config.model_copy_update(to_update(config.field_ref().label_options, new_labels))
+# Server-side label that classifies a TMR-launched agent. The value is
+# always an AgentKind enum value so the in-process kind and the on-server
+# label have a single source of truth -- mngr ls --include
+# 'labels.tmr_role == "INTEGRATOR"' matches the in-process classification.
+_ROLE_LABEL_KEY = "tmr_role"
 
 
 def _build_agent_options(
     agent_name: AgentName,
     branch_name: str,
     config: TmrLaunchConfig,
+    kind: AgentKind,
     initial_message: str | None = None,
     target_path: Path | None = None,
     transfer_mode: TransferMode | None = None,
 ) -> CreateAgentOptions:
     """Build CreateAgentOptions for a tmr agent.
+
+    ``kind`` is stamped onto ``label_options`` as the ``tmr_role`` label,
+    overriding any prior value carried on ``config``.
 
     ``target_path`` overrides where the agent's work_dir is placed on the
     host (used to pin the snapshotter to ``/code``). ``transfer_mode``
@@ -132,6 +131,7 @@ def _build_agent_options(
     if transfer_mode is None:
         transfer_mode = transfer_mode_for_provider(config.provider_name)
     is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
+    label_options = AgentLabelOptions(labels={**config.label_options.labels, _ROLE_LABEL_KEY: kind.value})
     return CreateAgentOptions(
         agent_type=config.agent_type,
         name=agent_name,
@@ -144,7 +144,7 @@ def _build_agent_options(
         ),
         data_options=AgentDataOptions(is_rsync_enabled=False),
         environment=config.env_options,
-        label_options=config.label_options,
+        label_options=label_options,
         ready_timeout_seconds=60.0 if is_remote else 10.0,
     )
 
@@ -154,20 +154,24 @@ def _create_tmr_agent(
     branch_name: str,
     config: TmrLaunchConfig,
     mngr_ctx: MngrContext,
+    kind: AgentKind,
     initial_message: str | None = None,
     existing_host: OnlineHostInterface | None = None,
     host_name: HostName | None = None,
-    is_snapshotter: bool = False,
 ) -> CreateAgentResult:
     """Create an agent on the configured provider with an optional initial message.
+
+    ``kind`` classifies the agent -- it controls the ``tmr_role`` label
+    (set by ``_build_agent_options``) and triggers the snapshotter-specific
+    work_dir pinning when ``kind is AgentKind.SNAPSHOTTER``.
 
     If existing_host is provided, the agent is placed on that host instead of
     creating a new one (used for host sharing in remote providers).
 
-    If is_snapshotter is True, pin the agent's work_dir to ``/code`` so the
-    git repo on the snapshotter's host lives at a known path; subsequent
-    agents created from the snapshot then git-worktree off that path
-    instead of re-uploading the source.
+    Snapshotter agents have their work_dir pinned to ``/code`` so the git
+    repo on the snapshotter's host lives at a known path; subsequent agents
+    created from the snapshot then git-worktree off that path instead of
+    re-uploading the source.
 
     If the agent is being placed on an existing host built from a snapshot
     (``existing_host`` is set and ``config.snapshot`` is set), source from
@@ -192,12 +196,13 @@ def _create_tmr_agent(
             environment=_build_host_environment(config),
         )
 
-    if is_snapshotter:
+    if kind is AgentKind.SNAPSHOTTER:
         source_location = HostLocation(host=config.source_host, path=config.source_dir)
         agent_options = _build_agent_options(
             agent_name,
             branch_name,
             config,
+            kind,
             initial_message=initial_message,
             target_path=_HOST_CODE_DIR,
         )
@@ -207,12 +212,13 @@ def _create_tmr_agent(
             agent_name,
             branch_name,
             config,
+            kind,
             initial_message=initial_message,
             transfer_mode=TransferMode.GIT_WORKTREE,
         )
     else:
         source_location = HostLocation(host=config.source_host, path=config.source_dir)
-        agent_options = _build_agent_options(agent_name, branch_name, config, initial_message=initial_message)
+        agent_options = _build_agent_options(agent_name, branch_name, config, kind, initial_message=initial_message)
 
     return api_create(
         source_location=source_location,
@@ -245,6 +251,7 @@ def _launch_test_agent(
         branch_name=branch_name,
         config=config,
         mngr_ctx=mngr_ctx,
+        kind=AgentKind.TESTING_AGENT,
         initial_message=build_test_agent_prompt(test_node_id, pytest_flags, prompt_suffix),
         existing_host=existing_host,
         host_name=host_name,
@@ -276,9 +283,9 @@ def _create_snapshot_host(
     create_result = _create_tmr_agent(
         agent_name=agent_name,
         branch_name=f"mngr-tmr/{run_name}/snapshotter",
-        config=_with_role_label(config, "snapshotter"),
+        config=config,
         mngr_ctx=mngr_ctx,
-        is_snapshotter=True,
+        kind=AgentKind.SNAPSHOTTER,
         host_name=host_name,
     )
 
@@ -516,8 +523,9 @@ def launch_integrator_agent(
     create_result = _create_tmr_agent(
         agent_name=agent_name,
         branch_name=branch_name,
-        config=_with_role_label(config, "integrator"),
+        config=config,
         mngr_ctx=mngr_ctx,
+        kind=AgentKind.INTEGRATOR,
         initial_message=prompt,
         host_name=host_name,
     )

@@ -292,7 +292,7 @@ def test_generate_html_report(tmp_path: Path) -> None:
             summary_markdown="Fixed missing import",
         ),
     ]
-    result_path, _ = generate_html_report(agents, output_dir)
+    result_path = generate_html_report(agents, output_dir)
     assert result_path == output_dir / "index.html"
     assert result_path.exists()
     content = result_path.read_text()
@@ -337,7 +337,7 @@ def test_generate_html_report_all_report_sections(tmp_path: Path) -> None:
         make_metadata_and_outcome(output_dir, "failed", error_summary="boom"),
         make_metadata_and_outcome(output_dir, "clean", tests_passing_before=True, tests_passing_after=True),
     ]
-    result_path, _ = generate_html_report(agents, output_dir)
+    result_path = generate_html_report(agents, output_dir)
     content = result_path.read_text()
     for sec in ReportSection:
         label = {
@@ -354,7 +354,7 @@ def test_generate_html_report_all_report_sections(tmp_path: Path) -> None:
 def test_generate_html_report_empty_agents(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
     output_dir.mkdir()
-    result_path, _ = generate_html_report([], output_dir)
+    result_path = generate_html_report([], output_dir)
     assert "0 test(s)" in result_path.read_text()
 
 
@@ -380,7 +380,7 @@ def test_generate_html_report_with_integrator(tmp_path: Path) -> None:
         integrator_meta.agent_name,
         {"squashed_branches": ["mngr-tmr/a"], "squashed_commit_hash": "abc", "impl_priority": [], "failed": []},
     )
-    result_path, _ = generate_html_report(agents, output_dir, integrator_metadata=integrator_meta)
+    result_path = generate_html_report(agents, output_dir, integrator_metadata=integrator_meta)
     content = result_path.read_text()
     assert "Test Map-Reduce Report" in content
     assert "Merged?" in content
@@ -399,14 +399,14 @@ def test_generate_html_report_integrator_with_failures(tmp_path: Path) -> None:
         integrator_meta.agent_name,
         {"squashed_branches": ["mngr-tmr/a"], "failed": ["mngr-tmr/b"]},
     )
-    result_path, _ = generate_html_report(agents, output_dir, integrator_metadata=integrator_meta)
+    result_path = generate_html_report(agents, output_dir, integrator_metadata=integrator_meta)
     assert result_path.exists()
 
 
 def test_generate_html_report_without_integrator(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
     agents = [make_metadata_and_outcome(output_dir, "a", tests_passing_before=True, tests_passing_after=True)]
-    result_path, _ = generate_html_report(agents, output_dir)
+    result_path = generate_html_report(agents, output_dir)
     assert "Test Map-Reduce Report" in result_path.read_text()
 
 
@@ -425,7 +425,7 @@ def test_generate_html_report_html_escaped(tmp_path: Path) -> None:
             summary_markdown="<img onerror=alert(1)>",
         )
     ]
-    result_path, _ = generate_html_report(agents, output_dir)
+    result_path = generate_html_report(agents, output_dir)
     content = result_path.read_text()
     assert "<script>alert" not in content
     assert "&lt;script&gt;" in content
