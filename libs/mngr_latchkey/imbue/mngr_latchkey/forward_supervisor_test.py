@@ -295,6 +295,29 @@ def test_stop_is_no_op_when_nothing_running(tmp_path: Path) -> None:
     supervisor.stop()
 
 
+def test_stop_immediately_after_ensure_running_terminates_child(tmp_path: Path) -> None:
+    """``stop()`` called within the fork-exec window still terminates the freshly-spawned child.
+
+    Regression: an earlier version of ``stop()`` ran an
+    :func:`is_forward_info_alive` check on the cached PID before
+    sending SIGTERM. The child's cmdline is briefly empty between
+    the kernel's ``fork`` and ``execve``, so the check would fail
+    and ``stop()`` would skip the SIGTERM, leaking the child. The
+    current ``stop()`` trusts ``_last_known_pid`` without a cmdline
+    check; this test pins that behaviour by NOT waiting for the
+    child to fully exec before calling ``stop()``.
+    """
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+    )
+    info = supervisor.ensure_running()
+    supervisor.stop()
+    assert _wait_for_process_exit(info.pid)
+
+
 def test_stop_skips_termination_for_stale_pid(tmp_path: Path) -> None:
     """A record whose PID is alive but not a ``mngr latchkey forward`` is not signaled.
 
