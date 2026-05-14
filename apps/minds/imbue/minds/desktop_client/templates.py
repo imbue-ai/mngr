@@ -220,7 +220,6 @@ def status_text_for(
 def render_creating_page(
     creation_id: CreationId,
     info: AgentCreationInfo,
-    launch_mode: LaunchMode = LaunchMode.LOCAL,
 ) -> str:
     """Render the progress page shown while an agent is being created.
 
@@ -230,8 +229,13 @@ def render_creating_page(
     needs a stable handle to poll status from the moment the user kicks
     off the form. The template's status-poll URL still includes this id
     so SSE/log-streaming endpoints can find the right ``log_queue``.
+
+    The launch mode is read off ``info.launch_mode`` -- the worker
+    thread records it at ``start_creation`` time, so the
+    ``AgentCreationInfo`` snapshot is the single source of truth for
+    caption resolution (consistent with the SSE status events).
     """
-    status_text = status_text_for(str(info.status), error=info.error, launch_mode=launch_mode)
+    status_text = status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode)
     template = JINJA_ENV.get_template("creating.html")
     return template.render(
         agent_id=creation_id,

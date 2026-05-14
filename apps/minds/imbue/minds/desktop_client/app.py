@@ -588,8 +588,6 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     )
 
     creating_url = "/creating/{}".format(creation_id)
-    if launch_mode is LaunchMode.IMBUE_CLOUD:
-        creating_url += "?mode=IMBUE_CLOUD"
     return Response(status_code=303, headers={"Location": creating_url})
 
 
@@ -784,12 +782,7 @@ def _handle_creating_page(
     if info.status == AgentCreationStatus.DONE and info.redirect_url is not None:
         return Response(status_code=307, headers={"Location": info.redirect_url})
 
-    mode_param = request.query_params.get("mode", "")
-    try:
-        creating_launch_mode = LaunchMode(mode_param) if mode_param else LaunchMode.LOCAL
-    except ValueError:
-        creating_launch_mode = LaunchMode.LOCAL
-    html = render_creating_page(creation_id=creation_id, info=info, launch_mode=creating_launch_mode)
+    html = render_creating_page(creation_id=creation_id, info=info)
     return HTMLResponse(content=html)
 
 
