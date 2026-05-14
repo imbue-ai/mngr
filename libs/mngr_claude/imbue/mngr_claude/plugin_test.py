@@ -1937,6 +1937,57 @@ def test_preserve_session_files_partial_data(
     assert not (dest_dir / "claude_session_id_history").exists()
 
 
+@pytest.mark.rsync
+def test_preserve_session_files_skips_projects_in_shared_mode(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In use_env_config_dir mode, _preserve_session_files must NOT copy the
+    user's $CLAUDE_CONFIG_DIR/projects/ directory -- that directory holds the
+    user's full cross-project session history and is not deleted with the
+    agent state. Transcripts and history (under the agent state dir) are
+    still preserved.
+    """
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+    )
+    agent_dir = agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    # Populate the shared projects dir with an "unrelated" project sub-dir
+    # that, if naively copied, would leak the user's other-project sessions
+    # into the preserved-sessions store.
+    unrelated_project = shared_dir / "projects" / "-Users-someone-other-project"
+    unrelated_project.mkdir(parents=True)
+    (unrelated_project / "deadbeef.jsonl").write_text('{"private":"data"}\n')
+
+    # Populate the per-agent transcript + history (these live under the agent
+    # state dir, so they DO need preservation regardless of shared mode).
+    raw_transcript_dir = agent_dir / "logs" / "claude_transcript"
+    raw_transcript_dir.mkdir(parents=True, exist_ok=True)
+    (raw_transcript_dir / "events.jsonl").write_text('{"type":"message"}\n')
+    history_file = agent_dir / "claude_session_id_history"
+    history_file.write_text("abc123 create\n")
+
+    _preserve_session_files(agent, host)
+
+    dest_dir = _get_preserved_sessions_dir(agent)
+    assert dest_dir.exists()
+    # Projects dir must NOT be preserved (it would contain unrelated user data).
+    assert not (dest_dir / "projects").exists()
+    # Transcript and history must still be preserved.
+    assert (dest_dir / "raw_transcript" / "events.jsonl").read_text() == '{"type":"message"}\n'
+    assert (dest_dir / "claude_session_id_history").read_text() == "abc123 create\n"
+
+
 def test_provision_prompts_for_all_dialogs_when_interactive(
     local_provider: LocalProviderInstance,
     tmp_path: Path,

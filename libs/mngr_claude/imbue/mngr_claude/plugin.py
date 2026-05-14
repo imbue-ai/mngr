@@ -2128,7 +2128,11 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         which exists, so the per-agent-keychain branch would otherwise compute the
         same label hash Claude Code itself uses and delete the user's real
         credentials. Since provision() never wrote any per-agent keychain or
-        trust entries in this mode, there is nothing for us to clean up.
+        trust entries in this mode, there is nothing for us to clean up. Session
+        preservation also skips copying the ``projects/`` directory in this mode
+        (it lives in the user's persistent dir and contains all of their
+        cross-project session history); only transcripts and the session-id
+        history from the agent state dir are preserved.
         """
         # Preserve session files before the state dir is deleted
         if self.agent_config.preserve_sessions_on_destroy:
@@ -2187,19 +2191,32 @@ def _preserve_session_files(agent: ClaudeAgent, host: OnlineHostInterface) -> No
     For local agents, this is a same-host copy. For remote agents, files are
     pulled to the local machine via copy_directory (rsync over SSH).
     Failures are logged as warnings but do not prevent agent destruction.
+
+    In ``use_env_config_dir`` mode the ``projects/`` copy is skipped: session
+    JSONLs already live in the user's persistent ``$CLAUDE_CONFIG_DIR`` (which
+    is not deleted with the agent state), and ``$CLAUDE_CONFIG_DIR/projects/``
+    contains the user's entire cross-project session history -- copying it
+    per-agent would duplicate gigabytes of unrelated sessions into mngr's
+    preserved-sessions store. Transcripts and the session-id history still
+    live under the agent state dir and are preserved as usual.
     """
     agent_dir = agent._get_agent_dir()
+    is_shared_config = agent.agent_config.use_env_config_dir
 
-    # Source paths for session data (on the agent's host)
+    # Source paths for session data (on the agent's host). In shared-config
+    # mode the projects dir is the user's persistent dir, so don't probe or
+    # copy it; sessions there survive the agent's state-dir deletion already.
     config_dir = agent.get_claude_config_dir()
     projects_dir = config_dir / "projects"
     raw_transcript_path = agent_dir / "logs" / "claude_transcript"
     common_transcript_path = agent_dir / "events" / "claude" / "common_transcript"
     history_path = agent_dir / "claude_session_id_history"
 
-    # Check which source directories/files exist on the agent's host (single roundtrip)
+    # Check which source directories/files exist on the agent's host (single roundtrip).
+    # The projects probe is omitted in shared-config mode -- we never copy it there.
+    projects_probe = "" if is_shared_config else f"[ -d {shlex.quote(str(projects_dir))} ] && echo projects;"
     check_script = (
-        f"[ -d {shlex.quote(str(projects_dir))} ] && echo projects;"
+        f"{projects_probe}"
         f" [ -d {shlex.quote(str(raw_transcript_path))} ] && echo raw_transcript;"
         f" [ -d {shlex.quote(str(common_transcript_path))} ] && echo common_transcript;"
         f" [ -f {shlex.quote(str(history_path))} ] && echo history;"
@@ -2218,7 +2235,9 @@ def _preserve_session_files(agent: ClaudeAgent, host: OnlineHostInterface) -> No
     local_host = _get_local_host(agent.mngr_ctx)
 
     with log_span("Preserving session files for agent {}", agent.name):
-        # Copy each available data category using copy_directory
+        # Copy each available data category using copy_directory.
+        # In shared-config mode, "projects" is never present in `available`
+        # because we omitted its probe -- so this branch naturally skips.
         if "projects" in available:
             _copy_to_local(local_host, host, projects_dir, dest_dir / "projects", "session projects", agent.name)
 
