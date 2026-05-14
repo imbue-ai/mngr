@@ -32,6 +32,7 @@ import semver
 import tomlkit
 from changelog_release_utils import finalize_changelog_unreleased
 from changelog_release_utils import today_pacific
+from trigger_changelog_consolidation import gate_release_on_pending_entries
 from utils import PACKAGES
 from utils import PACKAGE_BY_PYPI_NAME
 from utils import REPO_ROOT
@@ -507,6 +508,12 @@ def main() -> None:
 
     if args.bump_kind is None:
         parser.error("bump_kind is required: patch, minor, or major")
+
+    # Refuse to release while there are unconsolidated entries in
+    # changelog/. Otherwise the [Unreleased] section we're about to
+    # finalize would be missing those entries' bullets.
+    if not args.dry_run and not gate_release_on_pending_entries(REPO_ROOT):
+        sys.exit(1)
 
     base_kind: str = args.bump_kind
 

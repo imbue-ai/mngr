@@ -60,14 +60,10 @@ done
 # inside the Modal container.
 export IS_SANDBOX=1
 
-# Compute --disable-plugin args for every installed plugin EXCEPT the
-# minimum set the scheduled run needs.
-DISABLE_PLUGIN_ARGS=$(uv run python -c "
-import importlib.metadata
-enabled = {'schedule', 'modal', 'headless_claude', 'claude', 'file'}
-names = sorted({ep.name for ep in importlib.metadata.entry_points(group='mngr')} - enabled)
-print(' '.join(f'--disable-plugin {n}' for n in names))
-")
+# Compute --disable-plugin args via the shared helper so the deploy and
+# the on-demand trigger (scripts/release.py) stay in sync about which
+# plugins must be disabled around `mngr schedule` invocations.
+DISABLE_PLUGIN_ARGS=$(uv run python "${REPO_ROOT}/scripts/trigger_changelog_consolidation.py" --print-disable-plugin-args)
 
 # Always remove an existing trigger before recreating, so the deployed
 # schedule reflects the current source no matter what was deployed before.
