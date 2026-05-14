@@ -21,7 +21,6 @@ from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import DeployEnvConfig
 from imbue.minds.envs.local_store import LocalDevEnvConfig
 from imbue.minds.envs.local_store import delete_dev_env_file
@@ -194,17 +193,16 @@ def create_dev_env(
     assert supertokens_record is not None
 
     connector_url, litellm_proxy_url = _build_dev_env_urls(name, deploy_config)
-    client = ClientEnvConfig(connector_url=connector_url, litellm_proxy_url=litellm_proxy_url)
     local_config = LocalDevEnvConfig(
-        name=name,
-        client=client,
+        connector_url=connector_url,
+        litellm_proxy_url=litellm_proxy_url,
         secrets={
             "NEON_POOLED_DSN": neon_record.pooled_dsn,
             "SUPERTOKENS_CONNECTION_URI": SecretStr(supertokens_record.connection_uri),
             "SUPERTOKENS_API_KEY": supertokens_record.api_key,
         },
     )
-    config_path = write_dev_env_file(local_config, root_name=root_name)
+    config_path = write_dev_env_file(local_config, name=name, root_name=root_name)
 
     return CreatedDevEnv(
         name=name,
@@ -311,7 +309,7 @@ def list_dev_envs(*, root_name: str | None = None) -> tuple[DevEnvSummary, ...]:
             DevEnvSummary(
                 name=name,
                 config_path=str(path),
-                connector_url=config.client.connector_url,
+                connector_url=config.connector_url,
             )
         )
     return tuple(summaries)

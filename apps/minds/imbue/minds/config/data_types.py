@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Final
 
 from pydantic import AnyUrl
+from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -46,10 +47,18 @@ class ClientEnvConfig(FrozenModel):
     larger set of values the deploy pipeline needs.
 
     A dynamic dev env's ``~/.minds/envs/<dev-name>.toml`` uses the same
-    shape (it is a self-contained snapshot, not a layered override), and
-    may additionally carry a ``[secrets]`` subtable -- captured by
-    :class:`LocalDevEnvConfig`.
+    shape (it is a self-contained snapshot, not a layered override) and
+    may additionally carry a ``[secrets]`` subtable. To keep
+    ``minds run --config-file ~/.minds/envs/<name>.toml`` working against
+    such files, this model permits (and ignores) extra top-level fields
+    -- the desktop client only needs the URLs; the per-dev-env state
+    captured by :class:`LocalDevEnvConfig` is consumed elsewhere.
     """
+
+    # ``frozen=True`` is inherited from FrozenModel; we override only the
+    # extra-field policy so a per-dev-env TOML carrying a ``[secrets]``
+    # subtable still parses as a ClientEnvConfig.
+    model_config = ConfigDict(frozen=True, extra="ignore", arbitrary_types_allowed=False)
 
     connector_url: AnyUrl = Field(description="Base URL of the `remote_service_connector` Modal app for this env.")
     litellm_proxy_url: AnyUrl = Field(

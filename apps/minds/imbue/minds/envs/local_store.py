@@ -15,7 +15,6 @@ from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import SecretStr
 
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.envs.paths import dev_env_file
 from imbue.minds.envs.paths import dev_envs_dir
@@ -24,17 +23,20 @@ from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
 
 
-class LocalDevEnvConfig(FrozenModel):
+class LocalDevEnvConfig(ClientEnvConfig):
     """Self-contained snapshot of a dynamic dev environment.
 
-    Layered on top of the regular :class:`ClientEnvConfig` runtime knobs
-    with a ``[secrets]`` subtable for values that are not necessarily URLs
-    (Neon connection string, SuperTokens core API key, etc.) and that
-    should be ``chmod 600``-protected.
+    Extends :class:`ClientEnvConfig` (so the URLs sit at the top level of
+    the TOML and ``minds run --config-file`` can read the file directly)
+    with a ``[secrets]`` subtable for values that are not necessarily
+    URLs (Neon connection string, SuperTokens core API key, etc.) and
+    that should be ``chmod 600``-protected.
+
+    The dev env's name is the filename stem (``<name>.toml``) and is not
+    stored inside the file -- this keeps the on-disk shape a strict
+    superset of a tier ``client.toml``.
     """
 
-    name: DevEnvName = Field(description="Dev env name; matches the file stem under ~/.<root>/envs/.")
-    client: ClientEnvConfig = Field(description="The runtime URLs the desktop client needs for this env.")
     secrets: Mapping[str, SecretStr] = Field(
         default_factory=dict,
         description=(
@@ -47,29 +49,31 @@ class LocalDevEnvConfig(FrozenModel):
 def write_dev_env_file(
     config: LocalDevEnvConfig,
     *,
+    name: DevEnvName,
     root_name: str | None = None,
     overwrite: bool = False,
 ) -> Path:
     """Serialize ``config`` to ``~/.<root>/envs/<name>.toml`` with mode 0o600.
 
+    The file is written as a strict superset of a tier ``client.toml``
+    (``connector_url`` and ``litellm_proxy_url`` at the top level, plus
+    an optional ``[secrets]`` subtable) so the same file is consumable
+    by ``minds run --config-file``.
+
     Refuses to overwrite an existing file unless ``overwrite=True``; that
     keeps ``minds env create`` from silently clobbering a dev env that was
     already provisioned.
     """
-    target = dev_env_file(config.name, root_name=root_name)
+    target = dev_env_file(name, root_name=root_name)
     if target.exists() and not overwrite:
         raise DevEnvAlreadyExistsError(
-            f"Dev env file {target} already exists. Run `minds env destroy {config.name}` first "
-            "or pass --force to overwrite."
+            f"Dev env file {target} already exists. Run `minds env destroy {name}` first or pass --force to overwrite."
         )
     target.parent.mkdir(parents=True, exist_ok=True)
 
     doc = tomlkit.document()
-    doc["name"] = str(config.name)
-    client = tomlkit.table()
-    client["connector_url"] = str(config.client.connector_url)
-    client["litellm_proxy_url"] = str(config.client.litellm_proxy_url)
-    doc["client"] = client
+    doc["connector_url"] = str(config.connector_url)
+    doc["litellm_proxy_url"] = str(config.litellm_proxy_url)
     if config.secrets:
         secrets_block = tomlkit.table()
         for key, secret in config.secrets.items():
@@ -86,6 +90,9 @@ def write_dev_env_file(
 def read_dev_env_file(name: DevEnvName, *, root_name: str | None = None) -> LocalDevEnvConfig:
     """Read ``~/.<root>/envs/<name>.toml`` back into a :class:`LocalDevEnvConfig`.
 
+    The dev env's name is taken from the filename stem, not from inside
+    the file.
+
     Raises :class:`DevEnvNotFoundError` when the file does not exist.
     """
     path = dev_env_file(name, root_name=root_name)
@@ -93,17 +100,16 @@ def read_dev_env_file(name: DevEnvName, *, root_name: str | None = None) -> Loca
         raise DevEnvNotFoundError(f"No dev env file found for {name!r}: expected {path}")
     raw = tomlkit.loads(path.read_text())
 
-    client_section = raw.get("client") or {}
-    client = ClientEnvConfig(
-        connector_url=AnyUrl(str(client_section["connector_url"])),
-        litellm_proxy_url=AnyUrl(str(client_section["litellm_proxy_url"])),
-    )
     secrets_section = raw.get("secrets") or {}
     secrets: dict[str, SecretStr] = {}
     for key, value in secrets_section.items():
         secrets[str(key)] = SecretStr(str(value))
 
-    return LocalDevEnvConfig(name=name, client=client, secrets=secrets)
+    return LocalDevEnvConfig(
+        connector_url=AnyUrl(str(raw["connector_url"])),
+        litellm_proxy_url=AnyUrl(str(raw["litellm_proxy_url"])),
+        secrets=secrets,
+    )
 
 
 def delete_dev_env_file(name: DevEnvName, *, root_name: str | None = None) -> bool:
