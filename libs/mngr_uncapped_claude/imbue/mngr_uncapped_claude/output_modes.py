@@ -272,16 +272,14 @@ class StreamingOutputWriter(MutableModel):
         self.stdout.flush()
 
     def _finalize_json(self, meta: ResultMeta) -> None:
-        envelope = build_result_envelope(
-            text="\n".join(self.assistant_text_parts),
-            meta=meta,
-            turn_count=max(self.assistant_turn_count, 1),
-        )
-        self.stdout.write(json.dumps(envelope, separators=(",", ":")) + "\n")
-        self.stdout.flush()
+        self._write_result_envelope(meta)
 
     def _finalize_stream_json(self, meta: ResultMeta) -> None:
         self.write_init_if_needed()
+        self._write_result_envelope(meta)
+
+    def _write_result_envelope(self, meta: ResultMeta) -> None:
+        """Build and emit the trailing ``result`` envelope on a single line."""
         envelope = build_result_envelope(
             text="\n".join(self.assistant_text_parts),
             meta=meta,
