@@ -3,6 +3,8 @@
 import os
 import shlex
 import subprocess
+from collections.abc import Callable
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -11,6 +13,7 @@ from uuid import uuid4
 
 import pluggy
 import pytest
+from pydantic import Field
 from pyinfra.api import Host as PyinfraHost
 from pyinfra.api import State as PyinfraState
 from pyinfra.api.inventory import Inventory
@@ -22,6 +25,8 @@ from imbue.mngr.api.connect import SIGNAL_EXIT_CODE_STOP
 from imbue.mngr.api.connect import _build_ssh_activity_wrapper_script
 from imbue.mngr.api.connect import _build_ssh_args
 from imbue.mngr.api.connect import _determine_post_disconnect_action
+from imbue.mngr.api.connect import _ensure_local_tmux_session_alive
+from imbue.mngr.api.connect import _local_tmux_session_exists
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
@@ -31,6 +36,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NestedTmuxError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.primitives import AgentId
@@ -720,3 +726,163 @@ def test_resolve_connect_command_returns_none_when_neither_set(temp_mngr_ctx: Mn
     """resolve_connect_command should return None when neither CLI nor config is set."""
     result = resolve_connect_command(None, temp_mngr_ctx)
     assert result is None
+
+
+# =========================================================================
+# Tests for tmux-session-missing recovery in connect_to_agent (local host)
+# =========================================================================
+
+
+class _RecordingAgent(_TestAgent):
+    """Test agent that captures wait_for_ready_signal calls without running them.
+
+    Used to verify that the connect-time recovery path triggers the start path
+    without actually starting a real tmux session.
+    """
+
+    ready_signal_calls: list[tuple[bool, float | None]] = Field(default_factory=list)
+
+    def wait_for_ready_signal(
+        self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
+    ) -> None:
+        self.ready_signal_calls.append((is_creating, timeout))
+
+
+def _make_local_recording_agent(
+    local_provider: LocalProviderInstance,
+    mngr_ctx: MngrContext,
+    agent_name: str = "test-agent",
+) -> tuple[Host, _RecordingAgent]:
+    """Create a local host and a recording agent (captures start invocations)."""
+    host = Host(
+        id=HostId(f"host-{uuid4().hex}"),
+        host_name=HostName("test"),
+        connector=PyinfraConnector(local_provider._create_local_pyinfra_host()),
+        provider_instance=local_provider,
+        mngr_ctx=mngr_ctx,
+    )
+    agent = _RecordingAgent(
+        id=AgentId(f"agent-{uuid4().hex}"),
+        name=AgentName(agent_name),
+        agent_type=AgentTypeName("test"),
+        work_dir=Path("/tmp/work"),
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=mngr_ctx,
+        agent_config=AgentTypeConfig(),
+        host=host,
+    )
+    return host, agent
+
+
+@pytest.mark.tmux
+def test_local_tmux_session_exists_returns_false_for_unknown_session() -> None:
+    """_local_tmux_session_exists returns False for a session that does not exist."""
+    unique_session = f"mngr-test-no-such-session-{uuid4().hex}"
+    assert _local_tmux_session_exists(unique_session) is False
+
+
+@pytest.mark.tmux
+def test_ensure_local_tmux_session_alive_starts_agent_when_session_missing(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """When the tmux session is missing and is_start_desired=True, the start path runs.
+
+    Reproduces the bug: an agent whose stored lifecycle state would otherwise
+    be WAITING but whose tmux session has died out of band. The recovery path
+    should treat the agent as stopped and invoke wait_for_ready_signal so the
+    tmux session is recreated before the caller attempts to attach.
+    """
+    host, agent = _make_local_recording_agent(local_provider, temp_mngr_ctx)
+    missing_session = f"mngr-test-recovery-{uuid4().hex}"
+
+    _ensure_local_tmux_session_alive(
+        agent=agent,
+        host=host,
+        session_name=missing_session,
+        is_start_desired=True,
+    )
+
+    assert len(agent.ready_signal_calls) == 1
+    is_creating, _timeout = agent.ready_signal_calls[0]
+    assert is_creating is False
+
+
+@pytest.mark.tmux
+def test_ensure_local_tmux_session_alive_raises_when_session_missing_and_no_start(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """When the tmux session is missing and is_start_desired=False, UserInputError is raised.
+
+    Verifies that --no-start surfaces a clear, actionable message instead of
+    silently restarting (or, in the original bug, leaking tmux's "can't find
+    session" error to the user).
+    """
+    host, agent = _make_local_recording_agent(local_provider, temp_mngr_ctx)
+    missing_session = f"mngr-test-no-start-{uuid4().hex}"
+
+    with pytest.raises(UserInputError) as exc_info:
+        _ensure_local_tmux_session_alive(
+            agent=agent,
+            host=host,
+            session_name=missing_session,
+            is_start_desired=False,
+        )
+
+    message = str(exc_info.value)
+    assert missing_session in message
+    assert "is gone" in message
+    assert "mngr start" in message
+    assert agent.ready_signal_calls == []
+
+
+@pytest.mark.tmux
+def test_connect_to_agent_local_recovers_when_tmux_session_missing(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """connect_to_agent triggers the start path when the local tmux session is gone.
+
+    End-to-end check that connect_to_agent flows through
+    _ensure_local_tmux_session_alive before reaching the tmux attach call,
+    and that the attach is still attempted after the agent is started.
+    """
+    host, agent = _make_local_recording_agent(local_provider, temp_mngr_ctx, agent_name=f"recovery-{uuid4().hex}")
+    expected_session = f"{temp_mngr_ctx.config.prefix}{agent.name}"
+    # Use a name that definitely does not exist as a tmux session, so the
+    # in-function _local_tmux_session_exists check returns False naturally.
+    assert _local_tmux_session_exists(expected_session) is False
+
+    execvpe_calls: list[tuple[str, Sequence[str]]] = []
+    monkeypatch.setattr(
+        "imbue.mngr.api.connect.os.execvpe",
+        lambda program, args, env: execvpe_calls.append((program, list(args))),
+    )
+    opts = ConnectionOptions(is_unknown_host_allowed=False, is_start_desired=True)
+
+    connect_to_agent(agent, host, temp_mngr_ctx, opts)
+
+    assert len(agent.ready_signal_calls) == 1
+    assert execvpe_calls == [("tmux", ["tmux", "attach", "-t", f"={expected_session}"])]
+
+
+@pytest.mark.tmux
+def test_connect_to_agent_local_raises_when_tmux_session_missing_and_no_start(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """connect_to_agent surfaces UserInputError under --no-start when the tmux session is gone."""
+    host, agent = _make_local_recording_agent(local_provider, temp_mngr_ctx, agent_name=f"no-start-{uuid4().hex}")
+    expected_session = f"{temp_mngr_ctx.config.prefix}{agent.name}"
+    assert _local_tmux_session_exists(expected_session) is False
+
+    opts = ConnectionOptions(is_unknown_host_allowed=False, is_start_desired=False)
+
+    with pytest.raises(UserInputError) as exc_info:
+        connect_to_agent(agent, host, temp_mngr_ctx, opts)
+
+    assert expected_session in str(exc_info.value)
+    assert agent.ready_signal_calls == []

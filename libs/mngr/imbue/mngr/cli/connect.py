@@ -332,6 +332,7 @@ def _build_connection_options(opts: ConnectCliOptions, mngr_ctx: MngrContext) ->
         retry_delay=mngr_ctx.config.retry.connect_retry_delay,
         session_command=opts.session_command,
         is_unknown_host_allowed=opts.allow_unknown_host,
+        is_start_desired=opts.start,
     )
 
 

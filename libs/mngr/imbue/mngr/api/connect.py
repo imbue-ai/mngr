@@ -1,5 +1,6 @@
 import os
 import shlex
+import subprocess
 from pathlib import Path
 from typing import Final
 
@@ -10,6 +11,7 @@ from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NestedTmuxError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.utils.duration import parse_duration_to_seconds
@@ -192,6 +194,54 @@ def run_connect_command(
     os.execvpe("sh", ["sh", "-c", connect_command], env)
 
 
+def _local_tmux_session_exists(session_name: str) -> bool:
+    """Return True if a local tmux session named ``session_name`` exists.
+
+    Uses ``tmux has-session`` and dispatches on return code (rather than
+    stderr string-matching) so it doesn't false-trigger on unrelated tmux
+    errors.
+    """
+    completed = subprocess.run(
+        ["tmux", "has-session", "-t", "=" + session_name],
+        capture_output=True,
+    )
+    return completed.returncode == 0
+
+
+def _ensure_local_tmux_session_alive(
+    agent: AgentInterface,
+    host: OnlineHostInterface,
+    session_name: str,
+    is_start_desired: bool,
+) -> None:
+    """If the local tmux session for ``agent`` is missing, start the agent (or raise).
+
+    The stored lifecycle state may say WAITING/RUNNING even when the tmux
+    session has died out of band (manual kill, OS reboot, etc.), which would
+    otherwise cause ``tmux attach`` to fail with a bare "can't find session"
+    error. If ``is_start_desired`` is False, raises ``UserInputError`` instead
+    of silently restarting.
+    """
+    if _local_tmux_session_exists(session_name):
+        return
+    if not is_start_desired:
+        raise UserInputError(
+            f"Tmux session '{session_name}' for agent '{agent.name}' is gone, but automatic "
+            f"starting is disabled. Re-run without --no-start, or run `mngr start {agent.name}` "
+            "to restart the agent."
+        )
+    logger.info(
+        "Tmux session {} is missing despite the agent's stored state; starting agent {} before attaching",
+        session_name,
+        agent.name,
+    )
+    agent.wait_for_ready_signal(
+        is_creating=False,
+        start_action=lambda: host.start_agents([agent.id]),
+        timeout=agent.get_ready_timeout_seconds(),
+    )
+
+
 def connect_to_agent(
     agent: AgentInterface,
     host: OnlineHostInterface,
@@ -224,6 +274,12 @@ def connect_to_agent(
             # Copy and remove TMUX so tmux allows the nested attachment
             env = dict(os.environ)
             del env["TMUX"]
+        _ensure_local_tmux_session_alive(
+            agent=agent,
+            host=host,
+            session_name=session_name,
+            is_start_desired=connection_opts.is_start_desired,
+        )
         os.execvpe("tmux", ["tmux", "attach", "-t", f"={session_name}"], env)
     else:
         ssh_args = _build_ssh_args(host, connection_opts)
