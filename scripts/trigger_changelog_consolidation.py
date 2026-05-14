@@ -1,20 +1,20 @@
-"""Shared plugin-disable args for the changelog-consolidation schedule.
+"""Shared identifiers + plugin-disable args for the changelog-consolidation schedule.
 
 ``setup_changelog_agent.sh`` (which deploys the trigger) and
 ``scripts/release.py`` (which prints an on-demand invocation when the
-pre-release gate fires) both need the same ``--disable-plugin <name>``
-list passed to ``mngr schedule …`` calls in the isolated
-``mngr-changelog-schedule`` config namespace. This module is the single
-source of truth for that list: the shell script obtains it via the
-``--print-disable-plugin-args`` flag of this module's CLI, and
-``release.py`` calls :func:`disable_plugin_args` directly.
+pre-release gate fires) need to agree on three things: the
+``--disable-plugin <name>`` list passed to ``mngr schedule …`` calls,
+the schedule's deployed provider, and the trigger / namespace
+identifiers. This module is the source of truth.
 
-``TRIGGER_NAME`` and ``MNGR_ROOT_NAME`` are also defined here and
-imported by ``release.py``, but for the shell script's bash-side use
-they are duplicated as literals in ``setup_changelog_agent.sh`` (the
-script needs them before any ``uv run python`` invocation). The Python
-constants here and the matching bash assignments in that script must be
-kept in sync by hand.
+Python callers (``release.py``) import the constants and helpers
+directly. The shell script reads them through this module's CLI:
+``--print-disable-plugin-args`` for the disable list and
+``--print-provider`` for the provider. ``TRIGGER_NAME`` and
+``MNGR_ROOT_NAME`` are still duplicated as bash literals in
+``setup_changelog_agent.sh`` because that script needs them before any
+``uv run python`` invocation; those two literals must be kept in sync
+with the constants here by hand.
 """
 
 import argparse
@@ -23,6 +23,11 @@ from typing import Final
 
 TRIGGER_NAME: Final[str] = "changelog-consolidation"
 MNGR_ROOT_NAME: Final[str] = "mngr-changelog-schedule"
+# The schedule is deployed against this provider; release.py's printed
+# on-demand command must reference the same value so the command points
+# at the deployment that actually exists. Editing in-source is fine --
+# (re)deploys are rare and the file edit is the deliberate trigger.
+PROVIDER: Final[str] = "modal"
 # Plugins the schedule trigger needs to function; everything else is
 # disabled to avoid loading repo-specific plugins that would error on
 # import in this isolated mngr config namespace.
@@ -54,12 +59,20 @@ def main() -> None:
         help="Print the --disable-plugin args (space-separated) and exit. "
         "Used by setup_changelog_agent.sh and release.py so they stay in sync.",
     )
+    parser.add_argument(
+        "--print-provider",
+        action="store_true",
+        help="Print the deployed provider name and exit. Used by setup_changelog_agent.sh.",
+    )
     args = parser.parse_args()
     if args.print_disable_plugin_args:
         print(" ".join(disable_plugin_args()))
         return
+    if args.print_provider:
+        print(PROVIDER)
+        return
     # parser.error() prints usage to stderr and calls sys.exit(2); it does not return.
-    parser.error("no action specified; pass --print-disable-plugin-args")
+    parser.error("no action specified; pass --print-disable-plugin-args or --print-provider")
 
 
 if __name__ == "__main__":

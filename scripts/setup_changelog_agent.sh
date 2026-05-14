@@ -22,9 +22,13 @@ set -euo pipefail
 #   ANTHROPIC_API_KEY - used by claude inside the cron container.
 #
 # Optional environment:
-#   CHANGELOG_PROVIDER - Provider to use (default: "modal").
 #   CHANGELOG_VERIFY   - Verification mode (default: "none"). Set to "quick"
 #                        or "full" to run the agent once during deploy.
+#
+# The provider is read from the shared `PROVIDER` constant in
+# scripts/trigger_changelog_consolidation.py so release.py's printed
+# on-demand command targets the same deployment. To change providers,
+# edit that constant and re-run this script.
 #
 # To trigger a fire on demand and read its JSON outcome (status / pr_url / notes):
 #   env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME=mngr-changelog-schedule \
@@ -38,7 +42,7 @@ cd "$REPO_ROOT"
 TRIGGER_NAME="changelog-consolidation"
 # Midnight PST (UTC-8) = 08:00 UTC.
 SCHEDULE="0 8 * * *"
-PROVIDER="${CHANGELOG_PROVIDER:-modal}"
+PROVIDER=$(uv run python "${REPO_ROOT}/scripts/trigger_changelog_consolidation.py" --print-provider)
 VERIFY="${CHANGELOG_VERIFY:-none}"
 
 # Use an isolated mngr config namespace so we don't load the repo's

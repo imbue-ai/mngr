@@ -26,7 +26,6 @@ so the preview still works.
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 from collections import deque
@@ -43,6 +42,7 @@ from changelog_release_utils import finalize_changelog_unreleased
 from changelog_release_utils import today_pacific
 from consolidate_changelog import pending_changelog_entries
 from trigger_changelog_consolidation import MNGR_ROOT_NAME as CHANGELOG_MNGR_ROOT_NAME
+from trigger_changelog_consolidation import PROVIDER as CHANGELOG_PROVIDER
 from trigger_changelog_consolidation import TRIGGER_NAME as CHANGELOG_TRIGGER_NAME
 from trigger_changelog_consolidation import disable_plugin_args as changelog_disable_plugin_args
 from utils import PACKAGES
@@ -485,16 +485,16 @@ def _print_on_demand_consolidation_command(file: TextIO | None = None) -> None:
     ``$DISABLE_PLUGIN_ARGS``; this helper expands it onto its own line
     because the resolved value is long.
 
-    The provider is read from ``CHANGELOG_PROVIDER`` (default ``modal``),
-    matching the env var the deploy script honors, so the printed command
-    targets the same provider the schedule was deployed under.
+    The provider is the shared ``CHANGELOG_PROVIDER`` constant, so the
+    printed command targets the same provider the schedule was deployed
+    against; changing providers requires editing the constant and
+    redeploying the schedule together.
 
     ``file`` is forwarded to ``print``; defaults to ``sys.stdout`` (via
     ``print``'s own default when ``None`` is passed). Callers in error
     paths pass ``sys.stderr`` so the on-demand command lands on the same
     stream as the surrounding error message.
     """
-    provider = os.environ.get("CHANGELOG_PROVIDER", "modal")
     disable_args = " ".join(changelog_disable_plugin_args())
     print(f"  env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME={CHANGELOG_MNGR_ROOT_NAME} \\", file=file)
     # Only emit a continuation + third line when there are disable-plugin
@@ -503,10 +503,10 @@ def _print_on_demand_consolidation_command(file: TextIO | None = None) -> None:
     # copy-paste form malformed (the empty line terminates the
     # continuation and the leading spaces become a stray empty command).
     if disable_args:
-        print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {provider} \\", file=file)
+        print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {CHANGELOG_PROVIDER} \\", file=file)
         print(f"    {disable_args}", file=file)
     else:
-        print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {provider}", file=file)
+        print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {CHANGELOG_PROVIDER}", file=file)
 
 
 def _gate_release_on_pending_changelog_entries(entries: list[Path], dry_run: bool) -> bool:
