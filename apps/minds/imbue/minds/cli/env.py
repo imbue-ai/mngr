@@ -204,6 +204,19 @@ def _emit_create_result(result: CreatedDevEnv, *, output_format: OutputFormat) -
     )
 
 
+def _emit_destroy_result(name: DevEnvName, *, output_format: OutputFormat) -> None:
+    """Emit the destroy success summary in the requested format.
+
+    HUMAN mode logs a friendly status line (mirroring the create path);
+    JSON / JSONL emit the same structured payload operators have been
+    scripting against.
+    """
+    if output_format is OutputFormat.HUMAN:
+        logger.info("Destroyed dev env '{}'.", name)
+        return
+    _emit_json({"name": str(name), "status": "destroyed"}, output_format=output_format)
+
+
 @click.group()
 def env() -> None:
     """Manage dynamic dev environments."""
@@ -319,4 +332,4 @@ def env_destroy(ctx: click.Context, name: str, keep_agents: bool) -> None:
             logger.error("Destroy of {!r} failed: {}", str(dev_env_name), exc)
             raise click.ClickException(str(exc)) from exc
 
-    _emit_json({"name": str(dev_env_name), "status": "destroyed"}, output_format=output_format)
+    _emit_destroy_result(dev_env_name, output_format=output_format)
