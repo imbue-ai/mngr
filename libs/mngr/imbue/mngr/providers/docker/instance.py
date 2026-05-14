@@ -265,8 +265,9 @@ class DockerProviderInstance(BaseProviderInstance):
         default.
 
         Raises ``ProviderDaemonNotRunningError`` (a ``ProviderUnavailableError``)
-        when the daemon is unreachable so the discovery boundary surfaces
-        it as a warning rather than a hard error.
+        when the daemon is unreachable so the discovery boundary records it on
+        ``ListResult.errors`` as a provider failure instead of letting a raw
+        ``DockerException`` escape.
         """
         try:
             if self.config.host:
