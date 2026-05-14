@@ -330,6 +330,7 @@ def get_subprocess_test_env(
     root_name: str = "mngr-test",
     prefix: str | None = None,
     host_dir: Path | None = None,
+    enabled_backends: tuple[str, ...] | None = None,
 ) -> dict[str, str]:
     """Get environment variables for subprocess calls that prevent loading project config.
 
@@ -346,6 +347,13 @@ def get_subprocess_test_env(
     The host_dir parameter, if provided, sets MNGR_HOST_DIR to a unique directory.
     This is important for isolating the user_id file between tests.
 
+    The enabled_backends parameter, if provided, restricts the provider backends the
+    subprocess mngr will load -- it writes a settings.toml with `enabled_backends`
+    and points MNGR_PROJECT_CONFIG_DIR at it. Use this when the test environment only
+    has some providers available (e.g. a Modal sandbox has `local` and `modal` but no
+    Docker daemon); without it, mngr would try every installed backend and exit
+    non-zero on the ones it cannot reach. Requires host_dir to anchor the config file.
+
     Returns a copy of os.environ with the specified environment variables set.
     """
     env = os.environ.copy()
@@ -354,6 +362,14 @@ def get_subprocess_test_env(
         env["MNGR_PREFIX"] = prefix
     if host_dir is not None:
         env["MNGR_HOST_DIR"] = str(host_dir)
+    if enabled_backends is not None:
+        if host_dir is None:
+            raise ValueError("get_subprocess_test_env: enabled_backends requires host_dir to anchor the config file")
+        config_dir = host_dir / "_subprocess_test_config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        backends_toml = ", ".join(f'"{backend}"' for backend in enabled_backends)
+        (config_dir / "settings.toml").write_text(f"enabled_backends = [{backends_toml}]\n")
+        env["MNGR_PROJECT_CONFIG_DIR"] = str(config_dir)
     return env
 
 
