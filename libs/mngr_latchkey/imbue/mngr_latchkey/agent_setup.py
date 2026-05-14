@@ -61,20 +61,13 @@ ENV_LATCHKEY_DISABLE_COUNTING: Final[str] = "LATCHKEY_DISABLE_COUNTING"
 # Detent schema names and host string for the gateway-self baseline that
 # every agent inherits. Defined inline (in the agent's permissions file)
 # rather than relying on detent's built-in catalog so the names are
-# self-contained and the grant is exactly the two endpoints we want.
+# self-contained and the grant is exactly the endpoints we want.
 _GATEWAY_SELF_HOST: Final[str] = "latchkey-self.invalid"
 _SCOPE_LATCHKEY_SELF: Final[str] = "latchkey-self"
 _PERM_CREATE_PERMISSION_REQUEST: Final[str] = "latchkey-self-create-permission-request"
-_PERM_READ_PERMISSIONS: Final[str] = "latchkey-self-read-permissions"
 
-# Baseline permissions every newly-created agent starts with: enough to
-# POST a new permission request and to GET its own permissions file via
-# the gateway extensions, and nothing else. The user grants additional
-# service permissions through the dialog (which rewrites the ``rules``
-# array in this same file; the inline ``schemas`` definitions are
-# preserved because the gateway extension spreads ``{...file, rules}``).
 _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissionsConfig(
-    rules=({_SCOPE_LATCHKEY_SELF: [_PERM_CREATE_PERMISSION_REQUEST, _PERM_READ_PERMISSIONS]},),
+    rules=({_SCOPE_LATCHKEY_SELF: [_PERM_CREATE_PERMISSION_REQUEST]},),
     schemas={
         _SCOPE_LATCHKEY_SELF: {
             "properties": {"domain": {"const": _GATEWAY_SELF_HOST}},
@@ -84,13 +77,6 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
             "properties": {
                 "method": {"const": "POST"},
                 "path": {"const": "/permission-requests"},
-            },
-            "required": ["method", "path"],
-        },
-        _PERM_READ_PERMISSIONS: {
-            "properties": {
-                "method": {"const": "GET"},
-                "path": {"const": "/permissions"},
             },
             "required": ["method", "path"],
         },

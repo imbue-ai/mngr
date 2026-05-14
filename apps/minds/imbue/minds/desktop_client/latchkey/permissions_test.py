@@ -769,10 +769,7 @@ def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Pa
     baseline = {
         "rules": [
             {
-                "latchkey-self": [
-                    "latchkey-self-create-permission-request",
-                    "latchkey-self-read-permissions",
-                ],
+                "latchkey-self": ["latchkey-self-create-permission-request"],
             },
         ],
         "schemas": {
