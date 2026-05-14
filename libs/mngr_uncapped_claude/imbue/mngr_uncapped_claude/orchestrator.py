@@ -43,6 +43,7 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
+from imbue.mngr.utils.jsonl_warn import split_complete_lines
 from imbue.mngr.utils.name_generator import generate_agent_name
 from imbue.mngr_uncapped_claude.data_types import ArgPartition
 from imbue.mngr_uncapped_claude.data_types import ResultMeta
@@ -267,14 +268,14 @@ def _wait_for_turn_end(
     paused for the next user turn; STOPPED or DONE mean the agent exited
     prematurely (the caller treats this as a claude-side failure).
     """
-    seen_chars = 0
+    seen_bytes = 0
     parser_warner = MalformedJsonLineWarner(source_description=f"common transcript for agent {agent.name}")
     final_state: AgentLifecycleState | None = None
     while final_state is None:
-        seen_chars = _drain_new_events(events_target, writer, parser_warner, seen_chars)
+        seen_bytes = _drain_new_events(events_target, writer, parser_warner, seen_bytes)
         state = agent.get_lifecycle_state()
         if state in (AgentLifecycleState.WAITING, AgentLifecycleState.STOPPED, AgentLifecycleState.DONE):
-            _drain_new_events(events_target, writer, parser_warner, seen_chars)
+            _drain_new_events(events_target, writer, parser_warner, seen_bytes)
             final_state = state
         else:
             time.sleep(_POLL_INTERVAL_SECONDS)
@@ -285,38 +286,38 @@ def _drain_new_events(
     events_target: EventsTarget,
     writer: StreamingOutputWriter,
     parser_warner: MalformedJsonLineWarner,
-    seen_chars: int,
+    seen_bytes: int,
 ) -> int:
-    """Read the transcript file, emit any new events past ``seen_chars``, return new offset.
+    """Read the transcript file, emit any new events past ``seen_bytes``, return new offset.
 
     Only consumes complete newline-terminated lines; any trailing partial line
     (a write that has not yet been flushed by mngr_claude) is held back until
-    the next poll, so we do not silently drop in-flight events.
+    the next poll, so we do not silently drop in-flight events. The offset is
+    tracked in UTF-8 bytes to match :func:`split_complete_lines`.
     """
     try:
         content = read_event_content(events_target, _COMMON_TRANSCRIPT_PATH)
     except FileNotFoundError:
         # Benign before the transcript file has been written by mngr_claude.
         logger.trace("common transcript not yet available at {}", _COMMON_TRANSCRIPT_PATH)
-        return seen_chars
+        return seen_bytes
     except MngrError as exc:
         # Don't abort the whole turn over a transient read failure; the next
         # poll will retry. But surface it so the user can see what happened.
         logger.warning("Failed to read common transcript: {}", exc)
-        return seen_chars
-    if len(content) <= seen_chars:
-        return seen_chars
-    new_slice = content[seen_chars:]
-    last_newline = new_slice.rfind("\n")
-    if last_newline == -1:
+        return seen_bytes
+    content_bytes = content.encode("utf-8")
+    if len(content_bytes) <= seen_bytes:
+        return seen_bytes
+    new_slice = content_bytes[seen_bytes:].decode("utf-8", errors="replace")
+    new_lines, consumed_bytes = split_complete_lines(new_slice)
+    if consumed_bytes == 0:
         # Only a partial line so far; wait for the writer to flush a newline.
-        return seen_chars
-    complete_part = new_slice[: last_newline + 1]
-    new_lines = complete_part.splitlines()
+        return seen_bytes
     new_events = _parse_event_lines(new_lines, parser_warner)
     if new_events:
         writer.emit_events(new_events)
-    return seen_chars + len(complete_part)
+    return seen_bytes + consumed_bytes
 
 
 def _parse_event_lines(lines: Sequence[str], parser_warner: MalformedJsonLineWarner) -> list[dict[str, Any]]:
