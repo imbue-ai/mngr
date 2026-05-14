@@ -22,7 +22,13 @@ fail() { log "FAIL: $*"; exit 1; }
 BASELINE_COUNT="${BASELINE_LOGIN_COUNT:-0}"
 log "Waiting for fresh login URL in events log (baseline=$BASELINE_COUNT, up to 120s)"
 for i in $(seq 1 120); do
-  CURRENT_COUNT=$(grep -c "Login URL" "$EVENTS_LOG" 2>/dev/null || echo 0)
+  # `grep -c` prints `0` AND exits 1 when there are no matches, so a naive
+  # `... || echo 0` would capture two lines ("0\n0") and break the arithmetic
+  # comparison below. `|| true` discards the non-zero exit without adding a
+  # line; the `${...:-0}` default covers the file-missing case where grep
+  # prints nothing.
+  CURRENT_COUNT=$(grep -c "Login URL" "$EVENTS_LOG" 2>/dev/null || true)
+  CURRENT_COUNT=${CURRENT_COUNT:-0}
   if (( CURRENT_COUNT > BASELINE_COUNT )); then break; fi
   sleep 1
   [[ $i -eq 120 ]] && fail "no new login URL appeared within 120s (baseline=$BASELINE_COUNT)"
