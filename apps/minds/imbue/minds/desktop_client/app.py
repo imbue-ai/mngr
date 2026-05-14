@@ -1360,13 +1360,28 @@ def _build_workspace_list(
 
 # -- Workspace-server recovery / restart --
 
-# The forever-claude-template bootstrap service manager prefixes every
-# services.toml-managed tmux window with ``svc-`` and runs the workspace
-# server under the ``system_interface`` service entry, so the window we
-# need to kick is always ``svc-system_interface``. The session name is
-# host-specific (``${MNGR_PREFIX}-${MNGR_AGENT_NAME}`` -- e.g.
-# ``devminds-mindtest``), so it is discovered at run time rather than
-# hardcoded.
+# Minds creates two mngr agents per workspace, both with ``work_dir=/code``
+# in the same container:
+#   - a ``claude``-type agent with the user-chosen name -- runs the user's
+#     Claude conversation in tmux session ``${MNGR_PREFIX}<user-name>``.
+#   - a ``main``-type agent always named ``system-services`` -- runs the
+#     bootstrap service manager (which spawns ``svc-*`` windows from
+#     ``services.toml``, including the workspace server) in tmux session
+#     ``${MNGR_PREFIX}system-services``.
+# The restart endpoint is invoked with the user agent's id, but the
+# workspace server lives under the system-services agent's session, so
+# the kill must explicitly target that session.
+#
+# ``MNGR_PREFIX`` is propagated into the container's host env (see
+# ``_remote_host_env_flags`` in ``agent_creator.py``) and sourced by
+# ``mngr exec`` via ``build_source_env_prefix``, so it is reliably
+# available in the shell that runs this command.
+#
+# The bootstrap manager prefixes every services.toml-managed tmux window
+# with ``svc-`` and runs the workspace server under the
+# ``system_interface`` service entry, so the window we kick is always
+# ``svc-system_interface``.
+_SERVICES_AGENT_NAME: Final[str] = "system-services"
 _RESTART_TMUX_WINDOW: Final[str] = "svc-system_interface"
 # How long a single workspace probe through the plugin is allowed to hang.
 # Used by the background workspace-health probe loop -- we want a short,
@@ -1381,22 +1396,18 @@ _RESTART_DISPATCH_TIMEOUT_SECONDS: Final[float] = 10.0
 def _build_restart_shell_command() -> str:
     """Compose the shell command that ``mngr exec`` runs on the agent host.
 
-    The agent container's ``forever-claude-template`` runtime watches
-    ``services.toml`` mtime. We iterate every tmux session on the host
-    and kill the ``svc-system_interface`` window in each; the bootstrap
-    manager only acts on a session-window pair when reconcile sees the
-    window missing, so the loop is safe and idempotent. ``touch
-    services.toml`` then re-triggers the watch loop which respawns the
-    service. Both run regardless of each other's success so a stale
-    tmux state still produces a touch and vice versa.
+    Kills the ``svc-system_interface`` window in the system-services
+    tmux session (``${MNGR_PREFIX}system-services``), then ``touch``es
+    ``services.toml`` to re-trigger the bootstrap watch loop which
+    respawns the service. Both run regardless of each other's success
+    so a stale tmux state still produces a touch and vice versa.
 
     ``mngr exec`` runs commands in the agent's work_dir by default, so
     ``services.toml`` is referenced as a relative path.
     """
     return (
-        f"tmux list-sessions -F '#S' 2>/dev/null | "
-        f'while read s; do tmux kill-window -t "$s:{_RESTART_TMUX_WINDOW}" 2>/dev/null; done; '
-        f"touch services.toml"
+        f'tmux kill-window -t "${{MNGR_PREFIX}}{_SERVICES_AGENT_NAME}:{_RESTART_TMUX_WINDOW}" '
+        f"2>/dev/null; touch services.toml"
     )
 
 

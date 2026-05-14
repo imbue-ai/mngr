@@ -1402,14 +1402,15 @@ def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path
 
 def test_build_restart_shell_command_kicks_tmux_and_touches_services_toml() -> None:
     cmd = _build_restart_shell_command()
-    # The session name is host-specific (e.g. `devminds-mindtest`), so the
-    # command must discover it at run time. The window name comes from the
-    # forever-claude-template bootstrap manager, which always prefixes
-    # services.toml entries with `svc-`; `system_interface` is the entry
-    # that runs `minds-workspace-server`.
-    assert "tmux list-sessions" in cmd
-    assert "svc-system_interface" in cmd
+    # The workspace server lives under the system-services agent's tmux
+    # session (`${MNGR_PREFIX}system-services`), not the user agent's
+    # session. `MNGR_PREFIX` is sourced into the shell by `mngr exec`'s
+    # env prefix, so the command references it as a literal env-var
+    # expansion. The window name comes from the bootstrap manager, which
+    # always prefixes services.toml entries with `svc-`; `system_interface`
+    # is the entry that runs `minds-workspace-server`.
     assert "tmux kill-window" in cmd
+    assert "${MNGR_PREFIX}system-services:svc-system_interface" in cmd
     # mngr exec already runs in the agent's work_dir, so services.toml is relative.
     assert "touch services.toml" in cmd
 
