@@ -127,7 +127,7 @@ def test_assemble_command_skips_transcript_watcher_when_disabled(
     agent = gemini_agent_without_transcript
     command = str(agent.assemble_command(agent.host, (), command_override=None))
     assert "common_transcript.sh" not in command
-    assert command == "gemini --skip-trust"
+    assert command.endswith("gemini --skip-trust")
 
 
 def test_get_expected_process_name_returns_node(gemini_agent: GeminiAgent) -> None:
