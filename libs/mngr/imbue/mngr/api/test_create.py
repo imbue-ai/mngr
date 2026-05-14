@@ -39,6 +39,7 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.utils.plugin_testing import PLACEHOLDER_AGENT_TYPE
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_ctx_with_plugins
 from imbue.mngr.utils.testing import tmux_session_cleanup
@@ -79,7 +80,7 @@ def _make_options(
     name: AgentName,
     command: str | None = "sleep 60",
     *,
-    agent_type: str = "generic",
+    agent_type: str = PLACEHOLDER_AGENT_TYPE,
     transfer_mode: TransferMode = TransferMode.NONE,
     git: AgentGitOptions | None = None,
     target_path: Path | None = None,
@@ -247,7 +248,7 @@ def test_agent_state_is_persisted(
         data = json.loads(data_file.read_text())
         assert data["id"] == str(result.agent.id)
         assert data["name"] == str(agent_name)
-        assert data["type"] == "generic"
+        assert data["type"] == PLACEHOLDER_AGENT_TYPE
 
 
 # =============================================================================
