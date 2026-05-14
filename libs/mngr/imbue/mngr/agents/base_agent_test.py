@@ -919,7 +919,7 @@ def _create_named_agent_with_stub_host(
     Uses model_construct to bypass Pydantic validation so the stub host
     (which does not implement the full OnlineHostInterface) can be used.
     Accepts a cls parameter to create subclass instances and **kwargs
-    for additional fields (e.g. enter_submission_timeout_seconds).
+    for additional fields defined on those subclasses.
     """
     return cls.model_construct(
         id=AgentId.generate(),
