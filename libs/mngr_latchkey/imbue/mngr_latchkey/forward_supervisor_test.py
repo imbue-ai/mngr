@@ -19,7 +19,7 @@ import psutil
 
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 from imbue.mngr_latchkey.forward_supervisor import _cmdline_looks_like_mngr_latchkey_forward
-from imbue.mngr_latchkey.forward_supervisor import _is_forward_info_alive
+from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import forward_info_path
 from imbue.mngr_latchkey.store import forward_log_path
@@ -58,7 +58,7 @@ def _wait_for_process_alive(pid: int, timeout: float = 5.0) -> bool:
     """Poll until ``pid``'s cmdline matches ``mngr latchkey forward``.
 
     Between fork and exec the child briefly inherits the parent's argv,
-    which makes ``_is_forward_info_alive``'s cmdline check transiently
+    which makes ``is_forward_info_alive``'s cmdline check transiently
     fail. Waiting for the *specific* cmdline pattern (rather than just
     ``cmdline != []``) closes that window so adoption tests do not race
     with the kernel's exec syscall.
@@ -83,26 +83,64 @@ def _make_fake_mngr_binary(tmp_path: Path) -> Path:
 
     Recognised invocations:
 
-    * ``mngr latchkey forward [...]`` -- preserves the cmdline so the
-      supervisor's cmdline-based liveness probe accepts the process,
-      then sleeps until SIGTERM. The handler exits cleanly so
-      ``terminate()`` succeeds within the grace period.
+    * ``mngr latchkey forward --latchkey-directory <dir> [...]`` -- mirrors
+      the real :func:`_forward_command` to the extent the supervisor's
+      tests care about: writes a ``LatchkeyForwardInfo`` record to
+      ``<dir>/mngr_latchkey/latchkey_forward.json`` (with the script's
+      own PID), deletes it on SIGTERM, sleeps in between.
     * Anything else -- exits 99. Lets tests assert that the supervisor
       only ever spawns the supported subcommand.
     """
     script = tmp_path / "mngr"
-    # Setting argv[0] to ``mngr`` ensures the cmdline probe matches
-    # regardless of how Python or the interpreter line is laid out.
     script.write_text(
         "#!/usr/bin/env python3\n"
-        "import sys, signal, os\n"
+        "import json, os, signal, sys\n"
+        "from datetime import datetime, timezone\n"
+        "from pathlib import Path\n"
         'if sys.argv[1:3] != ["latchkey", "forward"]:\n'
         "    sys.exit(99)\n"
-        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+        "args = sys.argv[3:]\n"
+        "latchkey_directory = None\n"
+        "for i, arg in enumerate(args):\n"
+        '    if arg == "--latchkey-directory" and i + 1 < len(args):\n'
+        "        latchkey_directory = Path(args[i + 1])\n"
+        "        break\n"
+        "if latchkey_directory is None:\n"
+        "    sys.exit(98)\n"
+        'record_path = latchkey_directory / "mngr_latchkey" / "latchkey_forward.json"\n'
+        "record_path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "record_path.write_text(json.dumps({\n"
+        '    "pid": os.getpid(),\n'
+        '    "started_at": datetime.now(timezone.utc).isoformat(),\n'
+        '    "gateway_port": None,\n'
+        "}))\n"
+        "def _on_term(*_):\n"
+        "    try:\n"
+        "        record_path.unlink()\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, _on_term)\n"
         "signal.pause()\n"
     )
     script.chmod(0o755)
     return script
+
+
+_FORWARD_RECORD_POLL_TIMEOUT: Final[float] = 5.0
+_FORWARD_RECORD_POLL_INTERVAL: Final[float] = 0.05
+
+
+def _wait_for_forward_record(plugin_dir: Path) -> LatchkeyForwardInfo:
+    """Block until the forward child publishes its record. Fails the test on timeout."""
+    deadline = time.monotonic() + _FORWARD_RECORD_POLL_TIMEOUT
+    waiter = threading.Event()
+    while time.monotonic() < deadline:
+        record = load_forward_info(plugin_dir)
+        if record is not None:
+            return record
+        waiter.wait(timeout=_FORWARD_RECORD_POLL_INTERVAL)
+    raise AssertionError(f"forward record never appeared at {plugin_dir} within {_FORWARD_RECORD_POLL_TIMEOUT}s")
 
 
 # -- cmdline matcher ---------------------------------------------------------
@@ -154,11 +192,10 @@ def test_ensure_running_spawns_when_no_record_exists(tmp_path: Path) -> None:
         assert info.pid > 0
         assert isinstance(info.started_at, datetime)
         assert _wait_for_process_alive(info.pid)
-        # The record was persisted with the same shape we got back.
-        persisted = load_forward_info(supervisor.plugin_data_dir)
-        assert persisted is not None
+        # The forward child publishes the record asynchronously after
+        # the spawn returns; poll until it appears.
+        persisted = _wait_for_forward_record(supervisor.plugin_data_dir)
         assert persisted.pid == info.pid
-        # The log file was created.
         assert forward_log_path(supervisor.plugin_data_dir).is_file()
     finally:
         supervisor.stop()
@@ -170,7 +207,7 @@ def test_ensure_running_spawns_when_no_record_exists(tmp_path: Path) -> None:
 # ``subprocess.Popen`` returning and the child running its own argv
 # briefly leaves the cmdline as the parent's, racing with the
 # cmdline-based liveness probe). The same logic is covered by the
-# direct ``_is_forward_info_alive`` tests below plus the
+# direct ``is_forward_info_alive`` tests below plus the
 # ``_cmdline_looks_like_mngr_latchkey_forward`` matcher tests above
 # without an end-to-end subprocess race.
 
@@ -240,7 +277,7 @@ def test_stop_terminates_running_supervisor_and_deletes_record(tmp_path: Path) -
 
     info = supervisor.ensure_running()
     assert _wait_for_process_alive(info.pid)
-    assert forward_info_path(supervisor.plugin_data_dir).is_file()
+    _wait_for_forward_record(supervisor.plugin_data_dir)
 
     supervisor.stop()
     assert _wait_for_process_exit(info.pid)
@@ -255,8 +292,105 @@ def test_stop_is_no_op_when_nothing_running(tmp_path: Path) -> None:
         latchkey_binary="/usr/bin/latchkey-unused",
         latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
     )
-    # Must not raise even with no running supervisor / on-disk record.
     supervisor.stop()
+
+
+def test_stop_immediately_after_ensure_running_terminates_child(tmp_path: Path) -> None:
+    """``stop()`` called within the fork-exec window still terminates the freshly-spawned child.
+
+    Regression: an earlier version of ``stop()`` ran an
+    :func:`is_forward_info_alive` check on the cached PID before
+    sending SIGTERM. The child's cmdline is briefly empty between
+    the kernel's ``fork`` and ``execve``, so the check would fail
+    and ``stop()`` would skip the SIGTERM, leaking the child. The
+    current ``stop()`` trusts ``_last_known_pid`` without a cmdline
+    check; this test pins that behaviour by NOT waiting for the
+    child to fully exec before calling ``stop()``.
+    """
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+    )
+    info = supervisor.ensure_running()
+    supervisor.stop()
+    assert _wait_for_process_exit(info.pid)
+
+
+def test_stop_skips_termination_for_stale_pid(tmp_path: Path) -> None:
+    """A record whose PID is alive but not a ``mngr latchkey forward`` is not signaled.
+
+    Guards against PID reuse: between a previous supervisor exiting
+    and ``stop()`` being called, the OS may have recycled its PID
+    for an unrelated process. The cmdline-verified termination in
+    ``stop()`` skips the SIGTERM in that case.
+    """
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary="/usr/bin/mngr-unused",
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+    )
+    plugin_dir = supervisor.plugin_data_dir
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    # PID 1 is alive on every POSIX system, but its cmdline is not ours.
+    save_forward_info(plugin_dir, LatchkeyForwardInfo(pid=1, started_at=datetime.now(timezone.utc)))
+    supervisor.stop()
+    # PID 1 must still be running -- ``stop()`` recognized the cmdline
+    # mismatch and skipped the SIGTERM.
+    assert psutil.pid_exists(1)
+
+
+def test_restart_terminates_existing_and_spawns_fresh(tmp_path: Path) -> None:
+    """``restart()`` always replaces the running supervisor."""
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"
+
+    # Round 1: start a supervisor and let it publish its record. This
+    # simulates a 'previous minds session left a supervisor running'
+    # situation that a fresh minds startup will encounter.
+    supervisor_old = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=latchkey_directory,
+    )
+    info_old = supervisor_old.ensure_running()
+    _wait_for_forward_record(supervisor_old.plugin_data_dir)
+    assert _wait_for_process_alive(info_old.pid)
+
+    # Round 2: a fresh supervisor (new minds process). ``restart()``
+    # must terminate the old PID and produce a new one.
+    supervisor_new = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=latchkey_directory,
+    )
+    info_new = supervisor_new.restart()
+    try:
+        assert info_new.pid != info_old.pid
+        assert _wait_for_process_exit(info_old.pid)
+        assert _wait_for_process_alive(info_new.pid)
+        new_record = _wait_for_forward_record(supervisor_new.plugin_data_dir)
+        assert new_record.pid == info_new.pid
+    finally:
+        supervisor_new.stop()
+        assert _wait_for_process_exit(info_new.pid)
+
+
+def test_restart_is_a_clean_spawn_when_no_previous_supervisor(tmp_path: Path) -> None:
+    """``restart()`` on a fresh latchkey directory is equivalent to ``ensure_running()``."""
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+    )
+    info = supervisor.restart()
+    try:
+        assert _wait_for_process_alive(info.pid)
+    finally:
+        supervisor.stop()
+        assert _wait_for_process_exit(info.pid)
 
 
 def test_get_forward_info_returns_none_when_unstarted(tmp_path: Path) -> None:
@@ -271,17 +405,17 @@ def test_get_forward_info_returns_none_when_unstarted(tmp_path: Path) -> None:
 # -- liveness probe (direct) -------------------------------------------------
 
 
-def test_is_forward_info_alive_rejects_unrelated_pid() -> None:
+def testis_forward_info_alive_rejects_unrelated_pid() -> None:
     """A real PID whose cmdline doesn't match is rejected."""
     info = LatchkeyForwardInfo(pid=os.getpid(), started_at=datetime.now(timezone.utc))
     # The test process itself is pytest, not ``mngr latchkey forward``.
-    assert not _is_forward_info_alive(info)
+    assert not is_forward_info_alive(info)
 
 
-def test_is_forward_info_alive_rejects_dead_pid() -> None:
+def testis_forward_info_alive_rejects_dead_pid() -> None:
     dead_pid = 2**31 - 1
     info = LatchkeyForwardInfo(pid=dead_pid, started_at=datetime.now(timezone.utc))
-    assert not _is_forward_info_alive(info)
+    assert not is_forward_info_alive(info)
 
 
 # -- malformed-record handling ----------------------------------------------
