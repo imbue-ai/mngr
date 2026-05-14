@@ -96,7 +96,12 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Provision the gemini transcript converter to commands/."""
+        """Provision the gemini transcript converter to commands/.
+
+        When ``agent_config.emit_common_transcript`` is ``False`` this is a
+        no-op: no script is written and ``assemble_command`` will not prepend
+        the watcher.
+        """
         if not self.agent_config.emit_common_transcript:
             return
         with mngr_ctx.concurrency_group.make_concurrency_group("gemini_provisioning") as concurrency_group:
@@ -118,6 +123,9 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
 
         The watcher runs as a backgrounded child of the tmux command shell;
         when the tmux session terminates the child dies via SIGHUP propagation.
+        When ``agent_config.emit_common_transcript`` is ``False`` the watcher
+        is not prepended and the returned command is the base assembled by the
+        superclass.
         """
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
         if not self.agent_config.emit_common_transcript:
