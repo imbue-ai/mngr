@@ -4,8 +4,10 @@ import pytest
 from pydantic import Field
 
 from imbue.mngr.config.agent_class_registry import get_agent_class
+from imbue.mngr.config.agent_class_registry import get_orphan_agent_class
 from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.agent_class_registry import reset_agent_class_registry
+from imbue.mngr.config.agent_class_registry import set_orphan_agent_class
 from imbue.mngr.config.agent_config_registry import _apply_custom_overrides_to_parent_config
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.agent_config_registry import is_known_agent_type
@@ -203,6 +205,40 @@ def test_get_agent_class_unknown_includes_install_hint_for_known_plugin() -> Non
         get_agent_class("claude")
     formatted = exc_info.value.format_message()
     assert "imbue-mngr-claude" in formatted
+
+
+# =============================================================================
+# Orphan-fallback registry tests
+# =============================================================================
+
+
+class _FakeOrphanClass:
+    """Sentinel agent class for orphan-fallback round-trip tests."""
+
+    pass
+
+
+def test_get_orphan_agent_class_returns_none_when_unset() -> None:
+    """get_orphan_agent_class returns None after the registry is reset."""
+    reset_agent_class_registry()
+    assert get_orphan_agent_class() is None
+
+
+def test_set_orphan_agent_class_round_trips() -> None:
+    """set_orphan_agent_class followed by get_orphan_agent_class returns the same class."""
+    reset_agent_class_registry()
+    try:
+        set_orphan_agent_class(_FakeOrphanClass)
+        assert get_orphan_agent_class() is _FakeOrphanClass
+    finally:
+        reset_agent_class_registry()
+
+
+def test_reset_agent_class_registry_clears_orphan_fallback() -> None:
+    """reset_agent_class_registry must clear the orphan slot back to None."""
+    set_orphan_agent_class(_FakeOrphanClass)
+    reset_agent_class_registry()
+    assert get_orphan_agent_class() is None
 
 
 # =============================================================================
