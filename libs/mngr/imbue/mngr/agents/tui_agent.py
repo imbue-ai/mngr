@@ -38,7 +38,10 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
         if self.uses_submission_signal():
             super()._send_enter_and_wait(tmux_target)
             return
-        send_enter_cmd = f"tmux send-keys -t '{tmux_target}' Enter"
+        # Brief sleep before Enter so the TUI has time to absorb the pasted
+        # text into its input buffer before we submit. Without it, gemini
+        # occasionally swallows the Enter on fresh sessions.
+        send_enter_cmd = f"sleep 0.2 && tmux send-keys -t '{tmux_target}' Enter"
         result = self.host.execute_stateful_command(send_enter_cmd)
         if not result.success:
             raise SendMessageError(
