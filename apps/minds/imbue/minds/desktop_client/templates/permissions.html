@@ -25,6 +25,10 @@
                             sign-in flow is happening). Should contain
                             an element with id="permissions-progress"
                             if it wants to be hidden/shown automatically.
+    workspace_meta          Slot for a short note next to the workspace
+                            link explaining the scope of the grant
+                            (e.g. latchkey notes that grants are shared
+                            across every agent on the same host).
     permissions_extra_scripts   Optional extra <script> tag for backend-specific
                             client-side wiring (e.g. additional change handlers).
 #}
@@ -42,6 +46,9 @@
     <p class="text-sm text-zinc-600 mt-1">
       Workspace:
       <a href="{{ mngr_forward_origin }}/goto/{{ agent_id }}/" class="text-blue-600 hover:underline">{{ ws_name or agent_id }}</a>
+      {# Backend-specific scope hint slot (e.g. latchkey notes that grants #}
+      {# are shared across every agent on the host). #}
+      {% block workspace_meta %}{% endblock %}
     </p>
 
     {% call ui.card(extra='mt-6') %}

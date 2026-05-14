@@ -20,10 +20,11 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import find_and_maybe_start_agent_by_name_or_id
+from imbue.mngr.api.address_parsers import parse_agent_name_or_id
+from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr_schedule.errors import ScheduleDeployError
 
@@ -83,18 +84,9 @@ def _resolve_agent(agent_name: str, mngr_ctx: MngrContext) -> AgentInterface:
 
     Raises UserInputError if the agent cannot be found.
     """
-    agents_by_host, _ = discover_hosts_and_agents(
+    agent, _host = find_one_agent(
+        AgentAddress(agent=parse_agent_name_or_id(agent_name)),
         mngr_ctx,
-        provider_names=None,
-        agent_identifiers=(agent_name,),
-        include_destroyed=False,
-        reset_caches=False,
-    )
-    agent, _host = find_and_maybe_start_agent_by_name_or_id(
-        agent_name,
-        agents_by_host,
-        mngr_ctx,
-        "schedule-verify",
         is_start_desired=True,
         skip_agent_state_check=True,
     )

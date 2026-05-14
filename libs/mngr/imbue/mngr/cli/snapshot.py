@@ -5,12 +5,15 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.agent_addr import find_agents_by_addresses
+from imbue.mngr.api.address_parsers import parse_agent_or_host_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.find import filter_all_hosts
+from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import group_agents_by_host
-from imbue.mngr.api.find import parse_host_qualifier
-from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import HOST_ADDRESS
+from imbue.mngr.cli.address_params import parse_agent_addresses_or_raise
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.default_command_group import DefaultCommandGroup
@@ -30,13 +33,14 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import BaseMngrError
-from imbue.mngr.errors import HostNotFoundError
-from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
@@ -52,8 +56,8 @@ class SnapshotCreateCliOptions(CommonCliOptions):
     """Options for the snapshot create subcommand."""
 
     identifiers: tuple[str, ...]
-    agent_list: tuple[str, ...]
-    hosts: tuple[str, ...]
+    agent_list: tuple[AgentAddress, ...]
+    hosts: tuple[HostAddress, ...]
     name: str | None
     on_error: str
     # Future options
@@ -68,8 +72,8 @@ class SnapshotListCliOptions(CommonCliOptions):
     """Options for the snapshot list subcommand."""
 
     identifiers: tuple[str, ...]
-    agent_list: tuple[str, ...]
-    hosts: tuple[str, ...]
+    agent_list: tuple[AgentAddress, ...]
+    hosts: tuple[HostAddress, ...]
     limit: int | None
     # Future options
     after: str | None
@@ -80,7 +84,7 @@ class SnapshotDestroyCliOptions(CommonCliOptions):
     """Options for the snapshot destroy subcommand."""
 
     agents: tuple[str, ...]
-    agent_list: tuple[str, ...]
+    agent_list: tuple[AgentAddress, ...]
     snapshots: tuple[str, ...]
     all_snapshots: bool
     force: bool
@@ -91,50 +95,32 @@ class SnapshotDestroyCliOptions(CommonCliOptions):
 # =============================================================================
 
 
-def _find_host_across_providers(
-    host_identifier: str,
-    mngr_ctx: MngrContext,
-) -> tuple[HostId, ProviderInstanceName] | None:
-    """Find a host by ID, name, or `host.provider` form across all providers.
-
-    Returns (host_id, provider_name) if found, or None if no provider has a matching host.
-    """
-    host_name, provider_name = parse_host_qualifier(host_identifier)
-    for provider in get_all_provider_instances(mngr_ctx):
-        if provider_name is not None and provider.name != provider_name:
-            continue
-        if host_name is None:
-            continue
-        try:
-            host = provider.get_host(HostId(str(host_name)))
-            return host.id, provider.name
-        except (HostNotFoundError, ValueError, ProviderUnavailableError):
-            pass
-        try:
-            host = provider.get_host(host_name)
-            return host.id, provider.name
-        except (HostNotFoundError, ValueError, ProviderUnavailableError):
-            pass
-    return None
-
-
-def _classify_mixed_identifiers(
+def _bucketize_mixed_identifiers(
     identifiers: list[str],
-    mngr_ctx: MngrContext,
-) -> tuple[list[str], list[str]]:
-    """Classify mixed identifiers into agent and host identifiers.
+) -> tuple[list[AgentAddress], list[HostAddress]]:
+    """Parse a mixed positional list into agent and host addresses by text alone.
 
-    Each identifier is checked against known agent names and IDs.
-    If it matches an agent, it's treated as an agent identifier.
-    Otherwise, it's treated as a host identifier.
-
-    Returns (agent_identifiers, host_identifiers).
+    Each token is parsed via :func:`parse_agent_or_host_address`. The leading
+    ``@`` and the ``host-`` ID prefix are the disambiguators; no state is
+    consulted. Users must write ``@HOST`` (or ``HOST.PROVIDER``) to target a
+    host by bare name.
     """
-    if not identifiers:
-        return [], []
+    agent_addresses: list[AgentAddress] = []
+    host_addresses: list[HostAddress] = []
+    for identifier in identifiers:
+        try:
+            addr = parse_agent_or_host_address(identifier)
+        except UserInputError as e:
+            raise click.BadParameter(str(e)) from e
+        if isinstance(addr, AgentAddress):
+            agent_addresses.append(addr)
+        else:
+            host_addresses.append(addr)
+    return agent_addresses, host_addresses
 
-    # Use try/except to gracefully handle provider errors (e.g. unreachable providers).
-    # Partial results are acceptable here since we're only classifying identifiers.
+
+def _discover_all_hosts(mngr_ctx: MngrContext) -> list[DiscoveredHost]:
+    """Discover all hosts; on provider errors, log and return an empty list."""
     try:
         agents_by_host, _ = discover_hosts_and_agents(
             mngr_ctx,
@@ -144,43 +130,30 @@ def _classify_mixed_identifiers(
             reset_caches=False,
         )
     except BaseMngrError as e:
-        logger.warning("Failed to load agents for identifier classification: {}", e)
-        # Treat all identifiers as host identifiers when agents cannot be loaded
-        return [], identifiers
-
-    known_names_and_ids: set[str] = set()
-    for agent_refs in agents_by_host.values():
-        for agent_ref in agent_refs:
-            known_names_and_ids.add(str(agent_ref.agent_name))
-            known_names_and_ids.add(str(agent_ref.agent_id))
-
-    agent_ids: list[str] = []
-    host_ids: list[str] = []
-    for identifier in identifiers:
-        if identifier in known_names_and_ids:
-            agent_ids.append(identifier)
-        else:
-            host_ids.append(identifier)
-
-    return agent_ids, host_ids
+        logger.warning("Failed to discover hosts: {}", e)
+        return []
+    return list(agents_by_host.keys())
 
 
 def _resolve_snapshot_hosts(
-    agent_identifiers: list[str],
-    host_identifiers: list[str],
+    agent_addresses: list[AgentAddress],
+    host_addresses: list[HostAddress],
+    all_hosts: list[DiscoveredHost],
     mngr_ctx: MngrContext,
 ) -> list[tuple[str, ProviderInstanceName, list[str]]]:
     """Resolve agent and host identifiers to unique host targets.
 
     Returns a list of (host_id_str, provider_name, agent_names) tuples,
-    deduplicated by host.
+    deduplicated by host. An ambiguous host name (matching multiple hosts)
+    snapshots every matching host, mirroring the agent path's set-based
+    behavior.
     """
     seen_hosts: dict[str, tuple[ProviderInstanceName, list[str]]] = {}
 
-    # Resolve from agent identifiers
-    if agent_identifiers:
-        agents = find_agents_by_addresses(
-            raw_identifiers=agent_identifiers,
+    # Resolve from agent addresses
+    if agent_addresses:
+        agents = find_all_agents(
+            addresses=agent_addresses,
             filter_all=False,
             target_state=AgentLifecycleState.RUNNING,
             mngr_ctx=mngr_ctx,
@@ -196,17 +169,17 @@ def _resolve_snapshot_hosts(
             else:
                 seen_hosts[host_id_str] = (provider_name, agent_names)
 
-    # Resolve from host identifiers. These identifiers already failed agent
+    # Resolve from host addresses. These addresses already failed agent
     # lookup in _classify_mixed_identifiers, so if host lookup also fails,
     # the error should mention both.
-    for host_str in host_identifiers:
-        result = _find_host_across_providers(host_str, mngr_ctx)
-        if result is None:
-            raise UserInputError(f"Agent or host not found: {host_str}")
-        host_id, provider_name = result
-        host_id_str = str(host_id)
-        if host_id_str not in seen_hosts:
-            seen_hosts[host_id_str] = (provider_name, [])
+    for host_address in host_addresses:
+        matches = filter_all_hosts(host_address, all_hosts)
+        if not matches:
+            raise UserInputError(f"Agent or host not found: {host_address}")
+        for match in matches:
+            host_id_str = str(match.host_id)
+            if host_id_str not in seen_hosts:
+                seen_hosts[host_id_str] = (match.provider_name, [])
 
     return [(host_id_str, prov, agents) for host_id_str, (prov, agents) in seen_hosts.items()]
 
@@ -401,14 +374,16 @@ def snapshot(ctx: click.Context, **kwargs: Any) -> None:
 @optgroup.option(
     "--agent",
     "agent_list",
+    type=AGENT_ADDRESS,
     multiple=True,
-    help="Agent name or ID to snapshot (can be specified multiple times)",
+    help="Agent address (NAME[@HOST[.PROVIDER]]) to snapshot (can be specified multiple times)",
 )
 @optgroup.option(
     "--host",
     "hosts",
+    type=HOST_ADDRESS,
     multiple=True,
-    help="Host ID or name to snapshot directly (can be specified multiple times)",
+    help="Host address (HOST[.PROVIDER]) to snapshot directly (can be specified multiple times)",
 )
 @optgroup.group("Snapshot Options")
 @optgroup.option(
@@ -472,25 +447,27 @@ def _snapshot_create_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     _check_create_future_options(opts)
 
-    # Classify mixed positional identifiers as agents or hosts
+    # Parse mixed positional identifiers into agent and host addresses by text alone
     expanded_identifiers = expand_stdin_placeholder(opts.identifiers)
-    mixed_agent_ids, mixed_host_ids = _classify_mixed_identifiers(expanded_identifiers, mngr_ctx)
+    mixed_agents, mixed_hosts = _bucketize_mixed_identifiers(expanded_identifiers)
 
     # Combine with explicit --agent and --host options
-    agent_identifiers = mixed_agent_ids + list(opts.agent_list)
-    host_identifiers = mixed_host_ids + list(opts.hosts)
+    agent_addresses: list[AgentAddress] = mixed_agents + list(opts.agent_list)
+    host_addresses: list[HostAddress] = mixed_hosts + list(opts.hosts)
 
-    if not agent_identifiers and not host_identifiers:
+    if not agent_addresses and not host_addresses:
         if STDIN_PLACEHOLDER not in opts.identifiers:
             raise click.UsageError("Must specify at least one agent or host (use '-' to read from stdin)")
         return
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
-    # Resolve targets to unique hosts
+    # Resolve targets to unique hosts (discovery only needed for host-address resolution)
+    all_hosts = _discover_all_hosts(mngr_ctx) if host_addresses else []
     targets = _resolve_snapshot_hosts(
-        agent_identifiers=agent_identifiers,
-        host_identifiers=host_identifiers,
+        agent_addresses=agent_addresses,
+        host_addresses=host_addresses,
+        all_hosts=all_hosts,
         mngr_ctx=mngr_ctx,
     )
 
@@ -588,23 +565,25 @@ def snapshot_list(ctx: click.Context, **kwargs: Any) -> None:
 
     _check_list_future_options(opts)
 
-    # Classify mixed positional identifiers as agents or hosts
+    # Parse mixed positional identifiers into agent and host addresses by text alone
     expanded_identifiers = expand_stdin_placeholder(opts.identifiers)
-    mixed_agent_ids, mixed_host_ids = _classify_mixed_identifiers(expanded_identifiers, mngr_ctx)
+    mixed_agents, mixed_hosts = _bucketize_mixed_identifiers(expanded_identifiers)
 
     # Combine with explicit --agent and --host options
-    agent_identifiers = mixed_agent_ids + list(opts.agent_list)
-    host_identifiers = mixed_host_ids + list(opts.hosts)
+    agent_addresses: list[AgentAddress] = mixed_agents + list(opts.agent_list)
+    host_addresses: list[HostAddress] = mixed_hosts + list(opts.hosts)
 
-    if not agent_identifiers and not host_identifiers:
+    if not agent_addresses and not host_addresses:
         if STDIN_PLACEHOLDER not in opts.identifiers:
             raise click.UsageError("Must specify at least one agent or host (use '-' to read from stdin)")
         return
 
-    # Resolve to hosts
+    # Resolve to hosts (discovery only needed for host-address resolution)
+    all_hosts = _discover_all_hosts(mngr_ctx) if host_addresses else []
     targets = _resolve_snapshot_hosts(
-        agent_identifiers=agent_identifiers,
-        host_identifiers=host_identifiers,
+        agent_addresses=agent_addresses,
+        host_addresses=host_addresses,
+        all_hosts=all_hosts,
         mngr_ctx=mngr_ctx,
     )
 
@@ -642,8 +621,9 @@ def snapshot_list(ctx: click.Context, **kwargs: Any) -> None:
 @optgroup.option(
     "--agent",
     "agent_list",
+    type=AGENT_ADDRESS,
     multiple=True,
-    help="Agent name or ID whose snapshots to destroy (can be specified multiple times)",
+    help="Agent address (NAME[@HOST[.PROVIDER]]) whose snapshots to destroy (can be specified multiple times)",
 )
 @optgroup.option(
     "--snapshot",
@@ -675,9 +655,11 @@ def snapshot_destroy(ctx: click.Context, **kwargs: Any) -> None:
     logger.debug("Started snapshot destroy command")
 
     # Validate inputs
-    agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
+    agent_addresses: list[AgentAddress] = parse_agent_addresses_or_raise(expand_stdin_placeholder(opts.agents)) + list(
+        opts.agent_list
+    )
 
-    if not agent_identifiers:
+    if not agent_addresses:
         if STDIN_PLACEHOLDER not in opts.agents:
             raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
         return
@@ -688,10 +670,11 @@ def snapshot_destroy(ctx: click.Context, **kwargs: Any) -> None:
     if opts.snapshots and opts.all_snapshots:
         raise click.UsageError("Cannot specify both --snapshot and --all-snapshots")
 
-    # Resolve to hosts
+    # Resolve to hosts (no host_addresses here, so all_hosts is unused)
     targets = _resolve_snapshot_hosts(
-        agent_identifiers=agent_identifiers,
-        host_identifiers=[],
+        agent_addresses=agent_addresses,
+        host_addresses=[],
+        all_hosts=[],
         mngr_ctx=mngr_ctx,
     )
 

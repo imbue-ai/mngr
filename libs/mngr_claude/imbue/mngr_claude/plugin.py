@@ -50,6 +50,7 @@ from imbue.mngr.interfaces.data_types import RelativePath
 from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
@@ -879,7 +880,7 @@ def _write_generated_files(
     files to a local temp dir and rsyncs them in a single call.
     """
     file_summary = sorted((str(rel), len(content)) for rel, content in generated_files.items())
-    logger.info(
+    logger.debug(
         "_write_generated_files: host.is_local={}, config_dir={}, files={}",
         host.is_local,
         config_dir,
@@ -1779,7 +1780,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         config = self.agent_config
         config_dir = self.get_claude_config_dir()
         source_claude_dir = get_user_claude_config_dir()
-        logger.info(
+        logger.debug(
             "_setup_per_agent_config_dir: agent={} host.is_local={} config_dir={} "
             "sync_home_settings={} sync_claude_json={} sync_claude_credentials={}",
             self.id,
@@ -1981,8 +1982,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             # Transfer plugin data from source agent before config setup (if cloning via --from).
             # This copies sessions, memory, transcript offsets, etc. The subsequent config setup
             # will overwrite identity-specific files (.claude.json, credentials) with fresh values.
-            if options.source_agent_state_dir is not None:
-                self._transfer_source_plugin_data(host, options.source_agent_state_dir)
+            if options.source_agent_state_location is not None:
+                self._transfer_source_plugin_data(options.source_agent_state_location)
 
             # Set up per-agent config directory (for both local and remote hosts)
             self._setup_per_agent_config_dir(host, options, mngr_ctx)
@@ -2040,27 +2041,21 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         host.write_text_file(self._get_agent_dir() / "claude_session_id", last_session_id)
         logger.info("Adopted {} session(s), active session: {}", len(adopt_session_args), last_session_id)
 
-    def _transfer_source_plugin_data(
-        self,
-        host: OnlineHostInterface,
-        source_agent_state_dir: Path,
-    ) -> None:
-        """Transfer plugin data from a source agent's state directory during clone.
-
-        Copies the source agent's plugin/ directory into this agent's state
-        directory. This runs before _setup_per_agent_config_dir, which will
-        overwrite identity-specific config files with fresh values for the
-        new agent.
+    def _transfer_source_plugin_data(self, source_agent_state_location: HostLocation) -> None:
+        """Copy the source agent's plugin/ directory into this agent's state
+        directory. Runs before _setup_per_agent_config_dir, which overwrites
+        identity-specific config files with fresh values for the new agent.
         """
-        source_plugin_dir = source_agent_state_dir / "plugin"
+        source_host = source_agent_state_location.host
+        source_plugin_dir = source_agent_state_location.path / "plugin"
         dest_plugin_dir = self._get_agent_dir() / "plugin"
 
-        if not source_plugin_dir.exists():
+        if not source_host.path_exists(source_plugin_dir):
             logger.debug("No plugin directory in source agent, skipping clone transfer")
             return
 
         with log_span("Transferring source plugin data"):
-            host.copy_directory(host, source_plugin_dir, dest_plugin_dir)
+            self.host.copy_directory(source_host, source_plugin_dir, dest_plugin_dir)
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve session files and clean up per-agent credentials and trust entries.
@@ -2214,6 +2209,16 @@ def _copy_single_file_to_local(
         logger.warning("Failed to preserve session history for agent {}: {}", agent_name, e)
 
 
+def get_preserved_sessions_dir_for_host(host_dir: Path, agent_name: AgentName, agent_id: AgentId) -> Path:
+    """Return the preserved-sessions directory for an agent under the given host dir.
+
+    This is the single source of truth for the on-disk layout of preserved
+    Claude session data, so other plugins that need to read those files can
+    call this helper instead of duplicating the path structure.
+    """
+    return host_dir / "plugin" / "mngr_claude" / "preserved_sessions" / f"{agent_name}--{agent_id}"
+
+
 def _get_preserved_sessions_dir_for(agent_name: AgentName, agent_id: AgentId, mngr_ctx: MngrContext) -> Path:
     """Return the local directory path for an agent's preserved session files.
 
@@ -2221,7 +2226,7 @@ def _get_preserved_sessions_dir_for(agent_name: AgentName, agent_id: AgentId, mn
     the online (agent-based) and offline (volume-based) preservation paths.
     """
     local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
-    return local_host_dir / "plugin" / "mngr_claude" / "preserved_sessions" / f"{agent_name}--{agent_id}"
+    return get_preserved_sessions_dir_for_host(local_host_dir, agent_name, agent_id)
 
 
 def _should_preserve_sessions(ref: DiscoveredAgent) -> bool:

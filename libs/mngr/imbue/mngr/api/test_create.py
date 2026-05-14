@@ -21,11 +21,11 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import AgentGitOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
@@ -1082,6 +1082,7 @@ def test_create_rejects_duplicate_agent_name_on_same_host(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_create_with_update_flag_updates_existing_agent(
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,

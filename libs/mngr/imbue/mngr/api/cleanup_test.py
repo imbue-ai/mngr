@@ -128,6 +128,7 @@ class _StopFailingProvider(LocalProviderInstance):
         connector = PyinfraConnector(pyinfra_host)
         return _StopFailingHost(
             id=self.host_id,
+            host_name=HostName("test"),
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,

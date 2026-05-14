@@ -498,6 +498,7 @@ class DockerProviderInstance(BaseProviderInstance):
 
         host = Host(
             id=host_id,
+            host_name=host_name,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -857,6 +858,7 @@ kill -TERM 1
 
         return Host(
             id=host_id,
+            host_name=name,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,

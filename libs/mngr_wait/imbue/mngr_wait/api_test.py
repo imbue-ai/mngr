@@ -1,20 +1,21 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
-from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
-from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr_wait.api import _build_agent_resolved_target
-from imbue.mngr_wait.api import _build_host_resolved_target
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr_wait.api import _detect_state_changes
-from imbue.mngr_wait.api import _resolve_by_name
+from imbue.mngr_wait.api import resolve_wait_target
 from imbue.mngr_wait.api import wait_for_state
 from imbue.mngr_wait.data_types import CombinedState
 from imbue.mngr_wait.data_types import StateChange
@@ -22,193 +23,62 @@ from imbue.mngr_wait.data_types import WaitTarget
 from imbue.mngr_wait.primitives import WaitTargetType
 
 
-def _make_agents_by_host(
-    agent_name: str = "test-agent",
-    host_name: str = "test-host",
-) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], DiscoveredHost, DiscoveredAgent]:
-    host_id = HostId.generate()
+def _create_agent_data_json(per_host_dir: Path, agent_name: str) -> AgentId:
+    """Create an agent data.json file so the agent appears in discovery."""
     agent_id = AgentId.generate()
-    host_ref = DiscoveredHost(
-        host_id=host_id,
-        host_name=HostName(host_name),
-        provider_name=ProviderInstanceName("local"),
-    )
-    agent_ref = DiscoveredAgent(
-        host_id=host_id,
-        agent_id=agent_id,
-        agent_name=AgentName(agent_name),
-        provider_name=ProviderInstanceName("local"),
-    )
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {host_ref: [agent_ref]}
-    return agents_by_host, host_ref, agent_ref
+    agent_dir = per_host_dir / "agents" / str(agent_id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    data = {
+        "id": str(agent_id),
+        "name": agent_name,
+        "type": "generic",
+        "command": "sleep 1",
+        "work_dir": "/tmp/test",
+        "create_time": "2026-01-01T00:00:00+00:00",
+    }
+    (agent_dir / "data.json").write_text(json.dumps(data))
+    return agent_id
 
 
-# === _build_agent_resolved_target ===
+# === resolve_wait_target ===
 
 
-def test_build_agent_resolved_target_finds_agent_by_id(temp_mngr_ctx: MngrContext) -> None:
-    agents_by_host, host_ref, agent_ref = _make_agents_by_host(agent_name="my-agent")
-    agent_id_str = str(agent_ref.agent_id)
-    result = _build_agent_resolved_target(agent_id_str, agents_by_host, temp_mngr_ctx)
+def test_resolve_wait_target_finds_agent_by_name(
+    temp_mngr_ctx: MngrContext,
+    local_provider,
+) -> None:
+    agent_id = _create_agent_data_json(local_provider.host_dir, "my-agent")
+    result = resolve_wait_target(AgentAddress(agent=AgentName("my-agent")), temp_mngr_ctx)
     assert result.target.target_type == WaitTargetType.AGENT
-    assert result.agent_id == agent_ref.agent_id
+    assert result.agent_id == agent_id
 
 
-def test_build_agent_resolved_target_finds_agent_by_name(temp_mngr_ctx: MngrContext) -> None:
-    agents_by_host, host_ref, agent_ref = _make_agents_by_host(agent_name="named-agent")
-    result = _build_agent_resolved_target("named-agent", agents_by_host, temp_mngr_ctx)
-    assert result.target.target_type == WaitTargetType.AGENT
-    assert result.agent_id == agent_ref.agent_id
-
-
-def test_build_agent_resolved_target_raises_when_not_found(temp_mngr_ctx: MngrContext) -> None:
-    agents_by_host, _host_ref, _agent_ref = _make_agents_by_host()
-    nonexistent_agent_id = str(AgentId.generate())
-    with pytest.raises(UserInputError):
-        _build_agent_resolved_target(nonexistent_agent_id, agents_by_host, temp_mngr_ctx)
-
-
-# === _build_host_resolved_target ===
-
-
-def test_build_host_resolved_target_finds_host_by_id(temp_mngr_ctx: MngrContext) -> None:
-    agents_by_host, host_ref, _agent_ref = _make_agents_by_host()
-    all_hosts = list(agents_by_host.keys())
-    host_id_str = str(host_ref.host_id)
-    result = _build_host_resolved_target(host_id_str, all_hosts, temp_mngr_ctx)
+def test_resolve_wait_target_finds_host_by_id(
+    temp_mngr_ctx: MngrContext,
+    local_provider,
+) -> None:
+    # An agent must exist so the host gets discovered.
+    _create_agent_data_json(local_provider.host_dir, "irrelevant-agent")
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
+    result = resolve_wait_target(HostAddress(host=host.id), temp_mngr_ctx)
     assert result.target.target_type == WaitTargetType.HOST
-    assert result.host_id == host_ref.host_id
-
-
-def test_build_host_resolved_target_finds_host_by_name(temp_mngr_ctx: MngrContext) -> None:
-    agents_by_host, host_ref, _agent_ref = _make_agents_by_host(host_name="named-host")
-    all_hosts = list(agents_by_host.keys())
-    result = _build_host_resolved_target("named-host", all_hosts, temp_mngr_ctx)
-    assert result.target.target_type == WaitTargetType.HOST
-    assert result.host_id == host_ref.host_id
-
-
-def test_build_host_resolved_target_raises_when_not_found(temp_mngr_ctx: MngrContext) -> None:
-    agents_by_host, _host_ref, _agent_ref = _make_agents_by_host()
-    all_hosts = list(agents_by_host.keys())
-    nonexistent_host_id = str(HostId.generate())
-    with pytest.raises(UserInputError):
-        _build_host_resolved_target(nonexistent_host_id, all_hosts, temp_mngr_ctx)
-
-
-def test_build_host_resolved_target_handles_invalid_id_format(temp_mngr_ctx: MngrContext) -> None:
-    """Ensure a host-prefixed name with invalid UUID format raises UserInputError, not InvalidRandomIdError."""
-    agents_by_host, _host_ref, _agent_ref = _make_agents_by_host()
-    all_hosts = list(agents_by_host.keys())
-    with pytest.raises(UserInputError):
-        _build_host_resolved_target("host-myserver", all_hosts, temp_mngr_ctx)
-
-
-# === _resolve_by_name ===
-
-
-def test_resolve_by_name_finds_agent(temp_mngr_ctx: MngrContext) -> None:
-    agents_by_host, host_ref, agent_ref = _make_agents_by_host(agent_name="my-agent")
-    all_hosts = list(agents_by_host.keys())
-    result = _resolve_by_name("my-agent", agents_by_host, all_hosts, temp_mngr_ctx)
-    assert result.target.target_type == WaitTargetType.AGENT
-    assert result.agent_id == agent_ref.agent_id
-    assert result.host_id == host_ref.host_id
-
-
-def test_resolve_by_name_finds_host(temp_mngr_ctx: MngrContext) -> None:
-    agents_by_host, host_ref, _agent_ref = _make_agents_by_host(
-        agent_name="my-agent",
-        host_name="my-host",
-    )
-    all_hosts = list(agents_by_host.keys())
-    result = _resolve_by_name("my-host", agents_by_host, all_hosts, temp_mngr_ctx)
-    assert result.target.target_type == WaitTargetType.HOST
+    assert result.host_id == host.id
     assert result.agent_id is None
-    assert result.host_id == host_ref.host_id
 
 
-def test_resolve_by_name_raises_when_ambiguous(temp_mngr_ctx: MngrContext) -> None:
-    host_id = HostId.generate()
-    shared_name = "ambiguous"
-    host_ref = DiscoveredHost(
-        host_id=host_id,
-        host_name=HostName(shared_name),
-        provider_name=ProviderInstanceName("local"),
-    )
-    agent_ref = DiscoveredAgent(
-        host_id=host_id,
-        agent_id=AgentId.generate(),
-        agent_name=AgentName(shared_name),
-        provider_name=ProviderInstanceName("local"),
-    )
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {host_ref: [agent_ref]}
-    all_hosts = list(agents_by_host.keys())
-
-    with pytest.raises(UserInputError, match="matches both"):
-        _resolve_by_name(shared_name, agents_by_host, all_hosts, temp_mngr_ctx)
+def test_resolve_wait_target_raises_when_agent_not_found(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    with pytest.raises(UserInputError, match="Could not find agent"):
+        resolve_wait_target(AgentAddress(agent=AgentName("nonexistent-agent-92814")), temp_mngr_ctx)
 
 
-def test_resolve_by_name_raises_when_not_found(temp_mngr_ctx: MngrContext) -> None:
-    agents_by_host, _host_ref, _agent_ref = _make_agents_by_host()
-    all_hosts = list(agents_by_host.keys())
-
-    with pytest.raises(UserInputError, match="No agent or host found"):
-        _resolve_by_name("nonexistent", agents_by_host, all_hosts, temp_mngr_ctx)
-
-
-def test_resolve_by_name_raises_when_multiple_agents(temp_mngr_ctx: MngrContext) -> None:
-    host_ref_1 = DiscoveredHost(
-        host_id=HostId.generate(),
-        host_name=HostName("host-1"),
-        provider_name=ProviderInstanceName("local"),
-    )
-    host_ref_2 = DiscoveredHost(
-        host_id=HostId.generate(),
-        host_name=HostName("host-2"),
-        provider_name=ProviderInstanceName("local"),
-    )
-    agent_ref_1 = DiscoveredAgent(
-        host_id=host_ref_1.host_id,
-        agent_id=AgentId.generate(),
-        agent_name=AgentName("dup-agent"),
-        provider_name=ProviderInstanceName("local"),
-    )
-    agent_ref_2 = DiscoveredAgent(
-        host_id=host_ref_2.host_id,
-        agent_id=AgentId.generate(),
-        agent_name=AgentName("dup-agent"),
-        provider_name=ProviderInstanceName("local"),
-    )
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {
-        host_ref_1: [agent_ref_1],
-        host_ref_2: [agent_ref_2],
-    }
-    all_hosts = list(agents_by_host.keys())
-
-    with pytest.raises(UserInputError, match="Multiple"):
-        _resolve_by_name("dup-agent", agents_by_host, all_hosts, temp_mngr_ctx)
-
-
-def test_resolve_by_name_raises_when_multiple_hosts(temp_mngr_ctx: MngrContext) -> None:
-    host_ref_1 = DiscoveredHost(
-        host_id=HostId.generate(),
-        host_name=HostName("dup-host"),
-        provider_name=ProviderInstanceName("local"),
-    )
-    host_ref_2 = DiscoveredHost(
-        host_id=HostId.generate(),
-        host_name=HostName("dup-host"),
-        provider_name=ProviderInstanceName("local"),
-    )
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {
-        host_ref_1: [],
-        host_ref_2: [],
-    }
-    all_hosts = list(agents_by_host.keys())
-
-    with pytest.raises(UserInputError, match="Multiple"):
-        _resolve_by_name("dup-host", agents_by_host, all_hosts, temp_mngr_ctx)
+def test_resolve_wait_target_raises_when_host_not_found(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    nonexistent_host_id = HostId.generate()
+    with pytest.raises(UserInputError, match="Could not find host"):
+        resolve_wait_target(HostAddress(host=nonexistent_host_id), temp_mngr_ctx)
 
 
 # === _detect_state_changes ===
