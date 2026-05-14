@@ -35,12 +35,14 @@ After creation, the agent is accessible at:
 
 ## Environment variables and config
 
-`REMOTE_SERVICE_CONNECTOR_URL` comes from `MindsConfig`: a default is baked in pointing at the current dev-deployed server, and you can override it via `~/.<MINDS_ROOT_NAME>/config.toml` (file) or environment variable (env overrides file). That URL hosts both the Cloudflare tunnel API and the `/auth/*` routes the desktop client uses for sign-in, so no env-var setup is required for default operation. All Cloudflare tunnel requests authenticate with the signed-in user's SuperTokens session, and the session's email is used as the default Cloudflare Access policy -- so no Basic-auth credentials or `OWNER_EMAIL` need to be configured on the client. SuperTokens credentials (API key, OAuth client secrets) live on the backend server and never need to be set on the client.
+The remote service connector URL is taken from the per-tier `client.toml` selected by `minds run --config-file <path>` (see `apps/minds/docs/environments.md`). When `--config-file` is not passed, the default resolves to `apps/minds/imbue/minds/config/envs/_bundled/client.toml` (written by the Electron production build) and falls back to `apps/minds/imbue/minds/config/envs/dev/client.toml` shipped with the wheel. That URL hosts both the Cloudflare tunnel API and the `/auth/*` routes the desktop client uses for sign-in. All Cloudflare tunnel requests authenticate with the signed-in user's SuperTokens session, and the session's email is used as the default Cloudflare Access policy -- so no Basic-auth credentials or `OWNER_EMAIL` need to be configured on the client. SuperTokens credentials (API key, OAuth client secrets) live in HCP Vault (see `apps/minds/docs/vault-setup.md`) and are pushed into Modal Secrets at deploy time; they never need to be set on the client.
 
-To pin the remote service connector URL explicitly:
+To pin a specific tier or a dynamic dev env, point `--config-file` at the desired TOML:
 
 ```bash
-export REMOTE_SERVICE_CONNECTOR_URL=https://your-modal-endpoint.modal.run
+minds run --config-file apps/minds/imbue/minds/config/envs/staging/client.toml
+# or a per-developer dynamic dev env:
+minds run --config-file ~/.minds/envs/<dev-name>.toml
 ```
 
 To run an isolated dev copy alongside an installed minds:
