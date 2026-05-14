@@ -173,6 +173,10 @@ async function runInstall(onProgress) {
   // the new tree, then delete the old one. If the rename fails we restore.
   const backupDir = path.join(installDir, '_old');
   fs.rmSync(backupDir, { recursive: true, force: true });
+  // Recreate _old/ so the move-aside renameSync calls below have a valid
+  // destination directory. Without this, a re-install (lima version bump)
+  // fails with ENOENT on the first existing entry it tries to move aside.
+  fs.mkdirSync(backupDir, { recursive: true });
   for (const entry of fs.readdirSync(installDir)) {
     if (entry === '_tmp' || entry === '_old') continue;
     fs.renameSync(path.join(installDir, entry), path.join(backupDir, entry));
