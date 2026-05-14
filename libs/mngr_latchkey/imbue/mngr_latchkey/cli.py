@@ -394,14 +394,21 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     # in a terminal and closes it).
     latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
 
-    # Publish our own supervisor record (with our PID + a placeholder
-    # ``gateway_port=None``) before doing anything else. This makes
-    # the command self-contained: it works whether spawned by
-    # :class:`LatchkeyForwardSupervisor` (which writes an equivalent
-    # record beforehand -- we overwrite it harmlessly) or invoked
-    # directly from a shell (no embedder => no other writer).
-    # ``update_forward_info_gateway_port`` later patches in the bound
-    # port on the same record.
+    # Refuse to start if another forward is already alive for this
+    # latchkey directory; two forwards would fight over the same
+    # reverse tunnels and produce a confusing stream of failures.
+    existing = load_forward_info(latchkey.plugin_data_dir)
+    if existing is not None and is_forward_info_alive(existing):
+        raise click.ClickException(
+            f"Another ``mngr latchkey forward`` is already running for this latchkey directory "
+            f"(pid={existing.pid}); refusing to start a second supervisor.",
+        )
+    if existing is not None:
+        logger.info(
+            "Discarding stale forward record (pid={}); the previous supervisor is no longer running.",
+            existing.pid,
+        )
+
     save_forward_info(
         latchkey.plugin_data_dir,
         LatchkeyForwardInfo(pid=os.getpid(), started_at=datetime.now(timezone.utc)),

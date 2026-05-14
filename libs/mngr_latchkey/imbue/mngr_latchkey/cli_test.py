@@ -37,6 +37,7 @@ from imbue.mngr_latchkey.cli import latchkey
 from imbue.mngr_latchkey.config import LatchkeyPluginConfig
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
+from imbue.mngr_latchkey.store import load_forward_info
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.store import save_forward_info
@@ -553,6 +554,44 @@ def test_link_permissions_rejects_missing_opaque_path(
     )
     assert result.exit_code != 0
     assert "does not exist" in result.output
+
+
+# -- forward ----------------------------------------------------------------
+
+
+def test_forward_refuses_to_start_when_another_supervisor_is_alive(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    latchkey_root: Path,
+    fake_latchkey_binary: Path,
+    clean_latchkey_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A live competing forward record => clean ClickException, no second gateway spawn."""
+    del clean_latchkey_env
+    monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
+    monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    with _fake_running_supervisor() as pid:
+        save_forward_info(plugin_data_dir(latchkey_root), _build_forward_info(pid=pid, gateway_port=12345))
+        result = cli_runner.invoke(
+            latchkey,
+            ["forward"],
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
+    assert result.exit_code != 0
+    assert "already running" in result.output.lower()
+    assert str(pid) in result.output
+    # The competing record must be preserved verbatim -- the failing
+    # ``forward`` invocation must not clobber the live supervisor's
+    # PID.
+    persisted = load_forward_info(plugin_data_dir(latchkey_root))
+    assert persisted is not None
+    assert persisted.pid == pid
+    assert persisted.gateway_port == 12345
 
 
 # -- Group wiring -----------------------------------------------------------
