@@ -87,6 +87,7 @@ class LeaseResult(FrozenModel):
     container_ssh_port: int = Field(description="Port that maps to the docker container's sshd")
     agent_id: str = Field(description="Pre-baked mngr agent id on the host")
     host_id: str = Field(description="Pre-baked mngr host id")
+    host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(default_factory=dict, description="Attributes the row was matched against")
 
 
@@ -100,6 +101,7 @@ class LeasedHostInfo(FrozenModel):
     container_ssh_port: int
     agent_id: str
     host_id: str
+    host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(default_factory=dict)
     leased_at: str = Field(description="ISO-8601 timestamp")
 

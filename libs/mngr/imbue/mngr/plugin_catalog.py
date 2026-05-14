@@ -17,7 +17,6 @@ from imbue.mngr.primitives import PluginTier
 # Remove entries from here as they get published.
 UNPUBLISHED_PACKAGES: Final[frozenset[str]] = frozenset(
     {
-        "imbue-mngr-schedule",
         "imbue-mngr-tmr",
     }
 )
@@ -47,6 +46,12 @@ class OpenCodeSignalCheck(SignalCheck):
     command: tuple[str, ...] = ("opencode", "--version")
 
 
+class GeminiSignalCheck(SignalCheck):
+    """Detects whether the Gemini CLI is installed."""
+
+    command: tuple[str, ...] = ("gemini", "--version")
+
+
 class PiSignalCheck(SignalCheck):
     """Detects whether the Pi coding agent CLI is installed."""
 
@@ -68,6 +73,7 @@ class LimaSignalCheck(SignalCheck):
 # Shared instances for use across catalog entries.
 _CLAUDE_SIGNAL: Final[ClaudeSignalCheck] = ClaudeSignalCheck()
 _OPENCODE_SIGNAL: Final[OpenCodeSignalCheck] = OpenCodeSignalCheck()
+_GEMINI_SIGNAL: Final[GeminiSignalCheck] = GeminiSignalCheck()
 _PI_SIGNAL: Final[PiSignalCheck] = PiSignalCheck()
 _MODAL_SIGNAL: Final[ModalSignalCheck] = ModalSignalCheck()
 _LIMA_SIGNAL: Final[LimaSignalCheck] = LimaSignalCheck()
@@ -105,6 +111,14 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         description="OpenCode agent type plugin for mngr",
         tier=PluginTier.INDEPENDENT,
         signal=_OPENCODE_SIGNAL,
+        is_recommended=True,
+    ),
+    CatalogEntry(
+        entry_point_name="gemini",
+        package_name="imbue-mngr-gemini",
+        description="Gemini agent type plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+        signal=_GEMINI_SIGNAL,
         is_recommended=True,
     ),
     CatalogEntry(
