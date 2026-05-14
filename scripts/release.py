@@ -32,9 +32,10 @@ import semver
 import tomlkit
 from changelog_release_utils import finalize_changelog_unreleased
 from changelog_release_utils import today_pacific
+from consolidate_changelog import pending_changelog_entries
+from trigger_changelog_consolidation import MNGR_ROOT_NAME as CHANGELOG_MNGR_ROOT_NAME
 from trigger_changelog_consolidation import TRIGGER_NAME as CHANGELOG_TRIGGER_NAME
-from trigger_changelog_consolidation import pending_changelog_entries
-from trigger_changelog_consolidation import run_trigger as run_changelog_trigger
+from trigger_changelog_consolidation import disable_plugin_args as changelog_disable_plugin_args
 from utils import PACKAGES
 from utils import PACKAGE_BY_PYPI_NAME
 from utils import REPO_ROOT
@@ -461,18 +462,29 @@ def _format_pending_changelog_list(entries: list[Path], repo_root: Path) -> str:
     return "\n".join(f"  - {entry.relative_to(repo_root)}" for entry in entries)
 
 
+def _print_on_demand_consolidation_command() -> None:
+    """Print the one-liner that triggers an on-demand consolidation run.
+
+    Kept verbatim from ``setup_changelog_agent.sh``'s header so the user
+    can copy-paste it directly. Uses the shared constants and helper so
+    the disable-plugin list stays in sync with the deploy script.
+    """
+    disable_args = " ".join(changelog_disable_plugin_args())
+    print(f"  env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME={CHANGELOG_MNGR_ROOT_NAME} \\")
+    print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider modal \\")
+    print(f"    {disable_args}")
+
+
 def _gate_release_on_pending_changelog_entries(dry_run: bool) -> bool:
     """Block a release until pending changelog entries are consolidated.
 
     Returns ``True`` if the release may proceed (no pending entries, or
-    ``dry_run`` is set), ``False`` if the caller must abort (entries are
-    pending; the agent was triggered or the user declined). Either way,
-    after a real release attempt the user should re-run ``release.py``
-    once the consolidation PR has been merged.
+    ``dry_run`` is set), ``False`` if the caller must abort. After
+    consolidating (waiting for the nightly cron or running the on-demand
+    one-liner this prints), the user re-runs ``release.py``.
 
-    ``dry_run`` swaps the prompt for a warning so ``release.py --dry-run``
-    can still preview what would be released; a real release attempt with
-    pending entries will hit the prompt.
+    ``dry_run`` swaps the error for a warning so ``release.py --dry-run``
+    can still preview what would be released.
     """
     entries = pending_changelog_entries(REPO_ROOT)
     if not entries:
@@ -482,7 +494,7 @@ def _gate_release_on_pending_changelog_entries(dry_run: bool) -> bool:
         print()
         print(f"WARNING: {len(entries)} pending changelog entry/entries would block a real release:")
         print(_format_pending_changelog_list(entries, REPO_ROOT))
-        print(f"(use '{CHANGELOG_TRIGGER_NAME}' to consolidate before cutting the release)")
+        print(f"(consolidate via the '{CHANGELOG_TRIGGER_NAME}' schedule before cutting the release)")
         print()
         return True
 
@@ -493,26 +505,12 @@ def _gate_release_on_pending_changelog_entries(dry_run: bool) -> bool:
     print("CHANGELOG.md's [Unreleased] section yet:")
     print(_format_pending_changelog_list(entries, REPO_ROOT))
     print()
-    print("Release notes for this version would not include them. The nightly")
-    print(f"consolidation agent ('{CHANGELOG_TRIGGER_NAME}') normally handles this at midnight")
-    print("Pacific. You can trigger it on demand now (runs on Modal, takes a few")
-    print("minutes, opens a PR for you to review and merge).")
+    print(f"The '{CHANGELOG_TRIGGER_NAME}' schedule runs nightly at midnight Pacific. To")
+    print("trigger it on demand instead (opens a PR you can merge before re-running")
+    print("this script), run:")
     print()
-    answer = input(f"Trigger the {CHANGELOG_TRIGGER_NAME} agent now? [y/N] ")
-    if answer.strip().lower() != "y":
-        print()
-        print("Aborted. Wait for the nightly cron or re-run release.py and answer 'y'.")
-        return False
-
+    _print_on_demand_consolidation_command()
     print()
-    print(f"Triggering '{CHANGELOG_TRIGGER_NAME}'...")
-    exit_code = run_changelog_trigger()
-    print()
-    if exit_code != 0:
-        print(f"ERROR: 'mngr schedule run' exited {exit_code}. See output above.")
-        return False
-    print("Consolidation finished. Review and merge the PR it opened, then re-run")
-    print("scripts/release.py.")
     return False
 
 
