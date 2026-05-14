@@ -83,7 +83,7 @@ class _RunState(FrozenModel):
     cleanup).
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     agent: AgentInterface[Any]
     host: OnlineHostInterface
@@ -390,7 +390,7 @@ class _DestroyOnSignal(MutableModel):
     their own.
     """
 
-    model_config = ConfigDict(frozen=False, extra="forbid", arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     state: _RunState = Field(description="Run state used by the signal handler")
     original_int: Any = Field(default=None, description="Previous SIGINT handler")

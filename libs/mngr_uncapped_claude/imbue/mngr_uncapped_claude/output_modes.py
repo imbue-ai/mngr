@@ -204,7 +204,7 @@ class StreamingOutputWriter(MutableModel):
     text (for ``text``).
     """
 
-    model_config = ConfigDict(frozen=False, extra="forbid", arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     output_format: OutputFormat = Field(description="The chosen output format")
     session_id: str = Field(description="Session identifier used in envelopes")
