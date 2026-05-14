@@ -489,8 +489,16 @@ def _print_on_demand_consolidation_command(file: Any = None) -> None:
     provider = os.environ.get("CHANGELOG_PROVIDER", "modal")
     disable_args = " ".join(changelog_disable_plugin_args())
     print(f"  env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME={CHANGELOG_MNGR_ROOT_NAME} \\", file=file)
-    print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {provider} \\", file=file)
-    print(f"    {disable_args}", file=file)
+    # Only emit a continuation + third line when there are disable-plugin
+    # args to print. Otherwise the command would end with a trailing
+    # backslash followed by a whitespace-only line, which makes the
+    # copy-paste form malformed (the empty line terminates the
+    # continuation and the leading spaces become a stray empty command).
+    if disable_args:
+        print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {provider} \\", file=file)
+        print(f"    {disable_args}", file=file)
+    else:
+        print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {provider}", file=file)
 
 
 def _gate_release_on_pending_changelog_entries(entries: list[Path], dry_run: bool) -> bool:
