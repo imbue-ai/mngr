@@ -51,7 +51,7 @@ PRs are ordered so dependency arrows point upward. PRs in the same tier are inde
 
 **PR1 (LANDED on this branch): `gemini_config.py` — settings file management**
 - Already merged into `mngr/gemini-feature-parity`. Subsequent PRs should rebase or branch off this commit. JSON shape produced by the builders was validated end-to-end against the published Gemini settings schema (smoke-tested against Gemini CLI 0.42.0).
-- Provides path helpers, atomic/fcntl-locked read/write with `.bak` backup, malformed-JSON-tolerant reads, env-var interpolation, two hook-config builders (`SessionStart` readiness sentinel + `BeforeTool` wildcard auto-allow), `merge_hooks_config`/`hook_already_exists` dedup-preserving merge, and the placeholder `GeminiDirectoryNotTrustedError` class.
+- Provides path helpers, atomic read/write with `.bak` backup, malformed-JSON-tolerant reads, env-var interpolation, two hook-config builders (`SessionStart` readiness sentinel + `BeforeTool` wildcard auto-allow), `merge_hooks_config`/`hook_already_exists` dedup-preserving merge, and the placeholder `GeminiDirectoryNotTrustedError` class.
 - Not yet wired to `GeminiAgent`; `--skip-trust` remains the current escape hatch and gets replaced in PR2.
 
 ### Tier 2: lifecycle wiring (depends on PR1)
