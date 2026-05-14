@@ -245,8 +245,10 @@ def test_create_agent_with_unknown_type_raises(
 
     Previously this silently resolved to BaseAgent + empty config and only
     failed later inside ``assemble_command``; now the type gate in
-    ``resolve_agent_type`` catches it up front and points the user at
-    ``--type command -- ...`` via the error's plugin install hint.
+    ``resolve_agent_type`` catches it up front. The attached
+    ``user_help_text`` (from ``get_plugin_install_hint``) tells the user
+    that the name is not recognized and suggests installing a plugin that
+    provides it.
     """
     agent_name = AgentName(f"test-unknown-type-no-cmd-{int(time.time())}")
 

@@ -284,7 +284,8 @@ def get_plugin_install_hint(name: str) -> str:
     If the name appears in the catalog, names the actual PyPI package and
     description. Otherwise returns a generic prompt to check installed
     plugins, since fabricating a package name for an unknown name would be
-    misleading.
+    misleading. The fallback also points at ``--type command -- <shell
+    command>`` for callers who actually just want to run a shell command.
     """
     entry = get_catalog_entry(name)
     if entry is not None:
@@ -292,6 +293,8 @@ def get_plugin_install_hint(name: str) -> str:
     return (
         f"We do not recognize '{name}'. If it is provided by a third-party"
         " plugin, install that package and ensure the plugin is enabled."
+        " To run an arbitrary shell command without registering a type,"
+        " use `--type command -- <shell command>` instead."
     )
 
 

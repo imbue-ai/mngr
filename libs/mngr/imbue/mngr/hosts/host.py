@@ -39,6 +39,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr import resources as mngr_resources
+from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
@@ -54,6 +55,7 @@ from imbue.mngr.errors import InvalidActivityTypeError
 from imbue.mngr.errors import LockNotHeldError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
+from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
@@ -982,7 +984,16 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             return agent_refs
 
     def _load_agent_from_dir(self, agent_dir: Path) -> AgentInterface | None:
-        """Load an agent from its state directory."""
+        """Load an agent from its state directory.
+
+        If the agent's stored type is no longer registered (e.g. the plugin
+        was uninstalled or the type was renamed since the agent was created),
+        we degrade to BaseAgent + base AgentTypeConfig with a logged warning
+        so commands like ``mngr destroy`` / ``mngr list`` / ``mngr cleanup``
+        can still operate on the agent. ``check_agent_type_known`` separately
+        marks the agent's lifecycle state as ``RUNNING_UNKNOWN_AGENT_TYPE``
+        so users see that something is off.
+        """
         data_path = agent_dir / "data.json"
         try:
             content = self.read_text_file(data_path)
@@ -994,9 +1005,21 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         logger.trace("Loaded agent {} from {}", data.get("name"), agent_dir)
 
         agent_type = AgentTypeName(data["type"])
-        resolved = resolve_agent_type(agent_type, self.mngr_ctx.config)
+        try:
+            resolved = resolve_agent_type(agent_type, self.mngr_ctx.config)
+            resolved_class = resolved.agent_class
+            resolved_config = resolved.agent_config
+        except UnknownAgentTypeError:
+            logger.warning(
+                "Agent {} has type '{}' which is no longer registered; "
+                "loading as BaseAgent so existing commands keep working.",
+                data.get("name"),
+                agent_type,
+            )
+            resolved_class = BaseAgent
+            resolved_config = AgentTypeConfig()
 
-        return resolved.agent_class(
+        return resolved_class(
             id=AgentId(data["id"]),
             name=AgentName(data["name"]),
             agent_type=agent_type,
@@ -1005,7 +1028,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             host_id=self.id,
             host=self,
             mngr_ctx=self.mngr_ctx,
-            agent_config=resolved.agent_config,
+            agent_config=resolved_config,
         )
 
     def create_agent_work_dir(

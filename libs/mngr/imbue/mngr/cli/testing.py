@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Any
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.config.agent_class_registry import is_agent_class_registered
+from imbue.mngr.config.agent_class_registry import register_agent_class
+from imbue.mngr.config.agent_config_registry import is_agent_config_registered
+from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -18,6 +22,21 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import get_short_random_string
+
+
+def _ensure_test_agent_type_registered(agent_type: AgentTypeName) -> None:
+    """Register an arbitrary agent-type name as BaseAgent if it is otherwise unknown.
+
+    The strict gate in ``resolve_agent_type`` (and ``host.create_agent_state``,
+    which goes through it) rejects names that are not registered or declared
+    in user config. Test helpers historically passed ad-hoc placeholder names
+    that relied on the BaseAgent default fallback; now that the fallback is
+    gone, register the name on demand for the rest of the test session.
+    """
+    if not is_agent_class_registered(str(agent_type)):
+        register_agent_class(str(agent_type), BaseAgent)
+    if not is_agent_config_registered(str(agent_type)):
+        register_agent_config(str(agent_type), AgentTypeConfig)
 
 
 def create_test_agent(
@@ -44,6 +63,7 @@ def create_test_agent(
     agent_id = AgentId.generate()
     agent_name = AgentName(f"test-agent-{get_short_random_string()}")
     resolved_type = agent_type or AgentTypeName("test")
+    _ensure_test_agent_type_registered(resolved_type)
     resolved_config = agent_config or AgentTypeConfig(command=CommandString("sleep 1000"))
     create_time = datetime.now(timezone.utc)
 
@@ -85,9 +105,11 @@ def create_test_agent_state(host: Host, work_dir: Path, name: str) -> AgentInter
     creating a tmux session or starting the agent process. Useful for tests
     that need an agent to exist but don't need it running.
     """
+    agent_type = AgentTypeName("generic")
+    _ensure_test_agent_type_registered(agent_type)
     options = CreateAgentOptions(
         name=AgentName(name),
-        agent_type=AgentTypeName("generic"),
+        agent_type=agent_type,
         command=CommandString("sleep 1"),
     )
     return host.create_agent_state(work_dir, options)
