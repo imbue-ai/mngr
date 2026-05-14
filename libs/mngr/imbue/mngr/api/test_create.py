@@ -92,8 +92,8 @@ def _make_options(
     """Build CreateAgentOptions with sensible defaults for tests.
 
     Wraps the plain-string ``command`` and ``agent_type`` arguments in their
-    primitive types. Pass ``command=None`` to omit the command (used by
-    tests that exercise the no-command failure path).
+    primitive types. Pass ``command=None`` to leave ``CreateAgentOptions.command``
+    unset (e.g. when the agent type's registered config supplies the command).
     """
     return CreateAgentOptions(
         name=name,
