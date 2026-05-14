@@ -1,0 +1,11 @@
+# SSH public keys authorized to connect to TMR CI's modal agents.
+#
+# To add yourself: run
+#   uv run --project libs/mngr_tmr python libs/mngr_tmr/scripts/setup_tmr_ci_debug.py
+# and append the printed public key as a new line below. Open a PR.
+#
+# Lines starting with '#' and blank lines are ignored.
+#
+# To debug after your key is merged:
+#   MNGR_HOST_DIR=~/.mngr-tmr-ci uv run mngr list
+#   MNGR_HOST_DIR=~/.mngr-tmr-ci uv run mngr connect <agent-id>
