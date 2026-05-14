@@ -145,7 +145,7 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
     project_id = neon.get("NEON_PROJECT_ID", "")
     api_token = neon.get("NEON_API_TOKEN", "")
     if not project_id or not api_token:
-        raise MindError(
+        raise VaultReadError(
             f"Vault entry {vault_prefix}/neon missing NEON_PROJECT_ID or NEON_API_TOKEN; "
             "add them to the dev-tier Neon secret."
         )
@@ -153,13 +153,15 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
     core_url = supertokens.get("SUPERTOKENS_CONNECTION_URI", "")
     core_api_key = supertokens.get("SUPERTOKENS_API_KEY", "")
     if not core_url or not core_api_key:
-        raise MindError(
+        raise VaultReadError(
             f"Vault entry {vault_prefix}/supertokens missing SUPERTOKENS_CONNECTION_URI or SUPERTOKENS_API_KEY."
         )
 
     vultr_api_key = vultr_secret.get("VULTR_API_KEY", "")
     if not vultr_api_key:
-        raise MindError(f"Vault entry {vault_prefix}/pool-ssh missing VULTR_API_KEY (shared dev-tier key for Vultr).")
+        raise VaultReadError(
+            f"Vault entry {vault_prefix}/pool-ssh missing VULTR_API_KEY (shared dev-tier key for Vultr)."
+        )
 
     return ProviderCredentials(
         neon_project_id=project_id,
