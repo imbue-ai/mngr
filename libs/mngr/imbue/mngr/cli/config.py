@@ -416,6 +416,7 @@ def _config_get_impl(ctx: click.Context, key: str, **kwargs: Any) -> None:
         except KeyError:
             _emit_key_not_found(key, output_opts)
             ctx.exit(1)
+            return
         _emit_config_extend_value(key, extend_key, extend_value, output_opts)
         return
 
