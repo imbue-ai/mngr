@@ -592,9 +592,14 @@ class MngrConfig(FrozenModel):
             agent_types=merged_agent_types,
             providers=merged_providers,
             plugins=merged_plugins,
-            # disabled_plugins is a derived field (computed by _apply_plugin_overrides
-            # after layers are merged); an override with an empty set is
-            # indistinguishable from "not set", so preserve base when override is empty.
+            # disabled_plugins is a deliberate carveout from the assign-by-default
+            # rule: it is populated by CLI ``--disable-plugin`` flags via
+            # ``_apply_plugin_overrides`` *after* layers have been merged, and
+            # individual TOML layers do not normally write to it. An override
+            # with an empty frozenset is indistinguishable from "not set", so we
+            # preserve the base value instead of wiping it. Users wanting to
+            # disable a specific plugin per-scope should use
+            # ``[plugins.<name>] enabled = false`` rather than this field.
             disabled_plugins=override.disabled_plugins if override.disabled_plugins else self.disabled_plugins,
             commands=merged_commands,
             create_templates=merged_create_templates,
