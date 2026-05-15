@@ -1,31 +1,37 @@
 #!/usr/bin/env bash
 #
-# Deploy the remote_service_connector Modal app for a given tier.
+# Deploy the remote_service_connector Modal app for a given tier and
+# Modal environment.
 #
-# Pulls tier secrets from HCP Vault into Modal Secrets via
+# Pulls the connector's required Vault secrets into Modal Secrets via
 # scripts/push_modal_secrets.py, then deploys the Modal app pinned to
-# the workspace named in the tier's deploy.toml.
+# the workspace named in the tier's deploy.toml and the Modal env
+# named on the command line.
 #
 # Usage:
-#     scripts/deploy_remote_service_connector.sh <tier>
+#     scripts/deploy_remote_service_connector.sh <tier> <modal-env>
 #
 # Examples:
-#     scripts/deploy_remote_service_connector.sh production
-#     scripts/deploy_remote_service_connector.sh staging
-#     scripts/deploy_remote_service_connector.sh dev
+#     scripts/deploy_remote_service_connector.sh dev josh
+#     scripts/deploy_remote_service_connector.sh staging main
+#
+# Both args are required; there's no default. For dev, <modal-env> is
+# per-developer; for staging/production it's whatever stable env name
+# the tier's operator picked (typically `main`).
 #
 # Requires:
 #   - `vault login` against the HCP `admin` namespace
-#   - `modal token set` (or equivalent) for the tier's Modal workspace
+#   - `modal profile activate <name>` for the tier's Modal workspace
 
 set -euo pipefail
 
-if [[ $# -ne 1 ]]; then
-    echo "usage: $0 <tier>" >&2
+if [[ $# -ne 2 ]]; then
+    echo "usage: $0 <tier> <modal-env>" >&2
     exit 2
 fi
 
 tier="$1"
+modal_env="$2"
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 app_file="$repo_root/apps/remote_service_connector/imbue/remote_service_connector/app.py"
 deploy_toml="$repo_root/apps/minds/imbue/minds/config/envs/${tier}/deploy.toml"
@@ -39,9 +45,6 @@ if [[ ! -f "$deploy_toml" ]]; then
     exit 1
 fi
 
-# Read modal_workspace from deploy.toml via a one-liner Python invocation
-# so we don't grow a shell TOML parser. Falls back to an empty string if
-# the key is absent, which the loader will reject upstream.
 modal_workspace=$(uv run python -c "
 import sys, tomllib
 with open('$deploy_toml', 'rb') as f:
@@ -70,6 +73,6 @@ uv run python "$repo_root/scripts/push_modal_secrets.py" "$tier" \
 
 export MNGR_DEPLOY_ENV="$tier"
 
-echo "==> Deploying remote-service-connector-${tier} to Modal workspace '${modal_workspace}'..."
+echo "==> Deploying remote-service-connector-${tier} to workspace='${modal_workspace}', env='${modal_env}'..."
 cd "$repo_root"
-exec uv run modal deploy --name "remote-service-connector-${tier}" "$app_file"
+exec uv run modal deploy --name "remote-service-connector-${tier}" --env "$modal_env" "$app_file"

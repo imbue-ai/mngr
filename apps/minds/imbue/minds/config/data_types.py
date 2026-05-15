@@ -94,13 +94,6 @@ class DeployEnvConfig(FrozenModel):
     """
 
     modal_workspace: NonEmptyStr = Field(description="Modal workspace (Modal team/account) this tier deploys into.")
-    modal_env: NonEmptyStr | None = Field(
-        default=None,
-        description=(
-            "Optional Modal environment within the workspace. Only meaningful for the dev tier; "
-            "dynamic dev envs deploy via `modal deploy --env=<dev-name>`."
-        ),
-    )
     vault_path_prefix: NonEmptyStr = Field(
         description="HCP Vault path prefix for this tier's secrets, e.g. `secrets/minds/production`."
     )

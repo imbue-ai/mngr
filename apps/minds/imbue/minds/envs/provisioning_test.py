@@ -35,7 +35,6 @@ def _isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 def _deploy_config() -> DeployEnvConfig:
     return DeployEnvConfig(
         modal_workspace=NonEmptyStr("dev-workspace"),
-        modal_env=NonEmptyStr("main"),
         vault_path_prefix=NonEmptyStr("secrets/minds/dev"),
         cloudflare_domain=NonEmptyStr("dev.example.com"),
         secrets=DeploySecretsConfig(services=(ServiceName("cloudflare"),)),
