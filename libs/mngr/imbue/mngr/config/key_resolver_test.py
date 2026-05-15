@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
 from imbue.mngr.config.key_resolver import bare_key
 from imbue.mngr.config.key_resolver import is_extend_key
@@ -103,12 +104,14 @@ def test_resolve_extends_appends_to_unset_list_field() -> None:
 
 def test_resolve_extends_shallow_merges_dict_field() -> None:
     """__extend on a dict field shallow-merges keys; extender wins on collision."""
-    base = MngrConfig(work_dir_extra_paths={".venv": "SHARE"})
+    base = MngrConfig(work_dir_extra_paths={".venv": WorkDirExtraPathMode.SHARE})
     resolved = resolve_extends(
         base,
         {"work_dir_extra_paths__extend": {".env": "SHARE"}},
     )
-    # extender adds .env while preserving .venv from the base.
+    # extender adds .env while preserving .venv from the base; values are
+    # serialised through model_dump so the existing entry is rendered as its
+    # JSON form ("SHARE") -- exactly what users would write in TOML.
     assert resolved == {"work_dir_extra_paths": {".venv": "SHARE", ".env": "SHARE"}}
 
 
