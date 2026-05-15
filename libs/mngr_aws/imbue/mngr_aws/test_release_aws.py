@@ -108,6 +108,8 @@ class TestAwsProviderLifecycle:
         result = _run_mngr(
             "create",
             agent_name,
+            "--type",
+            "claude",
             "--provider",
             "aws",
             "--no-connect",
@@ -142,6 +144,8 @@ class TestAwsProviderLifecycle:
         result = _run_mngr(
             "create",
             agent_name,
+            "--type",
+            "claude",
             "--provider",
             "aws",
             "--no-connect",
