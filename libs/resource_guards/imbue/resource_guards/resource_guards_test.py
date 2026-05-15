@@ -9,7 +9,7 @@ import imbue.resource_guards.resource_guards as resource_guards
 from imbue.resource_guards.resource_guards import MethodKind
 from imbue.resource_guards.resource_guards import ResourceGuardViolation
 from imbue.resource_guards.resource_guards import _PerTestGuardState
-from imbue.resource_guards.resource_guards import _build_per_test_guard_env
+from imbue.resource_guards.resource_guards import _build_guard_env
 from imbue.resource_guards.resource_guards import _check_guard_violations
 from imbue.resource_guards.resource_guards import cleanup_resource_guard_wrappers
 from imbue.resource_guards.resource_guards import cleanup_sdk_resource_guards
@@ -803,16 +803,16 @@ def test_create_sdk_method_guard_async_gen(
 
 
 # ---------------------------------------------------------------------------
-# _build_per_test_guard_env (unit tests)
+# _build_guard_env (unit tests)
 # ---------------------------------------------------------------------------
 
 
-def test_build_per_test_guard_env_sets_allow_for_marked_resources(
+def test_build_guard_env_sets_allow_for_marked_resources(
     isolated_guard_state: None,
 ) -> None:
     register_resource_guard("tmux")
     register_resource_guard("rsync")
-    env = _build_per_test_guard_env({"tmux"}, "/tmp/track")
+    env = _build_guard_env({"tmux"}, "/tmp/track")
 
     assert env["_PYTEST_GUARD_PHASE"] == "call"
     assert env["_PYTEST_GUARD_TRACKING_DIR"] == "/tmp/track"

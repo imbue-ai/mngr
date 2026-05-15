@@ -508,8 +508,12 @@ def stop_resource_guards() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_per_test_guard_env(marks: set[str], tracking_dir: str) -> dict[str, str]:
-    """Build the env var dict for a single test's resource guards."""
+def _build_guard_env(marks: set[str], tracking_dir: str) -> dict[str, str]:
+    """Build the guard env var dict for a per-test or per-fixture scope.
+
+    ``marks`` is the set of resources the scope is authorized to use --
+    pytest marks for tests, @fixture_uses_resources declarations for fixtures.
+    """
     env: dict[str, str] = {
         "_PYTEST_GUARD_PHASE": "call",
         "_PYTEST_GUARD_TRACKING_DIR": tracking_dir,
@@ -517,6 +521,53 @@ def _build_per_test_guard_env(marks: set[str], tracking_dir: str) -> dict[str, s
     for resource in _guarded_resources:
         env[f"_PYTEST_GUARD_{resource.upper()}"] = "allow" if resource in marks else "block"
     return env
+
+
+class _GuardViolationKind(StrEnum):
+    """What kind of resource guard invariant was violated."""
+
+    @staticmethod
+    def _generate_next_value_(name: str, start: int, count: int, last_values: list[str]) -> str:
+        return name.upper()
+
+    BLOCKED = auto()
+    NEVER_INVOKED = auto()
+
+
+@dataclasses.dataclass(frozen=True)
+class _GuardViolation:
+    """A detected resource guard violation against a tracking_dir."""
+
+    resource: str
+    kind: _GuardViolationKind
+
+
+def _detect_guard_violations(
+    marks: set[str],
+    tracking_dir: str,
+    *,
+    check_never_invoked: bool,
+) -> _GuardViolation | None:
+    """Detect blocked-invocation and superfluous-mark violations.
+
+    Shared by the per-test and per-fixture guard checks. Returns the first
+    violation found, or None if the scope is clean. ``check_never_invoked``
+    should be False when the scope already failed for an unrelated reason --
+    a missing tracking file there is most likely a downstream consequence,
+    not the root cause.
+    """
+    for resource in _guarded_resources:
+        if (Path(tracking_dir) / f"blocked_{resource}").exists():
+            return _GuardViolation(resource=resource, kind=_GuardViolationKind.BLOCKED)
+
+    if not check_never_invoked:
+        return None
+
+    for resource in _guarded_resources:
+        if resource in marks and not (Path(tracking_dir) / resource).exists():
+            return _GuardViolation(resource=resource, kind=_GuardViolationKind.NEVER_INVOKED)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -565,16 +616,6 @@ def fixture_uses_resources(*resources: str) -> Callable[[F], F]:
     return decorator
 
 
-def _build_fixture_guard_env(resources: set[str], tracking_dir: str) -> dict[str, str]:
-    """Build env vars for a fixture's guard scope.
-
-    Same shape as _build_per_test_guard_env, but the "marks" come from the
-    fixture's @fixture_uses_resources declaration instead of the test's
-    pytest marks.
-    """
-    return _build_per_test_guard_env(resources, tracking_dir)
-
-
 def _make_guarded_fixture_wrapper(
     original_func: Callable[..., Any],
     fixture_env: dict[str, str],
@@ -621,29 +662,26 @@ def _check_fixture_setup_violations(
 ) -> None:
     """Validate fixture-scope guard invariants after setup.
 
-    Mirrors _check_guard_violations but applies to a fixture's setup phase.
     Raises ResourceGuardViolation on a blocked invocation regardless of
     setup outcome, and on a "declared but never invoked" violation only
     when setup succeeded (otherwise the violation may be a downstream
     consequence of the setup failure).
     """
-    for resource in _guarded_resources:
-        if (Path(tracking_dir) / f"blocked_{resource}").exists():
-            raise ResourceGuardViolation(
-                f"RESOURCE GUARD: Fixture '{fixture_id}' invoked '{resource}' but did not declare it via "
-                f"@fixture_uses_resources({resource!r}). Add the declaration or remove the {resource} usage."
-            )
-
-    if setup_failed:
+    violation = _detect_guard_violations(resources, tracking_dir, check_never_invoked=not setup_failed)
+    if violation is None:
         return
 
-    for resource in resources:
-        if not (Path(tracking_dir) / resource).exists():
-            raise ResourceGuardViolation(
-                f"RESOURCE GUARD: Fixture '{fixture_id}' declared @fixture_uses_resources({resource!r}) "
-                f"but did not invoke {resource} during setup. Remove the declaration "
-                f"or ensure the fixture exercises {resource}."
-            )
+    if violation.kind == _GuardViolationKind.BLOCKED:
+        raise ResourceGuardViolation(
+            f"RESOURCE GUARD: Fixture '{fixture_id}' invoked '{violation.resource}' but did not declare it via "
+            f"@fixture_uses_resources({violation.resource!r}). Add the declaration or remove the {violation.resource} usage."
+        )
+
+    raise ResourceGuardViolation(
+        f"RESOURCE GUARD: Fixture '{fixture_id}' declared @fixture_uses_resources({violation.resource!r}) "
+        f"but did not invoke {violation.resource} during setup. Remove the declaration "
+        f"or ensure the fixture exercises {violation.resource}."
+    )
 
 
 class _ResourceGuardPlugin:
@@ -698,7 +736,7 @@ def _pytest_fixture_setup(
 
     resources_set = set(resources)
     tracking_dir = tempfile.mkdtemp(prefix="pytest_guard_fixture_")
-    fixture_env = _build_fixture_guard_env(resources_set, tracking_dir)
+    fixture_env = _build_guard_env(resources_set, tracking_dir)
     fixture_id = fixturedef.argname
 
     original_func = fixturedef.func
@@ -735,7 +773,7 @@ def _pytest_runtest_setup(item: pytest.Item) -> Generator[None, None, None]:
 
     marks = {m.name for m in item.iter_markers()}
     tracking_dir = tempfile.mkdtemp(prefix="pytest_guard_track_")
-    env_patcher = patch.dict(os.environ, _build_per_test_guard_env(marks, tracking_dir))
+    env_patcher = patch.dict(os.environ, _build_guard_env(marks, tracking_dir))
     env_patcher.start()
 
     item._guard_state = _PerTestGuardState(  # ty: ignore[unresolved-attribute]
@@ -766,36 +804,27 @@ def _check_guard_violations(state: _PerTestGuardState, report: pytest.TestReport
     2. Superfluous marks: a test has @pytest.mark.<resource> but the resource
        was never invoked. Only checked on passing tests.
     """
-    tracking_dir = state.tracking_dir
-    marks = state.marks
-
-    for resource in _guarded_resources:
-        blocked_file = Path(tracking_dir) / f"blocked_{resource}"
-        if blocked_file.exists():
-            msg = (
-                f"RESOURCE GUARD: Test invoked '{resource}' without @pytest.mark.{resource}.\n"
-                f"Add @pytest.mark.{resource} to the test, or remove the {resource} usage."
-            )
-            if report.passed:
-                report.outcome = "failed"
-                report.longrepr = msg
-            else:
-                report.longrepr = f"{report.longrepr}\n\n{msg}"
-            return
-
-    if not report.passed:
+    violation = _detect_guard_violations(state.marks, state.tracking_dir, check_never_invoked=report.passed)
+    if violation is None:
         return
 
-    for resource in _guarded_resources:
-        if resource in marks:
-            tracking_file = Path(tracking_dir) / resource
-            if not tracking_file.exists():
-                report.outcome = "failed"
-                report.longrepr = (
-                    f"Test marked with @pytest.mark.{resource} but never invoked {resource}.\n"
-                    f"Remove the mark or ensure the test exercises {resource}."
-                )
-                return
+    if violation.kind == _GuardViolationKind.BLOCKED:
+        msg = (
+            f"RESOURCE GUARD: Test invoked '{violation.resource}' without @pytest.mark.{violation.resource}.\n"
+            f"Add @pytest.mark.{violation.resource} to the test, or remove the {violation.resource} usage."
+        )
+        if report.passed:
+            report.outcome = "failed"
+            report.longrepr = msg
+        else:
+            report.longrepr = f"{report.longrepr}\n\n{msg}"
+        return
+
+    report.outcome = "failed"
+    report.longrepr = (
+        f"Test marked with @pytest.mark.{violation.resource} but never invoked {violation.resource}.\n"
+        f"Remove the mark or ensure the test exercises {violation.resource}."
+    )
 
 
 @pytest.hookimpl(hookwrapper=True)
