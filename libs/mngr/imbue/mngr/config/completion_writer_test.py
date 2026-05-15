@@ -49,7 +49,7 @@ def test_write_cli_completions_cache_handles_oserror(monkeypatch: pytest.MonkeyP
     """write_cli_completions_cache should silently handle OSError."""
     # Monkeypatch atomic_write to simulate a write failure. We can't use chmod
     # because Modal sandboxes run as root, which bypasses permission checks.
-    monkeypatch.setenv("MNGR_COMPLETION_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR__COMPLETION_CACHE_DIR", str(tmp_path))
 
     def _raise_oserror(*_args: object, **_kwargs: object) -> None:
         raise OSError("simulated write failure")
