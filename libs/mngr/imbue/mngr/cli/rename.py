@@ -6,7 +6,6 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.mngr.api.discovery_events import emit_agent_discovered
-from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.find import find_one_agent_and_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
@@ -22,8 +21,6 @@ from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.interfaces.host import HostInterface
-from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
@@ -148,15 +145,9 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
     host = provider.get_host(host_ref.host_id)
     updated_ref = host.rename_agent(agent_ref, new_agent_name, labels_to_merge=labels_to_merge or None)
 
-    # Refresh observers. For online hosts re-emit the host's full discovery
-    # snapshot; for offline hosts only the renamed agent metadata changed.
-    match host:
-        case OnlineHostInterface() as online_host:
-            emit_discovery_events_for_host(mngr_ctx.config, online_host)
-        case HostInterface():
-            emit_agent_discovered(mngr_ctx.config, updated_ref)
-        case _ as unreachable:
-            assert_never(unreachable)
+    # Only the renamed agent's metadata changed; the host and other agents
+    # on it are untouched, so a single agent_discovered event suffices.
+    emit_agent_discovered(mngr_ctx.config, updated_ref)
 
     # Warn that the git branch was not renamed (only in human output mode)
     if output_opts.output_format == OutputFormat.HUMAN:
