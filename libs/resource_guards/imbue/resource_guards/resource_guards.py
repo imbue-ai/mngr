@@ -523,24 +523,11 @@ def _build_per_test_guard_env(marks: set[str], tracking_dir: str) -> dict[str, s
 # Fixture-level resource guard scope (opt-in)
 # ---------------------------------------------------------------------------
 #
-# By default, resource invocations during fixture setup/teardown are attributed
-# to whichever test's lifecycle they happen in. That works fine for
-# function-scoped fixtures (1:1 with tests), but for module/session-scoped
-# fixtures shared across tests it produces incorrect attribution: the fixture's
-# setup-time resource calls land in only the first consuming test's tracking
-# dir, and sibling tests appear to be either over-marked ("never invoked") or
-# under-authorized (the fixture's call gets blocked because some sibling that
-# triggered setup lacks the mark).
-#
-# @fixture_uses_resources declares that a fixture itself uses specific
-# resources. Such fixtures run setup/teardown under their own guard scope:
-# resource calls inside the fixture are authorized against the fixture's
-# declaration rather than the consuming test's marks, and the consuming test's
-# tracking_dir is untouched by the fixture's calls. Per-test marks then mean
-# "this test's body directly invokes the resource" -- a fixture providing the
-# resource handles its own declaration.
-#
-# Opt-in: untagged fixtures keep today's behavior unchanged.
+# @fixture_uses_resources declares which resources a fixture itself uses.
+# Such fixtures run setup/teardown under their own guard scope rather than
+# attributing resource calls to whichever test triggered the setup -- which
+# matters for module/session-scoped fixtures shared across tests. Untagged
+# fixtures keep today's per-test attribution behavior.
 
 
 # Maps a fixture function to the resources it has declared via

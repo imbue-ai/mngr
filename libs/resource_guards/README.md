@@ -53,6 +53,31 @@ def test_agent_creates_tmux_session():
     ...
 ```
 
+## Fixture-level resource declarations
+
+By default, resource calls during fixture setup/teardown are attributed to whichever test happens to drive that lifecycle. That's fine for function-scoped fixtures but breaks down for module/session-scoped fixtures shared across multiple tests: the fixture's resource calls land in only one test's tracking dir, and siblings end up either failing the superfluous-mark check or having their fixture call blocked.
+
+Opt a fixture into its own guard scope with `@fixture_uses_resources(...)`:
+
+```python
+import pytest
+from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+@pytest.fixture(scope="module")
+@fixture_uses_resources("modal")
+def deployed_function():
+    # Setup runs under the fixture's own guard scope: modal calls here
+    # are authorized against this declaration, not the consuming test's marks.
+    deploy_function(...)
+    yield url
+    # Teardown also runs under the fixture's guard scope.
+    stop_function(...)
+```
+
+With this in place, `@pytest.mark.modal` on a test means "this test body directly invokes modal." Tests that only consume `deployed_function` (e.g. to hit its URL over HTTP) don't need the mark — the fixture's declaration carries the dependency.
+
+The decorator must go *below* `@pytest.fixture` so it sees the underlying function before pytest captures it. Opt-in: untagged fixtures are unaffected.
+
 ## Usage for multi-package projects
 
 When a project is split across multiple packages, listing every guard in every consumer's `conftest.py` becomes a maintenance hazard: each package has to know which guards every other package's tools need, and a forgotten line silently downgrades a guarded mark back to "unknown". Resource guards solve this by letting the package that owns a tool declare its guards through a `resource_guards` entry point group, and letting consumers pick them up automatically with one call.
