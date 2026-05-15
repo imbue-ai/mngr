@@ -11,6 +11,7 @@ The returned values are kept in process memory only; no file is written.
 """
 
 import json
+import os
 import shutil
 from typing import Final
 
@@ -21,6 +22,8 @@ VAULT_BINARY: Final[str] = "vault"
 _DEFAULT_MOUNT: Final[str] = "secrets"
 _KV_PATH_PREFIX: Final[str] = "secrets/"
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 30.0
+_DEFAULT_VAULT_ADDR: Final[str] = "https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200"
+_DEFAULT_VAULT_NAMESPACE: Final[str] = "admin"
 
 
 class VaultPath(str):
@@ -70,6 +73,12 @@ def read_vault_kv(
         raise VaultReadError(f"Vault path {path!r} has no trailing key after the mount prefix.")
 
     command = [vault_binary, "kv", "get", "-format=json", f"-mount={_DEFAULT_MOUNT}", relative]
+    # Default VAULT_ADDR and VAULT_NAMESPACE to the imbue HCP cluster values
+    # so the helper works in a shell that hasn't exported them. Operator
+    # overrides via env take precedence.
+    subprocess_env = dict(os.environ)
+    subprocess_env.setdefault("VAULT_ADDR", _DEFAULT_VAULT_ADDR)
+    subprocess_env.setdefault("VAULT_NAMESPACE", _DEFAULT_VAULT_NAMESPACE)
     parent_cg = (
         parent_concurrency_group if parent_concurrency_group is not None else ConcurrencyGroup(name="vault-kv-get")
     )
@@ -84,6 +93,7 @@ def read_vault_kv(
                 command=command,
                 timeout=_DEFAULT_TIMEOUT_SECONDS,
                 is_checked_after=False,
+                env=subprocess_env,
             )
     except OSError as exc:
         raise VaultReadError(f"Failed to invoke {vault_binary}: {exc}") from exc
