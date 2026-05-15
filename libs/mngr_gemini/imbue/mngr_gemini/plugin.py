@@ -73,11 +73,11 @@ class GeminiAgentConfig(AgentTypeConfig):
     cli_args: tuple[str, ...] = Field(
         default=(),
         description="Additional CLI arguments to pass to the gemini agent. "
-        "The previous default of ('--skip-trust',) was dropped: that flag only "
-        "trusts the workspace for tool execution, not hook registration, so "
-        "the readiness hook installed by provision() would never fire. Trust "
-        "is now established via GEMINI_CLI_TRUST_WORKSPACE=true on the agent's "
-        "environment (see modify_env_vars).",
+        "Workspace trust is handled via the GEMINI_CLI_TRUST_WORKSPACE env "
+        "var (see modify_env_vars), so `--skip-trust` is not needed here -- "
+        "that flag only trusts the workspace for tool execution, not hook "
+        "registration, so the readiness hook installed by provision() would "
+        "not fire under it.",
     )
     emit_common_transcript: bool = Field(
         default=True,
