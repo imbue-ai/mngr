@@ -646,6 +646,51 @@ class _CreateEventCapture(MutableModel):
             self.canonical_host_id = host_id_raw
 
 
+def _build_mngr_create_subprocess_env(
+    parent_env: Mapping[str, str],
+    *,
+    anthropic_api_key: str | None,
+    anthropic_base_url: str | None,
+    gh_token: str | None,
+    scrub_inherited_anthropic_api_key: bool,
+    scrub_inherited_anthropic_base_url: bool,
+) -> dict[str, str] | None:
+    """Construct the env dict (if any) to hand ``mngr create``.
+
+    Returns ``None`` if the parent env can be used unchanged (no overrides,
+    no scrubs) -- the caller passes that through as ``env=None`` so the
+    subprocess inherits the parent env normally. Otherwise returns a fresh
+    dict copied from ``parent_env`` with the requested scrubs and overrides
+    applied.
+
+    The scrub flags are independent of the override values: when a flag is
+    True, the corresponding ``ANTHROPIC_*`` key is removed from the dict
+    even if no override is supplied. When both a scrub flag and an override
+    are given, the override wins (it's layered on top after the scrub).
+    """
+    needs_dict = (
+        anthropic_api_key is not None
+        or anthropic_base_url is not None
+        or gh_token is not None
+        or scrub_inherited_anthropic_api_key
+        or scrub_inherited_anthropic_base_url
+    )
+    if not needs_dict:
+        return None
+    env = dict(parent_env)
+    if scrub_inherited_anthropic_api_key:
+        env.pop("ANTHROPIC_API_KEY", None)
+    if scrub_inherited_anthropic_base_url:
+        env.pop("ANTHROPIC_BASE_URL", None)
+    if anthropic_api_key is not None:
+        env["ANTHROPIC_API_KEY"] = anthropic_api_key
+    if anthropic_base_url is not None:
+        env["ANTHROPIC_BASE_URL"] = anthropic_base_url
+    if gh_token is not None:
+        env["GH_TOKEN"] = gh_token
+    return env
+
+
 def run_mngr_create(
     launch_mode: LaunchMode,
     workspace_dir: Path | None,
@@ -659,6 +704,8 @@ def run_mngr_create(
     gh_token: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     *,
+    scrub_inherited_anthropic_api_key: bool = False,
+    scrub_inherited_anthropic_base_url: bool = False,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> tuple[str, AgentId, HostId]:
     """Create an mngr agent via ``mngr create --format jsonl``.
@@ -674,6 +721,13 @@ def run_mngr_create(
     into the subprocess env (not argv) so they don't show up in ``ps`` output;
     the FCT template's own ``pass_(host_)env`` declarations cause mngr to
     forward them onto the host as appropriate.
+
+    ``scrub_inherited_anthropic_api_key`` / ``scrub_inherited_anthropic_base_url``
+    cause the corresponding ``ANTHROPIC_*`` env var to be removed from the
+    inherited parent env before ``mngr create`` runs. Use these when the user
+    explicitly opted out of forwarding an ambient env var (e.g. picked the
+    SUBSCRIPTION auth mode and unchecked the "use it anyway" toggle) so the
+    var doesn't ride along via the FCT template's ``pass_host_env`` regardless.
 
     Returns ``(api_key, canonical_agent_id, canonical_host_id)``. Both
     canonical ids are parsed out of the ``"event": "created"`` JSONL
@@ -694,19 +748,19 @@ def run_mngr_create(
     )
 
     # Build the subprocess env from the parent's env + any secrets we inject
-    # for the matching ``--pass-(host-)env`` flag to forward. Mutating
+    # for the matching ``--pass-(host-)env`` flag to forward, minus any
+    # ambient ``ANTHROPIC_*`` vars the user opted out of. Mutating
     # ``os.environ`` directly would leak the user's secrets into the desktop
     # client's other subprocesses, so we keep the override scoped to this
     # invocation.
-    subprocess_env: dict[str, str] | None = None
-    if anthropic_api_key is not None or anthropic_base_url is not None or gh_token is not None:
-        subprocess_env = dict(os.environ)
-        if anthropic_api_key is not None:
-            subprocess_env["ANTHROPIC_API_KEY"] = anthropic_api_key
-        if anthropic_base_url is not None:
-            subprocess_env["ANTHROPIC_BASE_URL"] = anthropic_base_url
-        if gh_token is not None:
-            subprocess_env["GH_TOKEN"] = gh_token
+    subprocess_env = _build_mngr_create_subprocess_env(
+        os.environ,
+        anthropic_api_key=anthropic_api_key,
+        anthropic_base_url=anthropic_base_url,
+        gh_token=gh_token,
+        scrub_inherited_anthropic_api_key=scrub_inherited_anthropic_api_key,
+        scrub_inherited_anthropic_base_url=scrub_inherited_anthropic_base_url,
+    )
 
     logger.info("Running: {}", " ".join(mngr_command))
 
@@ -870,7 +924,10 @@ class AgentCreator(MutableModel):
         account_email: str = "",
         branch_or_tag: str = "",
         anthropic_api_key: str = "",
+        anthropic_base_url: str = "",
         gh_token: str = "",
+        use_env_anthropic_api_key: bool = False,
+        use_env_anthropic_base_url: bool = False,
         on_created: Callable[[AgentId], None] | None = None,
     ) -> CreationId:
         """Start creating an agent from a git URL or local path in a background thread.
@@ -882,10 +939,21 @@ class AgentCreator(MutableModel):
           ``account_email`` and inject ``ANTHROPIC_API_KEY`` /
           ``ANTHROPIC_BASE_URL`` so the agent talks to LiteLLM. Requires
           an account.
-        - ``API_KEY`` -- inject ``anthropic_api_key`` directly so the agent
-          talks to the official Anthropic API.
+        - ``API_KEY`` -- inject the form-supplied ``anthropic_api_key`` /
+          ``anthropic_base_url`` so the agent talks to the official Anthropic
+          API (or a custom endpoint).
         - ``SUBSCRIPTION`` -- inject neither; the user signs in to Claude
           interactively in the workspace.
+
+        For ``SUBSCRIPTION`` (and for ``API_KEY`` when the corresponding
+        form field is empty), ``use_env_anthropic_api_key`` and
+        ``use_env_anthropic_base_url`` decide whether the desktop client's
+        own ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_BASE_URL`` env vars (sourced
+        from the user's shell) ride along into the container. False means
+        scrub them from the ``mngr create`` subprocess env so the FCT
+        template's ``pass_host_env`` can't silently forward them; True
+        means leave them in place. The desktop UI surfaces the choice
+        inline when either env var is detected.
 
         ``gh_token`` is optional; when provided it's forwarded to the host
         as ``GH_TOKEN``.
@@ -941,7 +1009,10 @@ class AgentCreator(MutableModel):
                 account_email,
                 branch_or_tag,
                 anthropic_api_key,
+                anthropic_base_url,
                 gh_token,
+                use_env_anthropic_api_key,
+                use_env_anthropic_base_url,
                 on_created,
             ),
             daemon=True,
@@ -999,7 +1070,10 @@ class AgentCreator(MutableModel):
         account_email: str = "",
         branch_or_tag: str = "",
         anthropic_api_key: str = "",
+        anthropic_base_url: str = "",
         gh_token: str = "",
+        use_env_anthropic_api_key: bool = False,
+        use_env_anthropic_base_url: bool = False,
         on_created: Callable[[AgentId], None] | None = None,
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent.
@@ -1008,8 +1082,11 @@ class AgentCreator(MutableModel):
         plugin CLI) and forwards ``ANTHROPIC_API_KEY``/``ANTHROPIC_BASE_URL``
         onto the host via the subprocess env + matching
         ``--pass-(host-)env`` flags. For ``API_KEY``, forwards the
-        user-supplied key as ``ANTHROPIC_API_KEY``. For ``SUBSCRIPTION``,
-        injects neither.
+        form-supplied key (and optional base URL) the same way. For
+        ``SUBSCRIPTION``, injects neither -- and, depending on the
+        ``use_env_anthropic_*`` flags, may scrub any ambient
+        ``ANTHROPIC_*`` vars from the subprocess env so the FCT template's
+        ``pass_host_env`` can't silently forward them.
 
         For ``LaunchMode.IMBUE_CLOUD``, the plugin's provider backend
         handles the lease + SSH bootstrap inside ``create_host``; the
@@ -1112,10 +1189,22 @@ class AgentCreator(MutableModel):
 
                 # Resolve the Anthropic credentials according to the AI
                 # provider choice. IMBUE_CLOUD mints a fresh LiteLLM key;
-                # API_KEY uses the user-supplied key directly; SUBSCRIPTION
-                # injects nothing so the agent prompts the user to log in.
+                # API_KEY uses the form-supplied key (and optional base URL);
+                # SUBSCRIPTION injects nothing so the agent prompts the user
+                # to log in. For SUBSCRIPTION / form-empty API_KEY, the
+                # ``use_env_anthropic_*`` flags decide whether the desktop
+                # client's own ambient ``ANTHROPIC_*`` env vars ride along
+                # via the FCT template's ``pass_host_env`` (True = ride
+                # along, False = scrub before mngr-create runs).
                 effective_anthropic_api_key: str | None = None
                 effective_anthropic_base_url: str | None = None
+                # IMBUE_CLOUD always overwrites both vars with the minted
+                # LiteLLM credential pair, so scrubbing the ambient values
+                # is moot there. For the other modes, scrubbing matters
+                # only when no explicit value is being layered on top --
+                # otherwise the override takes precedence anyway.
+                scrub_inherited_anthropic_api_key = False
+                scrub_inherited_anthropic_base_url = False
                 match ai_provider:
                     case AIProvider.IMBUE_CLOUD:
                         if self.imbue_cloud_cli is None:
@@ -1142,8 +1231,31 @@ class AgentCreator(MutableModel):
                         if not anthropic_api_key:
                             raise MngrCommandError("AI provider API_KEY requires anthropic_api_key to be supplied")
                         effective_anthropic_api_key = anthropic_api_key
+                        # The form-supplied key always wins, so no need to
+                        # scrub the inherited one (the override layer
+                        # supersedes it). Base URL is form-optional: when
+                        # the user supplied one, use it; when they left
+                        # the field blank, honour ``use_env_anthropic_base_url``.
+                        if anthropic_base_url:
+                            effective_anthropic_base_url = anthropic_base_url
+                        elif not use_env_anthropic_base_url:
+                            scrub_inherited_anthropic_base_url = True
+                        else:
+                            # Form base URL is blank AND the user opted in
+                            # to forwarding the ambient ANTHROPIC_BASE_URL:
+                            # leave the parent env's value untouched so it
+                            # rides through via the FCT template's
+                            # pass_host_env.
+                            pass
                     case AIProvider.SUBSCRIPTION:
-                        pass
+                        # SUBSCRIPTION never injects credentials, so the
+                        # only question is whether to keep any ambient
+                        # ``ANTHROPIC_*`` vars. Default ``False`` -> scrub,
+                        # matching the form's "ignore by default" UI.
+                        if not use_env_anthropic_api_key:
+                            scrub_inherited_anthropic_api_key = True
+                        if not use_env_anthropic_base_url:
+                            scrub_inherited_anthropic_base_url = True
                     case _ as unreachable:
                         assert_never(unreachable)
 
@@ -1201,6 +1313,8 @@ class AgentCreator(MutableModel):
                     anthropic_api_key=effective_anthropic_api_key,
                     anthropic_base_url=effective_anthropic_base_url,
                     gh_token=gh_token if gh_token else None,
+                    scrub_inherited_anthropic_api_key=scrub_inherited_anthropic_api_key,
+                    scrub_inherited_anthropic_base_url=scrub_inherited_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,
                 )
 

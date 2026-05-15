@@ -124,9 +124,53 @@ def test_render_create_form_includes_gh_token_field() -> None:
     assert 'name="gh_token"' in html
 
 
+def test_render_create_form_includes_anthropic_base_url_field() -> None:
+    """The form must include a base URL input next to the API key input so
+    users on API_KEY auth can point at a custom endpoint (LiteLLM proxy,
+    Bedrock gateway, etc.) without having to set ``ANTHROPIC_BASE_URL`` in
+    their shell."""
+    html = render_create_form()
+    assert 'name="anthropic_base_url"' in html
+
+
 def test_render_create_form_shows_error_message_when_supplied() -> None:
     html = render_create_form(error_message="Imbue cloud requires an account.")
     assert "Imbue cloud requires an account." in html
+
+
+def test_render_create_form_hides_env_anthropic_notices_when_not_detected() -> None:
+    """When neither env var is detected, the form must not emit either notice
+    block -- their checkbox inputs would otherwise default to absent in the
+    POST and we'd lose the "form is authoritative" semantics if a stray
+    checked attribute leaked in via a re-render."""
+    html = render_create_form(
+        detected_env_anthropic_api_key=False,
+        detected_env_anthropic_base_url_value="",
+    )
+    assert 'id="env-api-key-notice"' not in html
+    assert 'id="env-base-url-notice"' not in html
+    assert 'name="use_env_anthropic_api_key"' not in html
+    assert 'name="use_env_anthropic_base_url"' not in html
+
+
+def test_render_create_form_shows_env_anthropic_api_key_notice_when_detected() -> None:
+    """When ANTHROPIC_API_KEY is detected, the form must surface a notice
+    with an opt-in checkbox. The key value itself must NEVER appear in the
+    HTML -- only its presence."""
+    html = render_create_form(detected_env_anthropic_api_key=True)
+    assert 'id="env-api-key-notice"' in html
+    assert 'name="use_env_anthropic_api_key"' in html
+    assert "ANTHROPIC_API_KEY" in html
+
+
+def test_render_create_form_shows_env_anthropic_base_url_notice_with_value() -> None:
+    """When ANTHROPIC_BASE_URL is detected, the form must surface a notice
+    that displays the value (it's not secret) so the user can sanity-check
+    the endpoint before opting in."""
+    html = render_create_form(detected_env_anthropic_base_url_value="https://litellm.example.com")
+    assert 'id="env-base-url-notice"' in html
+    assert 'name="use_env_anthropic_base_url"' in html
+    assert "https://litellm.example.com" in html
 
 
 def test_render_login_page_shows_prompt() -> None:

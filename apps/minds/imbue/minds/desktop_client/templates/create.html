@@ -73,7 +73,38 @@
           <div id="api-key-row" class="mt-3 hidden">
             <label for="anthropic_api_key" class="text-sm text-zinc-900 font-medium block mb-1">Anthropic API key</label>
             {{ ui.text_input('anthropic_api_key', value=anthropic_api_key, placeholder='sk-ant-...', id='anthropic_api_key', type='password') }}
+            <label for="anthropic_base_url" class="text-sm text-zinc-900 font-medium block mb-1 mt-3">Anthropic base URL <span class="text-xs text-zinc-400 font-normal">(optional)</span></label>
+            {{ ui.text_input('anthropic_base_url', value=anthropic_base_url, placeholder='https://api.anthropic.com', id='anthropic_base_url') }}
           </div>
+          {% if detected_env_anthropic_api_key %}
+            <div id="env-api-key-notice" class="mt-3 hidden">
+              {% call ui.notice(variant='info') %}
+                <label class="flex items-start gap-2 cursor-pointer">
+                  <input type="checkbox" name="use_env_anthropic_api_key" id="use_env_anthropic_api_key"
+                         class="mt-0.5 shrink-0">
+                  <span>
+                    <span class="font-medium">ANTHROPIC_API_KEY detected in your environment.</span>
+                    <span id="env-api-key-help" class="block text-xs mt-0.5 text-blue-800"></span>
+                  </span>
+                </label>
+              {% endcall %}
+            </div>
+          {% endif %}
+          {% if detected_env_anthropic_base_url_value %}
+            <div id="env-base-url-notice" class="mt-3 hidden">
+              {% call ui.notice(variant='info') %}
+                <label class="flex items-start gap-2 cursor-pointer">
+                  <input type="checkbox" name="use_env_anthropic_base_url" id="use_env_anthropic_base_url"
+                         class="mt-0.5 shrink-0">
+                  <span>
+                    <span class="font-medium">ANTHROPIC_BASE_URL detected:</span>
+                    <code class="text-xs bg-blue-100 px-1 py-0.5 rounded">{{ detected_env_anthropic_base_url_value }}</code>
+                    <span id="env-base-url-help" class="block text-xs mt-0.5 text-blue-800"></span>
+                  </span>
+                </label>
+              {% endcall %}
+            </div>
+          {% endif %}
         </div>
       </div>
 
@@ -145,6 +176,33 @@
       var launchModeError = document.getElementById('launch-mode-account-error');
       var aiProviderError = document.getElementById('ai-provider-account-error');
       var submitBtn = document.getElementById('create-submit');
+      // The env-detection notices and checkboxes are only emitted by the
+      // template when the corresponding env var was present at render time,
+      // so each `getElementById` returns null when the user's shell didn't
+      // export it. All env-notice logic below guards against that.
+      var envApiKeyNotice = document.getElementById('env-api-key-notice');
+      var envApiKeyCheckbox = document.getElementById('use_env_anthropic_api_key');
+      var envApiKeyHelp = document.getElementById('env-api-key-help');
+      var envBaseUrlNotice = document.getElementById('env-base-url-notice');
+      var envBaseUrlCheckbox = document.getElementById('use_env_anthropic_base_url');
+      var envBaseUrlHelp = document.getElementById('env-base-url-help');
+      // Track which notices the user has manually toggled this session so
+      // we don't keep overwriting their choice each time `update()` runs
+      // (which would defeat the per-create explicit-choice UX).
+      var userToggledApiKey = false;
+      var userToggledBaseUrl = false;
+      if (envApiKeyCheckbox) {
+        envApiKeyCheckbox.addEventListener('change', function() { userToggledApiKey = true; });
+      }
+      if (envBaseUrlCheckbox) {
+        envBaseUrlCheckbox.addEventListener('change', function() { userToggledBaseUrl = true; });
+      }
+      if (apiKeyInput) {
+        // Filling the form's API-key field changes the API_KEY defaults
+        // (form-supplied key wins, so the env-API-key notice becomes
+        // irrelevant and hides; env-base-url remains relevant).
+        apiKeyInput.addEventListener('input', function() { update(); });
+      }
 
       function update() {
         var hasAccount = accountSelect.value !== '';
@@ -158,9 +216,54 @@
         var aiImbueOption = aiProviderSelect.querySelector('option[data-requires-account]');
         if (aiImbueOption) aiImbueOption.disabled = !hasAccount;
 
-        var isApiKey = aiProviderSelect.value === 'API_KEY';
+        var aiProvider = aiProviderSelect.value;
+        var isApiKey = aiProvider === 'API_KEY';
+        var isSubscription = aiProvider === 'SUBSCRIPTION';
+        var isImbueCloud = aiProvider === 'IMBUE_CLOUD';
         apiKeyRow.classList.toggle('hidden', !isApiKey);
         apiKeyInput.required = isApiKey;
+
+        // Env-API-key notice visibility:
+        //   SUBSCRIPTION: always show when detected (env key would silently
+        //     override the OAuth-only intent if forwarded).
+        //   API_KEY: show only when the form field is empty (otherwise the
+        //     form-supplied key wins and the env key is irrelevant).
+        //   IMBUE_CLOUD: hide -- the minted LiteLLM key overrides any env key.
+        if (envApiKeyNotice) {
+          var formApiKeyEmpty = apiKeyInput.value.trim() === '';
+          var showApiKeyNotice = isSubscription || (isApiKey && formApiKeyEmpty);
+          envApiKeyNotice.classList.toggle('hidden', !showApiKeyNotice);
+          if (showApiKeyNotice && !userToggledApiKey) {
+            // Default checked state: API_KEY-with-empty-field defaults to
+            // "use" (offer to populate from env); SUBSCRIPTION defaults to
+            // "ignore" (form auth choice is authoritative).
+            envApiKeyCheckbox.checked = isApiKey && formApiKeyEmpty;
+          }
+          if (envApiKeyHelp) {
+            envApiKeyHelp.textContent = isApiKey && formApiKeyEmpty
+              ? 'Will be used as the API key since the field above is empty. Uncheck to ignore.'
+              : 'Will be ignored. Check to forward it to the agent anyway.';
+          }
+        }
+
+        // Env-base-URL notice visibility:
+        //   SUBSCRIPTION / API_KEY: show whenever detected.
+        //   IMBUE_CLOUD: hide -- LiteLLM provides its own base URL.
+        if (envBaseUrlNotice) {
+          var showBaseUrlNotice = !isImbueCloud;
+          envBaseUrlNotice.classList.toggle('hidden', !showBaseUrlNotice);
+          if (showBaseUrlNotice && !userToggledBaseUrl) {
+            // For API_KEY: default to "use" so the env-supplied base URL
+            // pairs with the user's API key. For SUBSCRIPTION: default to
+            // "ignore" (form is authoritative).
+            envBaseUrlCheckbox.checked = isApiKey;
+          }
+          if (envBaseUrlHelp) {
+            envBaseUrlHelp.textContent = isApiKey
+              ? 'Will be used as the base URL. Uncheck to ignore.'
+              : 'Will be ignored. Check to forward it to the agent anyway.';
+          }
+        }
 
         var launchInvalid = !hasAccount && launchSelect.value === 'IMBUE_CLOUD';
         var aiInvalid = !hasAccount && aiProviderSelect.value === 'IMBUE_CLOUD';

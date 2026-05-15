@@ -507,7 +507,17 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         ai_provider = AIProvider.SUBSCRIPTION
     account_id = str(form.get("account_id", "")).strip()
     anthropic_api_key = str(form.get("anthropic_api_key", "")).strip()
+    anthropic_base_url = str(form.get("anthropic_base_url", "")).strip()
     gh_token = str(form.get("gh_token", "")).strip()
+    # The env-forwarding checkboxes are only emitted when the corresponding
+    # env var was detected at render time; checked => present, unchecked =>
+    # absent. We must NOT fall back to the env-var-present state here as a
+    # default for unchecked, because that would silently re-enable
+    # forwarding for users who explicitly unchecked the box.
+    use_env_anthropic_api_key = form.get("use_env_anthropic_api_key") is not None
+    use_env_anthropic_base_url = form.get("use_env_anthropic_base_url") is not None
+
+    detected_env_anthropic_api_key, detected_env_anthropic_base_url_value = _detect_env_anthropic_credentials()
 
     session_store_inst: MultiAccountSessionStore | None = request.app.state.session_store
 
@@ -526,6 +536,9 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
             default_account_id=account_id,
             gh_token=gh_token,
             anthropic_api_key=anthropic_api_key,
+            anthropic_base_url=anthropic_base_url,
+            detected_env_anthropic_api_key=detected_env_anthropic_api_key,
+            detected_env_anthropic_base_url_value=detected_env_anthropic_base_url_value,
             error_message=message,
         )
         return HTMLResponse(content=html_body, status_code=status)
@@ -583,12 +596,33 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         account_email=account_email,
         branch_or_tag=branch_or_tag,
         anthropic_api_key=anthropic_api_key,
+        anthropic_base_url=anthropic_base_url,
         gh_token=gh_token,
+        use_env_anthropic_api_key=use_env_anthropic_api_key,
+        use_env_anthropic_base_url=use_env_anthropic_base_url,
         on_created=on_created,
     )
 
     creating_url = "/creating/{}".format(creation_id)
     return Response(status_code=303, headers={"Location": creating_url})
+
+
+def _detect_env_anthropic_credentials() -> tuple[bool, str]:
+    """Read the desktop-client process env for ``ANTHROPIC_*`` credentials.
+
+    Returns ``(api_key_present, base_url_value)``. The API key's value is
+    intentionally collapsed to a bool because it's secret and the UI must
+    not display it. The base URL value is non-secret and shown in the
+    form notice so the user can sanity-check the endpoint they'd be
+    opting into.
+
+    Both env vars get inherited by the ``mngr create`` subprocess (and
+    from there onto the new agent's container, via the FCT docker
+    template's ``pass_host_env``). Surfacing them in the form lets the
+    user opt in/out explicitly rather than having ambient shell state
+    silently override their AI-provider form choice.
+    """
+    return ("ANTHROPIC_API_KEY" in os.environ, os.environ.get("ANTHROPIC_BASE_URL", ""))
 
 
 def _handle_create_page(
@@ -605,11 +639,14 @@ def _handle_create_page(
     minds_config: MindsConfig | None = request.app.state.minds_config
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
+    detected_env_anthropic_api_key, detected_env_anthropic_base_url_value = _detect_env_anthropic_credentials()
     html = render_create_form(
         git_url=git_url,
         branch=branch,
         accounts=accounts,
         default_account_id=default_account_id or "",
+        detected_env_anthropic_api_key=detected_env_anthropic_api_key,
+        detected_env_anthropic_base_url_value=detected_env_anthropic_base_url_value,
     )
     return HTMLResponse(content=html)
 
@@ -654,8 +691,15 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             media_type="application/json",
         )
     anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
+    anthropic_base_url = str(body.get("anthropic_base_url", "")).strip()
     gh_token = str(body.get("gh_token", "")).strip()
     account_id = str(body.get("account_id", "")).strip()
+    # JSON API mirror of the form-path env-forwarding toggles. Default
+    # False so a caller that doesn't know about these flags gets the
+    # safer "form is authoritative; ambient env vars are ignored"
+    # behaviour rather than silently forwarding shell ANTHROPIC_* vars.
+    use_env_anthropic_api_key = bool(body.get("use_env_anthropic_api_key", False))
+    use_env_anthropic_base_url = bool(body.get("use_env_anthropic_base_url", False))
     if not git_url:
         return Response(
             status_code=400,
@@ -708,7 +752,10 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         ai_provider=ai_provider,
         account_email=account_email,
         anthropic_api_key=anthropic_api_key,
+        anthropic_base_url=anthropic_base_url,
         gh_token=gh_token,
+        use_env_anthropic_api_key=use_env_anthropic_api_key,
+        use_env_anthropic_base_url=use_env_anthropic_base_url,
     )
     # API contract: the JSON field stays named ``agent_id`` for backwards
     # compatibility with existing API clients, but the value is now a
