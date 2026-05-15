@@ -200,10 +200,30 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         ``BeforeTool`` wildcard hook that auto-approves every tool call.
         Because mngr owns this file outright (it lives in the per-agent state
         dir), no read-modify-merge dance against any pre-existing file is
-        needed: each provision run rewrites it from scratch. Composition of
-        the configured builders still goes through ``merge_hooks_config`` so
-        any future builder that adds entries under an already-used event key
-        is handled correctly (matcher-group dedup, deep copy, no mutation).
+        needed: each provision run rewrites it from scratch.
+
+        Composition of the configured builders intentionally goes through
+        ``merge_hooks_config`` rather than a flat ``dict.update`` over the
+        builders' ``hooks`` sub-dicts, even though the active builders today
+        write to disjoint event keys (``SessionStart`` vs ``BeforeTool``).
+        Reasons -- please read before "simplifying" to ``dict.update``:
+
+          1. ``merge_hooks_config`` appends matcher groups under an existing
+             event key; ``dict.update`` silently overwrites them. The instant
+             a future builder adds a second ``SessionStart`` hook (e.g. an
+             analogue of ``mngr_claude``'s ``/clear``-source hook), the
+             ``dict.update`` version would drop the readiness sentinel.
+          2. ``hook_already_exists``'s matcher-aware dedup (see
+             gemini_config_test.py:test_hook_already_exists_distinguishes_by_matcher)
+             is only exercised through ``merge_hooks_config``; the inline
+             path doesn't get it.
+          3. The cost difference is small (one import + an assert vs three
+             lines), and the failure mode of the inline path is silent.
+
+        The ``assert merged is not None`` documents an invariant rather than
+        guarding against runtime conditions: each builder contributes at
+        least one new matcher group against a fresh accumulator, so the
+        helper's "nothing-to-add" sentinel never fires at this callsite.
         """
         builders = [build_readiness_hooks_config()]
         if self.agent_config.auto_allow_permissions:
@@ -212,8 +232,6 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         settings: dict[str, Any] = {}
         for builder_output in builders:
             merged = merge_hooks_config(settings, builder_output)
-            # Each builder contributes at least one new matcher group against
-            # a fresh accumulator, so merge_hooks_config never returns None.
             assert merged is not None
             settings = merged
 
