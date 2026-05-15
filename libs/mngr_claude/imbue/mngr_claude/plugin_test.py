@@ -4327,7 +4327,7 @@ def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """In shared mode, modify_env_vars leaves CLAUDE_CONFIG_DIR / ORIGINAL_CLAUDE_CONFIG_DIR
-    untouched so the agent inherits the parent shell's values."""
+    untouched so the agent inherits the parent shell's values, and adds no other env vars."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
     agent, host = make_claude_agent(
@@ -4340,34 +4340,36 @@ def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
 
     agent.modify_env_vars(host, env_vars)
 
-    assert "CLAUDE_CONFIG_DIR" not in env_vars
-    assert "ORIGINAL_CLAUDE_CONFIG_DIR" not in env_vars
-    # Common transcript emission is independent of shared mode -- still set.
-    assert env_vars["MNGR_EMIT_COMMON_TRANSCRIPT"] == "1"
+    # In shared mode there's nothing to add: the transcript opt-out is
+    # gated at provisioning time (on-disk script presence), not via env var.
+    assert env_vars == {}
 
 
-def test_modify_env_vars_shared_mode_with_common_transcript_disabled(
+def test_modify_env_vars_does_not_emit_transcript_env_var(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In shared mode with emit_common_transcript=False, the env dict stays empty."""
+    """modify_env_vars no longer sets MNGR_EMIT_COMMON_TRANSCRIPT.
+
+    Pre-Phase 2/3 the env var gated the wrapper script's launch decision.
+    Now the converter is either provisioned on disk or it isn't, and the
+    wrapper just checks ``-x``. Confirm we don't accidentally regress and
+    start emitting the dead env var.
+    """
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
     agent, host = make_claude_agent(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(
-            check_installation=False, use_env_config_dir=True, emit_common_transcript=False
-        ),
+        agent_config=ClaudeAgentConfig(check_installation=False),
     )
     env_vars: dict[str, str] = {}
 
     agent.modify_env_vars(host, env_vars)
 
-    assert env_vars == {}
+    assert "MNGR_EMIT_COMMON_TRANSCRIPT" not in env_vars
 
 
 # =============================================================================

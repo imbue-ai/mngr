@@ -7,7 +7,7 @@ from typing import ClassVar
 from pydantic import Field
 
 from imbue.mngr import hookimpl
-from imbue.mngr.agents.common_transcript import provision_common_transcript_scripts
+from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_and_poll_for_cleared_indicator
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -86,6 +86,10 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
             cleared_indicator=self.INPUT_CLEARED_INDICATOR,
         )
 
+    @property
+    def is_common_transcript_enabled(self) -> bool:
+        return self.agent_config.emit_common_transcript
+
     def get_common_transcript_scripts(self) -> Mapping[str, str]:
         """Return the gemini transcript converter script."""
         return {_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_gemini_resource_script(_COMMON_TRANSCRIPT_SCRIPT_NAME)}
@@ -96,19 +100,18 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Provision the gemini transcript converter to commands/.
+        """Provision the gemini transcript converter to commands/ when enabled.
 
-        When ``agent_config.emit_common_transcript`` is ``False`` this is a
-        no-op: no script is written and ``assemble_command`` will not prepend
-        the watcher.
+        Delegates the enable-flag check and the upload to
+        :func:`maybe_provision_common_transcript_scripts`; when
+        ``agent_config.emit_common_transcript`` is ``False`` nothing is
+        written and ``assemble_command`` will not prepend the watcher.
         """
-        if not self.agent_config.emit_common_transcript:
-            return
         with mngr_ctx.concurrency_group.make_concurrency_group("gemini_provisioning") as concurrency_group:
-            provision_common_transcript_scripts(
+            maybe_provision_common_transcript_scripts(
+                self,
                 host,
                 self._get_agent_dir(),
-                self.get_common_transcript_scripts(),
                 concurrency_group,
             )
 
@@ -126,12 +129,12 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         children of non-interactive shells by default, so the watcher may
         outlive the tmux session and continue polling until killed by host
         teardown or until its session inputs disappear. When
-        ``agent_config.emit_common_transcript`` is ``False`` the watcher is
-        not prepended and the returned command is the base assembled by the
+        ``is_common_transcript_enabled`` is ``False`` the watcher is not
+        prepended and the returned command is the base assembled by the
         superclass.
         """
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
-        if not self.agent_config.emit_common_transcript:
+        if not self.is_common_transcript_enabled:
             return base_command
         background_cmd = f"( bash $MNGR_AGENT_STATE_DIR/commands/{_COMMON_TRANSCRIPT_SCRIPT_NAME} ) &"
         return CommandString(f"{background_cmd} {base_command}")
