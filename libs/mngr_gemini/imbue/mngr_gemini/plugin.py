@@ -197,8 +197,11 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         builder that shares an event key (e.g. a second ``SessionStart``
         hook) appends a matcher group instead of silently overwriting the
         readiness sentinel. The ``merged is not None`` invariant holds
-        because each builder adds at least one new matcher group against a
-        fresh accumulator.
+        because the current builders target disjoint hook events
+        (``SessionStart`` vs ``BeforeTool``), so neither merge encounters a
+        pre-existing matcher group with the same matcher and commands. If a
+        future builder is added that shares an event key with an earlier one,
+        this assertion will need to be reconsidered.
         """
         builders = [build_readiness_hooks_config()]
         if self.agent_config.auto_allow_permissions:
