@@ -157,7 +157,10 @@ def check_bash_version(minimum: int = 4) -> bool:
             result = cg.run_process_to_completion(["bash", "-c", "echo ${BASH_VERSINFO[0]}"])
         version = int(result.stdout.strip())
         return version >= minimum
-    except (OSError, ProcessError, ValueError):
+    except (OSError, ProcessError, ValueError, ConcurrencyExceptionGroup):
+        # ConcurrencyGroup's __exit__ wraps the underlying ProcessError in a
+        # ConcurrencyExceptionGroup before re-raising, so catching ProcessError
+        # alone is not enough -- we have to catch the group as well.
         return False
 
 
