@@ -79,8 +79,9 @@ The desktop app bundles platform-specific binaries so users need zero prerequisi
 
 - **uv**: Downloads Python, creates venvs, installs packages. Downloaded from GitHub releases during `pnpm build`.
 - **git**: Required for agent creation (cloning repos). Currently copied from the build machine; a statically-linked distribution should be used for production.
+- **lima**: Backs the default `lima` compute provider. The full Lima release tarball (`bin/`, `libexec/`, `share/`) is downloaded from GitHub releases during `pnpm build` and extracted into `resources/lima/`. `limactl` discovers its `share/lima/` (guest agents and templates) relative to its own binary location, so the bundle is fully relocatable. On Apple Silicon, Lima uses the built-in `vz` backend (Virtualization.framework), so no QEMU is needed.
 
-Both are placed in the `resources/` directory (outside the asar archive) and added to `PATH` in the child process environment.
+All three are placed in the `resources/` directory (outside the asar archive) and added to `PATH` in the child process environment.
 
 ## Data directory
 

@@ -34,6 +34,14 @@ function getGitBinDir() {
   return path.dirname(getGitPath());
 }
 
+function getLimactlPath() {
+  return path.join(getResourcesDir(), 'lima', 'bin', 'limactl');
+}
+
+function getLimaBinDir() {
+  return path.dirname(getLimactlPath());
+}
+
 /**
  * Path to the Latchkey CLI shipped as an npm dependency of this app.
  *
@@ -123,6 +131,8 @@ module.exports = {
   getUvBinDir,
   getGitPath,
   getGitBinDir,
+  getLimactlPath,
+  getLimaBinDir,
   getLatchkeyPath,
   getLatchkeyDirectory,
   getMindsRootName,

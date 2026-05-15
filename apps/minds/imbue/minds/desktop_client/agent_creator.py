@@ -844,7 +844,7 @@ class AgentCreator(MutableModel):
         repo_source: str,
         host_name: str = "",
         branch: str = "",
-        launch_mode: LaunchMode = LaunchMode.LOCAL,
+        launch_mode: LaunchMode = LaunchMode.LIMA,
         ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
         account_email: str = "",
         branch_or_tag: str = "",

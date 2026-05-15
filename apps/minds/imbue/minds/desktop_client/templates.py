@@ -149,7 +149,7 @@ def render_create_form(
     effective_branch = branch if branch else _DEFAULT_BRANCH
     has_account = bool(default_account_id and accounts)
     effective_launch_mode = (
-        launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LOCAL)
+        launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LIMA)
     )
     effective_ai_provider = (
         ai_provider

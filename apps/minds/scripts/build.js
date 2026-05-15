@@ -16,6 +16,7 @@ const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
 
 const UV_VERSION = '0.7.12';
+const LIMA_VERSION = '2.1.1';
 
 function getPlatformArch() {
   const platform = process.platform;
@@ -317,6 +318,52 @@ function bundleLatchkey() {
   );
 }
 
+function getLimaDownloadUrl({ platform, arch }) {
+  // Lima release tarballs use OS+arch names like "Darwin-arm64",
+  // "Darwin-x86_64", "Linux-x86_64", "Linux-aarch64".
+  const limaOs = platform === 'darwin' ? 'Darwin' : 'Linux';
+  const limaArch = arch === 'aarch64' ? 'arm64' : arch;
+  const target = `lima-${LIMA_VERSION}-${limaOs}-${limaArch}.tar.gz`;
+  return `https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/${target}`;
+}
+
+async function downloadLima({ platform, arch }) {
+  // The Lima tarball lays out bin/, libexec/, and share/ at the top level.
+  // limactl discovers share/lima/ (guest agents + templates) relative to
+  // its own binary location, so we extract the whole tree as-is and the
+  // bundle is relocatable to ``Contents/Resources/lima/``.
+  const limaDir = path.join(RESOURCES_DIR, 'lima');
+  fs.mkdirSync(limaDir, { recursive: true });
+
+  const url = getLimaDownloadUrl({ platform, arch });
+  console.log(`Downloading Lima from ${url}...`);
+
+  const tarball = await download(url);
+  const tarPath = path.join(limaDir, 'lima.tar.gz');
+  fs.writeFileSync(tarPath, tarball);
+
+  execSync(`tar xzf "${tarPath}" -C "${limaDir}"`, { stdio: 'inherit' });
+  fs.unlinkSync(tarPath);
+
+  const limactlPath = path.join(limaDir, 'bin', 'limactl');
+  if (!fs.existsSync(limactlPath)) {
+    throw new Error(`limactl binary not found at ${limactlPath} after extraction`);
+  }
+  fs.chmodSync(limactlPath, 0o755);
+
+  // Smoke-test the bundled limactl to catch a corrupt download or wrong
+  // platform/arch combo at build time.
+  const versionOutput = execFileSync(limactlPath, ['--version'], {
+    encoding: 'utf-8',
+  }).trim();
+  console.log(`Bundled limactl: ${versionOutput}`);
+  if (!versionOutput.includes(LIMA_VERSION)) {
+    throw new Error(
+      `Bundled limactl reported version ${versionOutput}, expected ${LIMA_VERSION}`
+    );
+  }
+}
+
 async function downloadGit() {
   const gitDir = path.join(RESOURCES_DIR, 'git');
   const binDir = path.join(gitDir, 'bin');
@@ -376,6 +423,7 @@ async function main() {
   // Download binaries and copy pyproject in parallel
   await Promise.all([
     downloadUv({ platform, arch }),
+    downloadLima({ platform, arch }),
     downloadGit(),
   ]);
 

@@ -497,9 +497,9 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     host_name = str(form.get("host_name", "")).strip()
     branch = str(form.get("branch", "")).strip()
     try:
-        launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.LOCAL.value)))
+        launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.LIMA.value)))
     except ValueError:
-        launch_mode = LaunchMode.LOCAL
+        launch_mode = LaunchMode.LIMA
     try:
         ai_provider = AIProvider(str(form.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
     except ValueError:
@@ -639,7 +639,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     host_name = str(body.get("host_name", "")).strip()
     branch = str(body.get("branch", "")).strip()
     try:
-        launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.LOCAL.value)))
+        launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.LIMA.value)))
     except ValueError:
         return Response(
             status_code=400,
@@ -785,9 +785,9 @@ def _handle_creating_page(
 
     mode_param = request.query_params.get("mode", "")
     try:
-        creating_launch_mode = LaunchMode(mode_param) if mode_param else LaunchMode.LOCAL
+        creating_launch_mode = LaunchMode(mode_param) if mode_param else LaunchMode.LIMA
     except ValueError:
-        creating_launch_mode = LaunchMode.LOCAL
+        creating_launch_mode = LaunchMode.LIMA
     html = render_creating_page(creation_id=creation_id, info=info, launch_mode=creating_launch_mode)
     return HTMLResponse(content=html)
 
