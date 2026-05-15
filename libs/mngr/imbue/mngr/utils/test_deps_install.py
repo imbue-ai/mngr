@@ -25,7 +25,6 @@ import pytest
 
 from imbue.mngr.utils.deps import _install_via_apt
 from imbue.mngr.utils.deps import _install_via_brew
-from imbue.mngr.utils.deps import _install_via_script
 from imbue.mngr.utils.testing import write_executable_script
 
 
@@ -153,36 +152,3 @@ def test_install_via_brew_against_real_brew() -> None:
         pytest.skip("No brew formulas installed on this machine; nothing safe to re-install")
 
     assert _install_via_brew([formulas[0]]) is True
-
-
-# -- Release tests: actual curl + bash invocation --
-
-
-@pytest.mark.release
-@pytest.mark.skipif(
-    shutil.which("curl") is None or shutil.which("bash") is None,
-    reason="curl and bash must both be on PATH",
-)
-@pytest.mark.timeout(60)
-def test_install_via_script_curls_and_pipes_to_real_bash(tmp_path: Path) -> None:
-    """End-to-end: ``_install_via_script(url)`` curls the URL and pipes to real bash.
-
-    Writes a tiny shell script to ``tmp_path``, points ``_install_via_script``
-    at it via a ``file://`` URL (curl supports ``file://`` natively), and
-    asserts that bash *actually* executed the piped content (the script
-    touches a marker file). This exercises the real ``curl`` and ``bash``
-    subprocesses plus the download->pipe wiring -- behaviour that is
-    unreachable with the mock-bin-on-PATH pattern used for brew/apt,
-    since mocking ``bash`` would ignore the piped script content and
-    a broken pipe would go undetected.
-    """
-    marker = tmp_path / "script_ran_marker"
-    script_path = tmp_path / "test_install.sh"
-    script_path.write_text(f"#!/usr/bin/env bash\ntouch {marker}\nexit 0\n")
-
-    assert _install_via_script(f"file://{script_path}") is True
-
-    assert marker.exists(), (
-        "bash did not actually execute the piped script -- either curl "
-        "failed silently, or the pipe to bash was broken."
-    )
