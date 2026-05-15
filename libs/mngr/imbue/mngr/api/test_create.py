@@ -269,7 +269,7 @@ def test_create_agent_with_unknown_type_raises(
     that the name is not recognized and suggests installing a plugin that
     provides it.
     """
-    agent_name = AgentName(f"test-unknown-type-no-cmd-{int(time.time())}")
+    agent_name = AgentName(f"test-unknown-type-{int(time.time())}")
 
     local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
