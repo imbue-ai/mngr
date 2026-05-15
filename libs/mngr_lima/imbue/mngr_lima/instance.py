@@ -46,8 +46,6 @@ from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
-from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
-from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
@@ -154,11 +152,6 @@ class LimaProviderInstance(BaseProviderInstance):
         """Directory for SSH keys."""
         return self._provider_dir / "keys"
 
-    @property
-    def _known_hosts_path(self) -> Path:
-        """Path to the known_hosts file for this provider instance."""
-        return self._keys_dir / "known_hosts"
-
     def _host_keys_dir(self, host_id: HostId) -> Path:
         """Directory holding this host's pre-injected sshd host keypair.
 
@@ -172,6 +165,17 @@ class LimaProviderInstance(BaseProviderInstance):
         """Return (private_key_path, public_key_path) for this host's pre-injected sshd host key."""
         host_keys_dir = self._host_keys_dir(host_id)
         return host_keys_dir / _HOST_KEY_NAME, host_keys_dir / f"{_HOST_KEY_NAME}.pub"
+
+    def _host_known_hosts_path(self, host_id: HostId) -> Path:
+        """Path to this host's known_hosts file.
+
+        Per-host (not per-provider) so each VM's entry is isolated. Every Lima VM
+        shares the 127.0.0.1 hostname and the forwarded port is reassigned on
+        each restart, so a shared file would accumulate dead [127.0.0.1]:<old>
+        lines; a per-host file is just rewritten in place. Lives under the
+        per-host keys dir, so delete_host's rmtree already cleans it up.
+        """
+        return self._host_keys_dir(host_id) / "known_hosts"
 
     def _ensure_host_keypair(self, host_id: HostId) -> tuple[str, str]:
         """Generate (or load) this host's pre-injected ed25519 keypair.
@@ -272,7 +276,7 @@ class LimaProviderInstance(BaseProviderInstance):
             hostname=ssh_config.hostname,
             port=ssh_config.port,
             private_key_path=ssh_config.identity_file,
-            known_hosts_path=self._known_hosts_path,
+            known_hosts_path=self._host_known_hosts_path(host_id),
             ssh_user=ssh_config.user,
         )
         connector = PyinfraConnector(pyinfra_host)
@@ -289,18 +293,20 @@ class LimaProviderInstance(BaseProviderInstance):
         )
 
     def _record_pre_injected_host_key(self, host_id: HostId, hostname: str, port: int) -> None:
-        """Write the host's known_hosts entry from the pre-injected per-host public key.
+        """(Re)write this host's known_hosts file from its pre-injected public key.
 
-        Clears any stale entry for this host:port first (Lima reassigns ports
-        across restarts, so the same hostname+port pair may have referred to a
-        different VM earlier). Idempotent: re-running with a matching key is a
-        no-op write.
+        The file is rewritten wholesale -- it only ever needs the single current
+        hostname:port entry. Lima reassigns the forwarded port on every restart,
+        so an append-style update would leave stale lines behind; a one-line
+        rewrite cannot. No locking needed: only this host's own
+        _create_host_object touches this file.
         """
-        self._keys_dir.mkdir(parents=True, exist_ok=True)
         _, public_key_path = self._host_keypair_paths(host_id)
         public_key = public_key_path.read_text().strip()
-        clear_host_from_known_hosts(self._known_hosts_path, hostname, port)
-        add_host_to_known_hosts(self._known_hosts_path, hostname, port, public_key)
+        host_pattern = hostname if port == 22 else f"[{hostname}]:{port}"
+        known_hosts_path = self._host_known_hosts_path(host_id)
+        known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+        known_hosts_path.write_text(f"{host_pattern} {public_key}\n")
 
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData) -> None:
         """Update the certified host data in the host record."""

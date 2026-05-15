@@ -128,9 +128,24 @@ def test_record_pre_injected_host_key_writes_known_hosts(lima_provider: LimaProv
 
     lima_provider._record_pre_injected_host_key(host_id, "127.0.0.1", 60022)
 
-    known_hosts = lima_provider._known_hosts_path.read_text()
+    known_hosts = lima_provider._host_known_hosts_path(host_id).read_text()
     assert "[127.0.0.1]:60022" in known_hosts
     assert public_openssh.strip() in known_hosts
+
+
+def test_record_pre_injected_host_key_rewrites_on_port_change(lima_provider: LimaProviderInstance) -> None:
+    # Lima reassigns the forwarded port across restarts; the per-host file must
+    # be rewritten wholesale so no stale [127.0.0.1]:<old-port> line survives.
+    host_id = HostId.generate()
+    lima_provider._ensure_host_keypair(host_id)
+
+    lima_provider._record_pre_injected_host_key(host_id, "127.0.0.1", 60022)
+    lima_provider._record_pre_injected_host_key(host_id, "127.0.0.1", 60099)
+
+    known_hosts = lima_provider._host_known_hosts_path(host_id).read_text()
+    assert "[127.0.0.1]:60099" in known_hosts
+    assert "[127.0.0.1]:60022" not in known_hosts
+    assert known_hosts.count("\n") == 1
 
 
 def test_delete_host_removes_keypair_dir(lima_provider: LimaProviderInstance) -> None:
