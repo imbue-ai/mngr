@@ -167,12 +167,7 @@ class LimaProviderInstance(BaseProviderInstance):
         return self._host_keys_dir(host_id) / "known_hosts"
 
     def _ensure_host_keypair(self, host_id: HostId) -> tuple[str, str]:
-        """Generate (or load) this host's pre-injected ed25519 keypair.
-
-        Returns (private_key_pem, public_key_openssh). The keypair is injected
-        into the VM via the Lima provision script and added to known_hosts on
-        the host machine atomically -- no ssh-keyscan required.
-        """
+        """Generate (or load) this host's ed25519 keypair, returning ``(private_key_pem, public_key_openssh)``."""
         private_key_path, public_key_openssh = load_or_create_host_keypair(
             self._host_keys_dir(host_id), _HOST_KEY_NAME
         )
