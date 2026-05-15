@@ -13,7 +13,12 @@ from imbue.mngr.e2e.conftest import MinimalInstallEnv
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_config_with_unknown_keys_strict(minimal_install_env: MinimalInstallEnv) -> None:
-    """In strict mode (the default), unknown config keys should produce a clear error."""
+    """In strict mode (the default), unknown config keys should produce a clear error.
+
+    ``headless`` is included as a known valid field alongside ``future_feature``
+    so the test also exercises the case where a real config has a typo / future
+    field mixed in with valid ones -- the error should pinpoint the unknown one.
+    """
     config_dir = minimal_install_env.repo_dir / f".{minimal_install_env.env['MNGR_ROOT_NAME']}"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_file = config_dir / "settings.toml"
@@ -25,8 +30,16 @@ def test_config_with_unknown_keys_strict(minimal_install_env: MinimalInstallEnv)
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
     combined = result.stdout + result.stderr
-    assert "future_feature" in combined.lower() or "unknown" in combined.lower(), (
-        f"Error should mention the unknown field:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    combined_lower = combined.lower()
+    # The error must pinpoint the unknown field by name so users know what to fix.
+    assert "future_feature" in combined_lower, (
+        f"Error should mention the unknown field 'future_feature':\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    # And it must frame the problem as an unknown/invalid field, not some other failure.
+    assert "unknown" in combined_lower, (
+        f"Error should describe the field as unknown:\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
 
@@ -51,6 +64,46 @@ def test_config_with_unknown_keys_non_strict(minimal_install_env: MinimalInstall
     )
     assert result.returncode == 0, (
         f"mngr list should succeed with MNGR_ALLOW_UNKNOWN_CONFIG=1:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    # A warning must be emitted naming the unknown field, so the user can tell
+    # the config file is being silently degraded rather than fully honored.
+    assert "future_feature" in result.stderr, (
+        f"Expected a warning mentioning the unknown field 'future_feature' in stderr:\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    # The known field 'headless' must not be reported as unknown.
+    assert "headless" not in result.stderr, (
+        f"Expected 'headless' (a valid field) not to appear in any unknown-field warning:\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+@pytest.mark.release
+@pytest.mark.timeout(60)
+def test_config_with_unknown_keys_non_strict_false_value(minimal_install_env: MinimalInstallEnv) -> None:
+    """MNGR_ALLOW_UNKNOWN_CONFIG=0 must keep strict behavior (unknown keys are fatal)."""
+    config_dir = minimal_install_env.repo_dir / f".{minimal_install_env.env['MNGR_ROOT_NAME']}"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_file = config_dir / "settings.toml"
+    config_file.write_text("future_feature = true\nheadless = true\n")
+
+    env = {**minimal_install_env.env, "MNGR_ALLOW_UNKNOWN_CONFIG": "0"}
+    mngr_bin = str(minimal_install_env.venv_dir / "bin" / "mngr")
+    result = subprocess.run(
+        [mngr_bin, "list"],
+        capture_output=True,
+        text=True,
+        cwd=minimal_install_env.repo_dir,
+        env=env,
+        timeout=30,
+    )
+    assert result.returncode != 0, (
+        f"mngr list should fail with MNGR_ALLOW_UNKNOWN_CONFIG=0 (falsy):\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    combined = result.stdout + result.stderr
+    assert "future_feature" in combined.lower() or "unknown" in combined.lower(), (
+        f"Error should mention the unknown field:\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
 

@@ -1,0 +1,1 @@
+- `test_create_modal_volume` now verifies the Modal volume is actually mounted at `/data` on the remote host and is read-writable, rather than only asserting that `mngr create ... -b volume=...` exited successfully.

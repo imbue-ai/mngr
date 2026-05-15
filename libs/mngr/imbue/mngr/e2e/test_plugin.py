@@ -10,13 +10,30 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 def test_plugin_list_shows_installed(e2e: E2eSession) -> None:
-    result = e2e.run("mngr plugin list", comment="List all installed plugins")
+    e2e.write_tutorial_block("""
+    # list all available plugins
+    mngr plugin list
+    """)
+    result = e2e.run("mngr plugin list", comment="list all available plugins")
     expect(result).to_succeed()
-    # The dev environment always has the claude plugin registered
-    expect(result.stdout).to_contain("claude")
+    # Output should be a table with the documented column headers
+    expect(result.stdout).to_contain("NAME")
+    expect(result.stdout).to_contain("VERSION")
+    expect(result.stdout).to_contain("DESCRIPTION")
+    expect(result.stdout).to_contain("ENABLED")
+    # The dev environment always has the claude plugin registered and enabled;
+    # match a row whose first column is exactly 'claude' followed by 'true' on
+    # the same line (avoids accidentally matching claude_subagent_proxy / claude_usage).
+    expect(result.stdout).to_match(r"(?m)^\s*claude\s+.*\btrue\b\s*$")
+    # The list should include many other built-in plugins (sanity check that
+    # the listing is not limited to a single plugin).
+    plugin_names = ("local", "modal", "docker")
+    for name in plugin_names:
+        expect(result.stdout).to_contain(name)
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_plugin_disable_enable_roundtrip(e2e: E2eSession) -> None:
     # Disable a plugin
     disable_result = e2e.run(
@@ -56,16 +73,30 @@ def test_plugin_disable_enable_roundtrip(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(90)
 def test_plugin_disable_affects_create(e2e: E2eSession) -> None:
     # Disable the claude plugin so its agent type should be unavailable
     expect(e2e.run("mngr plugin disable claude", comment="Disable claude plugin")).to_succeed()
 
-    # Attempting to create a claude agent should fail
+    # Attempting to create a claude agent should fail with a message
+    # naming the disabled plugin, not a generic error.
     create_result = e2e.run(
         "mngr create my-task claude --no-connect --no-ensure-clean",
         comment="Attempt to create claude agent with plugin disabled",
     )
     expect(create_result).to_fail()
+    expect(create_result.stderr).to_contain("claude")
+    expect(create_result.stderr).to_contain("disabled")
+
+    # Verify no agent state was actually written to disk: a partial create
+    # that exited non-zero but still registered the agent would be a silent
+    # failure. Inspecting the host dir directly avoids `mngr list`'s remote
+    # host discovery (which would trigger the modal resource guard here).
+    ls_result = e2e.run(
+        'ls "$MNGR_HOST_DIR/agents" 2>/dev/null || true',
+        comment="Verify no agent state was written to disk",
+    )
+    expect(ls_result.stdout).to_be_empty()
 
     # Re-enable so teardown can clean up normally
     e2e.run("mngr plugin enable claude", comment="Re-enable claude for cleanup")

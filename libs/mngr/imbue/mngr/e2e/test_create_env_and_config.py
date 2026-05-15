@@ -47,11 +47,22 @@ def test_create_with_env(e2e: E2eSession) -> None:
 
     wait_for(_env_var_visible, timeout=10.0, error_message=f"Expected {env_value} in tmux pane")
 
+    # Also verify the env var was persisted to the agent's env file on disk.
+    # This mirrors the storage check in test_create_with_pass_env and ensures
+    # the var is present both at runtime (verified above via tmux) and on disk.
+    env_file_result = e2e.run(
+        "cat $MNGR_HOST_DIR/agents/*/env",
+        comment="Verify MNGR_TEST_VAR was persisted to the agent's env file",
+    )
+    expect(env_file_result).to_succeed()
+    expect(env_file_result.stdout).to_contain(f"MNGR_TEST_VAR={env_value}")
+
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(60)
 def test_create_with_pass_env(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # it is *strongly encouraged* to either use --env-file or --pass-env, especially for any sensitive environment variables (like API keys) rather than --env, because that way they won't end up in your shell history or in your config files by accident. For example:
@@ -110,13 +121,15 @@ def test_create_with_template_modal_disabled(e2e: E2eSession) -> None:
     # The template sets provider=modal, but the modal plugin is disabled
     result = e2e.run(
         "mngr create my-task --template my_modal_template --type command --no-ensure-clean -- sleep 100094",
-        comment="templates are defined in your config",
+        comment="apply the template (provider=modal) when the modal plugin is disabled",
     )
     # Expect failure because the modal provider is disabled
     expect(result).to_fail()
-    # The error should reference the modal provider being unavailable
+    # The error must specifically reference the modal provider being unavailable,
+    # not merely contain the words "modal" or "provider" in some unrelated context.
     combined = result.stdout + result.stderr
-    expect(combined).to_match(r"(?i)modal|provider")
+    expect(combined).to_match(r"(?i)modal")
+    expect(combined).to_match(r"(?i)(unknown|disabled|not\s+(registered|available|enabled))")
 
 
 @pytest.mark.release
@@ -137,11 +150,24 @@ def test_create_with_plugin_flags(e2e: E2eSession) -> None:
     expect(combined).not_to_contain("Traceback")
     expect(result).to_fail()
     expect(combined).to_match(r"(?i)plugin.*not registered")
+    # The error should name the offending plugin so users know which one is wrong
+    expect(combined).to_contain("other-plugin")
+
+    # When validation fails, no partial agent should be left on disk.
+    # Use a filesystem check rather than ``mngr list`` to avoid triggering
+    # remote-provider discovery (which would require @pytest.mark.modal).
+    agents_dir_result = e2e.run(
+        'ls -1 "$MNGR_HOST_DIR/agents" 2>/dev/null | wc -l',
+        comment="Verify no agent directory was created when validation failed",
+    )
+    expect(agents_dir_result).to_succeed()
+    expect(agents_dir_result.stdout.strip()).to_equal("0")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(60)
 def test_create_in_place_alias_target(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you should probably use aliases for making little shortcuts for yourself, because many of the commands can get a bit long:
@@ -168,6 +194,7 @@ def test_create_in_place_alias_target(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_config_set_headless(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # or you can set that option in your config so that it always applies:
@@ -178,16 +205,31 @@ def test_config_set_headless(e2e: E2eSession) -> None:
         comment="or you can set that option in your config so that it always applies",
     )
     expect(result).to_succeed()
+    # The CLI confirms both the key and the scope it wrote to; project is the
+    # default scope for `config set` and the only place this test wrote.
     expect(result.stdout).to_contain("Set headless")
+    expect(result.stdout).to_contain("project")
 
-    # Verify the value was persisted via the merged config view (default scope)
+    # Verify the value was actually persisted to disk in the project scope
+    # config file -- a stronger check than just trusting `config get`, since
+    # the merged view would also surface a value written to the wrong scope.
+    file_result = e2e.run(
+        "cat .$MNGR_ROOT_NAME/settings.toml",
+        comment="Verify headless was written to the project settings.toml on disk",
+    )
+    expect(file_result).to_succeed()
+    expect(file_result.stdout).to_match(r"(?m)^headless\s*=\s*true\s*$")
+
+    # And verify the value is visible to a fresh mngr invocation via the
+    # merged config view (default scope).
     get_result = e2e.run("mngr config get headless", comment="Verify headless config is visible in merged view")
     expect(get_result).to_succeed()
-    expect(get_result.stdout).to_contain("true")
+    expect(get_result.stdout.strip()).to_equal("true")
 
 
 @pytest.mark.release
 @pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_env_var_mngr_headless(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # or you can set it as an environment variable:
@@ -217,6 +259,7 @@ def test_env_var_mngr_headless(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_config_set_default_provider(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # *all* mngr options work like that. For example, if you want to always run agents in Modal by default, you can set that in your config:
@@ -244,6 +287,7 @@ def test_config_set_default_provider(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_with_label(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can add labels to organize your agents and tags for host metadata:

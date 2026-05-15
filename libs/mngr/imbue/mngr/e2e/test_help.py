@@ -31,6 +31,8 @@ def test_help_succeeds(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("push")
     expect(result.stdout).to_contain("pull")
     expect(result.stdout).to_contain("clone")
+    # A successful help invocation should not emit warnings or errors on stderr.
+    expect(result.stderr).to_be_empty()
 
 
 @pytest.mark.release
@@ -45,9 +47,11 @@ def test_create_help_succeeds(e2e: E2eSession) -> None:
     )
     expect(result).to_succeed()
     # Verify the help text has key structural sections
+    expect(result.stdout).to_contain("NAME")
     expect(result.stdout).to_contain("SYNOPSIS")
     expect(result.stdout).to_contain("DESCRIPTION")
     expect(result.stdout).to_contain("OPTIONS")
+    expect(result.stdout).to_contain("SEE ALSO")
     expect(result.stdout).to_contain("EXAMPLES")
     # Verify a few representative flags are documented
     expect(result.stdout).to_contain("--no-connect")
