@@ -252,7 +252,10 @@ def _collect_explicit_toml_keys(
 
     Used by ``mngr config list`` (without ``--all``) to filter the merged
     config view to keys the user has actually written to a config file.
-    Missing or unreadable scope files contribute no keys.
+    Missing scope files (no path resolvable, file absent) contribute no
+    keys; a malformed TOML file surfaces as a ``tomllib.TOMLDecodeError``
+    from ``_load_config_file``, matching how the rest of ``mngr config``
+    handles parse failures.
     """
     explicit: set[tuple[str, ...]] = set()
     for scope in (ConfigScope.USER, ConfigScope.PROJECT, ConfigScope.LOCAL):
