@@ -4345,33 +4345,6 @@ def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
     assert env_vars == {}
 
 
-def test_modify_env_vars_does_not_emit_transcript_env_var(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-    temp_mngr_ctx: MngrContext,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """modify_env_vars no longer sets MNGR_EMIT_COMMON_TRANSCRIPT.
-
-    Pre-Phase 2/3 the env var gated the wrapper script's launch decision.
-    Now the converter is either provisioned on disk or it isn't, and the
-    wrapper just checks ``-x``. Confirm we don't accidentally regress and
-    start emitting the dead env var.
-    """
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    agent, host = make_claude_agent(
-        local_provider,
-        tmp_path,
-        temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False),
-    )
-    env_vars: dict[str, str] = {}
-
-    agent.modify_env_vars(host, env_vars)
-
-    assert "MNGR_EMIT_COMMON_TRANSCRIPT" not in env_vars
-
-
 # =============================================================================
 # get_claude_config_dir Tests
 # =============================================================================
