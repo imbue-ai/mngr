@@ -96,13 +96,28 @@ def _validate_against_template(
         )
 
 
-def _upsert_modal_secret(name: str, values: dict[str, str], *, is_dry_run: bool) -> None:
-    """Create or overwrite the Modal secret with the non-empty subset of ``values``."""
+def _upsert_modal_secret(
+    name: str,
+    values: dict[str, str],
+    *,
+    modal_env: str | None,
+    is_dry_run: bool,
+) -> None:
+    """Create or overwrite the Modal secret with the non-empty subset of ``values``.
+
+    When ``modal_env`` is set, the secret is created in that Modal env;
+    otherwise it lands in the workspace's default env. Modal Secrets are
+    env-scoped, so the env passed here must match the env the Modal app
+    is deployed into.
+    """
     non_empty = {k: v for k, v in values.items() if v}
     if not non_empty:
         print(f"[skip] {name}: every value was empty", file=sys.stderr)
         return
-    args = ["uv", "run", "modal", "secret", "create", "--force", name]
+    args = ["uv", "run", "modal", "secret", "create", "--force"]
+    if modal_env is not None:
+        args.extend(["--env", modal_env])
+    args.append(name)
     for key, value in non_empty.items():
         args.append(f"{key}={value}")
     printable = [a if "=" not in a else f"{a.split('=', 1)[0]}=***" for a in args]
@@ -126,6 +141,16 @@ def main() -> int:
             "Optional list of services to push (e.g. `litellm cloudflare`). "
             "Every name must appear in the tier's deploy.toml [secrets].services list. "
             "When omitted, every service from deploy.toml is pushed."
+        ),
+    )
+    parser.add_argument(
+        "--env",
+        dest="modal_env",
+        default=None,
+        help=(
+            "Modal environment to push the secrets into (e.g. `main` or a per-developer env name). "
+            "When omitted, the Modal CLI uses the workspace's default env. Modal Secrets are "
+            "env-scoped, so this should match the env the deploy targets."
         ),
     )
     parser.add_argument(
@@ -189,7 +214,12 @@ def main() -> int:
         # so a Vault entry can carry operator-only notes without leaking
         # into Modal.
         filtered = {key: vault_values[key] for key in expected_keys}
-        _upsert_modal_secret(modal_secret_name, filtered, is_dry_run=args.dry_run)
+        _upsert_modal_secret(
+            modal_secret_name,
+            filtered,
+            modal_env=args.modal_env,
+            is_dry_run=args.dry_run,
+        )
 
     return 0
 

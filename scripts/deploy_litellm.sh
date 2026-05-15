@@ -57,11 +57,13 @@ if [[ -z "$modal_workspace" || "$modal_workspace" == "CHANGE_ME" ]]; then
     exit 1
 fi
 
-echo "==> Pushing the litellm Vault secret to Modal for tier '${tier}'..."
+echo "==> Pushing the litellm Vault secret to Modal env '${modal_env}' for tier '${tier}'..."
 # litellm-proxy only consumes the `litellm-<tier>` Modal Secret; pushing
 # everything else would force every other tier's Vault entries to be
-# populated even when we're only iterating on the proxy.
-uv run python "$repo_root/scripts/push_modal_secrets.py" "$tier" litellm
+# populated even when we're only iterating on the proxy. The secret has
+# to land in the same Modal env the deploy below targets -- Modal
+# Secrets are env-scoped.
+uv run python "$repo_root/scripts/push_modal_secrets.py" "$tier" litellm --env "$modal_env"
 
 # Modal won't auto-create the env on deploy; create it idempotently so
 # operators don't have to remember a separate step on the first deploy

@@ -58,18 +58,20 @@ if [[ -z "$modal_workspace" || "$modal_workspace" == "CHANGE_ME" ]]; then
     exit 1
 fi
 
-echo "==> Pushing the connector's Vault secrets to Modal for tier '${tier}'..."
+echo "==> Pushing the connector's Vault secrets to Modal env '${modal_env}' for tier '${tier}'..."
 # The remote_service_connector binds these specific Modal Secrets in
 # apps/remote_service_connector/.../app.py. Pushing the litellm secret
 # is deferred to scripts/deploy_litellm.sh, which deploys a different
-# Modal app.
+# Modal app. The secrets have to land in the same Modal env the deploy
+# below targets -- Modal Secrets are env-scoped.
 uv run python "$repo_root/scripts/push_modal_secrets.py" "$tier" \
     cloudflare \
     supertokens \
     neon \
     pool-ssh \
     litellm-connector \
-    paid-accounts
+    paid-accounts \
+    --env "$modal_env"
 
 # Modal won't auto-create the env on deploy; create it idempotently so
 # operators don't have to remember a separate step on the first deploy
