@@ -141,6 +141,8 @@ def test_mngr_create_with_invalid_snapshot_id_fails(
             "mngr",
             "create",
             agent_name,
+            "--type",
+            "command",
             "--provider",
             "modal",
             "--snapshot",

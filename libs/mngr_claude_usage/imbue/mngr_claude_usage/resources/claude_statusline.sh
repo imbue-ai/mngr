@@ -6,9 +6,9 @@
 # JSON snapshot piped to stdin includes a `rate_limits` field with five_hour /
 # seven_day / overage windows (Claude.ai subscriptions only). We:
 #   1. Capture stdin once into a variable (any user statusline also reads stdin).
-#   2. Forward the payload to the rate-limits writer (sibling script in this
+#   2. Forward the payload to the usage writer (sibling script in this
 #      same commands/ dir), which appends one JSONL event per render to
-#      $MNGR_AGENT_STATE_DIR/events/claude/rate_limits/events.jsonl.
+#      $MNGR_AGENT_STATE_DIR/events/claude/usage/events.jsonl.
 #   3. Replay the payload to the user's pre-existing statusLine.command (if
 #      any) captured at provision time into the sibling user_statusline_cmd
 #      sidecar file, so any pre-existing user statusline keeps working
@@ -17,7 +17,7 @@ set -euo pipefail
 
 : "${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR must be set}"
 commands_dir="$MNGR_AGENT_STATE_DIR/commands"
-writer="$commands_dir/claude_rate_limits_writer.sh"
+writer="$commands_dir/claude_usage_writer.sh"
 user_cmd_file="$commands_dir/user_statusline_cmd"
 
 payload=$(cat)

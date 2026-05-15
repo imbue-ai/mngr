@@ -1,6 +1,10 @@
 # offload configuration for running mngr acceptance tests on Modal
 [offload]
-max_parallel = 200
+# With max_parallel > num_tests (~89), LPT degenerates to one-per-bin and
+# every batch pays full pytest cold-start + sandbox-create + per-batch
+# orchestrator-side `uv run` download overhead. 50 lets LPT pack 2-4
+# tests/batch while load-balancing the slowest tests into their own bin.
+max_parallel = 50
 test_timeout_secs = 900
 retry_count = 2
 stream_output = true

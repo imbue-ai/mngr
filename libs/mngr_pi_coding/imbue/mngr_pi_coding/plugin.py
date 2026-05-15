@@ -8,11 +8,11 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.mngr import hookimpl
-from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.agents.tui_utils import send_enter_best_effort
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import PluginMngrError
-from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -104,8 +104,20 @@ def _has_api_credentials_available(
     return False
 
 
-class PiCodingAgent(BaseAgent[PiCodingAgentConfig]):
+class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
     """Agent implementation for the pi coding agent with TUI handling."""
+
+    # Pi displays "pi v" followed by the version in its startup banner; this
+    # substring stays in the visible pane for the lifetime of the session,
+    # so it serves as the startup ready indicator.
+    TUI_READY_INDICATOR = "pi v"
+
+    def _send_enter_and_validate(self, tmux_target: str) -> None:
+        # Pi has no UserPromptSubmit hook and no input-row placeholder that
+        # disappears during typing, so submission can't be confirmed
+        # post-Enter. The earlier paste-visibility check is what gives us
+        # confidence the message landed.
+        send_enter_best_effort(self, tmux_target)
 
     def get_pi_config_dir(self) -> Path:
         """Return the per-agent pi config directory path.
@@ -125,37 +137,6 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig]):
         Pi sets process.title = "pi" in cli.ts.
         """
         return "pi"
-
-    def uses_paste_detection_send(self) -> bool:
-        """Enable paste-detection send_message for pi.
-
-        Pi is a TUI that echoes input to the terminal and has an editor-based
-        input handler that can misinterpret Enter if sent too quickly.
-        """
-        return True
-
-    def get_tui_ready_indicator(self) -> str | None:
-        """Return pi's banner text as the TUI ready indicator.
-
-        Pi displays "pi v" followed by the version in its startup banner.
-        Waiting for this ensures we don't send input before the UI is ready.
-        """
-        return "pi v"
-
-    def _send_enter_and_wait(self, tmux_target: str) -> None:
-        """Send Enter to submit the message.
-
-        Pi does not have Claude's UserPromptSubmit tmux hook mechanism,
-        so we just send Enter directly. The paste-detection phase already
-        confirmed the text is visible in the pane before this is called.
-        """
-        send_enter_cmd = f"tmux send-keys -t '{tmux_target}' Enter"
-        result = self.host.execute_stateful_command(send_enter_cmd)
-        if not result.success:
-            raise SendMessageError(
-                str(self.name),
-                f"tmux send-keys Enter failed: {result.stderr or result.stdout}",
-            )
 
     def on_before_provisioning(
         self,
