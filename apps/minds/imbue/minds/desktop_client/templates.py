@@ -190,7 +190,7 @@ _STATUS_TEXT_IMBUE_CLOUD: Final[dict[str, str]] = {
 def render_creating_page(
     creation_id: CreationId,
     info: AgentCreationInfo,
-    launch_mode: LaunchMode = LaunchMode.LOCAL,
+    launch_mode: LaunchMode = LaunchMode.LIMA,
 ) -> str:
     """Render the progress page shown while an agent is being created.
 
