@@ -83,6 +83,15 @@ class OvhVpsClient(VpsClientInterface):
         default=_DEFAULT_VPS_TASK_POLL_INTERVAL,
         description="Seconds between polls when waiting for a VPS task to complete",
     )
+    is_unconfigured: bool = Field(
+        default=False,
+        description=(
+            "True iff this client was constructed with placeholder credentials because no "
+            "OVH credentials were configured. Used by OvhProvider to short-circuit "
+            "discovery silently in environments (e.g. CI for unrelated tests) that "
+            "merely enumerate registered backends."
+        ),
+    )
 
     _ssh_key_cache: dict[str, str] = PrivateAttr(default_factory=dict)
 

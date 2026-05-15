@@ -106,16 +106,17 @@ class OvhProvider(VpsDockerProvider):
     def _list_provider_vps_ips(self) -> list[str]:
         if self._vps_iam_cache is not None:
             return list(self._vps_iam_cache)
+        if self.ovh_client.is_unconfigured:
+            # No credentials anywhere (config, OVH_* env, ~/.ovh.conf): don't
+            # bother making a doomed API call. Silently return empty so that
+            # `mngr list` / `mngr usage` / etc. don't dump a WARNING into
+            # stdout for users who haven't set up OVH. A real failure with
+            # real credentials still surfaces through the except branch below.
+            self._vps_iam_cache = []
+            return []
         try:
             resources = list_vps_resources_for_provider(self.ovh_client, provider_name=str(self.name))
         except (VpsApiError, MngrError) as e:
-            # Includes the "no credentials" case: python-ovh raises
-            # InvalidCredential / NotCredential from _call, which we then
-            # remap to VpsApiError. Treating this as an empty discovery
-            # (with a warning) keeps `mngr list` from crashing when OVH is
-            # configured but unreachable, while still surfacing the cause
-            # in the logs. Discovery from ~/.ovh.conf works through the
-            # same path.
             logger.warning("OVH IAM tag listing failed; treating as empty: {}", e)
             self._vps_iam_cache = []
             return []
@@ -227,11 +228,14 @@ def _build_ovh_client(config: OvhProviderConfig) -> OvhVpsClient:
     auth error rather than the provider blowing up at registration
     time. This mirrors how ``mngr_vultr`` accepts an empty API key when
     none is configured, and lets unrelated tests that merely enumerate
-    registered backends run without OVH credentials.
+    registered backends run without OVH credentials. The returned
+    client has ``is_unconfigured=True`` so ``OvhProvider`` can
+    short-circuit discovery without emitting log noise.
     """
     kwargs = config.resolve_python_ovh_kwargs()
     try:
         raw_client = ovh.Client(**kwargs)
+        is_unconfigured = False
     except InvalidConfiguration:
         logger.debug(
             "OVH credentials not configured; constructing a placeholder client. "
@@ -243,7 +247,12 @@ def _build_ovh_client(config: OvhProviderConfig) -> OvhVpsClient:
             application_secret="mngr-ovh-unconfigured",
             consumer_key="mngr-ovh-unconfigured",
         )
-    return OvhVpsClient(ovh_client=raw_client, subsidiary=config.ovh_subsidiary)
+        is_unconfigured = True
+    return OvhVpsClient(
+        ovh_client=raw_client,
+        subsidiary=config.ovh_subsidiary,
+        is_unconfigured=is_unconfigured,
+    )
 
 
 class OvhProviderBackend(ProviderBackendInterface):
