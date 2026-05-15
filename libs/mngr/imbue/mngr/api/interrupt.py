@@ -29,11 +29,17 @@ from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
+_in_flight_interrupts: set[str] = set()
+_in_flight_lock = Lock()
+
 
 class InterruptResult(MutableModel):
     """Result of interrupting agents."""
 
     successful_agents: list[str] = Field(default_factory=list, description="List of agent names that were interrupted")
+    skipped_agents: list[str] = Field(
+        default_factory=list, description="List of agent names skipped because an interrupt was already in progress"
+    )
     failed_agents: list[tuple[str, str]] = Field(
         default_factory=list, description="List of (agent_name, error_message) tuples"
     )
@@ -178,47 +184,63 @@ def _process_host_for_interrupt(
         if not agents_to_interrupt:
             return
 
-        agent_ids = [a.id for a in agents_to_interrupt]
-        try:
-            with log_span("Stopping {} agents for interrupt on host {}", len(agent_ids), host_ref.host_id):
-                host.stop_agents(agent_ids)
-            with log_span("Restarting {} agents for interrupt on host {}", len(agent_ids), host_ref.host_id):
-                host.start_agents(agent_ids)
-        except BaseMngrError as e:
-            error_msg = str(e)
-            for agent in agents_to_interrupt:
+        with _in_flight_lock:
+            already_in_flight = [a for a in agents_to_interrupt if a.id in _in_flight_interrupts]
+            agents_to_interrupt = [a for a in agents_to_interrupt if a.id not in _in_flight_interrupts]
+            for agent in already_in_flight:
+                logger.debug("Skipping agent {} — interrupt already in progress", agent.name)
                 with result_lock:
-                    result.failed_agents.append((str(agent.name), error_msg))
-                if on_error:
-                    on_error(str(agent.name), error_msg)
-            if error_behavior == ErrorBehavior.ABORT:
-                raise MngrError(error_msg) from e
-            return
+                    result.skipped_agents.append(str(agent.name))
+            if not agents_to_interrupt:
+                return
+            _in_flight_interrupts.update(a.id for a in agents_to_interrupt)
 
-        # Refresh agent objects so subsequent operations see the post-restart state
-        refreshed_agents = host.get_agents()
-        refreshed_by_id = {a.id: a for a in refreshed_agents}
+        claimed_ids = {a.id for a in agents_to_interrupt}
+        try:
+            agent_ids = [a.id for a in agents_to_interrupt]
+            try:
+                with log_span("Stopping {} agents for interrupt on host {}", len(agent_ids), host_ref.host_id):
+                    host.stop_agents(agent_ids)
+                with log_span("Restarting {} agents for interrupt on host {}", len(agent_ids), host_ref.host_id):
+                    host.start_agents(agent_ids)
+            except BaseMngrError as e:
+                error_msg = str(e)
+                for agent in agents_to_interrupt:
+                    with result_lock:
+                        result.failed_agents.append((str(agent.name), error_msg))
+                    if on_error:
+                        on_error(str(agent.name), error_msg)
+                if error_behavior == ErrorBehavior.ABORT:
+                    raise MngrError(error_msg) from e
+                return
 
-        resume_futures: list[Future[None]] = []
-        with mngr_executor(
-            parent_cg=parent_cg, name=f"interrupt_resume_{host_ref.host_id}", max_workers=32
-        ) as resume_executor:
-            for agent in agents_to_interrupt:
-                refreshed = refreshed_by_id.get(agent.id, agent)
-                resume_futures.append(
-                    resume_executor.submit(
-                        _send_resume_message,
-                        agent=refreshed,
-                        result=result,
-                        result_lock=result_lock,
-                        error_behavior=error_behavior,
-                        on_success=on_success,
-                        on_error=on_error,
+            # Refresh agent objects so subsequent operations see the post-restart state
+            refreshed_agents = host.get_agents()
+            refreshed_by_id = {a.id: a for a in refreshed_agents}
+
+            resume_futures: list[Future[None]] = []
+            with mngr_executor(
+                parent_cg=parent_cg, name=f"interrupt_resume_{host_ref.host_id}", max_workers=32
+            ) as resume_executor:
+                for agent in agents_to_interrupt:
+                    refreshed = refreshed_by_id.get(agent.id, agent)
+                    resume_futures.append(
+                        resume_executor.submit(
+                            _send_resume_message,
+                            agent=refreshed,
+                            result=result,
+                            result_lock=result_lock,
+                            error_behavior=error_behavior,
+                            on_success=on_success,
+                            on_error=on_error,
+                        )
                     )
-                )
 
-        for future in resume_futures:
-            future.result()
+            for future in resume_futures:
+                future.result()
+        finally:
+            with _in_flight_lock:
+                _in_flight_interrupts.difference_update(claimed_ids)
 
     except MngrError as e:
         if error_behavior == ErrorBehavior.ABORT:
