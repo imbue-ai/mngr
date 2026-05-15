@@ -2,7 +2,7 @@
 
 Each dynamic dev env gets its own Neon database, named ``minds-dev-<name>``,
 under a shared dev-tier Neon project. Authentication uses an API token the
-dev tier owns in Vault (``secrets/kv/minds/dev/neon`` plus the
+dev tier owns in Vault (``secrets/minds/dev/neon`` plus the
 operator-side Neon project id from ``deploy.toml``).
 
 Returns the pooled connection string the connector / connector clients use

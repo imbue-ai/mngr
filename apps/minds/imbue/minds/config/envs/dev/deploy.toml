@@ -7,7 +7,7 @@
 
 modal_workspace = "CHANGE_ME"
 modal_env = "main"
-vault_path_prefix = "secrets/kv/minds/dev"
+vault_path_prefix = "secrets/minds/dev"
 cloudflare_domain = "CHANGE_ME.example.com"
 
 oauth_google_client_id = ""

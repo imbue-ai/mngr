@@ -32,13 +32,13 @@ Each tier has two families of Vault entries:
 these from their runtime env via `modal.Secret.from_name(...)`):
 
 ```
-secrets/kv/minds/<tier>/cloudflare
-secrets/kv/minds/<tier>/litellm
-secrets/kv/minds/<tier>/litellm-connector
-secrets/kv/minds/<tier>/neon
-secrets/kv/minds/<tier>/paid-accounts
-secrets/kv/minds/<tier>/pool-ssh
-secrets/kv/minds/<tier>/supertokens
+secrets/minds/<tier>/cloudflare
+secrets/minds/<tier>/litellm
+secrets/minds/<tier>/litellm-connector
+secrets/minds/<tier>/neon
+secrets/minds/<tier>/paid-accounts
+secrets/minds/<tier>/pool-ssh
+secrets/minds/<tier>/supertokens
 ```
 
 **Read only by `minds env create` on a developer's laptop** (never pushed
@@ -46,8 +46,8 @@ to Modal -- the connector's runtime doesn't need create-database / VPS-
 management permissions):
 
 ```
-secrets/kv/minds/<tier>/neon-admin   # NEON_API_TOKEN, NEON_PROJECT_ID
-secrets/kv/minds/<tier>/vultr        # VULTR_API_KEY
+secrets/minds/<tier>/neon-admin   # NEON_API_TOKEN, NEON_PROJECT_ID
+secrets/minds/<tier>/vultr        # VULTR_API_KEY
 ```
 
 The schema for each `<service>` is the corresponding file under

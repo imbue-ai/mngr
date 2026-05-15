@@ -5,7 +5,7 @@
 # pulled from Vault and pushed into Modal as `<service>-production`.
 
 modal_workspace = "CHANGE_ME"
-vault_path_prefix = "secrets/kv/minds/production"
+vault_path_prefix = "secrets/minds/production"
 cloudflare_domain = "CHANGE_ME.example.com"
 
 # OAuth client IDs are not secrets; the client_secret stays in Vault under

@@ -102,7 +102,7 @@ class DeployEnvConfig(FrozenModel):
         ),
     )
     vault_path_prefix: NonEmptyStr = Field(
-        description="HCP Vault path prefix for this tier's secrets, e.g. `secrets/kv/minds/production`."
+        description="HCP Vault path prefix for this tier's secrets, e.g. `secrets/minds/production`."
     )
     cloudflare_domain: NonEmptyStr = Field(
         description="Cloudflare zone domain used by this tier (informational; the connector also reads this from its own Vault entry)."

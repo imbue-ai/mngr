@@ -51,7 +51,7 @@ def test_validate_missing_keys_exits(tmp_path: Path) -> None:
             expected_keys=("A", "B"),
             vault_values={"A": "v"},
             service="cloudflare",
-            vault_path="secrets/kv/minds/dev/cloudflare",  # type: ignore[arg-type]
+            vault_path="secrets/minds/dev/cloudflare",  # type: ignore[arg-type]
         )
 
 
@@ -61,5 +61,5 @@ def test_validate_extras_are_allowed() -> None:
         expected_keys=("A",),
         vault_values={"A": "v", "OPERATOR_NOTE": "ignore me"},
         service="cloudflare",
-        vault_path="secrets/kv/minds/dev/cloudflare",  # type: ignore[arg-type]
+        vault_path="secrets/minds/dev/cloudflare",  # type: ignore[arg-type]
     )

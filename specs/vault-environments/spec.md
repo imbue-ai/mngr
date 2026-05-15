@@ -22,7 +22,7 @@
 >
 > * Three environments to start: `dev`, `staging`, `production`. Staging and production are fully isolated and shape-identical; `dev` supports dynamic per-developer / per-branch environments sharing dev-tier base credentials.
 > * **Vault scope is server-side deploy secrets only.** Vault stores secrets the Modal-deployed services need at runtime. The deploy script pulls from Vault, pushes to Modal Secrets (which persist as today), and never writes Vault values to a persistent file on the deployer's laptop. **User-side desktop-app secrets stay as shell env vars** (`ANTHROPIC_API_KEY`, `GH_TOKEN`) — unchanged.
-> * Vault: HCP Vault, namespace `admin`, KV mount `secrets/`, path layout `secrets/kv/minds/<tier>/<service>` (one Vault secret per existing `.minds/template/<service>.sh` file). Dynamic dev env secrets are not stored in Vault.
+> * Vault: HCP Vault, namespace `admin`, KV mount `secrets/`, path layout `secrets/minds/<tier>/<service>` (one Vault secret per existing `.minds/template/<service>.sh` file). Dynamic dev env secrets are not stored in Vault.
 > * Vault auth: developer / CI is responsible for being logged in to the `vault` CLI themselves.
 > * Modal: three separate Modal accounts (one per env tier). Within the `dev` account, dynamic deployments isolate via separate Modal **environments** (`modal deploy --env=<dev-name>`).
 > * Per-service isolation: Neon (separate accounts per tier; separate DB per dev env), Cloudflare (separate accounts per tier; shared across dev envs), SuperTokens (separate accounts per tier; separate app per dev env), Google/GitHub OAuth (per-tier client; loopback callback works for every dev env), Vultr + Anthropic LiteLLM source key shared across dev envs (Vultr instances tagged `minds_dev_env=<name>`), pool-management SSH key per tier.
@@ -36,7 +36,7 @@
 ## Overview
 
 - Today, every environment-scoped secret lives on Josh's laptop as `.minds/<env>/<service>.sh` files and gets pushed into Modal Secrets at deploy time; every URL the desktop client uses points at a single `joshalbrecht`-owned Modal workspace. This blocks anyone else from running a real deploy and conflates "dev iteration" with "production users".
-- Move the source of truth for deploy-time secrets into **HCP Vault** (namespace `admin`, mount `secrets/`, layout `secrets/kv/minds/<tier>/<service>`). Each `.minds/template/<service>.sh` continues to be the *schema* of what a tier's Vault entry must contain.
+- Move the source of truth for deploy-time secrets into **HCP Vault** (namespace `admin`, mount `secrets/`, layout `secrets/minds/<tier>/<service>`). Each `.minds/template/<service>.sh` continues to be the *schema* of what a tier's Vault entry must contain.
 - Stand up **three completely separate accounts** (Modal, Neon, Cloudflare, SuperTokens, plus OAuth clients) for `dev`, `staging`, and `production`. Staging and production are shape-identical; dev hosts dynamic per-developer environments.
 - Within the `dev` Modal account, each dynamic dev env is its own Modal **environment** (`modal deploy --env=<dev-name>`). Each dev env also gets its own Neon DB and SuperTokens app; everything else (Cloudflare zone, OAuth clients, Vultr API key, Anthropic source key, pool-management SSH key) is shared across dev envs.
 - The desktop client picks the environment it talks to via `minds run --config-file <path>`. Per-tier config is split into two files: `client.toml` (tiny — the URLs the desktop reads) and `deploy.toml` (Modal workspace, Vault paths, etc. — what the deploy pipeline consumes). User-side runtime secrets (`ANTHROPIC_API_KEY`, `GH_TOKEN`) stay as shell env vars — Vault is *not* involved client-side.
@@ -49,7 +49,7 @@
 
 - `scripts/deploy_remote_service_connector.sh <tier>` and `scripts/deploy_litellm.sh <tier>` continue to be the entry points; their behavior changes:
   - They require `vault` CLI to be logged in to the HCP `admin` namespace (or they exit non-zero with a clear message).
-  - For each `<service>` declared in `apps/minds/imbue/minds/config/envs/<tier>/deploy.toml`'s `[secrets]` section, they read `secrets/kv/minds/<tier>/<service>` from Vault, then push it into Modal as `<service>-<tier>` via the existing `modal secret create --force` path.
+  - For each `<service>` declared in `apps/minds/imbue/minds/config/envs/<tier>/deploy.toml`'s `[secrets]` section, they read `secrets/minds/<tier>/<service>` from Vault, then push it into Modal as `<service>-<tier>` via the existing `modal secret create --force` path.
   - Vault values are held only in the deploy script's process memory; nothing is persisted to disk. Modal Secrets themselves persist (warm `min_containers=1` stays valid).
   - `MNGR_DEPLOY_ENV=<tier>` continues to drive both Modal app names and `Secret.from_name(...)` lookups inside the deployed apps.
 - The `<tier>` arg must be `dev`, `staging`, or `production`. Any other value is rejected.
@@ -68,7 +68,7 @@
 
 - `minds env create <name>` (where `<name>` matches the existing `[a-z0-9_-]+` pattern used for `MINDS_ROOT_NAME`):
   1. Validates `vault` CLI is logged in and the `dev` tier's `deploy.toml` resolves.
-  2. Reads dev-tier shared secrets from `secrets/kv/minds/dev/<service>` for the providers it needs to call (Neon API token, SuperTokens management key, Modal token-id/token-secret for the dev workspace, Vultr API key for tagging, Cloudflare API token if it ever needs to touch CF).
+  2. Reads dev-tier shared secrets from `secrets/minds/dev/<service>` for the providers it needs to call (Neon API token, SuperTokens management key, Modal token-id/token-secret for the dev workspace, Vultr API key for tagging, Cloudflare API token if it ever needs to touch CF).
   3. Creates a Modal environment named `<name>` in the dev workspace via `modal environment create`.
   4. Creates a fresh Neon database named `minds-dev-<name>` via the Neon REST API; captures the pooled connection string.
   5. Creates a fresh SuperTokens app/tenant for `<name>` via the dev-tier SuperTokens management API; captures its connection URI + API key.
@@ -110,7 +110,7 @@
 ### Vault layout (set up out-of-band, documented in repo)
 
 - Cluster: `vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200`, namespace `admin`, KV v2 mount `secrets/`.
-- For each tier (`dev`, `staging`, `production`) and each service file in `.minds/template/*.sh` (`cloudflare`, `litellm`, `litellm-connector`, `neon`, `paid-accounts`, `pool-ssh`, `supertokens`), one Vault secret at `secrets/kv/minds/<tier>/<service>` whose key set matches the keys declared in the corresponding template file.
+- For each tier (`dev`, `staging`, `production`) and each service file in `.minds/template/*.sh` (`cloudflare`, `litellm`, `litellm-connector`, `neon`, `paid-accounts`, `pool-ssh`, `supertokens`), one Vault secret at `secrets/minds/<tier>/<service>` whose key set matches the keys declared in the corresponding template file.
 - A new doc at `apps/minds/docs/vault-setup.md` enumerates the paths and links the template files as the schema.
 
 ### `apps/minds/imbue/minds/config/envs/` — per-tier config
@@ -136,7 +136,7 @@ apps/minds/imbue/minds/config/envs/
 
 - `apps/minds/imbue/minds/config/data_types.py` (existing) gains new types:
   - `ClientEnvConfig(FrozenModel)` — fields: `connector_url: AnyUrl`, `litellm_proxy_url: AnyUrl`.
-  - `DeployEnvConfig(FrozenModel)` — fields: `modal_workspace: NonEmptyStr`, `modal_env: NonEmptyStr | None` (only set for dev's dynamic case), `vault_path_prefix: NonEmptyStr` (e.g. `secrets/kv/minds/production`), `cloudflare_domain: NonEmptyStr`, `oauth_google_client_id: NonEmptyStr | None`, `oauth_github_client_id: NonEmptyStr | None`, `required_secrets: tuple[ServiceName, ...]`.
+  - `DeployEnvConfig(FrozenModel)` — fields: `modal_workspace: NonEmptyStr`, `modal_env: NonEmptyStr | None` (only set for dev's dynamic case), `vault_path_prefix: NonEmptyStr` (e.g. `secrets/minds/production`), `cloudflare_domain: NonEmptyStr`, `oauth_google_client_id: NonEmptyStr | None`, `oauth_github_client_id: NonEmptyStr | None`, `required_secrets: tuple[ServiceName, ...]`.
   - `LocalDevEnvConfig(ClientEnvConfig)` — extends ClientEnvConfig with `[secrets]` subtable typed as `Mapping[NonEmptyStr, SecretStr]` for any per-dev secrets the desktop side needs.
 - `apps/minds/imbue/minds/config/loader.py` (new) — pure loader:
   - `load_client_config(path: Path) -> ClientEnvConfig`
@@ -156,7 +156,7 @@ apps/minds/imbue/minds/config/envs/
 - New signature: `uv run scripts/push_modal_secrets.py <tier> [--dry-run]`.
   - `<tier>` ∈ {`dev`, `staging`, `production`}. (Per-dev-env pushes do not go through this script — they go through `minds env create`.)
   - For each `<service>` listed in `apps/minds/imbue/minds/config/envs/<tier>/deploy.toml`'s `required_secrets`:
-    - Read `secrets/kv/minds/<tier>/<service>` via `vault kv get -format=json -mount=secrets kv/minds/<tier>/<service>`.
+    - Read `secrets/minds/<tier>/<service>` via `vault kv get -format=json -mount=secrets kv/minds/<tier>/<service>`.
     - Validate every key declared in `.minds/template/<service>.sh` is present (uses the existing `_parse_env_file` against the template to get the expected key set).
     - Invoke `uv run modal secret create --force <service>-<tier> KEY=VAL ...` exactly as today.
 - Vault values are kept in process memory and `dict[str, str]` only. No `.sh` files are written.
@@ -252,7 +252,7 @@ Each phase produces a working system; no phase leaves the tree broken.
 
 ### Phase 3 — Stand up dedicated tier infra
 
-- Operator (out-of-band): create dedicated Modal / Neon / Cloudflare / SuperTokens accounts for `dev`, `staging`, `production`; create Google + GitHub OAuth clients per tier; populate `secrets/kv/minds/<tier>/<service>` in Vault for each tier.
+- Operator (out-of-band): create dedicated Modal / Neon / Cloudflare / SuperTokens accounts for `dev`, `staging`, `production`; create Google + GitHub OAuth clients per tier; populate `secrets/minds/<tier>/<service>` in Vault for each tier.
 - Update `apps/minds/imbue/minds/config/envs/{dev,staging,production}/{client.toml,deploy.toml}` to point at the new accounts' values.
 - Deploy `remote_service_connector` and `litellm-proxy` to each tier.
 - Verify smoke: `minds run --config-file apps/minds/imbue/minds/config/envs/staging/client.toml` can sign in via OAuth and create an agent.

@@ -57,7 +57,7 @@ def test_load_deploy_config_dev_tier_round_trip() -> None:
     """The committed dev/deploy.toml parses cleanly."""
     config = load_deploy_config("dev")
     assert isinstance(config, DeployEnvConfig)
-    assert config.vault_path_prefix == "secrets/kv/minds/dev"
+    assert config.vault_path_prefix == "secrets/minds/dev"
     assert "cloudflare" in config.secrets.services
     assert "supertokens" in config.secrets.services
 

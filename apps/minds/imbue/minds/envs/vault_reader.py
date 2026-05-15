@@ -19,12 +19,12 @@ from imbue.minds.envs.primitives import VaultReadError
 
 VAULT_BINARY: Final[str] = "vault"
 _DEFAULT_MOUNT: Final[str] = "secrets"
-_KV_PATH_PREFIX: Final[str] = "secrets/kv/"
+_KV_PATH_PREFIX: Final[str] = "secrets/"
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 30.0
 
 
 class VaultPath(str):
-    """A Vault KV path of the form ``secrets/kv/...`` (mount/secret-key).
+    """A Vault KV path of the form ``secrets/...`` (mount/secret-key).
 
     Subclassed from str so we can pass it directly as a CLI arg without an
     explicit cast, while still type-tagging the input contract.
@@ -39,7 +39,7 @@ def read_vault_kv(
 ) -> dict[str, str]:
     """Return the ``data.data`` dict of the KV-v2 secret at ``path``.
 
-    ``path`` looks like ``secrets/kv/minds/production/cloudflare``. We strip
+    ``path`` looks like ``secrets/minds/production/cloudflare``. We strip
     the ``secrets/`` mount prefix off the front and pass the rest to
     ``vault kv get -format=json -mount=secrets <rest>`` so the user's existing
     ``VAULT_ADDR`` / ``VAULT_NAMESPACE`` / token configuration is honored.
@@ -63,7 +63,7 @@ def read_vault_kv(
     if not path.startswith(_KV_PATH_PREFIX):
         raise VaultReadError(
             f"Vault path {path!r} must start with {_KV_PATH_PREFIX!r}. "
-            "Use the layout `secrets/kv/minds/<tier>/<service>`."
+            "Use the layout `secrets/minds/<tier>/<service>`."
         )
     relative = path[len(_KV_PATH_PREFIX) :].lstrip("/")
     if not relative:

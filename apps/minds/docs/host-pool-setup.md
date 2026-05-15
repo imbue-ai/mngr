@@ -59,7 +59,7 @@ Secrets live in HCP Vault now (not `.minds/<env>/` shell files); see
 `apps/minds/docs/vault-setup.md` for prerequisites. For the host-pool
 flow specifically:
 
-### secrets/kv/minds/production/neon
+### secrets/minds/production/neon
 
 The **pooled** Neon connection string:
 
@@ -68,7 +68,7 @@ vault kv put -mount=secrets kv/minds/production/neon \
     DATABASE_URL=postgresql://user:pass@host-pooler.neon.tech/db?sslmode=require
 ```
 
-### secrets/kv/minds/production/pool-ssh
+### secrets/minds/production/pool-ssh
 
 The management private key:
 

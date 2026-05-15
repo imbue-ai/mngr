@@ -20,7 +20,7 @@ The script:
 3. Errors out if the filled file is missing any template key.
 4. Pushes every declared key (including empty values, so the Vault entry
    matches the template schema exactly) to
-   `secrets/kv/minds/<tier>/<service>` via `vault kv put`.
+   `secrets/minds/<tier>/<service>` via `vault kv put`.
 
 `VAULT_NAMESPACE` and `VAULT_ADDR` default to the imbue HCP cluster values
 if the operator did not already export them.
@@ -119,7 +119,7 @@ def main() -> int:
         print("error: every value is empty -- nothing meaningful to push", file=sys.stderr)
         return 1
 
-    path = f"kv/minds/{args.tier}/{args.service}"
+    path = f"minds/{args.tier}/{args.service}"
     command = ["vault", "kv", "put", "-mount=secrets", path]
     for key, value in filled_values.items():
         command.append(f"{key}={value}")

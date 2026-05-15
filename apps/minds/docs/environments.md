@@ -52,7 +52,7 @@ HCP Vault -- see `apps/minds/docs/vault-setup.md`.
 1. Stand up the per-tier accounts (Modal workspace, Neon project,
    Cloudflare account+zone, SuperTokens core, Google+GitHub OAuth apps,
    Vultr account).
-2. Populate the Vault paths under `secrets/kv/minds/<tier>/...` -- see
+2. Populate the Vault paths under `secrets/minds/<tier>/...` -- see
    the schema files at `.minds/template/*.sh`.
 3. Update `apps/minds/imbue/minds/config/envs/<tier>/client.toml` and
    `deploy.toml` with the new account URLs / workspace names.

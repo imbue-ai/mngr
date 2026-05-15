@@ -1,7 +1,7 @@
 # Staging tier deploy config -- read by deploy scripts.
 
 modal_workspace = "CHANGE_ME"
-vault_path_prefix = "secrets/kv/minds/staging"
+vault_path_prefix = "secrets/minds/staging"
 cloudflare_domain = "CHANGE_ME.example.com"
 
 oauth_google_client_id = ""
