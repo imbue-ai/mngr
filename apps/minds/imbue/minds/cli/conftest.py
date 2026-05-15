@@ -30,7 +30,7 @@ def isolate_mind_tests(
     monkeypatch.setenv("MNGR_HOST_DIR", str(host_dir))
     monkeypatch.setenv("MNGR_PREFIX", "mngr_{}-".format(test_id))
     monkeypatch.setenv("MNGR_ROOT_NAME", "mngr-test-{}".format(test_id))
-    monkeypatch.setenv("MNGR_COMPLETION_CACHE_DIR", str(host_dir))
+    monkeypatch.setenv("MNGR__COMPLETION_CACHE_DIR", str(host_dir))
 
     with isolate_git(monkeypatch), isolate_tmux_server(monkeypatch):
         yield
