@@ -129,7 +129,15 @@ class AwsVpsClient(VpsClientInterface):
         return sg_id
 
     def _authorize_ssh_ingress_idempotent(self, sg_id: str) -> None:
-        """Authorize ingress for SSH ports on the SG, swallowing duplicate errors."""
+        """Authorize ingress for SSH ports on the SG, swallowing duplicate errors.
+
+        Each permission is authorized in its own API call so that a duplicate
+        on one port (e.g., tcp/22 already authorized from a previous run) does
+        not cause AWS to reject the entire batch and silently drop the other
+        port. AWS rejects ``AuthorizeSecurityGroupIngress`` calls with
+        ``InvalidPermission.Duplicate`` atomically — none of the permissions in
+        the batch are added if any one is a duplicate.
+        """
         ip_permissions = [
             {
                 "IpProtocol": "tcp",
@@ -144,13 +152,14 @@ class AwsVpsClient(VpsClientInterface):
                 "IpRanges": [{"CidrIp": self.allowed_ssh_cidr}],
             },
         ]
-        try:
-            self._ec2().authorize_security_group_ingress(GroupId=sg_id, IpPermissions=ip_permissions)
-        except ClientError as e:
-            code = e.response.get("Error", {}).get("Code", "")
-            if code != _DUPLICATE_INGRESS_ERROR:
-                http_status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
-                raise VpsApiError(http_status, f"{code}: {e}") from e
+        for permission in ip_permissions:
+            try:
+                self._ec2().authorize_security_group_ingress(GroupId=sg_id, IpPermissions=[permission])
+            except ClientError as e:
+                code = e.response.get("Error", {}).get("Code", "")
+                if code != _DUPLICATE_INGRESS_ERROR:
+                    http_status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
+                    raise VpsApiError(http_status, f"{code}: {e}") from e
 
     # =========================================================================
     # Instance Operations

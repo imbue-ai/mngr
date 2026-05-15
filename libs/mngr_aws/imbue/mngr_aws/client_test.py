@@ -331,6 +331,12 @@ class TestAwsVpsClientSecurityGroup:
             {"SecurityGroups": [{"GroupId": "sg-existing", "GroupName": "mngr-aws-test"}]},
             expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-test"]}]},
         )
+        # One call per port: tcp/22 and tcp/container_ssh_port (default 2222).
+        stubber.add_response(
+            "authorize_security_group_ingress",
+            {},
+            expected_params={"GroupId": "sg-existing", "IpPermissions": ANY},
+        )
         stubber.add_response(
             "authorize_security_group_ingress",
             {},
@@ -350,9 +356,38 @@ class TestAwsVpsClientSecurityGroup:
             {"GroupId": "sg-new"},
             expected_params={"GroupName": "mngr-aws-test", "Description": ANY},
         )
+        # One call per port: tcp/22 and tcp/container_ssh_port (default 2222).
+        stubber.add_response(
+            "authorize_security_group_ingress",
+            {},
+            expected_params={"GroupId": "sg-new", "IpPermissions": ANY},
+        )
         stubber.add_response(
             "authorize_security_group_ingress",
             {},
             expected_params={"GroupId": "sg-new", "IpPermissions": ANY},
         )
         assert client.ensure_security_group() == "sg-new"
+
+    def test_duplicate_on_one_port_does_not_drop_the_other(self, auto_sg_client: tuple[AwsVpsClient, Stubber]) -> None:
+        """Regression: prior implementation batched both ports and lost the second when one was a duplicate."""
+        client, stubber = auto_sg_client
+        stubber.add_response(
+            "describe_security_groups",
+            {"SecurityGroups": [{"GroupId": "sg-existing", "GroupName": "mngr-aws-test"}]},
+            expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-test"]}]},
+        )
+        # tcp/22 already exists -> duplicate (swallowed). tcp/container_ssh_port still gets added.
+        stubber.add_client_error(
+            "authorize_security_group_ingress",
+            service_error_code="InvalidPermission.Duplicate",
+            service_message="permission already exists",
+            http_status_code=400,
+            expected_params={"GroupId": "sg-existing", "IpPermissions": ANY},
+        )
+        stubber.add_response(
+            "authorize_security_group_ingress",
+            {},
+            expected_params={"GroupId": "sg-existing", "IpPermissions": ANY},
+        )
+        assert client.ensure_security_group() == "sg-existing"
