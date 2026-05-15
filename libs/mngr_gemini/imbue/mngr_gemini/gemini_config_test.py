@@ -59,15 +59,15 @@ def test_read_gemini_settings_empty_file_returns_empty(tmp_path: Path) -> None:
 
 def test_read_gemini_settings_parses_valid_json(tmp_path: Path) -> None:
     settings_path = tmp_path / "settings.json"
-    settings_path.write_text(json.dumps({"general": {"approvalMode": "default"}}))
-    assert read_gemini_settings(settings_path) == {"general": {"approvalMode": "default"}}
+    settings_path.write_text(json.dumps({"general": {"defaultApprovalMode": "default"}}))
+    assert read_gemini_settings(settings_path) == {"general": {"defaultApprovalMode": "default"}}
 
 
 def test_read_gemini_settings_malformed_json_returns_empty(tmp_path: Path) -> None:
     """Malformed JSON should not raise -- a user typo must not break agent provisioning."""
     settings_path = tmp_path / "settings.json"
     # Missing the closing brace -> json.loads raises.
-    settings_path.write_text('{"general": {"approvalMode": "default"')
+    settings_path.write_text('{"general": {"defaultApprovalMode": "default"')
     assert read_gemini_settings(settings_path) == {}
 
 
@@ -142,7 +142,7 @@ def test_write_gemini_settings_round_trips_through_read(tmp_path: Path) -> None:
     payload: dict[str, object] = {
         "hooks": {"BeforeTool": [{"matcher": ".*", "hooks": [{"type": "command", "command": "echo"}]}]},
         "mcpServers": {"my-server": {"command": "node", "args": ["server.js"]}},
-        "general": {"approvalMode": "default"},
+        "general": {"defaultApprovalMode": "default"},
     }
     write_gemini_settings(settings_path, payload)
     assert read_gemini_settings(settings_path) == payload
@@ -261,12 +261,12 @@ def test_hook_already_exists_treats_missing_matcher_as_none() -> None:
 
 
 def test_merge_hooks_config_adds_new_event() -> None:
-    existing: dict[str, object] = {"general": {"approvalMode": "default"}}
+    existing: dict[str, object] = {"general": {"defaultApprovalMode": "default"}}
     new_hooks = build_readiness_hooks_config()
     merged = merge_hooks_config(existing, new_hooks)
     assert merged is not None
     # Original keys preserved
-    assert merged["general"] == {"approvalMode": "default"}
+    assert merged["general"] == {"defaultApprovalMode": "default"}
     # New event installed
     assert HOOK_EVENT_SESSION_START in merged["hooks"]
 
@@ -317,7 +317,7 @@ def test_merge_hooks_config_preserves_unrelated_event_lists() -> None:
 def test_merge_hooks_config_round_trips_through_disk(tmp_path: Path) -> None:
     """End-to-end: write existing settings, merge in hooks, write back, re-read."""
     settings_path = tmp_path / "settings.json"
-    write_gemini_settings(settings_path, {"general": {"approvalMode": "default"}})
+    write_gemini_settings(settings_path, {"general": {"defaultApprovalMode": "default"}})
 
     existing = read_gemini_settings(settings_path)
     merged = merge_hooks_config(existing, build_readiness_hooks_config())
@@ -325,5 +325,5 @@ def test_merge_hooks_config_round_trips_through_disk(tmp_path: Path) -> None:
     write_gemini_settings(settings_path, merged)
 
     reloaded = read_gemini_settings(settings_path)
-    assert reloaded["general"] == {"approvalMode": "default"}
+    assert reloaded["general"] == {"defaultApprovalMode": "default"}
     assert HOOK_EVENT_SESSION_START in reloaded["hooks"]
