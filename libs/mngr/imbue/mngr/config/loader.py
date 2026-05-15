@@ -1,4 +1,6 @@
+import json
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -16,7 +18,6 @@ from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.agent_config_registry import is_agent_config_registered
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
-from imbue.mngr.config.data_types import AGENT_TYPE_CONCAT_TUPLE_FIELDS
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateCliOptions
@@ -29,6 +30,8 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.host_dir import read_default_host_dir
+from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
+from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
 from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.config.pre_readers import load_local_config
@@ -49,19 +52,22 @@ from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.git_utils import find_git_worktree_root
 from imbue.mngr.utils.logging import LoggingConfig
 
-# Environment variable prefix for command config overrides.
-# Format: MNGR_COMMANDS_<COMMANDNAME>_<VARNAME>=<value>
-# Example: MNGR_COMMANDS_CREATE_NEW_BRANCH_PREFIX=agent/
-#
-# IMPORTANT: Command names MUST be single words (no spaces, hyphens, or underscores).
-# This is because we use the first underscore after "MNGR_COMMANDS_" to separate
-# the command name from the parameter name. If command names contained underscores,
-# parsing would be ambiguous. For example, "MNGR_COMMANDS_FOO_BAR_BAZ" could be:
-#   - command="foo", param="bar_baz"
-#   - command="foo_bar", param="baz"
-#
-# Any future plugins that register custom commands must follow this single-word rule.
-_ENV_COMMANDS_PREFIX: Final[str] = "MNGR_COMMANDS_"
+# Prefix and shape for dynamic ``MNGR__*`` env var overrides. Each
+# ``__``-separated segment after the prefix is lowercased and treated as a
+# normalized config key. A trailing ``__EXTEND`` segment is the operator suffix
+# documented in ``key_resolver.py``.
+_ENV_OVERRIDE_PREFIX: Final[str] = "MNGR__"
+_ENV_OVERRIDE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^MNGR__[A-Z0-9_]+(__[A-Z0-9_]+)*$")
+
+# Old-style ``MNGR_*`` env vars that remain accepted as documented aliases for
+# specific ``MngrConfig`` fields. Each entry maps the env var name to the dotted
+# config path it sets. The synthesis step raises ``ConfigParseError`` when both
+# the alias and the canonical ``MNGR__*`` form are set with different values.
+_PRESERVED_ALIASES: Final[dict[str, str]] = {
+    "MNGR_HEADLESS": "headless",
+    "MNGR_PREFIX": "prefix",
+    "MNGR_HOST_DIR": "default_host_dir",
+}
 
 
 def load_config(
@@ -132,34 +138,38 @@ def load_config(
     ):
         if raw is not None:
             config = config.merge_with(
-                parse_config(
-                    raw, disabled_plugins=config_disabled_plugins, strict=strict, silent=silent_unknown_fields
+                _parse_config_with_extends(
+                    raw,
+                    base_config=config,
+                    disabled_plugins=config_disabled_plugins,
+                    strict=strict,
+                    silent=silent_unknown_fields,
                 )
             )
 
-    # Apply environment variable overrides
-    prefix = os.environ.get("MNGR_PREFIX")
-    default_host_dir = os.environ.get("MNGR_HOST_DIR")
+    # Apply ``MNGR__*`` env-var overrides plus the preserved-alias env vars
+    # (MNGR_PREFIX, MNGR_HOST_DIR, MNGR_HEADLESS). These all flow through the
+    # shared key resolver so assign vs extend semantics match TOML and
+    # ``--setting``. Conflicts between an alias and its canonical ``MNGR__*``
+    # form raise ConfigParseError.
+    env_override_raw = _collect_env_overrides(os.environ)
+    if env_override_raw:
+        config = config.merge_with(
+            _parse_config_with_extends(
+                env_override_raw,
+                base_config=config,
+                disabled_plugins=config_disabled_plugins,
+                strict=strict,
+                silent=silent_unknown_fields,
+            )
+        )
 
-    # Build a dict with non-None values for final validation
+    # Build a dict with non-None values for final validation.
     config_dict: dict[str, Any] = {}
-
-    # Apply env var overrides, or use merged values
-    if prefix is not None:
-        config_dict["prefix"] = prefix
-    elif config.prefix is not None:
+    if config.prefix is not None:
         config_dict["prefix"] = config.prefix
-    else:
-        # Neither env var nor config has prefix - will use pydantic default
-        pass
-
-    if default_host_dir is not None:
-        config_dict["default_host_dir"] = Path(default_host_dir)
-    elif config.default_host_dir is not None:
+    if config.default_host_dir is not None:
         config_dict["default_host_dir"] = config.default_host_dir
-    else:
-        # Neither env var nor config has default_host_dir - will use pydantic default
-        pass
 
     # Always include agent_types, providers, plugins, commands, and create_templates (they default to empty dicts)
     config_dict["agent_types"] = config.agent_types
@@ -167,16 +177,6 @@ def load_config(
     config_dict["plugins"] = config.plugins
     config_dict["commands"] = config.commands
     config_dict["create_templates"] = config.create_templates
-
-    # Apply environment variable overrides for commands
-    # Format: MNGR_COMMANDS_<COMMANDNAME>_<PARAMNAME>=<value>
-    # See _ENV_COMMANDS_PREFIX comment for details on the single-word command name requirement
-    env_command_overrides = _parse_command_env_vars(os.environ)
-    if env_command_overrides:
-        config_dict["commands"] = _merge_command_defaults(
-            config_dict["commands"],
-            env_command_overrides,
-        )
 
     # Apply CLI plugin overrides
     config_dict["plugins"], config_dict["disabled_plugins"] = _apply_plugin_overrides(
@@ -203,18 +203,15 @@ def load_config(
     config_dict["connect_command"] = config.connect_command
     config_dict["is_remote_agent_installation_allowed"] = config.is_remote_agent_installation_allowed
     config_dict["is_nested_tmux_allowed"] = config.is_nested_tmux_allowed
-    # Apply MNGR_HEADLESS env var override (env var > config file > default)
-    headless_env = os.environ.get("MNGR_HEADLESS")
-    if headless_env is not None:
-        config_dict["headless"] = parse_bool_env(headless_env)
-    else:
-        config_dict["headless"] = config.headless
+    config_dict["headless"] = config.headless
     config_dict["is_error_reporting_enabled"] = config.is_error_reporting_enabled
     config_dict["is_allowed_in_pytest"] = config.is_allowed_in_pytest
     config_dict["pre_command_scripts"] = config.pre_command_scripts
     config_dict["work_dir_extra_paths"] = config.work_dir_extra_paths
     config_dict["default_destroyed_host_persisted_seconds"] = config.default_destroyed_host_persisted_seconds
     config_dict["default_min_online_host_age_seconds"] = config.default_min_online_host_age_seconds
+    config_dict["agent_ready_timeout"] = config.agent_ready_timeout
+    config_dict["completion_cache_dir"] = config.completion_cache_dir
 
     # Allow plugins to modify config_dict before validation
     pm.hook.on_load_config(config_dict=config_dict)
@@ -314,25 +311,52 @@ def resolve_strict_from_env() -> bool:
 def _normalize_field_keys(raw: dict[str, Any], context: str) -> dict[str, Any]:
     """Replace hyphens with underscores in dict keys.
 
-    TOML conventionally uses hyphens (`pass-env`), but Python dataclasses use
-    underscores (`pass_env`). Normalize so both forms map to the same field.
-    Raises ConfigParseError if normalization would create a duplicate key.
+    TOML conventionally uses hyphens (``pass-env``), but Python dataclasses use
+    underscores (``pass_env``). Normalize so both forms map to the same field.
+
+    Also enforces two invariants that keep ``MNGR__*`` env-var lookups
+    unambiguous and round-trippable with TOML:
+
+    - Field names cannot themselves contain ``__`` (except as the trailing
+      ``__extend`` operator suffix). Two consecutive underscores in a field
+      name would collide with the segment separator in env-var form.
+    - Sibling keys that lowercase-collapse to the same env-var segment form
+      (e.g. ``MyAgent`` and ``my-agent`` both normalising to ``my_agent``)
+      raise so the caller picks one canonical spelling.
 
     Always returns a fresh dict, so callers can freely mutate the result
-    (e.g. via `del` in `_check_unknown_fields` or `pop` in `parse_config`)
-    without affecting the caller's input.
+    (e.g. via ``del`` in ``_check_unknown_fields`` or ``pop`` in
+    ``parse_config``) without affecting the caller's input.
     """
     result: dict[str, Any] = {}
-    seen_originals: dict[str, str] = {}
+    seen_normalized: dict[str, str] = {}
+    seen_casefolded: dict[str, str] = {}
     for key, value in raw.items():
         normalized = key.replace("-", "_")
-        if normalized in result:
+        # Strip an ``__extend`` suffix before checking the field-name shape;
+        # the operator suffix is the one place ``__`` is legitimately allowed.
+        field_part = normalized[: -len(EXTEND_SUFFIX)] if normalized.endswith(EXTEND_SUFFIX) else normalized
+        if "__" in field_part:
             raise ConfigParseError(
-                f"Config in {context} has both '{seen_originals[normalized]}' and '{key}' "
+                f"Config in {context} has key '{key}' containing '__' in its field name. "
+                "Field names cannot contain consecutive underscores; '__' is reserved as "
+                "the env-var segment separator and the '__extend' operator suffix."
+            )
+        if normalized in seen_normalized:
+            raise ConfigParseError(
+                f"Config in {context} has both '{seen_normalized[normalized]}' and '{key}' "
                 f"which both normalize to '{normalized}'. Use one or the other."
             )
+        casefolded = normalized.lower()
+        if casefolded in seen_casefolded and seen_casefolded[casefolded] != key:
+            raise ConfigParseError(
+                f"Config in {context} has both '{seen_casefolded[casefolded]}' and '{key}' "
+                f"which collapse to the same env-var segment '{casefolded.upper()}'. "
+                "Pick one canonical spelling."
+            )
         result[normalized] = value
-        seen_originals[normalized] = key
+        seen_normalized[normalized] = key
+        seen_casefolded[casefolded] = key
     return result
 
 
@@ -431,7 +455,13 @@ def _parse_providers(
     return providers
 
 
-_PLAIN_TUPLE_FIELDS: Final[frozenset[str]] = AGENT_TYPE_CONCAT_TUPLE_FIELDS - {"cli_args"}
+# Tuple-typed fields on AgentTypeConfig that need explicit list->tuple coercion
+# before model_construct (which bypasses pydantic's normal validators).
+# ``cli_args`` is handled separately because it also supports shell-splitting
+# of a single string into multiple arguments.
+_PLAIN_TUPLE_FIELDS: Final[frozenset[str]] = frozenset(
+    {"extra_provision_command", "upload_file", "create_directory", "env", "env_file"}
+)
 
 
 def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[str, Any]:
@@ -680,7 +710,9 @@ def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, Comman
     parameter defaults dict so it can be stored on CommandDefaults as a
     first-class field.
 
-    Uses model_construct to bypass validation and explicitly set None for unset fields.
+    Only fields actually present in ``raw_defaults`` end up in
+    ``model_fields_set`` so ``CommandDefaults.merge_with`` can distinguish
+    "layer touched defaults" from "layer touched only default_subcommand".
     """
     commands: dict[str, CommandDefaults] = {}
 
@@ -689,11 +721,14 @@ def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, Comman
         # _normalize_field_keys always returns a fresh dict, so the pop() below
         # cannot mutate the caller's input.
         defaults_copy = _normalize_field_keys(raw_defaults, f"commands.{command_name}")
+        has_default_subcommand = "default_subcommand" in defaults_copy
         default_subcommand = defaults_copy.pop("default_subcommand", None)
-        commands[command_name] = CommandDefaults.model_construct(
-            defaults=defaults_copy,
-            default_subcommand=default_subcommand,
-        )
+        construct_kwargs: dict[str, Any] = {}
+        if defaults_copy:
+            construct_kwargs["defaults"] = defaults_copy
+        if has_default_subcommand:
+            construct_kwargs["default_subcommand"] = default_subcommand
+        commands[command_name] = CommandDefaults.model_construct(**construct_kwargs)
 
     return commands
 
@@ -783,6 +818,8 @@ def parse_config(
     kwargs["work_dir_extra_paths"] = raw.pop("work_dir_extra_paths", None)
     kwargs["default_destroyed_host_persisted_seconds"] = raw.pop("default_destroyed_host_persisted_seconds", None)
     kwargs["default_min_online_host_age_seconds"] = raw.pop("default_min_online_host_age_seconds", None)
+    kwargs["agent_ready_timeout"] = raw.pop("agent_ready_timeout", None)
+    kwargs["completion_cache_dir"] = raw.pop("completion_cache_dir", None)
 
     if len(raw) > 0:
         if strict:
@@ -795,90 +832,117 @@ def parse_config(
 
 
 # =============================================================================
-# Environment Variable Overrides for Commands
+# Environment Variable Overrides
 # =============================================================================
 
 
-def _parse_command_env_vars(environ: Mapping[str, str]) -> dict[str, CommandDefaults]:
-    """Parse environment variables to extract command config overrides.
+def _parse_env_value(value_str: str) -> Any:
+    """Parse a ``MNGR__*`` env var value, mirroring ``--setting`` semantics.
 
-    Looks for environment variables matching the pattern:
-        MNGR_COMMANDS_<COMMANDNAME>_<PARAMNAME>=<value>
-
-    where:
-        - COMMANDNAME is the command name in uppercase (e.g., CREATE, LIST)
-        - PARAMNAME is the parameter name in uppercase with underscores (e.g., NEW_BRANCH_PREFIX)
-        - value is the string value to set
-
-    The command name is determined by the first underscore after "MNGR_COMMANDS_".
-    The remaining part becomes the parameter name (lowercased).
-
-    IMPORTANT: Command names MUST be single words (no underscores) for unambiguous parsing.
-    See the comment at _ENV_COMMANDS_PREFIX for details.
-
-    Examples:
-        MNGR_COMMANDS_CREATE_BRANCH=main:mngr/*
-            -> commands["create"]["branch"] = "main:mngr/*"
-
-        MNGR_COMMANDS_CREATE_CONNECT=false
-            -> commands["create"]["connect"] = "false"
-
-        MNGR_COMMANDS_LIST_FORMAT=json
-            -> commands["list"]["format"] = "json"
-
-    Returns:
-        Dict mapping command names to CommandDefaults with the parsed values.
+    JSON-parses first (so booleans, numbers, arrays, and objects all work) and
+    falls back to the raw string. This keeps env-var and ``--setting`` value
+    parsing identical.
     """
-    commands: dict[str, dict[str, Any]] = {}
+    try:
+        return json.loads(value_str)
+    except json.JSONDecodeError:
+        return value_str
 
+
+def _env_segments_to_key_path(segments: list[str]) -> list[str]:
+    """Convert lowercased env-var segments into raw-dict key path segments.
+
+    A trailing ``extend`` segment is collapsed into a ``key__extend`` suffix on
+    the preceding segment so that ``resolve_extends`` recognises the operator.
+    """
+    if len(segments) >= 2 and segments[-1] == "extend":
+        return segments[:-2] + [segments[-2] + EXTEND_SUFFIX]
+    return list(segments)
+
+
+def _set_raw_at_path(data: dict[str, Any], key_path: list[str], value: Any) -> None:
+    """Set ``value`` at the nested ``key_path`` inside ``data``, creating
+    intermediate dicts as needed. Existing non-dict values along the path are
+    replaced with dicts (the override wins by construction).
+    """
+    current = data
+    for segment in key_path[:-1]:
+        if segment not in current or not isinstance(current[segment], dict):
+            current[segment] = {}
+        current = current[segment]
+    current[key_path[-1]] = value
+
+
+def _parse_mngr_env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
+    """Parse ``MNGR__X__Y[__EXTEND]=value`` env vars into a raw config dict.
+
+    Segments are uppercase-only ([A-Z0-9_]+). Each segment is lowercased to
+    produce the canonical config key. Values are JSON-parsed with raw-string
+    fallback. The returned dict may contain ``__extend``-suffixed keys; the
+    shared resolver applies them against the base config.
+    """
+    raw: dict[str, Any] = {}
     for env_key, env_value in environ.items():
-        if not env_key.startswith(_ENV_COMMANDS_PREFIX):
+        if not env_key.startswith(_ENV_OVERRIDE_PREFIX):
             continue
-
-        # Strip the prefix to get "<COMMANDNAME>_<PARAMNAME>"
-        suffix = env_key[len(_ENV_COMMANDS_PREFIX) :]
-        if not suffix:
+        # Skip mixed-case variants of the canonical form. The pattern enforces
+        # the documented uppercase-only convention; anything else is treated as
+        # unrelated.
+        if not _ENV_OVERRIDE_PATTERN.fullmatch(env_key):
             continue
+        suffix = env_key[len(_ENV_OVERRIDE_PREFIX) :]
+        segments = [seg.lower() for seg in suffix.split("__")]
+        key_path = _env_segments_to_key_path(segments)
+        _set_raw_at_path(raw, key_path, _parse_env_value(env_value))
+    return raw
 
-        # Find the first underscore to split command name from param name
-        underscore_idx = suffix.find("_")
-        if underscore_idx == -1:
-            # No underscore means no param name, skip this
+
+def _collect_env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
+    """Combine ``MNGR__*`` overrides with preserved-alias env vars into a single
+    raw config dict.
+
+    Raises ``ConfigParseError`` when a preserved alias and its canonical
+    ``MNGR__*`` form are both set with different values.
+    """
+    raw = _parse_mngr_env_overrides(environ)
+    for alias_name, canonical_path in _PRESERVED_ALIASES.items():
+        alias_value = environ.get(alias_name)
+        if alias_value is None:
             continue
-
-        command_name = suffix[:underscore_idx].lower()
-        param_name = suffix[underscore_idx + 1 :].lower()
-
-        if not command_name or not param_name:
-            continue
-
-        # Initialize the command's dict if needed
-        if command_name not in commands:
-            commands[command_name] = {}
-
-        # Store as string - type conversion happens downstream in click/pydantic
-        # where the actual type information is available
-        commands[command_name][param_name] = env_value
-
-    # Convert raw dicts to CommandDefaults
-    result: dict[str, CommandDefaults] = {}
-    for command_name, params in commands.items():
-        result[command_name] = CommandDefaults(defaults=params)
-
-    return result
+        parsed = _parse_env_value(alias_value)
+        existing = _walk_raw(raw, canonical_path.split("."))
+        if existing is not None and existing != parsed:
+            raise ConfigParseError(
+                f"Conflict: {alias_name}={alias_value!r} and "
+                f"MNGR__{canonical_path.upper()}={existing!r} are both set with different values. "
+                "Use exactly one form."
+            )
+        _set_raw_at_path(raw, canonical_path.split("."), parsed)
+    return raw
 
 
-def _merge_command_defaults(
-    base: dict[str, CommandDefaults],
-    override: dict[str, CommandDefaults],
-) -> dict[str, CommandDefaults]:
-    """Merge two command defaults dicts, with override taking precedence."""
-    result: dict[str, CommandDefaults] = dict(base)
+def _walk_raw(data: dict[str, Any], key_path: list[str]) -> Any:
+    """Look up a dotted path inside a raw dict; return None if any step is
+    missing or the intermediate value is not a dict.
+    """
+    current: Any = data
+    for segment in key_path:
+        if not isinstance(current, dict) or segment not in current:
+            return None
+        current = current[segment]
+    return current
 
-    for command_name, override_defaults in override.items():
-        if command_name in result:
-            result[command_name] = result[command_name].merge_with(override_defaults)
-        else:
-            result[command_name] = override_defaults
 
-    return result
+def _parse_config_with_extends(
+    raw: dict[str, Any],
+    *,
+    base_config: MngrConfig,
+    disabled_plugins: frozenset[str],
+    strict: bool = True,
+    silent: bool = False,
+) -> MngrConfig:
+    """Resolve ``__extend`` keys in ``raw`` against ``base_config`` and parse
+    the resolved dict via ``parse_config``.
+    """
+    resolved = resolve_extends(base_config, raw)
+    return parse_config(resolved, disabled_plugins=disabled_plugins, strict=strict, silent=silent)

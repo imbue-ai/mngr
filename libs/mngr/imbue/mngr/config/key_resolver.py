@@ -1,0 +1,156 @@
+"""Shared resolver for setting overrides.
+
+Recognizes the ``__extend`` suffix on leaf keys and resolves it against the
+current config state into a plain assignment. The bare key is always an
+assignment; ``key__extend`` means "extend the base value": concat for
+list/tuple, shallow key-merge for dict, union for set/frozenset.
+
+The resolver runs before ``parse_config``; the raw dict it returns contains
+no ``__extend`` keys, so the parser never has to know about the operator.
+
+A single source of truth for the operator name and the segment separator is
+kept here so env-var parsing, TOML parsing, ``--setting`` parsing, and
+``mngr config`` all stay in lockstep.
+"""
+
+from collections.abc import Mapping
+from typing import Any
+from typing import Final
+
+from pydantic import BaseModel
+
+from imbue.mngr.errors import ConfigParseError
+
+# Operator suffix on a leaf key indicating "extend the current value".
+# Lowercase form used in TOML, ``--setting`` paths, and ``mngr config`` keys.
+EXTEND_SUFFIX: Final[str] = "__extend"
+
+# Uppercase form for env-var path segments. Matches the all-uppercase
+# convention for ``MNGR__*`` segments.
+EXTEND_SUFFIX_ENV: Final[str] = "__EXTEND"
+
+# Top-level container fields on ``MngrConfig`` that keep per-key additive
+# merging across config layers. Everything else flips to assign-by-default.
+# Kept here so the resolver and ``MngrConfig.merge_with`` agree.
+TOP_LEVEL_CONTAINER_FIELDS: Final[frozenset[str]] = frozenset(
+    {"agent_types", "providers", "plugins", "commands", "create_templates"}
+)
+
+
+def is_extend_key(key: str) -> bool:
+    """Return True if ``key`` is an ``__extend``-suffixed leaf key.
+
+    The suffix must be preceded by at least one character so ``__extend``
+    on its own is not treated as a bare key whose ``bare`` would be empty.
+    """
+    return key.endswith(EXTEND_SUFFIX) and len(key) > len(EXTEND_SUFFIX)
+
+
+def bare_key(extend_key: str) -> str:
+    """Return the field name with the ``__extend`` suffix stripped."""
+    return extend_key[: -len(EXTEND_SUFFIX)]
+
+
+def _walk_to_field(base: Any, path: tuple[str, ...]) -> Any:
+    """Walk ``base`` along ``path`` and return the value, or None if any
+    intermediate step is missing or untraversable.
+    """
+    current: Any = base
+    for segment in path:
+        if current is None:
+            return None
+        if isinstance(current, BaseModel):
+            current = getattr(current, segment, None)
+        elif isinstance(current, Mapping):
+            current = current.get(segment)
+        else:
+            return None
+    return current
+
+
+def _apply_extend(
+    current_value: Any,
+    extend_value: Any,
+    field_path: str,
+) -> Any:
+    """Apply ``extend_value`` onto ``current_value`` and return the result.
+
+    Operates only at the leaf field, no recursion into nested aggregates.
+    """
+    if current_value is None:
+        # Field unset in base. Extend acts like assign, but the shape must
+        # still be an aggregate; scalars cannot be the value of ``__extend``.
+        if not isinstance(extend_value, (list, tuple, dict, set, frozenset)):
+            raise ConfigParseError(
+                f"__extend on field '{field_path}' requires a list, tuple, dict, or set value; "
+                f"got: {type(extend_value).__name__}"
+            )
+        return extend_value
+    if isinstance(current_value, (list, tuple)):
+        if not isinstance(extend_value, (list, tuple)):
+            raise ConfigParseError(
+                f"__extend on field '{field_path}' (list/tuple) requires a JSON array value; "
+                f"got: {type(extend_value).__name__}"
+            )
+        merged = list(current_value) + list(extend_value)
+        return tuple(merged) if isinstance(current_value, tuple) else merged
+    if isinstance(current_value, (set, frozenset)):
+        if not isinstance(extend_value, (list, tuple, set, frozenset)):
+            raise ConfigParseError(
+                f"__extend on field '{field_path}' (set) requires a JSON array value; "
+                f"got: {type(extend_value).__name__}"
+            )
+        merged_set = set(current_value) | set(extend_value)
+        return frozenset(merged_set) if isinstance(current_value, frozenset) else merged_set
+    if isinstance(current_value, Mapping):
+        if not isinstance(extend_value, Mapping):
+            raise ConfigParseError(
+                f"__extend on field '{field_path}' (dict) requires a JSON object value; "
+                f"got: {type(extend_value).__name__}"
+            )
+        return {**current_value, **extend_value}
+    raise ConfigParseError(
+        f"__extend on field '{field_path}' is not valid: target field is a scalar "
+        f"({type(current_value).__name__}); use bare assignment instead."
+    )
+
+
+def resolve_extends(
+    base: Any,
+    override: dict[str, Any],
+    *,
+    path: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Walk ``override`` and resolve any ``__extend``-suffixed leaf keys
+    against ``base``, returning a new dict where every key is a plain
+    assignment.
+
+    Within a single layer of ``override``, a bare ``key`` is applied first
+    if present, and the sibling ``key__extend`` (if also present) extends
+    the just-assigned value. Lookups against ``base`` traverse pydantic
+    model attributes and Mapping keys interchangeably, so the same
+    function works whether ``base`` is a parsed ``MngrConfig``, a nested
+    config object, or a raw dict.
+    """
+    result: dict[str, Any] = {}
+    # First pass: copy bare keys and recurse into nested dicts.
+    for key, value in override.items():
+        if is_extend_key(key):
+            continue
+        if isinstance(value, dict):
+            result[key] = resolve_extends(base, value, path=path + (key,))
+        else:
+            result[key] = value
+    # Second pass: apply ``__extend`` keys against either the just-set bare
+    # value (if both forms appear in the same layer) or the base lookup.
+    for key, value in override.items():
+        if not is_extend_key(key):
+            continue
+        bare = bare_key(key)
+        field_path = ".".join(path + (bare,))
+        if bare in result:
+            current = result[bare]
+        else:
+            current = _walk_to_field(base, path + (bare,))
+        result[bare] = _apply_extend(current, value, field_path)
+    return result

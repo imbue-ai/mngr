@@ -18,10 +18,12 @@ COMPLETION_CACHE_FILENAME: Final[str] = ".command_completions.json"
 def get_completion_cache_dir() -> Path:
     """Return the directory used for completion cache files.
 
-    Uses MNGR_COMPLETION_CACHE_DIR if set, otherwise the mngr host directory
-    (MNGR_HOST_DIR or ~/.mngr). The directory is created if it does not exist.
+    Reads MNGR__COMPLETION_CACHE_DIR directly (a lightweight pre-reader path so
+    tab completion stays fast — no full config load). Falls back to the mngr
+    host directory (MNGR_HOST_DIR or ~/.mngr). The directory is created if it
+    does not exist.
     """
-    env_dir = os.environ.get("MNGR_COMPLETION_CACHE_DIR")
+    env_dir = os.environ.get("MNGR__COMPLETION_CACHE_DIR")
     if env_dir:
         cache_dir = Path(env_dir)
     else:

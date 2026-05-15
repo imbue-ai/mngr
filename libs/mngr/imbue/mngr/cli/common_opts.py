@@ -27,6 +27,7 @@ from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.config.loader import parse_config
@@ -340,6 +341,7 @@ def parse_output_options(
         is_logging_commands=is_log_commands,
         is_logging_command_output=config.logging.is_logging_command_output,
         is_logging_env_vars=config.logging.is_logging_env_vars,
+        enable_paramiko_logging=config.logging.enable_paramiko_logging,
     )
 
     output_opts = OutputOptions(
@@ -408,14 +410,16 @@ def apply_settings_to_config(
 ) -> MngrConfig:
     """Apply --setting KEY=VALUE overrides to a loaded config.
 
-    Parses each setting string, builds a raw config dict, parses it through the
-    config system, and merges it with the existing config. This gives --setting
-    the same semantics as config file values but at a higher precedence.
+    Parses each setting string into a raw dict, resolves any ``__extend``
+    suffixes against ``config`` via the shared key resolver, parses the
+    resolved dict through ``parse_config``, and merges with ``config``. This
+    gives --setting the same semantics as config file values but at a higher
+    precedence, with assign-vs-extend behavior unified across TOML, env vars,
+    --setting, and ``mngr config``.
     """
     if not settings:
         return config
 
-    # Build a raw config dict from the setting strings
     raw: dict[str, Any] = {}
     for setting_str in settings:
         if "=" not in setting_str:
@@ -430,8 +434,8 @@ def apply_settings_to_config(
         parsed_value = _parse_setting_value(value_str)
         _set_nested_dict_value(raw, key_path, parsed_value)
 
-    # Parse through the config system and merge with the existing config
-    settings_config = parse_config(raw, disabled_plugins=disabled_plugins, strict=True)
+    resolved = resolve_extends(config, raw)
+    settings_config = parse_config(resolved, disabled_plugins=disabled_plugins, strict=True)
     return config.merge_with(settings_config)
 
 

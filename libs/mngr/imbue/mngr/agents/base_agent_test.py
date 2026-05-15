@@ -11,11 +11,11 @@ import pytest
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import CommandResult
-from imbue.mngr.interfaces.host import DEFAULT_AGENT_READY_TIMEOUT_SECONDS
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -290,13 +290,9 @@ def test_get_resume_message_returns_message_when_set(
 
 def test_get_ready_timeout_seconds_returns_default_when_not_set(
     test_agent: BaseAgent,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test that get_ready_timeout_seconds returns default when not set in data.json."""
-    # get_ready_timeout_seconds falls back to get_agent_ready_timeout(), which
-    # honors MNGR_AGENT_READY_TIMEOUT. Remove it to guarantee the default path.
-    monkeypatch.delenv("MNGR_AGENT_READY_TIMEOUT", raising=False)
-    assert test_agent.get_ready_timeout_seconds() == DEFAULT_AGENT_READY_TIMEOUT_SECONDS
+    """get_ready_timeout_seconds falls back to MngrConfig.agent_ready_timeout when data.json omits it."""
+    assert test_agent.get_ready_timeout_seconds() == MngrConfig.model_fields["agent_ready_timeout"].default
 
 
 def test_get_ready_timeout_seconds_returns_value_when_set(

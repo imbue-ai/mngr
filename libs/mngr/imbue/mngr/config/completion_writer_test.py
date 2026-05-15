@@ -26,9 +26,9 @@ from imbue.mngr.primitives import ProviderInstanceName
 
 
 def test_get_completion_cache_dir_uses_env_var(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """get_completion_cache_dir should use MNGR_COMPLETION_CACHE_DIR when set."""
+    """get_completion_cache_dir should use MNGR__COMPLETION_CACHE_DIR when set."""
     cache_dir = tmp_path / "custom_cache"
-    monkeypatch.setenv("MNGR_COMPLETION_CACHE_DIR", str(cache_dir))
+    monkeypatch.setenv("MNGR__COMPLETION_CACHE_DIR", str(cache_dir))
     result = get_completion_cache_dir()
     assert result == cache_dir
     assert cache_dir.exists()
@@ -38,7 +38,7 @@ def test_get_completion_cache_dir_falls_back_to_default_host_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """get_completion_cache_dir should use read_default_host_dir when env var is unset."""
-    monkeypatch.delenv("MNGR_COMPLETION_CACHE_DIR", raising=False)
+    monkeypatch.delenv("MNGR__COMPLETION_CACHE_DIR", raising=False)
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "default_host"))
     result = get_completion_cache_dir()
     assert result == tmp_path / "default_host"
