@@ -97,7 +97,7 @@ def write_gemini_settings(settings_path: Path, settings: Mapping[str, Any]) -> N
         shutil.copy2(settings_path, backup_path)
         logger.trace("Created backup of Gemini settings at {}", backup_path)
 
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    # atomic_write creates the parent directory itself, so no mkdir is needed here.
     atomic_write(settings_path, serialize_gemini_settings(settings))
 
 
