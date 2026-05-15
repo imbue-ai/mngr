@@ -134,6 +134,8 @@ def render_create_form(
     anthropic_base_url: str = "",
     detected_env_anthropic_api_key: bool = False,
     detected_env_anthropic_base_url_value: str = "",
+    use_env_anthropic_api_key: bool | None = None,
+    use_env_anthropic_base_url: bool | None = None,
     error_message: str = "",
 ) -> str:
     """Render the agent creation form page.
@@ -154,6 +156,14 @@ def render_create_form(
     decide whether to forward those values to the agent. The API key's
     value is intentionally not exposed (it's secret); the base URL value
     is shown so the user can sanity-check the endpoint before opting in.
+
+    ``use_env_anthropic_api_key`` / ``use_env_anthropic_base_url`` carry the
+    user's submitted checkbox state through a validation-error re-render so
+    an explicit opt-in (or opt-out) survives the round trip. ``None`` (the
+    default) means "no submitted value yet, use the client-side defaults";
+    a concrete ``True`` / ``False`` is treated by the client-side JS as a
+    user choice that should not be overwritten by the per-provider default
+    when the user later switches AI providers.
     """
     effective_url = git_url if git_url else _DEFAULT_GIT_URL
     effective_name = host_name if host_name else _DEFAULT_HOST_NAME
@@ -183,6 +193,8 @@ def render_create_form(
         anthropic_base_url=anthropic_base_url,
         detected_env_anthropic_api_key=detected_env_anthropic_api_key,
         detected_env_anthropic_base_url_value=detected_env_anthropic_base_url_value,
+        use_env_anthropic_api_key=use_env_anthropic_api_key,
+        use_env_anthropic_base_url=use_env_anthropic_base_url,
         error_message=error_message,
     )
 

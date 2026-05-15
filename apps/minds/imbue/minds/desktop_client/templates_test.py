@@ -173,6 +173,51 @@ def test_render_create_form_shows_env_anthropic_base_url_notice_with_value() -> 
     assert "https://litellm.example.com" in html
 
 
+def test_render_create_form_preserves_use_env_checkbox_state_on_re_render() -> None:
+    """On a validation-error re-render, an explicit submitted value for
+    ``use_env_anthropic_*`` must round-trip into the rendered HTML so the
+    user's prior opt-in / opt-out choice is not silently reverted. The
+    server signals "this checkbox state was user-chosen" via the
+    ``data-user-set="true"`` attribute, which the client-side JS reads on
+    boot to seed the per-checkbox "user toggled" flag and stop the
+    per-provider default from clobbering the submitted value."""
+    html_checked = render_create_form(
+        detected_env_anthropic_api_key=True,
+        detected_env_anthropic_base_url_value="https://litellm.example.com",
+        use_env_anthropic_api_key=True,
+        use_env_anthropic_base_url=True,
+    )
+    assert 'name="use_env_anthropic_api_key"' in html_checked
+    # Both checkboxes should be rendered ``checked`` and marked as user-set.
+    api_key_input_start = html_checked.index('id="use_env_anthropic_api_key"')
+    api_key_input_fragment = html_checked[api_key_input_start : api_key_input_start + 300]
+    assert "checked" in api_key_input_fragment
+    assert 'data-user-set="true"' in api_key_input_fragment
+
+    html_unchecked = render_create_form(
+        detected_env_anthropic_api_key=True,
+        detected_env_anthropic_base_url_value="https://litellm.example.com",
+        use_env_anthropic_api_key=False,
+        use_env_anthropic_base_url=False,
+    )
+    # Explicit ``False`` should NOT emit ``checked`` but should still mark
+    # the input as user-set so the JS doesn't reset it to the default.
+    api_key_input_start = html_unchecked.index('id="use_env_anthropic_api_key"')
+    api_key_input_fragment = html_unchecked[api_key_input_start : api_key_input_start + 300]
+    assert "checked" not in api_key_input_fragment
+    assert 'data-user-set="true"' in api_key_input_fragment
+
+    # Default render (no submitted state) must NOT mark the inputs as
+    # user-set, so the client-side JS retains its per-provider defaulting.
+    html_default = render_create_form(
+        detected_env_anthropic_api_key=True,
+        detected_env_anthropic_base_url_value="https://litellm.example.com",
+    )
+    api_key_input_start = html_default.index('id="use_env_anthropic_api_key"')
+    api_key_input_fragment = html_default[api_key_input_start : api_key_input_start + 300]
+    assert "data-user-set" not in api_key_input_fragment
+
+
 def test_render_login_page_shows_prompt() -> None:
     html = render_login_page()
     assert "login URL" in html.lower() or "Login" in html

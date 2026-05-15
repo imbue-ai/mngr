@@ -539,6 +539,8 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
             anthropic_base_url=anthropic_base_url,
             detected_env_anthropic_api_key=detected_env_anthropic_api_key,
             detected_env_anthropic_base_url_value=detected_env_anthropic_base_url_value,
+            use_env_anthropic_api_key=use_env_anthropic_api_key,
+            use_env_anthropic_base_url=use_env_anthropic_base_url,
             error_message=message,
         )
         return HTMLResponse(content=html_body, status_code=status)

@@ -81,7 +81,9 @@
               {% call ui.notice(variant='info') %}
                 <label class="flex items-start gap-2 cursor-pointer">
                   <input type="checkbox" name="use_env_anthropic_api_key" id="use_env_anthropic_api_key"
-                         class="mt-0.5 shrink-0">
+                         class="mt-0.5 shrink-0"
+                         {% if use_env_anthropic_api_key %}checked{% endif %}
+                         {% if use_env_anthropic_api_key is not none %}data-user-set="true"{% endif %}>
                   <span>
                     <span class="font-medium">ANTHROPIC_API_KEY detected in your environment.</span>
                     <span id="env-api-key-help" class="block text-xs mt-0.5 text-blue-800"></span>
@@ -95,7 +97,9 @@
               {% call ui.notice(variant='info') %}
                 <label class="flex items-start gap-2 cursor-pointer">
                   <input type="checkbox" name="use_env_anthropic_base_url" id="use_env_anthropic_base_url"
-                         class="mt-0.5 shrink-0">
+                         class="mt-0.5 shrink-0"
+                         {% if use_env_anthropic_base_url %}checked{% endif %}
+                         {% if use_env_anthropic_base_url is not none %}data-user-set="true"{% endif %}>
                   <span>
                     <span class="font-medium">ANTHROPIC_BASE_URL detected:</span>
                     <code class="text-xs bg-blue-100 px-1 py-0.5 rounded">{{ detected_env_anthropic_base_url_value }}</code>
@@ -188,9 +192,13 @@
       var envBaseUrlHelp = document.getElementById('env-base-url-help');
       // Track which notices the user has manually toggled this session so
       // we don't keep overwriting their choice each time `update()` runs
-      // (which would defeat the per-create explicit-choice UX).
-      var userToggledApiKey = false;
-      var userToggledBaseUrl = false;
+      // (which would defeat the per-create explicit-choice UX). On a
+      // validation-error re-render, the server sets `data-user-set="true"`
+      // on each checkbox it has an explicit submitted value for so the
+      // user's prior choice survives the round trip instead of being
+      // clobbered by the per-provider default below.
+      var userToggledApiKey = !!(envApiKeyCheckbox && envApiKeyCheckbox.dataset.userSet === 'true');
+      var userToggledBaseUrl = !!(envBaseUrlCheckbox && envBaseUrlCheckbox.dataset.userSet === 'true');
       if (envApiKeyCheckbox) {
         envApiKeyCheckbox.addEventListener('change', function() { userToggledApiKey = true; });
       }
