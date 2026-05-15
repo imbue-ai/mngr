@@ -666,14 +666,32 @@ def _discovery_stream_emit_line(
     emitted_event_ids: set[str],
     emit_lock: Lock,
     on_line: Callable[[str], None] | None,
+    *,
+    skip_historical_error_events: bool = False,
 ) -> None:
-    """Parse and emit a single JSONL line, deduplicating by event_id."""
+    """Parse and emit a single JSONL line, deduplicating by event_id.
+
+    ``skip_historical_error_events`` is True for synchronous cache-replay
+    callers (``_emit_lines_from_offset``) so they don't re-flood consumers
+    with stale ``DISCOVERY_ERROR`` events from prior observe lifetimes.
+    Errors are transient signal, not state; an observe restart that
+    re-emits an hour of historical error events generates log spam without
+    adding diagnostic value (the current poll cycle will surface any
+    still-failing provider on its own). Skipped events are still recorded
+    in ``emitted_event_ids`` so the tail thread doesn't re-emit them if it
+    later catches up across the same byte range.
+    """
     parsed = warner.parse(line)
     if parsed is None:
         return
     data, stripped = parsed
     event_id = data.get("event_id")
     event_type = data.get("type", "unknown")
+    if skip_historical_error_events and event_type == DiscoveryEventType.DISCOVERY_ERROR:
+        if event_id:
+            with emit_lock:
+                emitted_event_ids.add(event_id)
+        return
     with emit_lock:
         if event_id and event_id in emitted_event_ids:
             logger.trace("Discovery stream: skipping already-emitted event {} (type={})", event_id, event_type)
@@ -749,6 +767,13 @@ def _emit_lines_from_offset(
     line buffered in one phase still surface a warning when the next phase or
     the tail reads more data after it.
 
+    Historical ``DISCOVERY_ERROR`` events are filtered out: they're stale by
+    the time we're replaying them and re-emitting them on every observe
+    bounce floods consumers with thousands of duplicate warning logs after
+    a long-running failure (e.g. a chronically broken provider held the
+    snapshot offset back so the replay covers hours of repeated polls).
+    Live errors emitted by the tail thread are unaffected.
+
     Holds back any trailing partial line (no terminating newline) so a
     mid-flush write doesn't get split between this phase and the tail thread,
     which would silently lose the event and produce misleading mid-file
@@ -761,7 +786,9 @@ def _emit_lines_from_offset(
         new_content = f.read().decode("utf-8", errors="replace")
     lines, bytes_consumed = split_complete_lines(new_content)
     for line in lines:
-        _discovery_stream_emit_line(line, warner, emitted_event_ids, emit_lock, on_line)
+        _discovery_stream_emit_line(
+            line, warner, emitted_event_ids, emit_lock, on_line, skip_historical_error_events=True
+        )
     return offset + bytes_consumed
 
 
