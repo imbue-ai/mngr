@@ -1,10 +1,6 @@
-from collections.abc import Mapping
-from collections.abc import Sequence
-
 import click
 from loguru import logger
 
-from imbue.imbue_common.pure import pure
 from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import find_one_agent
@@ -21,25 +17,6 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import OutputFormat
-
-
-@pure
-def filter_agents_by_host(
-    agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
-    host_filter: HostAddress,
-) -> dict[DiscoveredHost, Sequence[DiscoveredAgent]]:
-    """Filter agents_by_host to only include hosts matching the given :class:`HostAddress`.
-
-    Raises :class:`UserInputError` if no hosts match the filter.
-    """
-    filtered = {
-        host_ref: agent_refs
-        for host_ref, agent_refs in agents_by_host.items()
-        if host_filter.matches(HostAddress(host=host_ref.host_name, provider=host_ref.provider_name))
-    }
-    if not filtered:
-        raise UserInputError(f"No host found matching: {host_filter}")
-    return filtered
 
 
 def ensure_host_started_and_resolve_agent(
