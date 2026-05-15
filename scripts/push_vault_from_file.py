@@ -22,8 +22,8 @@ The script:
    matches the template schema exactly) to
    `secrets/kv/minds/<tier>/<service>` via `vault kv put`.
 
-`VAULT_NAMESPACE` is set to `admin` if the operator did not already export
-something else -- that's the namespace the HCP cluster uses.
+`VAULT_NAMESPACE` and `VAULT_ADDR` default to the imbue HCP cluster values
+if the operator did not already export them.
 """
 
 import argparse
@@ -32,9 +32,12 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
+from typing import Final
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _TEMPLATE_DIR = _REPO_ROOT / ".minds" / "template"
+_DEFAULT_VAULT_ADDR: Final[str] = "https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200"
+_DEFAULT_VAULT_NAMESPACE: Final[str] = "admin"
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -127,7 +130,8 @@ def main() -> int:
         return 0
 
     env = os.environ.copy()
-    env.setdefault("VAULT_NAMESPACE", "admin")
+    env.setdefault("VAULT_NAMESPACE", _DEFAULT_VAULT_NAMESPACE)
+    env.setdefault("VAULT_ADDR", _DEFAULT_VAULT_ADDR)
     subprocess.run(command, check=True, env=env)
 
     print()
