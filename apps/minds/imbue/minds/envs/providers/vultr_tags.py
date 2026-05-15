@@ -16,6 +16,7 @@ import httpx
 from pydantic import Field
 from pydantic import SecretStr
 from pydantic import TypeAdapter
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.envs.primitives import DevEnvName
@@ -31,7 +32,14 @@ class VultrProviderError(MindError):
 
 
 class VultrInstanceSummary(FrozenModel):
-    """One row of ``GET /instances``."""
+    """One row of ``GET /instances``.
+
+    Vultr returns ~40 fields per instance (plan, region, OS, status, ...);
+    we only care about the four below, so we tell pydantic to drop the
+    rest rather than fail validation on every new Vultr API field.
+    """
+
+    model_config = {"extra": "ignore", "frozen": True}
 
     id: str
     label: str = ""
@@ -99,7 +107,10 @@ def list_dev_env_instances(name: DevEnvName, *, api_key: SecretStr) -> tuple[Vul
             has_more = False
             continue
         instances_raw = payload.get("instances", [])
-        instances = _INSTANCE_LIST_ADAPTER.validate_python(instances_raw)
+        try:
+            instances = _INSTANCE_LIST_ADAPTER.validate_python(instances_raw)
+        except ValidationError as exc:
+            raise VultrProviderError(f"Vultr /instances returned an unexpected shape: {exc}") from exc
         for instance in instances:
             if expected_tag in instance.tags:
                 matches.append(instance)

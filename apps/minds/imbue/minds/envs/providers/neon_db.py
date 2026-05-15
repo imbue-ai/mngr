@@ -15,6 +15,7 @@ import httpx
 from pydantic import Field
 from pydantic import SecretStr
 from pydantic import TypeAdapter
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.envs.primitives import DevEnvName
@@ -29,7 +30,14 @@ class NeonProviderError(MindError):
 
 
 class NeonBranchSummary(FrozenModel):
-    """One row of ``GET /projects/{id}/branches``."""
+    """One row of ``GET /projects/{id}/branches``.
+
+    Neon's API returns lots of metadata per branch (project_id, slug,
+    project_slug, parent_id, default flags, timestamps, ...). We only
+    care about ``id`` and ``name``, so we tell pydantic to drop the rest.
+    """
+
+    model_config = {"extra": "ignore", "frozen": True}
 
     id: str
     name: str
@@ -77,7 +85,10 @@ def _resolve_default_branch(project_id: str, *, api_token: SecretStr) -> NeonBra
     branches_raw = payload.get("branches")
     if not isinstance(branches_raw, list) or not branches_raw:
         raise NeonProviderError(f"Neon project {project_id} has no branches")
-    branches = _BRANCH_LIST_ADAPTER.validate_python(branches_raw)
+    try:
+        branches = _BRANCH_LIST_ADAPTER.validate_python(branches_raw)
+    except ValidationError as exc:
+        raise NeonProviderError(f"Neon /projects/{project_id}/branches returned an unexpected shape: {exc}") from exc
     for branch in branches:
         if branch.name == "main":
             return branch
