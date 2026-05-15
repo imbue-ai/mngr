@@ -137,7 +137,7 @@ def render_create_form(
 
     The compute provider (``launch_mode``) and AI provider are independent.
     Both default to ``IMBUE_CLOUD`` when an account is selected; without
-    an account we drop them to ``LOCAL`` / ``SUBSCRIPTION`` so the form
+    an account we drop them to ``LIMA`` / ``SUBSCRIPTION`` so the form
     starts in a valid state for the no-account flow.
 
     ``host_name`` is the value of the form's "Name" field; it drives the
