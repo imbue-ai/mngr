@@ -322,11 +322,23 @@ def _seed_user_gemini_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, conte
     return user_dir
 
 
+@pytest.fixture
+def seeded_empty_user_gemini_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect ``Path.home()`` and seed an empty ``~/.gemini/settings.json``.
+
+    Most provision tests only care that ``read_gemini_settings`` resolves to
+    *some* user dir under the test's scratch space; this fixture concentrates
+    that boilerplate in one place. Tests that need a non-empty user
+    ``settings.json`` (or that need to populate auth artifacts before
+    provision) should keep calling :func:`_seed_user_gemini_dir` directly.
+    """
+    return _seed_user_gemini_dir(tmp_path, monkeypatch, {})
+
+
 def test_provision_writes_settings_to_per_agent_home_with_readiness_hook(
-    gemini_agent: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    gemini_agent: GeminiAgent, seeded_empty_user_gemini_dir: Path
 ) -> None:
     """settings.json lands at <GEMINI_CLI_HOME>/.gemini/settings.json with the SessionStart hook."""
-    _seed_user_gemini_dir(tmp_path, monkeypatch, {})
     _provision(gemini_agent)
     settings = _read_relocated_settings(gemini_agent)
     assert HOOK_EVENT_SESSION_START in settings["hooks"]
@@ -356,9 +368,8 @@ def test_provision_merges_user_settings_into_per_agent_settings(
 
 
 def test_provision_writes_trusted_folders_entry_for_work_dir(
-    gemini_agent: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    gemini_agent: GeminiAgent, seeded_empty_user_gemini_dir: Path
 ) -> None:
-    _seed_user_gemini_dir(tmp_path, monkeypatch, {})
     _provision(gemini_agent)
     trusted_path = gemini_agent._get_relocated_gemini_dir() / "trustedFolders.json"
     trusted: Any = json.loads(trusted_path.read_text())
@@ -366,11 +377,9 @@ def test_provision_writes_trusted_folders_entry_for_work_dir(
     assert trusted[str(gemini_agent.work_dir.resolve())] == "TRUST_FOLDER"
 
 
-def test_provision_symlinks_user_auth_artifacts(
-    gemini_agent: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_provision_symlinks_user_auth_artifacts(gemini_agent: GeminiAgent, seeded_empty_user_gemini_dir: Path) -> None:
     """oauth_creds / google_accounts / installation_id symlink into the relocated dir."""
-    user_dir = _seed_user_gemini_dir(tmp_path, monkeypatch, {})
+    user_dir = seeded_empty_user_gemini_dir
     (user_dir / "oauth_creds.json").write_text('{"token": "fake"}')
     (user_dir / "google_accounts.json").write_text('{"account": "fake"}')
     (user_dir / "installation_id").write_text("fake-uuid")
@@ -385,11 +394,10 @@ def test_provision_symlinks_user_auth_artifacts(
 
 
 def test_provision_skips_missing_user_auth_artifacts(
-    gemini_agent: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    gemini_agent: GeminiAgent, seeded_empty_user_gemini_dir: Path
 ) -> None:
     """If a user has not run gemini auth yet, missing artifacts are skipped silently."""
     # No auth files are seeded into the fake user dir on purpose.
-    _seed_user_gemini_dir(tmp_path, monkeypatch, {})
     _provision(gemini_agent)
     relocated = gemini_agent._get_relocated_gemini_dir()
     for name in ("oauth_creds.json", "google_accounts.json", "installation_id"):
@@ -397,17 +405,15 @@ def test_provision_skips_missing_user_auth_artifacts(
 
 
 def test_provision_does_not_create_gemini_dir_in_workspace(
-    gemini_agent: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    gemini_agent: GeminiAgent, seeded_empty_user_gemini_dir: Path
 ) -> None:
     """The user's work_dir must be left completely untouched by provision."""
-    _seed_user_gemini_dir(tmp_path, monkeypatch, {})
     _provision(gemini_agent)
     assert not (gemini_agent.work_dir / ".gemini").exists()
 
 
-def test_provision_is_idempotent(gemini_agent: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_provision_is_idempotent(gemini_agent: GeminiAgent, seeded_empty_user_gemini_dir: Path) -> None:
     """Running provision twice yields the same content."""
-    _seed_user_gemini_dir(tmp_path, monkeypatch, {})
     _provision(gemini_agent)
     first = _read_relocated_settings(gemini_agent)
     _provision(gemini_agent)
@@ -418,11 +424,9 @@ def test_provision_is_idempotent(gemini_agent: GeminiAgent, tmp_path: Path, monk
 
 def test_provision_installs_hooks_even_when_transcript_disabled(
     gemini_agent_without_transcript: GeminiAgent,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    seeded_empty_user_gemini_dir: Path,
 ) -> None:
     """Readiness hook ships unconditionally -- decoupled from transcript emission."""
-    _seed_user_gemini_dir(tmp_path, monkeypatch, {})
     agent = gemini_agent_without_transcript
     _provision(agent)
     settings = _read_relocated_settings(agent)
@@ -430,20 +434,18 @@ def test_provision_installs_hooks_even_when_transcript_disabled(
 
 
 def test_provision_omits_before_tool_hook_when_auto_allow_disabled(
-    gemini_agent: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    gemini_agent: GeminiAgent, seeded_empty_user_gemini_dir: Path
 ) -> None:
     """The default config does not install a permission auto-allow hook."""
-    _seed_user_gemini_dir(tmp_path, monkeypatch, {})
     _provision(gemini_agent)
     settings = _read_relocated_settings(gemini_agent)
     assert HOOK_EVENT_BEFORE_TOOL not in settings["hooks"]
 
 
 def test_provision_installs_before_tool_hook_when_auto_allow_enabled(
-    gemini_agent_auto_allow: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    gemini_agent_auto_allow: GeminiAgent, seeded_empty_user_gemini_dir: Path
 ) -> None:
     """``auto_allow_permissions=True`` adds a BeforeTool wildcard allow hook alongside readiness."""
-    _seed_user_gemini_dir(tmp_path, monkeypatch, {})
     agent = gemini_agent_auto_allow
     _provision(agent)
     settings = _read_relocated_settings(agent)
