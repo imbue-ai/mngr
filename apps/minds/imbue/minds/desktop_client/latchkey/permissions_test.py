@@ -679,7 +679,7 @@ def test_deny_sends_mngr_message(tmp_path: Path) -> None:
 def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: Path) -> None:
     """The handler routes the on-disk write through the gateway extension and clears the pending request."""
     fake_client = FakeLatchkeyGatewayClient(
-        base_url="http://gateway.invalid",
+        _base_url="http://gateway.invalid",
         password="p",
         admin_jwt="jwt",
     )
@@ -717,7 +717,7 @@ def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: 
 def test_deny_calls_gateway_delete_permission_request_only(tmp_path: Path) -> None:
     """Deny tears down the pending gateway record but never POSTs permissions."""
     fake_client = FakeLatchkeyGatewayClient(
-        base_url="http://gateway.invalid",
+        _base_url="http://gateway.invalid",
         password="p",
         admin_jwt="jwt",
     )
@@ -750,7 +750,7 @@ def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Pa
     The fake client mirrors that behaviour; this test pins it.
     """
     fake_client = FakeLatchkeyGatewayClient(
-        base_url="http://gateway.invalid",
+        _base_url="http://gateway.invalid",
         password="p",
         admin_jwt="jwt",
     )

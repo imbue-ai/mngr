@@ -75,7 +75,7 @@ def test_consumer_dispatches_each_streamed_request_to_on_request() -> None:
         return httpx.Response(200, content=payload, headers={"Content-Type": "application/x-ndjson"})
 
     client = LatchkeyGatewayClient(
-        base_url="http://gateway.invalid:1989",
+        _base_url="http://gateway.invalid:1989",
         password="p",
         admin_jwt="jwt",
         transport=httpx.MockTransport(_handler),

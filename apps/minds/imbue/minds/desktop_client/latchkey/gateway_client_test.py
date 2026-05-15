@@ -19,7 +19,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissio
 def _build_client(handler: Callable[[httpx.Request], httpx.Response]) -> LatchkeyGatewayClient:
     """Build a :class:`LatchkeyGatewayClient` whose transport is the handler."""
     return LatchkeyGatewayClient(
-        base_url="http://gateway.invalid:1989",
+        _base_url="http://gateway.invalid:1989",
         password="hunter2",
         admin_jwt="admin-jwt-token",
         transport=httpx.MockTransport(handler),

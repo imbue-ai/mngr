@@ -119,7 +119,7 @@ def build_fake_gateway_client() -> FakeLatchkeyGatewayClient:
     helper.
     """
     return FakeLatchkeyGatewayClient(
-        base_url="http://127.0.0.1:0",
+        _base_url="http://127.0.0.1:0",
         password="fake-password",
         admin_jwt="fake-admin-jwt",
     )
