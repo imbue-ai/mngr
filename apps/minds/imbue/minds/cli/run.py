@@ -25,6 +25,7 @@ import secrets
 import threading
 import webbrowser
 from pathlib import Path
+from types import FrameType
 from typing import Final
 
 import click
@@ -49,6 +50,7 @@ from imbue.minds.config.loader import resolve_default_client_config_path
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
@@ -366,8 +368,11 @@ def run(
         thread = threading.Thread(target=_sleep_then_open, args=(minds_login_url,), daemon=True)
         thread.start()
 
+    server = _PreShutdownAwareServer(config=uvicorn.Config(app, host=host, port=port, timeout_graceful_shutdown=1))
+    server.pre_shutdown_app = app
+    server.pre_shutdown_resolver = backend_resolver
     try:
-        uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
+        server.run()
     finally:
         consumer.terminate()
 
@@ -411,6 +416,60 @@ def _wait_for_gateway_port(latchkey: Latchkey) -> LatchkeyForwardInfo:
         f"Timed out after {_GATEWAY_PORT_WAIT_SECONDS:.1f}s waiting for ``mngr latchkey forward`` to stamp "
         f"its bound gateway port onto {plugin_dir}; is the supervisor stuck?",
     )
+
+
+class _PreShutdownAwareServer(uvicorn.Server):
+    """A uvicorn Server that flips ``app.state.shutdown_event`` on SIGINT/SIGTERM.
+
+    Without this hook, uvicorn's shutdown order is:
+
+    1. Signal handler sets ``should_exit = True``.
+    2. Main loop notices, calls ``shutdown()``.
+    3. ``shutdown()`` waits ``timeout_graceful_shutdown`` seconds for
+       in-flight connections (SSE streams that the browser is holding
+       open are still in-flight).
+    4. On timeout, cancels every in-flight task with ``CancelledError``
+       -- which surfaces as a noisy starlette/anyio traceback in the
+       log on every clean shutdown.
+    5. THEN calls ``lifespan.shutdown()`` (i.e. our ``_managed_lifespan``
+       finally block).
+
+    Setting ``shutdown_event`` from the lifespan finally is too late --
+    the cancel has already happened. ``handle_exit`` is the earliest
+    hook we have: it fires from the signal handler itself, BEFORE
+    uvicorn starts waiting for connections, so our SSE handlers see
+    the flag set on their next iteration and return their generators
+    cleanly. Once they're done, ``shutdown()``'s wait completes
+    without timing out, no tasks need to be cancelled, no traceback.
+
+    The ``backend_resolver.notify_change()`` poke wakes the chrome SSE
+    out of its 30-second ``change_event.wait()`` immediately, so the
+    SSE handlers don't have to wait out the full poll interval before
+    noticing ``shutdown_event``.
+
+    ``pre_shutdown_app`` and ``pre_shutdown_resolver`` are set by the
+    caller via direct attribute assignment immediately after
+    construction. We can't override ``__init__`` (the project ratchet
+    forbids it on non-exception classes), and the parent's __init__
+    takes only ``config``, so the cleanest way to thread these in is
+    explicit post-construction assignment. ``None`` defaults keep the
+    type checker happy and let the handler no-op gracefully if a future
+    caller forgets to wire them up.
+    """
+
+    pre_shutdown_app: FastAPI | None = None
+    pre_shutdown_resolver: BackendResolverInterface | None = None
+
+    def handle_exit(self, sig: int, frame: FrameType | None) -> None:
+        # Fire BEFORE super(): super().handle_exit sets should_exit,
+        # which begins uvicorn's shutdown sequence. We want shutdown_event
+        # set first so SSE handlers exit before uvicorn starts waiting
+        # on still-in-flight connections.
+        if self.pre_shutdown_app is not None:
+            self.pre_shutdown_app.state.shutdown_event.set()
+        if isinstance(self.pre_shutdown_resolver, MngrCliBackendResolver):
+            self.pre_shutdown_resolver.notify_change()
+        super().handle_exit(sig, frame)
 
 
 class _StreamedPermissionRequestHandler(FrozenModel):
