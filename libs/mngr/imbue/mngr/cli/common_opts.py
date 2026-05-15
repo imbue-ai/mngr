@@ -453,7 +453,7 @@ def apply_config_defaults(
 
     Special handling for tuple/list parameters:
     - An empty string value ("") clears the list (sets it to an empty tuple)
-    - This allows env vars like MNGR_COMMANDS_CREATE_ADD_COMMAND= to clear config defaults
+    - This allows env vars like MNGR__COMMANDS__CREATE__ADD_COMMAND= to clear config defaults
 
     When strict=True, raises ConfigParseError for unknown parameter names; when
     strict=False, logs a warning and skips them. Callers should resolve the
