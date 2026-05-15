@@ -3,10 +3,16 @@
  * a Detent permissions config file at a caller-supplied path.
  *
  * Endpoints (the target file is always selected by the ``path`` query
- * param; the rule key is selected by ``rule_key``):
+ * param, except for ``/permissions/self`` which uses the gateway-supplied
+ * config path from the extension context; the rule key is selected by
+ * ``rule_key``):
  *
  *   GET    /permissions?path=<path>
  *       Return the full permissions.json at <path>.
+ *   GET    /permissions/self
+ *       Return the full permissions.json that the gateway applied to
+ *       the caller for this request (from the extension context's
+ *       ``permissionsConfigPath``). Takes no query parameters.
  *   GET    /permissions/rules?path=<path>&rule_key=<key>
  *       Return the rule whose scope key is <key>.
  *   POST   /permissions/rules?path=<path>&rule_key=<key>
@@ -15,7 +21,8 @@
  *   DELETE /permissions/rules?path=<path>&rule_key=<key>
  *       Remove the rule for <key>.
  *
- * Security model: ``path`` must resolve (after symlink-aware
+ * Security model: for the endpoints that accept ``path``, ``path``
+ * must resolve (after symlink-aware
  * normalization of its existing parent directory and `..` segments)
  * underneath the directory named in the ``LATCHKEY_EXTENSION_PERMISSIONS_ROOT``
  * environment variable, and must not equal the root itself. Any path
@@ -23,7 +30,9 @@
  * and any request received when the env var is unset / empty are
  * rejected with HTTP 403. This is the only thing standing between a
  * caller and arbitrary read/write on the gateway host's filesystem,
- * so we are deliberately strict about it.
+ * so we are deliberately strict about it. ``/permissions/self`` does
+ * not consult the env var because its path is supplied by the gateway
+ * (via the extension context) rather than the caller.
  *
  * NOTE: extension requests still go through the gateway's permission
  * check, so callers must have a rule that allows them to talk to
@@ -44,6 +53,7 @@ import {
 import { dirname, isAbsolute, resolve, relative } from 'node:path';
 
 const COLLECTION_PATH = '/permissions';
+const SELF_PATH = '/permissions/self';
 const RULES_COLLECTION_PATH = '/permissions/rules';
 const PERMISSIONS_ROOT_ENV_VAR = 'LATCHKEY_EXTENSION_PERMISSIONS_ROOT';
 
@@ -264,6 +274,9 @@ function parseRoute(requestUrl) {
   if (pathOnly === COLLECTION_PATH || pathOnly === `${COLLECTION_PATH}/`) {
     return { kind: 'collection' };
   }
+  if (pathOnly === SELF_PATH || pathOnly === `${SELF_PATH}/`) {
+    return { kind: 'self' };
+  }
   if (pathOnly === RULES_COLLECTION_PATH || pathOnly === `${RULES_COLLECTION_PATH}/`) {
     return { kind: 'rule' };
   }
@@ -327,6 +340,22 @@ function handleGetCollection(response, filePath) {
   sendJson(response, 200, file);
 }
 
+function handleGetSelf(response, context) {
+  if (
+    typeof context !== 'object' ||
+    context === null ||
+    typeof context.permissionsConfigPath !== 'string' ||
+    context.permissionsConfigPath.length === 0
+  ) {
+    throw new PermissionsExtensionError(
+      500,
+      'Extension context did not provide permissionsConfigPath.',
+    );
+  }
+  const file = readPermissionsFile(context.permissionsConfigPath);
+  sendJson(response, 200, file);
+}
+
 function handleGetRule(response, filePath, ruleKey) {
   const file = readPermissionsFile(filePath);
   const rule = findRule(file, ruleKey);
@@ -367,7 +396,7 @@ function handleDeleteRule(response, filePath, ruleKey) {
   response.end();
 }
 
-export default async function permissionsExtension(request, response) {
+export default async function permissionsExtension(request, response, context) {
   const route = parseRoute(request.url);
   const method = (request.method ?? 'GET').toUpperCase();
   const searchParams = parseRequestUrl(request.url).searchParams;
@@ -376,6 +405,10 @@ export default async function permissionsExtension(request, response) {
     if (route.kind === 'collection' && method === 'GET') {
       const filePath = resolvePathParamUnderRoot(searchParams.get('path'));
       handleGetCollection(response, filePath);
+      return true;
+    }
+    if (route.kind === 'self' && method === 'GET') {
+      handleGetSelf(response, context);
       return true;
     }
     if (route.kind === 'rule') {
