@@ -246,6 +246,7 @@ def test_get_common_transcript_scripts_returns_common_transcript_sh(gemini_agent
 
 def test_provision_with_emit_disabled_does_not_write_script(
     gemini_agent_without_transcript: GeminiAgent,
+    seeded_empty_user_gemini_dir: Path,
 ) -> None:
     agent = gemini_agent_without_transcript
     _provision(agent)
@@ -255,7 +256,9 @@ def test_provision_with_emit_disabled_does_not_write_script(
     assert not expected_script.exists()
 
 
-def test_provision_with_emit_enabled_writes_transcript_script(gemini_agent: GeminiAgent) -> None:
+def test_provision_with_emit_enabled_writes_transcript_script(
+    gemini_agent: GeminiAgent, seeded_empty_user_gemini_dir: Path
+) -> None:
     """provision should write common_transcript.sh to the agent's commands/ directory."""
     _provision(gemini_agent)
 
