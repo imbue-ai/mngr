@@ -182,7 +182,9 @@ def test_install_sh_continues_when_dependencies_fail(tmp_path: Path) -> None:
     calls = log_file.read_text()
     assert "mngr dependencies -i" in calls
     assert "mngr extras -i" in calls
-    assert "WARNING" in result.stderr
+    # Pin the assertion to the step-3 warning text from install.sh so a
+    # regression that fires the wrong || warn (or none at all) is caught.
+    assert "Some dependencies could not be installed" in result.stderr
 
 
 @pytest.mark.timeout(30)
@@ -201,6 +203,8 @@ def test_install_sh_continues_when_extras_fail(tmp_path: Path) -> None:
     assert result.returncode == 0, f"install.sh failed unexpectedly\nstderr:\n{result.stderr}"
     calls = log_file.read_text()
     assert "mngr extras -i" in calls
-    assert "WARNING" in result.stderr
+    # Pin the assertion to the step-4 warning text from install.sh so a
+    # regression that fires the wrong || warn (or none at all) is caught.
+    assert "Some extras could not be installed" in result.stderr
     # The final "Get started" line must still be printed.
     assert "Get started" in result.stdout
