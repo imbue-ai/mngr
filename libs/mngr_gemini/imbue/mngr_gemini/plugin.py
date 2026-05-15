@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.resources
-import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -24,6 +23,7 @@ from imbue.mngr_gemini import resources as _gemini_resources
 from imbue.mngr_gemini.gemini_config import build_permission_auto_allow_hooks_config
 from imbue.mngr_gemini.gemini_config import build_readiness_hooks_config
 from imbue.mngr_gemini.gemini_config import merge_hooks_config
+from imbue.mngr_gemini.gemini_config import serialize_gemini_settings
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME = "common_transcript.sh"
 
@@ -217,7 +217,7 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
             assert merged is not None
             settings = merged
 
-        host.write_text_file(self._get_system_settings_path(), json.dumps(settings, indent=2) + "\n")
+        host.write_text_file(self._get_system_settings_path(), serialize_gemini_settings(settings))
 
     def assemble_command(
         self,

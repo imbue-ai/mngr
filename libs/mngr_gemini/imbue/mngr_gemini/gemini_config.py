@@ -109,6 +109,17 @@ def read_gemini_settings(settings_path: Path) -> dict[str, Any]:
     return read_json_dict(settings_path)
 
 
+@pure
+def serialize_gemini_settings(settings: Mapping[str, Any]) -> str:
+    """Serialize ``settings`` to the canonical Gemini ``settings.json`` text form.
+
+    Two-space-indented JSON with a trailing newline. Centralizing this so
+    every Gemini settings file mngr writes -- via ``write_gemini_settings``
+    or directly via an ``OnlineHostInterface`` -- shares the same shape.
+    """
+    return json.dumps(dict(settings), indent=2) + "\n"
+
+
 def write_gemini_settings(settings_path: Path, settings: Mapping[str, Any]) -> None:
     """Atomically write ``settings`` to ``settings_path`` with a ``.bak`` backup.
 
@@ -121,7 +132,7 @@ def write_gemini_settings(settings_path: Path, settings: Mapping[str, Any]) -> N
         logger.trace("Created backup of Gemini settings at {}", backup_path)
 
     settings_path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(settings_path, json.dumps(dict(settings), indent=2) + "\n")
+    atomic_write(settings_path, serialize_gemini_settings(settings))
 
 
 # =============================================================================

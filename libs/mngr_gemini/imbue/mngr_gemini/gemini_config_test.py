@@ -20,6 +20,7 @@ from imbue.mngr_gemini.gemini_config import hook_already_exists
 from imbue.mngr_gemini.gemini_config import interpolate_env_vars
 from imbue.mngr_gemini.gemini_config import merge_hooks_config
 from imbue.mngr_gemini.gemini_config import read_gemini_settings
+from imbue.mngr_gemini.gemini_config import serialize_gemini_settings
 from imbue.mngr_gemini.gemini_config import write_gemini_settings
 
 # =============================================================================
@@ -78,6 +79,23 @@ def test_read_gemini_settings_non_object_json_returns_empty(tmp_path: Path) -> N
     settings_path = tmp_path / "settings.json"
     settings_path.write_text("[1, 2, 3]")
     assert read_gemini_settings(settings_path) == {}
+
+
+# =============================================================================
+# Serializer
+# =============================================================================
+
+
+def test_serialize_gemini_settings_uses_two_space_indent_and_trailing_newline() -> None:
+    output = serialize_gemini_settings({"a": 1, "b": [2, 3]})
+    assert output.endswith("\n")
+    # At least one indented line (two-space pretty-print).
+    assert "\n  " in output
+
+
+def test_serialize_gemini_settings_round_trips_through_json_loads() -> None:
+    payload = {"hooks": {"SessionStart": [{"hooks": [{"command": "echo"}]}]}}
+    assert json.loads(serialize_gemini_settings(payload)) == payload
 
 
 # =============================================================================
