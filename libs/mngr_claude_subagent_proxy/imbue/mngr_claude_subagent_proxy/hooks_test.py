@@ -13,6 +13,7 @@ import io
 import json
 import stat
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -20,6 +21,7 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr_claude_subagent_proxy import _stop_hook_guard
+from imbue.mngr_claude_subagent_proxy.hook_io import parse_int_env
 from imbue.mngr_claude_subagent_proxy.hooks import cleanup as cleanup_hook
 from imbue.mngr_claude_subagent_proxy.hooks import reap as reap_hook
 from imbue.mngr_claude_subagent_proxy.hooks import spawn as spawn_hook
@@ -39,34 +41,15 @@ def _list_returns(agents: dict[str, AgentDetails] | None):
     return _stub
 
 
-@pytest.fixture
-def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
-    """Clear subagent-proxy env vars so individual tests set only what they need."""
-    for name in (
-        "MNGR_AGENT_STATE_DIR",
-        "MNGR_AGENT_NAME",
-        "MNGR_SUBAGENT_DEPTH",
-        "MNGR_MAX_SUBAGENT_DEPTH",
-        "MNGR_SUBAGENT_REAP_BACKGROUND",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    return monkeypatch
-
-
 def _mode_bits(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
-def _set_spawn_env(monkeypatch: pytest.MonkeyPatch, state_dir: Path) -> None:
-    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
-    monkeypatch.setenv("MNGR_AGENT_NAME", "parent-agent")
-
-
-def test_spawn_rewrites_input(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> None:
+def test_spawn_rewrites_input(
+    hook_env: pytest.MonkeyPatch,
+    state_dir: Path,
+) -> None:
     """PreToolUse hook rewrites the Agent invocation to the mngr proxy."""
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    _set_spawn_env(clean_env, state_dir)
 
     hook_input: dict[str, object] = {
         "tool_use_id": "toolu_abc12345678",
@@ -121,8 +104,18 @@ def test_spawn_rewrites_input(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> 
 
     assert prompt_file.read_text() == "find all readmes"
     map_data = json.loads(map_file.read_text())
-    assert set(map_data.keys()) == {"target_name", "subagent_type", "parent_cwd", "run_in_background"}
+    assert set(map_data.keys()) == {
+        "target_name",
+        "subagent_type",
+        "subagent_type_resolved_path",
+        "parent_cwd",
+        "run_in_background",
+    }
     assert map_data["subagent_type"] == "general-purpose"
+    # general-purpose is a Claude Code built-in with no on-disk .md file,
+    # so the resolver returns None and the parent's prompt is written
+    # verbatim into the prompt file (no system-prompt prepend).
+    assert map_data["subagent_type_resolved_path"] is None
     assert map_data["run_in_background"] is False
     assert map_data["target_name"].startswith("parent-agent--subagent-")
     assert script_file.is_file()
@@ -232,13 +225,128 @@ def test_wait_script_traps_env_file_cleanup_on_failure() -> None:
     )
 
 
-def test_spawn_depth_limit_denies_with_reason(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> None:
+def test_spawn_prepends_resolved_agent_definition_body_to_prompt_file(
+    hook_env: pytest.MonkeyPatch,
+    state_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typed ``subagent_type`` that resolves to an on-disk agent definition
+    causes the spawn hook to prepend the definition body (the spawned
+    subagent's system prompt) to the prompt file under a clearly-marked
+    section header, and to record the resolved path in the map file.
+
+    Without this, the mngr proxy spawns a generic Claude with no system
+    prompt for specialized types (verify-and-fix, review-conversation,
+    etc.) -- silently losing the typed-subagent contract.
+    """
+    # Drop a marketplace-installed plugin agent under a fake HOME so the
+    # resolver finds it without touching the developer's real ~/.claude/.
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    marketplace_agent = (
+        fake_home
+        / ".claude"
+        / "plugins"
+        / "marketplaces"
+        / "imbue-code-guardian"
+        / "plugins"
+        / "imbue-code-guardian"
+        / "agents"
+        / "verify-and-fix.md"
+    )
+    marketplace_agent.parent.mkdir(parents=True)
+    system_prompt_body = "You are an autonomous code verifier and fixer. Use your best judgment throughout."
+    marketplace_agent.write_text(
+        f"---\nname: verify-and-fix\ndescription: verify branch\n---\n\n{system_prompt_body}\n"
+    )
+
+    hook_input: dict[str, object] = {
+        "tool_use_id": "toolu_typed1234567",
+        "tool_input": {
+            "prompt": "fix the verify branch",
+            "description": "verify branch",
+            "subagent_type": "imbue-code-guardian:verify-and-fix",
+            "run_in_background": False,
+        },
+    }
+    stdin_buffer = io.StringIO(json.dumps(hook_input))
+    stdout_buffer = io.StringIO()
+    spawn_hook.run(stdin_buffer, stdout_buffer)
+
+    response = json.loads(stdout_buffer.getvalue())
+    assert response["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    tid = "toolu_typed1234567"
+    prompt_file = state_dir / "subagent_prompts" / f"{tid}.md"
+    map_file = state_dir / "subagent_map" / f"{tid}.json"
+
+    prompt_text = prompt_file.read_text()
+    # System prompt body appears under a clearly-marked section header
+    # BEFORE the parent's task prompt. Header has to be unambiguous so
+    # the spawned subagent doesn't mistake instructions from one section
+    # for the other.
+    assert "# System prompt for subagent_type 'imbue-code-guardian:verify-and-fix'" in prompt_text
+    assert system_prompt_body in prompt_text
+    assert "# Task from parent" in prompt_text
+    assert "fix the verify branch" in prompt_text
+    assert prompt_text.index(system_prompt_body) < prompt_text.index("fix the verify branch"), (
+        "System prompt body must appear before the parent task in the prompt file"
+    )
+    # YAML frontmatter is stripped from the system-prompt body -- otherwise
+    # the spawned subagent would see "---\nname: ...\n---" lines as user
+    # content.
+    assert "name: verify-and-fix" not in prompt_text
+
+    map_data = json.loads(map_file.read_text())
+    assert map_data["subagent_type"] == "imbue-code-guardian:verify-and-fix"
+    assert map_data["subagent_type_resolved_path"] == str(marketplace_agent)
+
+
+def test_spawn_unresolved_subagent_type_writes_raw_prompt(
+    hook_env: pytest.MonkeyPatch,
+    state_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a typed ``subagent_type`` does NOT resolve (built-in or unknown),
+    the prompt file gets the parent's prompt verbatim and the map file
+    records ``subagent_type_resolved_path: None``.
+
+    Same behavior the proxy had before typed-subagent support landed; pinning
+    that the fallback path is preserved.
+    """
+    fake_home = tmp_path / "fake_home_empty"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    hook_input: dict[str, object] = {
+        "tool_use_id": "toolu_unresolved12",
+        "tool_input": {
+            "prompt": "find the readmes",
+            "description": "explore",
+            "subagent_type": "some-plugin:nonexistent",
+            "run_in_background": False,
+        },
+    }
+    spawn_hook.run(io.StringIO(json.dumps(hook_input)), io.StringIO())
+
+    tid = "toolu_unresolved12"
+    prompt_text = (state_dir / "subagent_prompts" / f"{tid}.md").read_text()
+    map_data = json.loads((state_dir / "subagent_map" / f"{tid}.json").read_text())
+
+    assert prompt_text == "find the readmes"
+    assert map_data["subagent_type_resolved_path"] is None
+
+
+def test_spawn_depth_limit_denies_with_reason(
+    hook_env: pytest.MonkeyPatch,
+    state_dir: Path,
+) -> None:
     """At max depth, the hook denies the Task tool with an explanatory reason."""
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    _set_spawn_env(clean_env, state_dir)
-    clean_env.setenv("MNGR_SUBAGENT_DEPTH", "3")
-    clean_env.setenv("MNGR_MAX_SUBAGENT_DEPTH", "3")
+    hook_env.setenv("MNGR_SUBAGENT_DEPTH", "3")
+    hook_env.setenv("MNGR_MAX_SUBAGENT_DEPTH", "3")
 
     hook_input: dict[str, object] = {
         "tool_use_id": "toolu_depth1234567",
@@ -268,9 +376,8 @@ def test_spawn_depth_limit_denies_with_reason(tmp_path: Path, clean_env: pytest.
         assert entries == []
 
 
-def test_spawn_passes_through_without_env(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> None:
+def test_spawn_passes_through_without_env(clean_env: pytest.MonkeyPatch) -> None:
     """Missing state-dir env var causes an allow pass-through."""
-    del tmp_path  # unused
     del clean_env  # the fixture's job is the env cleanup
     stdin_buffer = io.StringIO(json.dumps({"tool_use_id": "tid", "tool_input": {"prompt": "hi"}}))
     stdout_buffer = io.StringIO()
@@ -282,8 +389,8 @@ def test_spawn_passes_through_without_env(tmp_path: Path, clean_env: pytest.Monk
 
 
 def test_rewrite_substitutes_output_and_cleans_up(
-    tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
+    state_dir: Path,
 ) -> None:
     """PostToolUse hook destroys the child and cleans up per-tool_use_id state files.
 
@@ -293,7 +400,6 @@ def test_rewrite_substitutes_output_and_cleans_up(
     this hook -- Claude Code's PostToolUse ``updatedToolOutput`` is
     MCP-only and does not apply to built-in tools.
     """
-    state_dir = tmp_path / "state"
     for sub in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
         (state_dir / sub).mkdir(parents=True)
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
@@ -354,8 +460,8 @@ def test_rewrite_substitutes_output_and_cleans_up(
 
 
 def test_rewrite_missing_result_preserves_subagent(
-    tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
+    state_dir: Path,
 ) -> None:
     """When result_file is missing, subagent_wait never observed END_TURN
     (Haiku gave up early -- timeout, hallucinated permission dialog,
@@ -367,7 +473,6 @@ def test_rewrite_missing_result_preserves_subagent(
     case so on_before_agent_destroy / SessionStart-reaper can still
     pick the child up later.
     """
-    state_dir = tmp_path / "state"
     for sub in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
         (state_dir / sub).mkdir(parents=True)
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
@@ -417,9 +522,9 @@ def test_rewrite_missing_result_preserves_subagent(
     ids=["running", "waiting"],
 )
 def test_rewrite_live_lifecycle_preserves_subagent(
-    tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
     live_state: AgentLifecycleState,
+    state_dir: Path,
 ) -> None:
     """Even when result_file IS present, a child still in RUNNING /
     WAITING must be preserved -- catches edge cases where subagent_wait
@@ -427,7 +532,6 @@ def test_rewrite_live_lifecycle_preserves_subagent(
     waiting for a permission prompt resolution that will produce more
     work).
     """
-    state_dir = tmp_path / "state"
     for sub in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
         (state_dir / sub).mkdir(parents=True)
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
@@ -468,8 +572,8 @@ def test_rewrite_live_lifecycle_preserves_subagent(
 
 
 def test_rewrite_preserves_subagent_when_mngr_list_errors(
-    tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
+    state_dir: Path,
 ) -> None:
     """A transient mngr-list failure must not destroy an in-flight child.
 
@@ -479,7 +583,6 @@ def test_rewrite_preserves_subagent_when_mngr_list_errors(
     as 'safely dead' would let a flaky listing call destroy a still-running
     subagent. Conservative behavior is to preserve.
     """
-    state_dir = tmp_path / "state"
     for sub in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
         (state_dir / sub).mkdir(parents=True)
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
@@ -518,11 +621,10 @@ def test_rewrite_preserves_subagent_when_mngr_list_errors(
 
 
 def test_rewrite_ignores_unmapped_tool_use_id(
-    tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
+    state_dir: Path,
 ) -> None:
     """If no map file exists for the tool_use_id, the hook is a no-op."""
-    state_dir = tmp_path / "state"
     (state_dir / "subagent_map").mkdir(parents=True)
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
 
@@ -540,67 +642,84 @@ def test_rewrite_ignores_unmapped_tool_use_id(
     assert destroy_calls == []
 
 
-def test_reap_fast_path_empty_state(
-    tmp_path: Path,
+def test_reap_skips_when_state_dir_unset(
     clean_env: pytest.MonkeyPatch,
 ) -> None:
-    """Reaper exits immediately when subagent_map/ is missing or empty, without dispatching."""
+    """SessionStart with MNGR_AGENT_STATE_DIR unset is a no-op (no dispatch).
+
+    Hooks on plain Claude sessions without mngr context (e.g. user
+    running ``claude`` directly) should not crash or attempt to reap.
+    """
     spawn_calls: list[None] = []
+    clean_env.delenv("MNGR_AGENT_STATE_DIR", raising=False)
 
-    def fake_spawn() -> None:
-        spawn_calls.append(None)
+    reap_hook.run(io.StringIO(""), spawn_background_callable=lambda: spawn_calls.append(None))
 
-    # Case 1: state dir does not exist at all.
-    state_dir = tmp_path / "no-state"
-    clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
-    reap_hook.run(io.StringIO(""), spawn_background_callable=fake_spawn)
-    assert spawn_calls == []
-
-    # Case 2: state dir exists with an empty subagent_map/.
-    state_dir2 = tmp_path / "empty-state"
-    (state_dir2 / "subagent_map").mkdir(parents=True)
-    clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir2))
-    reap_hook.run(io.StringIO(""), spawn_background_callable=fake_spawn)
     assert spawn_calls == []
 
 
-def test_reap_with_work_spawns_background_child(
-    tmp_path: Path,
+def test_reap_always_dispatches_background_when_state_dir_set(
     clean_env: pytest.MonkeyPatch,
+    state_dir: Path,
 ) -> None:
-    """When map entries exist, the reaper dispatches a detached background child."""
-    state_dir = tmp_path / "state"
-    (state_dir / "subagent_map").mkdir(parents=True)
-    (state_dir / "subagent_map" / "toolu_tid1234.json").write_text(
-        json.dumps(
-            {
-                "target_name": "fake-agent",
-                "subagent_type": "general-purpose",
-                "parent_cwd": "/tmp",
-                "run_in_background": False,
-            }
-        )
-    )
+    """SessionStart always dispatches the background reaper when state dir is set.
 
+    Same behavior in PROXY and DENY modes: we don't try to predict
+    whether there's work to do (would require a slow ``mngr list``
+    call in the foreground); the background child does the slow query
+    and short-circuits if there are no orphans. The dispatch itself is
+    cheap.
+    """
     spawn_calls: list[None] = []
-
-    def fake_spawn() -> None:
-        spawn_calls.append(None)
-
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
 
-    reap_hook.run(io.StringIO(""), spawn_background_callable=fake_spawn)
+    reap_hook.run(io.StringIO(""), spawn_background_callable=lambda: spawn_calls.append(None))
 
     assert len(spawn_calls) == 1
 
 
-def test_reap_background_worker_cleans_up_missing_agent(
-    tmp_path: Path,
+def test_reap_background_worker_destroys_terminal_children_by_label(
     clean_env: pytest.MonkeyPatch,
+    state_dir: Path,
+) -> None:
+    """Background reaper destroys children whose parent_id label matches ours
+    and whose state is terminal; non-terminal or non-matching children are
+    left alone. Same code path serves PROXY and DENY modes.
+    """
+    clean_env.setenv("MNGR_SUBAGENT_REAP_BACKGROUND", "1")
+    clean_env.setenv("MNGR_AGENT_ID", "parent-A")
+    clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
+
+    parent_label = "mngr_claude_subagent_proxy_parent_id"
+    agents_by_name = {
+        "child-done": make_test_agent_details(
+            name="child-done", state=AgentLifecycleState.DONE, labels={parent_label: "parent-A"}
+        ),
+        "child-running": make_test_agent_details(
+            name="child-running", state=AgentLifecycleState.RUNNING, labels={parent_label: "parent-A"}
+        ),
+        "other-parent-done": make_test_agent_details(
+            name="other-parent-done", state=AgentLifecycleState.DONE, labels={parent_label: "parent-B"}
+        ),
+    }
+    destroy_calls: list[tuple[str, Path]] = []
+
+    reap_hook.run(
+        io.StringIO(""),
+        list_callable=lambda: agents_by_name,
+        destroy_callable=lambda name, log: destroy_calls.append((name, log)),
+    )
+
+    destroyed_names = sorted(name for name, _ in destroy_calls)
+    assert destroyed_names == ["child-done"]
+
+
+def test_reap_background_worker_cleans_up_missing_agent(
+    clean_env: pytest.MonkeyPatch,
+    state_dir: Path,
 ) -> None:
     """Background reaper drops side files for map entries whose target agent is gone."""
     clean_env.setenv("MNGR_SUBAGENT_REAP_BACKGROUND", "1")
-    state_dir = tmp_path / "state"
     for sub in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
         (state_dir / sub).mkdir(parents=True)
     tid = "toolu_missing1234"
@@ -640,20 +759,12 @@ def test_reap_background_worker_cleans_up_missing_agent(
     assert destroy_calls == []
 
 
-def test_slugify_caps_length_and_collapses_runs() -> None:
-    """slugify lowercases, collapses non-alphanumeric runs to single dashes, and caps at 30 chars."""
-    assert spawn_hook.slugify("Hello, World!") == "hello-world"
-    assert spawn_hook.slugify("----") == ""
-    assert spawn_hook.slugify("a" * 50) == "a" * 30
-    assert spawn_hook.slugify("A B  C") == "a-b-c"
-
-
 def test_spawn_env_vars_from_real_os_env(clean_env: pytest.MonkeyPatch) -> None:
     """Sanity: helpers read from the actual os.environ (not a closure)."""
     # This ensures we don't accidentally snapshot at import time.
-    assert spawn_hook._parse_int_env("__DOES_NOT_EXIST__", 42) == 42
+    assert parse_int_env("__DOES_NOT_EXIST__", 42) == 42
     clean_env.setenv("__SPAWN_TEST_INT__", "7")
-    assert spawn_hook._parse_int_env("__SPAWN_TEST_INT__", 0) == 7
+    assert parse_int_env("__SPAWN_TEST_INT__", 0) == 7
 
 
 # guard_per_agent_plugin_cache wraps every Stop / SubagentStop command in
@@ -667,33 +778,12 @@ def test_spawn_env_vars_from_real_os_env(clean_env: pytest.MonkeyPatch) -> None:
 # by copying the user marketplace dir. The provisioning-time wrap of
 # the user marketplace never reached the cache. Fix: call this helper
 # from a SessionStart hook.
-def _write_unguarded_orchestrator_hooks(path: Path) -> None:
-    """Helper: write a hooks.json mimicking what Claude Code fetches from
-    a stop-hook plugin marketplace (un-guarded orchestrator command)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "hooks": {
-                    "Stop": [
-                        {
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "timeout": 900,
-                                    "command": "${CLAUDE_PLUGIN_ROOT}/scripts/stop_hook_orchestrator.sh",
-                                }
-                            ]
-                        }
-                    ]
-                }
-            }
-        )
-        + "\n"
-    )
 
 
-def test_guard_per_agent_plugin_cache_wraps_unguarded_stop_hooks(tmp_path: Path) -> None:
+def test_guard_per_agent_plugin_cache_wraps_unguarded_stop_hooks(
+    tmp_path: Path,
+    write_unguarded_orchestrator_hooks: Callable[[Path], None],
+) -> None:
     """Walks every hooks.json under the per-agent plugin cache and prepends
     the proxy-child guard to each Stop/SubagentStop command. Idempotent on
     second pass.
@@ -707,7 +797,7 @@ def test_guard_per_agent_plugin_cache_wraps_unguarded_stop_hooks(tmp_path: Path)
         cache_root / "marketplaces" / "beta" / "plugins" / "p2" / "hooks" / "hooks.json",
     ]
     for p in paths:
-        _write_unguarded_orchestrator_hooks(p)
+        write_unguarded_orchestrator_hooks(p)
 
     _stop_hook_guard.guard_per_agent_plugin_cache(state_dir)
 
@@ -740,42 +830,3 @@ def test_guard_per_agent_plugin_cache_noop_when_cache_missing(tmp_path: Path) ->
     state_dir.mkdir()
     # Should not raise.
     _stop_hook_guard.guard_per_agent_plugin_cache(state_dir)
-
-
-def test_reap_run_invokes_per_agent_plugin_cache_guard(
-    tmp_path: Path,
-    clean_env: pytest.MonkeyPatch,
-) -> None:
-    """The SessionStart reap hook calls guard_per_agent_plugin_cache for
-    the agent's own state dir BEFORE the orphan-reap fast path. This
-    closes the bug where a fresh-from-GitHub per-agent cache contained
-    an unguarded orchestrator that fired inside spawned subagents.
-    """
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    cache_hooks = (
-        state_dir
-        / "plugin"
-        / "claude"
-        / "anthropic"
-        / "plugins"
-        / "marketplaces"
-        / "x"
-        / "plugins"
-        / "p"
-        / "hooks"
-        / "hooks.json"
-    )
-    _write_unguarded_orchestrator_hooks(cache_hooks)
-    clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
-
-    # Empty subagent_map -- trips the fast-path `return`. The cache wrap
-    # must run BEFORE that early return; if it ran later (or only in the
-    # background-worker branch) this test would fail.
-    reap_hook.run(io.StringIO(""), spawn_background_callable=lambda: None)
-
-    cmd = json.loads(cache_hooks.read_text())["hooks"]["Stop"][0]["hooks"][0]["command"]
-    assert cmd.startswith('[ -n "$MNGR_CLAUDE_SUBAGENT_PROXY_CHILD" ] && exit 0; '), (
-        f"reap.run did not guard the per-agent plugin cache. Command after run: {cmd!r}. "
-        f"The SessionStart wrap of the cache must run before the orphan-reap fast path."
-    )

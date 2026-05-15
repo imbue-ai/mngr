@@ -31,6 +31,11 @@ class Volume(MutableModel, ABC):
         ...
 
     @abstractmethod
+    def path_exists(self, path: str) -> bool:
+        """Return True if a file or directory exists at the given path."""
+        ...
+
+    @abstractmethod
     def read_file(self, path: str) -> bytes:
         """Read a file from the volume and return its contents as bytes."""
         ...
@@ -106,6 +111,9 @@ class ScopedVolume(BaseVolume):
             VolumeFile(path=self._strip_prefix(e.path), file_type=e.file_type, mtime=e.mtime, size=e.size)
             for e in entries
         ]
+
+    def path_exists(self, path: str) -> bool:
+        return self.delegate.path_exists(_scoped_path(self.prefix, path))
 
     def read_file(self, path: str) -> bytes:
         return self.delegate.read_file(_scoped_path(self.prefix, path))

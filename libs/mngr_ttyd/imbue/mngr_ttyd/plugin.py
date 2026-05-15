@@ -1,4 +1,3 @@
-import importlib.resources
 import shlex
 from typing import Any
 
@@ -6,6 +5,7 @@ from loguru import logger
 
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.hosts.host import install_packaged_script_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr_ttyd import resources as ttyd_resources
@@ -84,12 +84,6 @@ def override_command_options(
     params["extra_window"] = (*existing, f'{TTYD_WINDOW_NAME}="{TTYD_COMMAND}"')
 
 
-def _load_ttyd_resource(filename: str) -> str:
-    """Load a resource file from the mngr_ttyd resources package."""
-    resource_files = importlib.resources.files(ttyd_resources)
-    return resource_files.joinpath(filename).read_text()
-
-
 def _build_ttyd_install_command() -> str:
     """Build a shell command that downloads the ttyd binary for the current architecture.
 
@@ -148,7 +142,6 @@ def on_after_provisioning(
 
     host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(ttyd_dir))}", timeout_seconds=10.0)
 
-    script_content = _load_ttyd_resource("ttyd_agent.sh")
     script_path = ttyd_dir / "agent.sh"
     logger.debug("Writing ttyd/agent.sh to {}", script_path)
-    host.write_file(script_path, script_content.encode(), mode="0755")
+    install_packaged_script_on_host(host, module=ttyd_resources, filename="ttyd_agent.sh", dest=script_path)

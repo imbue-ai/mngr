@@ -124,7 +124,8 @@ uv run mngr schedule add "$TRIGGER_NAME" \
     --provider "$PROVIDER" \
     --verify "$VERIFY" \
     --full-copy \
-    --no-auto-merge \
+    --auto-merge \
+    --auto-merge-branch main \
     --exclude-user-settings \
     --exclude-project-settings \
     --pass-env GH_TOKEN \

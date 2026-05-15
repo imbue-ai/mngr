@@ -5,8 +5,10 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import HOSTED_LOCATION
+from imbue.mngr.cli.address_params import HOST_ADDRESS
 from imbue.mngr.cli.agent_utils import find_agent_for_command
-from imbue.mngr.cli.agent_utils import parse_agent_spec
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -17,7 +19,11 @@ from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import UserInputError
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import ConflictMode
+from imbue.mngr.primitives import HostAddress
+from imbue.mngr.primitives import HostedLocation
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import SyncDirection
 from imbue.mngr.primitives import UncommittedChangesMode
@@ -28,10 +34,10 @@ from imbue.mngr_pair.api import pair_files
 class PairCliOptions(CommonCliOptions):
     """Options passed from the CLI to the pair command."""
 
-    source_pos: str | None
-    source: str | None
-    source_agent: str | None
-    source_host: str | None
+    source_pos: HostedLocation | None
+    source: HostedLocation | None
+    source_agent: AgentAddress | None
+    source_host: HostAddress | None
     source_path: str | None
     target: str | None
     require_git: bool
@@ -74,11 +80,16 @@ def _emit_pair_stopped(output_opts: OutputOptions) -> None:
 
 
 @click.command()
-@click.argument("source_pos", default=None, required=False, metavar="SOURCE")
+@click.argument("source_pos", type=HOSTED_LOCATION, default=None, required=False, metavar="SOURCE")
 @optgroup.group("Source Selection")
-@optgroup.option("--source", "source", help="Source specification: AGENT, AGENT:PATH, or PATH")
-@optgroup.option("--source-agent", help="Source agent name or ID")
-@optgroup.option("--source-host", help="Source host name or ID")
+@optgroup.option(
+    "--source",
+    "source",
+    type=HOSTED_LOCATION,
+    help="Source specification: AGENT[@HOST[.PROVIDER]][:PATH]",
+)
+@optgroup.option("--source-agent", type=AGENT_ADDRESS, help="Source agent address (NAME[@HOST[.PROVIDER]])")
+@optgroup.option("--source-host", type=HOST_ADDRESS, help="Source host address (HOST[.PROVIDER])")
 @optgroup.option("--source-path", help="Path within the agent's work directory")
 @optgroup.group("Target")
 @optgroup.option(
@@ -136,15 +147,24 @@ def pair(ctx: click.Context, **kwargs) -> None:
     )
 
     # Merge positional and named arguments (named option takes precedence)
-    effective_source = opts.source if opts.source is not None else opts.source_pos
+    effective_source_loc: HostedLocation | None = opts.source if opts.source is not None else opts.source_pos
 
-    # Parse source specification
-    agent_identifier, source_subpath = parse_agent_spec(
-        spec=effective_source,
-        explicit_agent=opts.source_agent,
-        spec_name="Source",
-        default_subpath=opts.source_path,
-    )
+    # Build source agent address and sub-path
+    source_address: AgentAddress | None = None
+    source_subpath: Path | None = None
+    if effective_source_loc is not None:
+        if effective_source_loc.agent is not None:
+            source_address = AgentAddress(agent=effective_source_loc.agent, host=effective_source_loc.host)
+        source_subpath = effective_source_loc.path
+    if opts.source_agent is not None:
+        if source_address is not None and source_address != opts.source_agent:
+            raise UserInputError("Cannot specify both --source and --source-agent with different values")
+        source_address = opts.source_agent
+    if opts.source_path is not None:
+        explicit_source_path = Path(opts.source_path)
+        if source_subpath is not None and source_subpath != explicit_source_path:
+            raise UserInputError("Cannot specify both a subpath in source and --source-path")
+        source_subpath = explicit_source_path
 
     # Determine target path
     if opts.target is not None:
@@ -157,8 +177,7 @@ def pair(ctx: click.Context, **kwargs) -> None:
     # Find the agent
     result = find_agent_for_command(
         mngr_ctx=mngr_ctx,
-        agent_identifier=agent_identifier,
-        command_usage="pair <agent-id>",
+        address=source_address,
         host_filter=opts.source_host,
     )
     if result is None:
@@ -173,11 +192,10 @@ def pair(ctx: click.Context, **kwargs) -> None:
     # Determine source path (agent's work_dir, potentially with subpath)
     source_path = agent.work_dir
     if source_subpath is not None:
-        parsed_subpath = Path(source_subpath)
-        if parsed_subpath.is_absolute():
-            source_path = parsed_subpath
+        if source_subpath.is_absolute():
+            source_path = source_subpath
         else:
-            source_path = agent.work_dir / parsed_subpath
+            source_path = agent.work_dir / source_subpath
 
     emit_info(f"Pairing with agent: {agent.name}", output_opts.output_format)
 

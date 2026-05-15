@@ -96,11 +96,46 @@ class TestAgentInfo(FrozenModel):
     created_at: float = Field(description="Monotonic timestamp (time.monotonic()) when the agent was created")
 
 
+class AgentKind(UpperCaseStrEnum):
+    """What flavor of tmr agent a directory under the output dir holds."""
+
+    TESTING_AGENT = auto()
+    INTEGRATOR = auto()
+
+
+class AgentMetadata(FrozenModel):
+    """In-memory hand-off between orchestration and the reporter.
+
+    Orchestration carries one of these per agent. The reporter combines it
+    with whatever it finds under ``<output_dir>/<agent_name>/`` (extracted
+    outcome JSON, branch bundle, etc.) to render rows. Orchestration is the
+    only authority on ``test_node_id``, ``branch_name``, and whether the
+    agent failed to publish outputs (``error_summary``); the outcome JSON
+    schema is a contract between the agent and the reporter and never
+    crosses orchestration.
+    """
+
+    kind: AgentKind = Field(description="What flavor of tmr agent this is")
+    agent_name: AgentName = Field(description="Agent name (matches the subdir under output_dir)")
+    test_node_id: str | None = Field(
+        default=None,
+        description="Pytest node id for testing agents; None for the integrator",
+    )
+    branch_name: str | None = Field(default=None, description="Branch the agent committed to, if any")
+    error_summary: str | None = Field(
+        default=None,
+        description="Markdown to render when the agent did not complete normally (timeout, "
+        "launch failure, etc.). When None, the reporter looks for the agent's outcome JSON "
+        "under output_dir/<agent_name>/test_output/.",
+    )
+
+
 class TmrLaunchConfig(FrozenModel):
     """Common configuration for launching tmr agents."""
 
     source_dir: Path = Field(description="Source directory for agent work dirs")
     source_host: OnlineHostInterface = Field(description="Local host where source code lives")
+    base_commit: str = Field(description="Commit at source_dir HEAD when the run started; used as the bundle base")
     agent_type: AgentTypeName = Field(description="Type of agent to run (claude, codex, etc.)")
     provider_name: ProviderInstanceName = Field(description="Provider for agent hosts (local, docker, modal)")
     env_options: AgentEnvironmentOptions = Field(
@@ -118,6 +153,10 @@ class TmrLaunchConfig(FrozenModel):
     templates: tuple[str, ...] = Field(
         default=(),
         description="Create template names to apply when creating agents",
+    )
+    additional_authorized_keys: tuple[str, ...] = Field(
+        default=(),
+        description="SSH public key lines to install in authorized_keys on each agent host (allows inbound SSH)",
     )
 
 
