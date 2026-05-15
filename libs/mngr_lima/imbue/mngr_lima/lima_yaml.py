@@ -163,11 +163,14 @@ def _build_host_key_block(
 ) -> str:
     """Return a bash block that overwrites the guest's ed25519 host key in place.
 
-    When no keypair is provided -- the optional-parameter default, exercised
-    only by this module's own unit tests -- returns an inert bash comment
-    placeholder (no-op in the provision script), so the guest keeps whatever
-    host key it generated on its own. Production host creation always supplies
-    a keypair.
+    When both arguments are provided, returns a bash block that writes the
+    private key to ``/etc/ssh/ssh_host_ed25519_key`` and the matching public
+    key to ``/etc/ssh/ssh_host_ed25519_key.pub``, removes other host-key
+    types (rsa, ecdsa, dsa), and sets ``SSH_KEY_CHANGED=1`` so the caller's
+    surrounding script restarts sshd.
+
+    When either argument is ``None``, returns an inert bash comment (a no-op
+    in the provision script) so the guest's own host key is left untouched.
     """
     if host_private_key_pem is None or host_public_key_openssh is None:
         return "# (no pre-injected host key)"
