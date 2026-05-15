@@ -437,3 +437,78 @@ def test_config_schema_preserves_generic_type_parameters(
     assert "list" in unset_vars_type and "str" in unset_vars_type, (
         f"expected unset_vars type to mention both 'list' and 'str', got: {unset_vars_type!r}"
     )
+
+
+def test_config_schema_lists_top_level_fields(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`mngr config schema` should enumerate the well-known top-level MngrConfig fields.
+
+    Spot-checks the discovery surface so the schema command stays useful for
+    surfacing settable keys via the documented entry points (MNGR__*,
+    --setting, mngr config set).
+    """
+    result = cli_runner.invoke(
+        config,
+        ["schema", "--format", "json"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    output = json.loads(result.output)
+    keys = {row["key"] for row in output["schema"]}
+    assert {"prefix", "default_host_dir", "unset_vars", "headless"} <= keys
+
+
+def test_config_extend_writes_extend_suffixed_key(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mngr_test_root_name: str,
+) -> None:
+    """`mngr config extend` should write a ``field__extend`` entry, not the bare field.
+
+    Locks down the on-disk TOML shape that downstream tooling and the
+    resolver rely on -- a regression here would silently change semantics
+    from "extend the base value" to "replace it".
+    """
+    monkeypatch.chdir(temp_git_repo)
+    result = cli_runner.invoke(
+        config,
+        ["extend", "unset_vars", '["FROM_EXTEND"]', "--scope", "project"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    config_path = temp_git_repo / f".{mngr_test_root_name}" / "settings.toml"
+    content = config_path.read_text()
+    assert 'unset_vars__extend = ["FROM_EXTEND"]' in content, content
+
+
+def test_config_set_with_extend_suffix_routes_to_extend(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mngr_test_root_name: str,
+) -> None:
+    """`mngr config set KEY__extend VALUE` should produce the same on-disk
+    shape as `mngr config extend KEY VALUE`.
+
+    This is the documented alias spelling for users who don't know about the
+    separate `extend` verb; the routing in _config_set_impl must end up at
+    the same TOML write.
+    """
+    monkeypatch.chdir(temp_git_repo)
+    result = cli_runner.invoke(
+        config,
+        ["set", "unset_vars__extend", '["FROM_SET_EXTEND"]', "--scope", "project"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    config_path = temp_git_repo / f".{mngr_test_root_name}" / "settings.toml"
+    content = config_path.read_text()
+    assert 'unset_vars__extend = ["FROM_SET_EXTEND"]' in content, content
