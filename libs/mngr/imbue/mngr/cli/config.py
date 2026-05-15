@@ -283,16 +283,17 @@ def _collect_key_paths(
     """Walk ``data`` and add a tuple key-path for every leaf key into ``out``.
 
     A leaf is any value that is not a dict (so nested tables recurse). The
-    operator suffix ``__extend`` is stripped so an extend write surfaces under
-    the same path as the bare assignment.
+    operator suffix ``__extend`` is leaf-only by spec, so the strip only
+    applies to leaf keys; intermediate keys are recorded verbatim so a
+    malformed config with ``foo__extend`` on a sub-table doesn't get silently
+    collapsed under a ``foo`` prefix.
     """
     for key, value in data.items():
-        bare = key[: -len(EXTEND_SUFFIX)] if isinstance(key, str) and key.endswith(EXTEND_SUFFIX) else key
-        path = prefix + (bare,)
         if isinstance(value, dict):
-            _collect_key_paths(value, path, out)
-        else:
-            out.add(path)
+            _collect_key_paths(value, prefix + (key,), out)
+            continue
+        bare = key[: -len(EXTEND_SUFFIX)] if isinstance(key, str) and key.endswith(EXTEND_SUFFIX) else key
+        out.add(prefix + (bare,))
 
 
 def _filter_to_explicit_keys(
