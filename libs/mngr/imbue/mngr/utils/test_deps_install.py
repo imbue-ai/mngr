@@ -149,6 +149,9 @@ def test_install_via_brew_against_real_brew() -> None:
     without mutating the machine.
     """
     listed = subprocess.run(["brew", "list", "--formula"], capture_output=True, timeout=30, text=True)
+    assert listed.returncode == 0, (
+        f"`brew list --formula` exited {listed.returncode}\nstdout: {listed.stdout}\nstderr: {listed.stderr}"
+    )
     formulas = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
     if not formulas:
         pytest.skip("No brew formulas installed on this machine; nothing safe to re-install")
