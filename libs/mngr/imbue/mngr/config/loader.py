@@ -91,13 +91,18 @@ def load_config(
     """Load and merge configuration from all sources.
 
     Precedence (lowest to highest):
-    1. User config (~/.{root_name}/profiles/<profile_id>/settings.toml)
-    2. Project config (.{root_name}/settings.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
-    3. Local config (.{root_name}/settings.local.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
-    4. Environment variables (MNGR_ROOT_NAME, MNGR_PREFIX, MNGR_HOST_DIR)
-    5. CLI arguments (handled by caller)
+    1. Built-in MngrConfig defaults
+    2. User config (~/.{root_name}/profiles/<profile_id>/settings.toml)
+    3. Project config (.{root_name}/settings.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
+    4. Local config (.{root_name}/settings.local.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
+    5. MNGR__* env vars (each ``__``-separated segment after ``MNGR__`` maps to a dotted config
+       key; values are JSON-parsed with raw-string fallback) plus the preserved aliases
+       ``MNGR_PREFIX``, ``MNGR_HOST_DIR``, and ``MNGR_HEADLESS`` (synthesised into the same form
+       via _collect_env_overrides). See docs/concepts/environment_variables.md for the full surface.
+    6. ``--setting KEY=VALUE`` CLI overrides (applied later in setup_command_context)
+    7. CLI arguments (handled by caller)
 
-    MNGR_ROOT_NAME is used to derive:
+    MNGR_ROOT_NAME is read before config-file resolution to derive:
     1. Config file paths (where to look for settings files)
     2. Defaults for prefix and default_host_dir (if not set in config files)
 
