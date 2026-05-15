@@ -21,6 +21,7 @@ from imbue.mngr_gemini.gemini_config import HOOK_EVENT_BEFORE_TOOL
 from imbue.mngr_gemini.gemini_config import HOOK_EVENT_SESSION_START
 from imbue.mngr_gemini.plugin import GeminiAgent
 from imbue.mngr_gemini.plugin import GeminiAgentConfig
+from imbue.mngr_gemini.plugin import _AUTH_ARTIFACT_FILENAMES
 from imbue.mngr_gemini.plugin import register_agent_type
 
 
@@ -392,16 +393,15 @@ def test_provision_writes_trusted_folders_entry_for_work_dir(
 
 
 def test_provision_symlinks_user_auth_artifacts(gemini_agent: GeminiAgent, seeded_empty_user_gemini_dir: Path) -> None:
-    """oauth_creds / google_accounts / installation_id symlink into the relocated dir."""
+    """Each entry in ``_AUTH_ARTIFACT_FILENAMES`` symlinks into the relocated dir."""
     user_dir = seeded_empty_user_gemini_dir
-    (user_dir / "oauth_creds.json").write_text('{"token": "fake"}')
-    (user_dir / "google_accounts.json").write_text('{"account": "fake"}')
-    (user_dir / "installation_id").write_text("fake-uuid")
+    for name in _AUTH_ARTIFACT_FILENAMES:
+        (user_dir / name).write_text("fake")
 
     _provision(gemini_agent)
 
     relocated = gemini_agent._get_relocated_gemini_dir()
-    for name in ("oauth_creds.json", "google_accounts.json", "installation_id"):
+    for name in _AUTH_ARTIFACT_FILENAMES:
         link = relocated / name
         assert link.is_symlink(), f"{name} should be a symlink"
         assert link.resolve() == (user_dir / name).resolve()
@@ -414,7 +414,7 @@ def test_provision_skips_missing_user_auth_artifacts(
     # No auth files are seeded into the fake user dir on purpose.
     _provision(gemini_agent)
     relocated = gemini_agent._get_relocated_gemini_dir()
-    for name in ("oauth_creds.json", "google_accounts.json", "installation_id"):
+    for name in _AUTH_ARTIFACT_FILENAMES:
         assert not (relocated / name).exists()
 
 
