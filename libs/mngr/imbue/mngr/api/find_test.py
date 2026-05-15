@@ -1014,8 +1014,11 @@ def test_ensure_agent_started_respects_config_when_data_unset(
     new_config = base_ctx.config.model_copy_update(
         to_update(base_ctx.config.field_ref().agent_ready_timeout, 37.5),
     )
-    local_provider.mngr_ctx = base_ctx.model_copy_update(
+    new_ctx = base_ctx.model_copy_update(
         to_update(base_ctx.field_ref().config, new_config),
+    )
+    local_provider = local_provider.model_copy_update(
+        to_update(local_provider.field_ref().mngr_ctx, new_ctx),
     )
     agent = create_test_agent(
         local_provider,
