@@ -209,14 +209,14 @@ class LatchkeyGatewayClient(MutableModel):
 
     def _one_shot_client(self) -> httpx.Client:
         """Return a per-call :class:`httpx.Client` honouring the optional test transport."""
-        if self.transport is not None:
-            return httpx.Client(timeout=_ONE_SHOT_TIMEOUT_SECONDS, transport=self.transport)
+        if self._transport is not None:
+            return httpx.Client(timeout=_ONE_SHOT_TIMEOUT_SECONDS, transport=self._transport)
         return httpx.Client(timeout=_ONE_SHOT_TIMEOUT_SECONDS)
 
     def _stream_client(self) -> httpx.Client:
         """Return a per-stream :class:`httpx.Client` honouring the optional test transport."""
-        if self.transport is not None:
-            return httpx.Client(timeout=_FOLLOW_READ_TIMEOUT, transport=self.transport)
+        if self._transport is not None:
+            return httpx.Client(timeout=_FOLLOW_READ_TIMEOUT, transport=self._transport)
         return httpx.Client(timeout=_FOLLOW_READ_TIMEOUT)
 
     def iter_permission_requests(self) -> Iterator[StreamedPermissionRequest]:
