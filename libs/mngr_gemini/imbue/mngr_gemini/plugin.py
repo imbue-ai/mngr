@@ -30,7 +30,7 @@ from imbue.mngr_gemini.gemini_config import build_readiness_hooks_config
 from imbue.mngr_gemini.gemini_config import merge_hooks_config
 from imbue.mngr_gemini.gemini_config import serialize_gemini_settings
 
-_COMMON_TRANSCRIPT_SCRIPT_NAME = "common_transcript.sh"
+_COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
 
 # Name of the readiness sentinel file the SessionStart hook touches. Polled by
 # ``GeminiAgent.wait_for_ready_signal`` to detect that the Gemini session has
@@ -54,19 +54,19 @@ _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
 # ``mngr_claude`` namespaces its files under ``plugin/claude/anthropic/``
 # inside ``$MNGR_AGENT_STATE_DIR``; future ``mngr_gemini`` state can land
 # alongside the system-settings file here.
-_PLUGIN_STATE_SUBDIR = ("plugin", "gemini")
+_PLUGIN_STATE_SUBDIR: Final[tuple[str, ...]] = ("plugin", "gemini")
 
 # Filename for the mngr-owned settings file that mngr_gemini installs into
 # the per-agent state dir. Gemini reads it as system-tier settings, which sit
 # at the top of the precedence stack (system > workspace > user). Keeping
 # mngr's hooks at that tier means the user's workspace and ``~/.gemini/``
 # stay untouched.
-_SYSTEM_SETTINGS_FILENAME = "system_settings.json"
+_SYSTEM_SETTINGS_FILENAME: Final[str] = "system_settings.json"
 
 # Set in the agent's environment so Gemini reads our settings file as the
 # system-tier override. The env-var override is documented at
 # https://geminicli.com/docs/cli/enterprise/#system-settings-path-configuration.
-_SYSTEM_SETTINGS_PATH_ENV_VAR = "GEMINI_CLI_SYSTEM_SETTINGS_PATH"
+_SYSTEM_SETTINGS_PATH_ENV_VAR: Final[str] = "GEMINI_CLI_SYSTEM_SETTINGS_PATH"
 
 # Set so Gemini treats ``work_dir`` as persistently trusted for the session.
 # This clears Gemini's "Do you trust this folder?" gate; without it a headless
@@ -79,7 +79,7 @@ _SYSTEM_SETTINGS_PATH_ENV_VAR = "GEMINI_CLI_SYSTEM_SETTINGS_PATH"
 # with this env var set, ``--debug`` reports ``Hook registry initialized
 # with N hook entries`` (N matches the configured count); without it the
 # count drops to 0.
-_TRUST_WORKSPACE_ENV_VAR = "GEMINI_CLI_TRUST_WORKSPACE"
+_TRUST_WORKSPACE_ENV_VAR: Final[str] = "GEMINI_CLI_TRUST_WORKSPACE"
 
 
 def _load_gemini_resource_script(filename: str) -> str:
