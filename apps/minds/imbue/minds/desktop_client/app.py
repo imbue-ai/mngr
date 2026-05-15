@@ -155,12 +155,9 @@ async def _managed_lifespan(
 ) -> AsyncGenerator[None, None]:
     """Manage the httpx client lifecycle and capture the running event loop.
 
-    Subprocess lifecycles (``mngr forward``, ``mngr observe`` / ``mngr event``
-    grandchildren) live in ``EnvelopeStreamConsumer`` and are torn down by
-    ``cli/run.py`` after ``uvicorn.run`` returns. SSH tunnels (forward + reverse)
-    live in ``cli/run.py``'s ``SSHTunnelManager``, which is solely used by the
-    surviving Latchkey discovery callback and is also cleaned up by
-    ``cli/run.py``.
+    SSH tunnels (forward + reverse) live in ``cli/run.py``'s
+    ``SSHTunnelManager``, which is solely used by the surviving Latchkey
+    discovery callback and is cleaned up by ``cli/run.py``.
     """
     if not is_externally_managed_client:
         inner_app.state.http_client = httpx.AsyncClient(
@@ -180,6 +177,23 @@ async def _managed_lifespan(
         inner_app.state.event_loop = None
         if not is_externally_managed_client:
             await inner_app.state.http_client.aclose()
+        # Terminate the `mngr forward` subprocess BEFORE draining the
+        # concurrency group. The CG owns three reader threads
+        # (`mngr-forward-stdout-reader`, `mngr-forward-stderr-reader`,
+        # `mngr-forward-lifecycle-watcher`) that are blocked on the
+        # subprocess's pipes; only the subprocess dying closes those pipes
+        # and unblocks the reads. If we hand control to ``CG.__exit__``
+        # while the subprocess is still alive, the readers stay blocked
+        # until the CG's shutdown timeout fires and force-terminates them
+        # with a noisy "N strands did not finish in time" warning on
+        # every clean shutdown. Doing the terminate here flips the order:
+        # subprocess dies → pipes close → reader threads exit → CG drains
+        # cleanly. A redundant ``.terminate()`` in ``cli/run.py``'s finally
+        # block remains as a fallback for startup-error paths that never
+        # reach this lifespan teardown.
+        envelope_stream_consumer = inner_app.state.envelope_stream_consumer
+        if envelope_stream_consumer is not None:
+            envelope_stream_consumer.terminate()
         # Exit the root ConcurrencyGroup. ``__exit__`` waits up to
         # ``shutdown_timeout_seconds`` for any still-in-flight strands (e.g.
         # a detached tunnel-setup task) to finish.

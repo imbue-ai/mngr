@@ -2,11 +2,17 @@
 
 ## Starting the desktop client
 
+In normal use, launch the Electron app -- either the packaged build or
+`just devminds-start` from this repo root for development iteration.
+Electron spawns the `minds run` backend internally (default:
+`http://127.0.0.1:8420`); a one-time login URL is printed to the
+terminal and the system browser opens directly on that URL.
+
+To bypass Electron and exercise the backend on its own:
+
 ```bash
 minds run
 ```
-
-This starts the local desktop client (default: `http://127.0.0.1:8420`). A one-time login URL is printed to the terminal.
 
 ## Creating your first agent
 
@@ -37,12 +43,21 @@ After creation, the agent is accessible at:
 
 The remote service connector URL is taken from the per-tier `client.toml` selected by `minds run --config-file <path>` (see `apps/minds/docs/environments.md`). When `--config-file` is not passed, the default resolves to `apps/minds/imbue/minds/config/envs/_bundled/client.toml` (written by the Electron production build) and falls back to `apps/minds/imbue/minds/config/envs/dev/client.toml` shipped with the wheel. That URL hosts both the Cloudflare tunnel API and the `/auth/*` routes the desktop client uses for sign-in. All Cloudflare tunnel requests authenticate with the signed-in user's SuperTokens session, and the session's email is used as the default Cloudflare Access policy -- so no Basic-auth credentials or `OWNER_EMAIL` need to be configured on the client. SuperTokens credentials (API key, OAuth client secrets) live in HCP Vault (see `apps/minds/docs/vault-setup.md`) and are pushed into Modal Secrets at deploy time; they never need to be set on the client.
 
-To pin a specific tier or a dynamic dev env, point `--config-file` at the desired TOML:
+To pin a specific tier or a dynamic dev env, set `MINDS_CLIENT_CONFIG_PATH`
+in your shell (Electron inherits it) or pass `--config-file` directly to
+the backend:
 
 ```bash
-minds run --config-file apps/minds/imbue/minds/config/envs/staging/client.toml
-# or a per-developer dynamic dev env:
-minds run --config-file ~/.minds/envs/<dev-name>.toml
+# Electron flow (the normal path):
+export MINDS_CLIENT_CONFIG_PATH=apps/minds/imbue/minds/config/envs/staging/client.toml
+just devminds-start
+
+# Or a per-developer dynamic dev env:
+export MINDS_CLIENT_CONFIG_PATH=~/.devminds/envs/<dev-name>.toml
+just devminds-start
+
+# Backend-only invocation (no Electron):
+minds run --config-file ~/.devminds/envs/<dev-name>.toml
 ```
 
 To run an isolated dev copy alongside an installed minds:

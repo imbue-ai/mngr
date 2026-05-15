@@ -124,9 +124,12 @@ _GATEWAY_PORT_POLL_INTERVAL_SECONDS: Final[float] = 0.2
     "config_file",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
+    envvar="MINDS_CLIENT_CONFIG_PATH",
     help=(
-        "Path to a per-env client config TOML. When unset, falls back to the "
-        "build-bundled file (production builds) and finally to the dev tier defaults."
+        "Path to a per-env client config TOML. Falls back in order to the "
+        "MINDS_CLIENT_CONFIG_PATH env var (so `just devminds-start` can target a "
+        "dynamic dev env without baking the path into Electron), the build-bundled "
+        "file (production builds), and finally the dev tier defaults."
     ),
 )
 @click.pass_context
@@ -346,7 +349,15 @@ def run(
     permission_requests_consumer.start(root_concurrency_group)
 
     if not no_browser:
-        thread = threading.Thread(target=_sleep_then_open, args=(f"http://{host}:{port}/",), daemon=True)
+        # Open the URL that carries the one-time code rather than the bare
+        # origin. The bare origin lands on the unauthenticated landing page
+        # ("Use the login URL printed in the terminal"), which is useless
+        # for the user when we already know the code; navigating to
+        # /login?one_time_code=... drops directly into the authenticated
+        # session. If the user already has a valid session cookie, the
+        # /login handler 307-redirects to / instead of consuming the code,
+        # so this is safe across restarts.
+        thread = threading.Thread(target=_sleep_then_open, args=(minds_login_url,), daemon=True)
         thread.start()
 
     try:

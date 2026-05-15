@@ -14,23 +14,40 @@ pool-management SSH keypair. There is zero cross-tier reach.
 
 ## How tier selection works
 
-The desktop client picks its env via:
+In normal use, you launch the desktop client via Electron --
+`just devminds-start` from this repo root for development iteration, or
+the packaged Electron app for end users. Both spawn the `minds run`
+backend behind the scenes; the only knob you usually need is the env
+var:
 
 ```bash
-minds run --config-file <path-to-client.toml>
+export MINDS_CLIENT_CONFIG_PATH=~/.devminds/envs/josh-1.toml
+just devminds-start
 ```
 
-If `--config-file` is not passed, the default is resolved in this order:
+`minds run` honors `MINDS_CLIENT_CONFIG_PATH` as the default for its
+`--config-file` flag, so setting the env var in your shell (or
+`~/.bashrc`) makes Electron use the right tier without any further
+plumbing. If you want to bypass Electron and exercise the backend
+directly, you can also pass the flag explicitly:
+
+```bash
+uv run minds run --config-file <path-to-client.toml>
+```
+
+If neither `MINDS_CLIENT_CONFIG_PATH` nor `--config-file` is set, the
+default is resolved in this order:
 
 1. `apps/minds/imbue/minds/config/envs/_bundled/client.toml`, if present.
    Production Electron builds write this file via the build script when
    `MINDS_BUILD_TIER=production` is set in the build env.
 2. `apps/minds/imbue/minds/config/envs/dev/client.toml`, which ships
-   with the wheel. This is what `uv run minds run` sees by default.
+   with the wheel.
 
 A dynamic dev env's local override file (`~/.<root>/envs/<dev-name>.toml`)
-is a full self-contained client config -- you point at it with the same
-`--config-file` flag, no layering happens at runtime.
+is a full self-contained client config -- point at it via
+`MINDS_CLIENT_CONFIG_PATH` or `--config-file`. No layering happens at
+runtime.
 
 ## Per-tier config files
 
@@ -65,9 +82,14 @@ HCP Vault -- see `apps/minds/docs/vault-setup.md`.
    scripts/deploy_remote_service_connector.sh <tier>
    scripts/deploy_litellm.sh <tier>
    ```
-6. Smoke-test:
+6. Smoke-test the backend directly:
    ```bash
    uv run minds run --config-file apps/minds/imbue/minds/config/envs/<tier>/client.toml
+   ```
+   Or exercise the full desktop-app path:
+   ```bash
+   export MINDS_CLIENT_CONFIG_PATH=apps/minds/imbue/minds/config/envs/<tier>/client.toml
+   just devminds-start
    ```
 
 ## Dynamic dev environments
@@ -79,28 +101,35 @@ and a SuperTokens app under the dev SuperTokens core. Cloudflare,
 Vultr, Anthropic, and OAuth clients are shared dev-tier resources.
 
 ```bash
-# Provision a new dev env named `josh`.
-uv run minds env create josh
+# Provision (or upgrade) a dev env named `josh-1`. Idempotent: re-runs
+# safely against an existing env to upgrade per-env Modal secrets and
+# redeploy the Modal apps in-place.
+uv run minds env deploy josh-1
 
-# Run minds against it.
-uv run minds run --config-file ~/.minds/envs/josh.toml
+# Run the full desktop app against it (Electron + backend):
+export MINDS_CLIENT_CONFIG_PATH=~/.devminds/envs/josh-1.toml
+just devminds-start
+
+# Or smoke-test the backend directly without Electron:
+uv run minds run --config-file ~/.devminds/envs/josh-1.toml
 
 # See what dev envs are configured on this machine.
 uv run minds env list
 
-# Tear it down.
-uv run minds env destroy josh
+# Tear it down (cloud resources + local TOML).
+uv run minds env destroy josh-1
 ```
 
-`minds env create` writes its result to `~/.<root>/envs/<name>.toml`
+`minds env deploy` writes its result to `~/.<root>/envs/<name>.toml`
 with mode `0600`. The file holds the per-dev-env URLs (connector URL,
 litellm URL) plus a `[secrets]` subtable with the new Neon DSN +
 SuperTokens app id. Nothing is written back to Vault.
 
-If a provisioning step fails partway through, `minds env create` rolls
-back the resources it already created and exits non-zero. The local
+If a provisioning step fails partway through, `minds env deploy` rolls
+back the resources it created on this run and exits non-zero. The local
 TOML is only written after every provider step succeeds, so a failed
-create never leaves a half-built local file behind.
+deploy never leaves a half-built local file behind. On re-run, deploy
+picks up where the last successful step left off.
 
 ## Cutover from the joshalbrecht production deployment
 
