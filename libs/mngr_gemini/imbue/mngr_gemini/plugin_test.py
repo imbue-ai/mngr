@@ -132,8 +132,6 @@ def test_assemble_command_skips_transcript_watcher_when_disabled(
     agent = gemini_agent_without_transcript
     command = str(agent.assemble_command(agent.host, (), command_override=None))
     assert "common_transcript.sh" not in command
-    # `endswith` matches the sibling tests' assertion style (see commit 410ba9b72).
-    # PR2 dropped the `--skip-trust` default, so the command no longer carries it.
     assert command.endswith("gemini")
 
 
