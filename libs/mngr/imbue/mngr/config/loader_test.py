@@ -132,6 +132,35 @@ def test_collect_env_overrides_allows_alias_and_canonical_with_same_value() -> N
     assert raw["headless"] is True
 
 
+@pytest.mark.parametrize(
+    ("alias_value", "canonical_value"),
+    [
+        ("yes", "yes"),
+        ("yes", "true"),
+        ("1", "true"),
+        ("no", "false"),
+    ],
+)
+def test_collect_env_overrides_accepts_semantically_equal_headless_spellings(
+    alias_value: str, canonical_value: str
+) -> None:
+    """MNGR_HEADLESS and MNGR__HEADLESS that mean the same thing don't raise.
+
+    The two env-var forms historically use different parsers (parse_bool_env
+    vs JSON-with-string-fallback), so a raw string-equality check would
+    treat e.g. MNGR_HEADLESS=yes and MNGR__HEADLESS=yes as conflicting even
+    though they intend the same boolean. The conflict check normalises both
+    sides through the alias parser before comparison.
+    """
+    environ = {
+        "MNGR_HEADLESS": alias_value,
+        "MNGR__HEADLESS": canonical_value,
+    }
+    raw = _collect_env_overrides(environ)
+    expected = alias_value.lower() in {"1", "true", "yes"}
+    assert raw["headless"] is expected
+
+
 @pytest.mark.parametrize("value", ["yes", "1", "True", "TRUE"])
 def test_collect_env_overrides_preserves_mngr_headless_truthy_spellings(value: str) -> None:
     """MNGR_HEADLESS keeps parse_bool_env semantics for backwards compatibility.

@@ -918,12 +918,20 @@ def _collect_env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
             continue
         parsed = value_parser(alias_value)
         existing = _walk_raw(raw, canonical_path.split("."))
-        if existing is not None and existing != parsed:
-            raise ConfigParseError(
-                f"Conflict: {alias_name}={alias_value!r} and "
-                f"MNGR__{canonical_path.upper()}={existing!r} are both set with different values. "
-                "Use exactly one form."
-            )
+        # Compare under the alias's value semantics. The alias and the
+        # canonical form may use different parsers (e.g. MNGR_HEADLESS uses
+        # parse_bool_env while MNGR__HEADLESS uses JSON-with-string-fallback),
+        # so a string canonical value gets re-parsed by the alias parser
+        # before the equality check. This stops false-positive conflicts
+        # when both forms carry the same intent (e.g. both set to "yes").
+        if existing is not None:
+            normalized_existing = value_parser(existing) if isinstance(existing, str) else existing
+            if normalized_existing != parsed:
+                raise ConfigParseError(
+                    f"Conflict: {alias_name}={alias_value!r} and "
+                    f"MNGR__{canonical_path.upper()}={existing!r} are both set with different values. "
+                    "Use exactly one form."
+                )
         _set_raw_at_path(raw, canonical_path.split("."), parsed)
     return raw
 
