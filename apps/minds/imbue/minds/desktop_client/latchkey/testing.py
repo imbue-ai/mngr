@@ -111,15 +111,12 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
 
 
 def build_fake_gateway_client() -> FakeLatchkeyGatewayClient:
-    """Return a :class:`FakeLatchkeyGatewayClient` with throwaway credentials.
+    """Return a :class:`FakeLatchkeyGatewayClient` ready for use in tests.
 
     Tests that just need *a* gateway client to satisfy the
     :class:`LatchkeyPermissionGrantHandler` constructor (rather than
     one with specific URL / password / JWT semantics) call this
-    helper.
+    helper. The fake overrides every method that would otherwise touch
+    the credentials, so it needs none of them set.
     """
-    return FakeLatchkeyGatewayClient(
-        _base_url="http://127.0.0.1:0",
-        password="fake-password",
-        admin_jwt="fake-admin-jwt",
-    )
+    return FakeLatchkeyGatewayClient()

@@ -97,7 +97,14 @@ class LatchkeyGatewayClient(MutableModel):
     pool used by the request thread).
     """
 
-    latchkey: Latchkey
+    latchkey: Latchkey | None = Field(
+        default=None,
+        description=(
+            "Source of the gateway credentials. Required for :meth:`ensure_initialized` to do any "
+            "work; tests that pre-populate the private credential attrs directly (e.g. via the "
+            "``testing`` helpers) can leave this ``None``."
+        ),
+    )
     transport: httpx.BaseTransport | None = Field(
         default=None,
         description=(
@@ -108,34 +115,42 @@ class LatchkeyGatewayClient(MutableModel):
         ),
     )
 
-    _base_url_raw: str | None = PrivateAttr(default=None)
+    _base_url: str | None = PrivateAttr(default=None)
     _password: str | None = PrivateAttr(default=None)
     _admin_jwt: str | None = PrivateAttr(default=None)
-    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _init_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     # ``httpx.BaseTransport`` is not pydantic-native; allow it through.
     model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
 
     def ensure_initialized(self) -> None:
-        """
-        Block until the supervised ``mngr latchkey forward`` binds its gateway port, then set all the properties.
+        """Block until the supervised ``mngr latchkey forward`` binds its gateway port, then derive credentials.
 
-        Ideally avoid running this in the main thread.
+        Idempotent: subsequent calls return immediately once the
+        credentials have been populated. Ideally avoid running this on
+        the main thread; ``minds run`` kicks it off from a background
+        thread so startup does not block on the supervisor.
 
+        Requires ``self.latchkey`` to be set; tests that pre-populate
+        the private credential attrs directly skip this entirely.
         """
-        with self._lock:
-            if self._base_url_raw is not None:
-                return  # Already initialized.
+        with self._init_lock:
+            if self._base_url is not None:
+                # Already initialized.
+                return
+            if self.latchkey is None:
+                raise LatchkeyGatewayClientNotInitializedError(
+                    "LatchkeyGatewayClient was constructed without a Latchkey instance; cannot initialize.",
+                )
             forward_info = self._wait_for_gateway_port(self.latchkey)
-            self._base_url_raw = f"http://{self.latchkey.listen_host}:{forward_info.gateway_port}"
+            self._base_url = f"http://{self.latchkey.listen_host}:{forward_info.gateway_port}"
             self._admin_jwt = self.latchkey.create_admin_permissions_jwt()
             self._password = self.latchkey.derive_gateway_password()
 
-    @property
-    def _base_url(self) -> str:
-        if self._base_url_raw is None:
+    def _require_base_url(self) -> str:
+        if self._base_url is None:
             raise LatchkeyGatewayClientNotInitializedError("LatchkeyGatewayClient is not initialized yet.")
-        return self._base_url_raw
+        return self._base_url
 
     def _wait_for_gateway_port(self, latchkey: Latchkey) -> LatchkeyForwardInfo:
         """Block until the supervised ``mngr latchkey forward`` stamps its bound gateway port.
@@ -179,7 +194,7 @@ class LatchkeyGatewayClient(MutableModel):
 
     def _build_headers(self) -> dict[str, str]:
         if self._password is None or self._admin_jwt is None:
-            raise LatchkeyGatewayClientNotInitializedError("Client is not initialized yet.")
+            raise LatchkeyGatewayClientNotInitializedError("LatchkeyGatewayClient is not initialized yet.")
         return {
             _HEADER_PASSWORD: self._password,
             _HEADER_PERMISSIONS_OVERRIDE: self._admin_jwt,
@@ -208,7 +223,7 @@ class LatchkeyGatewayClient(MutableModel):
         terminates the stream.
         """
         self.ensure_initialized()
-        url = f"{self._base_url.rstrip('/')}/permission-requests"
+        url = f"{self._require_base_url().rstrip('/')}/permission-requests"
         params = {"follow": "true"}
         try:
             with self._stream_client() as client:
@@ -244,7 +259,7 @@ class LatchkeyGatewayClient(MutableModel):
         way.
         """
         self.ensure_initialized()
-        url = f"{self._base_url.rstrip('/')}/permission-requests/{request_id}"
+        url = f"{self._require_base_url().rstrip('/')}/permission-requests/{request_id}"
         try:
             with self._one_shot_client() as client:
                 response = client.delete(url, headers=self._build_headers())
@@ -272,7 +287,7 @@ class LatchkeyGatewayClient(MutableModel):
         :class:`LatchkeyGatewayClientError`.
         """
         self.ensure_initialized()
-        url = f"{self._base_url.rstrip('/')}/permissions"
+        url = f"{self._require_base_url().rstrip('/')}/permissions"
         params = {"path": str(permissions_file_path)}
         try:
             with self._one_shot_client() as client:
@@ -320,7 +335,7 @@ class LatchkeyGatewayClient(MutableModel):
         loud.
         """
         self.ensure_initialized()
-        url = f"{self._base_url.rstrip('/')}/permissions/rules"
+        url = f"{self._require_base_url().rstrip('/')}/permissions/rules"
         params = {"path": str(permissions_file_path), "rule_key": rule_key}
         try:
             with self._one_shot_client() as client:

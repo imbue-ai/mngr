@@ -74,12 +74,11 @@ def test_consumer_dispatches_each_streamed_request_to_on_request() -> None:
         del request
         return httpx.Response(200, content=payload, headers={"Content-Type": "application/x-ndjson"})
 
-    client = LatchkeyGatewayClient(
-        _base_url="http://gateway.invalid:1989",
-        password="p",
-        admin_jwt="jwt",
-        transport=httpx.MockTransport(_handler),
-    )
+    client = LatchkeyGatewayClient(transport=httpx.MockTransport(_handler))
+    # Skip the lazy-init path; the consumer just needs a ready client.
+    client._base_url = "http://gateway.invalid:1989"
+    client._password = "p"
+    client._admin_jwt = "jwt"
     consumer = PermissionRequestsConsumer(gateway_client=client, on_request=_on_request)
     cg = ConcurrencyGroup(name="permission-requests-consumer-test")
     with cg:
