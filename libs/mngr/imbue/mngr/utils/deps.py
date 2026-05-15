@@ -282,6 +282,9 @@ def _install_via_apt(packages: list[str]) -> bool:
             cg.run_process_to_completion(["sudo", "apt-get", "install", "-y", "-qq", *packages])
         return True
     except (OSError, ProcessError, ConcurrencyExceptionGroup):
+        # ConcurrencyGroup's __exit__ wraps the underlying ProcessError in a
+        # ConcurrencyExceptionGroup before re-raising, so catching ProcessError
+        # alone is not enough -- we have to catch the group as well.
         return False
 
 
