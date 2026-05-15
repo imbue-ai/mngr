@@ -361,13 +361,12 @@ def test_landing_page_create_form_surfaces_env_anthropic_credentials(
 ) -> None:
     """Regression: when the landing page falls back to rendering the inline
     create form (no agents discovered yet), it must surface the same
-    ``ANTHROPIC_*`` env-detection notices as the dedicated ``/create`` route.
-
-    Earlier the env-detection wiring was only added to ``_handle_create_page``;
-    ``_handle_landing_page``'s parallel ``render_create_form`` call was missed,
-    so a user on a fresh install who landed straight on ``/`` would never see
-    the opt-in/opt-out checkboxes even with ``ANTHROPIC_API_KEY`` /
-    ``ANTHROPIC_BASE_URL`` set in their shell. This test pins that fix down.
+    ``ANTHROPIC_*`` env-detection checkboxes as the dedicated ``/create``
+    route -- the env-detection wiring was originally only added to
+    ``_handle_create_page`` and was missed on ``_handle_landing_page``'s
+    parallel ``render_create_form`` call, so a user on a fresh install who
+    landed straight on ``/`` would never see the opt-in toggles even with
+    ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_BASE_URL`` set in their shell.
     """
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://litellm.test.example/v1")
@@ -381,8 +380,6 @@ def test_landing_page_create_form_surfaces_env_anthropic_credentials(
 
     response = client.get("/")
     assert response.status_code == 200
-    assert 'id="env-api-key-notice"' in response.text
-    assert 'id="env-base-url-notice"' in response.text
     assert 'name="use_env_anthropic_api_key"' in response.text
     assert 'name="use_env_anthropic_base_url"' in response.text
     # Base URL is non-secret and shown inline so the user can sanity-check it.

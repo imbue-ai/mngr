@@ -1248,14 +1248,17 @@ class AgentCreator(MutableModel):
                             # pass_host_env.
                             pass
                     case AIProvider.SUBSCRIPTION:
-                        # SUBSCRIPTION never injects credentials, so the
-                        # only question is whether to keep any ambient
-                        # ``ANTHROPIC_*`` vars. Default ``False`` -> scrub,
-                        # matching the form's "ignore by default" UI.
-                        if not use_env_anthropic_api_key:
-                            scrub_inherited_anthropic_api_key = True
-                        if not use_env_anthropic_base_url:
-                            scrub_inherited_anthropic_base_url = True
+                        # SUBSCRIPTION always scrubs ambient ``ANTHROPIC_*``
+                        # env vars: picking OAuth means the user wants
+                        # OAuth, not their shell's API key silently riding
+                        # along via the FCT template's ``pass_host_env``.
+                        # The ``use_env_anthropic_*`` flags are intentionally
+                        # ignored here -- the create form only exposes them
+                        # under API_KEY auth, and an API caller that sets
+                        # them under SUBSCRIPTION is doing something
+                        # nonsensical that we should not honour.
+                        scrub_inherited_anthropic_api_key = True
+                        scrub_inherited_anthropic_base_url = True
                     case _ as unreachable:
                         assert_never(unreachable)
 

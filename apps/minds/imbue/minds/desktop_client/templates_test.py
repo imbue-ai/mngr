@@ -129,61 +129,55 @@ def test_render_create_form_shows_error_message_when_supplied() -> None:
     assert "Imbue cloud requires an account." in html
 
 
-def test_render_create_form_hides_env_anthropic_notices_when_not_detected() -> None:
-    """When neither env var is detected, the form must not emit either notice
-    block -- their checkbox inputs would otherwise default to absent in the
-    POST and we'd lose the "form is authoritative" semantics if a stray
-    checked attribute leaked in via a re-render."""
+def test_render_create_form_omits_env_checkboxes_when_not_detected() -> None:
+    """When neither env var is detected, the form must not emit either
+    checkbox. Browsers omit unchecked checkboxes from POSTs, but emitting
+    them at all when no env is set would clutter the API_KEY auth UI with
+    a useless "use [empty string]" toggle."""
     html = render_create_form(
         detected_env_anthropic_api_key=False,
         detected_env_anthropic_base_url_value="",
     )
-    assert 'id="env-api-key-notice"' not in html
-    assert 'id="env-base-url-notice"' not in html
     assert 'name="use_env_anthropic_api_key"' not in html
     assert 'name="use_env_anthropic_base_url"' not in html
 
 
-def test_render_create_form_shows_env_anthropic_api_key_notice_when_detected() -> None:
-    """When ANTHROPIC_API_KEY is detected, the form must surface a notice
-    with an opt-in checkbox. The key value itself must NEVER appear in the
-    HTML -- only its presence."""
+def test_render_create_form_emits_env_api_key_checkbox_when_detected() -> None:
+    """When ANTHROPIC_API_KEY is detected, the form must emit an opt-in
+    checkbox inside the API-key row. The key value itself must NEVER
+    appear in the HTML -- only the env-var name."""
     html = render_create_form(detected_env_anthropic_api_key=True)
-    assert 'id="env-api-key-notice"' in html
     assert 'name="use_env_anthropic_api_key"' in html
     assert "ANTHROPIC_API_KEY" in html
 
 
-def test_render_create_form_shows_env_anthropic_base_url_notice_with_value() -> None:
-    """When ANTHROPIC_BASE_URL is detected, the form must surface a notice
-    that displays the value (it's not secret) so the user can sanity-check
-    the endpoint before opting in."""
+def test_render_create_form_emits_env_base_url_checkbox_with_value_when_detected() -> None:
+    """When ANTHROPIC_BASE_URL is detected, the form must emit an opt-in
+    checkbox and display the value inline (the base URL is non-secret, so
+    showing it lets the user sanity-check the endpoint before opting in)."""
     html = render_create_form(detected_env_anthropic_base_url_value="https://litellm.example.com")
-    assert 'id="env-base-url-notice"' in html
     assert 'name="use_env_anthropic_base_url"' in html
     assert "https://litellm.example.com" in html
 
 
 def test_render_create_form_preserves_use_env_checkbox_state_on_re_render() -> None:
-    """On a validation-error re-render, an explicit submitted value for
-    ``use_env_anthropic_*`` must round-trip into the rendered HTML so the
-    user's prior opt-in / opt-out choice is not silently reverted. The
-    server signals "this checkbox state was user-chosen" via the
-    ``data-user-set="true"`` attribute, which the client-side JS reads on
-    boot to seed the per-checkbox "user toggled" flag and stop the
-    per-provider default from clobbering the submitted value."""
+    """On a validation-error re-render, the submitted ``use_env_anthropic_*``
+    checkbox states must round-trip into the rendered HTML so the user's
+    prior opt-in choice is not silently reverted. Verified by rendering
+    with explicit ``True`` / ``False`` and confirming the ``checked``
+    attribute lands (or not) on the corresponding input."""
     html_checked = render_create_form(
         detected_env_anthropic_api_key=True,
         detected_env_anthropic_base_url_value="https://litellm.example.com",
         use_env_anthropic_api_key=True,
         use_env_anthropic_base_url=True,
     )
-    assert 'name="use_env_anthropic_api_key"' in html_checked
-    # Both checkboxes should be rendered ``checked`` and marked as user-set.
     api_key_input_start = html_checked.index('id="use_env_anthropic_api_key"')
     api_key_input_fragment = html_checked[api_key_input_start : api_key_input_start + 300]
     assert "checked" in api_key_input_fragment
-    assert 'data-user-set="true"' in api_key_input_fragment
+    base_url_input_start = html_checked.index('id="use_env_anthropic_base_url"')
+    base_url_input_fragment = html_checked[base_url_input_start : base_url_input_start + 300]
+    assert "checked" in base_url_input_fragment
 
     html_unchecked = render_create_form(
         detected_env_anthropic_api_key=True,
@@ -191,22 +185,9 @@ def test_render_create_form_preserves_use_env_checkbox_state_on_re_render() -> N
         use_env_anthropic_api_key=False,
         use_env_anthropic_base_url=False,
     )
-    # Explicit ``False`` should NOT emit ``checked`` but should still mark
-    # the input as user-set so the JS doesn't reset it to the default.
     api_key_input_start = html_unchecked.index('id="use_env_anthropic_api_key"')
     api_key_input_fragment = html_unchecked[api_key_input_start : api_key_input_start + 300]
     assert "checked" not in api_key_input_fragment
-    assert 'data-user-set="true"' in api_key_input_fragment
-
-    # Default render (no submitted state) must NOT mark the inputs as
-    # user-set, so the client-side JS retains its per-provider defaulting.
-    html_default = render_create_form(
-        detected_env_anthropic_api_key=True,
-        detected_env_anthropic_base_url_value="https://litellm.example.com",
-    )
-    api_key_input_start = html_default.index('id="use_env_anthropic_api_key"')
-    api_key_input_fragment = html_default[api_key_input_start : api_key_input_start + 300]
-    assert "data-user-set" not in api_key_input_fragment
 
 
 def test_render_login_page_shows_prompt() -> None:
