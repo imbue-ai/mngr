@@ -363,10 +363,6 @@ def register_sdk_guard(
 class MethodKind(StrEnum):
     """How to wrap a guarded method."""
 
-    @staticmethod
-    def _generate_next_value_(name: str, start: int, count: int, last_values: list[str]) -> str:
-        return name.upper()
-
     SYNC = auto()
     ASYNC = auto()
     ASYNC_GEN = auto()
@@ -525,10 +521,6 @@ def _build_guard_env(marks: set[str], tracking_dir: str) -> dict[str, str]:
 
 class _GuardViolationKind(StrEnum):
     """What kind of resource guard invariant was violated."""
-
-    @staticmethod
-    def _generate_next_value_(name: str, start: int, count: int, last_values: list[str]) -> str:
-        return name.upper()
 
     BLOCKED = auto()
     NEVER_INVOKED = auto()
