@@ -118,6 +118,15 @@ def gemini_agent_auto_allow(
     return _make_gemini_agent(local_provider, tmp_path, GeminiAgentConfig(auto_allow_permissions=True))
 
 
+def _provision(agent: GeminiAgent) -> None:
+    """Run provision with the standard options used throughout these tests."""
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+
+
 def test_assemble_command_uses_bare_gemini_command_with_no_default_cli_args(
     gemini_agent: GeminiAgent,
 ) -> None:
@@ -163,11 +172,7 @@ def test_provision_with_emit_disabled_does_not_write_script(
     gemini_agent_without_transcript: GeminiAgent,
 ) -> None:
     agent = gemini_agent_without_transcript
-    agent.provision(
-        host=agent.host,
-        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
-        mngr_ctx=agent.mngr_ctx,
-    )
+    _provision(agent)
 
     # No script written because emit was disabled
     expected_script = agent._get_agent_dir() / "commands" / "common_transcript.sh"
@@ -176,11 +181,7 @@ def test_provision_with_emit_disabled_does_not_write_script(
 
 def test_provision_with_emit_enabled_writes_transcript_script(gemini_agent: GeminiAgent) -> None:
     """provision should write common_transcript.sh to the agent's commands/ directory."""
-    gemini_agent.provision(
-        host=gemini_agent.host,
-        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
-        mngr_ctx=gemini_agent.mngr_ctx,
-    )
+    _provision(gemini_agent)
 
     expected_script = gemini_agent._get_agent_dir() / "commands" / "common_transcript.sh"
     assert expected_script.exists()
@@ -231,11 +232,7 @@ def test_provision_writes_system_settings_with_readiness_hook(
     gemini_agent: GeminiAgent,
 ) -> None:
     """The mngr-owned system-tier settings file holds the SessionStart hook."""
-    gemini_agent.provision(
-        host=gemini_agent.host,
-        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
-        mngr_ctx=gemini_agent.mngr_ctx,
-    )
+    _provision(gemini_agent)
     settings = _read_system_settings(gemini_agent)
     assert HOOK_EVENT_SESSION_START in settings["hooks"]
     inner_command = settings["hooks"][HOOK_EVENT_SESSION_START][0]["hooks"][0]["command"]
@@ -247,20 +244,15 @@ def test_provision_does_not_create_gemini_dir_in_workspace(
     gemini_agent: GeminiAgent,
 ) -> None:
     """The user's work_dir must be left completely untouched by provision."""
-    gemini_agent.provision(
-        host=gemini_agent.host,
-        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
-        mngr_ctx=gemini_agent.mngr_ctx,
-    )
+    _provision(gemini_agent)
     assert not (gemini_agent.work_dir / ".gemini").exists()
 
 
 def test_provision_is_idempotent(gemini_agent: GeminiAgent) -> None:
     """Running provision twice yields the same content (mngr owns the file)."""
-    options = CreateAgentOptions(agent_type=AgentTypeName("gemini"))
-    gemini_agent.provision(host=gemini_agent.host, options=options, mngr_ctx=gemini_agent.mngr_ctx)
+    _provision(gemini_agent)
     first = _read_system_settings(gemini_agent)
-    gemini_agent.provision(host=gemini_agent.host, options=options, mngr_ctx=gemini_agent.mngr_ctx)
+    _provision(gemini_agent)
     second = _read_system_settings(gemini_agent)
     assert first == second
     assert len(second["hooks"][HOOK_EVENT_SESSION_START]) == 1
@@ -271,11 +263,7 @@ def test_provision_installs_hooks_even_when_transcript_disabled(
 ) -> None:
     """Readiness hook ships unconditionally -- decoupled from transcript emission."""
     agent = gemini_agent_without_transcript
-    agent.provision(
-        host=agent.host,
-        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
-        mngr_ctx=agent.mngr_ctx,
-    )
+    _provision(agent)
     settings = _read_system_settings(agent)
     assert HOOK_EVENT_SESSION_START in settings["hooks"]
 
@@ -284,11 +272,7 @@ def test_provision_omits_before_tool_hook_when_auto_allow_disabled(
     gemini_agent: GeminiAgent,
 ) -> None:
     """The default config does not install a permission auto-allow hook."""
-    gemini_agent.provision(
-        host=gemini_agent.host,
-        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
-        mngr_ctx=gemini_agent.mngr_ctx,
-    )
+    _provision(gemini_agent)
     settings = _read_system_settings(gemini_agent)
     assert HOOK_EVENT_BEFORE_TOOL not in settings["hooks"]
 
@@ -298,11 +282,7 @@ def test_provision_installs_before_tool_hook_when_auto_allow_enabled(
 ) -> None:
     """``auto_allow_permissions=True`` adds a BeforeTool wildcard allow hook alongside readiness."""
     agent = gemini_agent_auto_allow
-    agent.provision(
-        host=agent.host,
-        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
-        mngr_ctx=agent.mngr_ctx,
-    )
+    _provision(agent)
     settings = _read_system_settings(agent)
     # Both hooks land in the same file.
     assert HOOK_EVENT_SESSION_START in settings["hooks"]
