@@ -3,10 +3,11 @@ from typing import cast
 
 import pytest
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.cli.agent_utils import ensure_host_and_agent_started
 from imbue.mngr.cli.agent_utils import ensure_host_started_and_resolve_agent
 from imbue.mngr.cli.agent_utils import filter_agents_by_host
-from imbue.mngr.cli.agent_utils import select_agent_interactively_with_host
+from imbue.mngr.cli.agent_utils import find_agent_by_address_or_interactively
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -85,16 +86,33 @@ def test_filter_agents_by_host_raises_when_no_match() -> None:
 
 
 # =============================================================================
-# select_agent_interactively_with_host tests
+# find_agent_by_address_or_interactively tests
 # =============================================================================
 
 
-def test_select_agent_interactively_raises_when_no_agents(
+def test_find_agent_by_address_or_interactively_raises_when_no_agents_in_interactive_mode(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """With a fresh context (no hosts or agents), raises UserInputError."""
+    """In interactive mode with no agents, raises UserInputError before showing the selector."""
+    interactive_ctx = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().is_interactive, True))
     with pytest.raises(UserInputError, match="No agents found"):
-        select_agent_interactively_with_host(temp_mngr_ctx)
+        find_agent_by_address_or_interactively(
+            mngr_ctx=interactive_ctx,
+            address=None,
+            host_filter=None,
+        )
+
+
+def test_find_agent_by_address_or_interactively_raises_when_no_address_in_non_interactive_mode(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """In non-interactive mode without an address, raises UserInputError rather than showing a selector."""
+    with pytest.raises(UserInputError, match="not running in interactive mode"):
+        find_agent_by_address_or_interactively(
+            mngr_ctx=temp_mngr_ctx,
+            address=None,
+            host_filter=None,
+        )
 
 
 # =============================================================================

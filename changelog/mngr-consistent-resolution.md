@@ -27,3 +27,9 @@ User-visible changes:
   started automatically.
 - The `--start` help text on `connect`, `capture`, and `exec` has been
   reworded to reflect what `--start` actually starts in each command.
+- `mngr connect` no longer falls back to "most recently created agent"
+  when run non-interactively without an explicit agent. It now matches
+  every other single-agent command: pass an agent name, or run it from
+  an interactive terminal to use the selector.
+- Cancelling the interactive agent selector now exits cleanly via
+  `click.Abort` instead of printing nothing and returning silently.

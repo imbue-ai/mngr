@@ -1,8 +1,8 @@
-from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import assert_never
 
+import click
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
@@ -14,7 +14,6 @@ from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
@@ -155,40 +154,14 @@ def ensure_host_and_agent_started(
     return agent, online_host
 
 
-def select_agent_interactively_with_host(
-    mngr_ctx: MngrContext,
-    agent_filter: Callable[[AgentDetails], bool] | None = None,
-    no_agents_message: str = "No agents found",
-) -> tuple[DiscoveredHost, DiscoveredAgent] | None:
-    """Show interactive UI to select an agent.
-
-    When ``agent_filter`` is provided, only agents matching the predicate
-    are shown in the interactive selector. Returns the chosen agent's
-    discovery refs, or ``None`` if the user quit without selecting.
-    Callers compose with :func:`ensure_host_started_and_resolve_agent` or
-    :func:`ensure_host_and_agent_started` to bring the result live.
-    """
-    list_result = list_agents(mngr_ctx, is_streaming=False)
-    agents = list_result.agents
-    if agent_filter is not None:
-        agents = [a for a in agents if agent_filter(a)]
-    if not agents:
-        raise UserInputError(no_agents_message)
-
-    selected = select_agent_interactively(agents)
-    if selected is None:
-        return None
-
-    return find_one_agent(AgentAddress(agent=selected.id), mngr_ctx)
-
-
-def find_agent_for_command(
+def find_agent_by_address_or_interactively(
     mngr_ctx: MngrContext,
     address: AgentAddress | None,
     host_filter: HostAddress | None,
-    agent_filter: Callable[[AgentDetails], bool] | None = None,
+    include_filters: tuple[str, ...] = (),
+    exclude_filters: tuple[str, ...] = (),
     no_agents_message: str = "No agents found",
-) -> tuple[DiscoveredHost, DiscoveredAgent] | None:
+) -> tuple[DiscoveredHost, DiscoveredAgent]:
     """Find an agent by address, or interactively if no address is given.
 
     The optional ``host_filter`` is an additional :class:`HostAddress`
@@ -196,13 +169,19 @@ def find_agent_for_command(
     It is merged into the address; if the address already pins a different
     host, this raises :class:`UserInputError`.
 
-    Returns the agent's discovery refs, or ``None`` if the user cancelled
-    interactive selection. Callers compose with
+    The optional ``include_filters`` / ``exclude_filters`` are CEL expressions
+    that narrow the candidate pool of the interactive selector. They are
+    ignored when ``address`` is given.
+
+    Returns the chosen agent's discovery refs. Callers compose with
     :func:`ensure_host_started_and_resolve_agent` or
     :func:`ensure_host_and_agent_started` to bring the result live.
 
     Raises :class:`UserInputError` if no address is given and the session
-    is not interactive.
+    is not interactive, or if the interactive candidate pool is empty.
+    Raises :class:`click.Abort` if the user quits the interactive selector
+    without choosing an agent (which Click handles as a clean cancellation
+    rather than printing a stack trace).
     """
     if address is not None:
         if host_filter is not None:
@@ -214,11 +193,21 @@ def find_agent_for_command(
     if not mngr_ctx.is_interactive:
         raise UserInputError("No agent specified and not running in interactive mode (specify an agent name or ID)")
 
-    return select_agent_interactively_with_host(
+    list_result = list_agents(
         mngr_ctx,
-        agent_filter=agent_filter,
-        no_agents_message=no_agents_message,
+        is_streaming=False,
+        include_filters=include_filters,
+        exclude_filters=exclude_filters,
     )
+    if not list_result.agents:
+        raise UserInputError(no_agents_message)
+
+    selected = select_agent_interactively(list_result.agents)
+    if selected is None:
+        logger.info("No agent selected")
+        raise click.Abort()
+
+    return find_one_agent(AgentAddress(agent=selected.id), mngr_ctx)
 
 
 def stop_agent_after_sync(

@@ -10,7 +10,7 @@ from imbue.mngr.api.provision import provision_agent
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import HOST_ADDRESS
 from imbue.mngr.cli.agent_utils import ensure_host_started_and_resolve_agent
-from imbue.mngr.cli.agent_utils import find_agent_for_command
+from imbue.mngr.cli.agent_utils import find_agent_by_address_or_interactively
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.env_utils import resolve_env_vars
@@ -157,16 +157,11 @@ def provision(ctx: click.Context, **kwargs: Any) -> None:
 
     # Find the agent (provision needs the host online but manages the agent's
     # state itself via --restart, so the agent process state is not required).
-    result = find_agent_for_command(
+    host_ref, agent_ref = find_agent_by_address_or_interactively(
         mngr_ctx=mngr_ctx,
         address=address,
         host_filter=None,
     )
-    if result is None:
-        logger.info("No agent selected")
-        return
-
-    host_ref, agent_ref = result
     agent, host = ensure_host_started_and_resolve_agent(
         host_ref=host_ref,
         agent_ref=agent_ref,

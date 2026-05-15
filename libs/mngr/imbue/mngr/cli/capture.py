@@ -7,7 +7,7 @@ from loguru import logger
 
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.agent_utils import ensure_host_and_agent_started
-from imbue.mngr.cli.agent_utils import find_agent_for_command
+from imbue.mngr.cli.agent_utils import find_agent_by_address_or_interactively
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -48,15 +48,11 @@ def capture(ctx: click.Context, **kwargs: Any) -> None:
         command_class=CaptureCliOptions,
     )
 
-    result = find_agent_for_command(
+    host_ref, agent_ref = find_agent_by_address_or_interactively(
         mngr_ctx=mngr_ctx,
         address=opts.agent,
         host_filter=None,
     )
-    if result is None:
-        return
-
-    host_ref, agent_ref = result
     agent, _host = ensure_host_and_agent_started(
         host_ref=host_ref,
         agent_ref=agent_ref,

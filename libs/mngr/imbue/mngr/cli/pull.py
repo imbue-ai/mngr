@@ -2,7 +2,6 @@ from pathlib import Path
 
 import click
 from click_option_group import optgroup
-from loguru import logger
 
 from imbue.mngr.api.pull import pull_files
 from imbue.mngr.api.pull import pull_git
@@ -10,7 +9,7 @@ from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import HOSTED_LOCATION
 from imbue.mngr.cli.address_params import HOST_ADDRESS
 from imbue.mngr.cli.agent_utils import ensure_host_started_and_resolve_agent
-from imbue.mngr.cli.agent_utils import find_agent_for_command
+from imbue.mngr.cli.agent_utils import find_agent_by_address_or_interactively
 from imbue.mngr.cli.agent_utils import stop_agent_after_sync
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -283,15 +282,11 @@ def pull(ctx: click.Context, **kwargs) -> None:
     destination_path = Path(effective_destination) if effective_destination else Path.cwd()
 
     # Find the agent
-    result = find_agent_for_command(
+    host_ref, agent_ref = find_agent_by_address_or_interactively(
         mngr_ctx=mngr_ctx,
         address=source_address,
         host_filter=None,
     )
-    if result is None:
-        logger.info("No agent selected")
-        return
-    host_ref, agent_ref = result
     agent, host = ensure_host_started_and_resolve_agent(
         host_ref=host_ref,
         agent_ref=agent_ref,

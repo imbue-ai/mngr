@@ -7,11 +7,9 @@ from loguru import logger
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.data_types import ConnectionOptions
-from imbue.mngr.api.find import find_one_agent
-from imbue.mngr.api.list import list_agents
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
-from imbue.mngr.cli.agent_selector import select_agent_interactively
 from imbue.mngr.cli.agent_utils import ensure_host_and_agent_started
+from imbue.mngr.cli.agent_utils import find_agent_by_address_or_interactively
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.filter_opts import AgentFilterCliOptions
@@ -21,7 +19,6 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentAddress
 
 
@@ -30,8 +27,8 @@ class ConnectCliOptions(AgentFilterCliOptions, CommonCliOptions):
 
     Inherits common options from CommonCliOptions and the shared agent filter
     flags from AgentFilterCliOptions. Filter flags only narrow the candidate
-    pool when no explicit agent is given (interactive selector and the
-    non-interactive most-recent fallback); they are ignored otherwise.
+    pool of the interactive selector; they are ignored when an explicit
+    agent is given.
     """
 
     agent: AgentAddress | None
@@ -102,33 +99,16 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
 
     logger.info("Finding agent...")
 
-    if opts.agent is not None:
-        host_ref, agent_ref = find_one_agent(opts.agent, mngr_ctx)
-    else:
-        include_filters, exclude_filters = build_agent_filter_cel(
-            opts, mngr_ctx.concurrency_group, project_root=mngr_ctx.project_root
-        )
-        list_result = list_agents(
-            mngr_ctx,
-            is_streaming=False,
-            include_filters=include_filters,
-            exclude_filters=exclude_filters,
-        )
-        if not list_result.agents:
-            raise UserInputError("No agents found")
-
-        if not mngr_ctx.is_interactive:
-            # Default to most recently created agent when running non-interactively
-            sorted_agents = sorted(list_result.agents, key=lambda a: a.create_time, reverse=True)
-            most_recent = sorted_agents[0]
-            logger.info("No agent specified, connecting to most recently created: {}", most_recent.name)
-            host_ref, agent_ref = find_one_agent(most_recent.address, mngr_ctx)
-        else:
-            selected = select_agent_interactively(list_result.agents)
-            if selected is None:
-                logger.info("No agent selected")
-                return
-            host_ref, agent_ref = find_one_agent(selected.address, mngr_ctx)
+    include_filters, exclude_filters = build_agent_filter_cel(
+        opts, mngr_ctx.concurrency_group, project_root=mngr_ctx.project_root
+    )
+    host_ref, agent_ref = find_agent_by_address_or_interactively(
+        mngr_ctx=mngr_ctx,
+        address=opts.agent,
+        host_filter=None,
+        include_filters=include_filters,
+        exclude_filters=exclude_filters,
+    )
 
     agent, host = ensure_host_and_agent_started(
         host_ref=host_ref,
@@ -161,10 +141,9 @@ The agent can be specified as a positional argument or via --agent:
   mngr connect --agent my-agent
 
 Filter flags (--include/--exclude plus aliases like --running, --project,
---label, ...) narrow the candidate pool used by the interactive selector
-and the non-interactive most-recent fallback. They are ignored when an
-explicit agent is given. See `mngr list --help` for the full filter
-reference; the same flags work identically here.""",
+--label, ...) narrow the candidate pool of the interactive selector.
+They are ignored when an explicit agent is given. See `mngr list --help`
+for the full filter reference; the same flags work identically here.""",
     aliases=("conn",),
     examples=(
         ("Connect to an agent by name", "mngr connect my-agent"),

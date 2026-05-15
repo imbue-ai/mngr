@@ -23,10 +23,9 @@ The agent can be specified as a positional argument or via --agent:
   mngr connect --agent my-agent
 
 Filter flags (--include/--exclude plus aliases like --running, --project,
---label, ...) narrow the candidate pool used by the interactive selector
-and the non-interactive most-recent fallback. They are ignored when an
-explicit agent is given. See `mngr list --help` for the full filter
-reference; the same flags work identically here.
+--label, ...) narrow the candidate pool of the interactive selector.
+They are ignored when an explicit agent is given. See `mngr list --help`
+for the full filter reference; the same flags work identically here.
 
 Alias: conn
 
