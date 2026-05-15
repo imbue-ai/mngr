@@ -226,13 +226,28 @@ def deploy_litellm_proxy(
 ) -> AnyUrl:
     """``modal deploy`` the litellm-proxy app into env ``name`` for ``tier``.
 
+    Runs the LiteLLM Prisma schema push FIRST so the deployed proxy never
+    starts up against a database missing its ``LiteLLM_VerificationToken``
+    / ``LiteLLM_BudgetTable`` / etc. tables. The migration runs as a
+    Modal Function in the same app file, sharing the proxy's image and
+    secret (so ``DATABASE_URL`` is necessarily the same Postgres the
+    proxy will talk to). Idempotent.
+
     Returns the URL Modal actually assigned to the deployed function
     (parsed from ``modal deploy`` stdout). Honors Modal's hostname-
     truncation behavior, so the returned URL is correct even when the
     natural host exceeds DNS's 63-char limit.
     """
+    app_file = _litellm_app_file()
+    _run_modal_function(
+        app_file=app_file,
+        function_name="migrate_db",
+        modal_env=str(name),
+        tier=tier,
+        parent_cg=parent_cg,
+    )
     return _deploy_modal_app(
-        app_file=_litellm_app_file(),
+        app_file=app_file,
         app_name=f"litellm-proxy-{tier}",
         modal_env=str(name),
         tier=tier,
@@ -329,6 +344,54 @@ def _modal_subprocess_env() -> dict[str, str]:
     one place to land.
     """
     return dict(os.environ)
+
+
+def _run_modal_function(
+    *,
+    app_file: Path,
+    function_name: str,
+    modal_env: str,
+    tier: str,
+    parent_cg: ConcurrencyGroup,
+) -> None:
+    """Invoke a Modal Function defined in ``app_file`` via ``modal run``.
+
+    Used by :func:`deploy_litellm_proxy` to run ``migrate_db`` before
+    the proxy deploy. ``modal run`` of an ``@app.function`` does not
+    require a prior ``modal deploy``: Modal builds an ephemeral instance
+    on demand, so this works on first-time tier bootstrap when no
+    ``litellm-proxy-<tier>`` app yet exists.
+
+    ``MNGR_DEPLOY_ENV`` is set in the subprocess env because the Modal
+    app reads it at module load to pick the right per-tier Secret name
+    (``litellm-<tier>``). Without it the function would attach the wrong
+    secret and either fail to find a DATABASE_URL or, worse, migrate
+    against the wrong tier's database.
+    """
+    if not app_file.is_file():
+        raise RepoLayoutError(f"Modal app file not found: {app_file}")
+    command = [
+        "modal",
+        "run",
+        "--env",
+        modal_env,
+        f"{app_file}::{function_name}",
+    ]
+    subprocess_env = _modal_subprocess_env()
+    subprocess_env["MNGR_DEPLOY_ENV"] = tier
+    cg = parent_cg.make_concurrency_group(name=f"modal-run-{function_name}")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=command,
+            timeout=_MODAL_DEPLOY_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            env=subprocess_env,
+        )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise ModalDeployError(
+            f"`modal run --env {modal_env} {app_file}::{function_name}` failed (exit {result.returncode}): {stderr}"
+        )
 
 
 def per_env_secret_services() -> tuple[str, ...]:

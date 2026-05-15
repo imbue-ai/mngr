@@ -83,6 +83,18 @@ fi
 
 export MNGR_DEPLOY_ENV="$tier"
 
-echo "==> Deploying litellm-proxy-${tier} to workspace='${modal_workspace}', env='${modal_env}'..."
 cd "$repo_root"
+
+# Run the prisma schema push BEFORE the proxy deploy so the running
+# proxy never sees a missing LiteLLM_VerificationToken / etc. table.
+# The migrate_db function lives in the same app file, uses the same
+# Modal Secret as the proxy (so DATABASE_URL is necessarily the same
+# Postgres), and is idempotent -- re-running against an already-current
+# schema is a quick no-op. `modal run` of an @app.function does not
+# require a prior `modal deploy`, so this works on first-time tier
+# bootstrap too.
+echo "==> Pushing LiteLLM Prisma schema to DATABASE_URL via migrate_db Modal function..."
+uv run modal run --env "$modal_env" "${app_file}::migrate_db"
+
+echo "==> Deploying litellm-proxy-${tier} to workspace='${modal_workspace}', env='${modal_env}'..."
 exec uv run modal deploy --name "litellm-proxy-${tier}" --env "$modal_env" "$app_file"

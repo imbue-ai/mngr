@@ -23,6 +23,7 @@ Usage:
 
 import json
 import os
+import subprocess
 
 import modal
 
@@ -120,3 +121,38 @@ def litellm_app():
     from litellm.proxy.proxy_server import app as fastapi_app
 
     return fastapi_app
+
+
+@app.function(
+    secrets=[modal.Secret.from_name(f"litellm-{_DEPLOY_ENV}")],
+    timeout=300,
+)
+def migrate_db() -> None:
+    """Run `prisma db push` against DATABASE_URL to bring the LiteLLM schema current.
+
+    Invoked by the deploy scripts (scripts/deploy_litellm.sh and
+    apps/minds/imbue/minds/envs/per_env_deploy.py::deploy_litellm_proxy)
+    before each `modal deploy` so the running proxy never sees a missing
+    LiteLLM_VerificationToken / LiteLLM_BudgetTable / etc.
+
+    Runs in the same image as the proxy itself, so prisma + the
+    litellm[proxy] package (which ships the canonical schema.prisma)
+    are already installed. Runs against the same `litellm-<tier>` Modal
+    Secret the proxy consumes, so DATABASE_URL is necessarily the same
+    Postgres the proxy will talk to at runtime.
+
+    Idempotent: prisma db push only applies diffs, so re-running on an
+    already-current database is a no-op (~1s wall-clock). The
+    --accept-data-loss flag is safe here -- the schema is LiteLLM's,
+    not ours, so any "loss" would be of stale columns that LiteLLM
+    itself dropped in a version bump (we don't write to those tables
+    out-of-band). --skip-generate skips client codegen since the image
+    already did that at build time.
+    """
+    import litellm.proxy
+
+    schema_path = os.path.join(os.path.dirname(litellm.proxy.__file__), "schema.prisma")
+    subprocess.run(
+        ["prisma", "db", "push", "--schema", schema_path, "--accept-data-loss", "--skip-generate"],
+        check=True,
+    )
