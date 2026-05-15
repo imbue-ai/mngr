@@ -134,8 +134,8 @@ def test_record_pre_injected_host_key_writes_known_hosts(lima_provider: LimaProv
 
 
 def test_record_pre_injected_host_key_rewrites_on_port_change(lima_provider: LimaProviderInstance) -> None:
-    # Lima reassigns the forwarded port across restarts; the per-host file must
-    # be rewritten wholesale so no stale [127.0.0.1]:<old-port> line survives.
+    # Lima reassigns the forwarded port across restarts; the per-host known_hosts
+    # file must reflect only the current port, with no stale entries from prior ports.
     host_id = HostId.generate()
     lima_provider._ensure_host_keypair(host_id)
 
