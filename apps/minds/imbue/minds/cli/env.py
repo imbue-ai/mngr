@@ -129,25 +129,32 @@ def _build_real_providers(cg: ConcurrencyGroup) -> Providers:
 
 
 def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup) -> ProviderCredentials:
-    """Read every per-provider dev-tier secret from Vault.
+    """Read every per-provider dev-tier credential `minds env` needs from Vault.
 
-    The dev-tier Vault entries follow the shared schema; the specific keys
-    consumed by ``minds env`` are pulled out here and fed into the typed
-    :class:`ProviderCredentials` model. The ``cloudflare`` entry is read
-    purely to assert it exists (its keys ride along on the per-dev-env
-    Modal deploy, but no value is consumed here).
+    These credentials live in dedicated "admin" Vault entries that are
+    intentionally separate from the Modal-pushed entries -- the connector's
+    runtime never needs API tokens for creating Neon DBs or VPS instances,
+    so co-mingling those tokens with the Modal-pushed Vault paths would
+    leak them into the connector's runtime env unnecessarily.
+
+    Paths read here (none are pushed to Modal):
+
+    - ``<vault_prefix>/neon-admin`` -- ``NEON_API_TOKEN``, ``NEON_PROJECT_ID``
+    - ``<vault_prefix>/supertokens`` -- ``SUPERTOKENS_CONNECTION_URI``,
+      ``SUPERTOKENS_API_KEY`` (read from the Modal-pushed entry; safe to
+      read here because the connector also legitimately needs both keys)
+    - ``<vault_prefix>/vultr`` -- ``VULTR_API_KEY``
     """
-    neon = read_vault_kv(VaultPath(f"{vault_prefix}/neon"), parent_concurrency_group=cg)
+    neon_admin = read_vault_kv(VaultPath(f"{vault_prefix}/neon-admin"), parent_concurrency_group=cg)
     supertokens = read_vault_kv(VaultPath(f"{vault_prefix}/supertokens"), parent_concurrency_group=cg)
-    read_vault_kv(VaultPath(f"{vault_prefix}/cloudflare"), parent_concurrency_group=cg)
-    vultr_secret = read_vault_kv(VaultPath(f"{vault_prefix}/pool-ssh"), parent_concurrency_group=cg)
+    vultr_secret = read_vault_kv(VaultPath(f"{vault_prefix}/vultr"), parent_concurrency_group=cg)
 
-    project_id = neon.get("NEON_PROJECT_ID", "")
-    api_token = neon.get("NEON_API_TOKEN", "")
+    project_id = neon_admin.get("NEON_PROJECT_ID", "")
+    api_token = neon_admin.get("NEON_API_TOKEN", "")
     if not project_id or not api_token:
         raise VaultReadError(
-            f"Vault entry {vault_prefix}/neon missing NEON_PROJECT_ID or NEON_API_TOKEN; "
-            "add them to the dev-tier Neon secret."
+            f"Vault entry {vault_prefix}/neon-admin missing NEON_PROJECT_ID or NEON_API_TOKEN; "
+            "see .minds/template/neon-admin.sh for the schema."
         )
 
     core_url = supertokens.get("SUPERTOKENS_CONNECTION_URI", "")
@@ -160,7 +167,7 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
     vultr_api_key = vultr_secret.get("VULTR_API_KEY", "")
     if not vultr_api_key:
         raise VaultReadError(
-            f"Vault entry {vault_prefix}/pool-ssh missing VULTR_API_KEY (shared dev-tier key for Vultr)."
+            f"Vault entry {vault_prefix}/vultr missing VULTR_API_KEY; see .minds/template/vultr.sh for the schema."
         )
 
     return ProviderCredentials(

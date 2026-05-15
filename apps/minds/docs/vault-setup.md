@@ -26,8 +26,10 @@ vault login -method=oidc   # or whatever your team is set up for
 
 ## Path layout
 
-Every tier has the same set of secrets, distinguished only by the tier
-name in the path:
+Each tier has two families of Vault entries:
+
+**Pushed to Modal at deploy time** (the connector + litellm-proxy read
+these from their runtime env via `modal.Secret.from_name(...)`):
 
 ```
 secrets/kv/minds/<tier>/cloudflare
@@ -39,34 +41,41 @@ secrets/kv/minds/<tier>/pool-ssh
 secrets/kv/minds/<tier>/supertokens
 ```
 
+**Read only by `minds env create` on a developer's laptop** (never pushed
+to Modal -- the connector's runtime doesn't need create-database / VPS-
+management permissions):
+
+```
+secrets/kv/minds/<tier>/neon-admin   # NEON_API_TOKEN, NEON_PROJECT_ID
+secrets/kv/minds/<tier>/vultr        # VULTR_API_KEY
+```
+
 The schema for each `<service>` is the corresponding file under
 `.minds/template/<service>.sh` at the repo root. `push_modal_secrets.py`
-validates every key declared by the template against the Vault entry
-before pushing anything to Modal, so missing keys are caught before they
-break a deploy.
+validates every key declared by a Modal-pushed template against the
+Vault entry before pushing anything to Modal, so missing keys are caught
+before they break a deploy.
 
-`<tier>` is one of `dev`, `staging`, `production`. Dynamic dev env
-secrets are **not** stored in Vault -- they live on the developer's
-machine only.
+`<tier>` is one of `dev`, `staging`, `production`. Per-dev-env secrets
+(the values `minds env create` generates per developer) are **not**
+stored in Vault -- they live on the developer's machine only in
+`~/.<root>/envs/<name>.toml`.
 
 ## Populating a tier
 
-For each service:
+For each service, copy the template, fill in the values, and push:
 
 ```bash
-# Example: the cloudflare entry for staging.
-vault kv put -mount=secrets kv/minds/staging/cloudflare \
-    CLOUDFLARE_API_TOKEN=...   \
-    CLOUDFLARE_ACCOUNT_ID=...  \
-    CLOUDFLARE_ZONE_ID=...     \
-    CLOUDFLARE_DOMAIN=staging.example.com \
-    CLOUDFLARE_ALLOWED_IDPS=
+cp .minds/template/litellm.sh /tmp/dev-litellm.sh
+$EDITOR /tmp/dev-litellm.sh
+uv run scripts/push_vault_from_file.py dev litellm /tmp/dev-litellm.sh
+shred -u /tmp/dev-litellm.sh
 ```
 
-Keys with intentionally empty values (e.g. an unused optional override)
-should be set with an empty string -- the deploy script will skip those
-when pushing to Modal but the template-keys-present validation still
-passes.
+The helper validates that every key declared by the template is present
+in the filled file (empty values are fine -- the deploy step skips them
+when pushing to Modal), pushes the entry, and prints a `shred` command
+for cleanup.
 
 ## Deploying
 
