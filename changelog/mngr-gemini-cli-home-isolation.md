@@ -8,4 +8,4 @@ Relocate Gemini CLI's entire config dir under each agent's state dir via `GEMINI
 
 `modify_env_vars()` is now a single env var: `GEMINI_CLI_HOME`. The previous `GEMINI_CLI_SYSTEM_SETTINGS_PATH` and `GEMINI_CLI_TRUST_WORKSPACE` env vars are gone.
 
-Local hosts only for now — remote hosts raise `NotImplementedError` from `_symlink_user_auth_artifacts` because the symlink strategy doesn't extend across machines. A future PR mirroring `mngr_claude._provision_local_credentials` will copy-and-keep-in-sync.
+On remote hosts, `_symlink_user_auth_artifacts` issues the `ln -sf` via `host.execute_idempotent_command`, so the symlink is created server-side; the source paths it points at must already exist under `~/.gemini/` on the remote machine (or the agent should use API-key auth instead). A future PR mirroring `mngr_claude._provision_local_credentials` may add a copy-and-keep-in-sync mode for cross-machine setups.
