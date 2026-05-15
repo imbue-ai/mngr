@@ -4,7 +4,6 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.imbue_common.pure import pure
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
@@ -18,7 +17,6 @@ from imbue.mngr.cli.filter_opts import build_agent_filter_cel
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentAddress
 
 
@@ -36,18 +34,6 @@ class ConnectCliOptions(AgentFilterCliOptions, CommonCliOptions):
     reconnect: bool
     session_command: str | None
     allow_unknown_host: bool
-
-
-@pure
-def _build_connection_options(opts: ConnectCliOptions, mngr_ctx: MngrContext) -> ConnectionOptions:
-    """Build ConnectionOptions from CLI options and config."""
-    return ConnectionOptions(
-        is_reconnect=opts.reconnect,
-        retry_count=mngr_ctx.config.retry.connect_retry_times,
-        retry_delay=mngr_ctx.config.retry.connect_retry_delay,
-        session_command=opts.session_command,
-        is_unknown_host_allowed=opts.allow_unknown_host,
-    )
 
 
 @click.command()
@@ -118,7 +104,13 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
     )
 
     # Build connection options
-    connection_opts = _build_connection_options(opts, mngr_ctx)
+    connection_opts = ConnectionOptions(
+        is_reconnect=opts.reconnect,
+        retry_count=mngr_ctx.config.retry.connect_retry_times,
+        retry_delay=mngr_ctx.config.retry.connect_retry_delay,
+        session_command=opts.session_command,
+        is_unknown_host_allowed=opts.allow_unknown_host,
+    )
 
     logger.info("Connecting to agent: {}", agent.name)
     connect_to_agent(agent, host, mngr_ctx, connection_opts)
