@@ -362,7 +362,7 @@ def _normalize_field_keys(raw: dict[str, Any], context: str) -> dict[str, Any]:
                 f"which both normalize to '{normalized}'. Use one or the other."
             )
         casefolded = normalized.lower()
-        if casefolded in seen_casefolded and seen_casefolded[casefolded] != key:
+        if casefolded in seen_casefolded:
             raise ConfigParseError(
                 f"Config in {context} has both '{seen_casefolded[casefolded]}' and '{key}' "
                 f"which collapse to the same env-var segment '{casefolded.upper()}'. "
