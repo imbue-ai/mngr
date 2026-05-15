@@ -126,14 +126,9 @@ class TestAwsProviderLifecycle:
             assert agent_name in result.stdout
             assert "aws" in result.stdout
         finally:
-            subprocess.run(
-                ["uv", "run", "mngr", "destroy", agent_name, "--force"],
-                input="y\n",
-                capture_output=True,
-                text=True,
-                timeout=120,
-                cwd=os.environ.get("MNGR_REPO_ROOT", os.getcwd()),
-            )
+            # --force skips the destroy confirmation, so no stdin input needed.
+            # Result is intentionally not checked: best-effort cleanup.
+            _run_mngr("destroy", agent_name, "--force", timeout=120)
             time.sleep(20)
 
     def test_create_stop_start_destroy(self) -> None:
@@ -165,14 +160,9 @@ class TestAwsProviderLifecycle:
             assert result.returncode == 0, f"Post-restart exec failed: {result.stderr}"
             assert "alive-after-restart" in result.stdout
         finally:
-            subprocess.run(
-                ["uv", "run", "mngr", "destroy", agent_name, "--force"],
-                input="y\n",
-                capture_output=True,
-                text=True,
-                timeout=120,
-                cwd=os.environ.get("MNGR_REPO_ROOT", os.getcwd()),
-            )
+            # --force skips the destroy confirmation, so no stdin input needed.
+            # Result is intentionally not checked: best-effort cleanup.
+            _run_mngr("destroy", agent_name, "--force", timeout=120)
             time.sleep(20)
 
 
