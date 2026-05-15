@@ -7,9 +7,9 @@ from loguru import logger
 
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.find import find_one_agent_and_agents_by_host
+from imbue.mngr.api.find import resolve_to_started_host_and_agent
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import AGENT_NAME
-from imbue.mngr.cli.agent_utils import ensure_host_started_and_resolve_agent
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -125,7 +125,7 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
     # Use the sibling find function so the full discovery result is available
     # for the name-conflict check below without a second discovery pass.
     host_ref, agent_ref, agents_by_host = find_one_agent_and_agents_by_host(opts.current, mngr_ctx)
-    agent, host = ensure_host_started_and_resolve_agent(
+    agent, host = resolve_to_started_host_and_agent(
         host_ref=host_ref,
         agent_ref=agent_ref,
         allow_auto_start=opts.start,

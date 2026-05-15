@@ -5,8 +5,8 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.find import resolve_to_started_host_and_running_agent
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
-from imbue.mngr.cli.agent_utils import ensure_host_and_agent_started
 from imbue.mngr.cli.agent_utils import find_agent_by_address_or_interactively
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -53,7 +53,7 @@ def capture(ctx: click.Context, **kwargs: Any) -> None:
         address=opts.agent,
         host_filter=None,
     )
-    agent, _host = ensure_host_and_agent_started(
+    agent, _host = resolve_to_started_host_and_running_agent(
         host_ref=host_ref,
         agent_ref=agent_ref,
         allow_auto_start=opts.start,

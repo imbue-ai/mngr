@@ -4,8 +4,8 @@ from typing import cast
 import pytest
 
 from imbue.imbue_common.model_update import to_update
-from imbue.mngr.cli.agent_utils import ensure_host_and_agent_started
-from imbue.mngr.cli.agent_utils import ensure_host_started_and_resolve_agent
+from imbue.mngr.api.find import resolve_to_started_host_and_agent
+from imbue.mngr.api.find import resolve_to_started_host_and_running_agent
 from imbue.mngr.cli.agent_utils import find_agent_by_address_or_interactively
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
@@ -92,18 +92,18 @@ def _create_stopped_agent_with_ref(
 
 
 @pytest.mark.tmux
-def test_ensure_host_started_and_resolve_agent_succeeds_for_stopped_agent(
+def test_resolve_to_started_host_and_agent_succeeds_for_stopped_agent(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
 ) -> None:
-    """ensure_host_started_and_resolve_agent does not check the agent's lifecycle."""
+    """resolve_to_started_host_and_agent does not check the agent's lifecycle."""
     agent_name = AgentName("stopped-resolve-test-agent")
     local_host, host_ref, agent_ref = _create_stopped_agent_with_ref(
         local_provider, temp_work_dir, agent_name, CommandString("sleep 47293")
     )
 
-    found_agent, found_host = ensure_host_started_and_resolve_agent(
+    found_agent, found_host = resolve_to_started_host_and_agent(
         host_ref=host_ref,
         agent_ref=agent_ref,
         allow_auto_start=False,
@@ -114,19 +114,19 @@ def test_ensure_host_started_and_resolve_agent_succeeds_for_stopped_agent(
 
 
 @pytest.mark.tmux
-def test_ensure_host_and_agent_started_raises_for_stopped_agent_without_auto_start(
+def test_resolve_to_started_host_and_running_agent_raises_for_stopped_agent_without_auto_start(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
 ) -> None:
-    """ensure_host_and_agent_started raises when the agent is stopped and auto-start is disabled."""
+    """resolve_to_started_host_and_running_agent raises when the agent is stopped and auto-start is disabled."""
     agent_name = AgentName("stopped-ensure-test-agent")
     _local_host, host_ref, agent_ref = _create_stopped_agent_with_ref(
         local_provider, temp_work_dir, agent_name, CommandString("sleep 47294")
     )
 
     with pytest.raises(UserInputError, match="stopped and automatic starting is disabled"):
-        ensure_host_and_agent_started(
+        resolve_to_started_host_and_running_agent(
             host_ref=host_ref,
             agent_ref=agent_ref,
             allow_auto_start=False,

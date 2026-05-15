@@ -6,8 +6,8 @@ from loguru import logger
 
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.data_types import ConnectionOptions
+from imbue.mngr.api.find import resolve_to_started_host_and_running_agent
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
-from imbue.mngr.cli.agent_utils import ensure_host_and_agent_started
 from imbue.mngr.cli.agent_utils import find_agent_by_address_or_interactively
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -96,7 +96,7 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         exclude_filters=exclude_filters,
     )
 
-    agent, host = ensure_host_and_agent_started(
+    agent, host = resolve_to_started_host_and_running_agent(
         host_ref=host_ref,
         agent_ref=agent_ref,
         allow_auto_start=opts.start,

@@ -15,8 +15,8 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import find_one_agent
+from imbue.mngr.api.find import resolve_to_started_host_and_agent
 from imbue.mngr.api.list import list_agents
-from imbue.mngr.cli.agent_utils import ensure_host_started_and_resolve_agent
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentAddress
@@ -225,7 +225,7 @@ def compute_section(fields: dict[str, FieldValue]) -> BoardSection:
 def toggle_agent_mute(mngr_ctx: MngrContext, agent_name: AgentName) -> bool:
     """Toggle the mute state of an agent. Returns the new mute state."""
     host_ref, agent_ref = find_one_agent(AgentAddress(agent=agent_name), mngr_ctx)
-    agent, _host = ensure_host_started_and_resolve_agent(
+    agent, _host = resolve_to_started_host_and_agent(
         host_ref=host_ref,
         agent_ref=agent_ref,
         allow_auto_start=False,

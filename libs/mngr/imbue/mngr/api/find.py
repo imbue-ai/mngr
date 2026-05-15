@@ -552,8 +552,8 @@ def find_one_agent_and_agents_by_host(
 
     Returns only metadata. Callers that need a live ``AgentInterface`` or
     ``OnlineHostInterface`` should compose with
-    :func:`imbue.mngr.cli.agent_utils.ensure_host_started_and_resolve_agent`
-    or :func:`imbue.mngr.cli.agent_utils.ensure_host_and_agent_started`.
+    :func:`resolve_to_started_host_and_agent` or
+    :func:`resolve_to_started_host_and_running_agent`.
 
     Raises :class:`UserInputError` if the host constraint matches no hosts.
     Raises :class:`AgentNotFoundError` / :class:`UserInputError` if the
@@ -579,3 +579,59 @@ def find_one_agent(
     """
     host_ref, agent_ref, _ = find_one_agent_and_agents_by_host(address, mngr_ctx)
     return host_ref, agent_ref
+
+
+def resolve_to_started_host_and_agent(
+    host_ref: DiscoveredHost,
+    agent_ref: DiscoveredAgent,
+    allow_auto_start: bool,
+    mngr_ctx: MngrContext,
+) -> tuple[AgentInterface, OnlineHostInterface]:
+    """Resolve discovery refs to a live ``(AgentInterface, OnlineHostInterface)``.
+
+    Composes :func:`ensure_host_started` with the metadata-to-live lookup
+    step: brings the host online (auto-starting it iff ``allow_auto_start``
+    is True), then locates ``agent_ref`` on the live host. The agent's
+    lifecycle state is *not* checked -- the returned ``AgentInterface``
+    may represent a stopped agent. Callers that need the agent process to
+    be running should use :func:`resolve_to_started_host_and_running_agent`
+    instead.
+
+    Raises :class:`UserInputError` when the host is offline and
+    ``allow_auto_start`` is False. Raises :class:`RuntimeError` if the
+    agent was found during discovery but is missing on the live host (a
+    stale-cache / host state inconsistency case).
+    """
+    provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
+    host = provider.get_host(host_ref.host_id)
+    online_host, _was_started = ensure_host_started(host, is_start_desired=allow_auto_start, provider=provider)
+    for live_agent in online_host.get_agents():
+        if live_agent.id == agent_ref.agent_id:
+            return live_agent, online_host
+    raise RuntimeError(
+        f"Agent '{agent_ref.agent_name}' (ID: {agent_ref.agent_id}) was found during discovery but is "
+        f"no longer present on host {host_ref.host_name}.{host_ref.provider_name}. "
+        "This indicates a stale discovery cache or host state inconsistency."
+    )
+
+
+def resolve_to_started_host_and_running_agent(
+    host_ref: DiscoveredHost,
+    agent_ref: DiscoveredAgent,
+    allow_auto_start: bool,
+    mngr_ctx: MngrContext,
+) -> tuple[AgentInterface, OnlineHostInterface]:
+    """Resolve discovery refs to live interfaces, requiring the agent to be running.
+
+    Same as :func:`resolve_to_started_host_and_agent` but additionally
+    ensures the agent process is running (auto-starting it iff
+    ``allow_auto_start`` is True) via :func:`ensure_agent_started`.
+
+    Raises :class:`UserInputError` when the host is offline or the agent
+    is stopped and ``allow_auto_start`` is False. Raises
+    :class:`RuntimeError` if the agent was found during discovery but is
+    missing on the live host.
+    """
+    agent, online_host = resolve_to_started_host_and_agent(host_ref, agent_ref, allow_auto_start, mngr_ctx)
+    ensure_agent_started(agent, online_host, is_start_desired=allow_auto_start)
+    return agent, online_host
