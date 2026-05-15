@@ -42,10 +42,6 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
 
-# Configured via MngrConfig.agent_ready_timeout (settable from TOML or
-# MNGR__AGENT_READY_TIMEOUT). Hook-based polling returns early; this is a max
-# wait time, not an unconditional delay.
-
 
 class HostInterface(MutableModel, ABC):
     """Interface for host implementations."""
