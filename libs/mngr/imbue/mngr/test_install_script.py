@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-_E2E_DIR = Path(__file__).resolve().parent
-_REPO_ROOT = next(p for p in [_E2E_DIR, *_E2E_DIR.parents] if (p / ".git").exists())
+_THIS_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = next(p for p in [_THIS_DIR, *_THIS_DIR.parents] if (p / ".git").exists())
 _INSTALL_SH = _REPO_ROOT / "scripts" / "install.sh"
 # Resolve bash up-front so the subprocess lookup is independent of the
 # minimal PATH we hand the child (which only contains the mock bin dir
