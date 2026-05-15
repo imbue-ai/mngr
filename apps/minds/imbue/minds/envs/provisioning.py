@@ -42,8 +42,6 @@ from imbue.minds.envs.per_env_deploy import compute_per_env_overrides
 from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy
 from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector
 from imbue.minds.envs.per_env_deploy import ensure_modal_env
-from imbue.minds.envs.per_env_deploy import per_env_connector_url
-from imbue.minds.envs.per_env_deploy import per_env_litellm_proxy_url
 from imbue.minds.envs.per_env_deploy import per_env_secret_services
 from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret
 from imbue.minds.envs.primitives import DevEnvName
@@ -92,7 +90,7 @@ ListVultrInstancesFn = Callable[[DevEnvName, SecretStr], tuple[VultrInstanceSumm
 DeleteVultrInstancesFn = Callable[[tuple[VultrInstanceSummary, ...], SecretStr], None]
 ModalEnvOpFn = Callable[[DevEnvName, ConcurrencyGroup], None]
 PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None]
-DeployModalAppFn = Callable[[DevEnvName, str, ConcurrencyGroup], None]
+DeployModalAppFn = Callable[[DevEnvName, str, ConcurrencyGroup], AnyUrl]
 ReadPerEnvSecretValuesFn = Callable[[str, str, dict[str, str], ConcurrencyGroup], dict[str, str]]
 
 
@@ -211,20 +209,37 @@ def deploy_dev_env(
     assert supertokens_record is not None
 
     modal_workspace = str(deploy_config.modal_workspace)
-    overrides_by_service = compute_per_env_overrides(
+    tier_vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
+
+    # First pass: push every per-env Modal Secret using URLs we can know
+    # up front (per-env Neon DSN, per-env SuperTokens app URI). Modal
+    # Secrets must exist before `modal deploy` will accept the deploy,
+    # so this happens first. AUTH_WEBSITE_DOMAIN and the connector URL
+    # we'd want in litellm-connector are filled in later, after the
+    # first connector deploy gives us the real URL.
+    first_pass_overrides = compute_per_env_overrides(
         name,
         modal_workspace=modal_workspace,
         neon_record=neon_record,
         supertokens_record=supertokens_record,
     )
-    tier_vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
-
-    logger.info("Pushing per-env Modal Secrets into env {!r}...", str(name))
+    logger.info("Pushing initial per-env Modal Secrets into env {!r}...", str(name))
+    litellm_master_key = _read_litellm_master_key(
+        tier_vault_prefix,
+        providers,
+        parent_concurrency_group,
+    )
     for service in per_env_secret_services():
+        per_service_overrides = dict(first_pass_overrides.get(service, {}))
+        # Auto-populate litellm-connector with the master key from the
+        # litellm Vault entry. LITELLM_PROXY_URL is filled in second-pass
+        # below once we know the actual proxy URL.
+        if service == "litellm-connector" and litellm_master_key:
+            per_service_overrides.setdefault("LITELLM_MASTER_KEY", litellm_master_key)
         values = providers.read_per_env_secret_values(
             service,
             tier_vault_prefix,
-            overrides_by_service.get(service, {}),
+            per_service_overrides,
             parent_concurrency_group,
         )
         providers.push_per_env_modal_secret(
@@ -235,13 +250,58 @@ def deploy_dev_env(
         )
 
     logger.info("Deploying litellm-proxy-{} into env {!r}...", tier, str(name))
-    providers.deploy_litellm_proxy(name, tier, parent_concurrency_group)
+    litellm_proxy_url = providers.deploy_litellm_proxy(name, tier, parent_concurrency_group)
 
     logger.info("Deploying remote-service-connector-{} into env {!r}...", tier, str(name))
-    providers.deploy_remote_service_connector(name, tier, parent_concurrency_group)
+    connector_url = providers.deploy_remote_service_connector(name, tier, parent_concurrency_group)
 
-    connector_url = per_env_connector_url(name, modal_workspace)
-    litellm_proxy_url = per_env_litellm_proxy_url(name, modal_workspace)
+    # Second pass: now that we have the real connector + proxy URLs,
+    # update the two Modal Secrets whose values depended on them
+    # (supertokens.AUTH_WEBSITE_DOMAIN and litellm-connector.LITELLM_PROXY_URL)
+    # and redeploy the connector so the running container picks them up.
+    # litellm-proxy doesn't depend on either URL so no redeploy needed.
+    logger.info(
+        "Re-pushing URL-dependent Modal Secrets with actual deploy URLs (connector={}, litellm={})...",
+        connector_url,
+        litellm_proxy_url,
+    )
+    supertokens_values = providers.read_per_env_secret_values(
+        "supertokens",
+        tier_vault_prefix,
+        {
+            **first_pass_overrides.get("supertokens", {}),
+            "AUTH_WEBSITE_DOMAIN": str(connector_url),
+        },
+        parent_concurrency_group,
+    )
+    providers.push_per_env_modal_secret(
+        f"supertokens-{tier}",
+        supertokens_values,
+        str(name),
+        parent_concurrency_group,
+    )
+
+    litellm_connector_overrides: dict[str, str] = {
+        "LITELLM_PROXY_URL": str(litellm_proxy_url),
+    }
+    if litellm_master_key:
+        litellm_connector_overrides["LITELLM_MASTER_KEY"] = litellm_master_key
+    litellm_connector_values = providers.read_per_env_secret_values(
+        "litellm-connector",
+        tier_vault_prefix,
+        litellm_connector_overrides,
+        parent_concurrency_group,
+    )
+    providers.push_per_env_modal_secret(
+        f"litellm-connector-{tier}",
+        litellm_connector_values,
+        str(name),
+        parent_concurrency_group,
+    )
+
+    logger.info("Redeploying remote-service-connector-{} to pick up final secrets...", tier)
+    connector_url = providers.deploy_remote_service_connector(name, tier, parent_concurrency_group)
+
     local_config = LocalDevEnvConfig(
         connector_url=connector_url,
         litellm_proxy_url=litellm_proxy_url,
@@ -259,6 +319,23 @@ def deploy_dev_env(
         connector_url=connector_url,
         litellm_proxy_url=litellm_proxy_url,
     )
+
+
+def _read_litellm_master_key(
+    tier_vault_prefix: str,
+    providers: Providers,
+    parent_concurrency_group: ConcurrencyGroup,
+) -> str:
+    """Pull ``LITELLM_MASTER_KEY`` out of the tier-shared ``litellm`` Vault entry.
+
+    The connector's ``litellm-connector`` Modal Secret needs the same
+    master key the proxy uses (so the connector's ``/keys/*`` route can
+    mint virtual keys against the proxy's admin API). Returning empty
+    string when the Vault entry isn't populated lets the caller skip the
+    override instead of writing an empty value.
+    """
+    values = providers.read_per_env_secret_values("litellm", tier_vault_prefix, {}, parent_concurrency_group)
+    return values.get("LITELLM_MASTER_KEY", "")
 
 
 def _best_effort_rollback(

@@ -25,6 +25,7 @@ Vault entry gets populated and ``minds env deploy`` is re-run.
 """
 
 import os
+import re
 from pathlib import Path
 from typing import Final
 
@@ -39,6 +40,13 @@ from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.errors import MindError
+
+# Modal's `modal deploy` prints lines like:
+#     Created web function fastapi_app => https://<host>.modal.run
+# When the natural host exceeds DNS's 63-char limit, Modal truncates and
+# appends a 6-hex hash, and may wrap the URL across stdout lines. Collapsing
+# whitespace before regex matching handles both forms.
+_MODAL_DEPLOY_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"https://[A-Za-z0-9_\-.]+\.modal\.run")
 
 # Services that need a per-env Modal Secret. Order doesn't matter for the
 # pushes themselves, but listing them here in one place keeps the set
@@ -215,9 +223,15 @@ def deploy_litellm_proxy(
     *,
     tier: str,
     parent_cg: ConcurrencyGroup,
-) -> None:
-    """``modal deploy`` the litellm-proxy app into env ``name`` for ``tier``."""
-    _deploy_modal_app(
+) -> AnyUrl:
+    """``modal deploy`` the litellm-proxy app into env ``name`` for ``tier``.
+
+    Returns the URL Modal actually assigned to the deployed function
+    (parsed from ``modal deploy`` stdout). Honors Modal's hostname-
+    truncation behavior, so the returned URL is correct even when the
+    natural host exceeds DNS's 63-char limit.
+    """
+    return _deploy_modal_app(
         app_file=_litellm_app_file(),
         app_name=f"litellm-proxy-{tier}",
         modal_env=str(name),
@@ -231,15 +245,35 @@ def deploy_remote_service_connector(
     *,
     tier: str,
     parent_cg: ConcurrencyGroup,
-) -> None:
-    """``modal deploy`` the remote_service_connector app into env ``name`` for ``tier``."""
-    _deploy_modal_app(
+) -> AnyUrl:
+    """``modal deploy`` the remote_service_connector app into env ``name`` for ``tier``.
+
+    See :func:`deploy_litellm_proxy` for return-value semantics.
+    """
+    return _deploy_modal_app(
         app_file=_connector_app_file(),
         app_name=f"remote-service-connector-{tier}",
         modal_env=str(name),
         tier=tier,
         parent_cg=parent_cg,
     )
+
+
+def _parse_deploy_url_from_stdout(stdout: str) -> AnyUrl | None:
+    """Extract the deployed function URL from ``modal deploy`` stdout.
+
+    Modal wraps long URLs across lines in TTY-style output; collapsing
+    whitespace before matching catches both wrapped and inline forms.
+    Returns the last ``.modal.run`` URL seen (the deployed function);
+    earlier matches may be Modal dashboard URLs that aren't useful here.
+    Returns ``None`` if no URL is present (the caller decides whether
+    that's fatal).
+    """
+    collapsed = re.sub(r"\s+", "", stdout)
+    matches = _MODAL_DEPLOY_URL_PATTERN.findall(collapsed)
+    if not matches:
+        return None
+    return AnyUrl(matches[-1])
 
 
 def _deploy_modal_app(
@@ -249,7 +283,7 @@ def _deploy_modal_app(
     modal_env: str,
     tier: str,
     parent_cg: ConcurrencyGroup,
-) -> None:
+) -> AnyUrl:
     if not app_file.is_file():
         raise RepoLayoutError(f"Modal app file not found: {app_file}")
     command = [
@@ -279,6 +313,13 @@ def _deploy_modal_app(
         raise ModalDeployError(
             f"`modal deploy --name {app_name} --env {modal_env}` failed (exit {result.returncode}): {stderr}"
         )
+    url = _parse_deploy_url_from_stdout(result.stdout)
+    if url is None:
+        raise ModalDeployError(
+            f"`modal deploy --name {app_name} --env {modal_env}` succeeded but no .modal.run URL "
+            f"appeared in its stdout. Captured tail: {result.stdout[-500:]}"
+        )
+    return url
 
 
 def _modal_subprocess_env() -> dict[str, str]:

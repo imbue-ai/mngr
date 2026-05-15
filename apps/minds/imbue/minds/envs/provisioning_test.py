@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic import AnyUrl
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -138,11 +139,13 @@ def _build_fake_providers(
         call_log["calls"].append(("deploy_litellm_proxy", str(name), tier))
         if fail_step == "deploy_litellm":
             raise ModalDeployError("litellm deploy boom")
+        return AnyUrl(f"https://fake-litellm-{name}.modal.run")
 
     def deploy_remote_service_connector(name, tier, cg):
         call_log["calls"].append(("deploy_remote_service_connector", str(name), tier))
         if fail_step == "deploy_connector":
             raise ModalDeployError("connector deploy boom")
+        return AnyUrl(f"https://fake-connector-{name}.modal.run")
 
     return Providers(
         ensure_modal_env=ensure_modal_env,
@@ -171,8 +174,9 @@ def test_deploy_dev_env_writes_local_file(_isolated_home: Path, _root_cg: Concur
         providers=providers,
         parent_concurrency_group=_root_cg,
     )
-    assert str(result.connector_url).startswith("https://dev-workspace-alice--remote-service-connector-dev")
-    assert str(result.litellm_proxy_url).startswith("https://dev-workspace-alice--litellm-proxy-dev")
+    # The fake providers return synthesized URLs that include the dev env name.
+    assert str(result.connector_url) == "https://fake-connector-alice.modal.run/"
+    assert str(result.litellm_proxy_url) == "https://fake-litellm-alice.modal.run/"
     loaded = read_dev_env_file(DevEnvName("alice"))
     assert loaded.secrets["NEON_POOLED_DSN"].get_secret_value() == "postgres://pooled/alice"
     assert "SUPERTOKENS_CONNECTION_URI" in loaded.secrets
@@ -203,9 +207,10 @@ def test_deploy_dev_env_is_idempotent_on_re_run(_isolated_home: Path, _root_cg: 
     deploy_calls = [
         c for c in call_log["calls"] if c[0] in ("deploy_litellm_proxy", "deploy_remote_service_connector")
     ]
-    # Two ensures, two neon, two supertokens, two of each deploy.
+    # Per run: 1 litellm deploy + 2 connector deploys (first + post-URL
+    # backfill). Two runs => 2 litellm + 4 connector.
     assert len([c for c in deploy_calls if c[0] == "deploy_litellm_proxy"]) == 2
-    assert len([c for c in deploy_calls if c[0] == "deploy_remote_service_connector"]) == 2
+    assert len([c for c in deploy_calls if c[0] == "deploy_remote_service_connector"]) == 4
 
 
 def test_deploy_dev_env_rollback_on_neon_failure(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
@@ -299,8 +304,11 @@ def test_deploy_dev_env_pushes_per_env_secrets_and_deploys_apps(
     # All pushes target the same modal env (the dev env name).
     assert all(c[2] == "frank" for c in pushes)
     deploys = [c for c in call_log["calls"] if c[0].startswith("deploy_")]
+    # Litellm first, then connector twice (initial deploy + a redeploy after
+    # the second-pass URL-backfill push of supertokens / litellm-connector).
     assert deploys == [
         ("deploy_litellm_proxy", "frank", "dev"),
+        ("deploy_remote_service_connector", "frank", "dev"),
         ("deploy_remote_service_connector", "frank", "dev"),
     ]
 
@@ -390,4 +398,4 @@ def test_list_dev_envs_returns_summaries(_isolated_home: Path, _root_cg: Concurr
     )
     summaries = list_dev_envs()
     assert [str(s.name) for s in summaries] == ["ivy", "juan"]
-    assert all(str(s.connector_url).startswith("https://dev-workspace-") for s in summaries)
+    assert all(str(s.connector_url).startswith("https://fake-connector-") for s in summaries)

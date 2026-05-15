@@ -14,6 +14,7 @@ from typing import Final
 
 import click
 from loguru import logger
+from pydantic import AnyUrl
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -109,12 +110,12 @@ def _push_per_env_modal_secret_for_provider(
     real_push_per_env_modal_secret(secret_name, values, modal_env=modal_env, parent_cg=cg)
 
 
-def _deploy_litellm_proxy_for_provider(name: DevEnvName, tier: str, cg: ConcurrencyGroup) -> None:
-    real_deploy_litellm_proxy(name, tier=tier, parent_cg=cg)
+def _deploy_litellm_proxy_for_provider(name: DevEnvName, tier: str, cg: ConcurrencyGroup) -> AnyUrl:
+    return real_deploy_litellm_proxy(name, tier=tier, parent_cg=cg)
 
 
-def _deploy_connector_for_provider(name: DevEnvName, tier: str, cg: ConcurrencyGroup) -> None:
-    real_deploy_remote_service_connector(name, tier=tier, parent_cg=cg)
+def _deploy_connector_for_provider(name: DevEnvName, tier: str, cg: ConcurrencyGroup) -> AnyUrl:
+    return real_deploy_remote_service_connector(name, tier=tier, parent_cg=cg)
 
 
 def _build_real_providers() -> Providers:
