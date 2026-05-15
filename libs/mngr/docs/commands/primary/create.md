@@ -201,6 +201,19 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 
 ## Provider Build/Start Arguments
 
+Provider: aws
+  VPS-specific args (consumed by provider, not passed to docker):
+    --vps-region=REGION  AWS region (default: us-east-1)
+    --vps-plan=TYPE      EC2 instance type (default: t3.small)
+    --git-depth=N        Shallow-clone build context to depth N before upload
+
+  AMI selection is taken from the provider config (default_ami_id /
+  default_ami_by_region) for v1; per-host AMI override is a future improvement.
+
+  All other build args are passed to 'docker build' on the VPS.
+  Example: -b --vps-plan=t3.medium -b --file=Dockerfile -b .
+  Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
+
 Provider: docker
   Build args are passed directly to 'docker build'. Run 'docker build --help' for details.
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
