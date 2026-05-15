@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.resources
+import json
 from collections.abc import Callable
 from collections.abc import Mapping
 from pathlib import Path
@@ -27,7 +28,9 @@ from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_gemini import resources as _gemini_resources
 from imbue.mngr_gemini.gemini_config import build_permission_auto_allow_hooks_config
 from imbue.mngr_gemini.gemini_config import build_readiness_hooks_config
+from imbue.mngr_gemini.gemini_config import get_user_gemini_settings_path
 from imbue.mngr_gemini.gemini_config import merge_hooks_config
+from imbue.mngr_gemini.gemini_config import read_gemini_settings
 from imbue.mngr_gemini.gemini_config import serialize_gemini_settings
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
@@ -38,48 +41,52 @@ _COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
 # ``build_readiness_hooks_config`` (``$MNGR_AGENT_STATE_DIR/session_started``).
 _READINESS_SENTINEL_FILENAME: Final[str] = "session_started"
 
-# Matches mngr_claude's _READY_SIGNAL_TIMEOUT_SECONDS. Gemini start-up is
-# generally faster than Claude's because we don't have plugin/credential
-# provisioning to wait on. Governs only the sentinel-file poll in
-# ``wait_for_ready_signal`` below. The TUI banner poll (run by
-# ``InteractiveTuiAgent.wait_for_ready_signal`` when ``is_creating=True``)
-# has its own independent budget -- ``_TUI_READY_TIMEOUT_SECONDS`` in
-# ``mngr.agents.tui_utils`` -- and ignores the ``timeout`` argument we
-# forward through ``super()``. Worst-case total wait is therefore roughly
-# ``start_action duration + (is_creating ? _TUI_READY_TIMEOUT_SECONDS : 0)
-# + _READY_SIGNAL_TIMEOUT_SECONDS``.
+# Matches mngr_claude's _READY_SIGNAL_TIMEOUT_SECONDS. Governs only the
+# sentinel-file poll in ``wait_for_ready_signal`` below. The TUI banner poll
+# (run by ``InteractiveTuiAgent.wait_for_ready_signal`` when
+# ``is_creating=True``) has its own independent budget --
+# ``_TUI_READY_TIMEOUT_SECONDS`` in ``mngr.agents.tui_utils`` -- and ignores
+# the ``timeout`` argument we forward through ``super()``. Worst-case total
+# wait is therefore roughly ``start_action duration +
+# (is_creating ? _TUI_READY_TIMEOUT_SECONDS : 0) + _READY_SIGNAL_TIMEOUT_SECONDS``.
 _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
 
 # Plugin-scoped subdir inside the per-agent state dir. Mirrors how
 # ``mngr_claude`` namespaces its files under ``plugin/claude/anthropic/``
-# inside ``$MNGR_AGENT_STATE_DIR``; future ``mngr_gemini`` state can land
-# alongside the system-settings file here.
+# inside ``$MNGR_AGENT_STATE_DIR``. Gemini reads ``.gemini/`` (note the
+# leading dot) underneath the home dir, so the actual settings dir Gemini
+# touches is ``$MNGR_AGENT_STATE_DIR/plugin/gemini/.gemini/``.
 _PLUGIN_STATE_SUBDIR: Final[tuple[str, ...]] = ("plugin", "gemini")
 
-# Filename for the mngr-owned settings file that mngr_gemini installs into
-# the per-agent state dir. Gemini reads it as system-tier settings, which sit
-# at the top of the precedence stack (system > workspace > user). Keeping
-# mngr's hooks at that tier means the user's workspace and ``~/.gemini/``
-# stay untouched.
-_SYSTEM_SETTINGS_FILENAME: Final[str] = "system_settings.json"
+# Subdir Gemini CLI expects inside ``GEMINI_CLI_HOME``. See
+# ``packages/core/src/utils/paths.ts`` in google-gemini/gemini-cli:
+# ``homedir()`` is overridable via the env var, but every settings/auth path
+# still appends ``.gemini/``. Documented in
+# https://github.com/google-gemini/gemini-cli/issues/23622.
+_GEMINI_HOME_SUBDIR: Final[str] = ".gemini"
 
-# Set in the agent's environment so Gemini reads our settings file as the
-# system-tier override. The env-var override is documented at
-# https://geminicli.com/docs/cli/enterprise/#system-settings-path-configuration.
-_SYSTEM_SETTINGS_PATH_ENV_VAR: Final[str] = "GEMINI_CLI_SYSTEM_SETTINGS_PATH"
+# Set in the agent's environment so Gemini reads a per-agent home dir for
+# all of ``.gemini/`` (settings, trusted folders, credentials, history, tmp,
+# installation id) instead of the user's ``~/.gemini/``. Mirrors
+# ``mngr_claude``'s use of ``CLAUDE_CONFIG_DIR`` for total per-agent config
+# isolation. Documented as the user-isolation primitive at
+# https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/enterprise.md
+# (under "User isolation in shared environments").
+_GEMINI_CLI_HOME_ENV_VAR: Final[str] = "GEMINI_CLI_HOME"
 
-# Set so Gemini treats ``work_dir`` as persistently trusted for the session.
-# This clears Gemini's "Do you trust this folder?" gate; without it a headless
-# launch either refuses to start or consumes the first keystroke sent via tmux
-# to accept the dialog. The env var is Gemini's documented automation path
-# (see https://geminicli.com/docs/cli/trusted-folders/#headless-and-automated-environments)
-# and is paired with ``_SYSTEM_SETTINGS_PATH_ENV_VAR``: the latter points
-# Gemini at the system-tier settings file, this one ensures Gemini gets far
-# enough into startup to load it. Smoke-tested against Gemini CLI 0.42.0:
-# with this env var set, ``--debug`` reports ``Hook registry initialized
-# with N hook entries`` (N matches the configured count); without it the
-# count drops to 0.
-_TRUST_WORKSPACE_ENV_VAR: Final[str] = "GEMINI_CLI_TRUST_WORKSPACE"
+# Files the user authenticated against ``~/.gemini/`` produces that need to
+# be visible to the per-agent home for the agent to inherit the user's
+# Google login. ``oauth_creds.json`` carries the refresh/access tokens (when
+# Gemini hasn't migrated them to the OS keychain on this version);
+# ``google_accounts.json`` is the account selector the keychain lookup uses
+# when tokens have been migrated; ``installation_id`` is the per-installation
+# UUID Gemini sends to its backend. Symlinked in from ``~/.gemini/`` rather
+# than copied so the agent picks up re-auth state changes.
+_AUTH_ARTIFACT_FILENAMES: Final[tuple[str, ...]] = (
+    "oauth_creds.json",
+    "google_accounts.json",
+    "installation_id",
+)
 
 
 def _load_gemini_resource_script(filename: str) -> str:
@@ -183,9 +190,8 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
             raise AgentStartError(
                 str(self.name),
                 f"Agent did not signal readiness within {timeout}s. "
-                "This may indicate Gemini CLI failed to start, the workspace was not trusted "
-                f"({_TRUST_WORKSPACE_ENV_VAR}), or the SessionStart hook was not registered "
-                f"({_SYSTEM_SETTINGS_PATH_ENV_VAR}).",
+                "This may indicate Gemini CLI failed to start or that the per-agent "
+                f"home dir was not wired in ({_GEMINI_CLI_HOME_ENV_VAR}).",
             )
 
     @property
@@ -196,29 +202,32 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         """Return the gemini transcript converter script."""
         return {_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_gemini_resource_script(_COMMON_TRANSCRIPT_SCRIPT_NAME)}
 
-    def _get_system_settings_path(self) -> Path:
-        """Path to the mngr-owned system-tier settings file for this agent.
+    def _get_gemini_cli_home(self) -> Path:
+        """Per-agent value for ``GEMINI_CLI_HOME``.
 
-        Lives at ``$MNGR_AGENT_STATE_DIR/plugin/gemini/system_settings.json``
-        -- not in the user's workspace, not in ``~/.gemini/``. Mirrors the
-        plugin-scoped namespacing ``mngr_claude`` uses under
-        ``plugin/claude/anthropic/``.
+        Gemini reads ``<this dir>/.gemini/`` for settings, trusted folders,
+        credentials, history, tmp, and installation id. Living at
+        ``$MNGR_AGENT_STATE_DIR/plugin/gemini`` keeps every agent fully
+        isolated and never touches the user's ``~/.gemini/``.
         """
-        return self._get_agent_dir().joinpath(*_PLUGIN_STATE_SUBDIR, _SYSTEM_SETTINGS_FILENAME)
+        return self._get_agent_dir().joinpath(*_PLUGIN_STATE_SUBDIR)
+
+    def _get_relocated_gemini_dir(self) -> Path:
+        """``<GEMINI_CLI_HOME>/.gemini/`` -- the actual config dir Gemini touches."""
+        return self._get_gemini_cli_home() / _GEMINI_HOME_SUBDIR
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
-        """Wire trust + system-settings env vars for the agent.
+        """Point Gemini at the per-agent home dir via ``GEMINI_CLI_HOME``.
 
-        ``GEMINI_CLI_SYSTEM_SETTINGS_PATH`` points Gemini at the per-agent
-        settings file ``provision`` installed, which holds the readiness hook
-        at the system tier. This avoids writing any mngr-managed file into
-        the user's workspace or ``~/.gemini/``.
-
-        ``GEMINI_CLI_TRUST_WORKSPACE=true`` clears Gemini's "is this folder
-        trusted?" gate so headless launches don't refuse to start.
+        Mirrors ``mngr_claude``'s use of ``CLAUDE_CONFIG_DIR``: every
+        ``.gemini/`` artifact (settings, trusted folders, credentials,
+        history, tmp, installation id) now resolves under the per-agent
+        state dir instead of the user's ``~/.gemini/``. Provisioning seeds
+        this dir with merged settings, workspace trust, and symlinks back to
+        the user's auth artifacts so the agent inherits the user's login
+        without exposing any of mngr's hooks to the user's workspace.
         """
-        env_vars[_SYSTEM_SETTINGS_PATH_ENV_VAR] = str(self._get_system_settings_path())
-        env_vars[_TRUST_WORKSPACE_ENV_VAR] = "true"
+        env_vars[_GEMINI_CLI_HOME_ENV_VAR] = str(self._get_gemini_cli_home())
 
     def provision(
         self,
@@ -226,21 +235,30 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Install mngr's Gemini settings and (optionally) the transcript watcher.
+        """Seed the per-agent ``GEMINI_CLI_HOME`` dir and (optionally) the transcript watcher.
 
-        The settings file lives at
-        ``$MNGR_AGENT_STATE_DIR/plugin/gemini/system_settings.json`` and is
-        pointed to via ``GEMINI_CLI_SYSTEM_SETTINGS_PATH`` (see
-        ``modify_env_vars``). It is mngr-owned: provision rewrites it from
-        scratch every run, so no merge / no clobber-protection is needed. The
-        user's workspace and ``~/.gemini/settings.json`` stay untouched.
+        Three things land in ``$MNGR_AGENT_STATE_DIR/plugin/gemini/.gemini/``:
 
-        The transcript-watcher install delegates the enable-flag check and the
-        upload to :func:`maybe_provision_common_transcript_scripts`; when
-        ``agent_config.emit_common_transcript`` is ``False`` nothing is
+        1. ``settings.json`` -- the user's ``~/.gemini/settings.json``
+           contents (so ``security.auth.selectedType`` is preserved and the
+           agent knows which auth method to use) with mngr's hooks merged
+           in via ``merge_hooks_config``.
+        2. ``trustedFolders.json`` -- explicit trust for ``work_dir`` so the
+           "Do you trust this folder?" gate doesn't consume a tmux keystroke
+           at startup.
+        3. Symlinks back to the user's ``oauth_creds.json`` /
+           ``google_accounts.json`` / ``installation_id`` so the agent
+           inherits the user's existing Google login. Symlinks rather than
+           copies so re-auth in the user's dir flows through.
+
+        The transcript-watcher install delegates the enable-flag check and
+        the upload to :func:`maybe_provision_common_transcript_scripts`;
+        when ``agent_config.emit_common_transcript`` is ``False`` nothing is
         written and ``assemble_command`` will not prepend the watcher.
         """
-        self._install_system_settings(host)
+        self._install_settings(host)
+        self._install_workspace_trust(host)
+        self._symlink_user_auth_artifacts(host)
         with mngr_ctx.concurrency_group.make_concurrency_group("gemini_provisioning") as concurrency_group:
             maybe_provision_common_transcript_scripts(
                 self,
@@ -249,30 +267,68 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
                 concurrency_group,
             )
 
-    def _install_system_settings(self, host: OnlineHostInterface) -> None:
-        """Write the per-agent system-tier settings file with the configured hooks.
+    def _install_settings(self, host: OnlineHostInterface) -> None:
+        """Merge mngr's hooks into the user's settings.json and write to the per-agent dir.
 
-        Uses ``merge_hooks_config`` rather than ``dict.update`` so a future
-        builder that shares an event key (e.g. a second ``SessionStart``
-        hook) appends a matcher group instead of silently overwriting the
-        readiness sentinel. The ``merged is not None`` invariant holds
-        because the current builders target disjoint hook events
-        (``SessionStart`` vs ``BeforeTool``), so neither merge encounters a
-        pre-existing matcher group with the same matcher and commands. If a
-        future builder is added that shares an event key with an earlier one,
-        this assertion will need to be reconsidered.
+        Starts from the user's ``~/.gemini/settings.json`` contents so the
+        agent inherits ``security.auth.selectedType``, custom MCP servers,
+        approval mode, GEMINI.md filename overrides, etc. Layers mngr's
+        configured hook builders on top using ``merge_hooks_config`` so any
+        user-managed hooks under shared event keys are preserved rather than
+        clobbered.
         """
-        builders = [build_readiness_hooks_config()]
+        settings = read_gemini_settings(get_user_gemini_settings_path())
+
+        builders: list[dict[str, Any]] = [build_readiness_hooks_config()]
         if self.agent_config.auto_allow_permissions:
             builders.append(build_permission_auto_allow_hooks_config())
-
-        settings: dict[str, Any] = {}
         for builder_output in builders:
             merged = merge_hooks_config(settings, builder_output)
+            # Each builder adds a matcher group that isn't in the user's
+            # settings (mngr commands embed ``$MNGR_AGENT_STATE_DIR`` in the
+            # command body, which a user-managed hook would not), so
+            # ``merge_hooks_config`` always finds something to append.
             assert merged is not None
             settings = merged
 
-        host.write_text_file(self._get_system_settings_path(), serialize_gemini_settings(settings))
+        host.write_text_file(self._get_relocated_gemini_dir() / "settings.json", serialize_gemini_settings(settings))
+
+    def _install_workspace_trust(self, host: OnlineHostInterface) -> None:
+        """Mark ``work_dir`` as trusted in the per-agent ``trustedFolders.json``."""
+        trusted = {str(self.work_dir.resolve()): "TRUST_FOLDER"}
+        host.write_text_file(
+            self._get_relocated_gemini_dir() / "trustedFolders.json",
+            json.dumps(trusted, indent=2) + "\n",
+        )
+
+    def _symlink_user_auth_artifacts(self, host: OnlineHostInterface) -> None:
+        """Symlink the user's Google-account auth files into the per-agent dir.
+
+        Local-only for now. Remote hosts would need a copy-and-keep-in-sync
+        strategy (rsync, or a dedicated host-aware credential-sync hook --
+        mirrors what ``mngr_claude._provision_local_credentials`` does for
+        ``.credentials.json``). Raises ``NotImplementedError`` on remote
+        hosts so the gap is obvious rather than failing silently with a
+        confusing auth error later.
+        """
+        if not host.is_local:
+            raise NotImplementedError(
+                "mngr_gemini does not yet support remote hosts: the user's Google login "
+                "artifacts need to be replicated under the per-agent GEMINI_CLI_HOME, and "
+                "the local-symlink strategy does not extend across machines."
+            )
+
+        relocated_dir = self._get_relocated_gemini_dir()
+        relocated_dir.mkdir(parents=True, exist_ok=True)
+        user_dir = get_user_gemini_settings_path().parent
+        for name in _AUTH_ARTIFACT_FILENAMES:
+            source = user_dir / name
+            if not source.exists():
+                continue
+            link = relocated_dir / name
+            if link.is_symlink() or link.exists():
+                link.unlink()
+            link.symlink_to(source)
 
     def assemble_command(
         self,

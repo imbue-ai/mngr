@@ -229,10 +229,10 @@ def test_wait_for_ready_signal_raises_when_sentinel_never_appears(
         gemini_agent.wait_for_ready_signal(is_creating=False, start_action=lambda: None, timeout=0.2)
     message = str(excinfo.value)
     # The diagnostic must report the timeout value so operators can tell
-    # whether the budget was too short, and must name at least one of the
-    # env vars the hook depends on so the most likely fix is discoverable.
+    # whether the budget was too short, and must name the env var the
+    # per-agent home depends on so the most likely fix is discoverable.
     assert "0.2" in message
-    assert "GEMINI_CLI_SYSTEM_SETTINGS_PATH" in message or "GEMINI_CLI_TRUST_WORKSPACE" in message
+    assert "GEMINI_CLI_HOME" in message
 
 
 def test_get_common_transcript_scripts_returns_common_transcript_sh(gemini_agent: GeminiAgent) -> None:
@@ -266,101 +266,187 @@ def test_provision_with_emit_enabled_writes_transcript_script(gemini_agent: Gemi
     assert expected_script.stat().st_mode & 0o111
 
 
-def test_modify_env_vars_sets_trust_workspace_true(gemini_agent: GeminiAgent) -> None:
-    """The agent's env must mark the workspace as trusted so headless launches start."""
-    env_vars: dict[str, str] = {}
-    gemini_agent.modify_env_vars(gemini_agent.host, env_vars)
-    assert env_vars["GEMINI_CLI_TRUST_WORKSPACE"] == "true"
-
-
-def test_modify_env_vars_points_system_settings_at_plugin_scoped_per_agent_file(
+def test_modify_env_vars_sets_gemini_cli_home_under_agent_state_dir(
     gemini_agent: GeminiAgent,
 ) -> None:
-    """Gemini reads our system-tier settings from a plugin-scoped per-agent path.
+    """Gemini's whole config dir is relocated under the per-agent state dir."""
+    env_vars: dict[str, str] = {}
+    gemini_agent.modify_env_vars(gemini_agent.host, env_vars)
+    expected = gemini_agent._get_agent_dir() / "plugin" / "gemini"
+    assert env_vars["GEMINI_CLI_HOME"] == str(expected)
+    # Never inside the user's work_dir.
+    assert str(gemini_agent.work_dir) not in env_vars["GEMINI_CLI_HOME"]
 
-    Mirrors ``mngr_claude``'s ``plugin/claude/anthropic/`` namespacing inside
-    the per-agent state dir.
+
+def test_modify_env_vars_does_not_leak_system_or_trust_env_vars(
+    gemini_agent: GeminiAgent,
+) -> None:
+    """GEMINI_CLI_HOME is the only env var modify_env_vars sets.
+
+    The previous system-tier approach used GEMINI_CLI_SYSTEM_SETTINGS_PATH and
+    GEMINI_CLI_TRUST_WORKSPACE; both are obsolete now that we relocate the
+    whole home and write trustedFolders.json directly.
     """
     env_vars: dict[str, str] = {}
     gemini_agent.modify_env_vars(gemini_agent.host, env_vars)
-    settings_path = env_vars["GEMINI_CLI_SYSTEM_SETTINGS_PATH"]
-    expected = gemini_agent._get_agent_dir() / "plugin" / "gemini" / "system_settings.json"
-    assert settings_path == str(expected)
-    # Never inside the user's work_dir.
-    assert str(gemini_agent.work_dir) not in settings_path
+    assert "GEMINI_CLI_SYSTEM_SETTINGS_PATH" not in env_vars
+    assert "GEMINI_CLI_TRUST_WORKSPACE" not in env_vars
 
 
 def test_modify_env_vars_preserves_other_vars(gemini_agent: GeminiAgent) -> None:
     env_vars = {"PRE_EXISTING": "kept"}
     gemini_agent.modify_env_vars(gemini_agent.host, env_vars)
     assert env_vars["PRE_EXISTING"] == "kept"
-    assert env_vars["GEMINI_CLI_TRUST_WORKSPACE"] == "true"
-    assert "GEMINI_CLI_SYSTEM_SETTINGS_PATH" in env_vars
+    assert "GEMINI_CLI_HOME" in env_vars
 
 
-def _read_system_settings(agent: GeminiAgent) -> dict[str, Any]:
-    parsed: Any = json.loads(agent._get_system_settings_path().read_text())
+def _read_relocated_settings(agent: GeminiAgent) -> dict[str, Any]:
+    parsed: Any = json.loads((agent._get_relocated_gemini_dir() / "settings.json").read_text())
     assert isinstance(parsed, dict)
     return parsed
 
 
-def test_provision_writes_system_settings_with_readiness_hook(
-    gemini_agent: GeminiAgent,
+def _seed_user_gemini_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contents: dict[str, Any]) -> Path:
+    """Redirect ``Path.home()`` at ``~/.gemini`` to a per-test scratch dir.
+
+    Returns the redirected ``.gemini/`` so tests can sprinkle auth artifacts
+    alongside the settings file. Pre-creates ``~/.gemini/settings.json`` with
+    ``contents``.
+    """
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+    user_dir = fake_home / ".gemini"
+    user_dir.mkdir(exist_ok=True)
+    (user_dir / "settings.json").write_text(json.dumps(contents))
+    return user_dir
+
+
+def test_provision_writes_settings_to_per_agent_home_with_readiness_hook(
+    gemini_agent: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The mngr-owned system-tier settings file holds the SessionStart hook."""
+    """settings.json lands at <GEMINI_CLI_HOME>/.gemini/settings.json with the SessionStart hook."""
+    _seed_user_gemini_dir(tmp_path, monkeypatch, {})
     _provision(gemini_agent)
-    settings = _read_system_settings(gemini_agent)
+    settings = _read_relocated_settings(gemini_agent)
     assert HOOK_EVENT_SESSION_START in settings["hooks"]
     inner_command = settings["hooks"][HOOK_EVENT_SESSION_START][0]["hooks"][0]["command"]
     assert "session_started" in inner_command
     assert "MNGR_AGENT_STATE_DIR" in inner_command
 
 
+def test_provision_merges_user_settings_into_per_agent_settings(
+    gemini_agent: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user's security.auth.selectedType (and other settings) must survive."""
+    _seed_user_gemini_dir(
+        tmp_path,
+        monkeypatch,
+        {
+            "security": {"auth": {"selectedType": "oauth-personal"}},
+            "general": {"defaultApprovalMode": "default"},
+        },
+    )
+    _provision(gemini_agent)
+    settings = _read_relocated_settings(gemini_agent)
+    assert settings["security"] == {"auth": {"selectedType": "oauth-personal"}}
+    assert settings["general"] == {"defaultApprovalMode": "default"}
+    # Mngr's hook merged in alongside.
+    assert HOOK_EVENT_SESSION_START in settings["hooks"]
+
+
+def test_provision_writes_trusted_folders_entry_for_work_dir(
+    gemini_agent: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_user_gemini_dir(tmp_path, monkeypatch, {})
+    _provision(gemini_agent)
+    trusted_path = gemini_agent._get_relocated_gemini_dir() / "trustedFolders.json"
+    trusted: Any = json.loads(trusted_path.read_text())
+    assert isinstance(trusted, dict)
+    assert trusted[str(gemini_agent.work_dir.resolve())] == "TRUST_FOLDER"
+
+
+def test_provision_symlinks_user_auth_artifacts(
+    gemini_agent: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """oauth_creds / google_accounts / installation_id symlink into the relocated dir."""
+    user_dir = _seed_user_gemini_dir(tmp_path, monkeypatch, {})
+    (user_dir / "oauth_creds.json").write_text('{"token": "fake"}')
+    (user_dir / "google_accounts.json").write_text('{"account": "fake"}')
+    (user_dir / "installation_id").write_text("fake-uuid")
+
+    _provision(gemini_agent)
+
+    relocated = gemini_agent._get_relocated_gemini_dir()
+    for name in ("oauth_creds.json", "google_accounts.json", "installation_id"):
+        link = relocated / name
+        assert link.is_symlink(), f"{name} should be a symlink"
+        assert link.resolve() == (user_dir / name).resolve()
+
+
+def test_provision_skips_missing_user_auth_artifacts(
+    gemini_agent: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If a user has not run gemini auth yet, missing artifacts are skipped silently."""
+    # No auth files are seeded into the fake user dir on purpose.
+    _seed_user_gemini_dir(tmp_path, monkeypatch, {})
+    _provision(gemini_agent)
+    relocated = gemini_agent._get_relocated_gemini_dir()
+    for name in ("oauth_creds.json", "google_accounts.json", "installation_id"):
+        assert not (relocated / name).exists()
+
+
 def test_provision_does_not_create_gemini_dir_in_workspace(
-    gemini_agent: GeminiAgent,
+    gemini_agent: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The user's work_dir must be left completely untouched by provision."""
+    _seed_user_gemini_dir(tmp_path, monkeypatch, {})
     _provision(gemini_agent)
     assert not (gemini_agent.work_dir / ".gemini").exists()
 
 
-def test_provision_is_idempotent(gemini_agent: GeminiAgent) -> None:
-    """Running provision twice yields the same content (mngr owns the file)."""
+def test_provision_is_idempotent(gemini_agent: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Running provision twice yields the same content."""
+    _seed_user_gemini_dir(tmp_path, monkeypatch, {})
     _provision(gemini_agent)
-    first = _read_system_settings(gemini_agent)
+    first = _read_relocated_settings(gemini_agent)
     _provision(gemini_agent)
-    second = _read_system_settings(gemini_agent)
+    second = _read_relocated_settings(gemini_agent)
     assert first == second
     assert len(second["hooks"][HOOK_EVENT_SESSION_START]) == 1
 
 
 def test_provision_installs_hooks_even_when_transcript_disabled(
     gemini_agent_without_transcript: GeminiAgent,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Readiness hook ships unconditionally -- decoupled from transcript emission."""
+    _seed_user_gemini_dir(tmp_path, monkeypatch, {})
     agent = gemini_agent_without_transcript
     _provision(agent)
-    settings = _read_system_settings(agent)
+    settings = _read_relocated_settings(agent)
     assert HOOK_EVENT_SESSION_START in settings["hooks"]
 
 
 def test_provision_omits_before_tool_hook_when_auto_allow_disabled(
-    gemini_agent: GeminiAgent,
+    gemini_agent: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The default config does not install a permission auto-allow hook."""
+    _seed_user_gemini_dir(tmp_path, monkeypatch, {})
     _provision(gemini_agent)
-    settings = _read_system_settings(gemini_agent)
+    settings = _read_relocated_settings(gemini_agent)
     assert HOOK_EVENT_BEFORE_TOOL not in settings["hooks"]
 
 
 def test_provision_installs_before_tool_hook_when_auto_allow_enabled(
-    gemini_agent_auto_allow: GeminiAgent,
+    gemini_agent_auto_allow: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``auto_allow_permissions=True`` adds a BeforeTool wildcard allow hook alongside readiness."""
+    _seed_user_gemini_dir(tmp_path, monkeypatch, {})
     agent = gemini_agent_auto_allow
     _provision(agent)
-    settings = _read_system_settings(agent)
-    # Both hooks land in the same file.
+    settings = _read_relocated_settings(agent)
     assert HOOK_EVENT_SESSION_START in settings["hooks"]
     assert HOOK_EVENT_BEFORE_TOOL in settings["hooks"]
     before_tool_groups = settings["hooks"][HOOK_EVENT_BEFORE_TOOL]
