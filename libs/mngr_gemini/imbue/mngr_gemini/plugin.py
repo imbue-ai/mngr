@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+import shlex
 from collections.abc import Callable
 from collections.abc import Mapping
 from pathlib import Path
@@ -304,31 +305,30 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
     def _symlink_user_auth_artifacts(self, host: OnlineHostInterface) -> None:
         """Symlink the user's Google-account auth files into the per-agent dir.
 
-        Local-only for now. Remote hosts would need a copy-and-keep-in-sync
-        strategy (rsync, or a dedicated host-aware credential-sync hook --
-        mirrors what ``mngr_claude._provision_local_credentials`` does for
-        ``.credentials.json``). Raises ``NotImplementedError`` on remote
-        hosts so the gap is obvious rather than failing silently with a
-        confusing auth error later.
-        """
-        if not host.is_local:
-            raise NotImplementedError(
-                "mngr_gemini does not yet support remote hosts: the user's Google login "
-                "artifacts need to be replicated under the per-agent GEMINI_CLI_HOME, and "
-                "the local-symlink strategy does not extend across machines."
-            )
+        Each artifact is created via ``host.execute_idempotent_command("ln -sf …")``,
+        the same mechanism ``mngr_claude._provision_local_credentials`` uses.
+        That keeps the operation host-aware (a remote host backed by SSH does
+        the symlink server-side) and matches the abstraction pattern the rest
+        of provisioning uses. Missing source artifacts are skipped silently --
+        a user who hasn't run gemini interactively yet won't have all three.
 
+        Caveat: on a remote host the source path is interpreted on the remote
+        side, so the user's ``~/.gemini/`` artifacts need to already exist on
+        the remote machine. A future PR may add a copy-then-sync mode for
+        cross-machine setups; for now, remote hosts are expected to have
+        their own ``~/.gemini/`` populated (or to use API-key auth instead).
+        """
         relocated_dir = self._get_relocated_gemini_dir()
-        relocated_dir.mkdir(parents=True, exist_ok=True)
         user_dir = get_user_gemini_settings_path().parent
         for name in _AUTH_ARTIFACT_FILENAMES:
             source = user_dir / name
             if not source.exists():
                 continue
             link = relocated_dir / name
-            if link.is_symlink() or link.exists():
-                link.unlink()
-            link.symlink_to(source)
+            host.execute_idempotent_command(
+                f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(link))}",
+                timeout_seconds=5.0,
+            )
 
     def assemble_command(
         self,

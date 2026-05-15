@@ -6,9 +6,12 @@ Gemini CLI consults three settings tiers (highest-to-lowest precedence):
   2. ``<project>/.gemini/settings.json`` (workspace)
   3. ``~/.gemini/settings.json`` (user)
 
-``mngr_gemini`` writes a per-agent settings file into the agent state dir
-and points Gemini at it via the system-tier env var, keeping the user's
-workspace and ``~/.gemini/`` untouched.
+``mngr_gemini`` relocates Gemini's whole home dir per-agent via the
+``GEMINI_CLI_HOME`` env var (analog of ``CLAUDE_CONFIG_DIR``), so every
+``.gemini/`` artifact -- including the user-tier ``settings.json`` --
+resolves under ``$MNGR_AGENT_STATE_DIR/plugin/gemini/.gemini/``. The
+user's actual ``~/.gemini/`` is read at provision time to seed the
+relocated dir but is never written to.
 """
 
 from __future__ import annotations
@@ -34,10 +37,12 @@ from imbue.mngr.utils.file_utils import read_json_dict
 
 
 def get_gemini_config_dir() -> Path:
-    """Return the Gemini CLI config directory.
+    """Return the user-scope Gemini CLI config directory: ``~/.gemini/``.
 
-    Gemini CLI does not currently expose an env var to relocate this directory
-    (unlike Claude Code's ``$CLAUDE_CONFIG_DIR``). Returns ``~/.gemini/``.
+    This is the *user's* dir, not the per-agent one. ``mngr_gemini``
+    relocates Gemini at runtime via ``GEMINI_CLI_HOME``, so the agent reads
+    ``$GEMINI_CLI_HOME/.gemini/`` instead -- but the user's ``~/.gemini/``
+    is still what we seed the per-agent dir from at provision time.
     """
     return Path.home() / ".gemini"
 
@@ -177,12 +182,13 @@ def build_readiness_hooks_config() -> dict[str, Any]:
     signaling but means startup-time gates (e.g. trust enforcement) must live
     elsewhere.
 
-    ``mngr_gemini`` installs this hook at the system tier (via
-    ``GEMINI_CLI_SYSTEM_SETTINGS_PATH`` in the agent's env) rather than at
-    the workspace tier. That keeps the user's workspace and ``~/.gemini/``
-    untouched. The hook command runs in a shell at hook-execution time, so
-    ``$MNGR_AGENT_STATE_DIR`` expands then -- there's nothing to interpolate
-    at provisioning time.
+    ``mngr_gemini`` installs this hook into the per-agent
+    ``$GEMINI_CLI_HOME/.gemini/settings.json`` that ``GeminiAgent.provision``
+    seeds. ``GEMINI_CLI_HOME`` is set in the agent's env to point at a
+    per-agent dir under ``$MNGR_AGENT_STATE_DIR/plugin/gemini``, so the
+    user's actual ``~/.gemini/`` stays untouched. The hook command runs in
+    a shell at hook-execution time, so ``$MNGR_AGENT_STATE_DIR`` expands
+    then -- there's nothing to interpolate at provisioning time.
     """
     return {
         "hooks": {
