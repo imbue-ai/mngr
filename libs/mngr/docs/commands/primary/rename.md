@@ -6,13 +6,18 @@
 **Synopsis:**
 
 ```text
-mngr [rename|mv] <CURRENT> <NEW-NAME> [--dry-run] [--start/--no-start] [--host] [-l KEY=VALUE ...]
+mngr [rename|mv] <CURRENT> <NEW-NAME> [--dry-run] [--host] [-l KEY=VALUE ...]
 ```
 
 Rename an agent or host [experimental].
 
 Updates the agent's name in its data.json and renames the tmux session
 if the agent is currently running. Git branch names are not renamed.
+
+If the host is offline, the rename is applied to the provider's
+persisted agent data without starting the host; tmux and env-file
+updates are skipped (data.json remains the source of truth for the
+agent's name).
 
 If a previous rename was interrupted (e.g., the tmux session was renamed
 but data.json was not updated), re-running the command will attempt
@@ -37,7 +42,6 @@ mngr rename [OPTIONS] CURRENT NEW-NAME
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--dry-run` | boolean | Show what would be renamed without actually renaming | `False` |
-| `--start`, `--no-start` | boolean | Automatically start the host if offline (the agent does not need to be running) | `True` |
 | `--host` | boolean | Rename a host instead of an agent [future] | `False` |
 
 ## Labels
