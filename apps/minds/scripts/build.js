@@ -320,10 +320,11 @@ function bundleLatchkey() {
 }
 
 function getLimaDownloadUrl({ platform, arch }) {
-  // Lima release tarballs use OS+arch names like "Darwin-arm64",
-  // "Darwin-x86_64", "Linux-x86_64", "Linux-aarch64".
+  // Lima release tarballs use OS-specific arch names: Darwin uses
+  // "arm64"/"x86_64" while Linux uses "aarch64"/"x86_64". Only translate
+  // aarch64 -> arm64 on Darwin.
   const limaOs = platform === 'darwin' ? 'Darwin' : 'Linux';
-  const limaArch = arch === 'aarch64' ? 'arm64' : arch;
+  const limaArch = platform === 'darwin' && arch === 'aarch64' ? 'arm64' : arch;
   const target = `lima-${LIMA_VERSION}-${limaOs}-${limaArch}.tar.gz`;
   return `https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/${target}`;
 }
