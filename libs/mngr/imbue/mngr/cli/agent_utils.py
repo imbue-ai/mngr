@@ -1,11 +1,12 @@
 from collections.abc import Mapping
 from collections.abc import Sequence
-from typing import assert_never
 
 import click
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.find import ensure_agent_started
+from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.api.providers import get_provider_instance
@@ -14,10 +15,8 @@ from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
-from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostAddress
@@ -43,54 +42,6 @@ def filter_agents_by_host(
     return filtered
 
 
-def _ensure_host_online(
-    host_ref: DiscoveredHost,
-    allow_auto_start: bool,
-    mngr_ctx: MngrContext,
-) -> OnlineHostInterface:
-    """Resolve a :class:`DiscoveredHost` to an :class:`OnlineHostInterface`.
-
-    Starts the host if offline and ``allow_auto_start`` is True; otherwise
-    raises :class:`UserInputError` when the host is offline.
-    """
-    provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
-    host = provider.get_host(host_ref.host_id)
-    match host:
-        case OnlineHostInterface() as online_host:
-            return online_host
-        case HostInterface() as offline_host:
-            if not allow_auto_start:
-                raise UserInputError(
-                    f"Host '{offline_host.id}' is offline and automatic starting is disabled. "
-                    "Pass --start to start the host automatically."
-                )
-            logger.info("Host is offline, starting it...", host_id=offline_host.id, provider=provider.name)
-            return provider.start_host(offline_host)
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-def _resolve_agent_on_host(
-    host_ref: DiscoveredHost,
-    agent_ref: DiscoveredAgent,
-    online_host: OnlineHostInterface,
-) -> AgentInterface:
-    """Look up the agent that ``agent_ref`` points to on a live host.
-
-    Raises :class:`RuntimeError` if the agent was found during discovery
-    but is no longer present on the live host (a stale-cache / host state
-    inconsistency case).
-    """
-    for live_agent in online_host.get_agents():
-        if live_agent.id == agent_ref.agent_id:
-            return live_agent
-    raise RuntimeError(
-        f"Agent '{agent_ref.agent_name}' (ID: {agent_ref.agent_id}) was found during discovery but is "
-        f"no longer present on host {host_ref.host_name}.{host_ref.provider_name}. "
-        "This indicates a stale discovery cache or host state inconsistency."
-    )
-
-
 def ensure_host_started_and_resolve_agent(
     host_ref: DiscoveredHost,
     agent_ref: DiscoveredAgent,
@@ -98,6 +49,8 @@ def ensure_host_started_and_resolve_agent(
     mngr_ctx: MngrContext,
 ) -> tuple[AgentInterface, OnlineHostInterface]:
     """Bring the host online and resolve the agent ref to an :class:`AgentInterface`.
+
+    Delegates host startup to :func:`imbue.mngr.api.find.ensure_host_started`.
 
     The agent process's lifecycle state is *not* checked: the returned
     ``AgentInterface`` may represent a stopped agent. Callers that need
@@ -111,9 +64,17 @@ def ensure_host_started_and_resolve_agent(
     Raises :class:`RuntimeError` if the agent was found during discovery
     but is missing on the live host.
     """
-    online_host = _ensure_host_online(host_ref, allow_auto_start, mngr_ctx)
-    agent = _resolve_agent_on_host(host_ref, agent_ref, online_host)
-    return agent, online_host
+    provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
+    host = provider.get_host(host_ref.host_id)
+    online_host, _was_started = ensure_host_started(host, is_start_desired=allow_auto_start, provider=provider)
+    for live_agent in online_host.get_agents():
+        if live_agent.id == agent_ref.agent_id:
+            return live_agent, online_host
+    raise RuntimeError(
+        f"Agent '{agent_ref.agent_name}' (ID: {agent_ref.agent_id}) was found during discovery but is "
+        f"no longer present on host {host_ref.host_name}.{host_ref.provider_name}. "
+        "This indicates a stale discovery cache or host state inconsistency."
+    )
 
 
 def ensure_host_and_agent_started(
@@ -124,6 +85,11 @@ def ensure_host_and_agent_started(
 ) -> tuple[AgentInterface, OnlineHostInterface]:
     """Bring the host online, resolve the agent, and ensure the agent is running.
 
+    Delegates to :func:`ensure_host_started_and_resolve_agent` for the host
+    and resolution steps, then to
+    :func:`imbue.mngr.api.find.ensure_agent_started` for the agent's
+    lifecycle.
+
     When ``allow_auto_start`` is True, both an offline host and a stopped
     agent are started automatically. When False, either condition raises
     :class:`UserInputError`.
@@ -132,25 +98,7 @@ def ensure_host_and_agent_started(
     but is missing on the live host.
     """
     agent, online_host = ensure_host_started_and_resolve_agent(host_ref, agent_ref, allow_auto_start, mngr_ctx)
-    lifecycle_state = agent.get_lifecycle_state()
-    if lifecycle_state in (
-        AgentLifecycleState.RUNNING,
-        AgentLifecycleState.REPLACED,
-        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
-        AgentLifecycleState.WAITING,
-    ):
-        return agent, online_host
-    if not allow_auto_start:
-        raise UserInputError(
-            f"Agent '{agent.name}' is stopped and automatic starting is disabled. "
-            "Pass --start to start the agent automatically."
-        )
-    logger.info("Agent {} is stopped, starting it", agent.name)
-    agent.wait_for_ready_signal(
-        is_creating=False,
-        start_action=lambda: online_host.start_agents([agent.id]),
-        timeout=agent.get_ready_timeout_seconds(),
-    )
+    ensure_agent_started(agent, online_host, is_start_desired=allow_auto_start)
     return agent, online_host
 
 
