@@ -78,10 +78,8 @@ def _start_serial_tailer(cg: ConcurrencyGroup, serial_log_path: str) -> None:
     terminated explicitly via ``_stop_serial_tailer``.
     """
     global _active_serial_tailer
-    # `-F` = follow-by-name + retry on missing file, on both BSD (macOS) and
-    # GNU tail.
     _active_serial_tailer = cg.run_process_in_background(
-        ["tail", "-F", serial_log_path],
+        ["tail", "--follow=name", "--retry", serial_log_path],
         is_checked_by_group=False,
         on_output=_log_boot_output,
     )
