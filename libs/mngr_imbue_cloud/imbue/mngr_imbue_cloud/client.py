@@ -200,10 +200,12 @@ class ImbueCloudConnectorClient(MutableModel):
         access_token: SecretStr,
         attributes: LeaseAttributes,
         ssh_public_key: str,
+        host_name: str,
     ) -> LeaseResult:
         body = {
             "attributes": attributes.to_request_dict(),
             "ssh_public_key": ssh_public_key,
+            "host_name": host_name,
         }
         response = httpx.post(
             self._url("/hosts/lease"),

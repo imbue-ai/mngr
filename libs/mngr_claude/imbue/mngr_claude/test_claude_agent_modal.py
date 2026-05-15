@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import get_short_random_string
 
@@ -75,6 +76,7 @@ def _create_local_agent(
     agent_name: str,
     source_dir: Path,
     env: ModalSubprocessTestEnv,
+    prompt: str = "just say 'hello'",
 ) -> subprocess.CompletedProcess[str]:
     """Create a Claude agent on the local (test sandbox) host.
 
@@ -101,7 +103,7 @@ def _create_local_agent(
             "--",
             "--dangerously-skip-permissions",
             "-p",
-            "just say 'hello'",
+            prompt,
         ],
         capture_output=True,
         text=True,
@@ -137,6 +139,53 @@ def _clone_agent_to_modal(
     )
 
 
+def _send_message_to_agent(
+    agent_name: str,
+    message: str,
+    env: ModalSubprocessTestEnv,
+) -> subprocess.CompletedProcess[str]:
+    """Send ``message`` to a live claude agent via the mngr message bus."""
+    return subprocess.run(
+        ["uv", "run", "mngr", "message", agent_name, "--message", message],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env.env,
+    )
+
+
+def _wait_for_text_in_agent_pane(
+    agent_name: str,
+    expected: str,
+    env: ModalSubprocessTestEnv,
+    timeout: float,
+) -> str:
+    """Poll ``mngr capture --full`` until ``expected`` appears in the pane.
+    Uses ``--full`` so a response that has already scrolled out of the visible
+    window isn't missed.
+    """
+    last_capture: list[str] = [""]
+
+    def _capture_if_match() -> str | None:
+        result = subprocess.run(
+            ["uv", "run", "mngr", "capture", agent_name, "--full"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env.env,
+        )
+        last_capture[0] = result.stdout
+        return result.stdout if expected in result.stdout else None
+
+    capture, _, _ = poll_for_value(_capture_if_match, timeout=timeout, poll_interval=3.0)
+    if capture is None:
+        raise AssertionError(
+            f"Did not see {expected!r} in mngr capture of agent {agent_name!r} within {timeout}s.\n"
+            f"Last capture (tail):\n{last_capture[0][-3000:]}"
+        )
+    return capture
+
+
 def _destroy_modal_agent(agent_name: str, env: ModalSubprocessTestEnv) -> subprocess.CompletedProcess[str]:
     """Force-destroy a Modal agent and return the completed process."""
     return subprocess.run(
@@ -159,6 +208,23 @@ def _stop_modal_agent(agent_name: str, env: ModalSubprocessTestEnv) -> subproces
     )
 
 
+def _get_preserved_agent_dir(host_dir: Path, agent_name: str) -> Path:
+    """Return the unique preserved-sessions dir for ``agent_name``.
+
+    Layout: ``host_dir/plugin/mngr_claude/preserved_sessions/<agent-name>--<agent-id>/``.
+    Asserts the parent dir exists and exactly one child matches the prefix
+    so callers can assume a single unambiguous result.
+    """
+    preserved_sessions_dir = host_dir / "plugin" / "mngr_claude" / "preserved_sessions"
+    assert preserved_sessions_dir.exists(), f"Expected preserved_sessions dir at {preserved_sessions_dir}"
+    agent_dirs = [d for d in preserved_sessions_dir.iterdir() if d.is_dir() and d.name.startswith(agent_name)]
+    assert len(agent_dirs) == 1, (
+        f"Expected exactly one preserved dir for {agent_name}, "
+        f"found: {[d.name for d in preserved_sessions_dir.iterdir()]}"
+    )
+    return agent_dirs[0]
+
+
 def _assert_sessions_preserved(host_dir: Path, agent_name: str) -> None:
     """Assert that session files were preserved for the given agent under host_dir.
 
@@ -166,16 +232,7 @@ def _assert_sessions_preserved(host_dir: Path, agent_name: str) -> None:
     directory for the agent, and that directory has at least one non-empty
     session JSONL file.
     """
-    preserved_sessions_dir = host_dir / "plugin" / "mngr_claude" / "preserved_sessions"
-    assert preserved_sessions_dir.exists(), f"Expected preserved_sessions dir at {preserved_sessions_dir}"
-
-    # Find the agent's preserved directory (named <agent-name>--<agent-id>)
-    agent_dirs = [d for d in preserved_sessions_dir.iterdir() if d.is_dir() and d.name.startswith(agent_name)]
-    assert len(agent_dirs) == 1, (
-        f"Expected exactly one preserved dir for {agent_name}, "
-        f"found: {[d.name for d in preserved_sessions_dir.iterdir()]}"
-    )
-    agent_preserved_dir = agent_dirs[0]
+    agent_preserved_dir = _get_preserved_agent_dir(host_dir, agent_name)
 
     # At minimum, session JSONL files should be preserved (the projects/ directory)
     preserved_projects = agent_preserved_dir / "projects"
@@ -300,41 +357,53 @@ def test_destroy_stopped_modal_agent_preserves_sessions_from_volume(
     _assert_sessions_preserved(modal_subprocess_env.host_dir, agent_name)
 
 
+def _read_preserved_session_text(host_dir: Path, agent_name: str) -> str:
+    """Return the concatenated text of all preserved session JSONLs for an agent."""
+    agent_preserved_dir = _get_preserved_agent_dir(host_dir, agent_name)
+    session_files = list((agent_preserved_dir / "projects").rglob("*.jsonl"))
+    assert len(session_files) >= 1, f"No session .jsonl files under {agent_preserved_dir / 'projects'}"
+    return "\n".join(f.read_text() for f in session_files)
+
+
 @pytest.mark.release
 @pytest.mark.rsync
 @pytest.mark.tmux
-@pytest.mark.timeout(600)
-def test_clone_local_claude_agent_to_modal(
+@pytest.mark.timeout(900)
+def test_clone_local_claude_agent_to_modal_resumes_session(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
 ) -> None:
-    """Regression: ``mngr clone <local-agent> <new>@.modal`` must succeed
-    and actually transfer the source agent's plugin/ session data.
+    """End-to-end resume verification: plant a secret in the source agent's
+    prompt, clone to Modal, ask the cloned claude to recall it via
+    ``mngr message``, and assert the recall lands in the tmux pane. The
+    recall response only contains the secret if claude on the clone
+    actually resumed the source's session.
 
-    Previously this failed during plugin-data transfer with::
-
-        rsync: change_dir ".../<source-agent>/plugin" failed: No such file or directory
-
-    because ``_transfer_source_plugin_data`` passed the destination Modal host
-    as both source and target of ``copy_directory``. Rsync then ran on the
-    Modal sandbox looking for the source plugin dir there (where it doesn't
-    exist) instead of pushing it from the source host. The fix threads the
-    source agent's location (host + state dir) through
-    ``CreateAgentOptions.source_agent_state_location`` and passes that host as
-    the rsync source, so the cross-host transfer (local->Modal in this test)
-    actually runs from the right machine.
-
-    The test then destroys the target so the preserved-sessions mechanism
-    pulls the modal agent's plugin/ data back locally, and asserts the
-    source's session data made it across. A silent regression (e.g. the
-    transfer is skipped because ``path_exists`` returns False against the
-    wrong host) would leave that preserved dir empty.
+    Same secret-recall pattern as ``test_adopt_session.py``, exercising
+    the full clone-adoption stack: cross-host plugin/ rsync, source-host
+    JSONL discovery, project-subdir rename to the canonical-resolved
+    destination work_dir, and the ``claude_session_id`` rewrite to the
+    JSONL stem.
     """
     source_name = f"test-clone-src-{get_short_random_string()}"
     target_name = f"test-clone-dst-{get_short_random_string()}"
     _setup_claude_gitignore(temp_source_dir)
 
-    create_result = _create_local_agent(source_name, temp_source_dir, modal_subprocess_env)
+    # Two halves so the combined form only appears if the model saw both
+    # in the resumed conversation (no accidental match on prior knowledge).
+    secret_left = f"hocus{get_short_random_string()}"
+    secret_right = f"pocus{get_short_random_string()}"
+    combined = secret_left + secret_right
+    source_prompt = (
+        f"Memorize these two separate tokens for later: '{secret_left}' and '{secret_right}'. "
+        f"Just acknowledge with 'ok'."
+    )
+    recall_prompt = (
+        "Combine the two tokens I asked you to memorize earlier into a single string with no "
+        "space and no punctuation between them. Reply with just the combined string and nothing else."
+    )
+
+    create_result = _create_local_agent(source_name, temp_source_dir, modal_subprocess_env, prompt=source_prompt)
     assert create_result.returncode == 0, (
         f"Local create failed (rc={create_result.returncode}):\n"
         f"stdout: {create_result.stdout}\nstderr: {create_result.stderr}"
@@ -346,15 +415,23 @@ def test_clone_local_claude_agent_to_modal(
         f"stdout: {clone_result.stdout}\nstderr: {clone_result.stderr}"
     )
 
-    # Destroying the target Modal agent preserves its plugin/ session files back
-    # to the local host_dir (same mechanism as test_destroy_modal_agent_preserves_sessions_locally).
-    # Finding session files under the target's preserved_sessions dir proves the
-    # cross-host clone actually transferred the source agent's session data to
-    # the destination -- a silent no-op in _transfer_source_plugin_data would
-    # leave preserved_sessions empty.
+    msg_result = _send_message_to_agent(target_name, recall_prompt, modal_subprocess_env)
+    assert msg_result.returncode == 0, (
+        f"Sending recall message to clone failed (rc={msg_result.returncode}):\n"
+        f"stdout: {msg_result.stdout}\nstderr: {msg_result.stderr}"
+    )
+    _wait_for_text_in_agent_pane(target_name, combined, modal_subprocess_env, timeout=240.0)
+
+    # Sanity: the destroy path also preserves session content back to local.
     destroy_target_result = _destroy_modal_agent(target_name, modal_subprocess_env)
     assert destroy_target_result.returncode == 0, (
         f"Destroy of target failed (rc={destroy_target_result.returncode}):\n"
         f"stdout: {destroy_target_result.stdout}\nstderr: {destroy_target_result.stderr}"
     )
     _assert_sessions_preserved(modal_subprocess_env.host_dir, target_name)
+    preserved_text = _read_preserved_session_text(modal_subprocess_env.host_dir, target_name)
+    assert combined in preserved_text, (
+        f"Combined secret '{combined}' missing from preserved JSONL after destroy "
+        f"(claude's response wasn't appended to the resumed JSONL?). "
+        f"First 2000 chars:\n{preserved_text[:2000]}"
+    )

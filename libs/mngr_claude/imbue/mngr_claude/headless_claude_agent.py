@@ -508,12 +508,6 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         """
         BaseHeadlessAgent._preflight_send_message(self, tmux_target)
 
-    def uses_paste_detection_send(self) -> bool:
-        return BaseHeadlessAgent.uses_paste_detection_send(self)
-
-    def get_tui_ready_indicator(self) -> str | None:
-        return BaseHeadlessAgent.get_tui_ready_indicator(self)
-
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:

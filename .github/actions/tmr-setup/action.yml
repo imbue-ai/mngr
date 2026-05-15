@@ -23,7 +23,7 @@ runs:
 
     - name: Install Claude Code CLI
       shell: bash
-      run: npm install -g @anthropic-ai/claude-code@2.1.116
+      run: npm install -g @anthropic-ai/claude-code@2.1.141
 
     - name: Configure git identity
       shell: bash

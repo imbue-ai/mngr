@@ -19,6 +19,7 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
+from imbue.mngr.agents.agent_registry import list_available_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.config import ConfigScope
@@ -35,6 +36,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
 from imbue.mngr.errors import PluginSpecifierError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import PluginName
@@ -60,6 +62,7 @@ class PluginCliOptions(CommonCliOptions):
 
     is_active: bool = False
     fields: str | None = None
+    kind: str | None = None
     name: str | None = None
     names: tuple[str, ...] = ()
     scope: str | None = None
@@ -361,6 +364,12 @@ def plugin(ctx: click.Context, **kwargs: Any) -> None:
     default=None,
     help="Comma-separated list of fields to display (name, version, description, enabled)",
 )
+@click.option(
+    "--kind",
+    type=click.Choice(["agent-type", "provider"], case_sensitive=False),
+    default=None,
+    help="Filter to plugins of a specific kind: agent-type or provider",
+)
 @add_common_options
 @click.pass_context
 def plugin_list(ctx: click.Context, **kwargs: Any) -> None:
@@ -385,8 +394,67 @@ def _plugin_list_impl(ctx: click.Context, **kwargs: Any) -> None:
     # Filter to active plugins if requested
     filtered_plugins = [p for p in all_plugins if p.is_enabled] if opts.is_active else all_plugins
 
+    # Filter to a specific plugin kind if requested. ``opts.kind`` is
+    # constrained by click.Choice, so the unreachable arm catches drift.
+    match opts.kind:
+        case "agent-type":
+            filtered_plugins = _project_to_agent_type_entries(filtered_plugins, mngr_ctx.config)
+        case "provider":
+            filtered_plugins = _project_to_provider_entries(filtered_plugins)
+        case None:
+            # No --kind requested -- leave filtered_plugins as-is.
+            pass
+        case _:
+            raise AbortError(f"Unknown --kind value: {opts.kind!r}")
+
     fields = _parse_fields(opts.fields)
     _emit_plugin_list(filtered_plugins, output_opts, fields)
+
+
+def _project_to_agent_type_entries(plugins: list[PluginInfo], config: MngrConfig) -> list[PluginInfo]:
+    """Return a PluginInfo list keyed by every available agent type name.
+
+    Plugin entry-point names do not always match the agent-type name they
+    register (e.g. the pi_coding plugin -- entry-point name ``pi_coding``
+    -- registers an agent type named ``pi-coding``), and user config can
+    also define agent types under ``[agent_types.X]`` that are not backed
+    by a plugin entry point. We iterate ``list_available_agent_types`` --
+    the same source the tab-completion cache uses -- and reuse the
+    existing ``PluginInfo`` (with version/description) when an entry-point
+    name happens to match, otherwise synthesize a minimal entry.
+
+    ``--active`` filtering is honored upstream by ``pm.set_blocked``:
+    plugins disabled in config are blocked before
+    ``load_setuptools_entrypoints``, so their ``register_agent_type``
+    hookimpl never runs and their agent types are absent from
+    ``list_available_agent_types(config)``. The ``plugins`` argument is
+    therefore consulted only for metadata, not for filtering -- otherwise
+    agent types like ``pi-coding`` would be silently dropped because no
+    entry-point of that name exists.
+    """
+    existing_by_name = {p.name: p for p in plugins}
+    return [
+        existing_by_name.get(name, PluginInfo(name=name, is_enabled=True))
+        for name in list_available_agent_types(config)
+    ]
+
+
+def _project_to_provider_entries(plugins: list[PluginInfo]) -> list[PluginInfo]:
+    """Return a PluginInfo list keyed by every registered provider backend name.
+
+    Mirror of ``_project_to_agent_type_entries`` for provider backends.
+    Reuses the existing ``PluginInfo`` (with version/description) when an
+    entry-point name matches a backend name (the common case -- e.g.
+    ``docker``, ``modal``, ``vultr``); otherwise synthesizes a minimal
+    entry. Provider backends are plugin-registered only -- there is no
+    user-config equivalent to ``[agent_types.X]`` for backends -- so the
+    list comes solely from ``list_registered_provider_backend_names``.
+    """
+    existing_by_name = {p.name: p for p in plugins}
+    return [
+        existing_by_name.get(name, PluginInfo(name=name, is_enabled=True))
+        for name in list_registered_provider_backend_names()
+    ]
 
 
 @plugin.command(name="add")
@@ -793,6 +861,8 @@ name, version, description, enabled.""",
     examples=(
         ("List all plugins", "mngr plugin list"),
         ("List only active plugins", "mngr plugin list --active"),
+        ("List installed agent-type plugins", "mngr plugin list --kind agent-type --active"),
+        ("List installed provider plugins", "mngr plugin list --kind provider --active"),
         ("Output as JSON", "mngr plugin list --format json"),
         ("Show specific fields", "mngr plugin list --fields name,enabled"),
         ("Custom format template", "mngr plugin list --format '{name}\\t{enabled}'"),

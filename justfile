@@ -2,22 +2,12 @@ help:
     @just --list
 
 build target:
-  @if [ "{{target}}" = "flexmux" ]; then \
-    cd libs/flexmux/frontend && pnpm install && pnpm run build; \
-  elif [ -d "apps/{{target}}" ]; then \
+  @if [ -d "apps/{{target}}" ]; then \
     uvx --from build pyproject-build --installer=uv --outdir=dist --wheel apps/{{target}}; \
   elif [ -d "libs/{{target}}" ]; then \
     uvx --from build pyproject-build --installer=uv --outdir=dist --wheel libs/{{target}}; \
   else \
     echo "Error: Target '{{target}}' not found in apps/ or libs/"; \
-    exit 1; \
-  fi
-
-run target:
-  @if [ "{{target}}" = "flexmux" ]; then \
-    uv run flexmux; \
-  else \
-    echo "Error: No run command defined for '{{target}}'"; \
     exit 1; \
   fi
 
@@ -241,6 +231,74 @@ deploy-litellm env="production":
 # env. Equivalent to push-secrets + deploy-connector + deploy-litellm.
 deploy-all env="production": (push-secrets env) (deploy-connector env) (deploy-litellm env)
 
+# One-shot recipe for dev iteration on the minds stack. Combines the
+# vendor/mngr sync and the Electron launch into a single command so the
+# very first Create after starting the app picks up your local mngr code
+# rather than whatever stale snapshot the FCT worktree was created from.
+#
+# Why the sync step is necessary on EVERY startup:
+#   The desktop client's Create flow (apps/minds/.../agent_creator.py)
+#   rsyncs the FCT worktree (including vendor/mngr/) into a temp clone
+#   and ships THAT into the Docker container. mngr inside the container
+#   is editable-installed from /code/vendor/mngr/. So if vendor/mngr/ in
+#   the worktree is older than the mngr code you actually want to test
+#   (e.g. a new field you added to settings.toml), the container's mngr
+#   will reject your settings and the bootstrap's chat-agent create call
+#   will fail. The user-visible symptom is an empty workspace with "No
+#   conversation data" in the chat panel. Re-syncing on every startup
+#   makes the first Create work without a follow-up propagate_changes.
+#
+# Why rsync (not `git archive` like `just sync-vendor-mngr`):
+#   - rsync carries uncommitted mngr changes through, so you don't have
+#     to commit just to test something.
+#   - rsync leaves the FCT worktree's git state as a normal diff (visible
+#     to `git status`) instead of creating a commit you'd then have to
+#     undo. Use `just sync-vendor-mngr` for the release-flow sync that
+#     does want to commit.
+#
+# Why MINDS_ROOT_NAME=devminds:
+#   Keeps dev state under ~/.devminds/ (separate from prod ~/.minds/) so
+#   running this recipe doesn't clobber the prod minds profile and the
+#   minds bootstrap derives MNGR_HOST_DIR / MNGR_PREFIX correctly.
+#
+# Override agent_name / branch via positional args -- they're forwarded
+# verbatim to `just minds-start`:
+#   just devminds-start agent_name=foo branch=some-branch
+devminds-start agent_name="mindtest" branch="":
+    #!/bin/bash
+    set -ueo pipefail
+    fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
+    if [ ! -e "$fct_wt/.git" ]; then
+        echo "error: no FCT worktree at $fct_wt" >&2
+        echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
+        echo "       (e.g. base = josh/start-minds) before re-running devminds-start." >&2
+        exit 2
+    fi
+    vendor_mngr="$fct_wt/vendor/mngr"
+    mkdir -p "$vendor_mngr"
+    echo "Syncing $(pwd) -> $vendor_mngr (rsync, uncommitted-friendly, no FCT commit)"
+    # Exclusions must match _RSYNC_MANUAL_EXCLUDES + _GITIGNORE_RSYNC_FILTER
+    # in libs/mngr_imbue_cloud/.../cli/admin.py and apps/minds/.../cli/pool.py,
+    # and the RSYNC_EXCLUDES array in apps/minds/scripts/propagate_changes --
+    # all four paths populate the same vendor/mngr/ destination.
+    #
+    # `--filter=:- .gitignore` reads .gitignore at each directory level under
+    # the source and applies its exclude rules, so __pycache__, .venv,
+    # node_modules, .test_output, .mypy_cache, .ruff_cache, .pytest_cache,
+    # .external_worktrees, etc. are all covered without listing them here.
+    # `.git` and `uv.lock` aren't in .gitignore (`.git` is git's internal
+    # dir; `uv.lock` is intentionally committed but each install context
+    # regenerates its own), so we exclude those manually.
+    rsync -a --delete \
+        --filter=':- .gitignore' \
+        --exclude=.git \
+        --exclude=uv.lock \
+        ./ "$vendor_mngr/"
+    export MINDS_ROOT_NAME=devminds
+    # Delegate to minds-start to keep the env-loading / MINDS_WORKSPACE_*
+    # setup / PID-file gating logic in one place.
+    just minds-start "{{agent_name}}" "{{branch}}"
+
 # Start the minds desktop client (electron) in dev mode.
 # Sources .env (for ANTHROPIC_API_KEY etc.) and sets MINDS_WORKSPACE_*
 # env vars so the create-form auto-fills "repository", "name", and
@@ -304,8 +362,37 @@ minds-start agent_name="mindtest" branch="":
     cd apps/minds && pnpm start
 
 # Stop the minds desktop client started in this worktree by `just minds-start`.
-# Reads the PID file written by minds-start and SIGTERMs the recipe shell;
-# pnpm and electron follow on cascade. Idempotent (no-op if nothing running).
+#
+# Strategy: walk the recipe shell's process tree, find Electron's main
+# process, and SIGTERM that specifically. The Electron main process has a
+# `process.on('SIGTERM', () => app.quit())` handler (apps/minds/electron/
+# main.js) that triggers the `before-quit` chain -- which already
+# SIGTERMs the python backend and waits for uvicorn's graceful exit.
+# After electron exits cleanly: its zygotes / utility children die via
+# PR_SET_DEATHSIG, the python backend's grandparent-death watcher (which
+# already exists in apps/minds/imbue/minds/cli/run.py) sees electron die
+# and exits cleanly itself, pnpm / node / sh / the recipe shell exit as
+# their children terminate. Whole tree gone in <2s typically.
+#
+# Why we don't just SIGTERM the recipe shell (the PID stored in pid_file):
+#   `kill <pid>` signals only that PID. Bash's default SIGTERM behavior is
+#   to exit cleanly without forwarding the signal to its children, so
+#   children become orphans and survive indefinitely. We saw this
+#   empirically -- the previous version of this recipe always fell through
+#   to the SIGKILL fallback because nothing was telling electron to quit.
+#
+# Why not kill the recipe shell's process group with `kill -- -<pgid>`:
+#   In this stack the PGID leader is `just` itself (one level above the
+#   recipe shell), and the group cleanly contains only this minds
+#   invocation. That's safe-by-inspection here but brittle as a general
+#   rule -- nothing prevents some future change to the harness from
+#   placing unrelated processes in the same PGID. PID-by-PID via pstree
+#   can't accidentally touch anything outside the tree.
+#
+# Idempotent (no-op if nothing running). Falls back to SIGTERM-the-recipe
+# if electron hasn't reached its main process yet (rare startup race), and
+# to SIGKILLing specific surviving PIDs if the graceful path doesn't
+# finish within 10s.
 minds-stop:
     #!/bin/bash
     set -ueo pipefail
@@ -320,18 +407,53 @@ minds-stop:
         rm -f "$pid_file"
         exit 0
     fi
-    echo "Stopping minds-start (pid=$pid)"
-    kill "$pid"
-    # Wait up to 10s for graceful shutdown, then SIGKILL.
+    # Snapshot the full descendant tree. pstree -p -T walks PPID links and
+    # gives PIDs in flat form. We'll use this both to identify electron's
+    # main process and to verify the whole tree exits.
+    descendants=$(pstree -p -T "$pid" 2>/dev/null | grep -oE '\([0-9]+\)' | tr -d '()' | sort -u)
+    # Locate Electron's main process: the descendant whose cmd contains the
+    # electron binary path and is NOT a `--type=zygote` / `--type=utility`
+    # / `--type=...` subprocess. There's exactly one such process per
+    # session (the rest are renderer / GPU / network helpers it spawned).
+    electron_main_pid=""
+    for d in $descendants; do
+        cmd=$(ps -o cmd= -p "$d" 2>/dev/null || true)
+        if [[ "$cmd" == *"node_modules/electron/dist/electron "* && "$cmd" != *"--type="* ]]; then
+            electron_main_pid="$d"
+            break
+        fi
+    done
+    if [ -n "$electron_main_pid" ]; then
+        echo "Stopping minds (recipe=$pid, electron=$electron_main_pid) via clean shutdown"
+        kill -TERM "$electron_main_pid"
+    else
+        # Pre-electron startup race: electron hasn't been exec'd yet. Fall
+        # back to the recipe shell, which at least kills the bash sitting
+        # in `pnpm install` / similar.
+        echo "Stopping minds-start (pid=$pid, electron not yet spawned)"
+        kill -TERM "$pid"
+    fi
+    # Wait up to 10s for the whole tree to exit.
     for i in $(seq 1 10); do
-        if ! kill -0 "$pid" 2>/dev/null; then
+        still_alive=""
+        for descendant in $descendants; do
+            if kill -0 "$descendant" 2>/dev/null; then
+                still_alive="$still_alive $descendant"
+            fi
+        done
+        if [ -z "$still_alive" ]; then
             rm -f "$pid_file"
             exit 0
         fi
         sleep 1
     done
-    echo "minds-start (pid=$pid) did not exit after SIGTERM; sending SIGKILL"
-    kill -9 "$pid" 2>/dev/null || true
+    # Force-kill anything that survived the grace period. Each kill targets
+    # a specific PID we observed under the recipe shell -- never a broad
+    # pgrep-style match.
+    echo "Tree did not exit after 10s SIGTERM grace; force-killing leftovers:$still_alive"
+    for descendant in $still_alive; do
+        kill -9 "$descendant" 2>/dev/null || true
+    done
     rm -f "$pid_file"
 
 # Build the minds desktop client distributable (slow; uses todesktop).
