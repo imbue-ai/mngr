@@ -18,7 +18,6 @@ from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.agent_class_registry import get_agent_class
-from imbue.mngr.config.agent_class_registry import list_registered_agent_class_types
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
@@ -43,15 +42,6 @@ class TranscriptCliOptions(CommonCliOptions):
 _COMMON_TRANSCRIPT_SUFFIX = "common_transcript"
 
 
-def _list_agent_types_supporting_transcripts() -> list[str]:
-    """Return the sorted list of registered agent type names whose class implements HasCommonTranscriptMixin."""
-    supporting: list[str] = []
-    for type_name in list_registered_agent_class_types():
-        if issubclass(get_agent_class(type_name), HasCommonTranscriptMixin):
-            supporting.append(type_name)
-    return supporting
-
-
 def _assert_agent_type_supports_transcripts(address: AgentOrHostAddress, mngr_ctx: MngrContext) -> None:
     """Raise UserInputError if the targeted agent's type does not implement HasCommonTranscriptMixin.
 
@@ -68,12 +58,8 @@ def _assert_agent_type_supports_transcripts(address: AgentOrHostAddress, mngr_ct
     agent_class = get_agent_class(str(agent_type))
     if issubclass(agent_class, HasCommonTranscriptMixin):
         return
-    supporting = _list_agent_types_supporting_transcripts()
-    supporting_str = ", ".join(supporting) if supporting else "(none registered)"
     raise UserInputError(
-        f"Agent '{agent_ref.agent_name}' has type '{agent_type}', which does not implement "
-        f"HasCommonTranscriptMixin and therefore does not produce a common transcript. "
-        f"Agent types that support `mngr transcript`: {supporting_str}."
+        f"Agent '{agent_ref.agent_name}' has type '{agent_type}', which does not produce a common transcript."
     )
 
 

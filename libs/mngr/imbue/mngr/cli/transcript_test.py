@@ -470,8 +470,8 @@ def test_transcript_cli_rejects_agent_type_without_mixin(
     """Agent types whose class does not implement HasCommonTranscriptMixin should be rejected up front.
 
     The default 'generic' agent_type maps to the BaseAgent default class, which
-    does not implement the mixin -- the CLI must fail with a clear error that
-    names a supporting type, rather than a misleading 'no transcript yet' message.
+    does not implement the mixin -- the CLI must fail with a clear error
+    naming the agent and its type, rather than a misleading 'no transcript yet' message.
     """
     create_agent_with_events_dir(local_provider.host_dir, agent_name="no-transcript-agent")
 
@@ -481,10 +481,9 @@ def test_transcript_cli_rejects_agent_type_without_mixin(
         obj=plugin_manager,
     )
     assert result.exit_code != 0
-    assert "HasCommonTranscriptMixin" in result.output
+    assert "no-transcript-agent" in result.output
     assert "generic" in result.output
-    # The error should suggest at least one supporting type so the user has a path forward.
-    assert "claude" in result.output
+    assert "does not produce a common transcript" in result.output
 
 
 def test_transcript_cli_missing_events_file_for_supporting_type_gives_clear_error(

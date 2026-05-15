@@ -471,18 +471,39 @@ class HasCommonTranscriptMixin(ABC):
 
     Subclasses implement ``get_common_transcript_scripts`` to return the
     per-agent converter scripts that watch the agent's native transcript
-    files and write to the common path. They are responsible for launching
-    those scripts as part of ``assemble_command`` (typically as a
-    backgrounded child of the tmux session).
+    files and write to the common path, and ``is_common_transcript_enabled``
+    to report whether the user has opted in for this particular instance.
+    They are responsible for launching those scripts as part of
+    ``assemble_command`` (typically as a backgrounded child of the tmux
+    session).
     """
+
+    @property
+    @abstractmethod
+    def is_common_transcript_enabled(self) -> bool:
+        """Whether this agent instance should emit a common transcript.
+
+        Typically derived from a config field such as
+        ``self.agent_config.emit_common_transcript``. Read by the shared
+        ``maybe_provision_common_transcript_scripts`` helper to gate
+        provisioning, and (by convention) by the agent's ``assemble_command``
+        to gate launching.
+        """
+        ...
 
     @abstractmethod
     def get_common_transcript_scripts(self) -> Mapping[str, str]:
-        """Return ``{script_name: contents}`` for the transcript converter scripts.
+        """Return ``{script_name: contents}`` for the gated transcript converter scripts.
 
-        These are written to ``$MNGR_AGENT_STATE_DIR/commands/`` at mode
+        Only scripts that should be **omitted entirely** when
+        ``is_common_transcript_enabled`` is False belong here. Scripts that
+        the agent needs regardless (e.g. a raw-transcript streamer that
+        also feeds other agent infrastructure) should be provisioned via
+        a separate, agent-specific path.
+
+        Scripts are written to ``$MNGR_AGENT_STATE_DIR/commands/`` at mode
         ``0755`` during provisioning by
-        :func:`imbue.mngr.agents.common_transcript.provision_common_transcript_scripts`.
+        :func:`imbue.mngr.agents.common_transcript.maybe_provision_common_transcript_scripts`.
         """
         ...
 
