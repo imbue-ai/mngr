@@ -20,9 +20,20 @@ from pydantic import ValidationError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.errors import MindError
+from imbue.mngr.utils.polling import poll_for_value
 
 _NEON_API_BASE: Final[str] = "https://console.neon.tech/api/v2"
 _REQUEST_TIMEOUT_SECONDS: Final[float] = 60.0
+
+# Neon API operations are async: a POST/DELETE schedules an operation
+# and returns immediately, and any subsequent call against the same
+# project that targets a still-running operation gets HTTP 423 (Locked).
+# Poll-via-operations-API is the documented pattern, but retry-on-423
+# at a steady interval is much simpler and equally effective for our
+# few-call provisioning flow. The total budget is generous so a slow
+# Neon region doesn't trip us up.
+_LOCKED_RETRY_POLL_INTERVAL_SECONDS: Final[float] = 2.0
+_LOCKED_RETRY_TOTAL_BUDGET_SECONDS: Final[float] = 60.0
 
 
 class NeonProviderError(MindError):
@@ -56,6 +67,42 @@ class NeonDatabaseRecord(FrozenModel):
 _BRANCH_LIST_ADAPTER: TypeAdapter[list[NeonBranchSummary]] = TypeAdapter(list[NeonBranchSummary])
 
 
+class _NeonRequestAttempt(FrozenModel):
+    """Single-shot callable that runs one Neon HTTP request.
+
+    Returns ``None`` on HTTP 423 to signal ``poll_for_value`` it should
+    retry; otherwise returns the raw :class:`httpx.Response` so the
+    caller can decode the body / raise on non-423 4xx/5xx. Wrapped as a
+    FrozenModel so it's a module-level callable (not a nested ``def``).
+    """
+
+    model_config = {"arbitrary_types_allowed": True, "frozen": True}
+
+    method: str
+    path: str
+    api_token: SecretStr
+    json_body: dict | None = None
+
+    def __call__(self) -> httpx.Response | None:
+        headers = {
+            "Authorization": f"Bearer {self.api_token.get_secret_value()}",
+            "Accept": "application/json",
+        }
+        try:
+            with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
+                resp = client.request(
+                    self.method,
+                    f"{_NEON_API_BASE}{self.path}",
+                    headers=headers,
+                    json=self.json_body,
+                )
+        except httpx.HTTPError as exc:
+            raise NeonProviderError(f"Neon API request failed ({self.method} {self.path}): {exc}") from exc
+        if resp.status_code == 423:
+            return None
+        return resp
+
+
 def _neon_request(
     method: str,
     path: str,
@@ -63,15 +110,24 @@ def _neon_request(
     api_token: SecretStr,
     json_body: dict | None = None,
 ) -> dict:
-    headers = {
-        "Authorization": f"Bearer {api_token.get_secret_value()}",
-        "Accept": "application/json",
-    }
-    try:
-        with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
-            response = client.request(method, f"{_NEON_API_BASE}{path}", headers=headers, json=json_body)
-    except httpx.HTTPError as exc:
-        raise NeonProviderError(f"Neon API request failed ({method} {path}): {exc}") from exc
+    """Issue one Neon API request, retrying on HTTP 423 with a fixed-interval poll.
+
+    Other 4xx/5xx responses fail immediately. 423 (project locked behind
+    an in-flight async op) is the only retryable code per Neon's docs --
+    we wait for the in-flight op to drain by repeatedly retrying the
+    same call until Neon stops locking.
+    """
+    response, _, _ = poll_for_value(
+        _NeonRequestAttempt(method=method, path=path, api_token=api_token, json_body=json_body),
+        timeout=_LOCKED_RETRY_TOTAL_BUDGET_SECONDS,
+        poll_interval=_LOCKED_RETRY_POLL_INTERVAL_SECONDS,
+    )
+    if response is None:
+        raise NeonProviderError(
+            f"Neon API kept returning 423 (Locked) for {method} {path} after "
+            f"{_LOCKED_RETRY_TOTAL_BUDGET_SECONDS:.0f}s of retries; an in-flight "
+            "operation likely never finished."
+        )
     if response.status_code >= 400:
         raise NeonProviderError(f"Neon API returned {response.status_code} for {method} {path}: {response.text[:500]}")
     try:
