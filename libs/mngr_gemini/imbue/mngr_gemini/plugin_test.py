@@ -222,8 +222,7 @@ def test_modify_env_vars_preserves_other_vars(gemini_agent: GeminiAgent) -> None
 
 
 def _read_system_settings(agent: GeminiAgent) -> dict[str, Any]:
-    path = agent._get_agent_dir() / "plugin" / "gemini" / "system_settings.json"
-    parsed: Any = json.loads(path.read_text())
+    parsed: Any = json.loads(agent._get_system_settings_path().read_text())
     assert isinstance(parsed, dict)
     return parsed
 
