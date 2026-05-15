@@ -54,6 +54,9 @@ from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
+from imbue.mngr_lima.constants import SSH_KEYSCAN_BUDGET_SECONDS
+from imbue.mngr_lima.constants import SSH_KEYSCAN_PER_ATTEMPT_TIMEOUT_SECONDS
+from imbue.mngr_lima.constants import SSH_KEYSCAN_POLL_INTERVAL_SECONDS
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaHostCreationError
 from imbue.mngr_lima.errors import LimaHostRenameError
@@ -82,6 +85,22 @@ _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
     "Broken": HostState.CRASHED,
     "Unknown": HostState.CRASHED,
 }
+
+
+def _parse_keyscan_lines(stdout: str) -> list[tuple[str, str]]:
+    """Parse ssh-keyscan stdout into (key_type, key_data) pairs.
+
+    Each non-comment line is expected to look like ``<host> <type> <data>``;
+    lines that are blank, comment-prefixed, or malformed are skipped.
+    """
+    keys: list[tuple[str, str]] = []
+    for line in stdout.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 2)
+        if len(parts) >= 3:
+            keys.append((parts[1], parts[2]))
+    return keys
 
 
 class LimaProviderInstance(BaseProviderInstance):
@@ -257,45 +276,55 @@ class LimaProviderInstance(BaseProviderInstance):
             ),
         )
 
-    def _record_host_keys(self, hostname: str, port: int) -> None:
+    def _record_host_keys(
+        self,
+        hostname: str,
+        port: int,
+        timeout: float = SSH_KEYSCAN_BUDGET_SECONDS,
+        poll_interval: float = SSH_KEYSCAN_POLL_INTERVAL_SECONDS,
+    ) -> None:
         """Record this host's SSH keys (all key types) in known_hosts.
 
         First removes any stale entries for this host:port (from previous
         VMs that may have reused the same port), then writes every key
         type ssh-keyscan returns so paramiko can negotiate any of them.
+
+        sshd can race with ssh-keyscan during VM bring-up. The connection
+        path is host-machine ssh-keyscan <-A-> hostagent <-B-> lima-vm
+        sshd; A can be open while B is not yet ready, so the first few
+        attempts may fail until sshd is serving. Polls until success.
         """
         clear_host_from_known_hosts(self._known_hosts_path, hostname, port)
 
-        # sshd can race with ssh-keyscan during VM bring-up.
-        # Connections: host machine ssh-keyscan <-A-> hostagent <-B-> lima vm sshd
-        # It's possible A is open while B isn't ready. Thus polling until success.
         if not poll_until(
             lambda: self._try_scan_and_add_host_key(hostname, port),
-            timeout=60.0,
-            poll_interval=2.0,
+            timeout=timeout,
+            poll_interval=poll_interval,
         ):
             raise HostConnectionError(
-                f"ssh-keyscan could not read a host key for {hostname}:{port} after 60s; "
+                f"ssh-keyscan could not read a host key for {hostname}:{port} after {timeout}s; "
                 f"the Lima VM may not have finished starting sshd"
             )
 
     def _try_scan_and_add_host_key(self, hostname: str, port: int) -> bool:
-        """Run ssh-keyscan once and add any keys returned. Returns True iff at least one was added."""
+        """Run ssh-keyscan once and add any keys returned. Returns True iff at least one was added.
+
+        ``is_checked_after=False`` is required: during the bring-up race the
+        guest sshd is not yet serving, so ssh-keyscan exits with rc=1 and a
+        ``Broken pipe`` stderr. We want those failures to surface as a
+        False return value so the surrounding ``poll_until`` can retry.
+        """
         result = self.mngr_ctx.concurrency_group.run_process_to_completion(
             ["ssh-keyscan", "-t", "rsa,ecdsa,ed25519", "-p", str(port), hostname],
-            timeout=10.0,
+            timeout=SSH_KEYSCAN_PER_ATTEMPT_TIMEOUT_SECONDS,
+            is_checked_after=False,
         )
         if result.returncode != 0 or not result.stdout.strip():
             return False
-        added_any = False
-        for line in result.stdout.strip().splitlines():
-            if line and not line.startswith("#"):
-                parts = line.split(None, 2)
-                if len(parts) >= 3:
-                    key_type_and_data = f"{parts[1]} {parts[2]}"
-                    add_host_to_known_hosts(self._known_hosts_path, hostname, port, key_type_and_data)
-                    added_any = True
-        return added_any
+        keys = _parse_keyscan_lines(result.stdout)
+        for key_type, key_data in keys:
+            add_host_to_known_hosts(self._known_hosts_path, hostname, port, f"{key_type} {key_data}")
+        return bool(keys)
 
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData) -> None:
         """Update the certified host data in the host record."""

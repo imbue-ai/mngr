@@ -1,11 +1,15 @@
+import socket
+
 import pytest
 
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr_lima.errors import LimaHostRenameError
 from imbue.mngr_lima.instance import LimaProviderInstance
+from imbue.mngr_lima.instance import _parse_keyscan_lines
 from imbue.mngr_lima.instance import _parse_size_to_gb
 
 
@@ -98,3 +102,53 @@ def test_provider_dir_structure(lima_provider: LimaProviderInstance) -> None:
     assert "lima-test" in str(lima_provider._provider_dir)
     assert "providers" in str(lima_provider._provider_dir)
     assert "lima" in str(lima_provider._provider_dir)
+
+
+def test_parse_keyscan_lines_empty() -> None:
+    assert _parse_keyscan_lines("") == []
+    assert _parse_keyscan_lines("\n\n") == []
+
+
+def test_parse_keyscan_lines_skips_comments_and_blanks() -> None:
+    stdout = "# 127.0.0.1:2222 SSH-2.0-OpenSSH_9.6p1\n\n# another comment\n"
+    assert _parse_keyscan_lines(stdout) == []
+
+
+def test_parse_keyscan_lines_multi_key() -> None:
+    stdout = (
+        "# [127.0.0.1]:2222 SSH-2.0-OpenSSH_9.6p1\n"
+        "[127.0.0.1]:2222 ssh-rsa AAAARSAKEY\n"
+        "[127.0.0.1]:2222 ecdsa-sha2-nistp256 AAAAECDSAKEY\n"
+        "[127.0.0.1]:2222 ssh-ed25519 AAAAED25519KEY\n"
+    )
+    assert _parse_keyscan_lines(stdout) == [
+        ("ssh-rsa", "AAAARSAKEY"),
+        ("ecdsa-sha2-nistp256", "AAAAECDSAKEY"),
+        ("ssh-ed25519", "AAAAED25519KEY"),
+    ]
+
+
+def test_parse_keyscan_lines_skips_malformed() -> None:
+    # Fewer than 3 whitespace-split tokens means we cannot identify a key.
+    stdout = "only-one-field\nhost-only ssh-rsa\n[127.0.0.1]:2222 ssh-rsa AAAAGOOD\n"
+    assert _parse_keyscan_lines(stdout) == [("ssh-rsa", "AAAAGOOD")]
+
+
+def _bind_and_release_local_port() -> int:
+    """Return a TCP port that was just bound to 127.0.0.1 and immediately released.
+
+    Used by tests to obtain a port that ``ssh-keyscan`` will hit ECONNREFUSED on.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def test_record_host_keys_raises_when_unreachable(lima_provider: LimaProviderInstance) -> None:
+    # Drive the polling-then-raise path with a tight budget: ssh-keyscan to a
+    # closed loopback port returns ECONNREFUSED fast on every attempt, so the
+    # poll exhausts its budget and the typed error is raised.
+    lima_provider._keys_dir.mkdir(parents=True, exist_ok=True)
+    closed_port = _bind_and_release_local_port()
+    with pytest.raises(HostConnectionError, match="ssh-keyscan could not read a host key"):
+        lima_provider._record_host_keys("127.0.0.1", closed_port, timeout=0.5, poll_interval=0.1)

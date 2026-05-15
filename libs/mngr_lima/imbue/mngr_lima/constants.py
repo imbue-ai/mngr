@@ -26,3 +26,9 @@ SSH_CONNECT_TIMEOUT_SECONDS: Final[float] = 120.0
 
 # cloud-init completion timeout
 CLOUD_INIT_TIMEOUT_SECONDS: Final[float] = 300.0
+
+# ssh-keyscan polling parameters used while a freshly booted Lima VM's
+# sshd is still racing to start serving host keys.
+SSH_KEYSCAN_BUDGET_SECONDS: Final[float] = 60.0
+SSH_KEYSCAN_POLL_INTERVAL_SECONDS: Final[float] = 2.0
+SSH_KEYSCAN_PER_ATTEMPT_TIMEOUT_SECONDS: Final[float] = 10.0
