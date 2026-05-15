@@ -55,9 +55,14 @@ def cleanup_leaked_instances() -> Iterator[None]:
 
     Guards against leaked EC2 instances from previously-killed test runs. Only
     targets instances whose ``Name`` tag begins with the test-name prefix.
+
+    Gated on the same condition as the test ``skipif`` (credentials present
+    *and* opt-in set) so that a "creds missing, opt-in set" run skips tests
+    silently rather than failing the session inside this teardown trying to
+    call AWS without credentials.
     """
     yield
-    if not _OPT_IN:
+    if not (_AWS_CREDS_PRESENT and _OPT_IN):
         return
     try:
         session = boto3.Session(region_name=_AWS_REGION)
