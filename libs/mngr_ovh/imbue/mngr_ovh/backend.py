@@ -103,14 +103,18 @@ class OvhProvider(VpsDockerProvider):
     # =========================================================================
 
     def _list_provider_vps_ips(self) -> list[str]:
-        if not self.ovh_config.has_explicit_credentials():
-            logger.warning("OVH credentials not configured; skipping VPS discovery")
-            return []
         if self._vps_iam_cache is not None:
             return list(self._vps_iam_cache)
         try:
             resources = list_vps_resources_for_provider(self.ovh_client, provider_name=str(self.name))
         except (VpsApiError, MngrError) as e:
+            # Includes the "no credentials" case: python-ovh raises
+            # InvalidCredential / NotCredential from _call, which we then
+            # remap to VpsApiError. Treating this as an empty discovery
+            # (with a warning) keeps `mngr list` from crashing when OVH is
+            # configured but unreachable, while still surfacing the cause
+            # in the logs. Discovery from ~/.ovh.conf works through the
+            # same path.
             logger.warning("OVH IAM tag listing failed; treating as empty: {}", e)
             self._vps_iam_cache = []
             return []
