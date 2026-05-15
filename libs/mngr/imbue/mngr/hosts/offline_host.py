@@ -81,6 +81,18 @@ class BaseHost(HostInterface):
         default=None,
         description="Optional callback invoked when certified host data is updated",
     )
+    observed_state: HostState | None = Field(
+        frozen=True,
+        default=None,
+        description=(
+            "Provider's live observation of this host's state at the moment this "
+            "instance was constructed. When set, preferred over stop_reason-based "
+            "derivation in get_state() -- reflects external state changes (Mac "
+            "reboot, `limactl stop` outside mngr, etc.) that never wrote to our "
+            "stored record. None means 'no observation available'; get_state() "
+            "falls back to derive_offline_host_state in that case."
+        ),
+    )
 
     @property
     def host_dir(self) -> Path:
@@ -180,9 +192,14 @@ class BaseHost(HostInterface):
     def get_state(self) -> HostState:
         """Get the current state of the host.
 
-        Delegates to derive_offline_host_state() which contains the canonical
-        state-derivation logic shared with provider discovery code.
+        Prefers ``observed_state`` when set -- that's the provider's live view
+        captured at construction time, which reflects external state changes
+        (reboot, external ``limactl stop``, sandbox termination). Falls back
+        to ``derive_offline_host_state`` (reads only the stored record) when
+        no observation is available.
         """
+        if self.observed_state is not None:
+            return self.observed_state
         return derive_offline_host_state(
             certified_data=self.get_certified_data(),
             supports_shutdown_hosts=self.provider_instance.supports_shutdown_hosts,

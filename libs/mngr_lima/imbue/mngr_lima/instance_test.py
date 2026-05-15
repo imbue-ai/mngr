@@ -98,3 +98,31 @@ def test_provider_dir_structure(lima_provider: LimaProviderInstance) -> None:
     assert "lima-test" in str(lima_provider._provider_dir)
     assert "providers" in str(lima_provider._provider_dir)
     assert "lima" in str(lima_provider._provider_dir)
+
+
+def test_lima_status_to_host_state_mapping() -> None:
+    """Lima's native status strings map to mngr's HostState.
+
+    This mapping is the critical translation for get_observed_host_state --
+    a wrong mapping here would cause the GC to classify live VMs incorrectly.
+    """
+    from imbue.mngr.primitives import HostState
+    from imbue.mngr_lima.instance import _LIMA_STATUS_TO_HOST_STATE
+
+    assert _LIMA_STATUS_TO_HOST_STATE["Running"] == HostState.RUNNING
+    assert _LIMA_STATUS_TO_HOST_STATE["Stopped"] == HostState.STOPPED
+    assert _LIMA_STATUS_TO_HOST_STATE["Broken"] == HostState.CRASHED
+    assert _LIMA_STATUS_TO_HOST_STATE["Unknown"] == HostState.CRASHED
+
+
+def test_get_observed_host_state_returns_none_for_unknown_host(
+    lima_provider: LimaProviderInstance,
+) -> None:
+    """When the host_id is not in our store, observed-state is None.
+
+    Callers should interpret None as 'no observation available' and fall back
+    to stored-record derivation. This prevents lima-specific absence handling
+    from leaking into the generic path.
+    """
+    result = lima_provider.get_observed_host_state(HostId.generate())
+    assert result is None
