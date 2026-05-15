@@ -41,6 +41,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
+from imbue.mngr.utils.deps import CORE_DEPS
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import isolate_git
@@ -502,18 +503,17 @@ def minimal_install_env(
 
     The subprocess environment is intentionally minimal (not inherited from
     the parent process). PATH contains only the venv bin and the directories
-    of mngr's declared system dependencies. The list mirrors CORE_DEPS in
-    libs/mngr/imbue/mngr/utils/deps.py (git, tmux, jq, ssh) plus curl
-    (used by scripts/install.sh to bootstrap uv) and rsync (an optional
-    dep declared in deps.py, included so file-sync code paths are exercised).
-    This catches code that depends on tools from the developer's environment
-    (e.g. the modal CLI being on PATH).
+    of mngr's declared system dependencies: CORE_DEPS from
+    libs/mngr/imbue/mngr/utils/deps.py (git, tmux, jq, ssh) plus two
+    fixture-specific extras (curl, used by scripts/install.sh to bootstrap
+    uv, and rsync, an optional dep included so file-sync code paths are
+    exercised). This catches code that depends on tools from the developer's
+    environment (e.g. the modal CLI being on PATH).
     """
-    # Build PATH from only the venv and the directories containing mngr's
-    # declared system dependencies. Source of truth is deps.py; see the
-    # fixture docstring above for why curl and rsync are included alongside
-    # CORE_DEPS.
-    system_deps = ["git", "tmux", "jq", "curl", "ssh", "rsync"]
+    # Pull the core binary names from CORE_DEPS so this list cannot drift
+    # away from what mngr actually requires. The two extras below are
+    # fixture-specific (see docstring above).
+    system_deps = [dep.binary for dep in CORE_DEPS] + ["curl", "rsync"]
     dep_dirs: set[str] = set()
     for dep in system_deps:
         dep_path = shutil.which(dep)

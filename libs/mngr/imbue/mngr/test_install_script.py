@@ -160,7 +160,9 @@ def test_install_sh_errors_when_mngr_not_on_path_after_install(tmp_path: Path) -
     calls = log_file.read_text()
     assert "uv tool install imbue-mngr" in calls
     assert "uv tool dir --bin" in calls
-    assert "PATH" in result.stderr
+    # Pin to install.sh's error wording so an unrelated non-zero exit
+    # whose stderr happens to mention PATH does not satisfy this test.
+    assert "is not on your PATH" in result.stderr
 
 
 @pytest.mark.timeout(30)
@@ -208,5 +210,6 @@ def test_install_sh_continues_when_extras_fail(tmp_path: Path) -> None:
     # Pin the assertion to the step-4 warning text from install.sh so a
     # regression that fires the wrong || warn (or none at all) is caught.
     assert "Some extras could not be installed" in result.stderr
-    # The final "Get started" line must still be printed.
-    assert "Get started" in result.stdout
+    # Pin to install.sh's exact final-line text so a refactor that silently
+    # drops the line in favour of something else is caught here.
+    assert "Get started with: mngr --help" in result.stdout
