@@ -11,15 +11,17 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.api.address_parsers import parse_agent_name_or_id
 from imbue.mngr.api.address_parsers import parse_host_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import filter_all_agents
 from imbue.mngr.api.find import filter_all_hosts
+from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import Volume
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
@@ -140,53 +142,60 @@ def resolve_file_target(
 
     When the target host is online, direct host access is used. When offline,
     falls back to volume access for paths under the host directory.
+
+    Note that, unlike the standard single-agent flow used by connect/push/etc.,
+    this resolver does **not** call into ``ensure_host_*`` after finding the
+    agent: ``mngr file`` is allowed to operate against an offline host
+    through the provider's volume backend, and forcing the host online would
+    silently strip that capability.
     """
-    with log_span("Discovering hosts and agents"):
-        agents_by_host, _ = discover_hosts_and_agents(
-            mngr_ctx,
-            provider_names=None,
-            agent_identifiers=(target_identifier,),
-            include_destroyed=False,
-            reset_caches=False,
-        )
-
-    all_hosts = list(agents_by_host.keys())
-
-    # Find all matching agents and hosts. The target identifier may be an
-    # agent name/ID or a host name/ID -- attempt both parses and ignore the
-    # one that doesn't apply (e.g. a host ID isn't a valid AgentName, etc.).
+    # The target identifier may name either an agent or a host. Try both
+    # interpretations and reconcile.
+    agent_match: tuple[DiscoveredHost, DiscoveredAgent] | None = None
     try:
         agent_target = parse_agent_name_or_id(target_identifier)
     except UserInputError:
         agent_target = None
-    matching_agents = filter_all_agents(agent_target, agents_by_host) if agent_target is not None else []
+    if agent_target is not None:
+        try:
+            agent_match = find_one_agent(AgentAddress(agent=agent_target), mngr_ctx)
+        except AgentNotFoundError:
+            # No agent has this exact ID. Fall through to host lookup.
+            agent_match = None
+        except UserInputError as not_found_or_ambiguous:
+            # ``_filter_one_agent`` raises ``UserInputError`` both for an
+            # unknown AgentName and for a multi-match. Treat the former as
+            # "fall through to host lookup"; the latter must reach the user.
+            if "Multiple agents found" in str(not_found_or_ambiguous):
+                raise
+            agent_match = None
+
+    host_match: DiscoveredHost | None = None
     try:
         host_target = parse_host_address(target_identifier)
     except UserInputError:
         host_target = None
-    matching_hosts = filter_all_hosts(host_target, all_hosts) if host_target is not None else []
-
-    # Check for ambiguity within each type
-    if len(matching_agents) > 1:
-        raise UserInputError(
-            f"Multiple agents found matching '{target_identifier}'. "
-            f"Use the full agent ID to disambiguate.\n\n"
-            f"To see all agent IDs, run:\n"
-            f"  mngr list --fields id,name,host"
+    if host_target is not None:
+        agents_by_host, _ = discover_hosts_and_agents(
+            mngr_ctx,
+            provider_names=None,
+            agent_identifiers=None,
+            include_destroyed=False,
+            reset_caches=False,
         )
-    if len(matching_hosts) > 1:
-        raise UserInputError(
-            f"Multiple hosts found matching '{target_identifier}'. "
-            f"Use the full host ID to disambiguate.\n\n"
-            f"To see all IDs, run:\n"
-            f"  mngr list --fields id,name,host"
-        )
-
-    has_agent_match = len(matching_agents) == 1
-    has_host_match = len(matching_hosts) == 1
+        matching_hosts = filter_all_hosts(host_target, list(agents_by_host.keys()))
+        if len(matching_hosts) > 1:
+            raise UserInputError(
+                f"Multiple hosts found matching '{target_identifier}'. "
+                f"Use the full host ID to disambiguate.\n\n"
+                f"To see all IDs, run:\n"
+                f"  mngr list --fields id,name,host"
+            )
+        if len(matching_hosts) == 1:
+            host_match = matching_hosts[0]
 
     # Check for cross-type ambiguity
-    if has_agent_match and has_host_match:
+    if agent_match is not None and host_match is not None:
         raise UserInputError(
             f"'{target_identifier}' matches both an agent and a host. "
             f"Use the full ID to disambiguate.\n\n"
@@ -195,14 +204,14 @@ def resolve_file_target(
         )
 
     # Neither matched
-    if not has_agent_match and not has_host_match:
+    if agent_match is None and host_match is None:
         raise UserInputError(
             f"No agent or host found matching: {target_identifier}\n\nTo see available agents, run:\n  mngr list"
         )
 
     # Agent matched
-    if has_agent_match:
-        discovered_host, discovered_agent = matching_agents[0]
+    if agent_match is not None:
+        discovered_host, discovered_agent = agent_match
         return _resolve_agent_target(
             discovered_host=discovered_host,
             discovered_agent=discovered_agent,
@@ -211,14 +220,14 @@ def resolve_file_target(
         )
 
     # Host matched
-    discovered_host = matching_hosts[0]
+    assert host_match is not None
     if relative_to != PathRelativeTo.HOST and relative_to != PathRelativeTo.WORK:
         raise UserInputError(
             f"--relative-to {relative_to.value.lower()} is only valid for agent targets. "
             f"Host targets always use MNGR_HOST_DIR as the base path."
         )
     return _resolve_host_target(
-        discovered_host=discovered_host,
+        discovered_host=host_match,
         mngr_ctx=mngr_ctx,
     )
 

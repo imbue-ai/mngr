@@ -7,11 +7,11 @@ from pydantic import Field
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.address_parsers import parse_hosted_location
 from imbue.mngr.api.find import AgentMatch
+from imbue.mngr.api.find import _filter_all_agents
 from imbue.mngr.api.find import _filter_one_agent
 from imbue.mngr.api.find import _find_agents_by_identifiers_or_state
 from imbue.mngr.api.find import determine_resolved_path
 from imbue.mngr.api.find import ensure_agent_started
-from imbue.mngr.api.find import filter_all_agents
 from imbue.mngr.api.find import filter_all_hosts
 from imbue.mngr.api.find import filter_one_host
 from imbue.mngr.api.find import get_host_from_list_by_id
@@ -882,10 +882,10 @@ def test_filter_all_hosts_host_provider_form_no_match() -> None:
     )
 
 
-# --- filter_all_agents ---
+# --- _filter_all_agents ---
 
 
-def test_filter_all_agents_by_name() -> None:
+def test__filter_all_agents_by_name() -> None:
     host_id = HostId.generate()
     host = DiscoveredHost(host_id=host_id, host_name=HostName("h"), provider_name=ProviderInstanceName("local"))
     agent = DiscoveredAgent(
@@ -894,12 +894,12 @@ def test_filter_all_agents_by_name() -> None:
         agent_name=AgentName("my-agent"),
         provider_name=ProviderInstanceName("local"),
     )
-    result = filter_all_agents(AgentName("my-agent"), {host: [agent]})
+    result = _filter_all_agents(AgentName("my-agent"), {host: [agent]})
     assert len(result) == 1
     assert result[0] == (host, agent)
 
 
-def test_filter_all_agents_by_id() -> None:
+def test__filter_all_agents_by_id() -> None:
     host_id = HostId.generate()
     host = DiscoveredHost(host_id=host_id, host_name=HostName("h"), provider_name=ProviderInstanceName("local"))
     agent = DiscoveredAgent(
@@ -908,11 +908,11 @@ def test_filter_all_agents_by_id() -> None:
         agent_name=AgentName("a"),
         provider_name=ProviderInstanceName("local"),
     )
-    result = filter_all_agents(agent.agent_id, {host: [agent]})
+    result = _filter_all_agents(agent.agent_id, {host: [agent]})
     assert len(result) == 1
 
 
-def test_filter_all_agents_no_match() -> None:
+def test__filter_all_agents_no_match() -> None:
     host_id = HostId.generate()
     host = DiscoveredHost(host_id=host_id, host_name=HostName("h"), provider_name=ProviderInstanceName("local"))
     agent = DiscoveredAgent(
@@ -921,10 +921,10 @@ def test_filter_all_agents_no_match() -> None:
         agent_name=AgentName("other"),
         provider_name=ProviderInstanceName("local"),
     )
-    assert filter_all_agents(AgentName("nonexistent"), {host: [agent]}) == []
+    assert _filter_all_agents(AgentName("nonexistent"), {host: [agent]}) == []
 
 
-def test_filter_all_agents_multiple() -> None:
+def test__filter_all_agents_multiple() -> None:
     host1_id = HostId.generate()
     host2_id = HostId.generate()
     host1 = DiscoveredHost(host_id=host1_id, host_name=HostName("h1"), provider_name=ProviderInstanceName("local"))
@@ -941,11 +941,11 @@ def test_filter_all_agents_multiple() -> None:
         agent_name=AgentName("shared"),
         provider_name=ProviderInstanceName("local"),
     )
-    result = filter_all_agents(AgentName("shared"), {host1: [agent1], host2: [agent2]})
+    result = _filter_all_agents(AgentName("shared"), {host1: [agent1], host2: [agent2]})
     assert len(result) == 2
 
 
-def test_filter_all_agents_filtered_by_host() -> None:
+def test__filter_all_agents_filtered_by_host() -> None:
     host1_id = HostId.generate()
     host2_id = HostId.generate()
     host1 = DiscoveredHost(host_id=host1_id, host_name=HostName("h1"), provider_name=ProviderInstanceName("local"))
@@ -962,7 +962,7 @@ def test_filter_all_agents_filtered_by_host() -> None:
         agent_name=AgentName("shared"),
         provider_name=ProviderInstanceName("local"),
     )
-    result = filter_all_agents(AgentName("shared"), {host1: [agent1], host2: [agent2]}, resolved_host=host1)
+    result = _filter_all_agents(AgentName("shared"), {host1: [agent1], host2: [agent2]}, resolved_host=host1)
     assert len(result) == 1
     assert result[0] == (host1, agent1)
 

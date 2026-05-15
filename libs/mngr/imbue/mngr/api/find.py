@@ -113,7 +113,7 @@ def filter_one_host(
 
 
 @pure
-def filter_all_agents(
+def _filter_all_agents(
     agent: AgentNameOrId,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
     resolved_host: DiscoveredHost | None = None,
@@ -147,7 +147,7 @@ def _filter_one_agent(
     The multi-match error lists each matching agent in ``NAME@HOST.PROVIDER``
     form so the user can disambiguate.
     """
-    matches = filter_all_agents(agent, agents_by_host, resolved_host)
+    matches = _filter_all_agents(agent, agents_by_host, resolved_host)
     if len(matches) == 0:
         if isinstance(agent, AgentId):
             raise AgentNotFoundError(str(agent))
