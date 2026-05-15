@@ -371,17 +371,6 @@ def test_provision_merges_user_settings_into_per_agent_settings(
     assert HOOK_EVENT_SESSION_START in settings["hooks"]
 
 
-def test_provision_tolerates_user_hooks_field_with_wrong_type(
-    gemini_agent: GeminiAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A user typo like ``\"hooks\": []`` must not crash provisioning."""
-    _seed_user_gemini_dir(tmp_path, monkeypatch, {"hooks": []})
-    _provision(gemini_agent)
-    settings = _read_relocated_settings(gemini_agent)
-    # The malformed field is replaced and mngr's readiness hook still lands.
-    assert HOOK_EVENT_SESSION_START in settings["hooks"]
-
-
 def test_provision_writes_trusted_folders_entry_for_work_dir(
     gemini_agent: GeminiAgent, seeded_empty_user_gemini_dir: Path
 ) -> None:

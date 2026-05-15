@@ -10,7 +10,6 @@ from typing import Any
 from typing import ClassVar
 from typing import Final
 
-from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.logging import log_span
@@ -279,21 +278,7 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         user-managed hooks under shared event keys are preserved rather than
         clobbered.
         """
-        user_settings_path = get_user_gemini_settings_path()
-        settings = read_gemini_settings(user_settings_path)
-        # ``read_gemini_settings`` guarantees the top-level value is a dict
-        # but does not validate sub-fields. ``merge_hooks_config`` indexes
-        # ``settings["hooks"]`` as a dict, so a user typo like ``"hooks": []``
-        # or ``"hooks": null`` would crash provisioning. Coalesce to ``{}``
-        # so a malformed user field can't break the agent, matching the
-        # contract ``read_gemini_settings`` documents for its top level.
-        if "hooks" in settings and not isinstance(settings["hooks"], Mapping):
-            logger.warning(
-                "Ignoring non-object 'hooks' field in {} (got {!r})",
-                user_settings_path,
-                type(settings["hooks"]).__name__,
-            )
-            settings["hooks"] = {}
+        settings = read_gemini_settings(get_user_gemini_settings_path())
 
         builders: list[dict[str, Any]] = [build_readiness_hooks_config()]
         if self.agent_config.auto_allow_permissions:
