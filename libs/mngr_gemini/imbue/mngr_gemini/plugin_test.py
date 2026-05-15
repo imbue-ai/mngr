@@ -140,18 +140,41 @@ def test_assemble_command_appends_user_agent_args_after_cli_args(gemini_agent: G
     assert str(command).endswith("gemini --debug")
 
 
-def test_assemble_command_prepends_stale_sentinel_cleanup(gemini_agent: GeminiAgent) -> None:
-    """Every assembled command must clear a leftover readiness sentinel before launching."""
+_SENTINEL_RM_THEN_GEMINI = "rm -f $MNGR_AGENT_STATE_DIR/session_started && gemini"
+
+
+def test_assemble_command_clears_stale_sentinel_before_launching_gemini_with_watcher(
+    gemini_agent: GeminiAgent,
+) -> None:
+    """The sentinel rm must sit between the backgrounded watcher and ``gemini``.
+
+    Bash's ``A && B & C`` precedence parses as ``( A && B ) &`` followed by
+    ``C``, so writing ``rm && ( watcher ) & gemini`` would push the rm into
+    the background where it races gemini's startup. Putting the watcher
+    first confines ``&`` to the watcher subshell and leaves
+    ``rm && gemini`` as a foreground sequential chain.
+    """
     command = str(gemini_agent.assemble_command(gemini_agent.host, (), command_override=None))
-    assert command.startswith("rm -f $MNGR_AGENT_STATE_DIR/session_started && ")
+    assert command.endswith(_SENTINEL_RM_THEN_GEMINI), command
+
+
+def test_assemble_command_clears_stale_sentinel_before_launching_gemini_without_watcher(
+    gemini_agent_without_transcript: GeminiAgent,
+) -> None:
+    """Without the watcher, the rm is the head of the command and chains into ``gemini``."""
+    agent = gemini_agent_without_transcript
+    command = str(agent.assemble_command(agent.host, (), command_override=None))
+    assert command == _SENTINEL_RM_THEN_GEMINI, command
 
 
 def test_assemble_command_prepends_transcript_watcher_when_enabled(gemini_agent: GeminiAgent) -> None:
     command = str(gemini_agent.assemble_command(gemini_agent.host, (), command_override=None))
     assert "$MNGR_AGENT_STATE_DIR/commands/common_transcript.sh" in command
-    # Watcher subshell must come AFTER the sentinel-cleanup so its leading
-    # ``(`` does not get mistaken for the head of the whole command.
-    assert " ( bash $MNGR_AGENT_STATE_DIR/commands/common_transcript.sh ) &" in command
+    # Watcher subshell must come FIRST so its trailing ``&`` only terminates
+    # the watcher; the sentinel rm and ``gemini`` then run as a foreground
+    # ``&&`` chain (otherwise ``rm && ( watcher ) & gemini`` would push the
+    # rm into the background where it races gemini's startup).
+    assert command.startswith("( bash $MNGR_AGENT_STATE_DIR/commands/common_transcript.sh ) &")
 
 
 def test_assemble_command_skips_transcript_watcher_when_disabled(

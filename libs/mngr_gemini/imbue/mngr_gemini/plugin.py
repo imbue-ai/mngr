@@ -283,24 +283,34 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
     ) -> CommandString:
         """Assemble the gemini command with stale-sentinel cleanup and the transcript watcher.
 
-        Prepends ``rm -f $MNGR_AGENT_STATE_DIR/session_started`` so that a
-        leftover sentinel from a previous run doesn't make
+        Inserts ``rm -f $MNGR_AGENT_STATE_DIR/session_started`` as a
+        foreground step that runs to completion before ``gemini`` launches,
+        so that a leftover sentinel from a previous run cannot make
         ``wait_for_ready_signal`` succeed before the new Gemini session has
         actually started (relevant on every restart, not just first launch).
 
         When ``is_common_transcript_enabled`` is True, also launches the
         transcript watcher fire-and-forget as a backgrounded subshell
-        (``( bash ... ) &``). Bash does not propagate SIGHUP to background
-        children of non-interactive shells by default, so the watcher may
-        outlive the tmux session and continue polling until killed by host
-        teardown or until its session inputs disappear.
+        (``( bash ... ) &``) placed *before* the ``rm`` step. Placement
+        matters: ``A && B & C`` in bash parses as ``( A && B ) &`` followed
+        by ``C``, so writing ``rm -f X && ( watcher ) & gemini`` would push
+        the ``rm`` into the background where it races gemini's startup.
+        Putting the watcher first -- ``( watcher ) & rm -f X && gemini`` --
+        confines ``&`` to the watcher subshell and leaves the rm in the
+        foreground chain that precedes the agent invocation, matching
+        ``mngr_claude``'s assembled-command shape.
+
+        Bash does not propagate SIGHUP to background children of
+        non-interactive shells by default, so the watcher may outlive the
+        tmux session and continue polling until killed by host teardown or
+        until its session inputs disappear.
         """
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
         clear_sentinel = f"rm -f $MNGR_AGENT_STATE_DIR/{_READINESS_SENTINEL_FILENAME}"
         if not self.is_common_transcript_enabled:
             return CommandString(f"{clear_sentinel} && {base_command}")
         background_cmd = f"( bash $MNGR_AGENT_STATE_DIR/commands/{_COMMON_TRANSCRIPT_SCRIPT_NAME} ) &"
-        return CommandString(f"{clear_sentinel} && {background_cmd} {base_command}")
+        return CommandString(f"{background_cmd} {clear_sentinel} && {base_command}")
 
 
 @hookimpl
