@@ -82,7 +82,9 @@ def test_install_via_brew_returns_false_when_brew_exits_nonzero(
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
 
     assert _install_via_brew(["nonexistent-package"]) is False
-    # Even on failure, brew was invoked (the function caught ProcessError).
+    # Even on failure, brew was invoked (the function swallowed the
+    # ConcurrencyExceptionGroup that ConcurrencyGroup raised around the
+    # underlying ProcessError).
     assert log_file.read_text().strip().splitlines() == ["brew install nonexistent-package"]
 
 
