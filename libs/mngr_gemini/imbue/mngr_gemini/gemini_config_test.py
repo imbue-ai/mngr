@@ -5,9 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
-from imbue.mngr_gemini.gemini_config import GeminiDirectoryNotTrustedError
 from imbue.mngr_gemini.gemini_config import HOOK_EVENT_BEFORE_TOOL
 from imbue.mngr_gemini.gemini_config import HOOK_EVENT_SESSION_START
 from imbue.mngr_gemini.gemini_config import build_permission_auto_allow_hooks_config
@@ -330,20 +327,3 @@ def test_merge_hooks_config_round_trips_through_disk(tmp_path: Path) -> None:
     reloaded = read_gemini_settings(settings_path)
     assert reloaded["general"] == {"approvalMode": "default"}
     assert HOOK_EVENT_SESSION_START in reloaded["hooks"]
-
-
-# =============================================================================
-# Error class
-# =============================================================================
-
-
-def test_gemini_directory_not_trusted_error_records_source_path() -> None:
-    err = GeminiDirectoryNotTrustedError("/some/path")
-    assert err.source_path == "/some/path"
-    assert "/some/path" in str(err)
-
-
-def test_gemini_directory_not_trusted_error_can_be_raised_and_caught() -> None:
-    with pytest.raises(GeminiDirectoryNotTrustedError) as excinfo:
-        raise GeminiDirectoryNotTrustedError("/x")
-    assert excinfo.value.source_path == "/x"

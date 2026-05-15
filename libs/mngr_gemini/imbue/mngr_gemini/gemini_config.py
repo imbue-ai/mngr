@@ -6,21 +6,9 @@ Gemini CLI consults three settings tiers (highest-to-lowest precedence):
   2. ``<project>/.gemini/settings.json`` (workspace)
   3. ``~/.gemini/settings.json`` (user)
 
-The JSON shape produced by the merge and builder helpers here was validated
-against Gemini CLI's published ``settings.schema.json`` and against a live
-Gemini CLI 0.42.0 session. ``mngr_gemini`` writes a per-agent settings file
-into the agent state dir and points Gemini at it via
-``GEMINI_CLI_SYSTEM_SETTINGS_PATH``, keeping the user's workspace and
-``~/.gemini/`` untouched.
-
-Workspace trust (``--skip-trust`` replacement) is also relevant here: smoke-
-testing established that the persistent trust file is
-``~/.gemini/trustedFolders.json`` (a flat ``{ "<path>": "TRUST_FOLDER" }``
-map), that the ``GEMINI_CLI_TRUST_WORKSPACE=true`` env var is Gemini's
-documented headless-automation equivalent, and that ``--skip-trust`` is
-silently weaker than either of the above (tools run, but workspace hooks
-are stripped). ``GeminiDirectoryNotTrustedError`` is defined here so callers
-can already reference the type.
+``mngr_gemini`` writes a per-agent settings file into the agent state dir
+and points Gemini at it via the system-tier env var, keeping the user's
+workspace and ``~/.gemini/`` untouched.
 """
 
 from __future__ import annotations
@@ -37,33 +25,8 @@ from typing import Final
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.errors import ConfigError
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.file_utils import read_json_dict
-
-
-class GeminiDirectoryNotTrustedError(ConfigError):
-    """The source directory is not trusted in Gemini's settings.
-
-    Gemini CLI shows a "Do you trust this folder?" dialog on first run in any
-    new directory. When mngr launches Gemini and then sends keystrokes via
-    tmux, those keystrokes accept the dialog and are consumed, so the intended
-    initial prompt is lost AND the directory is silently trusted. The
-    automated launch path clears this gate by setting
-    ``GEMINI_CLI_TRUST_WORKSPACE=true`` on the agent's environment (see
-    ``GeminiAgent.modify_env_vars``); this error type is raised by callers
-    that detect an untrusted state outside that flow (e.g. interactive
-    launches that cannot or choose not to set the env var).
-    """
-
-    def __init__(self, source_path: str) -> None:
-        self.source_path = source_path
-        super().__init__(
-            f"Source directory {source_path} is not trusted by Gemini CLI. "
-            "Run `mngr create` interactively (without --no-connect) to be prompted, "
-            f"or run Gemini CLI manually in {source_path} and accept the trust dialog."
-        )
-
 
 # =============================================================================
 # Config directory + settings path resolution
