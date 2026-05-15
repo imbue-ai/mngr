@@ -1,45 +1,20 @@
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderNetworkUnreachableError
-from imbue.mngr.errors import ProviderNotAuthorizedError
-from imbue.mngr.primitives import ProviderInstanceName
 
 
 class ImbueCloudError(MngrError):
     """Base class for all imbue_cloud plugin errors."""
 
 
-class ImbueCloudConnectorError(ImbueCloudError, ProviderNetworkUnreachableError):
-    """Connector returned an unexpected response (5xx, malformed, network).
-
-    The ``ProviderNetworkUnreachableError`` parent gives the discovery
-    boundary a typed provider-unavailable class and lets programmatic
-    consumers discriminate via ``exception_type``. Like any other provider
-    failure it lands on ``ListResult.errors``.
-    """
-
-    def __init__(self, message: str, provider_name: str | None = None) -> None:
-        if provider_name is not None:
-            ProviderNetworkUnreachableError.__init__(self, ProviderInstanceName(provider_name), message)
-        else:
-            ImbueCloudError.__init__(self, message)
+class ImbueCloudConnectorError(ImbueCloudError):
+    """Raised when the remote_service_connector returns an unexpected response."""
 
 
-class ImbueCloudAuthError(ImbueCloudError, HostAuthenticationError, ProviderNotAuthorizedError):
-    """Connector rejected the configured token (401/403).
+class ImbueCloudAuthError(ImbueCloudError, HostAuthenticationError):
+    """Raised when authentication is missing or refresh fails."""
 
-    The ``ProviderNotAuthorizedError`` parent gives the discovery boundary
-    a typed, user-actionable auth-failure class and lets programmatic
-    consumers discriminate via ``exception_type``. Like any other provider
-    failure it lands on ``ListResult.errors``. The ``HostAuthenticationError``
-    parent lets per-host ``except HostAuthenticationError`` clauses match.
-    """
-
-    def __init__(self, message: str, provider_name: str | None = None) -> None:
-        if provider_name is not None:
-            ProviderNotAuthorizedError.__init__(self, ProviderInstanceName(provider_name), auth_help=message)
-        else:
-            ImbueCloudError.__init__(self, message)
+    def __init__(self, message: str) -> None:
+        ImbueCloudError.__init__(self, message)
 
 
 class ImbueCloudLeaseUnavailableError(ImbueCloudError):

@@ -42,7 +42,6 @@ from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
@@ -93,7 +92,6 @@ from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import get_provider_data_dir
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
-from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
@@ -342,18 +340,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             return self._leased_hosts_cache
         account = self._require_account()
         token = self._get_access_token(account)
-        # Wrap connector-unreachable as ProviderUnavailableError so the
-        # discovery boundary records it on ListResult.errors as a provider
-        # failure. The catch is narrow by design: ImbueCloudAuthError
-        # (401/403, wrong token) propagates as its own typed error so
-        # programmatic consumers can still discriminate via exception_type
-        # (both classes land on result.errors). The client layer can't
-        # raise ProviderUnavailableError directly because its constructor
-        # needs the provider instance name, which the client doesn't know.
-        try:
-            self._leased_hosts_cache = self.client.list_hosts(token)
-        except ImbueCloudConnectorError as exc:
-            raise ProviderUnavailableError(self.name, str(exc)) from exc
+        self._leased_hosts_cache = self.client.list_hosts(token)
         return self._leased_hosts_cache
 
     def discover_hosts(
