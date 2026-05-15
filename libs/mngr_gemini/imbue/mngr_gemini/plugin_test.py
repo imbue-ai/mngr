@@ -16,6 +16,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr_gemini.gemini_config import HOOK_EVENT_BEFORE_TOOL
 from imbue.mngr_gemini.gemini_config import HOOK_EVENT_SESSION_START
 from imbue.mngr_gemini.plugin import GeminiAgent
 from imbue.mngr_gemini.plugin import GeminiAgentConfig
@@ -31,6 +32,7 @@ def test_gemini_agent_config_has_correct_defaults() -> None:
     assert config.permissions == []
     assert config.parent_type is None
     assert config.emit_common_transcript is True
+    assert config.auto_allow_permissions is False
 
 
 def test_gemini_agent_config_merge_with_concatenates_user_args() -> None:
@@ -106,6 +108,14 @@ def gemini_agent_without_transcript(
     tmp_path: Path,
 ) -> GeminiAgent:
     return _make_gemini_agent(local_provider, tmp_path, GeminiAgentConfig(emit_common_transcript=False))
+
+
+@pytest.fixture
+def gemini_agent_auto_allow(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> GeminiAgent:
+    return _make_gemini_agent(local_provider, tmp_path, GeminiAgentConfig(auto_allow_permissions=True))
 
 
 def test_assemble_command_uses_bare_gemini_command_with_no_default_cli_args(
@@ -269,3 +279,36 @@ def test_provision_installs_hooks_even_when_transcript_disabled(
     )
     settings = _read_system_settings(agent)
     assert HOOK_EVENT_SESSION_START in settings["hooks"]
+
+
+def test_provision_omits_before_tool_hook_when_auto_allow_disabled(
+    gemini_agent: GeminiAgent,
+) -> None:
+    """The default config does not install a permission auto-allow hook."""
+    gemini_agent.provision(
+        host=gemini_agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
+        mngr_ctx=gemini_agent.mngr_ctx,
+    )
+    settings = _read_system_settings(gemini_agent)
+    assert HOOK_EVENT_BEFORE_TOOL not in settings["hooks"]
+
+
+def test_provision_installs_before_tool_hook_when_auto_allow_enabled(
+    gemini_agent_auto_allow: GeminiAgent,
+) -> None:
+    """``auto_allow_permissions=True`` adds a BeforeTool wildcard allow hook alongside readiness."""
+    agent = gemini_agent_auto_allow
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("gemini")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+    settings = _read_system_settings(agent)
+    # Both hooks land in the same file.
+    assert HOOK_EVENT_SESSION_START in settings["hooks"]
+    assert HOOK_EVENT_BEFORE_TOOL in settings["hooks"]
+    before_tool_groups = settings["hooks"][HOOK_EVENT_BEFORE_TOOL]
+    assert before_tool_groups[0]["matcher"] == ".*"
+    inner_command = before_tool_groups[0]["hooks"][0]["command"]
+    assert '"decision":"allow"' in inner_command

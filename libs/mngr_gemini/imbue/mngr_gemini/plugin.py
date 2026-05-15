@@ -20,7 +20,9 @@ from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
 from imbue.mngr_gemini import resources as _gemini_resources
+from imbue.mngr_gemini.gemini_config import build_permission_auto_allow_hooks_config
 from imbue.mngr_gemini.gemini_config import build_readiness_hooks_config
+from imbue.mngr_gemini.gemini_config import merge_hooks_config
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME = "common_transcript.sh"
 
@@ -86,6 +88,16 @@ class GeminiAgentConfig(AgentTypeConfig):
         "process polls gemini's session JSONL files and converts user, assistant, "
         "tool-call, and tool-result events into the common schema that "
         "`mngr transcript` reads.",
+    )
+    auto_allow_permissions: bool = Field(
+        default=False,
+        description="When True, install a BeforeTool hook (wildcard matcher) that "
+        'auto-approves every tool call by emitting `{"decision":"allow"}` on '
+        "stdout. Mirrors mngr_claude's `auto_allow_permissions` flag (which "
+        "uses Gemini's PermissionRequest event equivalent). Prefer this over "
+        "the `-y`/`--approval-mode yolo` CLI flag: the hook survives admin "
+        "policies that disable yolo mode (`security.disableYoloMode`) and "
+        "shows up explicitly in Gemini's `--debug` hook-registry output.",
     )
 
 
@@ -177,15 +189,20 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
             )
 
     def _install_system_settings(self, host: OnlineHostInterface) -> None:
-        """Write the mngr-owned system-tier settings file with the readiness hook.
+        """Write the mngr-owned system-tier settings file with the configured hooks.
 
-        The file's only contents are the readiness ``hooks`` block today;
-        when later PRs add more hooks (e.g. permission auto-allow) they ship
-        in the same file. Because mngr owns this file outright (it lives in
-        the per-agent state dir), no merge logic is needed: each provision
-        run rewrites it.
+        Always includes the readiness hook (``SessionStart`` → touch
+        ``$MNGR_AGENT_STATE_DIR/session_started``). When
+        ``agent_config.auto_allow_permissions`` is True, also includes a
+        ``BeforeTool`` wildcard hook that auto-approves every tool call.
+        Because mngr owns this file outright (it lives in the per-agent state
+        dir), no merge logic is needed: each provision run rewrites it. The
+        ``merge_hooks_config`` helper is still used here so multiple hook
+        builders compose without overwriting each other's event lists.
         """
         settings = build_readiness_hooks_config()
+        if self.agent_config.auto_allow_permissions:
+            settings = merge_hooks_config(settings, build_permission_auto_allow_hooks_config()) or settings
         host.write_text_file(self._get_system_settings_path(), json.dumps(settings, indent=2) + "\n")
 
     def assemble_command(
