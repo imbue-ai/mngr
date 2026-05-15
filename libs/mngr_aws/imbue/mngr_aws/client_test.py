@@ -155,6 +155,35 @@ class TestAwsVpsClientInstances:
         )
         assert client.get_instance_status(VpsInstanceId("i-1")) == VpsInstanceStatus.UNKNOWN
 
+    def test_get_instance_status_instance_not_found_returns_unknown(
+        self, stubbed_client: tuple[AwsVpsClient, Stubber]
+    ) -> None:
+        """The specific InvalidInstanceID.NotFound code maps to UNKNOWN (instance deleted upstream)."""
+        client, stubber = stubbed_client
+        stubber.add_client_error(
+            "describe_instances",
+            service_error_code="InvalidInstanceID.NotFound",
+            service_message="The instance ID 'i-missing' does not exist",
+            http_status_code=400,
+            expected_params={"InstanceIds": ["i-missing"]},
+        )
+        assert client.get_instance_status(VpsInstanceId("i-missing")) == VpsInstanceStatus.UNKNOWN
+
+    def test_get_instance_status_unrelated_not_found_surfaces(
+        self, stubbed_client: tuple[AwsVpsClient, Stubber]
+    ) -> None:
+        """Regression: other ``*.NotFound`` codes must NOT be silently swallowed as UNKNOWN."""
+        client, stubber = stubbed_client
+        stubber.add_client_error(
+            "describe_instances",
+            service_error_code="InvalidSubnetID.NotFound",
+            service_message="The subnet ID 'subnet-x' does not exist",
+            http_status_code=400,
+            expected_params={"InstanceIds": ["i-1"]},
+        )
+        with pytest.raises(VpsApiError, match="InvalidSubnetID.NotFound"):
+            client.get_instance_status(VpsInstanceId("i-1"))
+
     def test_get_instance_ip(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
         client, stubber = stubbed_client
         stubber.add_response(

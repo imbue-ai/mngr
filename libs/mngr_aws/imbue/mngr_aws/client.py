@@ -36,6 +36,10 @@ _STATE_MAP: Final[dict[str, VpsInstanceStatus]] = {
 # and should be treated as success (idempotent ensure).
 _DUPLICATE_INGRESS_ERROR: Final[str] = "InvalidPermission.Duplicate"
 
+# AWS error code for "the EC2 instance ID does not exist", as opposed to other
+# ``*.NotFound`` codes that indicate misconfiguration of other resources.
+_AWS_INSTANCE_NOT_FOUND_CODE: Final[str] = "InvalidInstanceID.NotFound"
+
 
 def _parse_kv_tag(raw_tag: str) -> dict[str, str]:
     """Parse a "key=value" string into an EC2 Tag dict.
@@ -284,7 +288,11 @@ class AwsVpsClient(VpsClientInterface):
         try:
             instance = self._describe_instance(instance_id)
         except VpsApiError as e:
-            if "NotFound" in str(e):
+            # Only the specific "instance does not exist" AWS code should be
+            # treated as UNKNOWN. Other ``*.NotFound`` codes (e.g.,
+            # InvalidSubnetID.NotFound) indicate real misconfiguration and
+            # must surface to the caller.
+            if _AWS_INSTANCE_NOT_FOUND_CODE in str(e):
                 return VpsInstanceStatus.UNKNOWN
             raise
         if instance is None:
