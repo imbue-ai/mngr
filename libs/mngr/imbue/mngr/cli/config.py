@@ -30,6 +30,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
 from imbue.mngr.config.key_resolver import is_extend_key
+from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.config.pre_readers import get_user_config_path
@@ -138,15 +139,10 @@ def _unset_nested_value(doc: tomlkit.TOMLDocument, key_path: str) -> bool:
 def _parse_value(value_str: str) -> Any:
     """Parse a string value into the appropriate type.
 
-    Attempts to parse as JSON first (for booleans, numbers, arrays, objects),
-    then falls back to treating it as a string.
+    Thin wrapper over ``parse_scalar_value`` so ``mngr config set/extend``
+    value semantics stay in lockstep with TOML / env-var / ``--setting``.
     """
-    # Try parsing as JSON for proper type handling
-    try:
-        return json.loads(value_str)
-    except json.JSONDecodeError:
-        # Not valid JSON, treat as string
-        return value_str
+    return parse_scalar_value(value_str)
 
 
 def _format_value_for_display(value: Any) -> str:

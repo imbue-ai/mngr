@@ -13,12 +13,14 @@ kept here so env-var parsing, TOML parsing, ``--setting`` parsing, and
 ``mngr config`` all stay in lockstep.
 """
 
+import json
 from collections.abc import Mapping
 from typing import Any
 from typing import Final
 
 from pydantic import BaseModel
 
+from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import ConfigParseError
 
 # Operator suffix on a leaf key indicating "extend the current value".
@@ -35,6 +37,21 @@ EXTEND_SUFFIX_ENV: Final[str] = "__EXTEND"
 TOP_LEVEL_CONTAINER_FIELDS: Final[frozenset[str]] = frozenset(
     {"agent_types", "providers", "plugins", "commands", "create_templates"}
 )
+
+
+@pure
+def parse_scalar_value(value_str: str) -> Any:
+    """Parse a raw string into the appropriate Python scalar/aggregate value.
+
+    JSON-parses first (so booleans, numbers, arrays, and objects work) and
+    falls back to the raw string when the input is not valid JSON. Shared by
+    the env-var loader, ``--setting``, ``mngr config set/extend``, and tests
+    so they all keep identical value semantics.
+    """
+    try:
+        return json.loads(value_str)
+    except json.JSONDecodeError:
+        return value_str
 
 
 def is_extend_key(key: str) -> bool:

@@ -1,4 +1,3 @@
-import json
 import string
 import sys
 import uuid
@@ -27,6 +26,7 @@ from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import load_config
@@ -382,13 +382,10 @@ def _process_template_escapes(template: str) -> str:
 def _parse_setting_value(value_str: str) -> Any:
     """Parse a setting value string into the appropriate Python type.
 
-    Tries JSON first (for booleans, numbers, arrays, objects), then falls back
-    to treating the value as a plain string.
+    Thin wrapper over ``parse_scalar_value`` so ``--setting`` value semantics
+    stay in lockstep with TOML / env-var / ``mngr config set`` parsing.
     """
-    try:
-        return json.loads(value_str)
-    except json.JSONDecodeError:
-        return value_str
+    return parse_scalar_value(value_str)
 
 
 def _set_nested_dict_value(data: dict[str, Any], key_path: str, value: Any) -> None:

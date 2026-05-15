@@ -1,4 +1,3 @@
-import json
 import os
 import re
 from collections.abc import Callable
@@ -32,6 +31,7 @@ from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
+from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
 from imbue.mngr.config.pre_readers import get_user_config_path
@@ -847,14 +847,10 @@ def parse_config(
 def _parse_env_value(value_str: str) -> Any:
     """Parse a ``MNGR__*`` env var value, mirroring ``--setting`` semantics.
 
-    JSON-parses first (so booleans, numbers, arrays, and objects all work) and
-    falls back to the raw string. This keeps env-var and ``--setting`` value
-    parsing identical.
+    Thin wrapper over ``parse_scalar_value`` so the env-var path stays in
+    lockstep with TOML / ``--setting`` / ``mngr config`` value parsing.
     """
-    try:
-        return json.loads(value_str)
-    except json.JSONDecodeError:
-        return value_str
+    return parse_scalar_value(value_str)
 
 
 def _env_segments_to_key_path(segments: list[str]) -> list[str]:
