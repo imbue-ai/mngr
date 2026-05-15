@@ -70,7 +70,7 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(16))
+    rc.check_inline_imports(_DIR, snapshot(30))
 
 
 def test_prevent_relative_imports() -> None:
@@ -246,7 +246,7 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(3))
+    rc.check_inline_functions(_DIR, snapshot(5))
 
 
 def test_prevent_underscore_imports() -> None:

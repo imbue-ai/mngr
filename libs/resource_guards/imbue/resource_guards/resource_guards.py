@@ -26,17 +26,21 @@ Usage:
 
 import dataclasses
 import importlib.metadata
+import inspect
 import os
 import shutil
 import stat
 import tempfile
+import weakref
 from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Iterable
 from enum import StrEnum
 from enum import auto
+from functools import wraps
 from pathlib import Path
 from typing import Any
+from typing import TypeVar
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -515,6 +519,146 @@ def _build_per_test_guard_env(marks: set[str], tracking_dir: str) -> dict[str, s
     return env
 
 
+# ---------------------------------------------------------------------------
+# Fixture-level resource guard scope (opt-in)
+# ---------------------------------------------------------------------------
+#
+# By default, resource invocations during fixture setup/teardown are attributed
+# to whichever test's lifecycle they happen in. That works fine for
+# function-scoped fixtures (1:1 with tests), but for module/session-scoped
+# fixtures shared across tests it produces incorrect attribution: the fixture's
+# setup-time resource calls land in only the first consuming test's tracking
+# dir, and sibling tests appear to be either over-marked ("never invoked") or
+# under-authorized (the fixture's call gets blocked because some sibling that
+# triggered setup lacks the mark).
+#
+# @fixture_uses_resources declares that a fixture itself uses specific
+# resources. Such fixtures run setup/teardown under their own guard scope:
+# resource calls inside the fixture are authorized against the fixture's
+# declaration rather than the consuming test's marks, and the consuming test's
+# tracking_dir is untouched by the fixture's calls. Per-test marks then mean
+# "this test's body directly invokes the resource" -- a fixture providing the
+# resource handles its own declaration.
+#
+# Opt-in: untagged fixtures keep today's behavior unchanged.
+
+
+# Maps a fixture function to the resources it has declared via
+# @fixture_uses_resources. WeakKeyDictionary so registering a decorator on
+# a transient function does not leak the function past its lifetime.
+_fixture_resource_marks: weakref.WeakKeyDictionary[Callable[..., Any], set[str]] = weakref.WeakKeyDictionary()
+
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def fixture_uses_resources(*resources: str) -> Callable[[F], F]:
+    """Declare which guarded resources a pytest fixture uses.
+
+    Apply BELOW @pytest.fixture so the underlying function is registered
+    before pytest captures it as a FixtureDef::
+
+        @pytest.fixture(scope="module")
+        @fixture_uses_resources("modal")
+        def deployed_function() -> Generator[...]:
+            ...
+
+    During the fixture's setup and teardown, the resource guard treats the
+    fixture as an independently-marked scope: resource calls inside the
+    fixture are authorized against the fixture's declared resources rather
+    than whichever test happens to trigger setup. This lets module/session-
+    scoped fixtures share expensive resource-using setup across tests
+    without requiring every consuming test to carry the same mark.
+    """
+
+    def decorator(func: F) -> F:
+        existing = _fixture_resource_marks.get(func, set())
+        _fixture_resource_marks[func] = existing | set(resources)
+        return func
+
+    return decorator
+
+
+def _build_fixture_guard_env(resources: set[str], tracking_dir: str) -> dict[str, str]:
+    """Build env vars for a fixture's guard scope.
+
+    Same shape as _build_per_test_guard_env, but the "marks" come from the
+    fixture's @fixture_uses_resources declaration instead of the test's
+    pytest marks.
+    """
+    return _build_per_test_guard_env(resources, tracking_dir)
+
+
+def _make_guarded_fixture_wrapper(
+    original_func: Callable[..., Any],
+    fixture_env: dict[str, str],
+) -> Callable[..., Any]:
+    """Wrap a fixture function so its setup and teardown run under fixture_env.
+
+    Between the fixture's setup yield and teardown, env vars are restored so
+    consuming tests see their own per-test env -- the fixture's env only
+    applies inside the fixture function itself.
+
+    Generator fixtures: setup runs up to the yield with fixture_env active,
+    then env is restored. When pytest re-enters the generator for teardown,
+    fixture_env is reapplied for the post-yield body.
+
+    Non-generator fixtures: fixture_env is active for the whole call.
+    """
+    if inspect.isgeneratorfunction(original_func):
+
+        @wraps(original_func)
+        def wrapped(*args: Any, **kwargs: Any) -> Generator[Any, None, None]:
+            gen = original_func(*args, **kwargs)
+            with patch.dict(os.environ, fixture_env):
+                value = next(gen)
+            yield value
+            with patch.dict(os.environ, fixture_env):
+                for _ in gen:
+                    pass
+
+        return wrapped
+
+    @wraps(original_func)
+    def wrapped_plain(*args: Any, **kwargs: Any) -> Any:
+        with patch.dict(os.environ, fixture_env):
+            return original_func(*args, **kwargs)
+
+    return wrapped_plain
+
+
+def _check_fixture_setup_violations(
+    fixture_id: str,
+    resources: set[str],
+    tracking_dir: str,
+    setup_failed: bool,
+) -> None:
+    """Validate fixture-scope guard invariants after setup.
+
+    Mirrors _check_guard_violations but applies to a fixture's setup phase.
+    Raises ResourceGuardViolation on a blocked invocation regardless of
+    setup outcome, and on a "declared but never invoked" violation only
+    when setup succeeded (otherwise the violation may be a downstream
+    consequence of the setup failure).
+    """
+    for resource in _guarded_resources:
+        if (Path(tracking_dir) / f"blocked_{resource}").exists():
+            raise ResourceGuardViolation(
+                f"RESOURCE GUARD: Fixture '{fixture_id}' invoked '{resource}' but did not declare it via "
+                f"@fixture_uses_resources({resource!r}). Add the declaration or remove the {resource} usage."
+            )
+
+    if setup_failed:
+        return
+
+    for resource in resources:
+        if not (Path(tracking_dir) / resource).exists():
+            raise ResourceGuardViolation(
+                f"RESOURCE GUARD: Fixture '{fixture_id}' declared @fixture_uses_resources({resource!r}) "
+                f"but did not invoke {resource} during setup. Remove the declaration "
+                f"or ensure the fixture exercises {resource}."
+            )
+
+
 class _ResourceGuardPlugin:
     """Pytest plugin registered by start_resource_guards().
 
@@ -539,6 +683,49 @@ class _ResourceGuardPlugin:
         call: pytest.CallInfo,
     ) -> Generator[None, None, None]:
         yield from _pytest_runtest_makereport(item, call)
+
+    @staticmethod
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_fixture_setup(
+        fixturedef: Any,
+        request: pytest.FixtureRequest,
+    ) -> Generator[None, None, None]:
+        yield from _pytest_fixture_setup(fixturedef, request)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def _pytest_fixture_setup(
+    fixturedef: Any,
+    request: pytest.FixtureRequest,
+) -> Generator[None, None, None]:
+    """Apply a fixture-scope guard around fixtures that opted in.
+
+    Only fires for fixtures decorated with @fixture_uses_resources. Other
+    fixtures yield-through with no behavior change, so this is fully
+    backward-compatible with existing fixtures.
+    """
+    resources = _fixture_resource_marks.get(fixturedef.func)
+    if not resources:
+        yield
+        return
+
+    resources_set = set(resources)
+    tracking_dir = tempfile.mkdtemp(prefix="pytest_guard_fixture_")
+    fixture_env = _build_fixture_guard_env(resources_set, tracking_dir)
+    fixture_id = fixturedef.argname
+
+    original_func = fixturedef.func
+    fixturedef.func = _make_guarded_fixture_wrapper(original_func, fixture_env)
+
+    setup_failed = False
+    try:
+        outcome = yield
+        setup_failed = outcome.excinfo is not None
+    finally:
+        fixturedef.func = original_func
+        _check_fixture_setup_violations(fixture_id, resources_set, tracking_dir, setup_failed)
+        # Tracking dir is left in /tmp; the wrapper's teardown still writes to
+        # it, and the OS cleans tempfiles. Not worth the bookkeeping to delete.
 
 
 @pytest.hookimpl(hookwrapper=True)

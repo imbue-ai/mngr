@@ -22,6 +22,7 @@ from imbue.mngr.utils.testing import register_modal_test_volume
 from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.routes.deployment import deploy_function
 from imbue.modal_proxy.direct import DirectModalInterface
+from imbue.resource_guards.resource_guards import fixture_uses_resources
 
 # =============================================================================
 # Acceptance tests (require Modal network access)
@@ -127,6 +128,7 @@ def _read_host_record_from_volume(app_name: str, host_id: str) -> dict[str, Any]
 
 
 @pytest.fixture(scope="module")
+@fixture_uses_resources("modal")
 def deployed_snapshot_function() -> Generator[tuple[str, str], None, None]:
     """Deploy the snapshot function for testing and clean up after.
 

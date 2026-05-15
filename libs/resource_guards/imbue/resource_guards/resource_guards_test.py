@@ -213,6 +213,151 @@ def test_unmarked_test_that_does_not_call_resource_passes(pytester: pytest.Pytes
 
 
 # ---------------------------------------------------------------------------
+# Fixture-scope guard (@fixture_uses_resources)
+# ---------------------------------------------------------------------------
+
+
+def test_fixture_declaring_resource_allows_setup_calls_for_unmarked_consumer(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """A module-scoped fixture that declares the resource handles its own setup calls.
+
+    The consuming test does not need the mark: the fixture's setup-time
+    resource calls are authorized against the fixture's declaration,
+    independent of the consuming test's marks.
+    """
+    pytester.makeconftest(_PYTESTER_CONFTEST)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture(scope="module")
+        @fixture_uses_resources("cat")
+        def cat_fixture():
+            subprocess.run(["cat", "/dev/null"], check=True)
+            yield "value"
+
+        def test_consumer_without_mark(cat_fixture):
+            assert cat_fixture == "value"
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1)
+
+
+def test_fixture_declares_resource_but_does_not_use_it_fails(pytester: pytest.Pytester, clean_guard_env: None) -> None:
+    """A fixture that declares a resource it never invokes during setup should fail."""
+    pytester.makeconftest(_PYTESTER_CONFTEST)
+    pytester.makepyfile("""
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture
+        @fixture_uses_resources("cat")
+        def empty_fixture():
+            yield "value"
+
+        def test_consumer(empty_fixture):
+            assert empty_fixture == "value"
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(errors=1)
+    result.stdout.fnmatch_lines(["*did not invoke cat during setup*"])
+
+
+def test_fixture_uses_resource_without_declaring_it_fails(pytester: pytest.Pytester, clean_guard_env: None) -> None:
+    """A fixture that uses cat without declaring it should fail at setup."""
+    pytester.makeconftest(_PYTESTER_CONFTEST)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture
+        @fixture_uses_resources("ls")
+        def wrong_fixture():
+            # Declares "ls" but actually calls cat. Cat is not in the fixture's
+            # declared resources, so the call should be blocked.
+            subprocess.run(["cat", "/dev/null"], capture_output=True)
+            yield "value"
+
+        def test_consumer(wrong_fixture):
+            assert wrong_fixture == "value"
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(errors=1)
+    result.stdout.fnmatch_lines(["*did not declare it*"])
+
+
+def test_fixture_resource_calls_do_not_leak_into_consumer_tracking(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """Fixture setup's resource calls must not satisfy the consuming test's mark.
+
+    A test marked @pytest.mark.cat that only consumes a fixture (and never
+    calls cat in its body) should still fail with "never invoked cat" --
+    the fixture's calls belong to the fixture's scope, not the test's.
+    """
+    pytester.makeconftest(_PYTESTER_CONFTEST)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture
+        @fixture_uses_resources("cat")
+        def cat_fixture():
+            subprocess.run(["cat", "/dev/null"], check=True)
+            yield "value"
+
+        @pytest.mark.cat
+        def test_marked_but_body_does_not_use_cat(cat_fixture):
+            assert cat_fixture == "value"
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*never invoked cat*"])
+
+
+def test_fixture_teardown_resource_calls_authorized_against_fixture(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """Fixture teardown calls should also run under the fixture's guard scope.
+
+    If teardown happens during an unmarked test's lifecycle, its resource
+    calls must not be blocked (they belong to the fixture, not the test).
+    """
+    pytester.makeconftest(_PYTESTER_CONFTEST)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture(scope="module")
+        @fixture_uses_resources("cat")
+        def cat_fixture():
+            subprocess.run(["cat", "/dev/null"], check=True)
+            yield "value"
+            # Teardown invocation; should not be blocked even when the
+            # last consuming test lacks the mark.
+            subprocess.run(["cat", "/dev/null"], check=True)
+
+        def test_first_consumer(cat_fixture):
+            assert cat_fixture == "value"
+
+        def test_second_consumer(cat_fixture):
+            assert cat_fixture == "value"
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=2)
+
+
+# ---------------------------------------------------------------------------
 # Session lifecycle
 # ---------------------------------------------------------------------------
 
