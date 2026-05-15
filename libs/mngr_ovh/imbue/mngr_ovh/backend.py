@@ -4,6 +4,7 @@ from typing import Final
 
 import ovh
 from loguru import logger
+from ovh.exceptions import InvalidConfiguration
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -217,9 +218,31 @@ def _iam_region_code(endpoint: str) -> str:
 
 
 def _build_ovh_client(config: OvhProviderConfig) -> OvhVpsClient:
-    """Construct an authenticated ``OvhVpsClient`` from config / env / ~/.ovh.conf."""
+    """Construct an ``OvhVpsClient`` from config / env / ``~/.ovh.conf``.
+
+    If no credentials are configured anywhere, ``python-ovh`` raises
+    ``InvalidConfiguration`` at construction time. We catch that and
+    substitute placeholder credentials so the client is still
+    constructible -- any actual API call will then fail with a clear
+    auth error rather than the provider blowing up at registration
+    time. This mirrors how ``mngr_vultr`` accepts an empty API key when
+    none is configured, and lets unrelated tests that merely enumerate
+    registered backends run without OVH credentials.
+    """
     kwargs = config.resolve_python_ovh_kwargs()
-    raw_client = ovh.Client(**kwargs)
+    try:
+        raw_client = ovh.Client(**kwargs)
+    except InvalidConfiguration:
+        logger.debug(
+            "OVH credentials not configured; constructing a placeholder client. "
+            "OVH provider API calls will fail until credentials are provided."
+        )
+        raw_client = ovh.Client(
+            endpoint=kwargs.get("endpoint", "ovh-us"),
+            application_key="mngr-ovh-unconfigured",
+            application_secret="mngr-ovh-unconfigured",
+            consumer_key="mngr-ovh-unconfigured",
+        )
     return OvhVpsClient(ovh_client=raw_client, subsidiary=config.ovh_subsidiary)
 
 
