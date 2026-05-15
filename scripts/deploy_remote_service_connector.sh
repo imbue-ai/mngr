@@ -78,7 +78,10 @@ uv run python "$repo_root/scripts/push_modal_secrets.py" "$tier" \
 # of a new env.
 echo "==> Ensuring Modal environment '${modal_env}' exists..."
 if ! env_create_output=$(uv run modal environment create "$modal_env" 2>&1); then
-    if echo "$env_create_output" | grep -qi "already exists"; then
+    # Modal's "this env already exists" failure has shifted wording across
+    # versions ("already exists", "same name or web label suffix as an
+    # existing one"); both contain the substring "exist".
+    if echo "$env_create_output" | grep -qi "exist"; then
         echo "    (already exists)"
     else
         echo "$env_create_output" >&2
