@@ -320,19 +320,23 @@ class AwsVpsClient(VpsClientInterface):
             filters.append({"Name": "tag:mngr-provider", "Values": [provider_tag]})
 
         instances: list[dict[str, Any]] = []
-        paginator = self._ec2().get_paginator("describe_instances")
-        for page in paginator.paginate(Filters=filters):
-            for reservation in page.get("Reservations", []):
-                for instance in reservation.get("Instances", []):
-                    tag_kv = [f"{t['Key']}={t['Value']}" for t in instance.get("Tags", [])]
-                    instances.append(
-                        {
-                            "id": instance.get("InstanceId", ""),
-                            "main_ip": instance.get("PublicIpAddress", ""),
-                            "state": instance.get("State", {}).get("Name", ""),
-                            "tags": tag_kv,
-                        }
-                    )
+        # The paginator defers actual API calls until iteration, so the error
+        # translation block must wrap the iteration itself, not just the
+        # ``get_paginator`` factory call.
+        with self._translate_aws_errors():
+            paginator = self._ec2().get_paginator("describe_instances")
+            for page in paginator.paginate(Filters=filters):
+                for reservation in page.get("Reservations", []):
+                    for instance in reservation.get("Instances", []):
+                        tag_kv = [f"{t['Key']}={t['Value']}" for t in instance.get("Tags", [])]
+                        instances.append(
+                            {
+                                "id": instance.get("InstanceId", ""),
+                                "main_ip": instance.get("PublicIpAddress", ""),
+                                "state": instance.get("State", {}).get("Name", ""),
+                                "tags": tag_kv,
+                            }
+                        )
         return instances
 
     # =========================================================================

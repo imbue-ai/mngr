@@ -222,6 +222,23 @@ class TestAwsVpsClientInstances:
         assert instances[0]["main_ip"] == "10.0.0.1"
         assert "mngr-provider=test" in instances[0]["tags"]
 
+    def test_list_instances_translates_client_errors(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        """Regression: ClientError raised during pagination must surface as VpsApiError.
+
+        Without translation, a raw botocore.ClientError would bypass the
+        (HostConnectionError, MngrError) handler in the shared discovery
+        flow and crash listing instead of being surfaced as a warning.
+        """
+        client, stubber = stubbed_client
+        stubber.add_client_error(
+            "describe_instances",
+            service_error_code="UnauthorizedOperation",
+            service_message="not authorized",
+            http_status_code=403,
+        )
+        with pytest.raises(VpsApiError, match="UnauthorizedOperation"):
+            client.list_instances(provider_tag="test")
+
 
 class TestAwsVpsClientKeyPairs:
     def test_upload_ssh_key(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
