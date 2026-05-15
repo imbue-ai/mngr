@@ -76,9 +76,9 @@ def test_install_via_brew_returns_false_when_brew_exits_nonzero(
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
 
     assert _install_via_brew(["nonexistent-package"]) is False
-    # Even on failure, brew was invoked (the function swallowed the
-    # ConcurrencyExceptionGroup that ConcurrencyGroup raised around the
-    # underlying ProcessError).
+    # Even on failure, brew was invoked: run_process_to_completion raised
+    # ProcessError, ConcurrencyGroup.__exit__ wrapped it in a
+    # ConcurrencyExceptionGroup, and _install_via_brew swallowed that group.
     assert log_file.read_text().strip().splitlines() == ["brew install nonexistent-package"]
 
 
@@ -120,8 +120,9 @@ def test_install_via_apt_stops_at_first_failure(tmp_path: Path, monkeypatch: pyt
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
 
     assert _install_via_apt(["tmux"]) is False
-    # Only the first command was attempted; ConcurrencyGroup raised ProcessError
-    # before the install call.
+    # Only the first command was attempted: run_process_to_completion raised
+    # ProcessError on the failing `update`, so control never reached the
+    # second `install` call inside the `with ConcurrencyGroup(...)` block.
     assert log_file.read_text().strip().splitlines() == ["sudo apt-get update -qq"]
 
 
