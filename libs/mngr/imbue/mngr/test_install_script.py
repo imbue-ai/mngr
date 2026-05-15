@@ -136,12 +136,14 @@ def test_install_sh_installs_when_mngr_not_present(tmp_path: Path) -> None:
 
 @pytest.mark.timeout(30)
 def test_install_sh_errors_when_mngr_not_on_path_after_install(tmp_path: Path) -> None:
-    """If uv "installs" mngr but the binary is not on PATH, exit with a PATH error.
+    """If `command -v mngr` fails after `uv tool install`, exit with a PATH error.
 
-    Reproduces the case where uv writes mngr to a directory the user has not
-    added to their shell's PATH (e.g. ~/.local/bin missing from $PATH on a
-    stock setup) -- install.sh should detect this and exit non-zero with
-    instructions pointing at the uv tool bin directory.
+    Simulates the post-install state where mngr is not resolvable on $PATH
+    by leaving the mock `mngr` binary off the synthetic PATH entirely.
+    install.sh cannot distinguish "binary lives in a directory not on PATH"
+    from "binary was never written" -- both reach the same `command -v mngr`
+    check -- so this test exercises the PATH-error branch of install.sh
+    without modelling where uv would have written the binary.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
